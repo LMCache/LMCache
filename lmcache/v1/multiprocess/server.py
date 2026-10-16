@@ -52,6 +52,7 @@ from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
     EngineModule,
     ModuleBuildContext,
+    apply_replacements,
     discover_modules,
     order_modules,
 )
@@ -204,25 +205,32 @@ def _build_server_components(
     module_configs = {
         module_type: config for module_type, config in configured_external
     }
+    module_classes, replacements = apply_replacements(
+        [
+            *discover_modules(),
+            *(module_type for module_type, _ in configured_external),
+        ]
+    )
     build_ctx = ModuleBuildContext(
         ctx,
         mp_config,
         coordinator_config,
         module_configs=module_configs,
+        replacements=replacements,
     )
-    module_classes = [
-        *discover_modules(),
-        *(module_type for module_type, _ in configured_external),
-    ]
     known_modules = set(module_classes)
 
     for module_cls in order_modules(
-        [cls for cls in module_classes if not cls.deferred], known_modules
+        [cls for cls in module_classes if not cls.deferred],
+        known_modules,
+        replacements,
     ):
         _build_module(module_cls, build_ctx)
 
     for module_cls in order_modules(
-        [cls for cls in module_classes if cls.deferred], known_modules
+        [cls for cls in module_classes if cls.deferred],
+        known_modules,
+        replacements,
     ):
         _build_module(module_cls, build_ctx)
 

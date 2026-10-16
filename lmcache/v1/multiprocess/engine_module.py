@@ -122,6 +122,8 @@ class ModuleBuildContext:
         coordinator_config: CoordinatorConfig,
         module_configs: Mapping[type[DiscoverableModule], Mapping[str, Any]]
         | None = None,
+        replacements: Mapping[type[DiscoverableModule], type[DiscoverableModule]]
+        | None = None,
     ) -> None:
         self.engine_context = engine_context
         self.mp_config = mp_config
@@ -132,6 +134,7 @@ class ModuleBuildContext:
             module_type: dict(config)
             for module_type, config in (module_configs or {}).items()
         }
+        self._replacements = dict(replacements or {})
         self._built: dict[type[DiscoverableModule], EngineModule] = {}
 
     @property
@@ -149,8 +152,8 @@ class ModuleBuildContext:
         return self._module_configs.get(module_type, {})
 
     def require(self, module_type: type[DiscoverableModuleT]) -> DiscoverableModuleT:
-        """Return an already-built module dependency."""
-        module = self._built.get(module_type)
+        """Return an already-built module dependency, or its replacement."""
+        module = self._built.get(self._replacements.get(module_type, module_type))
         if module is None:
             raise ValueError(
                 f"Module {module_type.module_name!r} is not built yet; built so "
@@ -181,11 +184,15 @@ class DiscoverableModule(abc.ABC):
 
     Dependencies are module class references. ``deferred`` modules are built
     after normal modules, and ``create`` returns ``None`` when disabled.
+    A module that sets ``replaces`` to one of its base classes is built in
+    place of that class: the replaced class is not built, and modules that
+    depend on it get the replacement.
     """
 
     module_name: ClassVar[str] = ""
     module_dependencies: ClassVar[tuple[type[DiscoverableModule], ...]] = ()
     deferred: ClassVar[bool] = False
+    replaces: ClassVar[type[DiscoverableModule] | None] = None
 
     @classmethod
     @abc.abstractmethod
@@ -201,17 +208,70 @@ def _is_liveness_target(module: EngineModule) -> TypeGuard[InstanceLivenessTarge
     )
 
 
+def apply_replacements(
+    module_classes: list[type[DiscoverableModule]],
+) -> tuple[
+    list[type[DiscoverableModule]],
+    dict[type[DiscoverableModule], type[DiscoverableModule]],
+]:
+    """Drop the classes that other modules replace.
+
+    Returns:
+        The remaining classes, and a map from each replaced class to its
+        replacement for ``order_modules`` and ``ModuleBuildContext``.
+
+    Raises:
+        ValueError: If a replaced class is not among ``module_classes``, is
+            not a base class of its replacement, is replaced twice, or is
+            itself a replacement.
+    """
+    present = set(module_classes)
+    replacements: dict[type[DiscoverableModule], type[DiscoverableModule]] = {}
+    for module_type in sorted(module_classes, key=_module_sort_key):
+        replaced = module_type.replaces
+        if replaced is None:
+            continue
+        if replaced not in present:
+            raise ValueError(
+                f"{module_type.__name__} replaces {replaced.__name__}, "
+                "which is not a discoverable module."
+            )
+        if not issubclass(module_type, replaced):
+            raise ValueError(
+                f"{module_type.__name__} must subclass {replaced.__name__}, "
+                "which it replaces."
+            )
+        previous = replacements.get(replaced)
+        if previous is not None:
+            raise ValueError(
+                f"{replaced.__name__} is replaced by both {previous.__name__} "
+                f"and {module_type.__name__}."
+            )
+        replacements[replaced] = module_type
+    chained = set(replacements) & set(replacements.values())
+    if chained:
+        module_type = min(chained, key=_module_sort_key)
+        raise ValueError(f"{module_type.__name__} is replaced and replaces.")
+    remaining = [cls for cls in module_classes if cls not in replacements]
+    return remaining, replacements
+
+
 def order_modules(
     module_classes: list[type[DiscoverableModule]],
     known_modules: "set[type[DiscoverableModule]] | None" = None,
+    replacements: (
+        "Mapping[type[DiscoverableModule], type[DiscoverableModule]] | None"
+    ) = None,
 ) -> list[type[DiscoverableModule]]:
     """Return one build phase in deterministic dependency order.
 
     Dependencies outside this phase must still appear in ``known_modules``;
     this supports a deferred phase whose dependencies were already built.
+    A dependency on a key of ``replacements`` resolves to its replacement.
     """
     if known_modules is None:
         known_modules = set(module_classes)
+    replacements = replacements or {}
 
     names: dict[str, type[DiscoverableModule]] = {}
     for module_type in sorted(
@@ -232,14 +292,18 @@ def order_modules(
     module_set = set(module_classes)
     graph: dict[type[DiscoverableModule], set[type[DiscoverableModule]]] = {}
     for module_type in sorted(module_classes, key=_module_sort_key):
-        unknown = set(module_type.module_dependencies) - known_modules
+        dependencies = {
+            replacements.get(dependency, dependency)
+            for dependency in module_type.module_dependencies
+        }
+        unknown = dependencies - known_modules
         if unknown:
             dependency = min(unknown, key=_module_sort_key)
             raise ValueError(
                 f"{module_type.__name__} depends on {dependency.__name__}, "
                 "which is not a discoverable module."
             )
-        graph[module_type] = set(module_type.module_dependencies) & module_set
+        graph[module_type] = dependencies & module_set
 
     try:
         return list(TopologicalSorter(graph).static_order())
