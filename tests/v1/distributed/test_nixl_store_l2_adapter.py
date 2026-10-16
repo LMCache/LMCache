@@ -151,9 +151,11 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
 # Test Fixtures
 # =============================================================================
 
+
 @pytest.fixture
 def pages_per_file():
     return 1
+
 
 @pytest.fixture
 def adapter(pages_per_file):
