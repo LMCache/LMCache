@@ -54,7 +54,7 @@ How to Generate KV Cache events
 
           LMCACHE_CONFIG_FILE=lmcache_config.yaml \
               vllm serve Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}' \
-              --disable-log-requests --no-enable-prefix-caching --kv-events-config '{"enable_kv_cache_events": "True", "publisher": "zmq", "topic": "kv-events"}'
+              --no-enable-prefix-caching --kv-events-config '{"enable_kv_cache_events": "True", "publisher": "zmq", "topic": "kv-events"}'
       
       Example of the LMCache configuration is as follows:
       
