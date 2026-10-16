@@ -70,7 +70,27 @@ class LMCacheControllerManager:
         lmcache_worker_timeout: int,
         full_sync_completion_threshold: float = 0.8,
         full_sync_timeout_s: float = 300.0,
+        advertise_host: str = "",
     ):
+        """Create the controller manager and bind its sockets.
+
+        Args:
+            controller_urls: Bind URLs keyed by socket ("pull", "reply" and
+                optionally "heartbeat"), e.g. ``{"pull": "0.0.0.0:8300"}``.
+            health_check_interval: Seconds between worker health checks;
+                a value <= 0 disables them.
+            lmcache_worker_timeout: Seconds without a heartbeat after which
+                a worker is deregistered.
+            full_sync_completion_threshold: Fraction of workers that need to
+                complete a full sync before the others can exit freeze mode.
+            full_sync_timeout_s: Timeout in seconds for a single worker's
+                full sync.
+            advertise_host: Host returned to workers in place of a bind-all
+                address (0.0.0.0/*), e.g. a Kubernetes Service name that
+                stays valid when the controller restarts with a new IP.
+                Empty (default) advertises this host's IP.
+        """
+        self.advertise_host = advertise_host
         # Initialize stats logger
         prometheus_labels = {
             "role": "controller",
@@ -290,25 +310,35 @@ class LMCacheControllerManager:
         """Convert a bind address to a connectable address.
 
         Bind addresses like "0.0.0.0:port" or "*:port" cannot be used
-        by workers to connect. We need to replace them with the actual
-        controller IP address.
+        by workers to connect. We need to replace them with the configured
+        advertise host if one is set, otherwise with the actual controller
+        IP address.
 
-        If worker_ip is provided and matches the controller's IP, use
-        127.0.0.1 for loopback connection (more reliable than external IP).
+        Workers keep the returned URL (e.g. the heartbeat URL) for their
+        lifetime, so an advertise host that survives controller restarts
+        (such as a Kubernetes Service name) lets them reach a replaced
+        controller and re-register.
+
+        Without an advertise host, if worker_ip is provided and matches the
+        controller's IP, use 127.0.0.1 for loopback connection (more reliable
+        than external IP).
 
         Args:
             bind_url: The bind URL (e.g., "0.0.0.0:8082" or "*:8082")
             worker_ip: The IP address of the requesting worker (optional)
 
         Returns:
-            A connectable URL (e.g., "192.168.1.100:8082" or "127.0.0.1:8082")
+            A connectable URL (e.g., "192.168.1.100:8082", "127.0.0.1:8082"
+            or "<advertise_host>:8082")
         """
         if ":" not in bind_url:
             return bind_url
 
         host, port = bind_url.rsplit(":", 1)
-        # Replace bind-all addresses with actual IP
+        # Replace bind-all addresses with the advertise host or actual IP
         if host in ("0.0.0.0", "*", ""):
+            if self.advertise_host:
+                return f"{self.advertise_host}:{port}"
             actual_ip = get_ip()
             # If worker is on the same machine, use loopback for reliability
             # This handles cases where external IP (e.g., VPN) doesn't support
