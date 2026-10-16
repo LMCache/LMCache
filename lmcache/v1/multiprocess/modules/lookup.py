@@ -4,6 +4,7 @@
 # Standard
 from dataclasses import dataclass
 from functools import partial
+from typing import Any
 import threading
 import time
 
@@ -520,11 +521,14 @@ class LookupModule(DiscoverableModule):
         if not obj_keys:
             return
 
-        self._ctx.storage_manager.finish_read_prefetched(
-            obj_keys,
-            read_locks=key.require_num_kv_readers(),
-            l1_owners=self._ctx.get_read_owners(key.request_id),
-        )
+        finish_kwargs: dict[str, Any] = {
+            "read_locks": key.require_num_kv_readers(),
+            "l1_owners": self._ctx.get_read_owners(key.request_id),
+        }
+        read_owner = self._ctx.get_read_lock_owner(key.request_id)
+        if isinstance(read_owner, str) and read_owner:
+            finish_kwargs["read_owner"] = read_owner
+        self._ctx.storage_manager.finish_read_prefetched(obj_keys, **finish_kwargs)
 
     @request_handler(HandlerType.BLOCKING)
     def end_session(self, request_id: str) -> None:
@@ -630,11 +634,15 @@ class LookupModule(DiscoverableModule):
         # read-locked (see ``unfold``: full-attention groups lock the whole
         # hit prefix, sliding-window groups only its in-window suffix).
         session = self._ctx.session_manager.get_or_create(job.request_id)
-        session.record_prefetch_result(
+        record_args = (
             found_count,
             tuple(range(job.attn_desc.num_object_groups)),
             result.l1_owners,
         )
+        if result.read_owner:
+            session.record_prefetch_result(*record_args, result.read_owner)
+        else:
+            session.record_prefetch_result(*record_args)
 
         # L1 is credited with the prefix its own cells serve under the same
         # window rule; L2 with however far it extended that prefix.

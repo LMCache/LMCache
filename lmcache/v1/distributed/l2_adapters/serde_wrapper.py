@@ -66,6 +66,7 @@ _POLL_TIMEOUT_MS = 500
 # L1 write tag for the wrapper's temp buffers. Temp keys are unique per task,
 # so no two reservations ever share a key; the tag documents the owner.
 _L1_WRITE_TAG = "serde_wrapper"
+_L1_READ_OWNER = "serde_wrapper"
 
 
 class _StorePhase(enum.Enum):
@@ -237,11 +238,24 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     ) -> L2TaskId:
         return self._inner.submit_lookup_and_lock_task(keys, group_layout_descs)
 
+    def submit_lookup_and_lock_task_with_owner(
+        self,
+        keys: list[ObjectKey],
+        group_layout_descs: dict[int, MemoryLayoutDesc],
+        read_owner: str,
+    ) -> L2TaskId:
+        return self._inner.submit_lookup_and_lock_task_with_owner(
+            keys, group_layout_descs, read_owner
+        )
+
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
         return self._inner.query_lookup_and_lock_result(task_id)
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         self._inner.submit_unlock(keys)
+
+    def submit_unlock_with_owner(self, keys: list[ObjectKey], read_owner: str) -> None:
+        self._inner.submit_unlock_with_owner(keys, read_owner)
 
     # ------------------------------------------------------------------
     # Load
@@ -395,7 +409,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                 )
         if read_locked:
             try:
-                self._l1_manager.finish_read(read_locked)
+                self._l1_manager.finish_read(read_locked, read_owner=_L1_READ_OWNER)
             except Exception:
                 logger.exception(
                     "Serde wrapper: error releasing read-locked leftover temps"
@@ -467,7 +481,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             # Serialize succeeded — transition temps write → read so inner
             # can safely read them during the store.
             self._l1_manager.finish_write_and_reserve_read(
-                state.temp_keys, tag=_L1_WRITE_TAG
+                state.temp_keys, tag=_L1_WRITE_TAG, read_owner=_L1_READ_OWNER
             )
             try:
                 inner_id = self._inner.submit_store_task(state.keys, state.temp_objs)
@@ -478,7 +492,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                 )
                 # Temps are now read-locked and temporary — finish_read
                 # is enough; the entries auto-delete.
-                self._l1_manager.finish_read(state.temp_keys)
+                self._l1_manager.finish_read(state.temp_keys, read_owner=_L1_READ_OWNER)
                 self._finalize_store(wrapped_id, success=False)
                 continue
 
@@ -508,7 +522,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                 )
                 continue
             if state is not None:
-                self._l1_manager.finish_read(state.temp_keys)
+                self._l1_manager.finish_read(state.temp_keys, read_owner=_L1_READ_OWNER)
             self._finalize_store(
                 wrapped_id, result.is_successful(), result.bytes_transferred()
             )

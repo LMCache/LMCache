@@ -299,6 +299,76 @@ class TestReserveRead:
 
         manager.close()
 
+    def test_read_locks_are_scoped_to_the_reservation_owner(
+        self, basic_l1_config, basic_layout
+    ):
+        """Releasing one reader must not make another reader unreadable."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+
+        manager.reserve_read([key], read_owner="reader-a")
+        manager.reserve_read([key], read_owner="reader-b")
+        assert manager.unsafe_read([key], read_owner="reader-a")[key][0] == (
+            L1Error.SUCCESS
+        )
+        assert manager.unsafe_read([key], read_owner="reader-b")[key][0] == (
+            L1Error.SUCCESS
+        )
+
+        manager.finish_read([key], read_owner="reader-a")
+        assert manager.unsafe_read([key], read_owner="reader-a")[key][0] == (
+            L1Error.KEY_NOT_READABLE
+        )
+        assert manager.unsafe_read([key], read_owner="reader-b")[key][0] == (
+            L1Error.SUCCESS
+        )
+        assert manager.delete([key])[key] == L1Error.KEY_IS_LOCKED
+
+        manager.finish_read([key], read_owner="reader-b")
+        assert manager.unsafe_read([key], read_owner="reader-b")[key][0] == (
+            L1Error.KEY_NOT_READABLE
+        )
+        manager.close()
+
+    def test_expired_reader_cannot_release_another_readers_lock(
+        self, basic_l1_config, basic_layout, monkeypatch
+    ):
+        """An expired A cannot make B unreadable or allow eviction."""
+        basic_l1_config.read_ttl_seconds = 1
+        now = [0.0]
+        monkeypatch.setattr(
+            "lmcache.v1.distributed.read_lock.time.monotonic",
+            lambda: now[0],
+        )
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(5669)
+
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        assert manager.reserve_read([key], read_owner="reader-a")[key][0] == (
+            L1Error.SUCCESS
+        )
+        now[0] = 1.2
+        assert manager.reserve_read([key], read_owner="reader-b")[key][0] == (
+            L1Error.SUCCESS
+        )
+
+        assert manager.finish_read([key], read_owner="reader-a")[key] == (
+            L1Error.KEY_IN_WRONG_STATE
+        )
+        assert manager.unsafe_read([key], read_owner="reader-b")[key][0] == (
+            L1Error.SUCCESS
+        )
+        assert not manager.is_key_evictable(key)
+        assert manager.delete([key])[key] == L1Error.KEY_IS_LOCKED
+        assert manager.finish_read([key], read_owner="reader-b")[key] == (
+            L1Error.SUCCESS
+        )
+        manager.close()
+
     def test_reserve_read_with_multiple_read_locks(self, basic_l1_config, basic_layout):
         """Test reserve_read(read_locks=N) acquires N locks."""
         manager = L1Manager(basic_l1_config)

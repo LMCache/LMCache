@@ -262,6 +262,15 @@ class L2AdapterInterface(ABC):
         """
         pass
 
+    def submit_lookup_and_lock_task_with_owner(
+        self,
+        keys: list[ObjectKey],
+        group_layout_descs: dict[int, MemoryLayoutDesc],
+        read_owner: str,
+    ) -> L2TaskId:
+        """Submit a lookup with an optional owner for peer-side L1 locks."""
+        return self.submit_lookup_and_lock_task(keys, group_layout_descs)
+
     @abstractmethod
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
         """
@@ -301,6 +310,10 @@ class L2AdapterInterface(ABC):
             is successful (i.e., have error handling and retry mechanism if needed).
         """
         pass
+
+    def submit_unlock_with_owner(self, keys: list[ObjectKey], read_owner: str) -> None:
+        """Release keys, optionally identifying the peer-side read owner."""
+        self.submit_unlock(keys)
 
     #####################
     # Load Interface

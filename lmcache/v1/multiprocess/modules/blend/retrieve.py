@@ -528,6 +528,7 @@ class RetrieveMixin:
         n_read: int,
         stream: Any,
         l1_owners: dict[ObjectKey, int] | None = None,
+        read_owner: str = "",
     ) -> int:
         """Release the sparse-prefetch read locks of the scattered matches.
 
@@ -547,17 +548,20 @@ class RetrieveMixin:
             for g in range(n_read)
         ]
         if release_keys:
-            if l1_owners is None:
+            if read_owner:
+                completion = self._ctx.storage_manager.prepare_read_completion(
+                    release_keys, l1_owners, read_owner
+                )
+                submit_callback_to_stream(stream, "finish_read_by_owner", completion)
+            elif l1_owners is None:
                 submit_callback_to_stream(
                     stream, "finish_read_prefetched", release_keys
                 )
             else:
-                groups: dict[int, list[ObjectKey]] = {}
-                for key in release_keys:
-                    groups.setdefault(l1_owners[key], []).append(key)
-                submit_callback_to_stream(
-                    stream, "finish_read_by_owner", list(groups.items())
+                completion = self._ctx.storage_manager.prepare_read_completion(
+                    release_keys, l1_owners
                 )
+                submit_callback_to_stream(stream, "finish_read_by_owner", completion)
         return len(release_keys)
 
     @request_handler(
@@ -766,6 +770,15 @@ class RetrieveMixin:
             if session
             else None
         )
+        read_lock_owner = (
+            _stash.get("read_owner")
+            if _stash
+            else session.get_prefetch_read_owner()
+            if session
+            else ""
+        )
+        if not isinstance(read_lock_owner, str):
+            read_lock_owner = ""
         if cached is not None and all(r.hash in cached for r in cb_match_result):
             # The lookup cached all-ranks obj keys (group-major, rank-minor);
             # select THIS rank's key per read group or TP>1 mispairs ranks.
@@ -795,8 +808,14 @@ class RetrieveMixin:
             if orphan_keys:
                 # Nothing will read these keys: release every lock the lookup
                 # took (N per key).
+                finish_kwargs: dict[str, Any] = {
+                    "read_locks": stash_read_locks,
+                    "l1_owners": l1_owners,
+                }
+                if read_lock_owner:
+                    finish_kwargs["read_owner"] = read_lock_owner
                 self._ctx.storage_manager.finish_read_prefetched(
-                    orphan_keys, read_locks=stash_read_locks, l1_owners=l1_owners
+                    orphan_keys, **finish_kwargs
                 )
                 logger.debug(
                     "CB released %d prefetched-but-unretrieved keys (req=%s)",
@@ -904,8 +923,11 @@ class RetrieveMixin:
             # cb.scatter opens mid-try; track it so a failure closes the span.
             scatter_open = False
             try:
+                read_kwargs: dict[str, Any] = {"l1_owners": l1_owners}
+                if read_lock_owner:
+                    read_kwargs["read_owner"] = read_lock_owner
                 with self._ctx.storage_manager.read_prefetched_results(
-                    all_obj_keys, l1_owners=l1_owners
+                    all_obj_keys, **read_kwargs
                 ) as memory_objs:
                     _stage_ms["fetch"] = (time.perf_counter() - _stage_t) * 1000
                     if memory_objs is None:
@@ -1045,6 +1067,7 @@ class RetrieveMixin:
                         n_read,
                         retrieve_cupy_stream,
                         l1_owners,
+                        read_lock_owner,
                     )
 
                     # Record this retrieve's device work for the next

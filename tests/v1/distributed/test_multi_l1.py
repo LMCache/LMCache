@@ -404,14 +404,39 @@ def test_read_release_trace_redacts_owners_and_replays_on_single_l1(
     bus.publish.assert_called_once()
     event = bus.publish.call_args.args[0]
     assert event.metadata["qualname"] == qualname
-    assert event.metadata["args"] == {"keys": keys, "read_locks": 2}
+    assert event.metadata["args"] == {
+        "keys": keys,
+        "read_locks": 2,
+        "read_owner": "",
+    }
     decoded = codecs.decode_args(records[0].args)
-    assert decoded == {"keys": keys, "read_locks": 2}
+    assert decoded == {"keys": keys, "read_locks": 2, "read_owner": ""}
     assert recorder.dropped_count == 0
 
     dispatcher = build_default_dispatcher()
     assert dispatcher.has(qualname)
     dispatcher.dispatch(qualname, ReplayContext(target), decoded)
+    assert target_l1.report_status()["read_locked_count"] == 0
+
+
+@pytest.mark.parametrize("read_owner", ["", "reader-5669"])
+def test_single_l1_read_completion_accepts_foreign_manager_id(
+    storage_factory: StorageFactory, read_owner: str
+) -> None:
+    """A captured owner ID is process-local; single-L1 completion uses the local L1."""
+    source, (source_l1,), _ = storage_factory((4096,))
+    target, (target_l1,), _ = storage_factory((4096,))
+    keys = [key(1)]
+    objects = target.reserve_write(keys, LAYOUT)
+    target.finish_write_by_owner(target.prepare_write_completion(objects))
+    assert target_l1.reserve_read(keys, read_owner=read_owner)[keys[0]][0] == (
+        L1Error.SUCCESS
+    )
+    assert source_l1.l1_manager_id != target_l1.l1_manager_id
+    completion = [(source_l1.l1_manager_id, read_owner, keys)]
+
+    target.finish_read_by_owner(completion)
+
     assert target_l1.report_status()["read_locked_count"] == 0
 
 

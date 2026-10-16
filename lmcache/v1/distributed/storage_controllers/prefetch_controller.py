@@ -94,6 +94,13 @@ def _get_prefetch_write_tag(request_id: PrefetchRequestId) -> str:
     return f"prefetch:{request_id}"
 
 
+def _get_prefetch_read_owner(
+    request_id: PrefetchRequestId, read_owner: str = ""
+) -> str:
+    """Return the read-lock owner for one prefetch request."""
+    return read_owner or f"prefetch-read:{request_id}"
+
+
 def _gather_keys(
     key_groups: list[GroupedObjectKeys],
     bitmaps: Bitmap2D,
@@ -309,6 +316,7 @@ def _build_request(
         fetching_policy=spec.fetching_policy,
         lock_mode=spec.lock_mode,
         num_kv_readers=spec.num_kv_readers,
+        read_owner=spec.read_owner,
     )
 
 
@@ -349,6 +357,7 @@ class InFlightPrefetchRequest:
     fetching_policy: FetchingPolicy
     lock_mode: PrefetchLockMode
     num_kv_readers: int
+    read_owner: str = ""
 
     # What the L2 lookups pinned; reported as found_cells at finish.
     l2_found_cells: "Bitmap2D | None" = None
@@ -1046,8 +1055,10 @@ class PrefetchController(StorageControllerInterface):
         # support unequal length of key groups. We left this as future refactor
         # TODOs.
         for adapter_idx, adapter in active_adapters.items():
-            task_id = adapter.submit_lookup_and_lock_task(
-                flattened_keys, spec.group_layout_descs
+            task_id = adapter.submit_lookup_and_lock_task_with_owner(
+                flattened_keys,
+                spec.group_layout_descs,
+                _get_prefetch_read_owner(request.request_id, request.read_owner),
             )
             request.inflight_lookup_tasks[adapter_idx] = task_id
 
@@ -1089,7 +1100,13 @@ class PrefetchController(StorageControllerInterface):
         completed = False
         try:
             for l1_idx, l1_manager in self._l1_managers.items():
-                result = l1_manager.reserve_read(flattened_keys, request.num_kv_readers)
+                result = l1_manager.reserve_read(
+                    flattened_keys,
+                    request.num_kv_readers,
+                    read_owner=_get_prefetch_read_owner(
+                        request.request_id, request.read_owner
+                    ),
+                )
                 res_bitmap = Bitmap(len(flattened_keys))
                 for i, key in enumerate(flattened_keys):
                     error, _obj = result[key]
@@ -1136,11 +1153,20 @@ class PrefetchController(StorageControllerInterface):
         for l1_idx, cells in l1_dropped.items():
             keys = _gather_keys(request.key_groups, cells)
             if keys:
-                self._l1_managers[l1_idx].finish_read(keys, request.num_kv_readers)
+                self._l1_managers[l1_idx].finish_read(
+                    keys,
+                    request.num_kv_readers,
+                    read_owner=_get_prefetch_read_owner(
+                        request.request_id, request.read_owner
+                    ),
+                )
         for l2_idx, cells in l2_dropped.items():
             keys = _gather_keys(request.key_groups, cells)
             if keys:
-                self._l2_adapters[l2_idx].submit_unlock(keys)
+                self._l2_adapters[l2_idx].submit_unlock_with_owner(
+                    keys,
+                    _get_prefetch_read_owner(request.request_id, request.read_owner),
+                )
 
         states.l1_locked_keys = load_plan.l1_planned_keys.copy()
         states.l2_locked_keys = load_plan.l2_planned_keys.copy()
@@ -1261,7 +1287,12 @@ class PrefetchController(StorageControllerInterface):
             for l2_idx, bitmap2d in l2_keys_to_unlock.items():
                 keys = _gather_keys(request.key_groups, bitmap2d)
                 if keys:
-                    self._l2_adapters[l2_idx].submit_unlock(keys)
+                    self._l2_adapters[l2_idx].submit_unlock_with_owner(
+                        keys,
+                        _get_prefetch_read_owner(
+                            request.request_id, request.read_owner
+                        ),
+                    )
             states.l2_locked_keys = l2_locked_keys_new
 
             # Step 5: re-plan on what is actually reserved. An L2 cell dropped
@@ -1434,14 +1465,20 @@ class PrefetchController(StorageControllerInterface):
             # Update L1 key status
             if loaded_keys:
                 l1_manager.finish_write_and_reserve_read(
-                    loaded_keys, read_locks=request.num_kv_readers, tag=tag
+                    loaded_keys,
+                    read_locks=request.num_kv_readers,
+                    tag=tag,
+                    read_owner=_get_prefetch_read_owner(
+                        request.request_id, request.read_owner
+                    ),
                 )
             if failed_keys:
                 l1_manager.finish_write_and_delete(failed_keys, tag=tag)
 
             # Unlock L2
-            self._l2_adapters[adapter_idx].submit_unlock(
-                _gather_keys(request.key_groups, planned)
+            self._l2_adapters[adapter_idx].submit_unlock_with_owner(
+                _gather_keys(request.key_groups, planned),
+                _get_prefetch_read_owner(request.request_id, request.read_owner),
             )
 
             # Update the key states and the inflight load tasks
@@ -1536,7 +1573,11 @@ class PrefetchController(StorageControllerInterface):
             release_keys = _gather_keys(request.key_groups, release)
             if release_keys:
                 self._l1_managers[l1_idx].finish_read(
-                    release_keys, read_locks=request.num_kv_readers
+                    release_keys,
+                    read_locks=request.num_kv_readers,
+                    read_owner=_get_prefetch_read_owner(
+                        request.request_id, request.read_owner
+                    ),
                 )
 
             # Notify the eviction module
@@ -1571,6 +1612,9 @@ class PrefetchController(StorageControllerInterface):
                 }
                 if request.lock_mode == PrefetchLockMode.LOCK
                 else {},
+                read_owner=_get_prefetch_read_owner(
+                    request.request_id, request.read_owner
+                ),
             ),
         )
         logger.debug(
@@ -1621,7 +1665,10 @@ class PrefetchController(StorageControllerInterface):
         for l2_idx, cells in states.l2_locked_keys.items():
             keys = _gather_keys(request.key_groups, cells)
             if keys and l2_idx in self._l2_adapters:
-                self._l2_adapters[l2_idx].submit_unlock(keys)
+                self._l2_adapters[l2_idx].submit_unlock_with_owner(
+                    keys,
+                    _get_prefetch_read_owner(request.request_id, request.read_owner),
+                )
         for l1_idx, cells in states.l1_reserved_keys.items():
             keys = _gather_keys(request.key_groups, cells)
             if keys:
@@ -1630,7 +1677,11 @@ class PrefetchController(StorageControllerInterface):
             keys = _gather_keys(request.key_groups, cells)
             if keys:
                 self._l1_managers[l1_idx].finish_read(
-                    keys, read_locks=request.num_kv_readers
+                    keys,
+                    read_locks=request.num_kv_readers,
+                    read_owner=_get_prefetch_read_owner(
+                        request.request_id, request.read_owner
+                    ),
                 )
 
         request.key_states = PrefetchKeyState()

@@ -44,6 +44,7 @@ logger = init_logger(__name__)
 
 # Poll timeout in milliseconds for the store loop
 STORE_LOOP_POLL_TIMEOUT_MS = 500
+_L1_READ_OWNER = "store_controller"
 
 
 def _group_keys_by_shape(
@@ -603,7 +604,7 @@ class StoreController(StorageControllerInterface):
                 continue
 
             # Reserve read to get MemoryObj references and hold read locks
-            read_results = l1_mgr.reserve_read(target_keys)
+            read_results = l1_mgr.reserve_read(target_keys, read_owner=_L1_READ_OWNER)
 
             successful_keys = []
             successful_objs = []
@@ -667,7 +668,7 @@ class StoreController(StorageControllerInterface):
                     adapter_index,
                     len(successful_keys),
                 )
-                l1_mgr.finish_read(successful_keys)
+                l1_mgr.finish_read(successful_keys, read_owner=_L1_READ_OWNER)
                 continue
 
             self._in_flight_tasks[(adapter_index, task_id)] = InFlightStoreTask(
@@ -745,7 +746,7 @@ class StoreController(StorageControllerInterface):
         l1_mgr = self._l1_manager
         success = task.l2_store_result
 
-        l1_mgr.finish_read(task.read_locked_keys)
+        l1_mgr.finish_read(task.read_locked_keys, read_owner=_L1_READ_OWNER)
         del self._in_flight_tasks[task_key]
         self._status_in_flight_count -= 1
 
@@ -808,5 +809,5 @@ class StoreController(StorageControllerInterface):
                 adapter_index,
                 len(task.read_locked_keys),
             )
-            l1_mgr.finish_read(task.read_locked_keys)
+            l1_mgr.finish_read(task.read_locked_keys, read_owner=_L1_READ_OWNER)
         self._in_flight_tasks.clear()

@@ -194,6 +194,16 @@ def test_lookup_forwards_group_layout_descs_and_returns_addresses():
         assert keys[2] not in adapter._remote_addresses
 
 
+def test_lookup_forwards_read_owner_to_peer():
+    keys = [_key(0)]
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
+        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=42)
+        adapter.submit_lookup_and_lock_task_with_owner(keys, {0: _LAYOUT}, "reader-a")
+        req_client.p2p_lookup_and_lock.assert_called_once_with(
+            keys, {0: _LAYOUT}, "reader-a"
+        )
+
+
 def test_lookup_query_not_ready_then_ready():
     keys = [_key(0)]
     addresses = [TransferChannelAddress(offset=100, size=10)]
@@ -325,6 +335,13 @@ def test_unlock_sends_rpc_and_clears_addresses():
         adapter.submit_unlock(keys)
         req_client.p2p_unlock_objects.assert_called_once_with(keys)
         assert keys[0] not in adapter._remote_addresses
+
+
+def test_unlock_forwards_read_owner_to_peer():
+    keys = [_key(0)]
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
+        adapter.submit_unlock_with_owner(keys, "reader-a")
+        req_client.p2p_unlock_objects.assert_called_once_with(keys, "reader-a")
 
 
 def test_unlock_empty_is_noop():

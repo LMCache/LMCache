@@ -69,7 +69,11 @@ def test_p2p_lookup_and_lock_protocol():
     """P2P_LOOKUP_AND_LOCK payload is [list[ObjectKey],
     dict[int, MemoryLayoutDesc]], returns int, and is BLOCKING."""
     spec = get_rpc_spec("p2p_lookup_and_lock")
-    assert spec.payload_types == (list[ObjectKey], dict[int, MemoryLayoutDesc])
+    assert spec.payload_types == (
+        list[ObjectKey],
+        dict[int, MemoryLayoutDesc],
+        str,
+    )
     assert spec.response_type is int
 
 
@@ -84,7 +88,7 @@ def test_p2p_query_lookup_results_protocol():
 def test_p2p_unlock_objects_protocol():
     """P2P_UNLOCK_OBJECTS payload is [list[ObjectKey]], returns None, BLOCKING."""
     spec = get_rpc_spec("p2p_unlock_objects")
-    assert spec.payload_types == (list[ObjectKey],)
+    assert spec.payload_types == (list[ObjectKey], str)
     assert spec.response_type is type(None)
 
 
@@ -184,6 +188,24 @@ def test_lookup_and_lock_submits_skip_l2_and_returns_task_id():
     assert spec.fetching_policy == "full"
     # A second call gets a distinct id.
     assert controller.p2p_lookup_and_lock(keys, group_layout_descs) == 1
+
+
+def test_lookup_and_unlock_use_the_explicit_read_owner():
+    """Concurrent same-key requests carry independent owner tokens."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.submit_prefetch_task.return_value = MagicMock(
+        total_requested_keys=1
+    )
+    keys = [_make_key(0)]
+
+    controller.p2p_lookup_and_lock(keys, {0: _make_layout_desc()}, "owner-a")
+    (spec,), _ = ctx.storage_manager.submit_prefetch_task.call_args
+    assert spec.read_owner == "owner-a"
+
+    controller.p2p_unlock_objects(keys, "owner-a")
+    ctx.storage_manager.finish_read_prefetched.assert_called_once_with(
+        keys, read_owner="owner-a"
+    )
 
 
 def test_lookup_and_lock_groups_keys_per_object_group():

@@ -226,6 +226,7 @@ class RequestClient(Protocol):
         self,
         keys: list[ObjectKey],
         group_layout_descs: dict[int, MemoryLayoutDesc],
+        read_owner: str = "",
     ) -> MessagingFuture[int]: ...
 
     @rpc_method
@@ -234,7 +235,9 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[list[TransferChannelAddress] | None]: ...
 
     @rpc_method
-    def p2p_unlock_objects(self, keys: list[ObjectKey]) -> MessagingFuture[None]: ...
+    def p2p_unlock_objects(
+        self, keys: list[ObjectKey], read_owner: str = ""
+    ) -> MessagingFuture[None]: ...
 
     @rpc_method
     def get_experimental(self) -> MessagingFuture[list[str]]: ...

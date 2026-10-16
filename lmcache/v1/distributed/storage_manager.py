@@ -96,6 +96,8 @@ _L1_WRITE_TAG = "storage_manager"
 
 # Internal stream-callback payload. No MemoryObj or device pointer crosses msgpack.
 L1WriteCompletion = list[tuple[int, list[ObjectKey]]]
+L1ReadCompletion = list[tuple[int, str, list[ObjectKey]]]
+LegacyL1ReadCompletion = list[tuple[int, list[ObjectKey]]]
 
 
 class StorageManager:
@@ -443,6 +445,7 @@ class StorageManager:
         self,
         keys: list[ObjectKey],
         l1_owners: dict[ObjectKey, int] | None = None,
+        read_owner: str = "",
     ) -> Iterator[list[MemoryObj] | None]:
         """
         Read the memory objects from L1 storage that has been prefetched beforehand.
@@ -476,7 +479,10 @@ class StorageManager:
                 "StorageManager.read_prefetched_results.__enter__",
                 {"keys": keys},
             )
-        read_results = self._read_objects(keys, l1_owners)
+        if read_owner:
+            read_results = self._read_objects(keys, l1_owners, read_owner)
+        else:
+            read_results = self._read_objects(keys, l1_owners)
         good_keys: list[ObjectKey] = []
         good_objs: list[MemoryObj] = []
         bad_keys: list[ObjectKey] = []
@@ -541,7 +547,10 @@ class StorageManager:
             # Decrease the read lock for all successfully read memory objects
             # if None is yielded or exception occurs during caller's processing
             if not all_good or not successfully_yielded:
-                self._finish_read_objects(good_keys, 1, l1_owners)
+                if read_owner:
+                    self._finish_read_objects(good_keys, 1, l1_owners, read_owner)
+                else:
+                    self._finish_read_objects(good_keys, 1, l1_owners)
                 self._event_bus.publish(
                     Event(
                         event_type=EventType.SM_READ_PREFETCHED_FINISHED,
@@ -564,6 +573,7 @@ class StorageManager:
         keys: list[ObjectKey],
         read_locks: int = 1,
         l1_owners: dict[ObjectKey, int] | None = None,
+        read_owner: str = "",
     ) -> None:
         """Finish reading prefetched objects.
 
@@ -572,7 +582,12 @@ class StorageManager:
             read_locks: Read locks to release per key (the whole
                 reservation when releasing a lookup's locks).
         """
-        finish_result = self._finish_read_objects(keys, read_locks, l1_owners)
+        if read_owner:
+            finish_result = self._finish_read_objects(
+                keys, read_locks, l1_owners, read_owner
+            )
+        else:
+            finish_result = self._finish_read_objects(keys, read_locks, l1_owners)
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
         self._event_bus.publish(
@@ -730,9 +745,13 @@ class StorageManager:
         self,
         keys: list[ObjectKey],
         l1_owners: dict[ObjectKey, int] | None = None,
+        read_owner: str = "",
     ) -> tuple[list[ObjectKey], list[MemoryObj]]:
         """Read already read-locked objects without acquiring new read locks."""
-        read_results = self._read_objects(keys, l1_owners)
+        if read_owner:
+            read_results = self._read_objects(keys, l1_owners, read_owner)
+        else:
+            read_results = self._read_objects(keys, l1_owners)
         good_keys: list[ObjectKey] = []
         good_objs: list[MemoryObj] = []
         for key in keys:
@@ -1357,7 +1376,8 @@ class StorageManager:
         self,
         keys: list[ObjectKey],
         l1_owners: dict[ObjectKey, int] | None = None,
-    ) -> L1WriteCompletion:
+        read_owner: str = "",
+    ) -> L1ReadCompletion:
         """Capture exact read owners for stream-ordered completion.
 
         Args:
@@ -1370,9 +1390,14 @@ class StorageManager:
         Raises:
             ValueError: A key has no registered owner, or multi-L1 owners are absent.
         """
-        return list(self._read_groups(keys, l1_owners).items())
+        return [
+            (owner, read_owner, group)
+            for owner, group in self._read_groups(keys, l1_owners).items()
+        ]
 
-    def finish_read_by_owner(self, completion: L1WriteCompletion) -> None:
+    def finish_read_by_owner(
+        self, completion: L1ReadCompletion | LegacyL1ReadCompletion
+    ) -> None:
         """Release one read lock per key on its captured owner after device use.
 
         Args:
@@ -1381,14 +1406,33 @@ class StorageManager:
         Raises:
             ValueError: An owner is not registered.
         """
-        if any(owner not in self._l1_managers_by_id for owner, _ in completion):
-            raise ValueError("Read completion requires a registered L1 owner")
+        normalized: L1ReadCompletion = []
+        for group in completion:
+            if len(group) == 2:
+                owner, keys = group
+                normalized.append((owner, "", keys))
+            else:
+                owner, read_owner, keys = group
+                normalized.append((owner, read_owner, keys))
         if not self.is_multi_l1:
-            # Keep single-L1 traces portable across process-local owner IDs.
-            self.finish_read_prefetched([key for _, keys in completion for key in keys])
-            return
-        for owner, keys in completion:
-            self.finish_read_prefetched(keys, l1_owners=dict.fromkeys(keys, owner))
+            normalized = [
+                (self._l1_manager.l1_manager_id, read_owner, keys)
+                for _, read_owner, keys in normalized
+            ]
+        if any(owner not in self._l1_managers_by_id for owner, _, _ in normalized):
+            raise ValueError("Read completion requires a registered L1 owner")
+        first_error: Exception | None = None
+        for owner, read_owner, keys in normalized:
+            try:
+                kwargs: dict[str, Any] = {"l1_owners": dict.fromkeys(keys, owner)}
+                if read_owner:
+                    kwargs["read_owner"] = read_owner
+                self.finish_read_prefetched(keys, **kwargs)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     def _read_groups(
         self, keys: list[ObjectKey], owners: dict[ObjectKey, int] | None
@@ -1404,22 +1448,33 @@ class StorageManager:
         return groups
 
     def _read_objects(
-        self, keys: list[ObjectKey], owners: dict[ObjectKey, int] | None
+        self,
+        keys: list[ObjectKey],
+        owners: dict[ObjectKey, int] | None,
+        read_owner: str = "",
     ) -> dict[ObjectKey, L1OperationResult]:
         results: dict[ObjectKey, L1OperationResult] = {
             key: (L1Error.KEY_NOT_EXIST, None) for key in keys
         }
         for owner, group in self._read_groups(keys, owners).items():
-            results.update(self._l1_managers_by_id[owner].unsafe_read(group))
+            kwargs = {"read_owner": read_owner} if read_owner else {}
+            results.update(self._l1_managers_by_id[owner].unsafe_read(group, **kwargs))
         return results
 
     def _finish_read_objects(
-        self, keys: list[ObjectKey], count: int, owners: dict[ObjectKey, int] | None
+        self,
+        keys: list[ObjectKey],
+        count: int,
+        owners: dict[ObjectKey, int] | None,
+        read_owner: str = "",
     ) -> dict[ObjectKey, L1Error]:
         results = {}
         for owner, group in self._read_groups(keys, owners).items():
+            kwargs = {"read_owner": read_owner} if read_owner else {}
             results.update(
-                self._l1_managers_by_id[owner].finish_read(group, read_locks=count)
+                self._l1_managers_by_id[owner].finish_read(
+                    group, read_locks=count, **kwargs
+                )
             )
         return results
 
