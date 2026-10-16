@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import enum
 
 # Third Party
+from vllm.distributed.kv_events import KVConnectorKVEvents
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
@@ -51,6 +52,7 @@ class LMCacheMPRequestTracker:
 
     # Read-only list to track the token ids
     all_token_ids: ConstantList[int]
+    num_prompt_tokens: int
 
     # Block ids will be updated at update_states_after_alloc and
     # during generation. Keyed by engine_group_idx; non-HMA models use 0.
@@ -88,6 +90,7 @@ class LMCacheMPRequestTracker:
         )
         self.lookup_started_at = None
         self.all_token_ids = request.all_token_ids
+        self.num_prompt_tokens = request.num_prompt_tokens
         self.allocated_block_ids = {}
         self.num_stored_tokens = 0
         self.num_vllm_hit_tokens = 0
@@ -138,15 +141,45 @@ class LMCacheMPRequestTracker:
     def append_block_ids(
         self,
         new_block_ids: tuple[list[int], ...],
-    ):
-        """Update the block ids for the current request
-        This function will be called when processing the cached requests.
+        relocation_window: int = 0,
+    ) -> None:
+        """Append one step's block ids, per engine group.
+
+        An id already in one of the last ``relocation_window`` tracked
+        slots is a moved block: that slot is set to 0 before the id is
+        appended. The null id 0 is never matched. With
+        ``relocation_window=0`` the ids are appended as-is.
+
+        Examples, each starting from tracked ``[10, 11, 12, 13]`` with
+        ``relocation_window=2``::
+
+            append [12, 14] -> [10, 11, 0, 13, 12, 14]   # 12 was in the last 2
+            append [10, 14] -> [10, 11, 12, 13, 10, 14]  # 10 was not
+
+        Args:
+            new_block_ids: Block ids reported this step, one list per engine
+                group.
+            relocation_window: Number of tail slots checked for a moved
+                block; 0 disables the check.
         """
         for engine_group_idx, group_block_ids in enumerate(new_block_ids):
-            if group_block_ids:
-                self.allocated_block_ids.setdefault(engine_group_idx, []).extend(
-                    group_block_ids
-                )
+            if not group_block_ids:
+                continue
+            block_ids = self.allocated_block_ids.setdefault(engine_group_idx, [])
+            if relocation_window == 0:
+                block_ids.extend(group_block_ids)
+                continue
+            prev_len = len(block_ids)
+            window_start = max(0, prev_len - relocation_window)
+            # A relocated block keeps its id: only its slot changes. An id seen
+            # again within the window is that block, so null its old slot.
+            for block_id in group_block_ids:
+                if block_id != 0:
+                    for slot in range(window_start, prev_len):
+                        if block_ids[slot] == block_id:
+                            block_ids[slot] = 0
+                            break
+                block_ids.append(block_id)
 
     def num_allocated_blocks(self) -> dict[int, int]:
         return {
@@ -195,6 +228,8 @@ class LMCacheMPRequestMetadata:
         tracker: LMCacheMPRequestTracker,
         lmcache_tokens_per_chunk: int,
         group_tokens_per_block: list[int],
+        *,
+        save_decode_cache: bool = False,
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the store metadata for the current request tracker.
@@ -207,6 +242,13 @@ class LMCacheMPRequestMetadata:
                 KV cache spec ``block_size``. Must each divide
                 ``lmcache_tokens_per_chunk`` (hybrid models can mix different
                 values); ``0`` marks a scratch group that is never stored.
+            save_decode_cache: Whether to store chunks containing generated
+                tokens. Defaults to storing only complete chunks within the
+                initial prompt, including when decode fills its partial tail.
+
+        Returns:
+            Metadata for newly storable chunks, or None when no complete
+            permitted chunk is available. Retrieval is unaffected.
         """
         # NOTE: the invariant here is that `num_stored_tokens` should
         # always be a multiple of `lmcache_tokens_per_chunk`
@@ -252,6 +294,8 @@ class LMCacheMPRequestMetadata:
             allocated_tokens,
             computed_tokens,
         )
+        if not save_decode_cache:
+            min_available_tokens = min(min_available_tokens, tracker.num_prompt_tokens)
         if tracker.max_offload_tokens is not None:
             min_available_tokens = min(min_available_tokens, tracker.max_offload_tokens)
         num_staging_tokens = min_available_tokens - tracker.num_stored_tokens
@@ -413,10 +457,16 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             breaks the request's stored-prefix chain so later chunks are not
             stored unreachable. ``aggregate()`` unions the sets: one rank's
             failure breaks the chain even when the other ranks succeeded.
+        kv_events: Completed-store KV events, carried here only when vLLM does
+            not call ``get_kv_connector_kv_cache_events`` on the connector
+            (e.g. as a ``MultiConnector`` child, which forwards each child's
+            worker metadata but not that hook). ``aggregate()`` merges them the
+            way vLLM merges ``kv_cache_events`` across workers.
     """
 
     completed_store_requests: dict[str, int]
     failed_store_requests: set[str] = field(default_factory=set)
+    kv_events: KVConnectorKVEvents | None = None
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -427,16 +477,24 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             other: The report of another rank, for the same scheduler step.
 
         Returns:
-            A new metadata whose completion counts are summed per request
-            and whose failed-request sets are unioned.
+            A new metadata whose completion counts are summed per request,
+            whose failed-request sets are unioned, and whose KV events are
+            merged.
         """
         assert isinstance(other, LMCacheMPWorkerMetadata)
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
+        kv_events = self.kv_events
+        if kv_events is None:
+            kv_events = other.kv_events
+        elif other.kv_events is not None:
+            kv_events.add_events(other.kv_events.get_all_events())
+            kv_events.increment_workers(other.kv_events.get_number_of_workers())
         return LMCacheMPWorkerMetadata(
             completed_store_requests=merged,
             failed_store_requests=(
                 self.failed_store_requests | other.failed_store_requests
             ),
+            kv_events=kv_events,
         )

@@ -16,9 +16,14 @@ from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
+from lmcache.v1.multiprocess.ext_server_module import (
+    TransportServiceRegistrar,
+    register_grpc_services,
+)
+from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import (
     BoundRequestHandler,
+    HandlerType,
     iter_request_handlers,
 )
 from lmcache.v1.multiprocess.transport.base import RequestServer
@@ -46,7 +51,7 @@ _CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
 
 @dataclass
 class _GrpcRequestHandler:
-    request_type: RequestType
+    operation: str
     handler: Callable[..., Any] | None
     handler_type: HandlerType
     requires_client_affinity: bool
@@ -71,11 +76,49 @@ class _GeneratedServicer:
         self._affinity_submit_lock = affinity_submit_lock
         self._sync_handler_lock = sync_handler_lock
 
-    def __getattr__(self, method_name: str) -> Callable[[Any, Any], Any]:
+    def __getattr__(self, method_name: str) -> Callable[..., Any]:
         full_name = f"{self._binding.descriptor.full_name}.{method_name}"
         handler = self._handlers.get(full_name)
         if handler is None:
             raise AttributeError(method_name)
+
+        if self._binding.descriptor.methods_by_name[method_name].server_streaming:
+
+            def subscribe(
+                request: Any, context: grpc.ServicerContext, send: Callable
+            ) -> None:
+                try:
+                    stream = self._dispatch(handler, request, context)
+                except ValueError as exc:
+                    context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+                    return
+                if not context.add_callback(stream.close):
+                    stream.close()
+                    return
+
+                def forward() -> None:
+                    try:
+                        for response in stream:
+                            send(handler.response_encoder(response))
+                    except Exception as exc:
+                        if context.is_active():
+                            logger.exception(
+                                "Error in streaming handler %s", handler.operation
+                            )
+                            context.set_code(grpc.StatusCode.INTERNAL)
+                            context.set_details(str(exc))
+                    finally:
+                        stream.close()
+                        send(None)
+
+                # The same nonblocking hook used by grpc.health.v1.Health.Watch:
+                # an idle stream must not occupy the unary request executor.
+                threading.Thread(
+                    target=forward, daemon=True, name="grpc-event-stream"
+                ).start()
+
+            subscribe.experimental_non_blocking = True  # type: ignore[attr-defined]
+            return subscribe
 
         def invoke(request: Any, context: grpc.ServicerContext) -> Any:
             return self._dispatch(handler, request, context)
@@ -92,7 +135,7 @@ class _GeneratedServicer:
             if registered.handler is None:
                 context.abort(
                     grpc.StatusCode.UNIMPLEMENTED,
-                    f"{registered.request_type.name} is not enabled on this server",
+                    f"{registered.operation} is not enabled on this server",
                 )
                 raise RuntimeError("gRPC context abort unexpectedly returned")
             payloads = registered.request_decoder(request)
@@ -118,6 +161,8 @@ class _GeneratedServicer:
                 raise NotImplementedError(
                     f"{registered.handler_type.name} handlers are not supported"
                 )
+            if isinstance(result, MessagingStream):
+                return result
             return registered.response_encoder(result)
         except NotImplementedError as exc:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
@@ -169,29 +214,37 @@ class GrpcMultiprocessServer(RequestServer):
         """Return the TCP port selected by gRPC, including for port zero."""
         return self._bound_port
 
-    def add_modules(self, modules: Sequence[object]) -> None:
+    def add_modules(
+        self,
+        modules: Sequence[object],
+        *,
+        service_registrars: Sequence[TransportServiceRegistrar] = (),
+    ) -> None:
         """Register decorated module methods as generated gRPC services.
 
         Args:
             modules: Ordered business modules. A later module overrides an
                 earlier handler for the same request type.
+            service_registrars: Out-of-tree gRPC service registrars returned
+                by server-module factories.
 
         Raises:
             TypeError: If a module handler does not match its protocol types.
             ValueError: If a module exposes invalid handler metadata.
         """
-        handlers_by_request: dict[RequestType, BoundRequestHandler] = {}
+        handlers_by_operation: dict[str, BoundRequestHandler] = {}
         for module in modules:
             for registered in iter_request_handlers(module):
-                handlers_by_request[registered.options.request_type] = registered
+                handlers_by_operation[registered.operation] = registered
 
         for binding in get_service_bindings().values():
-            self._add_generated_service(binding, handlers_by_request)
+            self._add_generated_service(binding, handlers_by_operation)
+        register_grpc_services(modules, self._server, service_registrars)
 
     def _add_generated_service(
         self,
         binding: ServiceBinding,
-        handlers_by_request: dict[RequestType, BoundRequestHandler],
+        handlers_by_operation: dict[str, BoundRequestHandler],
     ) -> None:
         service_name = binding.descriptor.name
 
@@ -199,12 +252,12 @@ class GrpcMultiprocessServer(RequestServer):
         codec_registry = get_method_codec_registry()
         for method in binding.descriptor.methods:
             method_codec = codec_registry.by_full_name[method.full_name]
-            bound_handler = handlers_by_request.get(method_codec.request_type)
+            bound_handler = handlers_by_operation.get(method_codec.operation)
             if bound_handler is not None:
                 method_codec.validate_handler(bound_handler.handler)
             full_name = method.full_name
             registered = _GrpcRequestHandler(
-                request_type=method_codec.request_type,
+                operation=method_codec.operation,
                 handler=(bound_handler.handler if bound_handler is not None else None),
                 handler_type=(
                     bound_handler.options.handler_type
@@ -255,12 +308,16 @@ class GrpcMultiprocessServer(RequestServer):
 def build_grpc_request_server(
     modules: list[EngineModule],
     mp_config: MPServerConfig,
+    *,
+    service_registrars: Sequence[TransportServiceRegistrar] = (),
 ) -> GrpcMultiprocessServer:
     """Build a gRPC request server for the supplied business modules.
 
     Args:
         modules: Ordered business modules composing the cache server.
         mp_config: Multiprocess server configuration.
+        service_registrars: Out-of-tree gRPC service registrars returned by
+            server-module factories.
 
     Returns:
         Configured, but not yet started, gRPC request server.
@@ -271,5 +328,5 @@ def build_grpc_request_server(
         max_cpu_workers=mp_config.max_cpu_workers,
         grpc_server_workers=mp_config.grpc_server_workers,
     )
-    server.add_modules(modules)
+    server.add_modules(modules, service_registrars=service_registrars)
     return server

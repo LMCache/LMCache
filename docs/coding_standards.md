@@ -2,8 +2,8 @@
 
 This document defines the coding quality standards and code review expectations for the LMCache project. All contributors (human and AI) should follow these standards. Reviewers should use this as the authoritative reference when reviewing PRs.
 
-> **Source of truth**: This file is the canonical reference. `AGENTS.md` contains the
-> quick-reference checklist; `CLAUDE.md` and `.gemini/styleguide.md` point here for details.
+> **Source of truth**: This file is the canonical reference; `AGENTS.md` and
+> `.gemini/styleguide.md` point here (`CLAUDE.md` is an `@AGENTS.md` pointer).
 
 ---
 
@@ -136,7 +136,7 @@ A full docstring must include:
   rather than mirroring module file names. See `docs/design/README.md` for the full
   convention.
 - User-facing READMEs (`README.md` in module directories) stay next to the code and
-  are symlinked from the corresponding `docs/design/<path>/` location — do not move
+  are symlinked from the corresponding `docs/design/<path>/` location -- do not move
   them.
 
 ### 5.2 Testing
@@ -235,19 +235,9 @@ from .utils import helper
 
 ### 7.3 Formatting and Linting
 
-```bash
-# Run all checks (mirrors CI)
-pre-commit run --all-files
-
-# Individual tools
-ruff check .              # Lint (E, F, B, SLF rules)
-ruff format .             # Format (line-length 88)
-isort .                   # Import sorting (black profile, from_first=true)
-mypy --config-file=pyproject.toml   # Type checking
-codespell --toml pyproject.toml     # Spell checking
-```
-
-C++/CUDA files use clang-format (Google style, 80-col). Rust code uses `cargo fmt` and `cargo clippy`.
+All code must pass `pre-commit run --all-files` (mirrors CI: ruff lint/format,
+isort, mypy, codespell). C++/CUDA files use clang-format (Google style, 80-col).
+Rust code uses `cargo fmt` and `cargo clippy`.
 
 ### 7.4 Logging
 
@@ -259,11 +249,10 @@ C++/CUDA files use clang-format (Google style, 80-col). Rust code uses `cargo fm
   - `int` (counts, numeric IDs) → `%d`
   - everything else (`str`, `bool`, objects, exceptions) → `%s`
   - floats use `%f` / `%.2f` as appropriate
-  - Watch ambiguous names: `instance_id` is a `str` in most modules (e.g. `cache_engine.py`, `config_base.py`) but an `int` GPU index in some multiprocess modules — check the annotation before choosing `%s` vs `%d`. Bools print as `1`/`0` under `%d`, so use `%s` when you want `True`/`False`.
+  - Watch ambiguous names: `instance_id` is a `str` in most modules (e.g. `cache_engine.py`, `config_base.py`) but an `int` GPU index in some multiprocess modules -- check the annotation before choosing `%s` vs `%d`. Bools print as `1`/`0` under `%d`, so use `%s` when you want `True`/`False`.
 
 ### 7.5 Error Handling
 
-- Replace `assert` with `if/raise` for all runtime validation (see Section 2.2).
 - Error/failure paths must not leave the system in an inconsistent state. Check:
   - Locks are released
   - Pool entries are freed
@@ -274,7 +263,9 @@ C++/CUDA files use clang-format (Google style, 80-col). Rust code uses `cargo fm
 
 - Unbounded collections are memory leaks. If a set or dict grows over time (e.g., tracking seen keys), ensure entries are cleaned up when the corresponding resource is freed.
 - CUDA/GPU resources must be properly managed (allocated, freed, synchronized).
-- No unnecessary memory copies or allocations in hot paths.
+- No unnecessary memory copies or allocations in hot paths, and no implicit
+  GPU synchronization (`.item()`, `.cpu()`, `.tolist()`) on the store/retrieve
+  hot path.
 
 ---
 
@@ -331,53 +322,43 @@ Reviews should **not** focus on:
 3. List issues grouped by severity (`error` > `warning` > `info`).
 4. End with a summary table: severity | count | key items.
 
+### 9.5 AI-Generated Code Signals
+
+Check the diff against Section 10. Several violations together in one PR
+suggest unreviewed AI output -- say so and ask the author to explain the design.
+
+Severity: a broad `except` swallowing errors on a data path, or a defensive
+branch masking real failures, is an **error**; boilerplate docstrings,
+redundant guards, and style inconsistent with the surrounding module are
+**warning**s.
+
 ---
 
-## 10. Quick Reference Checklist
+## 10. AI-Assisted Coding
 
-Use this checklist before submitting a PR or during review:
+Hard requirements targeting the common failure modes of AI-generated code.
 
-### Correctness
-- [ ] Code does what it claims; matches PR description
-- [ ] Edge cases handled (empty inputs, `None` values, boundary conditions)
-- [ ] Error/failure paths do not leave inconsistent state
-- [ ] No regressions (existing tests still pass)
+### 10.1 No Defensive Programming
 
-### Typing and Style
-- [ ] `pre-commit run --all-files` passes
-- [ ] All functions have type hints (arguments + return values)
-- [ ] No use of `Any` or bare generic containers
-- [ ] License header present on all Python files
-- [ ] Import ordering follows section-heading convention
+- Do not handle failures that cannot occur. Validate at API boundaries
+  (Section 2.2); internal helpers assume valid inputs. No speculative `None`
+  checks or fallback defaults.
+- Keep `try/except` narrow and catch specific types. `except Exception` only
+  at thread/process entry points, RPC handlers, and background-loop bodies.
+- Use `logger.exception` inside `except` blocks unless re-raising.
 
-### Documentation
-- [ ] All public functions have complete docstrings
-- [ ] Docstrings match actual behavior
-- [ ] Design docs updated for non-trivial changes
-- [ ] User docs updated for user-facing changes
+### 10.2 Comments and TODOs
 
-### Encapsulation and Design
-- [ ] No cross-class private member access
-- [ ] Public APIs minimal and well-defined
-- [ ] Module-level helpers at top; private methods at end of class
-- [ ] No boolean parameters (use enum or split into separate functions)
-- [ ] No ambiguous return values
+- Comments explain WHY, not WHAT. Never narrate the change ("now we...",
+  "previously..."); git history covers that.
+- No docstring boilerplate that restates the signature on internal helpers.
+- No TODOs that defer work the task requires. TODOs carry the owner's GitHub
+  handle: `# TODO(Zhengfei): make this tunable`.
 
-### Caller Impact (Global View)
-- [ ] All callers of changed signatures still compile/pass type checks
-- [ ] All callers still handle the new return type / new exceptions correctly
-- [ ] Subclasses/implementers of modified base classes or protocols updated
-- [ ] Tests and integration code (`tests/`, `lmcache/integration/`) checked, not just production paths
+### 10.3 Match the Codebase
 
-### Testing
-- [ ] New features have corresponding tests
-- [ ] Bug fixes have regression tests
-- [ ] Tests target public interface, not implementation details
-- [ ] Tests do not access private members
-
-### Safety and Performance
-- [ ] No `assert` for runtime validation (use `if/raise`)
-- [ ] No unbounded collection growth
-- [ ] Thread safety maintained for shared state
-- [ ] No unnecessary memory copies in hot paths
-- [ ] CUDA/GPU resources properly managed
+- Reuse existing helpers and patterns (Section 5.3); do not re-implement a
+  textbook version.
+- No speculative config options, hooks, or abstractions for problems the
+  codebase does not have. New code should read as if the module's original
+  author wrote it.

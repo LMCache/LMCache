@@ -18,17 +18,14 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
+    PrepareRetrieveResponse,
+    PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
+    RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
 from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
-from lmcache.v1.multiprocess.protocols.engine import (
-    PrepareRetrieveResponse,
-    PrepareStoreResponse,
-    RegisterEngineDrivenContextResponse,
-)
-from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 
 # Local
@@ -254,7 +251,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         non-GPU transfers."""
         return self._ctx.resolve_obj_keys(key, [0])[0]
 
-    @request_handler(RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT)
+    @request_handler()
     def register_kv_cache_engine_driven_context(
         self,
         payload: RegisterEngineDrivenContextPayload,
@@ -331,6 +328,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         )
         strategy: TransferStrategy = create_transfer_strategy(
             self._ctx.storage_manager,
+            read_owner_resolver=self._ctx.get_read_owners,
             shm_name=shm_name,
             pool_size=pool_size,
             pending_writes=self._pending_shm_writes,
@@ -356,7 +354,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             shm_name=shm_name, pool_size=pool_size
         )
 
-    @request_handler(RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT)
+    @request_handler(operation="unregister_kv_cache_engine_driven_context")
     def unregister_kv_cache(self, instance_id: int) -> None:
         """Unregister a non-GPU KV cache context for the given instance ID.
 
@@ -378,7 +376,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         logger.info("Unregistered non-CUDA context for instance ID %d", instance_id)
 
     @request_handler(
-        RequestType.PREPARE_STORE,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )
@@ -395,7 +392,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             instance_id: Worker instance identifier.
 
         Returns:
-            PrepareStoreResponse with empty slots for pickle mode.
+            PrepareStoreResponse with empty slots for inline mode.
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
         response = strategy.prepare_store(
@@ -409,7 +406,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         return response
 
     @request_handler(
-        RequestType.COMMIT_STORE,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )
@@ -425,7 +421,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         Args:
             key: Cache key for the token range to store.
             instance_id: Worker instance identifier.
-            cpu_data: Pickled list of CPU tensors produced by the worker.
+            cpu_data: Typed inline CPU tensor payload produced by the worker.
 
         Returns:
             ``True`` when all reserved objects are written, otherwise ``False``.
@@ -456,7 +452,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         return result
 
     @request_handler(
-        RequestType.PREPARE_RETRIEVE,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )
@@ -490,7 +485,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         return response
 
     @request_handler(
-        RequestType.COMMIT_RETRIEVE,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )
@@ -503,8 +497,8 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         """Finalize a retrieve operation.
 
         Args:
-            key: Cache key (unused for pickle).
-            instance_id: Worker instance identifier (unused for pickle).
+            key: Cache key (unused for inline transfer).
+            instance_id: Worker instance identifier (unused for inline transfer).
 
         Returns:
             Always ``True``.

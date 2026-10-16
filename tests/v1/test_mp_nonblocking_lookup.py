@@ -47,6 +47,23 @@ def ready(value: Any) -> MessagingFuture[Any]:
     return future
 
 
+class NoopHeartbeatThread:
+    """Keep lookup-status tests independent of background health polling."""
+
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        self.recover_callback: Callable[[], bool] | None = None
+
+    def register_recover_callback(self, callback: Callable[[], bool]) -> None:
+        """Mirror the production heartbeat interface without running it."""
+        self.recover_callback = callback
+
+    def start(self) -> None:
+        """Do not start a thread in a synchronous polling test."""
+
+    def stop(self) -> None:
+        """Match the scheduler shutdown interface."""
+
+
 class Client:
     """Old-peer RPC surface only; no L0 capabilities or GPU API are supplied."""
 
@@ -100,6 +117,7 @@ def make_adapter(monkeypatch: pytest.MonkeyPatch) -> Iterator[AdapterFactory]:
     """Construct public adapters against controllable old-peer clients."""
     adapters: list[LMCacheMPSchedulerAdapter] = []
     context = zmq.Context()
+    monkeypatch.setattr(adapter_module, "HeartbeatThread", NoopHeartbeatThread)
 
     def create(
         count: int = 1,

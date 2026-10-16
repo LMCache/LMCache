@@ -172,6 +172,8 @@ store is skipped and nothing is committed — a later retrieve simply misses and
 the engine recomputes. The non-GPU transfer path rejects multi-group transfers
 outright.
 
+**Failed retrieves:** on vLLM versions exposing `KVConnectorTransferResults`, multi-group receive failures are reported by request ID in both `finished_recving` and `failed_recving`, without flat block errors. This lets vLLM wait for all workers and apply its configured failure policy instead of rejecting an incompatible error report. Single-group models retain block-level reporting so a valid partial prefix can remain reusable; older vLLM versions retain the legacy completion and block-error hooks.
+
 ## Example
 
 vLLM exposes two engine groups — group 0: layers [0,2,4], group 1: [1,3]. If
@@ -205,6 +207,25 @@ logical-block granularity. See
 limits (notably: edited groups are byte-opaque — no content-aware processing,
 no cross-backend cache sharing).
 
+### MTP and the last prompt block
+
+With MTP, vLLM's scheduler runs the prompt's last full block and its tail in
+one prefill step, so no Mamba state is ever written for that block's
+boundary. In vLLM's own block list that position becomes the null block
+(id 0), and the speculative block that used to sit there is moved to the
+end. The connector only receives the blocks added at the end, so the tracker
+would still show the moved block at its old position and store it as the
+chunk's Mamba state, which no kernel ever wrote.
+
+vLLM only moves blocks out of the last `num_speculative_tokens` positions, and
+a block is never listed twice for one request. So when a reported id is
+already in those last positions of the tracker's list, `append_block_ids` sets
+the old position to 0. Without align-mode Mamba and speculative decoding the
+window is 0 and ids are appended as-is.
+The server then sees an all-zero chunk for the Mamba group and skips it, and
+the next hit ends one chunk earlier. Needs `--separate-object-groups` and
+chunk size equal to the Mamba block size.
+
 ## Code map
 
 | Area | File |
@@ -215,4 +236,4 @@ no cross-backend cache sharing).
 | Group metadata edits (Mamba, sub-paged attention) | `lmcache/integration/vllm/kv_cache_group_edits.py` |
 | Register / store / retrieve | `lmcache/integration/vllm/{lmcache_mp_connector,vllm_multi_process_adapter}.py` |
 | Server GPU context / transfer | `lmcache/v1/multiprocess/{gpu_context,modules/lmcache_driven_transfer}.py` |
-| Request protocol | `lmcache/v1/multiprocess/protocols/engine.py` |
+| Request RPC contract | `lmcache/v1/multiprocess/transport/base.py` |

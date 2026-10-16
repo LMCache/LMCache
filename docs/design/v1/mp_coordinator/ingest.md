@@ -3,6 +3,9 @@
 Modules: `lmcache/v1/mp_coordinator/ingest/`
  - `event_source.py` — source lifecycle/status contract
  - `http_event_source.py` — non-durable `POST /events` push source
+ - `kafka_event_source.py` — durable Kafka pull source (poll thread)
+ - `stream_position.py` — `StreamPosition`: the checkpoint's own cursor into
+   the Kafka stream, and the only one
  - `event_gate.py` — `EventGate`: admission (fencing, dedup, gap detection)
  - `event_broadcaster.py` — `CacheEventBroadcaster` + the `CacheEventConsumer` protocol
 Contract vocabulary: `lmcache/v1/mp_coordinator/api.py`
@@ -14,12 +17,13 @@ it decides **what** is admitted (the gate) and **who** sees it (the
 broadcaster). Neither holds cache state — the consumers do.
 
 ```
-source adapter                    ingest layer                 consumers
-──────────────────────────────────────────────────────────────────────────────
-POST /events ──▶ HttpCacheEventSource ──▶ EventGate ──▶ CacheEventBroadcaster
- (HTTP push)      .ingest(batches)          fence /      .broadcast(batch) ────▶ KeyDirectory
-                                             dedup /       .fence_instance(id) ──▶ FleetEvictionController
-                                             gap detect
+source adapters                     ingest layer                  consumers
+────────────────────────────────────────────────────────────────────────────────
+POST /events ──▶ HttpCacheEventSource ──┐
+ (HTTP push)      .ingest(batches)       ├─▶ EventGate ──▶ CacheEventBroadcaster
+Kafka topic  ──▶ KafkaCacheEventSource ──┘    fence /      .broadcast(batch) ────▶ KeyDirectory
+ (durable pull)   poll thread                  dedup /       .fence_instance(id) ──▶ FleetEvictionController
+                                               gap detect
 ```
 
 ## Why a gate separate from the directory
@@ -38,13 +42,14 @@ consumer is a `register_consumer` call in `create_app`.
 ## Admission (`EventGate.ingest`)
 
 One batch = `(instance_id, incarnation, seq, event_type, tier, backend,
-entries[], ts)`. The gate enforces, in order:
+entries[], ts, dropped_events)`. The gate enforces, in order:
 
 | mechanism | rule | why |
 | --- | --- | --- |
 | Incarnation fencing | `incarnation <` current → drop batch (`STALE_INCARNATION`). `incarnation >` current → `fence_instance(id)` on every consumer, then start a fresh cursor. | A restart empties the reporter's *memory* — its L1 placements must not survive. L2 bytes persist on disk across restarts, so L2 is deliberately not fenced (consumers that track L2 only no-op the hook). |
 | Seq dedup | `seq <=` last admitted (same incarnation) → drop batch (`DUPLICATE`). | Replays (retry, event-bus redelivery) must be idempotent. |
-| Gap detection | `seq >` last admitted `+ 1` → set the emitter's `gap_detected` flag, admit anyway. | Events may be lost; the flag marks the emitter's slice as stale until the stream is replayed (durable-transport retention). Consumer application is idempotent, so admitting past a gap is safe. |
+| Gap detection | `seq >` last admitted `+ 1`, or `dropped_events` grew → set the emitter's `gap_detected` flag, admit anyway. | Events may be lost; the flag marks the emitter's slice as stale until the stream is replayed (durable-transport retention). Consumer application is idempotent, so admitting past a gap is safe. |
+| Loss accounting | Per admitted batch: add the skipped `seq` count to `missing_batches` (not for the first batch of a stream the gate was not tracking), and the increase of `dropped_events` to `events_dropped`. | The flag says *that* the slice is incomplete; the counts say *how much*, and their rate says whether loss is ongoing. A skipped `seq` is loss in transit; `dropped_events` is what the emitter itself threw away. |
 
 Per-instance FIFO by `seq` is the **only** ordering the design needs:
 each instance is the sole writer of its own facts, so there is no
@@ -69,20 +74,64 @@ the registry is still a follow-up; the method exists and is tested.)
 lists to `EventGate.ingest_batches`, which reports the aggregate admitted /
 duplicate / stale counts.
 
-Today the adapter is `HttpCacheEventSource`, fed by `POST /events` from
-the MP-server `CacheEventSubscriber` (see
-[cache_events.md](cache_events.md)). It is a non-durable push source:
-FastAPI owns its request lifecycle, and the source cannot seek or replay
-events that failed before the coordinator accepted them. A future durable
-message-queue source enters through the same gate, so fencing, dedup, fan-out,
-and consumers do not change.
+Two adapters exist, and a coordinator runs exactly one of them, selected by
+`--event-transport` (default `http`). One path per emitter stream is what
+the gate's per-emitter `seq` cursor assumes: two paths carrying the same
+stream could interleave, and a late lower `seq` would then be dropped as a
+duplicate it never was.
 
-The source lifecycle/status contract is deliberately smaller than a
-replayable-source contract. HTTP reports `replay_capability=none`; it does
-not implement a silent no-op `seek`. A durable source will add its own
-transport position and seek/lag contract when that position has a concrete
-representation. Transport positions (for example Kafka partition offsets)
-are separate from the gate's per-emitter seq cursors.
+- **`HttpCacheEventSource`**, fed by `POST /events` from the MP-server
+  `CacheEventSubscriber` (see [cache_events.md](cache_events.md)). A
+  non-durable push source: FastAPI owns its request lifecycle, and it cannot
+  seek or replay events that failed before the coordinator accepted them. It
+  reports `replay_capability=none` and implements no silent no-op `seek`.
+- **`KafkaCacheEventSource`**, selected by `--event-transport kafka` (with
+  `--kafka-bootstrap-servers`, `--kafka-topic`, `--kafka-group-id`);
+  `POST /events` then answers 404. One
+  poll thread reads the topic the MP servers' `KafkaCacheEventSink`
+  produces to -- one `CacheEventsRequest` envelope per record (the
+  `POST /events` body), keyed by `instance_id` so a partition is one
+  instance's stream in order -- and
+  offers each
+  record's batches to `ingest_batches`. A record's offset is recorded
+  into `StreamPosition` (see below) only after the gate has seen it, so
+  delivery is at-least-once; the gate's dedup absorbs any redelivery. A
+  record that does not decode is logged and skipped -- and still
+  recorded, so it cannot stall its partition. It
+  reports `replay_capability=seekable` because the topic retains the
+  stream: rewinding `StreamPosition` replays it.
+
+## Resuming correctly (`StreamPosition`)
+
+The read position is checkpointed state like any other. `StreamPosition`
+records each partition's offset as records are admitted, and is
+registered in `app.py`'s `checkpoint_components`, so `save_checkpoint`
+captures it under the *same* quiesce as the gate and the views. A
+checkpoint therefore holds a view and the exact offset that produced it;
+`on_assign` seeks each partition to `StreamPosition.next_offset(...)`,
+which is by construction the right place for the state just restored.
+
+The consumer group never commits (`enable.auto.commit: False`, no
+`store_offsets`). A committed offset would be a second cursor on its own
+timer, and after an ungraceful crash it could sit ahead of the last
+checkpoint -- resuming from it would skip the records in between
+permanently, since the broker considers them delivered and the restored
+state does not contain them. One cursor, moved only by a checkpoint, has
+no such gap. The cost: `kafka-consumer-groups --describe` shows this
+group no progress, so the source reports its own lag instead:
+`lmcache_coordinator.kafka.unread_records` per partition (the high
+watermark from the consumer's fetch cache, minus the next offset to read,
+computed when metrics are read so it can never stall ingest), plus `kafka.partitions_assigned` and
+`kafka.records_read`.
+
+Because the restored view and the resume point cannot disagree, nothing
+gates startup on catching up. A partition
+`StreamPosition` has never seen -- a first start, one added since, or
+any start with no checkpoint path configured -- falls back to
+`auto.offset.reset` (`earliest`).
+
+Kafka partition offsets are a separate coordinate system from the gate's
+per-emitter seq cursors; both ride in the checkpoint, independently.
 
 A source that is a *scan* of current contents rather than a stream —
 the startup L2 resync that used to paginate `GET /cache/objects` — has
@@ -107,6 +156,11 @@ Consumers implement two hooks:
   `FleetEvictionController` no-ops, because the L2 bytes it accounts
   outlive the process and leave only via `DELETE`.
 
+A consumer that raises is logged with the batch's instance, incarnation
+and `seq`; the consumers after it still run. Only the one that raised misses the batch, and it is not retried:
+consumers are in-memory, so the same batch would fail the same way, and
+re-sending it to all of them would apply it twice to the rest.
+
 Registration order is invocation order. Today: the key directory
 (placements and token bindings, the source of truth), then the eviction
 controller (per-salt usage and the LRU). The two are independent — the
@@ -123,15 +177,28 @@ registration order.
 | How many bytes is this salt using? What should be evicted? | `FleetEvictionController` |
 
 `EventGate.stats()` has **no HTTP endpoint yet** — `GET /directory/stats`
-deliberately reports directory contents only. So `gap_detected` is
-currently invisible to operators; exposing it is part of the replay
-follow-up below.
+deliberately reports directory contents only. Its loss state is exported
+as metrics instead: fleet counters
+`lmcache_coordinator.ingest.event_batches_missing` and
+`...events_dropped_by_servers`, and per-`instance_id` gauges
+`...server_event_batches_missing`, `...server_events_dropped` and
+`...server_view_incomplete` (the `gap_detected` flag). The per-instance
+counts cover the emitter's current incarnation and are not
+checkpointed; the last `dropped_events` seen is, so a restarted
+coordinator keeps measuring against the last report. See
+[observability.md](observability.md).
 
 ## Deliberately out of scope (follow-ups)
 
-- **Replay integration**: exposing `gap_detected` over HTTP, then acting
-  on it by replaying the emitter's stream from a durable transport's
-  retention.
+- **Gap visibility over HTTP**: `gap_detected` is a metric but still has
+  no HTTP endpoint (the planned `GET /status`, see
+  [observability.md](observability.md)).
+- **Operator-driven replay from an arbitrary point**: a restart already
+  resumes correctly on its own. Replaying from further back --
+  reprocessing retained history the checkpoint has already moved past --
+  is still manual: an operator clears the `kafka_stream_position`
+  section from the checkpoint, and the source falls back to
+  `auto.offset.reset`.
 - **Registry integration**: calling `EventGate.drop_instance` from
   deregistration / heartbeat-timeout eviction.
 - **Allocation generations** for shared pools (deterministic

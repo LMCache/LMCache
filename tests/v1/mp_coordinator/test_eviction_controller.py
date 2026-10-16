@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import Callable
+from dataclasses import replace
 import asyncio
 import time
 
@@ -808,12 +809,17 @@ async def test_the_loop_evicts_on_each_tick_until_stopped():
     k = _make_key("alice", h="aa")
     _store(ctrl, kd, k, 100)
     qs.set_quota("alice", 0)  # ratio=1.0 → full eviction
-    dispatched, handler = _recorder()
+    dispatched: list[str] = []
+    arrived = asyncio.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        dispatched.append(str(request.url))
+        arrived.set()
+        return httpx.Response(200, json={"requested": 1, "adapter": "s3", "ok": True})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         async with ctrl.run(ControllerRuntime(http_client=client)):
-            # Long enough for several ticks, short enough to keep the test fast.
-            await asyncio.sleep(0.1)
+            await asyncio.wait_for(arrived.wait(), timeout=5.0)
 
     assert dispatched, "the loop never dispatched an eviction"
     assert dispatched[0] == "http://10.0.0.1:8000/cache/objects"
@@ -906,3 +912,70 @@ async def test_the_controller_dispatches_to_the_shared_membership_view():
         await ctrl.wait_for_in_flight_dispatches()
 
     assert dispatched == ["http://10.9.9.9:8000/cache/objects"]
+
+
+# -- Pins across object groups ------------------------------------------------
+#
+# A pin protects a chunk, and under --separate-object-groups a chunk is stored
+# once per object group, so a pin on any group's key covers all of them.
+
+
+def _in_group(key: ObjectKey, group: int) -> ObjectKey:
+    return replace(key, object_group_id=group)
+
+
+def test_a_pin_covers_its_chunk_in_every_object_group():
+    ctrl, _, kd = _setup(eviction_ratio=1.0)
+    k = _make_key("a")
+    for group in (0, 1, 2):
+        _store(ctrl, kd, _in_group(k, group), 100)
+
+    ctrl.pin([k])
+
+    assert ctrl.compute_eviction_plan() == {}
+    assert ctrl.filter_unpinned([_in_group(k, 1), _in_group(k, 2)]) == []
+
+
+def test_pins_on_different_groups_of_one_chunk_share_a_count():
+    """One entry per chunk, so pins taken through different groups add up
+    and each needs its own unpin."""
+    ctrl, _, _ = _setup()
+    k = _make_key("a")
+
+    ctrl.pin([_in_group(k, 1)])
+    ctrl.pin([_in_group(k, 2)])
+    ctrl.unpin([k])
+
+    assert ctrl.filter_unpinned([k]) == []
+    assert ctrl.list_pins("", "", 0, 10)[0] == 1
+
+
+def test_drop_pins_clears_every_group():
+    ctrl, _, _ = _setup()
+    k = _make_key("a")
+    ctrl.pin([k])
+
+    ctrl.drop_pins([_in_group(k, 2)])
+
+    assert ctrl.filter_unpinned([k, _in_group(k, 1)]) == [k, _in_group(k, 1)]
+
+
+def test_restored_pins_on_other_groups_merge_into_one_entry():
+    """A captured table with entries for several groups of one chunk loads
+    as one entry carrying their combined count, so it takes that many
+    unpins to release."""
+    source, _, _ = _setup()
+    k = _make_key("a")
+    source.pin([k])
+    entry = dict(source.capture()["entries"][0])
+    other_group = {**entry, "key": {**entry["key"], "object_group_id": 2}}
+
+    ctrl, _, _ = _setup()
+    ctrl.restore({"entries": [entry, other_group]})
+
+    total, pins = ctrl.list_pins("", "", 0, 10)
+    assert total == 1
+    ctrl.unpin([k])
+    assert ctrl.filter_unpinned([k]) == []  # one of the two pins remains
+    ctrl.unpin([k])
+    assert ctrl.filter_unpinned([k]) == [k]
