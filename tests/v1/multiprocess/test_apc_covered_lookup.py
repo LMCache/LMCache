@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the APC-covered-lookup skip (shared foundation).
+"""Unit tests for the APC-covered-lookup skip.
 
+The engine marks the APC-covered prefix by setting the lookup key's ``start``;
+the server touches ``[0, start)`` and locks/prefetches only ``[start, end)``.
 Covers the correctness-critical pieces that do not require the native compute
 backend:
 
-- The covered count carried in ``request_configs`` under
-  ``COVERED_CHUNKS_CONFIG_KEY`` survives ``no_worker_id_version`` and does not
-  change cache identity.
-- ``resolve_prefetched_obj_keys`` clamping the release range to the covered
-  prefix, so a release never touches a chunk the lookup did not lock (risk 1:
-  over-release would drop a concurrent prefix-sharing request's read lock).
+- ``resolve_prefetched_obj_keys`` flooring the release range to the key's
+  ``start``, so a release never touches a chunk the lookup did not lock
+  (over-release would drop a concurrent prefix-sharing request's read lock).
+- The connector freezing the boundary only on a real submit, going sticky on
+  a shrink, and remembering the abandoned lookup's locked range for the FREE.
 """
 
 # Standard
@@ -23,10 +24,7 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.custom_types import (
-    COVERED_CHUNKS_CONFIG_KEY,
-    IPCCacheServerKey,
-)
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
 
 CHUNK_SIZE = 16
@@ -59,21 +57,17 @@ class _FakeRequest:
         self.sampling_params = None
 
 
-def _make_key(n_chunks: int, covered_chunks: int = 0) -> IPCCacheServerKey:
+def _make_key(n_chunks: int, start_chunks: int = 0) -> IPCCacheServerKey:
     n_tokens = n_chunks * CHUNK_SIZE
-    request_configs = (
-        {COVERED_CHUNKS_CONFIG_KEY: covered_chunks} if covered_chunks else None
-    )
     return IPCCacheServerKey(
         model_name="m",
         world_size=1,
         worker_id=None,
         token_ids=tuple(range(n_tokens)),
-        start=0,
+        start=start_chunks * CHUNK_SIZE,
         end=n_tokens,
         request_id="r",
         num_kv_readers=1,
-        request_configs=request_configs,
     )
 
 
@@ -86,60 +80,72 @@ def _ctx_with_hashes(n_chunks: int) -> MagicMock:
     return ctx
 
 
-def test_covered_config_survives_no_worker_id_version():
-    key = _make_key(4, covered_chunks=2).no_worker_id_version()
-    assert key.request_configs[COVERED_CHUNKS_CONFIG_KEY] == 2
-    assert key.worker_id is None
-
-
-def test_covered_config_not_part_of_cache_identity():
-    # request_configs is compare=False, so two otherwise-equal keys are equal.
-    a = _make_key(4, covered_chunks=0)
-    b = _make_key(4, covered_chunks=3)
-    assert a == b
-
-
-def test_resolve_full_attention_clamps_to_covered():
-    # Full attention (window -1): locked range is [covered, hit).
-    ctx = _ctx_with_hashes(4)
-    key = _make_key(4, covered_chunks=2)
+def test_resolve_full_attention_floors_to_key_start():
+    # Full attention (window -1): locked range is [start, hit).
+    ctx = _ctx_with_hashes(2)  # hashes for [2, 4)
+    key = _make_key(4, start_chunks=2)
     obj_keys = resolve_prefetched_obj_keys(
-        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(-1,), covered_chunks=2
+        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(-1,)
     )
-    # world_size 1, one group => (hit - covered) = 2 keys, for chunks 2 and 3.
+    # world_size 1, one group => (hit - start) = 2 keys, for chunks 2 and 3.
     assert len(obj_keys) == 2
 
 
-def test_resolve_covered_zero_releases_full_prefix():
+def test_resolve_start_zero_releases_full_prefix():
     ctx = _ctx_with_hashes(4)
-    key = _make_key(4, covered_chunks=0)
+    key = _make_key(4)
     obj_keys = resolve_prefetched_obj_keys(
-        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(-1,), covered_chunks=0
+        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(-1,)
     )
     assert len(obj_keys) == 4
 
 
-def test_resolve_covered_at_hit_releases_nothing():
-    ctx = _ctx_with_hashes(4)
-    key = _make_key(4, covered_chunks=4)
+def test_resolve_start_at_hit_releases_nothing():
+    ctx = _ctx_with_hashes(0)  # empty range [4, 4)
+    key = _make_key(4, start_chunks=4)
     obj_keys = resolve_prefetched_obj_keys(
-        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(-1,), covered_chunks=4
+        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(-1,)
     )
     assert obj_keys == []
 
 
-def test_resolve_sliding_window_clamped_by_covered():
-    # Sliding window w=2, hit=4 => window [2,4); covered=3 clamps it to [3,4).
-    ctx = _ctx_with_hashes(4)
-    key = _make_key(4, covered_chunks=3)
+def test_resolve_sliding_window_floored_by_key_start():
+    # Sliding window w=2, hit=4 => window [2,4); start=3 floors it to [3,4).
+    ctx = _ctx_with_hashes(1)  # hashes for [3, 4)
+    key = _make_key(4, start_chunks=3)
     obj_keys = resolve_prefetched_obj_keys(
-        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(2,), covered_chunks=3
+        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(2,)
     )
     assert len(obj_keys) == 1
 
 
-def test_l2_adapter_touch_keys_refreshes_recency_without_io():
-    """``L2AdapterInterface.touch_keys`` marks keys accessed and moves no bytes.
+def test_worker_retrieve_key_start_excludes_the_covered_prefix():
+    """A failed retrieve resolves with its key's own ``start``.
+
+    ``GetRetrieveMetadata`` starts a retrieve at
+    ``num_vllm_hit_tokens // chunk * chunk``, at or above the covered
+    boundary, so the key's own ``start`` already excludes the prefix the
+    lookup never locked.
+    """
+    ctx = _ctx_with_hashes(2)
+    key = IPCCacheServerKey(
+        model_name="m",
+        world_size=1,
+        worker_id=0,
+        token_ids=tuple(range(4 * CHUNK_SIZE)),
+        start=2 * CHUNK_SIZE,
+        end=4 * CHUNK_SIZE,
+        request_id="r",
+        num_kv_readers=1,
+    )
+    obj_keys = resolve_prefetched_obj_keys(
+        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(-1,)
+    )
+    assert len(obj_keys) == 2
+
+
+def test_l2_adapter_submit_touch_refreshes_recency_without_io():
+    """``L2AdapterInterface.submit_touch`` marks keys accessed, moves no bytes.
 
     The covered prefix is skipped instead of loaded, so without this refresh L2
     would see those keys as cold and evict data a non-skipping lookup kept.
@@ -161,7 +167,7 @@ def test_l2_adapter_touch_keys_refreshes_recency_without_io():
     adapter._listeners = [listener]
     # Drive the real implementation; it must reach the eviction listener and
     # perform no read/load call on the adapter.
-    L2AdapterInterface.touch_keys(adapter, [keys[0]])
+    L2AdapterInterface.submit_touch(adapter, [keys[0]])
 
     adapter._notify_keys_accessed.assert_called_once_with([keys[0]])
     adapter.submit_load_task.assert_not_called()
@@ -173,26 +179,25 @@ def test_touch_cached_keys_hits_both_tiers():
     from lmcache.v1.distributed.storage_manager import StorageManager
 
     sm = MagicMock(spec=StorageManager)
+    l1 = MagicMock()
     l2_a, l2_b = MagicMock(), MagicMock()
     sm._adapters_lock = threading.Lock()
+    sm._l1_managers_by_id = {0: l1}
     sm._l2_adapters = {0: l2_a, 1: l2_b}
-    sm.touch_l1_keys = MagicMock()
 
     keys = [ObjectKey(chunk_hash=ObjectKey.IntHash2Bytes(7), model_name="m", kv_rank=0)]
     StorageManager.touch_cached_keys(sm, keys)
 
-    sm.touch_l1_keys.assert_called_once_with(keys)
-    l2_a.touch_keys.assert_called_once_with(keys)
-    l2_b.touch_keys.assert_called_once_with(keys)
+    l1.touch_keys.assert_called_once_with(keys)
+    l2_a.submit_touch.assert_called_once_with(keys)
+    l2_b.submit_touch.assert_called_once_with(keys)
 
 
-def test_submit_returns_clamped_covered_and_none_when_already_pending():
-    """``maybe_submit_lookup_request`` reports what the server actually got.
+def test_submit_sends_key_start_and_reports_whether_it_sent():
+    """``maybe_submit_lookup_request`` carries ``start`` on the key.
 
     The caller must key its frozen covered boundary off the return value: a
-    poll that no-ops because a lookup is already in flight returns ``None``,
-    and a submitted lookup returns the count after clamping to the aligned
-    range -- not the count the caller passed in.
+    poll that no-ops because a lookup is already in flight returns ``False``.
     """
     # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
@@ -212,16 +217,26 @@ def test_submit_returns_clamped_covered_and_none_when_already_pending():
     adapter._ensure_heartbeat_started = MagicMock()
 
     submit = LMCacheMPSchedulerAdapter.maybe_submit_lookup_request
-    # 8 chunks of tokens, but ask for 99 covered chunks -> clamped to 8.
-    sent = submit(
-        adapter, "req", token_ids=list(range(8 * CHUNK_SIZE)), covered_chunks=99
+    assert (
+        submit(
+            adapter,
+            "req",
+            token_ids=list(range(8 * CHUNK_SIZE)),
+            start=3 * CHUNK_SIZE,
+        )
+        is True
     )
-    assert sent == 8
+    assert adapter._create_key.call_args.kwargs["start"] == 3 * CHUNK_SIZE
 
     # Second poll: the request is still pending, so nothing is sent.
     assert (
-        submit(adapter, "req", token_ids=list(range(8 * CHUNK_SIZE)), covered_chunks=3)
-        is None
+        submit(
+            adapter,
+            "req",
+            token_ids=list(range(8 * CHUNK_SIZE)),
+            start=3 * CHUNK_SIZE,
+        )
+        is False
     )
 
 
@@ -241,7 +256,7 @@ def test_covered_boundary_frozen_only_when_a_lookup_is_sent():
     adapter = MagicMock()
     adapter.lmcache_tokens_per_chunk = CHUNK_SIZE
     # A lookup is already in flight, so the adapter sends nothing.
-    adapter.maybe_submit_lookup_request.return_value = None
+    adapter.maybe_submit_lookup_request.return_value = False
     adapter.check_lookup_result.return_value = None
 
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
@@ -251,7 +266,6 @@ def test_covered_boundary_frozen_only_when_a_lookup_is_sent():
     connector._hit_alignment_tokens = CHUNK_SIZE
     connector._connector_stats = MagicMock()
     connector.lazy_offload = False
-    connector._skip_covered_lookup = True
 
     request = _FakeRequest(list(range(8 * CHUNK_SIZE)))
     tracker = connector._get_or_create_request_tracker(request)
@@ -266,11 +280,11 @@ def test_covered_boundary_frozen_only_when_a_lookup_is_sent():
     assert tracker.apc_covered_tokens == 4 * CHUNK_SIZE
 
 
-def _shrink_connector(skip_enabled: bool = True, covered_chunks: int = 4):
+def _shrink_connector(covered_chunks: int = 4):
     """A connector poised at the shrink check inside the lookup poll.
 
     Models the second poll of a request whose first poll already submitted a
-    lookup: ``maybe_submit_lookup_request`` returns ``None`` (one is still in
+    lookup: ``maybe_submit_lookup_request`` returns ``False`` (one is still in
     flight, so the frozen boundary is not rewritten) and the lookup result is
     in. Callers vary ``num_computed_tokens`` to move vLLM's APC hit relative
     to that boundary.
@@ -280,12 +294,11 @@ def _shrink_connector(skip_enabled: bool = True, covered_chunks: int = 4):
 
     adapter = MagicMock()
     adapter.lmcache_tokens_per_chunk = CHUNK_SIZE
-    adapter.maybe_submit_lookup_request.return_value = None
+    adapter.maybe_submit_lookup_request.return_value = False
     adapter.check_lookup_result.return_value = 6 * CHUNK_SIZE
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
     connector.request_trackers = {}
     connector.scheduler_adapter = adapter
-    connector._skip_covered_lookup = skip_enabled
     connector._reserve_last_token_for_lookup = False
     connector._hit_alignment_tokens = CHUNK_SIZE
     connector._connector_stats = MagicMock()
@@ -298,14 +311,13 @@ def _shrink_connector(skip_enabled: bool = True, covered_chunks: int = 4):
 
 
 @requires_vllm
-def test_shrink_goes_sticky_and_leaves_the_release_to_the_server():
-    """A shrink re-looks-up and never skips again, issuing no release itself.
+def test_shrink_goes_sticky_and_remembers_the_stale_locked_range():
+    """A shrink re-looks-up immediately and keeps the stale range for the FREE.
 
-    The stale ``[c0, ret)`` locks are settled by the server when the
-    replacement LOOKUP arrives, while the session still describes which
-    groups the abandoned lookup held. Releasing from here instead would
-    race that LOOKUP through the server's thread pool, and read locks are
-    anonymous refcounts shared with prefix-sharing requests.
+    The abandoned lookup locked ``[c0, ret)``. The connector records that
+    range in ``pending_free_ranges`` -- released with the request's next
+    ``FREE_LOOKUP_LOCKS`` -- and resubmits the full lookup in the same
+    scheduler step instead of waiting for the next poll.
     """
     connector, adapter, request, tracker = _shrink_connector()
     tracker.num_stored_tokens = 6 * CHUNK_SIZE
@@ -316,15 +328,18 @@ def test_shrink_goes_sticky_and_leaves_the_release_to_the_server():
 
     # Scheduler is told to re-poll rather than given a hit length.
     assert result == (None, True)
-    # The server settles the abandoned locks on the replacement LOOKUP;
-    # releasing from here would race it.
+    # The stale [c0, ret) range rides the next FREE; nothing is sent now.
     adapter.free_lookup_locks.assert_not_called()
+    assert tracker.pending_free_ranges == [(4 * CHUNK_SIZE, 6 * CHUNK_SIZE)]
     adapter.cleanup_lookup_result.assert_called_once_with(request.request_id)
+    # The full re-lookup is submitted in the same step: once at the top of
+    # the poll, once after the shrink was detected.
+    assert adapter.maybe_submit_lookup_request.call_count == 2
+    assert "start" not in adapter.maybe_submit_lookup_request.call_args.kwargs
     # Sticky, so a second shrink cannot recur for this request.
     assert tracker.need_full_lookup is True
-    # Per-lookup state reset so the next poll submits a fresh full lookup.
+    # Per-lookup state reset so the re-lookup starts clean.
     assert tracker.apc_covered_tokens == 0
-    assert tracker.lookup_started_at is None
     assert tracker.num_stored_tokens == 0
     assert tracker.num_lmcache_hit_tokens == 0
 
@@ -339,33 +354,25 @@ def test_no_shrink_when_apc_hit_still_covers_the_boundary():
 
     adapter.free_lookup_locks.assert_not_called()
     assert tracker.need_full_lookup is False
+    assert tracker.pending_free_ranges == []
     assert tracker.apc_covered_tokens == 4 * CHUNK_SIZE
 
 
 @requires_vllm
-def test_shrink_is_inert_when_the_skip_is_disabled():
-    """With the server not advertising the skip, or once sticky, do nothing.
+def test_shrink_cannot_recur_once_fallen_back():
+    """``need_full_lookup`` makes the fallback fire only once.
 
-    ``need_full_lookup`` is what makes the fallback fire only once; acting on
-    an already-fallen-back request would free locks the replacement full
-    lookup legitimately holds.
+    Acting on an already-fallen-back request would record a bogus stale
+    range against the replacement full lookup's locks.
     """
-    connector, adapter, request, tracker = _shrink_connector(skip_enabled=False)
+    connector, adapter, request, tracker = _shrink_connector(covered_chunks=0)
+    tracker.need_full_lookup = True
 
-    # Would be a shrink if the skip were in play.
     connector.get_num_new_matched_tokens(request, 0)
 
     adapter.free_lookup_locks.assert_not_called()
-    assert tracker.need_full_lookup is False
-
-    # Same once the request has already fallen back: boundary reset to 0.
-    connector2, adapter2, request2, tracker2 = _shrink_connector(covered_chunks=0)
-    tracker2.need_full_lookup = True
-
-    connector2.get_num_new_matched_tokens(request2, 0)
-
-    adapter2.free_lookup_locks.assert_not_called()
-    adapter2.cleanup_lookup_result.assert_not_called()
+    adapter.cleanup_lookup_result.assert_not_called()
+    assert tracker.pending_free_ranges == []
 
 
 def _lookup_ctx(n_chunks: int) -> MagicMock:
@@ -376,24 +383,21 @@ def _lookup_ctx(n_chunks: int) -> MagicMock:
         num_chunks_in_sw=[-1], num_object_groups=1
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
-    # No abandoned lookup to settle unless a test says otherwise.
-    _sess = ctx.session_manager.get_or_create.return_value
-    _sess.take_prefetch_release.return_value = None
     return ctx
 
 
-def test_server_honors_the_covered_count_sent_by_the_engine():
-    """A covered count in ``request_configs`` skips the lock and the prefetch.
+def test_server_honors_the_lookup_key_start():
+    """A lookup key with ``start > 0`` skips the lock and the prefetch below it.
 
-    The LRU touch is the observable proof that the count was honored -- it
-    happens only on the skip path. A request that sends no count keeps the
-    old behavior, so the prefix is still locked and prefetched.
+    The LRU touch is the observable proof that the start was honored -- it
+    happens only on the skip path. A key starting at 0 keeps the old
+    behavior, so the prefix is still locked and prefetched.
     """
     # First Party
     from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
     covered_ctx = _lookup_ctx(4)
-    LookupModule(covered_ctx).lookup(_make_key(4, covered_chunks=2), 1)
+    LookupModule(covered_ctx).lookup(_make_key(4, start_chunks=2), 1)
     covered_ctx.storage_manager.touch_cached_keys.assert_called_once()
 
     plain_ctx = _lookup_ctx(4)
@@ -426,41 +430,8 @@ def test_end_session_refreshes_both_tiers():
     assert len(touched) == 4
 
 
-def test_retrieve_range_alone_excludes_the_covered_prefix():
-    """A failed retrieve needs no covered-chunk clamp; its own start suffices.
-
-    ``GetRetrieveMetadata`` starts a retrieve at
-    ``num_vllm_hit_tokens // chunk * chunk``, which is at or above the covered
-    boundary: either APC still covers what it covered at lookup, or it shrank
-    and the request re-looked-up with ``covered_chunks=0`` before it could
-    reach retrieve. So resolving with the key's own
-    ``start`` gives the same keys as clamping to the covered prefix, and
-    ``prepare_failed_retrieve_release`` does not need to report it.
-    """
-    ctx = _ctx_with_hashes(2)
-    # Retrieve range [2, 4): starts exactly at the covered boundary.
-    key = IPCCacheServerKey(
-        model_name="m",
-        world_size=1,
-        worker_id=0,
-        token_ids=tuple(range(4 * CHUNK_SIZE)),
-        start=2 * CHUNK_SIZE,
-        end=4 * CHUNK_SIZE,
-        request_id="r",
-        num_kv_readers=1,
-    )
-    unclamped = resolve_prefetched_obj_keys(
-        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(-1,)
-    )
-    clamped = resolve_prefetched_obj_keys(
-        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(-1,), covered_chunks=2
-    )
-    assert unclamped == clamped
-    assert len(unclamped) == 2
-
-
 def test_serde_wrapper_forwards_touch_to_the_inner_adapter():
-    """The serde wrapper must delegate ``touch_keys``, not inherit it.
+    """The serde wrapper must delegate ``submit_touch``, not inherit it.
 
     ``register_listener`` forwards to the inner adapter, so the wrapper's own
     listener list is always empty. Inheriting the base implementation would
@@ -475,6 +446,6 @@ def test_serde_wrapper_forwards_touch_to_the_inner_adapter():
     wrapper._inner = inner
     keys = [ObjectKey(chunk_hash=ObjectKey.IntHash2Bytes(3), model_name="m", kv_rank=0)]
 
-    SerdeL2AdapterWrapper.touch_keys(wrapper, keys)
+    SerdeL2AdapterWrapper.submit_touch(wrapper, keys)
 
-    inner.touch_keys.assert_called_once_with(keys)
+    inner.submit_touch.assert_called_once_with(keys)

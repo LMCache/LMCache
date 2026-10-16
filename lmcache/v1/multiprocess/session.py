@@ -47,10 +47,6 @@ class Session:
     prefetch_locked_gids: tuple = ()
     prefetch_group_windows: tuple[int, ...] = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
-    # Leading APC-covered chunks the lookup skipped; releases clamp to it.
-    prefetch_covered_chunks: int = 0
-    # Set once anything has released this lookup's read locks.
-    prefetch_released: bool = False
     extras: dict[str, Any] = field(default_factory=dict)
     _lookup_generation: int = field(default=0, repr=False)
     _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
@@ -151,7 +147,6 @@ class Session:
         self,
         key: IPCCacheServerKey,
         group_windows: tuple[int, ...],
-        covered_chunks: int = 0,
     ) -> None:
         """Record a new lookup and reset its per-lookup release state."""
         with self._lock:
@@ -159,47 +154,9 @@ class Session:
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
             self.prefetch_group_windows = group_windows
-            self.prefetch_covered_chunks = covered_chunks
-            self.prefetch_released = False
             self._lookup_generation += 1
             self._failed_retrieve_releases.clear()
             self._prefetch_owners.clear()
-
-    def mark_prefetch_released(self) -> None:
-        """Mark this lookup's read locks released, keeping the lock model.
-
-        Several disjoint ``FREE_LOOKUP_LOCKS`` can share one lookup, so the
-        model must survive; only the abandoned-lookup settle reads the mark.
-        """
-        with self._lock:
-            self.prefetch_released = True
-
-    def take_prefetch_release(
-        self,
-    ) -> tuple[IPCCacheServerKey, int, tuple[int, ...], int] | None:
-        """Claim an unreleased lookup result, atomically, at most once.
-
-        Releases are anonymous refcount decrements, so running one twice
-        would strip a concurrent prefix-sharing request's lock.
-
-        Returns:
-            ``(lookup_ipc_key, hit_chunks, locked_gids, covered_chunks)``, or
-            ``None`` when a FREE already released them.
-        """
-        with self._lock:
-            if (
-                self.prefetch_released
-                or self.prefetch_hit_chunks < 0
-                or self.lookup_ipc_key is None
-            ):
-                return None
-            self.prefetch_released = True
-            return (
-                self.lookup_ipc_key,
-                self.prefetch_hit_chunks,
-                self.prefetch_locked_gids,
-                self.prefetch_covered_chunks,
-            )
 
     def record_prefetch_result(
         self,

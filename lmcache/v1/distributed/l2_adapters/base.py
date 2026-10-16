@@ -380,7 +380,7 @@ class L2AdapterInterface(ABC):
         self._backend_name = name
         self._shared = shared
 
-    def touch_keys(self, keys: list[ObjectKey]) -> None:
+    def submit_touch(self, keys: list[ObjectKey]) -> None:
         """Mark ``keys`` accessed for eviction without moving any bytes.
 
         Args:

@@ -39,9 +39,9 @@ from tests.v1.multiprocess.transport_test_utils import (
 
 
 def test_free_locks_payload_classes():
-    """FREE_LOOKUP_LOCKS payload should be [IPCCacheServerKey, int]."""
+    """FREE_LOOKUP_LOCKS payload should be [key, tp_size, extra_ranges]."""
     payload_classes = get_rpc_spec("free_lookup_locks").payload_types
-    assert len(payload_classes) == 2
+    assert len(payload_classes) == 3
     assert payload_classes[0] is IPCCacheServerKey
     assert payload_classes[1] is int
 
@@ -61,12 +61,17 @@ class _FreeLocksHandler:
     """Record FREE_LOOKUP_LOCKS calls from a request server."""
 
     def __init__(self) -> None:
-        self.call: tuple[IPCCacheServerKey, int] | None = None
+        self.call: tuple | None = None
 
     @request_handler(HandlerType.BLOCKING)
-    def free_lookup_locks(self, key: IPCCacheServerKey, tp_size: int) -> None:
+    def free_lookup_locks(
+        self,
+        key: IPCCacheServerKey,
+        tp_size: int,
+        extra_ranges: tuple[tuple[int, int], ...] = (),
+    ) -> None:
         """Record the decoded request payload."""
-        self.call = (key, tp_size)
+        self.call = (key, tp_size, extra_ranges)
 
 
 @pytest.mark.parametrize("request_transport", REQUEST_TRANSPORTS)
@@ -81,8 +86,10 @@ def test_free_locks_request_transport(request_transport: RequestTransport) -> No
     server = start_lookup_request_server(request_transport, server_url, handler)
     client = RequestClientFactory.create(server_url)
     try:
-        assert client.free_lookup_locks(key, 1).result(timeout=5) is None
-        assert handler.call == (key, 1)
+        assert client.free_lookup_locks(key, 1, ((256, 512),)).result(timeout=5) is None
+        got_key, got_tp, got_ranges = handler.call
+        assert (got_key, got_tp) == (key, 1)
+        assert [tuple(r) for r in got_ranges] == [(256, 512)]
     finally:
         client.close()
         server.close()
@@ -98,16 +105,19 @@ def _make_free_locks_ctx(
     windows: list[int],
     hit_chunks: int,
     locked_gids: tuple = (),
+    lookup_start: int = 0,
 ) -> MagicMock:
     """Build a mock engine context for free_lookup_locks tests.
 
     Args:
-        chunk_hashes: Hashes returned for the freed [start, end) range.
+        chunk_hashes: Hashes returned for every resolved [start, end) range.
         windows: Per-object-group windows for the registered AttnWindowDesc.
         hit_chunks: Prefetch hit length recorded on the session (-1 for
             "never recorded").
         locked_gids: The lock model recorded on the session; empty means
             "every group" (legacy std-lookup behavior).
+        lookup_start: ``start`` of the session's lookup key; releases are
+            floored to it.
 
     Returns:
         The configured MagicMock context.
@@ -123,30 +133,7 @@ def _make_free_locks_ctx(
     session = ctx.session_manager.get_or_create.return_value
     session.prefetch_hit_chunks = hit_chunks
     session.prefetch_locked_gids = tuple(locked_gids)
-    session.prefetch_covered_chunks = 0
-    session.prefetch_released = False
-    session.lookup_ipc_key = _free_locks_key(1024, start=0, end=1024)
-
-    # Model the real release bookkeeping: a FREE marks the result released
-    # but leaves the lock model in place (several disjoint FREEs can share
-    # it), while the abandoned-lookup settle claims it only once and only if
-    # no FREE got there first.
-    def _mark_prefetch_released():
-        session.prefetch_released = True
-
-    def _take_prefetch_release():
-        if session.prefetch_released or session.prefetch_hit_chunks < 0:
-            return None
-        session.prefetch_released = True
-        return (
-            session.lookup_ipc_key,
-            session.prefetch_hit_chunks,
-            session.prefetch_locked_gids,
-            session.prefetch_covered_chunks,
-        )
-
-    session.mark_prefetch_released.side_effect = _mark_prefetch_released
-    session.take_prefetch_release.side_effect = _take_prefetch_release
+    session.lookup_ipc_key = _free_locks_key(1024, start=lookup_start, end=1024)
     return ctx
 
 
@@ -254,6 +241,75 @@ def test_server_free_lookup_locks_caps_release_at_hit_length():
 
     released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
     assert released == {(0, b"h0"), (0, b"h1")}
+
+
+def test_server_free_lookup_locks_floors_release_to_the_lookup_start():
+    """A FREE over [0, end) must not reach below the lookup's own ``start``.
+
+    The APC-covered skip looks up ``[start, end)`` only, so chunks below
+    ``start`` were never locked; the engine still frees from 0 because the
+    retrieve-skip range starts there.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    # Session lookup covered [2, 4); mocked hashes stand for that range.
+    hashes = [b"h2", b"h3"]
+    ctx = _make_free_locks_ctx(hashes, windows=[-1], hit_chunks=4, lookup_start=512)
+    module = LookupModule(ctx)
+
+    module.free_lookup_locks(_free_locks_key(1024, start=0, end=1024), 1)
+
+    released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
+    assert released == {(0, b"h2"), (0, b"h3")}
+    # The range was floored before hashing: [512, 1024), not [0, 1024).
+    hash_call = ctx.token_hasher.compute_chunk_hashes.call_args
+    assert hash_call.kwargs["start"] == 512
+
+
+def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
+    """An extra range is an abandoned lookup's lock model, end == its hit.
+
+    The session now describes the *replacement* lookup (hit 8 here), so
+    resolving the stale range with the session hit would translate a
+    sliding-window group to the wrong chunks. The range's own end is the
+    abandoned lookup's hit boundary: window group releases chunk 3 only.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    hashes = [b"h2", b"h3"]  # the stale range [2, 4)
+    ctx = _make_free_locks_ctx(hashes, windows=[1, -1], hit_chunks=8)
+    module = LookupModule(ctx)
+
+    # Primary range empty; only the stale range [512, 1024) is released.
+    module.free_lookup_locks(
+        _free_locks_key(1024, start=0, end=0), 1, extra_ranges=((512, 1024),)
+    )
+
+    released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
+    # Window 1 with hit=4 (the range end): only chunk 3; full attention:
+    # chunks 2-3 (floored to the range start).
+    assert released == {(0, b"h3"), (1, b"h2"), (1, b"h3")}
+
+
+def test_server_free_lookup_locks_primary_and_extra_in_one_call():
+    """A FREE can settle the current lookup's range and a stale one together."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    hashes = [b"h0", b"h1"]
+    ctx = _make_free_locks_ctx(hashes, windows=[-1], hit_chunks=2)
+    module = LookupModule(ctx)
+
+    module.free_lookup_locks(
+        _free_locks_key(1024, start=0, end=512), 1, extra_ranges=((512, 1024),)
+    )
+
+    # One release call carrying both ranges' keys.
+    ctx.storage_manager.finish_read_prefetched.assert_called_once()
+    (obj_keys,), _ = ctx.storage_manager.finish_read_prefetched.call_args
+    assert len(obj_keys) == 4
 
 
 def test_server_free_lookup_locks_without_result_releases_nothing():
@@ -390,7 +446,7 @@ def test_server_handler_registered():
 
 def test_adapter_free_lookup_locks_sends_request():
     """LMCacheMPSchedulerAdapter.free_lookup_locks should send a FREE_LOOKUP_LOCKS
-    request with the correct key payload."""
+    request with the correct key payload and extra ranges."""
     # First Party
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPSchedulerAdapter,
@@ -420,16 +476,18 @@ def test_adapter_free_lookup_locks_sends_request():
         end=512,
         request_id="req-1",
         request_configs={"lmcache.skip_save": True},
+        extra_ranges=((256, 512),),
     )
 
     mock_client.free_lookup_locks.assert_called_once()
-    key, tp_size = mock_client.free_lookup_locks.call_args.args
+    key, tp_size, extra_ranges = mock_client.free_lookup_locks.call_args.args
     assert isinstance(key, IPCCacheServerKey)
     assert key.worker_id is None
     assert key.model_name == "test_model"
     assert key.request_id == "req-1"
     assert key.request_configs == {"lmcache.skip_save": True}
     assert tp_size == 1
+    assert extra_ranges == ((256, 512),)
 
 
 def test_adapter_free_lookup_locks_key_matches_lookup():
@@ -487,8 +545,9 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
         request_id="req-1",
         request_configs={"lmcache.skip_save": True},
     )
-    free_key, tp_size = mock_client.free_lookup_locks.call_args.args
+    free_key, tp_size, extra_ranges = mock_client.free_lookup_locks.call_args.args
     assert tp_size == 1
+    assert extra_ranges == ()
 
     # Keys should be identical
     assert lookup_key.model_name == free_key.model_name
@@ -529,77 +588,6 @@ def test_server_free_lookup_locks_honors_the_session_lock_model():
     assert released == ["g0-h2", "g1-h0", "g1-h1", "g1-h2"]
 
 
-def _drive_relookup(module: LookupModule, ctx: MagicMock) -> None:
-    """Send a second LOOKUP for the same request, as a re-lookup would.
-
-    ``lookup`` settles any abandoned result before ``begin_lookup`` resets
-    it, which is early enough that an empty group layout lets the call exit
-    right afterwards -- so this drives the settle without a real prefetch.
-    """
-    ctx.layout_desc_registry.find_group_layout_descs.return_value = {}
-    module.lookup(_free_locks_key(512, start=0, end=512), 1)
-
-
-def test_relookup_settles_the_abandoned_lookups_locks():
-    """A re-lookup releases the locks of the lookup it replaces.
-
-    A request can look up twice -- preemption/resume, or a covered-skip
-    fallback. FREE_LOOKUP_LOCKS carries no range; it reconstructs one from
-    the session's hit length and lock model, which ``begin_lookup`` resets.
-    If the replacement lands first and nothing settles the old result, those
-    locks survive only until the read-lock TTL, and a FREE arriving later
-    resolves against the *new* lookup's state instead.
-    """
-    ctx = _make_free_locks_ctx([b"h0", b"h1"], windows=[-1], hit_chunks=2)
-    module = LookupModule(ctx)
-
-    _drive_relookup(module, ctx)
-
-    ctx.storage_manager.finish_read_prefetched.assert_called_once()
-
-
-def test_relookup_leaves_an_in_flight_prefetch_to_its_controller():
-    """Locks of a running prefetch belong to the prefetch controller.
-
-    Releasing them here would double-decrement when the controller settles
-    the same prefetch in ``_finish_request``.
-    """
-    ctx = _make_free_locks_ctx([b"h0", b"h1"], windows=[-1], hit_chunks=2)
-    module = LookupModule(ctx)
-    with module._prefetch_job_lock:
-        module._prefetch_jobs["req-sw"] = MagicMock()
-
-    _drive_relookup(module, ctx)
-
-    ctx.storage_manager.finish_read_prefetched.assert_not_called()
-
-
-def test_take_prefetch_release_is_one_shot():
-    """``Session.take_prefetch_release`` hands the lock model to one caller.
-
-    A re-lookup settles the abandoned result and a late FREE_LOOKUP_LOCKS
-    tries to settle the same one. Releases are anonymous refcount
-    decrements, so the second must get nothing rather than strip a
-    concurrent prefix-sharing request's lock.
-    """
-    # First Party
-    from lmcache.v1.multiprocess.session import Session
-
-    session = Session(request_id="r", hasher=MagicMock())
-    key = _free_locks_key(1024, start=0, end=1024)
-    session.begin_lookup(key, (-1,), covered_chunks=2)
-    session.record_prefetch_result(4, (0,), None)
-
-    first = session.take_prefetch_release()
-    assert first is not None
-    _, hit_chunks, locked_gids, covered_chunks = first
-    # All four come from the same lookup: a release built from a mix of two
-    # would resolve to the wrong keys.
-    assert hit_chunks == 4 and locked_gids == (0,) and covered_chunks == 2
-
-    assert session.take_prefetch_release() is None
-
-
 def test_disjoint_frees_for_one_lookup_both_land():
     """One lookup can be released by several disjoint FREEs.
 
@@ -615,20 +603,3 @@ def test_disjoint_frees_for_one_lookup_both_land():
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=512), 1)
 
     assert ctx.storage_manager.finish_read_prefetched.call_count == 2
-
-
-def test_relookup_does_not_re_release_what_a_free_already_released():
-    """A FREE and a re-lookup must not both settle the same locks.
-
-    Read locks are anonymous refcounts, so a second decrement strips a
-    concurrent prefix-sharing request's lock rather than this request's.
-    """
-    ctx = _make_free_locks_ctx([b"h0", b"h1"], windows=[-1], hit_chunks=2)
-    module = LookupModule(ctx)
-
-    module.free_lookup_locks(_free_locks_key(512, start=0, end=512), 1)
-    released_by_free = ctx.storage_manager.finish_read_prefetched.call_count
-    _drive_relookup(module, ctx)
-
-    assert released_by_free == 1
-    assert ctx.storage_manager.finish_read_prefetched.call_count == 1

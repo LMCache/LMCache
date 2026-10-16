@@ -85,6 +85,9 @@ class LMCacheMPRequestTracker:
     # Sticky: after a shrink, the request looks up the full prefix from token 0.
     need_full_lookup: bool = False
 
+    # Lock ranges left by abandoned lookups, released with the next FREE.
+    pending_free_ranges: list[tuple[int, int]] = field(default_factory=list)
+
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
     def __init__(self, request: "Request"):
@@ -103,6 +106,7 @@ class LMCacheMPRequestTracker:
         self.num_lmcache_hit_tokens = 0
         self.apc_covered_tokens = 0
         self.need_full_lookup = False
+        self.pending_free_ranges = []
         self.state = LMCacheMPRequestState.PREFETCHING
         self.mm_adjusted_prompt_ids = []
         mm_hashes, mm_positions = extract_mm_features(request)
