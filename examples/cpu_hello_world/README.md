@@ -129,9 +129,10 @@ model-specific state), so any small model your vLLM build supports should work.
 - **`vllm serve` won't start / "PackageNotFoundError: vllm".** The CPU wheel
   registers under `vllm-cpu-nightly`; `install_cpu.sh` writes a `+cpu`
   dist-info alias to fix this. Re-run the installer.
-- **No cache hit / zero chunks.** Your prompt is shorter than one chunk. Keep
-  the small `--chunk-size` (16) and a long shared prefix, and make sure the two
-  requests share that prefix.
+- **No cache hit / zero chunks.** Your prompt is shorter than one chunk. Keep a
+  long shared prefix and make sure the two requests share it. `--chunk-size`
+  must stay a multiple of the vLLM block size, so lowering it to force more
+  chunks is not an option.
 - **vLLM is slow to come up.** CPU startup can take a minute+; the driver waits
   up to 10 minutes (`VLLM_READY_TIMEOUT`).
 - **macOS.** Use the default engine-driven transport (POSIX shared-memory

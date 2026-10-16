@@ -19,7 +19,8 @@
 #   LMCACHE_ZMQ_PORT    LMCache RPC port      (default: 15557)
 #   LMCACHE_HTTP_PORT   LMCache metrics port  (default: 18082)
 #   VLLM_PORT           vLLM HTTP port        (default: 18000)
-#   CHUNK_SIZE          LMCache chunk size    (default: 16, demo value)
+#   CHUNK_SIZE          LMCache chunk size    (default: 256; must be a
+#                       multiple of the vLLM block size)
 #   MAX_MODEL_LEN       vLLM max context      (default: 2048)
 #   VLLM_READY_TIMEOUT  seconds               (default: 600)
 #   TRANSFER_MODE       engine_driven|lmcache_driven (default: engine_driven)
@@ -34,7 +35,7 @@ MODEL="${MODEL:-Qwen/Qwen2.5-0.5B-Instruct}"
 LMCACHE_ZMQ_PORT="${LMCACHE_ZMQ_PORT:-15557}"
 LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-18082}"
 VLLM_PORT="${VLLM_PORT:-18000}"
-CHUNK_SIZE="${CHUNK_SIZE:-16}"
+CHUNK_SIZE="${CHUNK_SIZE:-256}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-2048}"
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-600}"
 LMCACHE_READY_TIMEOUT="${LMCACHE_READY_TIMEOUT:-60}"
@@ -65,7 +66,7 @@ trap cleanup EXIT
 
 echo "==> Tier 1: LMCache TTFT reduction on CPU"
 echo "    model:        ${MODEL}"
-echo "    chunk-size:   ${CHUNK_SIZE}  (demo value; production default is 256)"
+echo "    chunk-size:   ${CHUNK_SIZE}"
 echo "    LMCache ZMQ/HTTP: ${LMCACHE_ZMQ_PORT}/${LMCACHE_HTTP_PORT}"
 echo "    vLLM port:    ${VLLM_PORT}"
 echo "    work dir:     ${WORK_DIR}"
@@ -74,6 +75,11 @@ echo "    work dir:     ${WORK_DIR}"
 # Build prompts. A long shared prefix guarantees several full chunks so
 # there is visible cache traffic (a prompt shorter than one chunk caches
 # nothing). cold and warm send the identical prompt; negative differs.
+#
+# The paragraph count is bounded by MAX_MODEL_LEN: 40 paragraphs tokenize to
+# ~1700 tokens, which leaves headroom under the 2048 default and still spans
+# six full 256-token chunks. Overrun it and vLLM rejects the request with
+# HTTP 400 rather than truncating, so raise MAX_MODEL_LEN before raising this.
 # ------------------------------------------------------------------ #
 python3 - "${PROMPT_SHARED}" "${PROMPT_NEGATIVE}" <<'PY'
 import sys
@@ -82,7 +88,7 @@ shared_path, negative_path = sys.argv[1], sys.argv[2]
 
 def document(topic: str, marker: str) -> str:
     lines = [f"# Background briefing on {topic} ({marker})", ""]
-    for i in range(1, 121):
+    for i in range(1, 41):
         lines.append(
             f"{marker}-{i:03d}. This paragraph describes aspect {i} of "
             f"{topic}: how it is defined, why it matters for the system, "
@@ -102,8 +108,10 @@ echo "    shared prompt:   $(wc -c <"${PROMPT_SHARED}") chars"
 echo "    negative prompt: $(wc -c <"${PROMPT_NEGATIVE}") chars"
 
 # ------------------------------------------------------------------ #
-# Start LMCache server (CPU L1). Small chunk-size so short demo prompts
-# still form several cacheable chunks.
+# Start LMCache server (CPU L1). The chunk size must be a whole multiple of
+# the vLLM block size (128 here), or the connector aborts engine startup with
+# "LMCache chunk size N must be a multiple of ...". 256 is LMCache's own
+# default and divides cleanly by the block sizes vLLM uses on CPU.
 # ------------------------------------------------------------------ #
 echo ""
 echo "==> Starting lmcache server (log: ${LMCACHE_LOG})"
@@ -122,7 +130,7 @@ if ! kill -0 "${LMCACHE_PID}" 2>/dev/null; then
 fi
 if ! wait_for_endpoint_contains \
     "http://127.0.0.1:${LMCACHE_HTTP_PORT}/healthcheck" \
-    "${LMCACHE_READY_TIMEOUT}" "" "lmcache server"; then
+    "${LMCACHE_READY_TIMEOUT}" "" "lmcache server" "${LMCACHE_PID}"; then
   tail -n 40 "${LMCACHE_LOG}" || true; exit 1
 fi
 echo "    lmcache server healthy"
@@ -179,7 +187,7 @@ fi
 echo "==> Waiting for vLLM readiness (timeout ${VLLM_READY_TIMEOUT}s; CPU startup is slow)"
 if ! wait_for_endpoint_contains \
     "http://127.0.0.1:${VLLM_PORT}/v1/models" \
-    "${VLLM_READY_TIMEOUT}" "${MODEL}" "vLLM server"; then
+    "${VLLM_READY_TIMEOUT}" "${MODEL}" "vLLM server" "${VLLM_PID}"; then
   echo "!! Last 60 vLLM log lines:"; tail -n 60 "${VLLM_LOG}" || true; exit 1
 fi
 echo "    vLLM ready"

@@ -4,7 +4,7 @@
 #   source "$(dirname "${BASH_SOURCE[0]}")/../common.sh"
 #
 # Provides:
-#   wait_for_endpoint_contains URL TIMEOUT EXPECTED LABEL
+#   wait_for_endpoint_contains URL TIMEOUT EXPECTED LABEL [WATCH_PID]
 #   scrape_metric METRIC_NAME HTTP_PORT   -> integer counter total (or 0)
 #   pick_loopback_iface                   -> echoes lo (Linux) / lo0 (macOS)
 #   demo_mktemp PREFIX                    -> portable temp file path
@@ -35,15 +35,23 @@ demo_mktemp_dir() {
 }
 
 # Poll an HTTP endpoint until it responds and (optionally) its body contains
-# EXPECTED. Returns 0 on success, 1 on timeout.
+# EXPECTED. Returns 0 on success, 1 on timeout. If WATCH_PID is given, give up
+# as soon as that process dies rather than waiting out the full timeout -- a
+# vLLM engine that fails during startup is otherwise indistinguishable from one
+# that is merely slow, and CPU timeouts here are measured in minutes.
 wait_for_endpoint_contains() {
   local url="$1"
   local timeout="$2"
   local expected="$3"
   local label="$4"
+  local watch_pid="${5:-}"
   local response
 
   for _ in $(seq 1 "${timeout}"); do
+    if [ -n "${watch_pid}" ] && ! kill -0 "${watch_pid}" 2>/dev/null; then
+      echo "!! ${label} exited before becoming ready (${url})"
+      return 1
+    fi
     if response="$(curl -fsS --max-time 5 "${url}" 2>/dev/null)"; then
       if [ -z "${expected}" ] || echo "${response}" | grep -q "${expected}"; then
         return 0

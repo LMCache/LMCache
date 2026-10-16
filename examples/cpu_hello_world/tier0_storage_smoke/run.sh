@@ -72,7 +72,7 @@ fi
 echo "==> Waiting for healthcheck (timeout ${HEALTHCHECK_TIMEOUT}s)"
 if ! wait_for_endpoint_contains \
     "http://127.0.0.1:${HTTP_PORT}/healthcheck" \
-    "${HEALTHCHECK_TIMEOUT}" "" "lmcache server"; then
+    "${HEALTHCHECK_TIMEOUT}" "" "lmcache server" "${SERVER_PID}"; then
   echo "!! Last 40 log lines:"
   tail -n 40 "${LOG_FILE}" || true
   exit 1

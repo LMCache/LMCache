@@ -28,11 +28,11 @@ needed). Override with `MODEL=...` (see the license note in the parent
 
 ```
 ======================= RESULTS =======================
-  cold TTFT : 1.83s
-  warm TTFT : 0.42s
-  store: 0 -> 62 chunks written (cold)
-  hit  : 0 -> 62 chunks read    (warm)
-  negative read delta: 62 -> 62
+  cold TTFT : 5.5029s
+  warm TTFT : 0.8146s
+  store: 0 -> 6 chunks written (cold)
+  hit  : 0 -> 6 chunks read    (warm)
+  negative read delta: 6 -> 6
 =======================================================
 ==> PASS: LMCache stored KV on the cold request and served it on the warm
     request, entirely on CPU.
@@ -74,8 +74,9 @@ which is exactly when LMCache matters most in production.
 
 - **CPU startup is slow.** vLLM can take a minute or more to load on CPU; the
   script waits up to 10 minutes by default (`VLLM_READY_TIMEOUT`).
-- **Chunk size is lowered to 16** for the demo so short prompts still form
-  several cacheable chunks. Production default is 256 — a prompt shorter than
-  one chunk caches nothing.
+- **Chunk size must be a multiple of the vLLM block size** (128 here), or the
+  connector aborts engine startup. The demo uses LMCache's default of 256. A
+  prompt shorter than one chunk caches nothing, so the driver builds a prompt
+  of ~1700 tokens — six full chunks — while staying under `MAX_MODEL_LEN`.
 - **Transport:** POSIX shared-memory transports are Linux-only; this demo uses
   the default engine-driven path, which works on Linux and macOS.
