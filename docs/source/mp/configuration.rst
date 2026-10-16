@@ -743,6 +743,29 @@ data parallelism (``dp_size > 1``) are rejected with a clear error.
         --kv-transfer-config \
         '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.server_urls": "tcp://host1:6667,tcp://host2:6667"}}'
 
+LoRA adapters
+~~~~~~~~~~~~~
+
+With ``--enable-lora``, the same prompt produces different KV under each
+adapter, so the connector folds the adapter name and path into the request's
+``cache_salt`` before every lookup, store, retrieve and lock release. This
+prevents KV written under one adapter from being loaded for another adapter
+or for the base model. Base-model requests keep their ``cache_salt`` as is,
+so their keys do not change. The derived salt is
+``hashlib.sha256(f"{cache_salt}\0{lora_name}\0{lora_path}".encode()).hexdigest()``
+(``extract_cache_salt_from_request`` in ``lmcache/integration/vllm/utils.py``),
+so load an adapter from the same path string on every replica that should
+share its KV.
+
+Adapter requests show up under that 64-character salt in metric labels,
+``lmcache query`` output and the per-salt quota API. On an ``IsolatedLRU``
+server this moves adapter traffic out of the tenant's bucket: register a
+quota for each derived salt (compute it with the expression above), or
+adapter requests are evicted at the next cycle. KV that adapter requests
+wrote before this change sits under the base-model salt, where base-model
+requests keep hitting it until it is evicted, so clear persistent L2 backends
+when enabling the fix and upgrade every replica at the same time.
+
 Decode context parallelism (DCP)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

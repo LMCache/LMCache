@@ -1424,6 +1424,7 @@ def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> Non
             self.num_computed_tokens = 0
             self.num_preemptions = 0
             self.cache_salt = ""
+            self.lora_request = None
             self.prompt_token_ids = [1, 2, 3, 4]
             self.num_prompt_tokens = 4
             self.all_token_ids = [1, 2, 3, 4]
