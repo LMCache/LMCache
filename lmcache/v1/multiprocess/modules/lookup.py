@@ -177,10 +177,6 @@ class LookupModule:
         via query_prefetch_status. When the KV load policy declines the
         request, no prefetch is submitted and the job reports zero hits.
 
-        ``key.start`` marks a leading prefix the serving engine already has:
-        it is touched but not locked or prefetched, and the prefetch covers
-        only ``[start, end)``.
-
         Args:
             key: Cache key with request_id embedded.
             tp_size: Legacy wire field; ignored (kept for payload arity).
