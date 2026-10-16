@@ -73,7 +73,7 @@ jobs:
               # source is required for any other torch.
               env:
                 CIBW_BUILD: cp3*-manylinux_${{ matrix.cibw_arch }}
-                CIBW_TEST_COMMAND: "python {project}/.github/scripts/assert_native_ops.py"
+                CIBW_TEST_COMMAND: "python {project}/.github/scripts/assert_native_ops.py && python {project}/.github/scripts/assert_native_ops.py lmcache.lmcache_nixl nixl"
               run: |
                 python -m cibuildwheel --output-dir dist
 

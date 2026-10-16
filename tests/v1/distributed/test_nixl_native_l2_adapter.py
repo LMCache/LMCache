@@ -3,6 +3,8 @@
 
 # Standard
 from types import ModuleType
+import importlib.abc
+import importlib.util
 import os
 import sys
 
@@ -112,6 +114,120 @@ def test_factory_missing_extension_has_build_guidance(
     monkeypatch.setitem(sys.modules, "lmcache.lmcache_nixl", None)
     with pytest.raises(RuntimeError, match="BUILD_WITH_NIXL=1"):
         create_l2_adapter(config, L1MemoryDesc(4096, 8192, 4096))
+
+
+class _FakeNixlClient:
+    """Minimal native-client contract for the import-order tests."""
+
+    storage_type = "OBJECT"
+    supports_query = True
+    supports_delete = False
+    supports_direct_io = False
+    atomic_publication = False
+
+    def __init__(self, **kwargs: object) -> None:
+        self.read_fd, self.write_fd = os.pipe()
+
+    def event_fd(self) -> int:
+        """Return the pollable completion descriptor."""
+        return self.read_fd
+
+    def close(self) -> None:
+        """Close the fake completion descriptor."""
+        os.close(self.read_fd)
+        os.close(self.write_fd)
+
+
+class _ImportScenario(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    """Simulate how the extension and the nixl wheel load.
+
+    ``lmcache.lmcache_nixl`` loads only when ``extension_loads()`` is true;
+    importing ``nixl`` raises ``nixl_error`` when set. Records every import
+    attempt in ``attempts``.
+    """
+
+    def __init__(self, extension_loads, nixl_error: str = "") -> None:
+        self.extension_loads = extension_loads
+        self.nixl_error = nixl_error
+        self.attempts: list[str] = []
+
+    def find_spec(self, fullname, path, target=None):
+        """Claim the extension and nixl; leave every other import alone."""
+        if fullname not in ("lmcache.lmcache_nixl", "nixl"):
+            return None
+        self.attempts.append(fullname)
+        if fullname == "nixl" and self.nixl_error:
+            raise ImportError(self.nixl_error)
+        if fullname == "lmcache.lmcache_nixl" and not self.extension_loads():
+            raise ImportError("libnixl.so: cannot open shared object file")
+        return importlib.util.spec_from_loader(fullname, self)
+
+    def create_module(self, spec):
+        """Use the default module creation."""
+        return None
+
+    def exec_module(self, module: ModuleType) -> None:
+        """Populate the fake extension with the client class."""
+        if module.__name__ == "lmcache.lmcache_nixl":
+            module.LMCacheNixlClient = _FakeNixlClient  # type: ignore[attr-defined]
+
+
+def _install_scenario(
+    monkeypatch: pytest.MonkeyPatch, scenario: _ImportScenario
+) -> None:
+    """Route the extension and nixl imports through ``scenario``."""
+    for name in ("lmcache.lmcache_nixl", "nixl"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setattr(sys, "meta_path", [scenario, *sys.meta_path])
+
+
+def _obj_config() -> NixlNativeL2AdapterConfig:
+    return NixlNativeL2AdapterConfig.from_dict({"backend": "OBJ", "backend_params": {}})
+
+
+def test_factory_source_build_does_not_import_nixl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An extension that loads on its own (source build with RUNPATH) is used
+    without importing the nixl wheel, which would substitute its libnixl."""
+    scenario = _ImportScenario(extension_loads=lambda: True)
+    _install_scenario(monkeypatch, scenario)
+
+    adapter = create_l2_adapter(_obj_config(), L1MemoryDesc(4096, 8192, 4096))
+    adapter.close()
+
+    assert scenario.attempts == ["lmcache.lmcache_nixl"]
+
+
+def test_factory_wheel_imports_nixl_then_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wheel extension (no RUNPATH) loads once the nixl wheel is imported."""
+    scenario = _ImportScenario(extension_loads=lambda: "nixl" in sys.modules)
+    _install_scenario(monkeypatch, scenario)
+
+    adapter = create_l2_adapter(_obj_config(), L1MemoryDesc(4096, 8192, 4096))
+    adapter.close()
+
+    assert scenario.attempts == ["lmcache.lmcache_nixl", "nixl", "lmcache.lmcache_nixl"]
+
+
+def test_factory_reports_nixl_import_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing nixl import (e.g. missing OpenSSL 3) is reported, not hidden
+    behind the extension's missing-libnixl error."""
+    scenario = _ImportScenario(
+        extension_loads=lambda: False,
+        nixl_error="libssl.so.3: cannot open shared object file",
+    )
+    _install_scenario(monkeypatch, scenario)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        create_l2_adapter(_obj_config(), L1MemoryDesc(4096, 8192, 4096))
+
+    assert "libssl.so.3" in str(excinfo.value)
+    assert "libnixl.so" in str(excinfo.value)
 
 
 def test_factory_forwards_l1_arena_and_safe_status(
