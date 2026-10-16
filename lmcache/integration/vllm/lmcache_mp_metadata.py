@@ -427,10 +427,28 @@ class LMCacheMPRequestMetadata:
         return None
 
 
+@dataclass
+class LMCacheMPTokenDropRequestState:
+    """Request state; worker adapter assigns worker_row."""
+
+    request_id: str
+    algorithm: str
+    config: dict[str, Any]
+    resident_kv_tokens: int | None = None
+    has_physical_override: bool = False
+    physical_block_ids: list[int] | None = None
+    is_genuine_decode: bool = False
+    num_decoded_tokens: int = 0
+    num_new_tokens: int = 0
+    worker_row: int = -1
+
+
 class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
+        self.token_drop_requests: list[LMCacheMPTokenDropRequestState] = []
+        self.token_drop_reset_ids: set[str] = set()
         self.need_flush_before_forward: bool = False
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
