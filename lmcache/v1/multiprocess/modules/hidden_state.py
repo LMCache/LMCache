@@ -29,7 +29,12 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_object_keys,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    InstanceLivenessTarget,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 
 if TYPE_CHECKING:
@@ -65,7 +70,7 @@ def hidden_model_name(model_name: str) -> str:
     return f"{model_name}{HIDDEN_NAMESPACE_SUFFIX}"
 
 
-class HiddenStateModule(InstanceLivenessTarget):
+class HiddenStateModule(DiscoverableModule, InstanceLivenessTarget):
     """Stores and serves per-chunk hidden states keyed by the KV chunk hashes.
 
     A worker declares its layer set and hidden size once, at registration; every
@@ -75,6 +80,14 @@ class HiddenStateModule(InstanceLivenessTarget):
     Args:
         ctx: The shared engine context.
     """
+
+    module_name = "hidden_state"
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        """Always built: it holds no device resources and starts no threads, so
+        an engine that never registers a hidden-state layout pays nothing."""
+        return cls(build_ctx.engine_context)
 
     def __init__(self, ctx: "MPCacheServerContext") -> None:
         self._ctx = ctx
