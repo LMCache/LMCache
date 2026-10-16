@@ -602,8 +602,6 @@ class LookupModule:
         # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp
         #  and will be deleted after finish_read_prefetched, when we touch all keys,
         #  these keys has been deleted and will not be touched.
-        # L2 too: the covered prefix is touched at lookup and the retrieved
-        # tail when read, so an L1-only refresh ages the prefix out of L2.
         self._ctx.storage_manager.touch_cached_keys(obj_keys)
 
     # -----------------------------------------------------------------
