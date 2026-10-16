@@ -37,10 +37,12 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
+    NO_SESSION_END_INFO,
     BlockAllocationRecord,
     IPCCacheServerKey,
     KVEventBatch,
     KVEventRecord,
+    SessionEndInfo,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.group_view import (
@@ -1247,7 +1249,11 @@ class LMCacheMPSchedulerAdapter:
         for url in self._server_urls:
             self.req_clients[url].free_lookup_locks(base_key, self.tp_size)
 
-    def end_session(self, request_id: str) -> None:
+    def end_session(
+        self,
+        request_id: str,
+        end_info: SessionEndInfo = NO_SESSION_END_INFO,
+    ) -> None:
         """
         Notify LMCache server to remove the session for a finished request.
 
@@ -1257,6 +1263,9 @@ class LMCacheMPSchedulerAdapter:
 
         Args:
             request_id: The ID of the finished request.
+            end_info: How the request finished, for the server's commit
+                policy. Defaults to "nothing known", which every built-in
+                policy reads as "do not commit".
         """
         if not self.is_healthy:
             return
@@ -1284,7 +1293,7 @@ class LMCacheMPSchedulerAdapter:
                 return
 
         for url in self._server_urls:
-            self.req_clients[url].end_session(request_id)
+            self.req_clients[url].end_session(request_id, end_info)
 
     def report_block_allocations(
         self,

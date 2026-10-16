@@ -20,6 +20,15 @@ message IpcCacheServerKey {
   int64 num_kv_readers = 10;
 }
 
+// What the engine observed about a finished request, sent with EndSession.
+// Mirrors lmcache.v1.multiprocess.custom_types.SessionEndInfo. stop_token_id
+// has presence so that "unknown" (-1 in Python) survives the proto3 default
+// of 0, which is a valid token id.
+message SessionEndInfo {
+  string finish_reason = 1;
+  optional int64 stop_token_id = 2;
+}
+
 // Store / Retrieve and CacheBlend retrieve share this reply shape.
 message EventIpcHandleResult {
   bytes event_ipc_handle = 1;
