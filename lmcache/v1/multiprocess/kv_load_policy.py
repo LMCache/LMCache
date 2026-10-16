@@ -84,19 +84,10 @@ class KVLoadPolicy(ABC):
 
 
 class DefaultKVLoadPolicy(KVLoadPolicy):
-    """Serves every lookup worth serving.
+    """Serves every lookup unless the request sets ``lmcache.skip_load``.
 
-    Declines when the request sets ``lmcache.skip_load`` (forwarded from the
-    client's transfer params), or when the engine's own prefix cache leaves
-    at most one chunk to load: the engine recomputes such a tail faster than
-    the server can look it up, lock it, and deliver it. The possible load is
-    bounded by ``num_lookup_tokens`` minus the engine's prefix-cache hit
-    (``lmcache.hint.engine_computed_tokens``, floored to chunks); a request
-    without the hint is always served.
-
-    A fully covered lookup (nothing could load) is also served: it fetches
-    nothing anyway, and its reported hit keeps the engine's stored-token
-    accounting from re-offloading the prompt.
+    The engine integration forwards the flag from the client request, e.g.
+    ``{"lmcache.skip_load": true}`` in the request's transfer params.
     """
 
     def should_load(self, ctx: KVLoadContext) -> bool:
