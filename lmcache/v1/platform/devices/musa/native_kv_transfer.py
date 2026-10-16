@@ -298,9 +298,8 @@ def try_native_multi_layer_block_kv_transfer(
     from lmcache.v1.gpu_connector.kv_format import get_spec_class
 
     format_spec = get_spec_class(engine_kv_format)
-    # 20261013: the stride-aware musa_aiter kernel accepts padded per-layer
-    # paged views and blocked-scale MLA pages that the legacy ABI cannot
-    # address; try it before the legacy qualification chain.
+    # The stride-aware kernel accepts padded per-layer paged views and
+    # blocked-scale MLA pages that the legacy ABI cannot address.
     _r = _try_strided_native_block_transfer(
         paged_layers=paged_layers,
         object_tensors=object_tensors,
