@@ -25,7 +25,6 @@ from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
-from lmcache.v1.platform.base.native_kernel_device_ops import NativeKernelDeviceOps
 from lmcache.v1.platform.devices.cpu.device_ops import CpuDeviceOps
 from lmcache.v1.platform.devices.cuda.device_ops import CudaDeviceOps
 from lmcache.v1.platform.devices.hpu.device_ops import HpuDeviceOps
@@ -246,6 +245,18 @@ def test_bind_native_shadows_baseline_for_present_ops() -> None:
     assert other.multi_layer_kv_transfer is not ops.multi_layer_kv_transfer  # type: ignore[attr-defined]
 
 
+def test_bind_native_skip_keeps_class_methods() -> None:
+    """Names passed as ``skip`` stay on the class method; the rest are bound."""
+    ops = DeviceOps()
+    ops.bind_native(_FakeNativeModule(), skip={"calculate_cdf"})
+
+    assert ops.multi_layer_kv_transfer() == "native-mlt"  # type: ignore[call-arg]
+    symbols = torch.zeros(1, 2, 3, dtype=torch.int8)
+    assert torch.equal(
+        ops.calculate_cdf(symbols, 4), DeviceOps().calculate_cdf(symbols, 4)
+    )
+
+
 def test_bind_native_discovers_all_public_symbols() -> None:
     """bind_native auto-discovers all public symbols from the native module."""
     ops = DeviceOps()
@@ -309,23 +320,22 @@ def test_base_allocates_plain_host_output() -> None:
 
 
 @pytest.mark.parametrize(
-    ("ops_cls", "lowers_to_native_kernel"),
+    "ops_cls",
     [
-        (CudaDeviceOps, True),
-        (XpuDeviceOps, True),
-        (NpuDeviceOps, True),
-        (DeviceOps, False),
-        (CpuDeviceOps, False),
-        (HpuDeviceOps, False),
-        (MusaDeviceOps, False),
-        (RblnDeviceOps, False),
+        CpuDeviceOps,
+        CudaDeviceOps,
+        HpuDeviceOps,
+        MusaDeviceOps,
+        NpuDeviceOps,
+        RblnDeviceOps,
+        XpuDeviceOps,
     ],
 )
-def test_only_address_kernel_backends_lower_block_transfer(
-    ops_cls: type[DeviceOps], lowers_to_native_kernel: bool
+def test_device_backends_derive_directly_from_device_ops(
+    ops_cls: type[DeviceOps],
 ) -> None:
-    """CUDA, XPU and Ascend serve tensor block transfers on an address kernel."""
-    assert issubclass(ops_cls, NativeKernelDeviceOps) is lowers_to_native_kernel
+    """Backends override DeviceOps methods directly, with no layer in between."""
+    assert ops_cls.__bases__ == (DeviceOps,)
 
 
 # -- Package export --------------------------------------------------------

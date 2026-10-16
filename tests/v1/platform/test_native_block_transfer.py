@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""NativeKernelDeviceOps serves tensor block transfers on an address kernel.
+"""CUDA, XPU and Ascend serve tensor block transfers on an address kernel.
 
 CPU tests install fake extension modules for the real CUDA, XPU and Ascend ops
 classes and record what reaches the kernel. CUDA tests exercise the compiled
@@ -24,8 +24,7 @@ from lmcache.v1.gpu_connector.utils import (
     make_page_buffer_shape_desc,
     normalize_kv_and_discover_format,
 )
-from lmcache.v1.platform import resolve_device_ops
-from lmcache.v1.platform.base import native_kernel_device_ops
+from lmcache.v1.platform import native_block_transfer, resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.devices.cuda.device_ops import CudaDeviceOps
 from lmcache.v1.platform.devices.npu.device_ops import NpuDeviceOps
@@ -271,7 +270,7 @@ def test_unpinned_h2d_chunks_sync_after_launch(
     ops, kernel = _native_ops(monkeypatch, CudaDeviceOps, "lmcache.cuda_ops")
     syncs: list[int] = []
     monkeypatch.setattr(
-        native_kernel_device_ops,
+        native_block_transfer,
         "synchronize_device",
         lambda _device: syncs.append(len(kernel.launches)),
     )

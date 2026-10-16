@@ -421,12 +421,15 @@ Implementation notes
   transfer; other functions in ``torch_ops.py`` can be overridden as
   needed.
 - Callers pass tensors to ``multi_layer_block_kv_transfer``. If your
-  compiled kernel takes raw addresses like CUDA's, derive your ``DeviceOps``
-  from ``NativeKernelDeviceOps``
-  (``lmcache/v1/platform/base/native_kernel_device_ops.py``): it keeps the
-  bound kernel off the public method and converts tensors to the kernel's
-  addresses, including pinned host buffers. If your kernel takes tensors, a
-  plain ``DeviceOps`` subclass that binds it is enough.
+  compiled kernel takes tensors, binding it with ``bind_native`` is enough.
+  If it takes raw addresses like CUDA's, override
+  ``multi_layer_block_kv_transfer`` and ``allocate_block_transfer_output``
+  in your ``DeviceOps`` subclass, call the helpers in
+  ``lmcache/v1/platform/native_block_transfer.py`` (they convert tensors to
+  the kernel's addresses and pin host buffers), and pass
+  ``skip={"multi_layer_block_kv_transfer"}`` to ``bind_native`` so the
+  compiled kernel does not shadow your override. See
+  ``lmcache/v1/platform/devices/cuda/device_ops.py``.
 - If you fall back to the generic path from inside a device-specific
   wrapper (e.g. when inputs are unsupported), call the corresponding
   ``lmcache.v1.platform.torch_ops`` function directly to preserve

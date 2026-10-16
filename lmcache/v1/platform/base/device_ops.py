@@ -11,6 +11,7 @@ kernels via :meth:`DeviceOps.bind_native`.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Collection
 from typing import Any, ClassVar
 
 # Third Party
@@ -87,18 +88,23 @@ class DeviceOps:
         Guarded by ``_native_bound`` so it runs at most once per instance.
         """
 
-    def bind_native(self, module: object) -> None:
+    def bind_native(self, module: object, *, skip: Collection[str] = ()) -> None:
         """Rebind ops and types from a compiled native module.
 
         Walks the native module's public symbols.  For each callable or
         type, binds it on this instance — replacing the torch fallback if
         one exists, or adding a native-only symbol that has no pure-Python
         equivalent.
+
+        Args:
+            module: Compiled extension module.
+            skip: Names this class implements itself; they stay on the
+                class method even when ``module`` exports them.
         """
         bound_ops = 0
         bound_types = 0
         for name in dir(module):
-            if name.startswith("_"):
+            if name.startswith("_") or name in skip:
                 continue
             native_sym = getattr(module, name, None)
             if native_sym is None:

@@ -11,5 +11,5 @@ backend selection.
 | `ipc_wrapper.py` | `NpuIPCWrapper`: plane-aggregating KV IPC wrapper over torch_npu storage IPC (`_share_npu_` / `_new_shared_npu`); one wrapper per layer, registered form preserved across the wire |
 | `event_ipc.py` | `NpuEventIPCBackend`: shared CUDA-style event ABI adapter with device-pinned export |
 | `cache_context.py` | `NpuCacheContext`: device pointer tables, `_TempNpuBuffer` staging, transfer stream |
-| `device_ops.py` | `NpuDeviceOps`: binds the plugin's `lmcache_ascend.ops`; lowers tensor block transfers to the plugin's address kernel through `NativeKernelDeviceOps`; stream-ordered completion/event recording; torch `copy_`-based memcpy |
+| `device_ops.py` | `NpuDeviceOps`: binds the plugin's `lmcache_ascend.ops`; overrides block transfer to lower tensors to the plugin's address kernel via `native_block_transfer`; stream-ordered completion/event recording; torch `copy_`-based memcpy |
 | `pin_memory.py` | Host-memory pinning via CANN `acl` / `libascendcl` |
