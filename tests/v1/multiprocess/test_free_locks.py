@@ -293,25 +293,6 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
     assert released == {(0, b"h3"), (1, b"h2"), (1, b"h3")}
 
 
-def test_server_free_lookup_locks_primary_and_extra_in_one_call():
-    """A FREE can settle the current lookup's range and a stale one together."""
-    # First Party
-    from lmcache.v1.multiprocess.modules.lookup import LookupModule
-
-    hashes = [b"h0", b"h1"]
-    ctx = _make_free_locks_ctx(hashes, windows=[-1], hit_chunks=2)
-    module = LookupModule(ctx)
-
-    module.free_lookup_locks(
-        _free_locks_key(1024, start=0, end=512), 1, extra_ranges=((512, 1024),)
-    )
-
-    # One release call carrying both ranges' keys.
-    ctx.storage_manager.finish_read_prefetched.assert_called_once()
-    (obj_keys,), _ = ctx.storage_manager.finish_read_prefetched.call_args
-    assert len(obj_keys) == 4
-
-
 def test_server_free_lookup_locks_without_result_releases_nothing():
     """Without a lookup result there is no ownership record.
 

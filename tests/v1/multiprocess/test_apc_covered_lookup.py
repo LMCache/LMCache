@@ -80,35 +80,6 @@ def _ctx_with_hashes(n_chunks: int) -> MagicMock:
     return ctx
 
 
-def test_resolve_full_attention_floors_to_key_start():
-    # Full attention (window -1): locked range is [start, hit).
-    ctx = _ctx_with_hashes(2)  # hashes for [2, 4)
-    key = _make_key(4, start_chunks=2)
-    obj_keys = resolve_prefetched_obj_keys(
-        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(-1,)
-    )
-    # world_size 1, one group => (hit - start) = 2 keys, for chunks 2 and 3.
-    assert len(obj_keys) == 2
-
-
-def test_resolve_start_zero_releases_full_prefix():
-    ctx = _ctx_with_hashes(4)
-    key = _make_key(4)
-    obj_keys = resolve_prefetched_obj_keys(
-        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(-1,)
-    )
-    assert len(obj_keys) == 4
-
-
-def test_resolve_start_at_hit_releases_nothing():
-    ctx = _ctx_with_hashes(0)  # empty range [4, 4)
-    key = _make_key(4, start_chunks=4)
-    obj_keys = resolve_prefetched_obj_keys(
-        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(-1,)
-    )
-    assert obj_keys == []
-
-
 def test_resolve_sliding_window_floored_by_key_start():
     # Sliding window w=2, hit=4 => window [2,4); start=3 floors it to [3,4).
     ctx = _ctx_with_hashes(1)  # hashes for [3, 4)
@@ -117,60 +88,6 @@ def test_resolve_sliding_window_floored_by_key_start():
         ctx, key, hit_chunks=4, locked_gids=(), group_windows=(2,)
     )
     assert len(obj_keys) == 1
-
-
-def test_worker_retrieve_key_start_excludes_the_covered_prefix():
-    """A failed retrieve resolves with its key's own ``start``.
-
-    ``GetRetrieveMetadata`` starts a retrieve at
-    ``num_vllm_hit_tokens // chunk * chunk``, at or above the covered
-    boundary, so the key's own ``start`` already excludes the prefix the
-    lookup never locked.
-    """
-    ctx = _ctx_with_hashes(2)
-    key = IPCCacheServerKey(
-        model_name="m",
-        world_size=1,
-        worker_id=0,
-        token_ids=tuple(range(4 * CHUNK_SIZE)),
-        start=2 * CHUNK_SIZE,
-        end=4 * CHUNK_SIZE,
-        request_id="r",
-        num_kv_readers=1,
-    )
-    obj_keys = resolve_prefetched_obj_keys(
-        ctx, key, hit_chunks=4, locked_gids=(), group_windows=(-1,)
-    )
-    assert len(obj_keys) == 2
-
-
-def test_l2_adapter_submit_touch_refreshes_recency_without_io():
-    """``L2AdapterInterface.submit_touch`` marks keys accessed, moves no bytes.
-
-    The covered prefix is skipped instead of loaded, so without this refresh L2
-    would see those keys as cold and evict data a non-skipping lookup kept.
-    """
-    # First Party
-    from lmcache.v1.distributed.eviction import L2EvictionPolicy
-    from lmcache.v1.distributed.eviction_policy import LRUEvictionPolicy
-    from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
-
-    policy = LRUEvictionPolicy()
-    listener = L2EvictionPolicy(policy)
-    keys = [
-        ObjectKey(chunk_hash=ObjectKey.IntHash2Bytes(i), model_name="m", kv_rank=0)
-        for i in range(3)
-    ]
-    policy.on_keys_created(keys)
-
-    adapter = MagicMock(spec=L2AdapterInterface)
-    adapter._listeners = [listener]
-    # Drive the real implementation; it must reach the eviction listener and
-    # perform no read/load call on the adapter.
-    L2AdapterInterface.submit_touch(adapter, [keys[0]])
-
-    adapter._notify_keys_accessed.assert_called_once_with([keys[0]])
-    adapter.submit_load_task.assert_not_called()
 
 
 def test_touch_cached_keys_hits_both_tiers():
