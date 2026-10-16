@@ -79,7 +79,11 @@ class LMCacheMPRequestTracker:
     max_offload_tokens: int | None = None
     lookup_started_at: float | None = None
 
-    # APC-covered boundary in tokens, frozen at lookup submit.
+    # Number of prefix tokens that are skipped in the LMCache lookup because
+    # vLLM's APC already covers them, aligned to the LMCache chunk size.
+    # Unlike ``num_vllm_hit_tokens``, which tracks the APC hit as of the
+    # latest poll, this is frozen when the LOOKUP is submitted -- the shrink
+    # check must compare against the boundary the server actually used.
     apc_covered_tokens: int = 0
 
     # Sticky: after a shrink, the request looks up the full prefix from token 0.
