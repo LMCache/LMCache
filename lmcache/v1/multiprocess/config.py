@@ -145,10 +145,6 @@ class MPServerConfig:
     sent a PING (model warmup, or death before its first request). Must be
     >= worker_reap_timeout_seconds."""
 
-    enable: list[str] = field(default_factory=list)
-    """List of experimental transfer modules to enable. Options: transfer_query
-    (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
-
     kv_event_log_size: int = 32768
     """CPU store/eviction records retained for KV-event subscribers; 0 disables it."""
 
@@ -573,15 +569,6 @@ def add_mp_server_args(
         "orders a prompt so it starts with an exact copy of a cached prompt.",
     )
     mp_group.add_argument(
-        "--enable",
-        type=str,
-        nargs="*",
-        default=[],
-        help="List of experimental transfer modules to enable. "
-        "Options: transfer_query (see lmcache.v1.multiprocess.modules."
-        "experimental.__init___.py).",
-    )
-    mp_group.add_argument(
         "--kv-event-log-size",
         type=int,
         default=MPServerConfig.kv_event_log_size,
@@ -592,10 +579,14 @@ def add_mp_server_args(
         "--server-module",
         action="append",
         default=[],
-        help="JSON object describing an out-of-tree server module. "
+        help="JSON object describing a server module to load. "
         "Repeat to load multiple Python modules. Example: "
         '\'{"module_path":"my_pkg.server_module",'
-        '"config":{"name":"demo"}}\'.',
+        '"config":{"name":"demo"}}\'. '
+        "Opt-in modules shipped with LMCache live under "
+        "lmcache.v1.multiprocess.plugin_modules, e.g. "
+        '\'{"module_path":"lmcache.v1.multiprocess.plugin_modules.qstore"}\' '
+        "for query-tensor transfer.",
     )
     return parser
 
@@ -650,7 +641,6 @@ def parse_args_to_mp_server_config(
         session_ttl_seconds=args.session_ttl_seconds,
         kv_load_policy=args.kv_load_policy,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
-        enable=args.enable or [],
         kv_event_log_size=args.kv_event_log_size,
         server_modules=parse_server_module_specs(args.server_module or []),
     )
