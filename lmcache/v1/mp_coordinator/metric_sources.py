@@ -27,7 +27,7 @@ def register_metric_source(component: object) -> None:
     _metric_sources[type(component)] = component
 
 
-def take_metric_sources() -> list[object]:
+def get_metric_sources() -> list[object]:
     """Return every registered component, in construction order, and forget them.
 
     Returns:

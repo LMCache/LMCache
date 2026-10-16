@@ -35,7 +35,7 @@ from lmcache.v1.mp_coordinator.ingest.event_gate import (
 from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
     KafkaCacheEventSource,
 )
-from lmcache.v1.mp_coordinator.metric_sources import take_metric_sources
+from lmcache.v1.mp_coordinator.metric_sources import get_metric_sources
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import (
     DirectoryStats,
@@ -98,7 +98,7 @@ def register_coordinator_metrics(
     """
     if meter is None:
         meter = metrics.get_meter("lmcache.mp_coordinator")
-    specs = [spec for c in take_metric_sources() for spec in _specs_for(c)]
+    specs = [spec for c in get_metric_sources() for spec in _specs_for(c)]
     specs.append(
         _MetricSpec(
             _PREFIX + "controller.up",
