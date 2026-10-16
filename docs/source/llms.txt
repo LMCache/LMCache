@@ -1,0 +1,104 @@
+# LMCache
+
+> LMCache is a KV cache management layer for LLM inference. It turns the KV cache from temporary per-request state into reusable knowledge that can be stored persistently, reused across serving engines, monitored, and transformed — reducing time-to-first-token (TTFT) and improving throughput, especially for long-context, multi-turn, agentic, and retrieval-augmented (RAG) workloads.
+
+LMCache runs as a standalone daemon process, managing KV cache independently of the inference engine, so cached data is not lost when an engine restarts. It is vendor-neutral: it works as the KV cache layer for mainstream open-source serving engines (vLLM, SGLang) and inference frameworks (NVIDIA Dynamo), across hardware vendors and storage systems, letting users switch engines or storage while reusing stored KV caches.
+
+Two capabilities distinguish it. Tiered offloading moves KV caches out of GPU memory into CPU RAM, local disk, and remote backends, so prefill computation can be reused across requests, sessions, and engine instances. CacheBlend extends reuse beyond prefix caching by reusing cached KV blocks at any position in a prompt, selectively recomputing a narrow band of tokens to recover quality.
+
+These docs describe LMCache's multiprocess (MP) architecture, the current recommended deployment mode. Pages at the root of this site track the `dev` branch; tagged releases are published under versioned path prefixes, and a Chinese translation is published under `/zh_CN/`.
+
+## Getting started
+
+- [Getting Started](https://docs.lmcache.ai/getting_started/index.html): Entry point for new users — overview, installation, quickstart, and reference tools.
+- [Installation](https://docs.lmcache.ai/getting_started/installation.html): Install via pip/uv (stable and nightly wheels for CUDA 13.0, CUDA 12.9, ROCm, Intel XPU, and MetaX MACA), from source, via Docker, or CLI-only.
+- [Quickstart](https://docs.lmcache.ai/getting_started/quickstart/index.html): Minimal working examples — offloading KV cache, sharing KV cache between engines, disaggregated prefill, multimodal models, and the standalone starter.
+- [Benchmarking](https://docs.lmcache.ai/getting_started/benchmarking.html): How to measure LMCache's effect on TTFT and throughput, and how to reproduce published numbers.
+- [KV Cache Size Calculator](https://docs.lmcache.ai/getting_started/kv_cache_calculator.html): Estimate KV cache memory footprint for a given model, context length, and batch size.
+
+## KV cache storage and reuse
+
+- [Using Different Storage Backends](https://docs.lmcache.ai/kv_cache/storage_backends/index.html): Index of every supported storage backend and how to configure each one.
+- [CPU RAM](https://docs.lmcache.ai/kv_cache/storage_backends/cpu_ram.html): The default first offload tier below GPU memory.
+- [Local Storage](https://docs.lmcache.ai/kv_cache/storage_backends/local_storage.html): Persist KV cache to local disk or SSD.
+- [Redis](https://docs.lmcache.ai/kv_cache/storage_backends/redis.html): Redis as a remote KV cache backend; see also the Valkey and RESP backends.
+- [Mooncake](https://docs.lmcache.ai/kv_cache/storage_backends/mooncake.html): Integration with the Mooncake distributed KV store.
+- [S3 Backend](https://docs.lmcache.ai/kv_cache/storage_backends/s3.html): S3-compatible object storage as an L2 tier, including AWS S3, S3 Express One Zone, CoreWeave AI Object Storage, and MinIO.
+- [Nixl](https://docs.lmcache.ai/kv_cache/storage_backends/nixl.html): NIXL transport for KV transfer over NVLink, RDMA, or TCP.
+- [Device-DAX](https://docs.lmcache.ai/kv_cache/storage_backends/dax.html): Byte-addressable memory such as CXL as a tier between DRAM and storage.
+- [Secondary KV Storage](https://docs.lmcache.ai/mp/l2_storage/index.html): How the L2 storage tier works in multiprocess mode.
+- [P2P KV Cache Sharing](https://docs.lmcache.ai/kv_cache/p2p_sharing.html): Share KV cache directly between nodes without a central store.
+- [Distributed KV Cache](https://docs.lmcache.ai/distributed_kv_cache.html): Distributing KV cache across multiple nodes.
+- [Async Loading](https://docs.lmcache.ai/kv_cache/async_loading.html): Load KV cache off the critical path to avoid blocking prefill.
+- [Using Different Caching Policies](https://docs.lmcache.ai/kv_cache/caching_policies.html): Eviction and admission policy configuration.
+- [Custom Backend](https://docs.lmcache.ai/kv_cache/storage_backends/custom_backend.html): Implement a storage backend against LMCache's unified interface.
+
+## KV cache optimizations
+
+- [KV Cache Optimizations](https://docs.lmcache.ai/kv_cache_optimizations/index.html): Index of techniques that go beyond plain storage and retrieval.
+- [CacheBlend](https://docs.lmcache.ai/kv_cache_optimizations/cacheblend.html): Reuse cached KV for non-prefix text by selectively recomputing boundary tokens. Best Paper, EuroSys 2025.
+- [CacheGen](https://docs.lmcache.ai/kv_cache_optimizations/compression/cachegen.html): KV cache compression and streaming for faster transfer.
+- [Layerwise](https://docs.lmcache.ai/kv_cache_optimizations/layerwise.html): Overlap KV loading with computation layer by layer.
+- [Segmented Prefill](https://docs.lmcache.ai/kv_cache_optimizations/segmented_prefill.html): Split long prefills into segments for better cache reuse.
+- [Lazy KV Cache Offload](https://docs.lmcache.ai/mp/lazy_offload.html): Defer GPU-to-LMCache stores and submit finished requests in FIFO batches, trading immediate cache availability for serving throughput. vLLM + LMCacheMPConnector only, disabled by default.
+- [Using NIXL](https://docs.lmcache.ai/disaggregated_prefill/nixl/index.html): Prefill-decode disaggregation over NIXL, including 1P1D and XpYd topologies.
+- [Non-KV Caching](https://docs.lmcache.ai/non_kv_cache/index.html): Cache encoder outputs, hidden states, and encodings for multimodal and embedding workloads.
+
+## Model recipes
+
+- [Recipes](https://docs.lmcache.ai/recipes/index.html): Per-model deployment recipes with tested configurations. Individual pages cover Llama, Qwen3, Qwen3.5, Qwen2.5-VL, DeepSeek-V4-Flash, GLM-5.2, Kimi K3, Kimi Linear, MiniMax M2, MiniMax M3, Mixtral, Gemma 3, Gemma 4, Phi-3, Devstral, gpt-oss, multimodal models, and uniform-attention models.
+
+## Production deployment
+
+- [Use LMCache in Production](https://docs.lmcache.ai/production/index.html): Production deployment guidance and operational concerns.
+- [Kubernetes Deployment](https://docs.lmcache.ai/production/kubernetes_deployment.html): Running LMCache on Kubernetes.
+- [Kubernetes Operator](https://docs.lmcache.ai/mp/operator.html): The LMCache operator, including opting vLLM pods in and verifying injection.
+- [Docker Deployment](https://docs.lmcache.ai/production/docker_deployment.html): Container-based deployment.
+- [Performance Tuning](https://docs.lmcache.ai/production/performance_tuning.html): Tuning parameters that affect hit rate, TTFT, and throughput.
+- [Dynamo Coordination](https://docs.lmcache.ai/production/dynamo_coordination.html): Coordinating with NVIDIA Dynamo.
+- [KV Cache Events](https://docs.lmcache.ai/production/kv_cache_events.html): The cache event stream used for fleet-wide cache directories and external indexing.
+
+## Observability and operations
+
+- [Observability (MP mode)](https://docs.lmcache.ai/mp/observability/index.html): Metrics, logs, and traces for multiprocess deployments.
+- [Metrics](https://docs.lmcache.ai/mp/observability/metrics.html): Prometheus metrics, including token-level and request-level prefix cache hit rates.
+- [Production Observability](https://docs.lmcache.ai/production/observability/index.html): Health monitoring, chunk statistics, the frontend dashboard, and the vLLM metrics endpoint.
+- [Frontend Dashboard](https://docs.lmcache.ai/production/observability/frontend.html): Web UI for monitoring and managing a fleet of MP servers from one page.
+- [KV Cache Operations](https://docs.lmcache.ai/interacting_with_server.html): Interact with a running server to look up, pin, move, clear, and compress cached KV.
+- [LMCache Controller](https://docs.lmcache.ai/kv_cache_management/index.html): Controller APIs for cache management operations.
+- [Controller WebUI](https://docs.lmcache.ai/controller/index.html): Web interface for the controller.
+- [Tracing and Debugging](https://docs.lmcache.ai/mp/tracing_and_debugging.html): Diagnose transfer paths and cache misses.
+
+## CLI and API reference
+
+- [CLI Reference](https://docs.lmcache.ai/cli/index.html): The `lmcache` command line — server, coordinator, bench, query, describe, kvcache, quota, ping, trace, and tool subcommands.
+- [Configuring LMCache](https://docs.lmcache.ai/api_reference/configurations.html): Every configuration option, its environment variable, and its default.
+- [Storage Backends API](https://docs.lmcache.ai/api_reference/storage_backends.html): Programmatic interface to storage backends.
+- [KV Cache SDK](https://docs.lmcache.ai/mp/sdk.html): Embed LMCache operations directly in application code.
+- [Internal API Server](https://docs.lmcache.ai/internal_api_server/internal_api_server.html): HTTP endpoints exposed by the internal API server, including vLLM and controller APIs.
+- [Multimodality API](https://docs.lmcache.ai/api_reference/multimodality.html): Multimodal cache interfaces.
+- [Dynamic Connector](https://docs.lmcache.ai/api_reference/dynamic_connector.html): Connector loaded at runtime without rebuilding.
+
+## Developer guide
+
+- [Developer Guide](https://docs.lmcache.ai/developer_guide/index.html): Index for contributors and integrators.
+- [Architecture Overview](https://docs.lmcache.ai/developer_guide/architecture.html): How LMCache is structured internally and where each component sits in the inference path.
+- [Contributing Guide](https://docs.lmcache.ai/developer_guide/contributing.html): Development environment setup, coding standards, testing, and how to build the docs.
+- [Integration](https://docs.lmcache.ai/developer_guide/integration.html): Integrate LMCache with a serving engine or framework.
+- [Extending LMCache](https://docs.lmcache.ai/developer_guide/extending_lmcache/storage_plugins.html): Write storage plugins, runtime plugins, remote storage plugins, native connectors, and new device backends.
+- [MUSA AITER Integration](https://docs.lmcache.ai/developer_guide/extending_lmcache/musa_aiter_integration.html): Worked example of integrating a non-CUDA hardware backend, for Moore Threads MUSA.
+- [SERDE](https://docs.lmcache.ai/mp/serde.html): The serialization interface for compression, token dropping, and custom KV transformation.
+
+## Community and project
+
+- [Community](https://docs.lmcache.ai/community/index.html): Community meetings, office hours, and blog index.
+- [LMCache on GitHub](https://github.com/LMCache/LMCache): Source, issues, releases, and pull requests. Apache-2.0 licensed.
+- [LMCache blog](https://blog.lmcache.ai/): Release announcements, benchmarks, and technical deep dives.
+- [LMCache Slack](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA): Community Slack workspace for questions and development discussion.
+
+## Optional
+
+- [Legacy (In-Process Mode)](https://docs.lmcache.ai/legacy/index.html): The earlier in-process architecture, kept for reference. New deployments should use multiprocess (MP) mode.
+- [CacheGen paper](https://dl.acm.org/doi/10.1145/3651890.3672274): KV Cache Compression and Streaming for Fast Large Language Model Serving (SIGCOMM 2024).
+- [CacheBlend paper](https://arxiv.org/abs/2405.16444): Fast Large Language Model Serving with Cached Knowledge Fusion (EuroSys 2025).
+- [Do Large Language Models Need a Content Delivery Network?](https://arxiv.org/abs/2409.13761): The position paper behind treating KV cache as reusable, distributable knowledge.

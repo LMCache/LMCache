@@ -9,7 +9,10 @@ import argparse
 import pytest
 
 # First Party
-from lmcache.cli.commands.coordinator import CoordinatorCommand
+from lmcache.cli.commands.coordinator import (
+    CoordinatorCommand,
+    _parse_extra_config,
+)
 
 
 @pytest.fixture
@@ -60,11 +63,27 @@ class TestCoordinatorCommandArguments:
                 "sha256",
                 "--blend-probe-stride",
                 "2",
+                "--checkpoint-path",
+                "/tmp/checkpoint",
+                "--checkpoint-interval",
+                "30",
+                "--metadata-path",
+                "/tmp/metadata.json",
+                "--extra-config",
+                '{"my_view.window": 8}',
                 "--timeout-keep-alive",
                 "15",
                 "--disable-metrics",
                 "--otlp-endpoint",
                 "http://collector:4317",
+                "--event-transport",
+                "kafka",
+                "--kafka-bootstrap-servers",
+                "broker:9092",
+                "--kafka-topic",
+                "events",
+                "--kafka-group-id",
+                "coord",
             ]
         )
         assert args.host == "127.0.0.1"
@@ -72,9 +91,17 @@ class TestCoordinatorCommandArguments:
         assert args.chunk_size == 512
         assert args.hash_algorithm == "sha256"
         assert args.blend_probe_stride == 2
+        assert args.checkpoint_path == "/tmp/checkpoint"
+        assert args.checkpoint_interval == 30.0
+        assert args.metadata_path == "/tmp/metadata.json"
+        assert args.extra_config == '{"my_view.window": 8}'
         assert args.timeout_keep_alive == 15
         assert args.disable_metrics is True
         assert args.otlp_endpoint == "http://collector:4317"
+        assert args.event_transport == "kafka"
+        assert args.kafka_bootstrap_servers == "broker:9092"
+        assert args.kafka_topic == "events"
+        assert args.kafka_group_id == "coord"
 
     def test_enable_blend_lookup_flag(self, parser):
         """The blend-lookup switch parses as True when passed."""
@@ -88,16 +115,27 @@ class TestCoordinatorCommandArguments:
         assert args.hash_algorithm is None
         assert args.enable_blend_lookup is None
         assert args.blend_probe_stride is None
+        assert args.checkpoint_path is None
+        assert args.checkpoint_interval is None
+        assert args.metadata_path is None
+        assert args.extra_config is None
         assert args.timeout_keep_alive is None
         assert args.disable_metrics is None
         assert args.otlp_endpoint is None
+        assert args.event_transport is None
+        assert args.kafka_bootstrap_servers is None
+        assert args.kafka_topic is None
+        assert args.kafka_group_id is None
 
 
 class TestCoordinatorCommandExecute:
     def test_overrides_applied(self, cmd):
         """chunk_size/hash_algorithm/blend flags override the config."""
         # First Party
-        from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+        from lmcache.v1.mp_coordinator.config import (
+            KafkaCacheEventSourceConfig,
+            MPCoordinatorConfig,
+        )
 
         args = argparse.Namespace(
             host=None,
@@ -111,9 +149,17 @@ class TestCoordinatorCommandExecute:
             hash_algorithm="sha256",
             enable_blend_lookup=True,
             blend_probe_stride=2,
+            checkpoint_path="/var/lib/lmcache/checkpoint",
+            checkpoint_interval=30.0,
+            metadata_path="/var/lib/lmcache/metadata.json",
+            extra_config='{"my_view.window": 8, "controller_packages": ["acme.c"]}',
             timeout_keep_alive=None,
             disable_metrics=True,
             otlp_endpoint="http://collector:4317",
+            event_transport="kafka",
+            kafka_bootstrap_servers="broker:9092",
+            kafka_topic="events",
+            kafka_group_id="coord",
         )
 
         captured = {}
@@ -138,8 +184,20 @@ class TestCoordinatorCommandExecute:
         assert captured["config"].hash_algorithm == "sha256"
         assert captured["config"].enable_blend_lookup is True
         assert captured["config"].blend_probe_stride == 2
+        assert captured["config"].checkpoint_path == "/var/lib/lmcache/checkpoint"
+        assert captured["config"].checkpoint_interval == 30.0
+        assert captured["config"].metadata_path == "/var/lib/lmcache/metadata.json"
+        # Out-of-tree controllers ride in here rather than on a flag of
+        # their own, the way vLLM is told where to find a KV connector.
+        assert captured["config"].extra_config == {
+            "my_view.window": 8,
+            "controller_packages": ["acme.c"],
+        }
         assert captured["config"].metrics_enabled is False
         assert captured["config"].otlp_endpoint == "http://collector:4317"
+        assert captured["config"].event_source_config == KafkaCacheEventSourceConfig(
+            bootstrap_servers="broker:9092", topic="events", group_id="coord"
+        )
         # Unset flags keep the config defaults.
         assert captured["config"].host == MPCoordinatorConfig.host
         assert captured["config"].port == MPCoordinatorConfig.port
@@ -166,9 +224,17 @@ class TestCoordinatorCommandExecute:
             hash_algorithm=None,
             enable_blend_lookup=None,
             blend_probe_stride=None,
+            checkpoint_path=None,
+            checkpoint_interval=None,
+            metadata_path=None,
+            extra_config=None,
             timeout_keep_alive=None,
             disable_metrics=None,
             otlp_endpoint=None,
+            event_transport=None,
+            kafka_bootstrap_servers=None,
+            kafka_topic=None,
+            kafka_group_id=None,
         )
 
         captured = {}
@@ -188,3 +254,26 @@ class TestCoordinatorCommandExecute:
             cmd.execute(args)
 
         assert captured["config"] == MPCoordinatorConfig()
+
+
+class TestExtraConfig:
+    """``--extra-config`` is how a discovered view or controller gets a
+    setting without this class, the CLI and the docs all having to learn
+    its name."""
+
+    def test_an_unset_flag_leaves_the_default_alone(self):
+        assert _parse_extra_config(None) is None
+
+    @pytest.mark.parametrize(
+        ("raw", "reason"),
+        [
+            ("[1, 2]", "a list"),
+            ('"text"', "a bare string"),
+            ("{not json", "unparsable"),
+        ],
+    )
+    def test_a_value_that_is_not_an_object_is_refused(self, raw: str, reason: str):
+        """Left to the config, this would surface far from here -- on the
+        first lookup by whichever component reads it."""
+        with pytest.raises(ValueError, match="--extra-config"):
+            _parse_extra_config(raw)

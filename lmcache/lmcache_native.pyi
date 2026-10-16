@@ -27,6 +27,9 @@ class EngineKVFormat(IntEnum):
     NL_X_NB_BS_NH_CS = 13
     NL_X_NB_BSV_BSS = 14
     NL_X_TWO_NB_NH_ONE_BS_HS = 15
+    NL_X_TWO_X_NB_BS_NH_HS = 16
+    NL_X_NP_X_NB_BS_ONE_HS = 17
+    NL_X_NB_BS_NH_HS = 18
 
 # Backward-compat alias for EngineKVFormat.
 GPUKVFormat = EngineKVFormat
@@ -36,6 +39,35 @@ class TransferDirection(IntEnum):
 
     H2D = 0
     D2H = 1
+
+class PageBufferShapeDesc:
+    """Descriptor for one engine page-buffer layout."""
+
+    kv_size: int
+    nl: int
+    nb: int
+    bs: int
+    nh: int
+    hs: int
+    element_size: int
+    block_stride_elems: int
+    dtype: Any
+
+    def __init__(self) -> None: ...
+
+class KernelGroupSpec:
+    """Backend-agnostic descriptor for one blocked-transfer kernel group."""
+
+    def __init__(
+        self,
+        paged_buffer_ptrs: int,
+        lmcache_objects_ptrs: Sequence[int],
+        shape_desc: PageBufferShapeDesc,
+        lmcache_chunk_size: int,
+        engine_kv_format: int,
+        block_ids_base: int,
+        block_ids_capacity: int,
+    ) -> None: ...
 
 def is_kv_list(format: EngineKVFormat) -> bool:
     """Return whether the format stores KV as a list of per-token KV tensors."""
@@ -48,6 +80,9 @@ def is_cross_layer(format: EngineKVFormat) -> bool:
 
 def is_mla(format: EngineKVFormat) -> bool:
     """Return whether the format is an MLA variant (single latent KV head)."""
+
+def is_kv_second_tuple(format: EngineKVFormat) -> bool:
+    """Return whether each per-layer list entry is a (K, V) tuple of paged tensors."""
 
 class TTLLock:
     """
@@ -145,6 +180,18 @@ class Bitmap:
         Returns:
             True if the bit is set to 1, False otherwise.
         """
+        ...
+
+    def size(self) -> int:
+        """Number of bits in the bitmap."""
+        ...
+
+    def __len__(self) -> int:
+        """Number of bits in the bitmap (same as :meth:`size`)."""
+        ...
+
+    def copy(self) -> Bitmap:
+        """Return an independent copy with the same size and bits."""
         ...
 
     def popcount(self) -> int:
@@ -250,6 +297,49 @@ def unfold(
     Returns:
         Retain mask of length ``len(group_windows) * num_chunks * num_ranks``
         (all ranks of each retained ``(group, chunk)`` set).
+    """
+    ...
+
+def fold_grouped(
+    rows: Sequence[Bitmap],
+    windows: Sequence[int],
+) -> Bitmap:
+    """Fold per-row presence bitmaps into servable prefix lengths.
+
+    Args:
+        rows: Presence bitmaps, all of the same length (the number of
+            chunks); bit ``j`` of ``rows[i]`` set iff chunk ``j`` is present.
+        windows: Per-row cross-chunk window size in chunks, parallel to
+            ``rows``; ``<= 0`` means full attention.
+
+    Returns:
+        A bitmap of size ``num_chunks``; bit ``j`` set iff every row can serve
+        a length-``j + 1`` prefix under its own window.
+
+    Raises:
+        ValueError: If ``rows`` and ``windows`` differ in length or the rows
+            differ in length.
+    """
+    ...
+
+def unfold_grouped(
+    hit_length: int,
+    num_chunks: int,
+    windows: Sequence[int],
+) -> list[Bitmap]:
+    """Expand a model-wide hit length into per-row retain bitmaps.
+
+    Args:
+        hit_length: Model-wide prefix hit length in chunks (clamped to
+            ``num_chunks``).
+        num_chunks: Number of LMCache chunks in the request.
+        windows: Per-row cross-chunk window size in chunks; ``<= 0`` means
+            full attention.
+
+    Returns:
+        ``len(windows)`` bitmaps of size ``num_chunks``, parallel to
+        ``windows``; bit ``j`` of row ``i`` set iff that row retains chunk
+        ``j``.
     """
     ...
 

@@ -8,12 +8,39 @@ from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.cachegen_encoder import encode_function
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.gpu_connector.gpu_ops import lmcache_memcpy_async_h2d
+from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import BytesBufferMemoryObj, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.naive_serde.cachegen_basics import CacheGenConfig
 from lmcache.v1.storage_backend.naive_serde.serde import Serializer
 
 logger = init_logger(__name__)
+
+
+def _to_accelerator(memory_obj: MemoryObj) -> torch.Tensor:
+    """Move a CacheGen input tensor to its accelerator safely.
+
+    Args:
+        memory_obj: CacheGen input object containing the source tensor.
+
+    Returns:
+        The input tensor on the configured accelerator. Lazy allocator-backed
+        inputs are copied through the platform-specific staging helper; all
+        other inputs preserve the existing ``Tensor.to`` behavior.
+
+    Raises:
+        ValueError: If ``memory_obj`` does not contain a tensor.
+    """
+    tensor = memory_obj.tensor
+    if tensor is None:
+        raise ValueError("CacheGen input memory object does not contain a tensor")
+    if not isinstance(memory_obj.parent(), LazyMemoryAllocator):
+        return tensor.to(torch_device_type)
+
+    device_tensor = torch.empty_like(tensor, device=torch_device_type)
+    lmcache_memcpy_async_h2d(memory_obj, device_tensor)
+    return device_tensor
 
 
 class CacheGenSerializer(Serializer):
@@ -40,20 +67,21 @@ class CacheGenSerializer(Serializer):
     # TODO(Jiayi): A lot of memory copies can be avoided in this function.
     @_lmcache_nvtx_annotate
     def serialize(self, memory_obj: MemoryObj) -> BytesBufferMemoryObj:
-        """
-        Serialize a KV_2LTD MemoryObj to CACHEGEN_BINARY MemoryObj.
+        """Serialize a KV_2LTD memory object to CacheGen binary data.
 
-        Input:
-            memory_obj: the memory object to be serialized.
+        Args:
+            memory_obj: Memory object containing the KV tensor to encode.
 
         Returns:
-            MemoryObj: the serialized binary memory object.
+            The encoded CacheGen byte buffer.
+
+        Raises:
+            ValueError: If ``memory_obj`` does not contain a tensor.
         """
 
         # TODO(Jiayi): please avoid this copy by directly performing
         # serialization inside gpu connector.
-        assert memory_obj.tensor is not None
-        tensor = memory_obj.tensor.to(torch_device_type)
+        tensor = _to_accelerator(memory_obj)
 
         # Temporary fix for issue #83: encoder will have the default device 0
         # on all the ray workers. Need to set it to the correct device.

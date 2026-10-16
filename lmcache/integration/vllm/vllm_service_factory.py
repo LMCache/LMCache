@@ -204,7 +204,7 @@ class VllmServiceFactory(BaseServiceFactory):
                 self.lmcache_config,
                 self.metadata,
                 EngineType.VLLM,
-                layout_hints=vllm_layout_hints(),
+                layout_hints=vllm_layout_hints(self.vllm_config),
             )
 
         engine = LMCacheEngineBuilder.get_or_create(

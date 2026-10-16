@@ -41,7 +41,7 @@ msgstr "Python (pip / uv)"
 
 #: ../../source/getting_started/installation.rst
 msgid "Stable"
-msgstr "稳定"
+msgstr "稳定版"
 
 #: ../../source/getting_started/installation.rst
 msgid "CUDA 13.0"
@@ -82,7 +82,7 @@ msgstr ""
 
 #: ../../source/getting_started/installation.rst
 msgid "Nightly"
-msgstr "夜间版"
+msgstr "每日构建版"
 
 #: ../../source/getting_started/installation.rst:65
 msgid ""
@@ -90,8 +90,8 @@ msgid ""
 " UTC and published to GitHub Releases. No version pinning required — "
 "``--pre`` picks the latest nightly automatically."
 msgstr ""
-"Nightly wheel 包每天 UTC 时间 07:30 从最新的 ``dev`` 分支构建并发布到 GitHub "
-"Releases。无需锁定版本 — ``--pre`` 会自动选取最新的 nightly 版本。"
+"每日构建版 wheel 包每天 UTC 时间 07:30 从最新的 ``dev`` 分支构建并发布到 GitHub "
+"Releases。无需锁定版本 — ``--pre`` 会自动选取最新的每日构建版。"
 
 #: ../../source/getting_started/installation.rst
 msgid "From Source"

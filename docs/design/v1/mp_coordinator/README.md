@@ -31,6 +31,7 @@ shape.
 | `DELETE /instances/{id}` | mp → coordinator | deregister (idempotent, 204) |
 | `GET /instances` | operator/tools | list the fleet |
 | `GET /healthz` | k8s probe | liveness |
+| `PUT /config/chunk-size` | mp → coordinator | bind token hashing and blend lookup to the fleet's negotiated chunk size |
 | `PUT/GET /quota/config` | operator | fleet-wide quota configuration |
 | `PUT/GET/DELETE /quota/{cache_salt}` | operator | per-tenant byte budgets |
 | `GET /quota` | operator | fleet-wide usage summary |
@@ -40,7 +41,10 @@ shape.
 | `POST /cache/prefetches` | operator/scheduler | submit warm prefetch to a named server |
 | `GET /cache/prefetches/{instance_id}/{request_id}` | operator/scheduler | poll a warm prefetch |
 | `POST/DELETE /cache/pins` | operator | pin / unpin keys against fleet-wide eviction |
+| `GET /cache/pins` | operator/tools | paginated listing of pinned keys with their pin counts, filterable by `cache_salt` / `model_name` |
 | `POST /cache/delete` | operator | delete cached objects on a named server |
+| `GET /instances/usage` | operator/scheduler | fleet memory view: per-server, per-module usage vs declared capacity |
+| `GET /instances/{instance_id}/usage` | operator/scheduler | one server's memory compartments |
 
 For server-initiated work (fleet-wide eviction, warm prefetch) a coordinator
 router resolves an instance's address from the registry (`ip` + `http_port`)
@@ -56,30 +60,42 @@ lmcache/v1/mp_coordinator/
   app.py                # create_app + lifespan + router discovery + health/eviction loops
   __main__.py           # uvicorn entrypoint (`python -m lmcache.v1.mp_coordinator`)
   config.py             # MPCoordinatorConfig (CLI flags only, no env vars)
-  registry.py           # InstanceRegistry + MPInstance (pure membership)
   schemas.py            # Pydantic request/response models (shared wire contract)
   registrar.py          # mp-server-side register/heartbeat/deregister helpers
-  key_directory.py      # KeyDirectory: placements + token bindings (a cache-event consumer)
   blend_index.py      # BlendIndex: fragment (blend) lookup over those bindings
   blend_client.py       # mp-server-side fragment-lookup query client
   ingest/
     __init__.py
     event_gate.py       # EventGate: incarnation fencing, seq dedup, gap detection
     event_broadcaster.py  # fans admitted events to the registered consumers
-  controllers/
-    __init__.py
+    event_source.py     # source lifecycle/status contract
+    http_event_source.py  # non-durable POST /events push source
+    kafka_event_source.py  # durable Kafka pull source (poll thread -> gate)
+    stream_position.py  # StreamPosition: the checkpoint's own read cursor
+  discovery.py          # Registry + package scan, shared by views and controllers
+  views/                # read models of the fleet: what is cached, and how much
+    __init__.py         # build_views: scans this package
+    base.py             # View: the marker; may depend on other views only
+    instance_registry.py  # InstanceRegistry + MPInstance: fleet membership
+    key_directory.py    # KeyDirectory: placements + token bindings (a consumer)
+    server_config.py    # ServerConfigRegistry: per-server capacities (from registration)
+    usage_manager.py    # per-tier usage view, by salt and by instance (a consumer)
+  controllers/          # policy: loops and request handling, reading the views
+    __init__.py         # build_controllers: scans this package + named ones
+    base.py             # Controller: construction + run(); views only
     eviction_controller.py  # the fleet L2 control loop: quota + usage + LRU + pins
-    usage_manager.py    # per-salt L2 usage view (owned by the eviction controller)
+    eviction_http_api.py    # the /quota and /cache/pins endpoints it owns
     prefetch_manager.py # dispatches warm prefetch to a named MP server
+  http_routes.py        # HttpRoutes: a controller registering its own endpoints
   http_apis/
     __init__.py
     dependencies.py     # shared FastAPI dependencies (registry, key directory, ...)
     instances_api.py    # /instances REST resource
     health_api.py       # /healthz
-    quota_api.py        # /quota/config, /quota/{cache_salt}, /quota
-    cache_api.py        # /cache/prefetches, /cache/pins, /cache/delete
+    cache_api.py        # /cache/prefetches, /cache/delete
     events_api.py       # /events (fleet cache-event ingest)
     directory_api.py    # /directory/lookup, /directory/blend-lookup, /directory/keys, ...
+    instances_usage_api.py  # /instances/usage, /instances/{id}/usage
 ```
 
 ## Request flow
@@ -92,11 +108,23 @@ sequenceDiagram
     participant API as POST /instances
     participant Reg as InstanceRegistry
 
-    C->>API: POST /instances {instance_id, ip, http_port}
+    C->>API: POST /instances {instance_id, ip, http_port, chunk_size?}
     API->>API: validate JSON body
     API->>Reg: register(MPInstance(...))
     API-->>C: 200 {instance_id, re_registered}
 ```
+
+Chunk size is a fleet invariant. Before an MP server reports chunk-size
+negotiation success, it calls `PUT /config/chunk-size`; the coordinator updates
+its `TokenHasher` and optional `BlendIndex` first. Repeating the same binding is
+idempotent, while a different value is rejected. An MP server also includes the
+value on later registrations once finalization has completed, so a restarted
+coordinator restores the same binding.
+
+A finalized MP server can serve another model only when its chunk size is a
+multiple of that model's required alignment. Otherwise, preconfigure a common
+multiple or use a separate MP server. MP servers using different final chunk
+sizes also need separate coordinators.
 
 Heartbeat is `PUT /instances/{id}/heartbeat` → `registry.update_heartbeat`; a
 404 tells the client to re-register. The health loop (in `app.py`, started by
@@ -118,9 +146,12 @@ sequenceDiagram
 ## Extension seam (adding a capability)
 
 `app.state` carries the **shared collaborators** every capability composes
-from: `config`, `registry`, `key_directory`, `eviction_controller` (which owns
-the quota registry and usage view), the ingest `event_gate`, and the
-`controllers/` managers. Endpoints use them directly — membership is thin
+from: `config`, `registry`, the ingest `event_gate`, and two registries --
+`views` (the key directory and the usage view) and `controllers` (the
+eviction loop, which owns the quota registry, and the prefetch proxy).
+Adding either is one file in `views/` or `controllers/`: discovery builds
+it, subscribes it to the event stream if it consumes, and routes whatever
+durable state it advertises. Endpoints use them directly — membership is thin
 enough to have no service layer (the `/instances` router calls the registry
 straight, matching the mp server's own `http_apis` convention).
 
@@ -167,10 +198,24 @@ Every fact the coordinator holds about fleet cache contents arrives
 through this layer, which decides **what** is admitted and **who** sees
 it. It holds no cache state itself. See [ingest.md](ingest.md).
 
+- `event_source.py` — common source lifecycle/status contract.
+- `http_event_source.py` — `HttpCacheEventSource`, the non-durable
+  `POST /events` push adapter.
+- `kafka_event_source.py` — `KafkaCacheEventSource`, the durable pull
+  adapter: a poll thread reads the fleet's Kafka topic and offers each
+  record to the same `EventGate.ingest_batches`. Selected by
+  `--event-transport kafka` in place of the HTTP source; a coordinator
+  runs exactly one.
+- `stream_position.py` — `StreamPosition`, checkpointed beside the state
+  it describes: the cursor a restarted `KafkaCacheEventSource` seeks each
+  partition to. It is the only cursor — the consumer group never commits
+  — so the resume point moves only when a checkpoint is written, and the
+  offset in a checkpoint always describes the state stored beside it. A
+  partition it has never seen falls back to `auto.offset.reset`.
 - `event_gate.py` — the admission point for every source. Owns the
   per-emitter stream cursor: incarnation fencing (a restart voids the
-  emitter's L1 facts), `seq` dedup, gap detection. `ingest()` for a live
-  emitter stream, `reconcile()` for a scan that has no stream position.
+  emitter's L1 facts), `seq` dedup, and gap detection. Scan sources
+  without stream positions are deliberately unsupported.
 - `event_broadcaster.py` — fans admitted batches (and fence
   notifications) to its registered `CacheEventConsumer`s: the key
   directory and the eviction manager. Adding a consumer is a wiring
@@ -183,20 +228,24 @@ Where the coordinator's fleet-level *doing* lives — the counterpart to
 
 - `eviction_controller.py` — `FleetEvictionController`, the fleet L2
   control loop: it holds the target (`QuotaManager` budgets), observes
-  the value (`L2UsageManager` byte totals), and acts to close the gap.
+  the value (`CacheUsageManager` byte totals, on the `l2` tier), and
+  acts to close the gap.
   Its `run()` wakes every `EVICTION_CHECK_INTERVAL` seconds, walks salts
   over their trigger watermark, and dispatches `DELETE /cache/objects`
   requests (chunked at `MAX_DELETE_BATCH`) to a uniformly random registered
   mp server (all servers share the backing L2, so one dispatch evicts the
   fleet). Also tracks the pins taken via `POST /cache/pins` so pinned keys
-  are excluded from eviction and delete. Reachable as
-  `ctx.eviction_controller`, with `.quota` / `.usage` for the `/quota`
-  endpoints.
-- `usage_manager.py` — the per-`cache_salt` L2 byte totals, maintained
-  as a derived **view** of the key directory from the same admitted
-  event stream. Supporting state for the controller above, not a peer of
-  it (the same way `store_policy.py` supports `store_controller.py` in
-  `storage_controllers/`).
+  are excluded from eviction and delete; `GET /cache/pins` pages through
+  that table. Reachable as
+  `ctx.eviction_controller`, with `.quota` for the `/quota` endpoints.
+- `views/usage_manager.py` — `CacheUsageManager`, byte totals per tier rolled
+  up per `cache_salt` (the tenant axis the eviction controller enforces
+  against) and per `(instance_id, backend)` (the capacity axis: how full
+  one node's L1 is). A consumer in its own right rather than supporting
+  state of the controller above, because it spans both tiers while the
+  controller reads only the L2 half. Registered before the controller,
+  which reads a key's remaining size for the batch it is consuming. See
+  [usage_and_eviction.md](usage_and_eviction.md).
 - `prefetch_manager.py` — implements `POST /cache/prefetches` dispatch to a
   named mp server and proxies status polls. A request-scoped proxy with no
   loop and no state of its own, so it stays a *manager*, not a controller.
@@ -209,6 +258,34 @@ entire meaning is "exempt from eviction", so the pin set is eviction
 state that the cache-control endpoints write, not the reverse.
 
 
+## Fleet memory pressure (`server_config.py`)
+
+`GET /instances/usage` answers how full each server's memory compartments
+are, by joining two halves that ride the same channel at very different
+rates: **usage** from `CacheUsageManager.get_bytes_by_instance`, already
+maintained off the admitted cache-event stream, and **capacity** from
+`capacity_reports` on `POST /events`. Capacity is configuration — it changes
+at boot and at reconfiguration, not per event — so a server reports it once
+at startup and again on each change, each report a whole declaration fenced
+by `(incarnation, revision)`.
+
+The endpoint adds no usage tracking of its own: the per-instance,
+per-backend rollup it needs is exactly what the usage manager publishes.
+
+`ServerConfigRegistry` holds the declarations. It lives outside
+`registry.py` because that file is membership only; a capacity is not a way
+to reach a server.
+
+Two properties the endpoint depends on. Shared backends (one S3 bucket
+mounted by N servers) are counted **once** for the fleet, never summed —
+the same empty-owner convention the key directory uses. And `usage_ratio` is
+`null`, not a sentinel, whenever no capacity was declared: that is the
+common case for `fs` / `mooncake` / `p2p` / `sagemaker`, which expose no
+capacity knob at all.
+
+Read-only — it never evicts, throttles, or pushes. See
+[memory_pressure.md](memory_pressure.md).
+
 ## Fleet CacheBlend lookup (`blend_index.py`)
 
 Cross-request, cross-instance blend reuse is served by the **blend index**,
@@ -217,7 +294,10 @@ path, matches verified token-exact, and eviction exact because it follows
 binding lifecycle. Blend servers query it with `POST
 /directory/blend-lookup` and get `(chunk_hash, old_st, cur_st)` per match,
 which they expand into per-rank object keys with their own model and salt.
-The match window is the fleet chunk size (`CHUNK_SIZE`), probed at
+The query's `model_name`/`cache_salt`/`world_size` scope matches to chunks
+stored in that namespace, so a match always expands into keys that exist.
+The match
+window is the fleet chunk size (`CHUNK_SIZE`), probed at
 `BLEND_PROBE_STRIDE`. See [blend_index.md](blend_index.md).
 
 The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
@@ -235,16 +315,24 @@ The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
   on shutdown. `HEALTH_CHECK_INTERVAL = 0` disables the stale-instance loop
   (it does not affect the L2 eviction loop, which is gated separately by
   `EVICTION_CHECK_INTERVAL`).
-- The L2 eviction loop is a second asyncio task started in the lifespan,
-  running `FleetEvictionController.run` (the controller owns its own
-  cadence); it is cancelled on shutdown. `EVICTION_CHECK_INTERVAL = 0`
-  disables it.
+- The L2 eviction loop is the controller's own, not the app's: the lifespan
+  enters every controller's `run` and names none of them.
+  `EVICTION_CHECK_INTERVAL = 0` makes `FleetEvictionController.start`
+  create no task.
 - Registration is idempotent: re-registering replaces the entry. The registry
   is ephemeral — rebuilt from heartbeats after a coordinator restart. Durable
   state (registered quotas) belongs in an external store, not here. The
   directory, usage view, and LRU are rebuilt only from the cache-event
   stream, so after a coordinator restart they start empty and refill as
   events arrive — quotas under-report until they do.
+
+## Observability
+
+Every answer the coordinator gives is derived from the cache-event stream,
+so its observability is organized around ingest fidelity, freshness, and
+control-loop liveness rather than request rates. Metrics catalog,
+`/status`, cardinality rules, and phasing: see
+[observability.md](observability.md).
 
 ## Running
 

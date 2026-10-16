@@ -60,9 +60,9 @@ kv_format/
   (`is_mla`, `is_hnd`, `is_cross_layer`, `attention_backends`).
 - **Static facts are class attributes, declared once.** The structural shape
   (`is_cross_layer` / `is_kv_list` / `is_layer_list`, exactly one true) and the
-  `is_mla` / `is_hnd` / `is_fused_packed` / `is_two_major` / `is_pbs_fused`
-  modifiers are booleans on the spec, defaulting to `False` so a spec only
-  declares what applies. Consumers read them via `get_spec_class(fmt)` — a
+  `is_mla` / `is_hnd` / `is_fused_packed` / `is_two_major` / `is_pbs_fused` /
+  `requires_blocked_scale_repacking` modifiers are booleans on the spec,
+  defaulting to `False` so a spec only declares what applies. Consumers read them via `get_spec_class(fmt)` — a
   call site must never re-list formats (`fmt in (A, B, ...)`), which is how
   the same predicate used to drift across `torch_ops.py`, the transfer
   helpers and the connectors. The device kernels keep their own copy in
@@ -108,7 +108,7 @@ kv_format/
 
 1. Add the enum value in `csrc/kv_transfer_types.h` (the single
    backend-agnostic definition shared by every accelerator backend), then
-   register it in each backend's pybind module — `csrc/cuda/pybind.cpp` (CUDA)
+   register it in the common native pybind module — `csrc/lmcache_native/pybind.cpp`
    and `csrc/sycl/pybind_sycl.cpp` (SYCL/XPU).
 2. Add a branch in the engine's `detectors/<engine>.py` `discover()`. It keys
    off `(list_depth, tensor_ndim)` from `measure_list_depth_until_tensor`,
@@ -257,7 +257,7 @@ consumer code must never do any of the following — it queries via the
   only way in — no test-only shortcuts, no cached topology fields; the
   manager exposes only `kv_layer_groups`, `num_groups`, and
   `get_shape_desc`.
-- **`lmcache/v1/platform/cuda/cache_context.py::GPUCacheContext`** —
+- **`lmcache/v1/platform/devices/cuda/cache_context.py::GPUCacheContext`** —
   constructs the manager directly at init, delegates
   `get_shape_desc(group_idx)` to it, assembles per-group GPU pointer
   tensors via `get_group_data_ptrs`. No parallel `shape_descs_` /

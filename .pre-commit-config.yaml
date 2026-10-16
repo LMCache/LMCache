@@ -11,13 +11,13 @@ repos:
     name: Ban direct torch device usage
     entry: >-
       bash -c '
-      pattern=$(find lmcache/v1/platform -mindepth 1 -maxdepth 1 -type d \
-        -exec basename {} \; | grep -v "^__" | grep -v "^base$" | sort | paste -sd "|");
+      pattern=$(find lmcache/v1/platform/devices -mindepth 1 -maxdepth 1 -type d \
+        -exec basename {} \; | grep -v "^__" | sort | paste -sd "|");
       if [ -z "$pattern" ]; then
-        echo "WARNING: no platform dirs found, skipping check";
+        echo "WARNING: no device dirs found, skipping check";
         exit 0;
       fi;
-      echo "Detected platforms: ${pattern//|/, }";
+      echo "Detected devices: ${pattern//|/, }";
       echo "Ban pattern: torch.($pattern)";
       matches=$(grep -rHnE "torch\.($pattern)" "$@");
       if [ -n "$matches" ]; then
