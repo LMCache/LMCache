@@ -68,6 +68,9 @@ class KVEventModule(InstanceLivenessTarget):
         self._kv_event_bindings: OrderedDict[
             bytes, tuple[tuple[int, ...], bytes | None]
         ] = OrderedDict()
+        # L1 tags holding each object. A chunk is withdrawn once one of its
+        # objects has no copy left anywhere.
+        self._kv_event_owners: dict[ObjectKey, set[str]] = {}
         if not self._kv_events_enabled:
             return
         self._ctx.event_bus.subscribe_drops(self._record_kv_event_loss)
@@ -259,6 +262,9 @@ class KVEventModule(InstanceLivenessTarget):
             if dropped > self._kv_event_dropped:
                 self._kv_event_dropped = dropped
                 self._kv_event_lost_markers += 1
+                # The dropped events may have changed owners, so later
+                # evictions of unknown objects withdraw their chunk.
+                self._kv_event_owners.clear()
                 self._append_kv_event(_KIND_LOST, "", [])
 
     def _record_kv_event(self, event: Event) -> None:
@@ -278,11 +284,22 @@ class KVEventModule(InstanceLivenessTarget):
                         self._kv_event_bindings.popitem(last=False)
                 return
             keys: list[ObjectKey] = event.metadata["keys"]
+            l1_tag = event.metadata.get("l1_tag", "")
+            evicted = event.event_type == EventType.L1_KEYS_EVICTED
             by_model: dict[str, dict[bytes, None]] = {}
             for key in keys:
+                if evicted:
+                    owners = self._kv_event_owners.get(key)
+                    if owners is not None:
+                        owners.discard(l1_tag)
+                        if owners:
+                            continue
+                        del self._kv_event_owners[key]
+                else:
+                    self._kv_event_owners.setdefault(key, set()).add(l1_tag)
                 by_model.setdefault(key.model_name, {})[key.chunk_hash] = None
             for model_name, hashes in by_model.items():
-                if event.event_type == EventType.L1_KEYS_EVICTED:
+                if evicted:
                     self._append_kv_event(
                         KV_EVENT_KIND_REMOVED, model_name, list(hashes)
                     )
