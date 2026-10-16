@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from typing import Callable, Optional
 from unittest.mock import MagicMock, patch
 import asyncio
 import os
 import shutil
 import tempfile
 import threading
+import time
 
 # Third Party
 import pytest
@@ -196,6 +198,111 @@ class TestLocalDiskBackend:
 
         assert result is None
 
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    @pytest.mark.parametrize("read_mode", ["blocking", "batched_blocking", "async"])
+    def test_binary_buffer_round_trips_through_disk(
+        self, local_disk_backend: LocalDiskBackend, read_mode: str
+    ) -> None:
+        """Test LocalDiskBackend stores and loads byte-buffer memory objects."""
+        payload = b"opaque hybrid state payload"
+        key = CacheEngineKey(
+            model_name="test_model",
+            world_size=1,
+            worker_id=0,
+            chunk_hash=0xB1A17,
+            dtype=torch.uint8,
+            request_configs={"lmcache.tag.kind": "binary-buffer"},
+        )
+        memory_obj = local_disk_backend.local_cpu_backend.allocate(
+            torch.Size([len(payload)]),
+            [],
+            MemoryFormat.BINARY_BUFFER,
+        )
+        assert memory_obj is not None
+        assert memory_obj.get_physical_size() == len(payload)
+        memory_obj.byte_array[:] = payload
+
+        local_disk_backend.submit_put_task(key, memory_obj)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not local_disk_backend.contains(key):
+            local_disk_backend.loop.run_until_complete(asyncio.sleep(0.01))
+
+        assert local_disk_backend.contains(key)
+        if read_mode == "blocking":
+            loaded = local_disk_backend.get_blocking(key)
+        elif read_mode == "batched_blocking":
+            loaded, missing = local_disk_backend.batched_get_blocking(
+                [key, create_test_key(0xB1A19)]
+            )
+            assert missing is None
+        else:
+            [loaded] = local_disk_backend.loop.run_until_complete(
+                local_disk_backend.batched_get_non_blocking("binary", [key])
+            )
+            loaded.unpin()
+
+        assert loaded is not None
+        assert loaded.get_memory_format() == MemoryFormat.BINARY_BUFFER
+        assert loaded.tensor is None
+        assert bytes(loaded.byte_array) == payload
+        assert local_disk_backend.dict[key].size == len(payload)
+
+        local_disk_backend.loop.run_until_complete(
+            local_disk_backend.disk_worker.executor.shutdown_async()
+        )
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    @pytest.mark.parametrize("read_mode", ["blocking", "batched_blocking", "async"])
+    def test_binary_buffer_uses_buffered_io_with_odirect_enabled(
+        self, local_disk_backend: LocalDiskBackend, read_mode: str
+    ) -> None:
+        """Byte-buffer payloads must not use O_DIRECT."""
+        local_disk_backend.use_odirect = True
+        payload = b"x" * local_disk_backend.os_disk_bs
+        key = CacheEngineKey(
+            model_name="test_model",
+            world_size=1,
+            worker_id=0,
+            chunk_hash=0xB1A18,
+            dtype=torch.uint8,
+            request_configs={"lmcache.tag.kind": "binary-buffer-odirect"},
+        )
+        memory_obj = local_disk_backend.local_cpu_backend.allocate(
+            torch.Size([len(payload)]),
+            [],
+            MemoryFormat.BINARY_BUFFER,
+        )
+        assert memory_obj is not None
+        memory_obj.byte_array[:] = payload
+
+        with patch("os.open", side_effect=AssertionError("O_DIRECT was used")):
+            local_disk_backend.submit_put_task(key, memory_obj)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not local_disk_backend.contains(key):
+                local_disk_backend.loop.run_until_complete(asyncio.sleep(0.01))
+
+            assert local_disk_backend.contains(key)
+            if read_mode == "blocking":
+                loaded = local_disk_backend.get_blocking(key)
+            elif read_mode == "batched_blocking":
+                loaded, missing = local_disk_backend.batched_get_blocking(
+                    [key, create_test_key(0xB1A19)]
+                )
+                assert missing is None
+            else:
+                [loaded] = local_disk_backend.loop.run_until_complete(
+                    local_disk_backend.batched_get_non_blocking("binary", [key])
+                )
+                loaded.unpin()
+
+        assert loaded is not None
+        assert loaded.get_memory_format() == MemoryFormat.BINARY_BUFFER
+        assert bytes(loaded.byte_array) == payload
+
+        local_disk_backend.loop.run_until_complete(
+            local_disk_backend.disk_worker.executor.shutdown_async()
+        )
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
 
@@ -396,22 +503,27 @@ class TestGetBlockingCachePolicyUpdate:
         self,
         backend: LocalDiskBackend,
         key: CacheEngineKey,
-        shape: torch.Size,
-        dtype: torch.dtype,
+        shape: Optional[torch.Size],
+        dtype: Optional[torch.dtype],
+        fmt: Optional[MemoryFormat] = MemoryFormat.KV_2LTD,
+        path: str = "/nonexistent/path.pt",
+        size: int = 0,
     ) -> None:
         """Insert a key into backend.dict without writing anything to disk."""
         meta = DiskCacheMetadata(
-            path="/nonexistent/path.pt",
-            size=0,
+            path=path,
+            size=size,
             shape=shape,
             dtype=dtype,
             cached_positions=None,
-            fmt=MemoryFormat.KV_2LTD,
+            fmt=fmt,
             pin_count=0,
         )
         with backend.disk_lock:
             backend.dict[key] = meta
             backend.cache_policy.update_on_put(key)
+            backend.current_cache_size += size
+            backend.usage += size
 
     def test_no_phantom_hit_when_load_fails(
         self, local_disk_backend: LocalDiskBackend
@@ -432,6 +544,286 @@ class TestGetBlockingCachePolicyUpdate:
         assert result is None
         mock_update.assert_not_called()
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_corrupted_metadata_returns_none_without_load(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Corrupted disk metadata must fail gracefully without loading bytes."""
+        key = create_test_key(104)
+        shape = torch.Size([28, 2, 256, 8, 128])
+        self._inject_key(local_disk_backend, key, shape, None)
+
+        with patch.object(local_disk_backend, "load_bytes_from_disk") as mock_load:
+            with patch.object(
+                local_disk_backend.cache_policy, "update_on_hit"
+            ) as mock_update:
+                result = local_disk_backend.get_blocking(key)
+
+        assert result is None
+        mock_load.assert_not_called()
+        mock_update.assert_not_called()
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_batched_get_corrupted_metadata_returns_empty_and_releases_lock(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Async disk loads must not leak disk_lock when metadata is invalid."""
+        key = create_test_key(105)
+        shape = torch.Size([28, 2, 256, 8, 128])
+        self._inject_key(local_disk_backend, key, shape, None)
+
+        result = local_disk_backend.loop.run_until_complete(
+            local_disk_backend.batched_get_non_blocking("lookup", [key])
+        )
+
+        assert result == []
+        acquired = local_disk_backend.disk_lock.acquire(blocking=False)
+        assert acquired
+        if acquired:
+            local_disk_backend.disk_lock.release()
+        local_disk_backend.loop.run_until_complete(
+            local_disk_backend.disk_worker.executor.shutdown_async()
+        )
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_load_bytes_allocation_failure_returns_none(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Disk load allocation failures must return None instead of asserting."""
+        key = create_test_key(106)
+        with patch.object(
+            local_disk_backend.local_cpu_backend, "allocate", return_value=None
+        ):
+            result = local_disk_backend.load_bytes_from_disk(
+                key,
+                "/nonexistent/path.pt",
+                dtype=torch.bfloat16,
+                shape=torch.Size([28, 2, 256, 8, 128]),
+                fmt=MemoryFormat.KV_2LTD,
+            )
+
+        assert result is None
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_missing_file_returns_none_and_drops_stale_metadata(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Missing files must not produce initialized memory objects."""
+        key = create_test_key(107)
+        shape = torch.Size([4])
+        self._inject_key(local_disk_backend, key, shape, torch.uint8, size=4)
+
+        with patch.object(
+            local_disk_backend.cache_policy, "update_on_hit"
+        ) as mock_update:
+            result = local_disk_backend.get_blocking(key)
+
+        assert result is None
+        assert key not in local_disk_backend.dict
+        assert local_disk_backend.current_cache_size == 0.0
+        assert local_disk_backend.usage == 0
+        mock_update.assert_not_called()
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_short_read_returns_none_and_removes_corrupt_file(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Short disk reads are treated as corrupt cache entries."""
+        key = create_test_key(108)
+        path = local_disk_backend._key_to_path(key)
+        with open(path, "wb") as f:
+            f.write(b"ab")
+        self._inject_key(
+            local_disk_backend,
+            key,
+            torch.Size([4]),
+            torch.uint8,
+            path=path,
+            size=4,
+        )
+
+        result = local_disk_backend.get_blocking(key)
+
+        assert result is None
+        assert key not in local_disk_backend.dict
+        assert not os.path.exists(path)
+        assert local_disk_backend.current_cache_size == 0.0
+        assert local_disk_backend.usage == 0
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_batched_get_returns_loaded_prefix_on_read_failure(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Async disk reads should return only the successfully loaded prefix."""
+        key1 = create_test_key(109)
+        key2 = create_test_key(110)
+        path1 = local_disk_backend._key_to_path(key1)
+        path2 = local_disk_backend._key_to_path(key2)
+        with open(path1, "wb") as f:
+            f.write(b"abcd")
+        self._inject_key(
+            local_disk_backend,
+            key1,
+            torch.Size([4]),
+            None,
+            fmt=MemoryFormat.BINARY_BUFFER,
+            path=path1,
+            size=4,
+        )
+        self._inject_key(
+            local_disk_backend,
+            key2,
+            torch.Size([4]),
+            None,
+            fmt=MemoryFormat.BINARY_BUFFER,
+            path=path2,
+            size=4,
+        )
+
+        result = local_disk_backend.loop.run_until_complete(
+            local_disk_backend.batched_get_non_blocking("lookup", [key1, key2])
+        )
+
+        assert len(result) == 1
+        assert bytes(result[0].byte_array) == b"abcd"
+        assert key1 in local_disk_backend.dict
+        assert local_disk_backend.dict[key1].pin_count == 0
+        assert key2 not in local_disk_backend.dict
+        assert local_disk_backend.current_cache_size == 4.0
+        assert local_disk_backend.usage == 4
+        acquired = local_disk_backend.disk_lock.acquire(blocking=False)
+        assert acquired
+        if acquired:
+            local_disk_backend.disk_lock.release()
+
+        result[0].unpin()
+        result[0].ref_count_down()
+        local_disk_backend.loop.run_until_complete(
+            local_disk_backend.disk_worker.executor.shutdown_async()
+        )
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_unreadable_file_cleanup_failure_still_returns_none(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Read and unlink errors must not expose an unpopulated object."""
+        key = create_test_key(111)
+        self._inject_key(local_disk_backend, key, torch.Size([4]), torch.uint8, size=4)
+        allocated = local_disk_backend.local_cpu_backend.allocate(
+            torch.Size([4]), torch.uint8, MemoryFormat.KV_2LTD
+        )
+        assert allocated is not None
+        with (
+            patch.object(
+                local_disk_backend.local_cpu_backend, "allocate", return_value=allocated
+            ),
+            patch("builtins.open", side_effect=PermissionError("cannot read")),
+            patch("os.remove", side_effect=PermissionError("cannot unlink")),
+        ):
+            result = local_disk_backend.get_blocking(key)
+
+        assert result is None
+        assert allocated.get_ref_count() == 0
+        assert not local_disk_backend.contains(key)
+        assert local_disk_backend.current_cache_size == 0.0
+        assert local_disk_backend.usage == 0
+
+    @pytest.mark.parametrize(
+        "read_mode", ["blocking", "batched_blocking", "async", "async_before_worker"]
+    )
+    def test_read_failure_keeps_concurrent_replacement(
+        self, local_disk_backend: LocalDiskBackend, read_mode: str
+    ) -> None:
+        """Failure from an old read must not remove a newly published entry."""
+        key = create_test_key(112)
+        local_disk_backend.insert_key(
+            key,
+            size=4,
+            shape=torch.Size([4]),
+            dtype=None,
+            fmt=MemoryFormat.BINARY_BUFFER,
+        )
+        old_meta = local_disk_backend.dict[key]
+        path = old_meta.path
+        with open(path, "wb") as file:
+            file.write(b"old!")
+        local_disk_backend.current_cache_size = 4.0
+        local_disk_backend.usage = 4
+
+        def replace_during_read(*args: object, **kwargs: object) -> bool:
+            assert local_disk_backend.remove(key)
+            local_disk_backend.insert_key(
+                key,
+                size=4,
+                shape=torch.Size([4]),
+                dtype=None,
+                fmt=MemoryFormat.BINARY_BUFFER,
+            )
+            with open(path, "wb") as file:
+                file.write(b"new!")
+            local_disk_backend.usage = 4
+            return False
+
+        async def replace_before_worker(
+            task_type: str,
+            load: Callable[..., list[MemoryObj]],
+            *,
+            paths: list[str],
+            keys: list[CacheEngineKey],
+            memory_objs: list[MemoryObj],
+            disk_metas: list[DiskCacheMetadata],
+        ) -> list[MemoryObj]:
+            replace_during_read()
+            return load(
+                paths=paths, keys=keys, memory_objs=memory_objs, disk_metas=disk_metas
+            )
+
+        read_effect = (
+            local_disk_backend.read_file
+            if read_mode == "async_before_worker"
+            else replace_during_read
+        )
+        with patch.object(local_disk_backend, "read_file", side_effect=read_effect):
+            if read_mode == "blocking":
+                result = local_disk_backend.get_blocking(key)
+            elif read_mode == "batched_blocking":
+                result, missing = local_disk_backend.batched_get_blocking(
+                    [key, create_test_key(113)]
+                )
+                assert missing is None
+            else:
+                if read_mode == "async_before_worker":
+                    with patch.object(
+                        local_disk_backend.disk_worker,
+                        "submit_task",
+                        side_effect=replace_before_worker,
+                    ):
+                        results = local_disk_backend.loop.run_until_complete(
+                            local_disk_backend.batched_get_non_blocking(
+                                "replacement", [key]
+                            )
+                        )
+                else:
+                    results = local_disk_backend.loop.run_until_complete(
+                        local_disk_backend.batched_get_non_blocking(
+                            "replacement", [key]
+                        )
+                    )
+                assert results == []
+                assert old_meta.pin_count == 0
+                result = None
+
+        assert result is None
+        assert local_disk_backend.contains(key)
+        assert local_disk_backend.dict[key] is not old_meta
+        assert local_disk_backend.dict[key].pin_count == 0
+        assert local_disk_backend.current_cache_size == 4.0
+        assert local_disk_backend.usage == 4
+        with open(path, "rb") as reader:
+            assert reader.read() == b"new!"
+        local_disk_backend.loop.run_until_complete(
+            local_disk_backend.disk_worker.executor.shutdown_async()
+        )
 
     def test_updates_cache_policy_on_successful_load(
         self, local_disk_backend: LocalDiskBackend
@@ -588,10 +980,10 @@ class TestBatchedGetBlocking:
         lock = threading.Lock()
         original_read_file = local_disk_backend.read_file
 
-        def tracking_read_file(key, buffer, path):
+        def tracking_read_file(key, buffer, path, **kwargs):
             with lock:
                 thread_ids.append(threading.current_thread().ident)
-            return original_read_file(key, buffer, path)
+            return original_read_file(key, buffer, path, **kwargs)
 
         with patch.object(
             local_disk_backend, "read_file", side_effect=tracking_read_file
