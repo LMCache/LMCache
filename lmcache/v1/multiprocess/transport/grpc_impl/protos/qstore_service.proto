@@ -7,9 +7,21 @@ syntax = "proto3";
 package lmcache.mp;
 
 import "lmcache_driven_service.proto";
+import "common.proto";
+
+// Q-store remains independent of the native KV-event registration profile.
+message RegisterQCacheRequest {
+  int64 instance_id = 1;
+  repeated DeviceIpcWrapper kv_cache = 2;
+  string model_name = 3;
+  int64 world_size = 4;
+  string engine_type = 5;
+  bytes encoded_layout_hints = 6;
+  repeated EngineGroupInfo engine_group_infos = 7;
+}
 
 service QStoreService {
-  rpc RegisterQCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
+  rpc RegisterQCache(RegisterQCacheRequest) returns (RegisterKvCacheResponse);
   rpc UnregisterQCache(UnregisterKvCacheRequest)
       returns (UnregisterKvCacheResponse);
   rpc StoreQ(StoreRequest) returns (StoreResponse);

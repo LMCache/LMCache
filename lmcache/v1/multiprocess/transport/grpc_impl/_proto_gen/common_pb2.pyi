@@ -5,13 +5,13 @@
 from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from collections.abc import Iterable as _Iterable
-from typing import ClassVar as _ClassVar, Optional as _Optional
+from collections.abc import Iterable as _Iterable, Mapping as _Mapping
+from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class IpcCacheServerKey(_message.Message):
-    __slots__ = ("model_name", "world_size", "worker_id", "token_ids", "start", "end", "request_id", "cache_salt", "encoded_request_configs", "num_kv_readers")
+    __slots__ = ("model_name", "world_size", "worker_id", "token_ids", "start", "end", "request_id", "cache_salt", "encoded_request_configs", "num_kv_readers", "event_profile", "event_bindings")
     MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
     WORLD_SIZE_FIELD_NUMBER: _ClassVar[int]
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
@@ -22,6 +22,8 @@ class IpcCacheServerKey(_message.Message):
     CACHE_SALT_FIELD_NUMBER: _ClassVar[int]
     ENCODED_REQUEST_CONFIGS_FIELD_NUMBER: _ClassVar[int]
     NUM_KV_READERS_FIELD_NUMBER: _ClassVar[int]
+    EVENT_PROFILE_FIELD_NUMBER: _ClassVar[int]
+    EVENT_BINDINGS_FIELD_NUMBER: _ClassVar[int]
     model_name: str
     world_size: int
     worker_id: int
@@ -32,7 +34,9 @@ class IpcCacheServerKey(_message.Message):
     cache_salt: str
     encoded_request_configs: bytes
     num_kv_readers: int
-    def __init__(self, model_name: _Optional[str] = ..., world_size: _Optional[int] = ..., worker_id: _Optional[int] = ..., token_ids: _Optional[_Iterable[int]] = ..., start: _Optional[int] = ..., end: _Optional[int] = ..., request_id: _Optional[str] = ..., cache_salt: _Optional[str] = ..., encoded_request_configs: _Optional[bytes] = ..., num_kv_readers: _Optional[int] = ...) -> None: ...
+    event_profile: KVEventProfile
+    event_bindings: _containers.RepeatedCompositeFieldContainer[EventBinding]
+    def __init__(self, model_name: _Optional[str] = ..., world_size: _Optional[int] = ..., worker_id: _Optional[int] = ..., token_ids: _Optional[_Iterable[int]] = ..., start: _Optional[int] = ..., end: _Optional[int] = ..., request_id: _Optional[str] = ..., cache_salt: _Optional[str] = ..., encoded_request_configs: _Optional[bytes] = ..., num_kv_readers: _Optional[int] = ..., event_profile: _Optional[_Union[KVEventProfile, _Mapping]] = ..., event_bindings: _Optional[_Iterable[_Union[EventBinding, _Mapping]]] = ...) -> None: ...
 
 class EventIpcHandleResult(_message.Message):
     __slots__ = ("event_ipc_handle", "success")
@@ -69,3 +73,25 @@ class EngineGroupInfo(_message.Message):
     extra_object_group_tag: int
     recurrent_state: bool
     def __init__(self, engine_group_id: _Optional[int] = ..., layer_indices: _Optional[_Iterable[int]] = ..., tokens_per_block: _Optional[int] = ..., sw_size_tokens: _Optional[int] = ..., extra_object_group_tag: _Optional[int] = ..., recurrent_state: bool = ...) -> None: ...
+
+class KVEventProfile(_message.Message):
+    __slots__ = ("profile_id", "block_size")
+    PROFILE_ID_FIELD_NUMBER: _ClassVar[int]
+    BLOCK_SIZE_FIELD_NUMBER: _ClassVar[int]
+    profile_id: str
+    block_size: int
+    def __init__(self, profile_id: _Optional[str] = ..., block_size: _Optional[int] = ...) -> None: ...
+
+class EventBinding(_message.Message):
+    __slots__ = ("profile_id", "encoded_block_hashes", "encoded_parent_block_hash", "token_ids", "block_size")
+    PROFILE_ID_FIELD_NUMBER: _ClassVar[int]
+    ENCODED_BLOCK_HASHES_FIELD_NUMBER: _ClassVar[int]
+    ENCODED_PARENT_BLOCK_HASH_FIELD_NUMBER: _ClassVar[int]
+    TOKEN_IDS_FIELD_NUMBER: _ClassVar[int]
+    BLOCK_SIZE_FIELD_NUMBER: _ClassVar[int]
+    profile_id: str
+    encoded_block_hashes: _containers.RepeatedScalarFieldContainer[bytes]
+    encoded_parent_block_hash: bytes
+    token_ids: _containers.RepeatedScalarFieldContainer[int]
+    block_size: int
+    def __init__(self, profile_id: _Optional[str] = ..., encoded_block_hashes: _Optional[_Iterable[bytes]] = ..., encoded_parent_block_hash: _Optional[bytes] = ..., token_ids: _Optional[_Iterable[int]] = ..., block_size: _Optional[int] = ...) -> None: ...

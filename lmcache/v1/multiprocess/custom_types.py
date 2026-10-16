@@ -8,6 +8,9 @@ import msgspec
 import torch
 
 # First Party
+from lmcache.v1.multiprocess.kv_event_types import EventBinding as EventBinding
+from lmcache.v1.multiprocess.kv_event_types import KVEventProfile as KVEventProfile
+from lmcache.v1.multiprocess.kv_event_types import NativeBlockHash as NativeBlockHash
 from lmcache.v1.platform.base.ipc_wrapper import (  # noqa: E402,F401
     DeviceIPCWrapper,
 )
@@ -69,12 +72,20 @@ class IPCCacheServerKey:
     # lookups reject it.
     num_kv_readers: int = field(default=0, compare=False)
 
+    # Optional STORE metadata, excluded from storage identity.
+    event_profile: KVEventProfile | None = field(default=None, compare=False)
+    event_bindings: tuple[EventBinding, ...] = field(default=(), compare=False)
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
     _SALT_MAX_LEN = 128
 
     def __post_init__(self) -> None:
+        if self.event_bindings and self.event_profile is None:
+            raise ValueError("native event bindings require an event profile")
+        if not isinstance(self.event_bindings, tuple):
+            raise ValueError("native event bindings must be an immutable tuple")
         bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
         if bad:
             raise ValueError(
@@ -145,6 +156,8 @@ class IPCCacheServerKey:
             request_id=self.request_id,
             cache_salt=self.cache_salt,
             request_configs=self.request_configs,
+            event_profile=self.event_profile,
+            event_bindings=self.event_bindings,
         )
 
 
