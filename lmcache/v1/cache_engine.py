@@ -39,6 +39,7 @@ from lmcache.utils import (
     compress_slot_mapping,
     convert_tokens_to_list,
 )
+from lmcache.v1 import pcp_shard
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
@@ -118,6 +119,23 @@ class LMCacheEngine:
             self.config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
             and metadata.use_mla
         )
+        # PCP shard mode (extra_config pcp_shard_store): chunk i is stored,
+        # looked up and loaded only by rank i % world_size and broadcast from
+        # it on a load. See lmcache/v1/pcp_shard.py.
+        self._pcp_shard = bool(self.save_only_first_rank) and (
+            pcp_shard.shard_store_enabled(config, metadata.use_mla, metadata.world_size)
+        )
+        if self._pcp_shard:
+            pcp_shard.check_broadcast_group(
+                broadcast_fn, metadata.worker_id, metadata.world_size
+            )
+            logger.info(
+                "PCP shard store: rank %d of %d stores/loads chunks i %% %d == %d",
+                metadata.worker_id,
+                metadata.world_size,
+                metadata.world_size,
+                metadata.worker_id,
+            )
 
         if self.save_only_first_rank and self.gpu_connector is not None:
             self.broadcast_stream = (
@@ -311,6 +329,8 @@ class LMCacheEngine:
                 or self.metadata.is_first_rank()
                 or len(lookup_server_worker_ids) == 0
                 or self.metadata.worker_id in lookup_server_worker_ids
+                # PCP shard mode: every rank stores the chunks it owns.
+                or self._pcp_shard
             ):
                 logger.info(
                     "Initialize storage manager on rank %d, "
@@ -421,7 +441,8 @@ class LMCacheEngine:
             "gpu_connector is required for store operation"
         )
 
-        if self._is_passive():
+        # PCP shard mode: every rank stores the chunks it owns (filtered below).
+        if self._is_passive() and not self._pcp_shard:
             logger.debug("rank=%d ignore store", self.metadata.worker_id)
             return
 
@@ -499,6 +520,16 @@ class LMCacheEngine:
                     logger.debug(
                         "Skipping empty token range [%d, %d) during store", start, end
                     )
+                    continue
+
+                # PCP shard mode: store only the chunks this rank owns.
+                if self._pcp_shard and (
+                    pcp_shard.chunk_owner(
+                        start, self.config.chunk_size, self.metadata.world_size
+                    )
+                    != self.metadata.worker_id
+                ):
+                    prev_key = key.chunk_hash
                     continue
 
                 # Allocate the memory object
@@ -829,6 +860,11 @@ class LMCacheEngine:
         retrieval, the caller must release its pins with ``lookup_unpin(lookup_id)``
         before issuing further blocking retrievals that may need cache space.
         """
+        # PCP shard mode, before the health check: an unhealthy rank must still
+        # join the collectives (it reports a failure, so nobody loads).
+        if self._pcp_shard:
+            return self._pcp_shard_retrieve(tokens, mask, **kwargs)
+
         # Health check: block operation if LMCache is unhealthy
         if not self.is_healthy():
             logger.warning("LMCache is unhealthy, skipping retrieve operation")
@@ -1194,6 +1230,11 @@ class LMCacheEngine:
             logger.warning("LMCache is unhealthy, skipping lookup operation")
             return 0
 
+        if self._pcp_shard:
+            return self._pcp_shard_lookup(
+                tokens, hashes, offsets, search_range, lookup_id, pin, request_configs
+            )
+
         assert self.storage_manager is not None
 
         if tokens is not None:
@@ -1379,6 +1420,33 @@ class LMCacheEngine:
         # split each chunk key into num_layers per-layer keys so the
         # storage backend hot_cache lookups match the same key type.
         keys_per_chunk = self.num_layers if self.use_layerwise else 1
+
+        if self._pcp_shard:  # prefetch only the chunks this rank owns
+            shard_keys, shard_cum = pcp_shard.async_lookup_keys(
+                list(
+                    self.token_database.process_tokens(
+                        tokens=tokens,
+                        hashes=hashes,
+                        offsets=offsets,
+                        request_configs=request_configs,
+                    )
+                ),
+                self.config.chunk_size,
+                self.metadata.world_size,
+                self.metadata.worker_id,
+            )
+            asyncio.run_coroutine_threadsafe(
+                self.storage_manager.async_lookup_and_prefetch(
+                    lookup_id,
+                    shard_keys,
+                    shard_cum,
+                    search_range,
+                    pin,
+                    keys_per_chunk=1,
+                ),
+                self.storage_manager.loop,
+            )
+            return
 
         # TODO(Jiayi): make token database able to return list.
         for start, end, key in self.token_database.process_tokens(
@@ -1591,7 +1659,8 @@ class LMCacheEngine:
         request_configs: Optional[dict] = None,
     ) -> int:
         # TODO: need to clear by request_configs
-        if self.save_only_first_rank:
+        # PCP shard mode: every rank holds its own chunks, so every rank clears.
+        if self.save_only_first_rank and not self._pcp_shard:
             if self.metadata.is_first_rank():
                 num_removed = self._clear(tokens, locations, request_configs)
                 return num_removed
@@ -1942,6 +2011,362 @@ class LMCacheEngine:
                     raw_data=raw_tensor, metadata=metadata, parent_allocator=None
                 )
                 reordered_chunks.append((None, memory_obj, start, end))
+
+    # ------------------------------------------------ PCP shard store mode
+    def _pcp_shard_lookup(
+        self,
+        tokens,
+        hashes,
+        offsets,
+        search_range,
+        lookup_id,
+        pin,
+        request_configs,
+    ) -> int:
+        """Look up only the chunks this rank owns.
+
+        Returns the start token of this rank's first owned miss (or the end of
+        the last chunk if every owned chunk hit). The scheduler's lookup client
+        takes the minimum over ranks: the longest prefix whose every chunk is
+        present on its owner. Pins (pin=True) cover this rank's owned hits and
+        are released by lookup_unpin on this rank, as in the default path.
+        """
+        assert self.storage_manager is not None
+        if tokens is not None:
+            lookup_stats = self.stats_monitor.on_lookup_request(len(tokens))
+        else:
+            assert offsets is not None
+            assert hashes is not None
+            lookup_stats = self.stats_monitor.on_lookup_request(sum(offsets))
+        if search_range is None:
+            search_range = self.retrieve_locations
+
+        res = 0
+        try:
+            chunks = list(
+                self.token_database.process_tokens(
+                    tokens=tokens,
+                    hashes=hashes,
+                    offsets=offsets,
+                    request_configs=request_configs,
+                )
+            )
+            bounds = [(start, end) for start, end, _ in chunks]
+            owned = pcp_shard.owned_positions(
+                [start for start, _ in bounds],
+                self.config.chunk_size,
+                self.metadata.world_size,
+                self.metadata.worker_id,
+            )
+            hit_chunks = 0
+            if owned:
+                keys: List[CacheEngineKey] = []
+                for pos in owned:
+                    key = chunks[pos][2]
+                    assert isinstance(key, CacheEngineKey)
+                    keys.append(key)
+                hit_chunks, block_mapping = self.storage_manager.batched_contains(
+                    keys, search_range, pin
+                )
+                if pin and block_mapping:
+                    assert lookup_id is not None, (
+                        "lookup_id is required when pin is True"
+                    )
+                    for location, pinned_keys in block_mapping.items():
+                        self.lookup_pins[lookup_id][location].extend(pinned_keys)
+            res = pcp_shard.rank_lookup_tokens(bounds, owned, hit_chunks)
+            return res
+        finally:
+            self.stats_monitor.on_lookup_finished(lookup_stats, res)
+            if pin:
+                self.storage_manager.touch_cache()
+
+    def _pcp_shard_fetch_owned(self, owned, n_chunks, kwargs):
+        """Fetch this rank's owned chunks from storage.
+
+        owned: [(pos, key, start, end)] in chunk order.
+        Returns ({pos: memory_obj} for the owned chunks before the first owned
+        failure, position of the first owned failure or n_chunks). Never
+        raises: a storage error counts as a failure so that this rank still
+        joins the collectives with the other ranks.
+        """
+        fetched: Dict[int, MemoryObj] = {}
+        try:
+            assert self.storage_manager is not None
+            infos = [(key, start, end) for _, key, start, end in owned]
+            pos_by_start = {start: pos for pos, _, start, _ in owned}
+            req_id = kwargs.get("req_id")
+            if (
+                infos
+                and req_id is not None
+                and req_id in self.lookup_pins
+                and len(self.lookup_pins[req_id]) == 1
+            ):
+                location = next(iter(self.lookup_pins[req_id].keys()))
+                block_mapping = {location: infos}
+            elif infos:
+                block_mapping = self.storage_manager.get_block_mapping(infos)
+            else:
+                block_mapping = {}
+            for location, blocks in block_mapping.items():
+                memory_objs = self.storage_manager.batched_get(
+                    keys=[key for key, _, _ in blocks],
+                    location=location,
+                )
+                for (_, start, _), memory_obj in zip(blocks, memory_objs, strict=False):
+                    if memory_obj is not None:
+                        fetched[pos_by_start[start]] = memory_obj
+        except Exception as e:
+            logger.error(
+                "PCP shard store: rank %d failed to fetch its chunks: %s",
+                self.metadata.worker_id,
+                e,
+            )
+
+        first_fail = n_chunks
+        for pos, _, _, _ in owned:
+            if pos not in fetched:
+                first_fail = pos
+                break
+        kept: Dict[int, MemoryObj] = {}
+        for pos, memory_obj in fetched.items():
+            if pos < first_fail:
+                kept[pos] = memory_obj
+            else:
+                memory_obj.ref_count_down()
+        return kept, first_fail
+
+    def _pcp_shard_take_prefetched(self, owned, n_chunks, kwargs):
+        """This rank's owned chunks from its async prefetch.
+
+        Same contract as _pcp_shard_fetch_owned. The prefetch event is popped,
+        so lookup_unpin -> cleanup_memory_objs finds nothing left to release;
+        prefetched objects not kept are released here. A rank whose lookup hit
+        nothing has no event and contributes no chunk. Never raises.
+        """
+        by_key: Dict[CacheEngineKey, MemoryObj] = {}
+        req_id = kwargs.get("req_id")
+        try:
+            if (
+                req_id is not None
+                and self.event_manager.get_event_status(EventType.LOADING, req_id)
+                == EventStatus.DONE
+            ):
+                future = self.event_manager.pop_event(EventType.LOADING, req_id)
+                for backend_results in future.result():
+                    for key, memory_obj in backend_results:
+                        by_key[key] = memory_obj
+        except Exception as e:
+            logger.error(
+                "pcp_shard: rank %d: no prefetched chunks for %s: %s",
+                self.metadata.worker_id,
+                req_id,
+                e,
+            )
+        kept, first_fail, unused = pcp_shard.select_prefetched(owned, n_chunks, by_key)
+        for memory_obj in unused:
+            if memory_obj.is_pinned:
+                memory_obj.unpin()
+            memory_obj.ref_count_down()
+        return kept, first_fail
+
+    def _pcp_shard_retrieve(self, tokens, mask=None, **kwargs) -> torch.Tensor:
+        """Load a prefix with every rank fetching its own chunks.
+
+        Collective order, identical on every rank whatever it found locally:
+        world_size object broadcasts (src 0..world_size-1: fingerprint, first
+        failed chunk, metadata of the fetched chunks), then for each agreed
+        chunk j in order one tensor broadcast from its owner j % world_size.
+        """
+        assert self.gpu_connector is not None
+        req_id = self._get_req_id(kwargs)
+        if mask is not None:
+            num_required_tokens = torch.sum(mask).item()
+        else:
+            num_required_tokens = len(tokens)
+        self._log_kvcache_for_check(
+            operation="retrieve",
+            kwargs=kwargs,
+            token_count=num_required_tokens,
+            require_req_id=True,
+        )
+        retrieve_stats = self.stats_monitor.on_retrieve_request(num_required_tokens)
+        ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
+
+        rank = self.metadata.worker_id
+        world_size = self.metadata.world_size
+        chunk_size = self.config.chunk_size
+        device = f"{torch_device_type}:{self.metadata.local_worker_id}"
+        request_configs = kwargs.get("request_configs")
+
+        local_objs: Dict[int, MemoryObj] = {}
+        tot_kv_size = 0
+        prefix = 0
+        try:
+            with retrieve_stats.profile_process_tokens():
+                chunk_infos: List[Tuple[CacheEngineKey, int, int]] = []
+                try:
+                    for start, end, key in self.token_database.process_tokens(
+                        tokens=tokens, mask=mask, request_configs=request_configs
+                    ):
+                        assert isinstance(key, CacheEngineKey)
+                        chunk_infos.append((key, start, end))
+                except Exception as e:
+                    # Join the collectives anyway; the fingerprint mismatch
+                    # makes every rank load nothing.
+                    logger.error("PCP shard store: process_tokens failed: %s", e)
+                    chunk_infos = []
+                n_chunks = len(chunk_infos)
+                owners = [
+                    pcp_shard.chunk_owner(start, chunk_size, world_size)
+                    for _, start, _ in chunk_infos
+                ]
+                owned = [
+                    (pos, key, start, end)
+                    for pos, (key, start, end) in enumerate(chunk_infos)
+                    if owners[pos] == rank
+                ]
+                healthy = self.is_healthy()
+                if healthy and self.async_loading:
+                    local_objs, first_fail = self._pcp_shard_take_prefetched(
+                        owned, n_chunks, kwargs
+                    )
+                elif healthy:
+                    local_objs, first_fail = self._pcp_shard_fetch_owned(
+                        owned, n_chunks, kwargs
+                    )
+                else:
+                    logger.warning(
+                        "LMCache is unhealthy: rank %d reports its chunks missing",
+                        rank,
+                    )
+                    first_fail = owned[0][0] if owned else n_chunks
+                fp = pcp_shard.fingerprint(
+                    [(start, end) for _, start, end in chunk_infos],
+                    [key.chunk_hash for key, _, _ in chunk_infos],
+                )
+
+            with retrieve_stats.profile_broadcast():
+                with torch_dev.stream(self.broadcast_stream):
+                    # Stage the owned chunks on this rank's device before the
+                    # exchange, so the ranks copy their shares in parallel.
+                    staged: Dict[int, torch.Tensor] = {}
+                    metas: Dict[int, Any] = {}
+                    for pos in sorted(local_objs):
+                        memory_obj = local_objs[pos]
+                        try:
+                            raw_tensor = memory_obj.raw_tensor
+                            assert raw_tensor is not None
+                            # Exactly the bytes the receivers allocate from
+                            # the metadata (MemoryObjMetadata.get_size()).
+                            nbytes = memory_obj.metadata.get_size()
+                            raw_bytes = raw_tensor.view(torch.uint8)
+                            assert raw_bytes.numel() >= nbytes
+                            staged[pos] = raw_bytes[:nbytes].to(
+                                device, non_blocking=True
+                            )
+                            metas[pos] = memory_obj.metadata.to_dict()
+                        except Exception as e:
+                            # Still join the exchange, reporting the failure.
+                            logger.error(
+                                "PCP shard store: rank %d failed to stage chunk %d: %s",
+                                rank,
+                                pos,
+                                e,
+                            )
+                            first_fail = min(first_fail, pos)
+                            break
+                    for pos in [p for p in staged if p >= first_fail]:
+                        del staged[pos]
+                        metas.pop(pos, None)
+                    msgs = pcp_shard.exchange(
+                        rank,
+                        world_size,
+                        (fp, first_fail, metas),
+                        self.broadcast_object_fn,
+                    )
+                    prefix = pcp_shard.agree_prefix(msgs, n_chunks, owners)
+
+                    def _recv_buffer(meta_dict):
+                        meta = MemoryObjMetadata.from_dict(meta_dict)
+                        return torch.empty(
+                            torch.Size([meta.get_size()]),
+                            dtype=torch.uint8,
+                            device=device,
+                        )
+
+                    tensors = pcp_shard.broadcast_chunks(
+                        rank,
+                        prefix,
+                        owners,
+                        msgs,
+                        staged,
+                        _recv_buffer,
+                        self.broadcast_fn,
+                    )
+                if not hasattr(self.gpu_connector, "load_stream"):
+                    self.broadcast_stream.synchronize()
+
+            if prefix > 0:
+                with retrieve_stats.profile_to_gpu():
+                    memory_objs: List[MemoryObj] = []
+                    starts: List[int] = []
+                    ends: List[int] = []
+                    for j in range(prefix):
+                        _, start, end = chunk_infos[j]
+                        if j in local_objs:
+                            meta = local_objs[j].metadata
+                        else:
+                            meta = MemoryObjMetadata.from_dict(
+                                msgs[owners[j]][2][j]  # type: ignore[index]
+                            )
+                        memory_objs.append(
+                            TensorMemoryObj(
+                                raw_data=tensors[j],
+                                metadata=meta,
+                                parent_allocator=None,
+                            )
+                        )
+                        starts.append(start)
+                        ends.append(end)
+                        ret_mask[start:end] = True
+                        tot_kv_size += tensors[j].numel() * tensors[j].element_size()
+                    self.gpu_connector.batched_to_gpu(
+                        memory_objs, starts, ends, **kwargs
+                    )
+        finally:
+            # Owned L1 objects were read by async device copies: wait for them
+            # before handing the buffers back to the allocator.
+            if local_objs:
+                try:
+                    self.broadcast_stream.synchronize()
+                except Exception as e:
+                    logger.error("PCP shard store: stream synchronize failed: %s", e)
+            for memory_obj in local_objs.values():
+                # prefetched objects: as the default async path.
+                if self.async_loading and memory_obj.is_pinned:
+                    memory_obj.unpin()
+                memory_obj.ref_count_down()
+
+        retrieved_tokens = torch.sum(ret_mask)
+        self.stats_monitor.on_retrieve_finished(retrieve_stats, retrieved_tokens)
+        onload_time = retrieve_stats.time_to_retrieve()
+        log = logger.info if self.metadata.is_first_rank() else logger.debug
+        log(
+            "[req_id=%s] PCP shard store: rank %d retrieved %d out of %d required "
+            "tokens (from %d total tokens), %d chunks agreed, %d owned loaded. "
+            "size: %.4f gb, cost %.4f ms",
+            req_id,
+            rank,
+            retrieved_tokens,
+            num_required_tokens,
+            len(tokens),
+            prefix,
+            sum(1 for pos in local_objs if pos < prefix),
+            tot_kv_size / 1024**3,
+            onload_time * 1000,
+        )
+        return ret_mask
 
     def _is_passive(self):
         """
