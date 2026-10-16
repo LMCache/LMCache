@@ -1063,7 +1063,7 @@ class PDBackendAsync(AllocatorBackendInterface):
         :param on_complete_callback: Optional per-key completion callback.
         """
         # Skip PD transfer for local requests (no transfer_spec), as PDBackend
-        # does. Requests sent directly to the sender have no disagg_spec.
+        # does. Requests without kv_transfer_params have no disagg_spec.
         if transfer_spec is None:
             return
 
