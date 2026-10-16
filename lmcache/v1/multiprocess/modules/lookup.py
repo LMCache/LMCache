@@ -23,10 +23,16 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.kv_load_policy import (
     DefaultKVLoadPolicy,
     KVLoadContext,
     KVLoadPolicy,
+    create_kv_load_policy,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -115,7 +121,7 @@ class _PrefetchJob:
     early_exit_reason: str = ""
 
 
-class LookupModule:
+class LookupModule(DiscoverableModule):
     """Handles lookup, prefetch polling, lock release, and session lifecycle.
 
     Owns the prefetch-job bookkeeping (``_prefetch_jobs``) and exposes
@@ -129,6 +135,19 @@ class LookupModule:
         load_policy: Decides per lookup whether to serve the request or let
             the engine recompute it. Defaults to ``DefaultKVLoadPolicy``.
     """
+
+    module_name = "lookup"
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        """Build the lookup module; it applies to every configuration."""
+        return cls(
+            build_ctx.engine_context,
+            create_kv_load_policy(
+                build_ctx.mp_config.kv_load_policy,
+                build_ctx.mp_config.runtime_plugin_config.extra_config,
+            ),
+        )
 
     def __init__(
         self,

@@ -16,7 +16,13 @@ import pytest
 # First Party
 from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
 from lmcache.v1.mp_observability.event import EventType
+from lmcache.v1.multiprocess.config import (
+    CoordinatorConfig,
+    MPServerConfig,
+    RuntimePluginConfig,
+)
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
 from lmcache.v1.multiprocess.kv_load_policy import KVLoadContext, KVLoadPolicy
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
@@ -35,6 +41,11 @@ class _RecordingPolicy(KVLoadPolicy):
     def should_load(self, ctx: KVLoadContext) -> bool:
         self.contexts.append(ctx)
         return self.answer
+
+
+class _ConfiguredPolicy(KVLoadPolicy):
+    def should_load(self, ctx: KVLoadContext) -> bool:
+        return bool(self.configs["test.should_load"])
 
 
 def _ctx() -> MagicMock:
@@ -121,6 +132,24 @@ def test_policy_sees_lookup_and_request_configs() -> None:
             request_configs=configs,
         )
     ]
+
+
+@pytest.mark.parametrize("should_load", [False, True])
+def test_factory_uses_configured_load_policy(should_load: bool) -> None:
+    """Module construction preserves both the policy path and its extra config."""
+    ctx = _ctx()
+    config = MPServerConfig(
+        kv_load_policy=f"{__name__}:_ConfiguredPolicy",
+        runtime_plugin_config=RuntimePluginConfig(
+            extra_config={"test.should_load": should_load}
+        ),
+    )
+    module = LookupModule.create(ModuleBuildContext(ctx, config, CoordinatorConfig()))
+    assert isinstance(module, LookupModule)
+
+    module.lookup(_key(None), tp_size=1)
+
+    assert ctx.storage_manager.submit_prefetch_task.called is should_load
 
 
 @pytest.mark.parametrize(

@@ -70,7 +70,7 @@ def test_factory_rejects_invalid_or_unsupported_urls(server_url: str) -> None:
         RequestClientFactory.create(server_url)
 
 
-def test_request_server_factory_passes_grpc_service_registrars(
+def test_request_server_factory_selects_grpc_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     grpc_server_module = importlib.import_module(
@@ -80,26 +80,15 @@ def test_request_server_factory_passes_grpc_service_registrars(
     build = MagicMock(return_value=server)
     modules: list[EngineModule] = []
     config = MPServerConfig(transport="grpc")
-    grpc_registrars = (MagicMock(name="grpc_registrar"),)
-    zmq_registrars = (MagicMock(name="zmq_registrar"),)
     monkeypatch.setattr(grpc_server_module, "build_grpc_request_server", build)
 
-    result = create_request_server(
-        modules,
-        config,
-        grpc_service_registrars=grpc_registrars,
-        zmq_service_registrars=zmq_registrars,
-    )
+    result = create_request_server(modules, config)
 
     assert result is server
-    build.assert_called_once_with(
-        modules,
-        config,
-        service_registrars=grpc_registrars,
-    )
+    build.assert_called_once_with(modules, config)
 
 
-def test_request_server_factory_passes_zmq_service_registrars(
+def test_request_server_factory_selects_zmq_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     zmq_server_module = importlib.import_module(
@@ -109,20 +98,9 @@ def test_request_server_factory_passes_zmq_service_registrars(
     build = MagicMock(return_value=server)
     modules: list[EngineModule] = []
     config = MPServerConfig(transport="zmq")
-    grpc_registrars = (MagicMock(name="grpc_registrar"),)
-    zmq_registrars = (MagicMock(name="zmq_registrar"),)
     monkeypatch.setattr(zmq_server_module, "build_zmq_request_server", build)
 
-    result = create_request_server(
-        modules,
-        config,
-        grpc_service_registrars=grpc_registrars,
-        zmq_service_registrars=zmq_registrars,
-    )
+    result = create_request_server(modules, config)
 
     assert result is server
-    build.assert_called_once_with(
-        modules,
-        config,
-        service_registrars=zmq_registrars,
-    )
+    build.assert_called_once_with(modules, config)

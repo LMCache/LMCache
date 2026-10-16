@@ -1959,7 +1959,7 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
         return torch.Size([num_tokens, 2, self.hidden_dim_size])
 
 
-_TRTLLM_KERNEL_BATCH_SIZE = 32
+_TRTLLM_MAX_OBJECTS_PER_KERNEL_CALL = 4
 
 
 class TRTLLMGPUConnector(GPUConnectorInterface):
@@ -2003,7 +2003,7 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         self.chunk_size = chunk_size
         self.dtype = dtype
         self.device = device
-        self._batch_size = _TRTLLM_KERNEL_BATCH_SIZE
+        self._batch_size = _TRTLLM_MAX_OBJECTS_PER_KERNEL_CALL
         self.load_stream = torch.cuda.Stream(device=device)
         self.store_stream = torch.cuda.Stream(device=device)
 

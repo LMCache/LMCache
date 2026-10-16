@@ -66,12 +66,12 @@ def test_scatter_syncs_before_releasing_dynamically_pinned_chunks() -> None:
         )
 
 
-def test_pickle_store_syncs_before_commit_serializes() -> None:
-    """The pickle path must sync before commit_store reads the buffers.
+def test_inline_store_syncs_before_commit_serializes() -> None:
+    """The inline path must sync before commit_store reads the buffers.
 
-    Gather issues async device->CPU copies into fresh buffers, and the pickle
+    Gather issues async device->CPU copies into fresh buffers, and the inline
     transport serializes them immediately in ``commit_store``. Syncing only
-    when ``out_buffers`` is given (the SHM path) leaves pickle serializing a
+    when ``out_buffers`` is given (the SHM path) leaves inline serialization of a
     buffer that is still being written.
     """
     # First Party
@@ -80,7 +80,7 @@ def test_pickle_store_syncs_before_commit_serializes() -> None:
     order: list[str] = []
     ctx = worker_transfer.EngineDrivenTransferContext(1, MagicMock())
     transport = MagicMock()
-    transport.prepare_store.return_value = None  # pickle mode
+    transport.prepare_store.return_value = None  # inline mode
 
     def _commit(*_a: object, **_k: object) -> bool:
         order.append("commit")
@@ -128,6 +128,6 @@ def test_pickle_store_syncs_before_commit_serializes() -> None:
     assert any(
         i for i, step in enumerate(order) if step == "sync" and gathered < i < committed
     ), (
-        "pickle store must synchronize after gather and before commit_store "
+        "inline store must synchronize after gather and before commit_store "
         f"serializes the buffers, got {order}"
     )

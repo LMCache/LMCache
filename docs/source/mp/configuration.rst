@@ -86,7 +86,9 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Port to bind the selected request server.
    * - ``--chunk-size``
      - ``256``
-     - Chunk size for KV cache operations (in tokens).
+     - Minimum chunk size for KV cache operations (in tokens). The vLLM MP
+       connector may negotiate it upward to satisfy the model's KV geometry;
+       see :doc:`chunk_size_negotiation`.
    * - ``--null-block-id``
      - ``0``
      - Engine block ID that denotes absent KV data. Keep the default for
@@ -172,17 +174,18 @@ Source: ``lmcache/v1/multiprocess/config.py``
        non-GPU path is loaded, i.e. ``--supported-transfer-mode`` is
        ``auto`` or ``engine_driven``).
        ``""`` (empty string, default): SHM disabled; KV transfer uses
-       the pickle path.  Any other value: create a SHM pool and use
+       the typed inline path.  Any other value: create a SHM pool and use
        that exact name for its segment.
    * - ``--kv-event-log-size``
      - ``32768``
      - CPU store-completion and eviction records retained for subscriptions
        and reconnects. Workers receive pushes over ZMQ or gRPC and republish
-       them as KV events. ``0`` disables the channel and its capability
-       advertisement. Requires the observability event
-       bus, which ``--disable-observability`` turns off. Workers subscribe
-       automatically when vLLM KV events are enabled and the server advertises
-       support; otherwise they report only their own completed stores.
+       them as KV events. ``0`` disables the channel. The channel requires
+       the observability event bus, which ``--disable-observability`` turns
+       off. When vLLM KV events are enabled, workers subscribe to the server
+       automatically. When the channel is disabled, the server answers the
+       subscription with ``enabled=False``. The worker then reports only its
+       own completed stores.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at
@@ -281,12 +284,17 @@ The HTTP frontend is included when running ``lmcache server``.
      - Description
    * - ``--http-host``
      - ``127.0.0.1``
-     - Host to bind the HTTP (FastAPI/uvicorn) server. The admin API has
-       no authentication; only bind a non-loopback address on a trusted
-       network.
+     - Host to bind the HTTP (FastAPI/uvicorn) server.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
+   * - ``--http-api-key-file``
+     - unset
+     - Read a bearer API key from a file. Repeat the option to accept multiple
+       keys during rotation. ``LMCACHE_HTTP_API_KEY_FILE`` and
+       ``LMCACHE_HTTP_API_KEY`` provide environment alternatives. All sources
+       are cumulative. When none are set, authentication is disabled. ``/``
+       and ``/healthcheck`` remain public when authentication is enabled.
 
 P2P
 ---
@@ -372,6 +380,30 @@ single-L1 interface.
        DAX L2 adapter with the same ``device_path`` is registered, that
        adapter's ``max_dax_size_gb`` is used as the L1 Device-DAX overflow
        size.
+   * - ``--l1-mlock``
+     - ``False``
+     - ROCm only. ``mlock`` the DRAM L1 so memory compaction cannot migrate
+       it. See *Locked L1 on ROCm* below. ``--l1-manager`` key: ``mlock``.
+
+Locked L1 on ROCm
+-----------------
+
+On ROCm, ``hipHostRegister`` does not page-lock memory: when the kernel
+migrates a registered L1 page (memory compaction), the driver evicts all GPU
+queues of the server until the mapping is restored, which stalls transfers for
+seconds. ``--l1-mlock`` keeps the L1 as ordinary anonymous memory (O_DIRECT,
+RDMA registration and memory-cgroup accounting are unchanged) and locks it.
+Requirements, checked at startup:
+
+- the node sets ``sysctl -w vm.compact_unevictable_allowed=0``; otherwise
+  compaction still moves locked pages;
+- the server may lock the whole L1: ``docker run --ulimit memlock=-1`` or
+  ``CAP_IPC_LOCK``.
+
+Not covered: explicit page migration (``move_pages``, ``migrate_pages``,
+NUMA balancing), khugepaged when transparent huge pages are ``always``
+(use ``madvise`` or ``never``), and host memory registered by other
+processes such as vLLM. Device-DAX L1 is rejected.
 
 GDS L1 Tier
 -----------
@@ -728,13 +760,13 @@ by one interleave layout from being loaded by another. It does not change the
 model name served by vLLM, but the decorated cache model name is visible in MP
 metric labels so operators can distinguish incompatible cache layouts.
 
-One configuration change is required: the LMCache chunk size must be a
-multiple of vLLM's resolved scheduler block size. For a single attention
-group, that is ``block_size * decode_context_parallel_size``. For a hybrid
-model, it is the least common multiple of every attention group's DCP-scaled
-block span and every recurrent-state group's unscaled physical block span. If
-the chunk size is incompatible, vLLM fails at connector startup with the
-required multiple in the message (the LMCache server itself starts fine).
+The vLLM MP connector automatically negotiates a compatible chunk size. For a
+single attention group, the required alignment is
+``block_size * decode_context_parallel_size``. For a hybrid model, it is the
+least common multiple of every attention group's DCP-scaled block span and
+every recurrent-state group's unscaled physical block span. The server treats
+``--chunk-size`` as a minimum and rounds it up to the smallest compatible
+multiple; see :doc:`chunk_size_negotiation`.
 
 The example model also needs a vLLM build that can run it under DCP:
 Kimi-Linear DCP support landed after v0.27.1 (vLLM commit ``63ac04a61e``,
@@ -743,8 +775,8 @@ PR #50484). On stock v0.27.1 the command below fails at startup with
 
 .. code-block:: bash
 
-    # block_size 1024 x dcp 2 -> chunk size must be a multiple of 2048
-    lmcache server --host localhost --port 6000 --chunk-size 2048 \
+    # block_size 1024 x dcp 2 -> a configured minimum of 256 negotiates to 2048
+    lmcache server --host localhost --port 6000 --chunk-size 256 \
         --l1-size-gb 20 --eviction-policy LRU
 
     vllm serve moonshotai/Kimi-Linear-48B-A3B-Instruct \

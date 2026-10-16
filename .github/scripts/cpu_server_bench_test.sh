@@ -71,7 +71,7 @@ rm -f "${LOG_FILE}"
 # --supported-transfer-mode (default: lmcache_driven), so pass the
 # bench's mode explicitly. The engine-driven leg also names a SHM
 # segment: the default --shm-name "" would silently downgrade it to
-# pickle transport. Keep the name short — macOS caps POSIX SHM names
+# typed inline transport. Keep the name short — macOS caps POSIX SHM names
 # at 31 chars including the server's lmcache_l1_pool_ prefix.
 SERVER_MODE_ARGS=(--supported-transfer-mode "${TRANSFER_MODE}")
 if [ "${TRANSFER_MODE}" = "engine_driven" ]; then
