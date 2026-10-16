@@ -24,10 +24,20 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, KVCache
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    InstanceLivenessTarget,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.modules.experimental import (
+    EXPERIMENTAL_TRANSFER,
+    TRANSFER_QUERY,
+)
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
+    LMCacheDrivenTransferModule,
     get_layout_desc,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
@@ -43,7 +53,7 @@ import lmcache.lmcache_native as lmcache_native
 logger = init_logger(__name__)
 
 
-class QStoreModule(InstanceLivenessTarget):
+class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
     """Handles paged Q ring registration and store operations.
 
     Owns Q context registrations and provides handlers for register,
@@ -52,6 +62,27 @@ class QStoreModule(InstanceLivenessTarget):
     Args:
         ctx: The shared engine context.
     """
+
+    module_name = "qstore"
+    # Requires the LMCache-driven transfer path to exist.
+    module_dependencies = (LMCacheDrivenTransferModule,)
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        """Build when ``--enable`` names this experimental feature."""
+        for feature in build_ctx.mp_config.enable:
+            if feature not in EXPERIMENTAL_TRANSFER:
+                raise ValueError(f"Unknown --enable experimental module '{feature}'.")
+        if TRANSFER_QUERY not in build_ctx.mp_config.enable:
+            return None
+        try:
+            build_ctx.require(LMCacheDrivenTransferModule)
+        except ValueError:
+            raise ValueError(
+                f"Experimental module '{TRANSFER_QUERY}' requires "
+                "supported_transfer_mode='lmcache_driven' or 'auto'."
+            ) from None
+        return cls(build_ctx.engine_context)
 
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx

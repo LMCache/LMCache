@@ -31,6 +31,7 @@ class BenchConfig:
         kvcache_shape_spec: LMCache KV shape specification string.
         num_blocks: Fallback number of paged KV blocks.
         block_size: Fallback number of tokens per paged KV block.
+        concurrency: Number of clients sending requests at the same time.
     """
 
     rpc_url: str
@@ -43,6 +44,7 @@ class BenchConfig:
     kvcache_shape_spec: str
     num_blocks: int
     block_size: int
+    concurrency: int = 1
 
     def __post_init__(self) -> None:
         if self.mode not in ("cpu", "gpu"):
@@ -55,6 +57,8 @@ class BenchConfig:
             raise ValueError(f"unsupported transfer mode: {self.transfer_mode}")
         if self.tp_size < 1:
             raise ValueError(f"tp_size must be positive, got {self.tp_size}")
+        if self.concurrency < 1:
+            raise ValueError(f"concurrency must be positive, got {self.concurrency}")
 
     @property
     def is_gpu(self) -> bool:
@@ -135,4 +139,5 @@ def parse_args_to_config(args: argparse.Namespace) -> BenchConfig:
         kvcache_shape_spec=args.kvcache_shape_spec,
         num_blocks=args.num_blocks,
         block_size=args.block_size,
+        concurrency=int(getattr(args, "concurrency", 1)),
     )

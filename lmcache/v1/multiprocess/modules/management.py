@@ -10,7 +10,12 @@ from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    InstanceLivenessTarget,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
@@ -22,7 +27,7 @@ from lmcache.v1.periodic_thread import (
 logger = init_logger(__name__)
 
 
-class ManagementModule:
+class ManagementModule(DiscoverableModule):
     """Handles management and utility operations for the cache engine.
 
     Owns the lock used during cache clearing and provides handlers for
@@ -43,6 +48,25 @@ class ManagementModule:
         experimental_transfer: Enabled experimental transfer types and server
             capability flags.
     """
+
+    module_name = "management"
+    # Build last so every liveness target is available; reverse close order
+    # then stops the reaper before those targets release their state.
+    deferred = True
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        """Build with every liveness target collected so far."""
+        mp_config = build_ctx.mp_config
+        return cls(
+            build_ctx.engine_context,
+            liveness_targets=build_ctx.liveness_targets,
+            worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
+            worker_registration_grace_seconds=(
+                mp_config.worker_registration_grace_seconds
+            ),
+            experimental_transfer=build_ctx.experimental_transfer,
+        )
 
     def __init__(
         self,
@@ -145,7 +169,24 @@ class ManagementModule:
         Returns:
             The chunk size.
         """
-        return self._ctx.chunk_size
+        return self._ctx.finalize_chunk_size()
+
+    @request_handler()
+    def negotiate_chunk_size(self, required_chunk_alignment: int) -> int:
+        """Negotiate the server chunk size against model geometry.
+
+        Args:
+            required_chunk_alignment: The least common multiple of cacheable
+                engine group ``tokens_per_block`` values.
+
+        Returns:
+            The concrete server chunk size.
+
+        Raises:
+            ValueError: If the context cannot bind or validate the requested
+                geometry.
+        """
+        return self._ctx.negotiate_chunk_size(required_chunk_alignment)
 
     @request_handler()
     def get_experimental(self) -> list[str]:

@@ -179,24 +179,24 @@ def test_server_module_flags_are_parsed():
     config = _parse_mp(
         [
             "--server-module",
-            (
-                '{"module_path":"my_pkg.server_module",'
-                '"factory_name":"build_extra_modules",'
-                '"config":{"mode":"test"}}'
-            ),
+            ('{"module_path":"my_pkg.server_module","config":{"mode":"test"}}'),
         ]
     )
 
     assert len(config.server_modules) == 1
     spec = config.server_modules[0]
     assert spec.module_path == "my_pkg.server_module"
-    assert spec.factory_name == "build_extra_modules"
     assert spec.config == {"mode": "test"}
 
 
 def test_server_module_flag_rejects_invalid_json():
     with pytest.raises(ValueError, match="--server-module must be valid JSON"):
         _parse_mp(["--server-module", "{"])
+
+
+def test_mp_config_rejects_non_positive_chunk_size() -> None:
+    with pytest.raises(ValueError, match="chunk size must be positive"):
+        MPServerConfig(chunk_size=0)
 
 
 @pytest.mark.parametrize("workers", ["0", "-1"])
@@ -420,3 +420,12 @@ def test_session_ttl_seconds_default_and_flag():
     """Session TTL defaults to 600 s and is settable for deep queueing."""
     assert _parse_mp([]).session_ttl_seconds == 600.0
     assert _parse_mp(["--session-ttl-seconds", "7200"]).session_ttl_seconds == 7200.0
+
+
+def test_kv_load_policy_default_and_flag():
+    """The KV load policy defaults to DEFAULT and accepts a module path."""
+    assert _parse_mp([]).kv_load_policy == "DEFAULT"
+    assert (
+        _parse_mp(["--kv-load-policy", "my_pkg.policies:Custom"]).kv_load_policy
+        == "my_pkg.policies:Custom"
+    )
