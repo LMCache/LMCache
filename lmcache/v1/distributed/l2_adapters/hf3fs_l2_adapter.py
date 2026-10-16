@@ -35,13 +35,6 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 
 logger = init_logger(__name__)
 
-# Keys consumed only by LMCache (never forwarded to 3FS).
-_LMCACHE_ONLY_KEYS = {
-    "type",
-    "num_workers",
-    "per_op_workers",
-}
-
 
 class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
     """
@@ -62,6 +55,13 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
                 (``"lookup"``, ``"retrieve"``, ``"store"``,
                 ``"delete"``) to dedicated worker counts.  Ops
                 not mentioned use the shared ``num_workers`` pool.
+    - max_capacity_gb: declared L2 capacity in GiB across all base_paths,
+        used for usage accounting. ``0`` (default) disables it. A value
+        ``> 0`` does **not** bound 3FS usage on its own -- watermark
+        eviction runs only when the adapter spec also carries an
+        ``eviction`` block, e.g.
+        ``{"eviction": {"eviction_policy": "LRU"}}``. Without one,
+        files accumulate past the declared capacity.
     """
 
     def __init__(
@@ -75,6 +75,7 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
         iov_size: int = 209715200,
         enable_key_buffer: bool = True,
         per_op_workers: dict[str, int] | None = None,
+        max_capacity_gb: float = 0,
     ):
         self.mount_point = mount_point
         self.base_paths = base_paths
@@ -87,6 +88,7 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
         self.per_op_workers = L2AdapterConfigBase._validate_per_op_workers(
             per_op_workers
         )
+        self.max_capacity_gb = max_capacity_gb
 
     @classmethod
     def from_dict(cls, d: dict) -> "Hf3fsL2AdapterConfig":
@@ -152,6 +154,20 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
 
         per_op_workers = L2AdapterConfigBase._parse_per_op_workers_from_dict(d)
 
+        max_capacity_gb = d.get("max_capacity_gb", 0)
+        if not isinstance(max_capacity_gb, (int, float)) or max_capacity_gb < 0:
+            raise ValueError("max_capacity_gb must be a non-negative number")
+        if max_capacity_gb > 0 and d.get("eviction") is None:
+            logger.warning(
+                "hf3fs: max_capacity_gb=%s is declared for %s but no "
+                "'eviction' block is configured, so it is used for usage "
+                "accounting only and will NOT bound 3FS usage. Add an "
+                "eviction block to enforce it, e.g. "
+                '"eviction": {"eviction_policy": "LRU"}.',
+                max_capacity_gb,
+                base_paths,
+            )
+
         return cls(
             mount_point=mount_point,
             base_paths=base_paths,
@@ -162,6 +178,7 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
             iov_size=iov_size,
             enable_key_buffer=enable_key_buffer,
             per_op_workers=per_op_workers,
+            max_capacity_gb=float(max_capacity_gb),
         )
 
     @classmethod
@@ -184,7 +201,13 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
             "- per_op_workers (dict[str, int] | None): Optional dict mapping "
             "lane keys to dedicated worker counts. Valid keys: lookup, "
             "retrieve, store, delete. Ops not mentioned use the shared "
-            "num_workers pool."
+            "num_workers pool.\n"
+            "- max_capacity_gb (float): declared L2 capacity in GiB across "
+            "all base_paths for usage accounting (default 0 = disabled). "
+            "Does not bound 3FS usage by itself; add an 'eviction' block "
+            "to enable watermark eviction, e.g. "
+            '"eviction": {"eviction_policy": "LRU", '
+            '"trigger_watermark": 0.8, "eviction_ratio": 0.2}'
         )
 
 
@@ -232,6 +255,7 @@ def _create_hf3fs_l2_adapter(
     return NativeConnectorL2Adapter(
         native_client,
         type_name="Hf3fsL2Adapter",
+        max_capacity_gb=config.max_capacity_gb,
         extra_status={
             "mount_point": config.mount_point,
             "base_paths": config.base_paths,
@@ -239,6 +263,7 @@ def _create_hf3fs_l2_adapter(
             "ior_entries": config.ior_entries,
             "io_depth": config.io_depth,
             "per_op_workers": config.per_op_workers,
+            "max_capacity_gb": config.max_capacity_gb,
         },
     )
 
