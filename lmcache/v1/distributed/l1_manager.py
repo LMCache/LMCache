@@ -1065,18 +1065,28 @@ class L1Manager(L1ManagerInterface):
         """
         return self._require_devdax_memory_manager().get_arena_status(device_path)
 
-    def owns_device(self, device_path: str) -> bool:
-        """Return whether L1 maps the physical device at a path.
+    def owns_device(
+        self,
+        device_path: str,
+        *,
+        offset_bytes: int = 0,
+        size_bytes: int | None = None,
+    ) -> bool:
+        """Return whether L1 maps a byte range of the physical device at a path.
 
         Args:
             device_path: Candidate device path or alias.
+            offset_bytes: Start of the range to check.
+            size_bytes: Length of the range, or ``None`` for the rest of the
+                device.
 
         Returns:
-            ``True`` while the device remains mapped; ``False`` for non-DAX L1.
+            ``True`` while a mapping of the device overlaps the range;
+            ``False`` for non-DAX L1.
         """
         manager = self._memory_manager
         return isinstance(manager, DevDaxL1MemoryManager) and manager.owns_device(
-            device_path
+            device_path, offset_bytes=offset_bytes, size_bytes=size_bytes
         )
 
     def memory_region_count(self) -> int:
@@ -1095,12 +1105,14 @@ class L1Manager(L1ManagerInterface):
         self,
         device_path: str,
         size_in_bytes: int,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
         """Add a Device-DAX device to the L1 arena pool.
 
         Args:
             device_path: Path of the Device-DAX device to map.
             size_in_bytes: Number of bytes to map.
+            offset_in_bytes: Device offset the arena starts at.
 
         Returns:
             Status of the newly added arena.
@@ -1110,7 +1122,7 @@ class L1Manager(L1ManagerInterface):
                 cannot be applied.
         """
         return self._require_devdax_memory_manager().add_device(
-            device_path, size_in_bytes
+            device_path, size_in_bytes, offset_in_bytes
         )
 
     def remove_devdax_device(

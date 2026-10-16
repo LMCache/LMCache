@@ -133,7 +133,9 @@ class _StorageManagerStub:
     def _single_region_adapter_names(self) -> list[str]:
         return StorageManager._single_region_adapter_names(cast("StorageManager", self))
 
-    def _l2_device_owner_names(self, _device_path: str) -> list[str]:
+    def _l2_device_owner_names(
+        self, _device_path: str, *_args: object, **_kwargs: object
+    ) -> list[str]:
         return []
 
     def _l1_devdax_arena_is_active(self, device_path: str) -> bool:
@@ -456,7 +458,7 @@ class TestCapacityChangePublishing:
                 )
 
             def add_devdax_device(
-                self, _device_path: str, _size_in_bytes: int
+                self, _device_path: str, _size_in_bytes: int, _offset: int = 0
             ) -> DevDaxArenaStatus:
                 self._capacities = {L1BackendType.DEVDAX: 8192}
                 return active

@@ -38,6 +38,7 @@ class _StorageManagerLike(Protocol):
         self,
         device_path: str,
         size_in_bytes: int,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus: ...
 
     def remove_l1_devdax_device(
@@ -54,6 +55,7 @@ class L1DaxAddRequest(BaseModel):
 
     device_path: str
     size: SizeRequest
+    offset_bytes: int = 0
 
 
 class L1DaxRemoveRequest(BaseModel):
@@ -143,7 +145,10 @@ async def l1_dax_add(
         return JSONResponse(status_code=400, content={"error": SIZE_ERROR})
     try:
         status = await asyncio.to_thread(
-            storage_manager.add_l1_devdax_device, body.device_path, size_bytes
+            storage_manager.add_l1_devdax_device,
+            body.device_path,
+            size_bytes,
+            body.offset_bytes,
         )
     except L1ReconfigureError as exc:
         logger.warning("l1 dax add failed for %s: %s", body.device_path, exc)

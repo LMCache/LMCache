@@ -132,10 +132,19 @@ class StorageManager:
             else:
                 created: list[L1ManagerInterface] = []
                 for manager_config in config.l1_manager_configs:
-                    path = manager_config.memory_config.devdax_path
-                    if path and any(m.owns_device(path) for m in created):
+                    memory = manager_config.memory_config
+                    path = memory.devdax_path
+                    if path and any(
+                        m.owns_device(
+                            path,
+                            offset_bytes=memory.devdax_offset_in_bytes,
+                            size_bytes=memory.devdax_size_in_bytes
+                            or memory.size_in_bytes,
+                        )
+                        for m in created
+                    ):
                         raise ValueError(
-                            f"Device-DAX path already owned by an L1: {path}"
+                            f"Device-DAX range already owned by an L1: {path}"
                         )
                     manager: L1ManagerInterface = L1Manager(manager_config)
                     cleanup.callback(manager.close)
@@ -190,6 +199,7 @@ class StorageManager:
             self._l2_adapters: dict[int, L2AdapterInterface] = {}
             self._adapter_descriptors: dict[int, L2AdapterDescriptor] = {}
             for ac in config.l2_adapter_config.adapters:
+                self._reject_mapped_dax_devices(ac)
                 adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
                 cleanup.callback(adapter.close)
                 self._l2_adapters[adapter_id] = adapter
@@ -888,6 +898,7 @@ class StorageManager:
         self,
         device_path: str,
         size_in_bytes: int,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
         """Add a Device-DAX device to the L1 arena pool.
 
@@ -900,6 +911,7 @@ class StorageManager:
         Args:
             device_path: Path of the Device-DAX device to map.
             size_in_bytes: Number of bytes to map.
+            offset_in_bytes: Device offset the arena starts at.
 
         Returns:
             Status of the newly added arena.
@@ -923,15 +935,19 @@ class StorageManager:
                     f"({', '.join(incompatible)}); their transfers cover "
                     "only the primary arena",
                 )
-            device_owners = self._l2_device_owner_names(device_path)
+            device_owners = self._l2_device_owner_names(
+                device_path, offset_bytes=offset_in_bytes, size_bytes=size_in_bytes
+            )
             if device_owners:
                 raise L1ReconfigureError(
                     409,
-                    "cannot add a Device-DAX L1 arena: the physical device "
-                    "is already mapped by L2 adapter(s) "
+                    "cannot add a Device-DAX L1 arena: the requested range of the "
+                    "physical device is already mapped by L2 adapter(s) "
                     f"({', '.join(device_owners)})",
                 )
-            status = self._l1_manager.add_devdax_device(device_path, size_in_bytes)
+            status = self._l1_manager.add_devdax_device(
+                device_path, size_in_bytes, offset_in_bytes
+            )
         self._publish_capacity_changed()
         return status
 
@@ -1106,12 +1122,16 @@ class StorageManager:
         Returns:
             JSON-serializable operation result.
         """
-        with self._lifecycle_lock if operation == "add" else nullcontext():
+        # Add and resize check the other owners, so hold the lock until they finish.
+        locked = operation in ("add", "resize")
+        with self._lifecycle_lock if locked else nullcontext():
             adapter = self._get_reconfigurable_l2_adapter(adapter_index)
             result = adapter.reconfigure(
                 operation,
                 payload,
-                device_owners=lambda path: self._device_owner_names(path, adapter),
+                device_owners=lambda path, offset, size: self._device_owner_names(
+                    path, adapter, offset, size
+                ),
             )
         result["adapter_index"] = adapter_index
         self._publish_capacity_changed()
@@ -1148,16 +1168,7 @@ class StorageManager:
                     "Device-DAX, or more than one Device-DAX arena); remove the "
                     "additional Device-DAX regions before adding it"
                 )
-            # Check all DAX devices before the constructor maps any.
-            device_config = unwrap_l2_adapter_config(config)
-            if get_type_name_for_config(device_config) == "dax":
-                for device in cast(Any, device_config).devices:
-                    owners = self._device_owner_names(device.device_path)
-                    if owners:
-                        raise ValueError(
-                            f"device {device.device_path} is already mapped by "
-                            f"{', '.join(owners)}"
-                        )
+            self._reject_mapped_dax_devices(config)
             adapter_id, adapter, descriptor = self._build_l2_adapter(config)
             for listener in self._registered_l2_listeners:
                 adapter.register_listener(listener)
@@ -1526,21 +1537,62 @@ class StorageManager:
 
         return None
 
+    def _reject_mapped_dax_devices(self, config: L2AdapterConfigBase) -> None:
+        """Raise if a DAX range in ``config`` overlaps one mapped by L1 or L2.
+
+        Args:
+            config: L2 adapter configuration about to be built.
+
+        Raises:
+            ValueError: If one of its DAX ranges is already mapped.
+        """
+        device_config = unwrap_l2_adapter_config(config)
+        if get_type_name_for_config(device_config) != "dax":
+            return
+        # Check all devices before the adapter maps any.
+        for device in cast(Any, device_config).devices:
+            owners = self._device_owner_names(
+                device.device_path,
+                offset_bytes=device.offset_bytes,
+                size_bytes=device.max_dax_size_bytes,
+            )
+            if owners:
+                raise ValueError(
+                    f"the requested range of device {device.device_path} is "
+                    f"already mapped by {', '.join(owners)}"
+                )
+
     def _device_owner_names(
-        self, device_path: str, exclude: Optional[L2ReconfigurableAdapter] = None
+        self,
+        device_path: str,
+        exclude: Optional[L2ReconfigurableAdapter] = None,
+        offset_bytes: int = 0,
+        size_bytes: Optional[int] = None,
     ) -> list[str]:
-        """Return other L1/L2 owners while the caller holds the lifecycle lock."""
+        """Return other L1/L2 owners of a device byte range.
+
+        The caller holds the lifecycle lock. A ``None`` size covers the rest
+        of the device.
+        """
         owners = [
             f"L1[{tag}]" if self.is_multi_l1 else "L1"
             for tag, manager in self._l1_by_tag.items()
-            if manager.owns_device(device_path)
+            if manager.owns_device(
+                device_path, offset_bytes=offset_bytes, size_bytes=size_bytes
+            )
         ]
-        return owners + self._l2_device_owner_names(device_path, exclude)
+        return owners + self._l2_device_owner_names(
+            device_path, exclude, offset_bytes, size_bytes
+        )
 
     def _l2_device_owner_names(
-        self, device_path: str, exclude: Optional[L2ReconfigurableAdapter] = None
+        self,
+        device_path: str,
+        exclude: Optional[L2ReconfigurableAdapter] = None,
+        offset_bytes: int = 0,
+        size_bytes: Optional[int] = None,
     ) -> list[str]:
-        """Return L2 type names that own the physical device at a path.
+        """Return L2 type names that map a byte range of a physical device.
 
         The caller holds ``_lifecycle_lock`` so registered adapters cannot be
         added or deleted between this check and the mapping attempt.
@@ -1548,10 +1600,13 @@ class StorageManager:
         Args:
             device_path: Candidate Device-DAX path.
             exclude: L2 adapter whose own mappings are ignored.
+            offset_bytes: Start of the range to check.
+            size_bytes: Length of the range, or ``None`` for the rest of the
+                device.
 
         Returns:
-            Registered adapter type names whose open device has the same
-            physical identity.
+            Registered adapter type names whose open mapping of the same
+            physical device overlaps the range.
         """
         owners: list[str] = []
         for _adapter_id, descriptor, adapter in self._snapshot_adapters():
@@ -1559,7 +1614,9 @@ class StorageManager:
             if (
                 owner is not exclude
                 and isinstance(owner, L2DeviceOwner)
-                and owner.owns_device(device_path)
+                and owner.owns_device(
+                    device_path, offset_bytes=offset_bytes, size_bytes=size_bytes
+                )
             ):
                 owners.append(descriptor.type_name)
         return owners

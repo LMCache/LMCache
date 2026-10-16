@@ -57,6 +57,7 @@ class _FakeStorageManager:
         self,
         device_path: str,
         size_in_bytes: int,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
         self.calls.append(("add", (device_path, size_in_bytes)))
         self._raise_if_configured()

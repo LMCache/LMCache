@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.utils import get_device_identity
+from lmcache.utils import byte_ranges_overlap, get_device_identity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
@@ -90,12 +90,21 @@ class DaxDeviceConfig:
     """One configured DAX arena in a DAX L2 adapter."""
 
     device_path: str
-    max_dax_size_gb: float
+    max_dax_size_gb: float | None
+    offset_gb: float = 0.0
 
     @property
-    def max_dax_size_bytes(self) -> int:
-        """Return this device's configured arena size in bytes."""
+    def max_dax_size_bytes(self) -> int | None:
+        """Return the configured arena size in bytes, or ``None`` for the
+        rest of the device after the offset."""
+        if self.max_dax_size_gb is None:
+            return None
         return int(self.max_dax_size_gb * 1024**3)
+
+    @property
+    def offset_bytes(self) -> int:
+        """Return the device offset this arena starts at, in bytes."""
+        return int(self.offset_gb * 1024**3)
 
 
 @dataclass
@@ -108,6 +117,7 @@ class DaxDeviceEntry:
     max_dax_size_bytes: int
     slot_bytes: int
     state: DaxDeviceState
+    offset_bytes: int = 0
 
 
 def _parse_positive_int(value: object, field_name: str) -> int:
@@ -119,6 +129,14 @@ def _parse_positive_int(value: object, field_name: str) -> int:
 def _parse_positive_float(value: object, field_name: str) -> float:
     if not isinstance(value, (int, float)) or value <= 0:
         raise ValueError(f"{field_name} must be a positive number")
+    return float(value)
+
+
+def _parse_offset_gb(value: object, field_name: str) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative number")
     return float(value)
 
 
@@ -143,6 +161,28 @@ def _reconfigure_size_bytes(payload: dict[str, object]) -> int:
         return _parse_positive_int(value, "size_bytes")
     except ValueError as exc:
         raise L2ReconfigureError(400, str(exc)) from exc
+
+
+def _reconfigure_offset_bytes(payload: dict[str, object]) -> int:
+    value = payload.get("offset_bytes", 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise L2ReconfigureError(400, "offset_bytes must be a non-negative integer")
+    return value
+
+
+def _reconfigure_selected_offset(payload: dict[str, object]) -> int | None:
+    if payload.get("offset_bytes") is None:
+        return None
+    return _reconfigure_offset_bytes(payload)
+
+
+def _reject_owned_range(owners: list[str]) -> None:
+    if owners:
+        raise L2ReconfigureError(
+            409,
+            "the requested range of the physical device is already mapped by "
+            f"{', '.join(owners)}",
+        )
 
 
 class DaxL2AdapterConfig(L2AdapterConfigBase):
@@ -214,34 +254,42 @@ class DaxL2AdapterConfig(L2AdapterConfigBase):
                     raw_device.get("device_path"),
                     f"devices[{i}].device_path",
                 )
-                max_dax_size_gb = _parse_positive_float(
-                    raw_device.get("max_dax_size_gb"),
-                    f"devices[{i}].max_dax_size_gb",
-                )
-                max_dax_size_bytes = int(max_dax_size_gb * 1024**3)
-                if max_dax_size_bytes // slot_bytes <= 0:
-                    raise ValueError(
-                        f"devices[{i}] configured DAX arena does not fit one slot"
+                max_dax_size_gb = None
+                if raw_device.get("max_dax_size_gb") is not None:
+                    max_dax_size_gb = _parse_positive_float(
+                        raw_device.get("max_dax_size_gb"),
+                        f"devices[{i}].max_dax_size_gb",
                     )
+                    max_dax_size_bytes = int(max_dax_size_gb * 1024**3)
+                    if max_dax_size_bytes // slot_bytes <= 0:
+                        raise ValueError(
+                            f"devices[{i}] configured DAX arena does not fit one slot"
+                        )
                 devices.append(
                     DaxDeviceConfig(
                         device_path=device_path,
                         max_dax_size_gb=max_dax_size_gb,
+                        offset_gb=_parse_offset_gb(
+                            raw_device.get("offset_gb"), f"devices[{i}].offset_gb"
+                        ),
                     )
                 )
         else:
             device_path = _validate_device_path(d.get("device_path"))
-            max_dax_size_gb = _parse_positive_float(
-                d.get("max_dax_size_gb"),
-                "max_dax_size_gb",
-            )
-            max_dax_size_bytes = int(max_dax_size_gb * 1024**3)
-            if max_dax_size_bytes // slot_bytes <= 0:
-                raise ValueError("configured DAX arena does not fit even one slot")
+            max_dax_size_gb = None
+            if d.get("max_dax_size_gb") is not None:
+                max_dax_size_gb = _parse_positive_float(
+                    d.get("max_dax_size_gb"),
+                    "max_dax_size_gb",
+                )
+                max_dax_size_bytes = int(max_dax_size_gb * 1024**3)
+                if max_dax_size_bytes // slot_bytes <= 0:
+                    raise ValueError("configured DAX arena does not fit even one slot")
             devices = [
                 DaxDeviceConfig(
                     device_path=device_path,
                     max_dax_size_gb=max_dax_size_gb,
+                    offset_gb=_parse_offset_gb(d.get("offset_gb"), "offset_gb"),
                 )
             ]
 
@@ -277,9 +325,12 @@ class DaxL2AdapterConfig(L2AdapterConfigBase):
         return (
             "DAX L2 adapter config fields:\n"
             "- device_path (str): legacy single mmap-able DAX path or file path\n"
-            "- max_dax_size_gb (float): legacy single-device mapped size in GiB\n"
-            "- devices (list): optional multi-device entries with device_path and "
-            "max_dax_size_gb\n"
+            "- max_dax_size_gb (float): legacy single-device mapped size in GiB "
+            "(optional, default: the rest of the device after offset_gb)\n"
+            "- offset_gb (float): legacy single-device start offset in GiB "
+            "(optional, default 0)\n"
+            "- devices (list): optional multi-device entries with device_path "
+            "and optional max_dax_size_gb and offset_gb\n"
             "- hotplug_enabled (bool): enables runtime /reconfigure/dax/l2/* "
             "management APIs\n"
             "- slot_bytes (int): fixed slot size in bytes (required, >0)\n"
@@ -305,7 +356,7 @@ class DaxL2Adapter(L2AdapterInterface):
                 configured devices map the same physical device.
         """
         super().__init__(
-            max_capacity_bytes=sum(d.max_dax_size_bytes for d in config.devices)
+            max_capacity_bytes=sum(d.max_dax_size_bytes or 0 for d in config.devices)
         )
         self._config = config
 
@@ -342,13 +393,19 @@ class DaxL2Adapter(L2AdapterInterface):
         try:
             with self._device_lock:
                 for device_config in config.devices:
-                    if self.owns_device(device_config.device_path):
+                    if self.owns_device(
+                        device_config.device_path,
+                        offset_bytes=device_config.offset_bytes,
+                        size_bytes=device_config.max_dax_size_bytes,
+                    ):
                         raise ValueError(
-                            f"device {device_config.device_path} is already mapped"
+                            f"the requested range of device "
+                            f"{device_config.device_path} is already mapped"
                         )
                     self._add_device_entry_locked(
                         device_path=device_config.device_path,
                         size_bytes=device_config.max_dax_size_bytes,
+                        offset_bytes=device_config.offset_bytes,
                     )
             self._store_executor = ThreadPoolExecutor(
                 max_workers=config.num_store_workers,
@@ -394,17 +451,26 @@ class DaxL2Adapter(L2AdapterInterface):
         """
         return self._load_efd.fileno()
 
-    def owns_device(self, device_path: str) -> bool:
-        """Return whether this adapter maps the physical device at a path.
+    def owns_device(
+        self,
+        device_path: str,
+        *,
+        offset_bytes: int = 0,
+        size_bytes: int | None = None,
+    ) -> bool:
+        """Return whether this adapter maps a byte range of a physical device.
 
         Args:
             device_path: Path whose physical backing identity should be checked.
+            offset_bytes: Start of the range to check.
+            size_bytes: Length of the range, or ``None`` for the rest of the
+                device.
 
         Returns:
-            ``True`` if a currently open DAX core maps the same device;
-            otherwise ``False``. Missing, uninterpretable, and unsupported
-            paths return ``False`` so their normal add validation remains the
-            error boundary.
+            ``True`` if a currently open DAX core maps bytes of the same device
+            inside the range; otherwise ``False``. Missing, uninterpretable,
+            and unsupported paths return ``False`` so their normal add
+            validation remains the error boundary.
         """
         requested_identity = get_device_identity(device_path)
         if requested_identity is None:
@@ -415,7 +481,14 @@ class DaxL2Adapter(L2AdapterInterface):
                 fd = entry.core.fd
                 if fd is None:
                     continue
-                if get_device_identity(fd) == requested_identity:
+                if get_device_identity(fd) == requested_identity and (
+                    byte_ranges_overlap(
+                        entry.offset_bytes,
+                        entry.max_dax_size_bytes,
+                        offset_bytes,
+                        size_bytes,
+                    )
+                ):
                     return True
         return False
 
@@ -749,15 +822,17 @@ class DaxL2Adapter(L2AdapterInterface):
         operation: str,
         payload: dict[str, object],
         *,
-        device_owners: Callable[[str], list[str]],
+        device_owners: Callable[[str, int, int | None], list[str]],
     ) -> dict:
         """Apply one generic runtime reconfiguration operation.
 
         Args:
             operation: One of ``status``, ``add``, ``remove``, or ``resize``.
             payload: DAX-specific operation payload.
-            device_owners: Query other L1 or L2 owners on each add. The caller
-                must hold the lifecycle lock from this check until add completes.
+            device_owners: Query other L1 or L2 owners of a device byte range
+                (path, offset, size) on each add or resize. The caller must
+                hold the lifecycle lock from this check until the operation
+                completes.
 
         Returns:
             JSON-serializable operation result.
@@ -771,13 +846,10 @@ class DaxL2Adapter(L2AdapterInterface):
 
         if operation == "add":
             device_path = _reconfigure_device_path(payload)
-            owners = device_owners(device_path)
-            if owners:
-                raise L2ReconfigureError(
-                    409, f"physical device is already mapped by {', '.join(owners)}"
-                )
             size_bytes = _reconfigure_size_bytes(payload)
-            return self.hotplug_add_device(device_path, size_bytes)
+            offset_bytes = _reconfigure_offset_bytes(payload)
+            _reject_owned_range(device_owners(device_path, offset_bytes, size_bytes))
+            return self.hotplug_add_device(device_path, size_bytes, offset_bytes)
 
         if operation == "remove":
             device_path = _reconfigure_device_path(payload)
@@ -791,6 +863,7 @@ class DaxL2Adapter(L2AdapterInterface):
                 device_path,
                 cast(HotplugRemoveMode, mode),
                 force,
+                offset_bytes=_reconfigure_selected_offset(payload),
             )
 
         if operation == "resize":
@@ -802,11 +875,18 @@ class DaxL2Adapter(L2AdapterInterface):
             force = payload.get("force", False)
             if not isinstance(force, bool):
                 raise L2ReconfigureError(400, "force must be a boolean")
+            with self._device_lock:
+                _, entry = self._get_device_for_path_locked(
+                    device_path, _reconfigure_selected_offset(payload)
+                )
+                offset_bytes = entry.offset_bytes
+            _reject_owned_range(device_owners(device_path, offset_bytes, size_bytes))
             return self.hotplug_resize_device(
                 device_path,
                 size_bytes,
                 cast(HotplugResizeMode, mode),
                 force,
+                offset_bytes=offset_bytes,
             )
 
         raise L2ReconfigureError(
@@ -814,12 +894,15 @@ class DaxL2Adapter(L2AdapterInterface):
             f"unsupported DAX reconfigure operation: {operation}",
         )
 
-    def hotplug_add_device(self, device_path: str, size_bytes: int) -> dict:
+    def hotplug_add_device(
+        self, device_path: str, size_bytes: int, offset_bytes: int = 0
+    ) -> dict:
         """Map and activate one additional DAX device.
 
         Args:
             device_path: Path to an existing readable and writable DAX device.
             size_bytes: Number of bytes to map.
+            offset_bytes: Device offset the mapping starts at.
 
         Returns:
             JSON-serializable operation result.
@@ -850,22 +933,32 @@ class DaxL2Adapter(L2AdapterInterface):
                 )
                 if not same_device and entry.device_path != device_path:
                     continue
-                if entry.max_dax_size_bytes == size_bytes:
+                if (
+                    entry.max_dax_size_bytes == size_bytes
+                    and entry.offset_bytes == offset_bytes
+                ):
                     return {
                         "status": "ok",
                         "operation": "add",
                         "adapter_index": 0,
                         "device": self._device_status_locked(index, entry),
                     }
-                raise L2ReconfigureError(
-                    409,
-                    "device_path already active with a different size",
-                )
+                if byte_ranges_overlap(
+                    entry.offset_bytes,
+                    entry.max_dax_size_bytes,
+                    offset_bytes,
+                    size_bytes,
+                ):
+                    raise L2ReconfigureError(
+                        409,
+                        "device_path already active over an overlapping range",
+                    )
 
             try:
                 entry = self._add_device_entry_locked(
                     device_path=device_path,
                     size_bytes=size_bytes,
+                    offset_bytes=offset_bytes,
                 )
             except ValueError as exc:
                 logger.exception("Invalid DAX hotplug add request")
@@ -890,6 +983,8 @@ class DaxL2Adapter(L2AdapterInterface):
         device_path: str,
         mode: HotplugRemoveMode,
         force: bool = False,
+        *,
+        offset_bytes: int | None = None,
     ) -> dict:
         """Remove or drain a DAX device.
 
@@ -898,6 +993,8 @@ class DaxL2Adapter(L2AdapterInterface):
             mode: ``migrate`` preserves KV on another device, ``evict`` deletes
                 DAX-resident entries, and ``drain`` only stops new writes.
             force: Whether destructive delete may remove locked entries.
+            offset_bytes: Start of the range to remove when the adapter maps
+                more than one range of ``device_path``.
 
         Returns:
             JSON-serializable operation result.
@@ -910,7 +1007,9 @@ class DaxL2Adapter(L2AdapterInterface):
         self._validate_remove_mode(mode)
 
         with self._device_lock:
-            source_index, source = self._get_device_for_path_locked(device_path)
+            source_index, source = self._get_device_for_path_locked(
+                device_path, offset_bytes
+            )
             if mode == "drain":
                 source.state = "draining"
                 return {
@@ -983,6 +1082,8 @@ class DaxL2Adapter(L2AdapterInterface):
         size_bytes: int,
         mode: HotplugResizeMode,
         force: bool = False,
+        *,
+        offset_bytes: int | None = None,
     ) -> dict:
         """Resize a mapped DAX device.
 
@@ -991,6 +1092,8 @@ class DaxL2Adapter(L2AdapterInterface):
             size_bytes: New mapped byte size.
             mode: Migration behavior for shrink operations.
             force: Whether destructive shrink may evict out-of-range entries.
+            offset_bytes: Start of the range to resize when the adapter maps
+                more than one range of ``device_path``.
 
         Returns:
             JSON-serializable operation result.
@@ -1008,7 +1111,15 @@ class DaxL2Adapter(L2AdapterInterface):
             raise L2ReconfigureError(400, "size_bytes does not fit one slot")
 
         with self._device_lock:
-            device_index, entry = self._get_device_for_path_locked(device_path)
+            device_index, entry = self._get_device_for_path_locked(
+                device_path, offset_bytes
+            )
+            if size_bytes > entry.max_dax_size_bytes and self._overlaps_sibling_locked(
+                entry, size_bytes
+            ):
+                raise L2ReconfigureError(
+                    409, "resize would overlap another range of the same device"
+                )
             old_size_bytes = entry.max_dax_size_bytes
             if old_size_bytes == size_bytes:
                 return {
@@ -1310,20 +1421,23 @@ class DaxL2Adapter(L2AdapterInterface):
         self,
         *,
         device_path: str,
-        size_bytes: int,
+        size_bytes: int | None,
+        offset_bytes: int = 0,
     ) -> DaxDeviceEntry:
         core = DaxCore[ObjectKey](
             device_path=device_path,
             max_dax_size_bytes=size_bytes,
             slot_bytes=self._config.slot_bytes,
+            offset_bytes=offset_bytes,
         )
         entry = DaxDeviceEntry(
             device_id=self._next_device_id,
             device_path=device_path,
             core=core,
-            max_dax_size_bytes=size_bytes,
+            max_dax_size_bytes=core.arena_bytes,
             slot_bytes=self._config.slot_bytes,
             state="active",
+            offset_bytes=offset_bytes,
         )
         self._next_device_id += 1
         self._devices.append(entry)
@@ -1345,6 +1459,7 @@ class DaxL2Adapter(L2AdapterInterface):
             "device_path": entry.device_path,
             "state": entry.state,
             "max_dax_size_bytes": entry.max_dax_size_bytes,
+            "offset_bytes": entry.offset_bytes,
             "slot_bytes": entry.slot_bytes,
             "inflight_store_tasks": inflight_store,
             "inflight_lookup_tasks": inflight_lookup,
@@ -1355,6 +1470,7 @@ class DaxL2Adapter(L2AdapterInterface):
     def _get_device_for_path_locked(
         self,
         device_path: str,
+        offset_bytes: int | None = None,
     ) -> tuple[int, DaxDeviceEntry]:
         normalized_path = device_path.strip()
         if not normalized_path:
@@ -1365,6 +1481,8 @@ class DaxL2Adapter(L2AdapterInterface):
             if entry.device_path != normalized_path:
                 continue
             if entry.state in {"closed", "removed", "failed"}:
+                continue
+            if offset_bytes is not None and entry.offset_bytes != offset_bytes:
                 continue
             matches.append((index, entry))
 
@@ -1379,6 +1497,7 @@ class DaxL2Adapter(L2AdapterInterface):
                         {
                             "index": index,
                             "device_id": entry.device_id,
+                            "offset_bytes": entry.offset_bytes,
                             "state": entry.state,
                         }
                         for index, entry in matches
@@ -1390,6 +1509,26 @@ class DaxL2Adapter(L2AdapterInterface):
             return matches[0]
 
         raise L2ReconfigureError(404, "DAX device not found")
+
+    def _overlaps_sibling_locked(self, entry: DaxDeviceEntry, size_bytes: int) -> bool:
+        if entry.core.fd is None:
+            return False
+        identity = get_device_identity(entry.core.fd)
+        for other in self._devices:
+            if (
+                other is entry
+                or other.state in {"closed", "removed", "failed"}
+                or other.core.fd is None
+            ):
+                continue
+            if get_device_identity(other.core.fd) == identity and byte_ranges_overlap(
+                other.offset_bytes,
+                other.max_dax_size_bytes,
+                entry.offset_bytes,
+                size_bytes,
+            ):
+                return True
+        return False
 
     def _blocked_payload_locked(
         self,
