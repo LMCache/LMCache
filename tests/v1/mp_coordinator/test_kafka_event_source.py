@@ -141,6 +141,7 @@ def _source(
     broker: FakeKafkaBroker,
     recording: _RecordingConsumer | None = None,
     position: StreamPosition | None = None,
+    committed_offsets: dict[str, int] | None = None,
 ) -> tuple[KafkaCacheEventSource, FakeKafkaConsumer, _RecordingConsumer]:
     """Build a Kafka source over the fake consumer, feeding one recorder.
 
@@ -151,6 +152,8 @@ def _source(
             ``None``.
         position: Checkpoint position to seek from; a fresh (empty) one
             when ``None`` -- pass one in to inspect or pre-populate it.
+        committed_offsets: Per-topic offset the consumer group already
+            committed on the broker; ``None`` for a group with none.
 
     Returns:
         The source, its fake Kafka consumer, and the cache-event consumer.
@@ -159,7 +162,7 @@ def _source(
 
     def _consumer_factory(config: dict[str, str | int | bool]) -> FakeKafkaConsumer:
         nonlocal kafka_consumer
-        kafka_consumer = FakeKafkaConsumer(broker, config)
+        kafka_consumer = FakeKafkaConsumer(broker, config, committed_offsets)
         return kafka_consumer
 
     install_fake_confluent_kafka(monkeypatch, consumer_factory=_consumer_factory)
@@ -293,6 +296,26 @@ def test_restart_from_a_stale_checkpoint_replays_the_gap(
         _run_until(second_source, lambda: len(second_recording.batches) == 2)
     )
     assert [batch.seq for batch in second_recording.batches] == [2, 3]
+
+
+def test_a_position_less_partition_ignores_a_stale_group_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkpoint with no position for a partition -- one written before
+    the position was checkpointed, or with its section cleared to replay
+    -- must replay the partition from the beginning. The consumer group
+    may still hold an offset committed by an older coordinator; trusting
+    it would skip whatever the restored state does not contain.
+    """
+    broker = FakeKafkaBroker()
+    _record(broker, _batch(1))
+    _record(broker, _batch(2))
+    _record(broker, _batch(3))
+    source, _, recording = _source(monkeypatch, broker, committed_offsets={_TOPIC: 2})
+
+    assert asyncio.run(_run_until(source, lambda: len(recording.batches) == 3))
+
+    assert [batch.seq for batch in recording.batches] == [1, 2, 3]
 
 
 def test_kafka_source_skips_undecodable_record(
