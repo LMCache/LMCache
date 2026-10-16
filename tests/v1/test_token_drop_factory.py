@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 # First Party
-from lmcache.integration.vllm import token_drop
-from lmcache.integration.vllm.token_drop import (
+from lmcache.integration.vllm.experimental import token_drop
+from lmcache.integration.vllm.experimental.token_drop import (
     TokenDropSpec,
     build_token_drop_algorithm,
 )
