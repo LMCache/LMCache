@@ -156,26 +156,30 @@ class GrpcAioMultiprocessServer(RequestServer):
                 f"{registered.operation} is not enabled on this server",
             )
             raise RuntimeError("gRPC context abort unexpectedly returned")
-        payloads = registered.request_decoder(request)
         loop = asyncio.get_running_loop()
-        if registered.handler_type is HandlerType.SYNC:
-            result = await loop.run_in_executor(self._sync_pool, handler, *payloads)
-        elif registered.handler_type is not HandlerType.BLOCKING:
-            await context.abort(
-                grpc.StatusCode.UNIMPLEMENTED,
-                f"{registered.handler_type.name} handlers are not supported",
-            )
-            raise RuntimeError("gRPC context abort unexpectedly returned")
-        elif registered.requires_client_affinity:
-            # Only the loop thread submits, so this needs no submit lock.
-            future = self._affinity_pool.submit(
-                handler,
-                *payloads,
-                affinity_key=client_affinity_key(context),
-            )
-            result = await asyncio.wrap_future(future)
-        else:
-            result = await loop.run_in_executor(self._normal_pool, handler, *payloads)
+        try:
+            payloads = registered.request_decoder(request)
+            if registered.handler_type is HandlerType.SYNC:
+                result = await loop.run_in_executor(self._sync_pool, handler, *payloads)
+            elif registered.handler_type is not HandlerType.BLOCKING:
+                raise NotImplementedError(
+                    f"{registered.handler_type.name} handlers are not supported"
+                )
+            elif registered.requires_client_affinity:
+                # Only the loop thread submits, so this needs no submit lock.
+                future = self._affinity_pool.submit(
+                    handler,
+                    *payloads,
+                    affinity_key=client_affinity_key(context),
+                )
+                result = await asyncio.wrap_future(future)
+            else:
+                result = await loop.run_in_executor(
+                    self._normal_pool, handler, *payloads
+                )
+        except NotImplementedError as exc:
+            await context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
+            raise RuntimeError("gRPC context abort unexpectedly returned") from exc
         if isinstance(result, MessagingStream):
             return result
         return registered.response_encoder(result)

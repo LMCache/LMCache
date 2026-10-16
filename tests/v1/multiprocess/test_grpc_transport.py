@@ -624,7 +624,7 @@ def test_grpc_server_keeps_handler_concurrency(grpc_server_mode: str) -> None:
     handlers all run on one worker."""
     lock = threading.Lock()
     running = peak = 0
-    store_threads: dict[int, set[int]] = {}
+    affinity_threads: dict[int, set[int]] = {}
 
     class Module:
         @request_handler(HandlerType.BLOCKING)
@@ -640,7 +640,7 @@ def test_grpc_server_keeps_handler_concurrency(grpc_server_mode: str) -> None:
 
         @request_handler(HandlerType.BLOCKING, requires_client_affinity=True)
         def clear(self, force: bool = False) -> None:
-            store_threads.setdefault(int(force), set()).add(threading.get_ident())
+            affinity_threads.setdefault(int(force), set()).add(threading.get_ident())
 
     config = MPServerConfig(
         transport="grpc",
@@ -665,4 +665,4 @@ def test_grpc_server_keeps_handler_concurrency(grpc_server_mode: str) -> None:
         server.close()
 
     assert peak == 2
-    assert [len(threads) for threads in store_threads.values()] == [1, 1]
+    assert [len(threads) for threads in affinity_threads.values()] == [1, 1]
