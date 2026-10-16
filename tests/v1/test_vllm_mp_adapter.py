@@ -31,7 +31,6 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.utils import CacheRemoveEvent, CacheStoreEvent
 from lmcache.v1.multiprocess.custom_types import (
-    KV_EVENT_CAPABILITY,
     KVEventBatch,
     KVEventRecord,
 )
@@ -88,13 +87,11 @@ def _parallel_strategy(
 def _event_adapter(
     fake_adapter: tuple,
     parallel_strategy: ParallelStrategy | None = None,
-    advertised: bool = True,
+    extra_config: dict | None = None,
 ) -> tuple[LMCacheMPWorkerAdapter, MagicMock, list[Callable]]:
     """Use cancellable streams at the stubbed network boundary."""
     _, client, _ = fake_adapter
-    client.get_experimental.return_value.result.return_value = (
-        [KV_EVENT_CAPABILITY] if advertised else []
-    )
+    client.get_experimental.return_value.result.return_value = []
     senders = []
     ready = threading.Event()
 
@@ -129,14 +126,29 @@ def _event_adapter(
 
     client.subscribe_kv_events.side_effect = subscribe
     adapter = _make_worker_adapter(
+        extra_config=extra_config,
         enable_kv_events=True,
         parallel_strategy=parallel_strategy,
     )
     assert adapter.get_kv_events() == []
     strategy = parallel_strategy or _parallel_strategy()
-    if KV_EVENT_CAPABILITY in adapter.experimental and strategy.is_kv_event_subscriber:
+    if strategy.is_kv_event_subscriber:
         assert ready.wait(5)
     return adapter, client, senders
+
+
+def _own_reporting_adapter(
+    fake_adapter: tuple, extra_config: dict | None = None
+) -> LMCacheMPWorkerAdapter:
+    """Build a worker whose server has the KV event stream disabled.
+
+    The worker always subscribes; the server's first batch carries
+    ``enabled=False``, after which the worker reports its own completed
+    stores as KV events.
+    """
+    adapter, _, senders = _event_adapter(fake_adapter, extra_config=extra_config)
+    senders[-1](KVEventBatch(False, 7, 0, False, []))
+    return adapter
 
 
 def _event_record(kind: str = "stored", chunk: bytes = b"chunk") -> KVEventRecord:
@@ -861,7 +873,7 @@ def test_store_kv_events_are_reported_after_successful_store(
     # First Party
     from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
-    adapter = _make_worker_adapter(enable_kv_events=True)
+    adapter = _own_reporting_adapter(fake_adapter)
     monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
     transfer_ctx = MagicMock()
     store_future = MagicMock()
@@ -932,9 +944,8 @@ def test_lazy_store_kv_events_preserve_completion_and_failure_reporting(
     store_result: bool | None,
 ) -> None:
     """Only successful stores emit events; every lazy store reports completion."""
-    adapter = _make_worker_adapter(
-        extra_config={"lmcache.mp.lazy_offload": True},
-        enable_kv_events=True,
+    adapter = _own_reporting_adapter(
+        fake_adapter, extra_config={"lmcache.mp.lazy_offload": True}
     )
     adapter.transfer_ctx = MagicMock()
     future = adapter.transfer_ctx.submit_store.return_value
@@ -966,15 +977,18 @@ def test_lazy_store_kv_events_preserve_completion_and_failure_reporting(
 @pytest.mark.parametrize("lazy_offload", [False, True])
 @pytest.mark.parametrize("enable_kv_events", [False, True])
 def test_kv_event_buffer_metrics(
-    fake_adapter: object,
+    fake_adapter: tuple,
     lazy_offload: bool,
     enable_kv_events: bool,
 ) -> None:
     """A stalled drain is visible; failed/pending stores do not count as events."""
-    adapter = _make_worker_adapter(
-        extra_config={"lmcache.mp.lazy_offload": lazy_offload},
-        enable_kv_events=enable_kv_events,
-    )
+    extra_config: dict[str, object] = {"lmcache.mp.lazy_offload": lazy_offload}
+    if enable_kv_events:
+        adapter = _own_reporting_adapter(fake_adapter, extra_config=extra_config)
+    else:
+        adapter = _make_worker_adapter(
+            extra_config=extra_config, enable_kv_events=False
+        )
     adapter.transfer_ctx = MagicMock()
     future = adapter.transfer_ctx.submit_store.return_value
     future.result.return_value = True
@@ -2032,13 +2046,19 @@ def test_one_publisher_per_server(
         adapter.shutdown()
 
 
-def test_unadvertised_channel_keeps_completed_store_reporting(
+def test_disabled_server_stream_keeps_completed_store_reporting(
     fake_adapter: tuple,
 ) -> None:
-    adapter, _, senders = _event_adapter(fake_adapter, advertised=False)
+    """The worker always subscribes; a server whose event log is off answers
+    the first batch with enabled=False, and the worker falls back to reporting
+    its own completed stores without resubscribing."""
+    adapter, client, senders = _event_adapter(fake_adapter)
     try:
+        assert len(senders) == 1
+        senders[-1](KVEventBatch(False, 7, 0, False, []))
         _complete_event_store(adapter)
         assert isinstance(adapter.get_kv_events()[0], CacheStoreEvent)
-        assert not senders
+        assert len(senders) == 1
+        assert client.subscribe_kv_events.call_count == 1
     finally:
         adapter.shutdown()

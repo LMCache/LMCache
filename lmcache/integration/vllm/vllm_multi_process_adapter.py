@@ -35,7 +35,6 @@ from lmcache.utils import (
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
-    KV_EVENT_CAPABILITY,
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
     BlockAllocationRecord,
@@ -2638,17 +2637,8 @@ class LMCacheMPWorkerAdapter:
     def _resolve_kv_event_source(
         self, enable_kv_events: bool, parallel_strategy: ParallelStrategy
     ) -> None:
-        """Use server records when advertised; elect one subscriber per server."""
+        """Use server records; elect one subscriber per server."""
         if not enable_kv_events:
-            return
-        if KV_EVENT_CAPABILITY not in self.experimental:
-            logger.warning(
-                "The LMCache server does not advertise the '%s' capability, "
-                "so this worker reports only its own completed stores and the "
-                "router will not learn LMCache host-cache evictions from it. "
-                "Check the server version and KV event configuration.",
-                KV_EVENT_CAPABILITY,
-            )
             return
         self._kv_event_server_source = True
         self._kv_event_subscriber = parallel_strategy.is_kv_event_subscriber

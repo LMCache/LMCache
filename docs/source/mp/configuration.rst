@@ -180,11 +180,12 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - ``32768``
      - CPU store-completion and eviction records retained for subscriptions
        and reconnects. Workers receive pushes over ZMQ or gRPC and republish
-       them as KV events. ``0`` disables the channel and its capability
-       advertisement. Requires the observability event
-       bus, which ``--disable-observability`` turns off. Workers subscribe
-       automatically when vLLM KV events are enabled and the server advertises
-       support; otherwise they report only their own completed stores.
+       them as KV events. ``0`` disables the channel. The channel requires
+       the observability event bus, which ``--disable-observability`` turns
+       off. When vLLM KV events are enabled, workers subscribe to the server
+       automatically. When the channel is disabled, the server answers the
+       subscription with ``enabled=False``. The worker then reports only its
+       own completed stores.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at

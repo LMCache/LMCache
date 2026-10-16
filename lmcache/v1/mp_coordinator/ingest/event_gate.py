@@ -22,6 +22,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
@@ -157,6 +158,7 @@ class EventGate:
         self._lock = threading.Lock()
         self._broadcaster = broadcaster
         self._cursors: dict[str, _StreamCursor] = {}
+        self._departed: dict[str, int] = {}
         # Acquired outside self._lock on every mutating path, so a capture
         # and an ingest take the two locks in the same order.
         self._quiesce = quiesce
@@ -227,7 +229,18 @@ class EventGate:
         """
         with self._quiesce.applying(), self._lock:
             self._broadcaster.fence_instance(instance_id)
-            self._cursors.pop(instance_id, None)
+            cursor = self._cursors.pop(instance_id, None)
+            if cursor is not None:
+                self._departed[instance_id] = cursor.incarnation
+
+    def readmit_instance(self, instance_id: str) -> None:
+        """Take L1 batches from ``instance_id`` again after it re-registers.
+
+        Args:
+            instance_id: The instance that registered again.
+        """
+        with self._lock:
+            self._departed.pop(instance_id, None)
 
     @property
     def name(self) -> str:
@@ -328,6 +341,12 @@ class EventGate:
     def _admit(self, batch: CacheEventBatch) -> IngestResult:
         """Decide ``batch``'s fate and, if admitted, account its loss and
         broadcast it. Call holding the quiesce and ``self._lock``."""
+        departed = self._departed.get(batch.instance_id)
+        if departed is not None:
+            if batch.incarnation > departed:
+                del self._departed[batch.instance_id]
+            elif batch.tier == Tier.L1:
+                return IngestResult.STALE_INCARNATION
         cursor = self._cursors.get(batch.instance_id)
         # Loss is measured only from a known starting point: a stream the
         # gate already tracks, including across a restart.
