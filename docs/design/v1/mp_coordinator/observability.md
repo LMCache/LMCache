@@ -363,8 +363,31 @@ Three steps, each one or more small PRs. Tests read public state only:
 | P2 | HTTP server and outbound metrics; tracing once trace context exists | `test_metrics_api.py`, `test_directory_api.py`, `test_cache_api.py` |
 
 Components keep plain running totals and `stats()` snapshots and create no
-instruments. Every metric is one row of a table in `observability.py`, read
-from those snapshots; `register_coordinator_metrics` registers them all and
-takes an optional `meter`.
-Production passes nothing and gets the global one; tests pass a private meter
-so readings don't leak between tests.
+instruments. A component with metrics calls `track_metric_source(self)` (from
+`metric_sources.py`) as the last line of its `__init__`; every metric is
+defined in `observability.py`, one list per component type. When metrics are
+on, the app calls `register_coordinator_metrics(controllers_up)` once, after
+building everything: it takes the tracked components and creates their
+instruments. So the app names no component for metrics.
+
+```python
+class EventGate:
+    def __init__(self, broadcaster, quiesce) -> None:
+        ...
+        track_metric_source(self)
+
+# observability.py
+def _specs_for(component: object) -> list[_MetricSpec]:
+    match component:
+        case EventGate():
+            return _event_gate_specs(component)
+        ...
+```
+
+Tracking is keyed by class, since a coordinator process builds one of each;
+a later component of the same class replaces the earlier. Adding a component
+with metrics means one `track_metric_source(self)` line and one `case` with
+its metric list.
+`register_coordinator_metrics` takes an optional `meter`: production passes
+nothing and gets the global one; tests pass a private meter so readings don't
+leak between tests, and clear the tracked components before each test.

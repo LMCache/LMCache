@@ -51,10 +51,7 @@ from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
     KafkaCacheEventSource,
 )
 from lmcache.v1.mp_coordinator.ingest.stream_position import StreamPosition
-from lmcache.v1.mp_coordinator.observability import (
-    CoordinatorMetricSources,
-    register_coordinator_metrics,
-)
+from lmcache.v1.mp_coordinator.observability import register_coordinator_metrics
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
     load_checkpoint,
     save_checkpoint,
@@ -72,7 +69,6 @@ from lmcache.v1.mp_coordinator.persistence.store import (
 )
 from lmcache.v1.mp_coordinator.views import build_views
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
-from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.server_config import ServerConfigRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
@@ -150,22 +146,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # Whether each controller's run() was entered; the lifespan flips it.
     controllers_up = {type(c).__name__: False for c in controllers.all()}
     if config.metrics_enabled:
-        register_coordinator_metrics(
-            CoordinatorMetricSources(
-                key_directory=views.get(KeyDirectory),
-                event_gate=event_gate,
-                broadcaster=event_broadcaster,
-                background_loops=background_loops,
-                event_loop_monitor=event_loop_monitor,
-                registry=registry,
-                controllers_up=controllers_up,
-                kafka_source=(
-                    event_source
-                    if isinstance(event_source, KafkaCacheEventSource)
-                    else None
-                ),
-            )
-        )
+        # Every component with metrics tracked itself as it was built.
+        register_coordinator_metrics(controllers_up)
 
     ctx = CoordinatorContext(
         views=views,

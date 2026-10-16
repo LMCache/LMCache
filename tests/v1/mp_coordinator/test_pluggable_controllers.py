@@ -439,8 +439,7 @@ def test_a_controller_failing_to_start_does_not_take_the_others_down(
 
     assert fleet.status_code == 200
     assert greeting.status_code == 200
-    sources = app_module.register_coordinator_metrics.call_args.args[0]
-    controllers_up = sources.controllers_up
+    controllers_up = app_module.register_coordinator_metrics.call_args.args[0]
     assert controllers_up["ZzzFailingController"] is False
     assert controllers_up["FleetEvictionController"] is True
     # The healthy one ran for the app's lifetime and was torn down.

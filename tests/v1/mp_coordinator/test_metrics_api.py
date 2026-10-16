@@ -12,7 +12,10 @@ import pytest
 # First Party
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
-from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.observability import register_coordinator_metrics
+
+# Local
+from .otel_reader import private_meter, read_values
 
 
 def _client(config: MPCoordinatorConfig) -> TestClient:
@@ -91,19 +94,27 @@ def test_enabled_app_registers_metrics_over_its_own_components(
         health_check_interval=0.0,
         eviction_check_interval=0.0,
     )
+    meter, reader = private_meter()
 
     with patch(
-        "lmcache.v1.mp_coordinator.app.register_coordinator_metrics"
-    ) as mock_register:
-        app = create_app(config)
+        "lmcache.v1.mp_coordinator.app.register_coordinator_metrics",
+        lambda controllers_up: register_coordinator_metrics(controllers_up, meter),
+    ):
+        create_app(config)
 
-    mock_register.assert_called_once()
-    sources = mock_register.call_args.args[0]
-    ctx = app.state.ctx
-    assert sources.key_directory is ctx.views.get(KeyDirectory)
-    assert sources.event_gate is ctx.event_gate
+    names = set(read_values(reader))
+    prefix = "lmcache_coordinator."
+    # One metric from each component the app builds, found without the app
+    # naming any of them.
+    assert {
+        prefix + "key_directory.placements",
+        prefix + "ingest.event_batches_received",
+        prefix + "ingest.batches_delivered",
+        prefix + "event_loop.blocked_seconds",
+        prefix + "controller.up",
+    } <= names
     # An HTTP-source coordinator exports no Kafka metrics.
-    assert sources.kafka_source is None
+    assert not any(name.startswith(prefix + "kafka.") for name in names)
 
 
 def test_disabled_app_does_not_register_metrics() -> None:

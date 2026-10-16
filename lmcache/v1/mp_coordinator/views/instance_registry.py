@@ -24,6 +24,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.mp_coordinator.metric_sources import track_metric_source
 from lmcache.v1.mp_coordinator.views.base import View
 
 logger = init_logger(__name__)
@@ -74,6 +75,7 @@ class InstanceRegistry(View):
         """Initialize an empty registry."""
         self._lock = threading.Lock()
         self._instances: dict[str, MPInstance] = {}
+        track_metric_source(self)
 
     def register(self, instance: MPInstance) -> bool:
         """Insert or replace an mp server entry atomically.
