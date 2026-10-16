@@ -481,11 +481,14 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             (e.g. as a ``MultiConnector`` child, which forwards each child's
             worker metadata but not that hook). ``aggregate()`` merges them the
             way vLLM merges ``kv_cache_events`` across workers.
+        resident_kv_updates: Absolute post-compaction lengths per request;
+            conflicting reports for the same request are rejected.
     """
 
     completed_store_requests: dict[str, int]
     failed_store_requests: set[str] = field(default_factory=set)
     kv_events: KVConnectorKVEvents | None = None
+    resident_kv_updates: dict[str, int] = field(default_factory=dict)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -504,6 +507,14 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
+        resident_updates = dict(self.resident_kv_updates)
+        for request_id, length in other.resident_kv_updates.items():
+            if (
+                request_id in resident_updates
+                and resident_updates[request_id] != length
+            ):
+                raise ValueError(f"Conflicting resident KV length for {request_id!r}")
+            resident_updates[request_id] = length
         kv_events = self.kv_events
         if kv_events is None:
             kv_events = other.kv_events
@@ -516,4 +527,5 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
                 self.failed_store_requests | other.failed_store_requests
             ),
             kv_events=kv_events,
+            resident_kv_updates=resident_updates,
         )
