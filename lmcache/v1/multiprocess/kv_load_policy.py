@@ -107,7 +107,8 @@ class DefaultKVLoadPolicy(KVLoadPolicy):
         if covered <= 0:
             return True
         remaining = ctx.num_lookup_tokens - covered
-        return remaining <= 0 or remaining > ctx.chunk_size
+        # If the engine needs to load no more than 1 chunk, skip the load.
+        return remaining <= 0 or remaining > ctx.chunk_size * 1
 
 
 _BUILTIN_POLICIES: dict[str, type[KVLoadPolicy]] = {
