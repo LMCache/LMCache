@@ -15,6 +15,14 @@ CPU RAM and Local Storage are the two ways of offloading KV cache onto non-GPU
 memory of the same machine that is running inference.
 
 
+The backend also stores opaque ``MemoryFormat.BINARY_BUFFER`` payloads. Their
+payload byte length counts toward the disk budget, and they are loaded without a
+tensor dtype. Binary buffers always use buffered I/O, including when
+``use_odirect`` is enabled, because Python byte buffers do not guarantee the
+alignment required by ``O_DIRECT``. Tensor-backed cache objects retain the
+configured direct-I/O behavior.
+
+
 Two ways to configure LMCache Disk Offloading:
 ----------------------------------------------
 
