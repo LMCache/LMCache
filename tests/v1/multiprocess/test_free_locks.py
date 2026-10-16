@@ -87,6 +87,7 @@ def test_free_locks_request_transport(request_transport: RequestTransport) -> No
     client = RequestClientFactory.create(server_url)
     try:
         assert client.free_lookup_locks(key, 1, ((256, 512),)).result(timeout=5) is None
+        assert handler.call is not None
         got_key, got_tp, got_ranges = handler.call
         assert (got_key, got_tp) == (key, 1)
         assert [tuple(r) for r in got_ranges] == [(256, 512)]
