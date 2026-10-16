@@ -3,8 +3,8 @@
 lmcache bench
 =============
 
-The ``lmcache bench`` command runs sustained performance benchmarks. It has
-three sub-commands, each targeting a different layer of the stack:
+The ``lmcache bench`` command runs performance and answer-quality
+benchmarks. It has four sub-commands:
 
 .. list-table::
    :header-rows: 1
@@ -21,10 +21,13 @@ three sub-commands, each targeting a different layer of the stack:
    * - ``l2``
      - Throughput / latency benchmark against an L2 cache adapter
        (store / lookup / load).
+   * - ``quality``
+     - Checks whether CacheBlend changes the model's answers, against a
+       full-recompute reference, and gives a pass/fail verdict.
 
 .. code-block:: bash
 
-   lmcache bench {engine,server,l2} [options]
+   lmcache bench {engine,server,l2,quality} [options]
 
 
 .. _lmcache-bench-engine:
@@ -703,8 +706,10 @@ gold answers -- ``ctxs[].{title,text}``, ``paragraphs[].paragraph_text``,
 ``user_input`` and ``reference``. Records missing any of the three are
 skipped.
 
-**Comparing two stacks.** The workload reports one arm; run it twice and diff
-the files by ``sample_id``:
+**Comparing two stacks.** For CacheBlend against full recompute, use
+:ref:`lmcache bench quality <lmcache-bench-quality>`, which runs both in one
+invocation and prints a verdict. For other pairs, run the workload once per
+stack and diff the files by ``sample_id``:
 
 .. code-block:: bash
 
@@ -1891,3 +1896,411 @@ Exit codes
        env var was missing or could not be parsed, an option value was
        invalid, or ``--flamegraph on`` was requested but the profiling
        toolchain is unavailable.
+
+
+.. _lmcache-bench-quality:
+
+quality
+-------
+
+The ``lmcache bench quality`` command checks whether CacheBlend changes the
+model's answers. It sends the same QA prompts to a full-recompute reference
+engine and to a CacheBlend engine, scores both against gold answers, and
+prints one verdict -- ``PASS``, ``FAIL``, ``UNDERPOWERED`` or ``INVALID`` --
+that CI can gate on.
+
+.. code-block:: bash
+
+   lmcache bench quality [options]
+
+:ref:`rag-qa-quality <bench-rag-qa-quality>` scores one stack per run.
+``bench quality`` runs every arm in one invocation and adds what a comparison
+needs: byte-identical prompts for every arm, a record of how each passage got
+into the cache, a noise floor from repeated reference runs, a check that
+blending actually happened, and a statistical verdict.
+
+The command does not launch engines. Start each one yourself, from an empty
+cache (see the note under :ref:`Quality quick start <bench-quality-quick-start>`).
+
+
+What bench quality does
+~~~~~~~~~~~~~~~~~~~~~~~
+
+**Arms.** Each arm is an OpenAI-compatible engine serving the same model:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 15 25 60
+
+   * - Arm
+     - Flag
+     - Engine
+   * - ``reference``
+     - ``--reference-url``
+     - vLLM with prefix caching **off**. Runs ``--reference-repeats`` times
+       (default 2); how often it disagrees with itself is the *flip rate*,
+       the noise floor.
+   * - ``apc``
+     - ``--apc-url`` (optional)
+     - vLLM with prefix caching on and no LMCache. It reuses KV only at its
+       original position, so it should match the reference; a gap points at
+       the harness or the engine rather than CacheBlend.
+   * - ``blend``
+     - ``--blend-url``
+     - vLLM with the CacheBlend connector and blend server.
+
+Arms run one after another, and questions run one at a time.
+
+**Reuse scenarios.** Caching arms first receive *store requests*
+(``max_tokens=1``) that put the passages in the cache, then the measured
+prompts:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 82
+
+   * - ``--scenario``
+     - What is stored, and how it is reused
+   * - ``independent``
+     - Each distinct passage is stored alone, then measured together with the
+       question's other passages -- the basic RAG case.
+   * - ``reordered``
+     - Each question's passages are stored together, then measured in a
+       seeded new order -- reuse at a different position *and* next to
+       different neighbors.
+
+Prompts are chunk-aligned the same way as ``rag-qa-quality``, so set
+``--chunk-size`` to the blend server's chunk size.
+
+**Engagement.** A blend arm that silently fell back to recompute would score
+like the reference and pass. With ``--blend-metrics-url``, the blend server's
+``lmcache_blend_lookup_*`` counters are read around every question (once
+before any arm runs, so an unreachable endpoint fails fast; a failed read is
+retried before it stops the run). The
+*blend share* is the share of looked-up tokens served by blending at a new
+position. The verdict is ``INVALID`` if the share is below
+``--min-blend-share``, over the whole run or in any window of 10 consecutive
+questions (which catches a run that stopped blending partway).
+
+With ``--enable-segmented-prefix`` on the blend server, prefix chunks loaded
+past an L2 load failure are reused at their original positions. That is not
+blending, so those tokens lower the blend share; the summary reports them as
+*segmented-prefix tokens*, and an ``INVALID`` reason names them, so a low
+share caused by L2 trouble is not mistaken for blending being off.
+
+**Verdict.** Δ is the mean blend score minus the mean score of the first
+reference run, and SE is the standard error of the per-question differences.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 82
+
+   * - Verdict
+     - Condition
+   * - ``INVALID``
+     - The runs cannot be compared: engagement was measured and is below
+       ``--min-blend-share``, an arm run had no successful request (for
+       example an unreachable engine), a store request failed, or more than
+       5% of questions are unscored. The summary lists the reasons.
+   * - ``PASS``
+     - \|Δ\| ≤ ``--tolerance`` (default 0.05, i.e. 5 points).
+   * - ``FAIL``
+     - \|Δ\| > tolerance **and** \|Δ\| > 2·SE.
+   * - ``UNDERPOWERED``
+     - Otherwise: the difference may be noise. The summary says roughly how
+       many questions would settle it.
+
+The check is two-sided: a blend arm that scores well *above* the reference
+also fails. Reusing KV should not improve answers, so a large gain points at
+the setup (for example a misconfigured reference) as much as a loss does.
+
+Each question the blend arm loses is tagged ``abstention`` (the model said the
+passages lack the answer), ``empty`` (no parsed answer), ``wrong_value`` (it
+answered with another string from the prompt) or ``wording``.
+
+
+Scoring
+~~~~~~~
+
+``--verdict-metric`` picks how answers are scored. It defaults to ``judge``
+when ``--judge-url`` is given and to ``match`` otherwise.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 12 88
+
+   * - Metric
+     - Description
+   * - ``judge``
+     - An LLM judge scores each answer with RAGAS ``AnswerAccuracy`` (0 to 1
+       in steps of 0.25). This is the reference metric: use it for numbers
+       you report. The metric is built in, so ragas need not be installed;
+       its scores match ragas 0.4.3 run on the same judge model.
+   * - ``match``
+     - Judge-free: the answer states a gold answer, by normalized phrase
+       match or by every gold number within 0.5% (``$11.588 billion``
+       matches ``$11588.00``). Good for CI and quick checks; it can
+       understate the size of a loss.
+   * - ``f1``
+     - SQuAD token F1, as in ``rag-qa-quality``. Kept for continuity; not
+       recommended for the verdict.
+
+**Judge endpoint.** Any OpenAI-compatible server works. Serve the judge from
+a separate deployment, not from the engines under test. As in a RAGAS
+hand-off, the judge compares each answer with the question's *first* gold
+answer only, while ``match`` accepts any of them; on datasets with answer
+aliases (e.g. MuSiQue), a correct alias can rate lower under the judge.
+Judgments are cached
+in ``judge_cache.jsonl`` at the top of ``--output-dir`` and reused by every
+later run into it. The cache trusts the judge model name: delete it after
+changing what serves that name (provider, quantization, engine version). An
+unreadable line, such as a partial last line from a killed run, is skipped
+and re-judged.
+
+* **Judge sanity check.** Before the arms run, the judge rates a right and a wrong
+  answer to a sanity-check question, and the run stops unless it rates them 4 and
+  0. Ratings are read as ragas reads them -- the smallest digit 0-4 anywhere
+  in the reply -- so a thinking model served without a reasoning parser
+  (vLLM ``--reasoning-parser``) has its reasoning read as a rating of 0,
+  which would zero every arm and pass silently.
+* **Failures.** Transient request errors are retried with backoff. A judge
+  that still fails mid-run stops the run; the arms' answers are already
+  written to the run's directory, and a rerun into the same
+  ``--output-dir`` only judges what is not cached.
+* **Unscored questions.** A question that some arm got no rating for is left
+  out and reported as unscored. If more than 5% of questions are unscored,
+  the verdict is ``INVALID``.
+
+.. note::
+
+   Only short-answer QA is supported (``--task qa``). A dataset whose median
+   gold answer is longer than 50 words, such as a summarization set, is
+   refused, because the prompt, answer parsing and loss tags are QA-specific.
+
+
+.. _bench-quality-quick-start:
+
+Quality quick start
+~~~~~~~~~~~~~~~~~~~
+
+``bench quality`` loads the model's tokenizer to align passages to cache
+chunks, so it needs ``transformers``, which the ``lmcache-cli`` package does
+not install:
+
+.. code-block:: bash
+
+   pip install transformers
+
+With a reference engine on port 8000, a CacheBlend engine on port 8001
+(blend server metrics on port 9090), and a judge on another host:
+
+.. code-block:: bash
+
+   lmcache bench quality \
+       --reference-url http://localhost:8000 \
+       --blend-url http://localhost:8001 \
+       --blend-metrics-url http://localhost:9090/metrics \
+       --model Qwen/Qwen3-8B \
+       --dataset hotpotqa --limit 200 \
+       --scenario independent --chunk-size 256 \
+       --judge-url http://judge-host:8000 --judge-model openai/gpt-oss-120b
+
+Drop the ``--judge-*`` flags for a judge-free run scored with ``match``.
+
+.. note::
+
+   Start each caching arm from an empty cache: restart the engine and the
+   blend server before every run. Otherwise the arm reuses KV from an earlier
+   run, and what is measured is no longer the chosen scenario. The command
+   does not do this for you yet.
+
+**Datasets** are the same as for :ref:`rag-qa-quality <bench-rag-qa-quality>`:
+``musique``, ``hotpotqa``, or a local QA file, including the RAGAS hand-off
+fields (``user_input``, ``retrieved_contexts``, ``reference``). Supporting
+passages are taken from the dataset's own markers when it has them (MuSiQue
+``is_supporting``, HotpotQA ``supporting_facts``, ``context_metadata[].gold``),
+otherwise from which passage contains a gold answer.
+
+**Reasoning models.** As with ``rag-qa-quality``, pass the chat-template
+setting with ``--template-kwargs`` (for example ``reasoning_effort=low``) and
+leave ``--max-output-tokens`` enough room for the reasoning and the answer.
+
+
+Quality options
+~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Flag
+     - Default
+     - Description
+   * - ``--reference-url``
+     - *required*
+     - Engine serving full recompute (vLLM, prefix caching off).
+   * - ``--blend-url``
+     - *required*
+     - Engine serving CacheBlend.
+   * - ``--apc-url``
+     - *(unset)*
+     - Engine serving vLLM prefix caching only. Reported alongside; does
+       not set the verdict.
+   * - ``--blend-metrics-url``
+     - *(unset)*
+     - The blend server's Prometheus ``/metrics`` URL. Without it,
+       engagement is not checked and cannot make the verdict ``INVALID``.
+   * - ``--model``
+     - *required*
+     - Served model name. Its tokenizer is used to align passages to chunks.
+   * - ``--task``
+     - ``qa``
+     - Task type of the dataset. Only ``qa`` is supported.
+   * - ``--dataset``
+     - *required*
+     - ``musique``, ``hotpotqa``, or a path to a local ``.json``,
+       ``.jsonl`` or ``.parquet`` QA file.
+   * - ``--limit``
+     - 0
+     - Questions to measure, in dataset order (0 = all).
+   * - ``--scenario``
+     - ``independent``
+     - ``independent`` or ``reordered`` (see above).
+   * - ``--chunk-size``
+     - 256
+     - LMCache chunk size. Must match the blend server's.
+   * - ``--max-output-tokens``
+     - 2048
+     - Token budget per answer, reasoning included.
+   * - ``--template-kwargs``
+     - *(unset)*
+     - Chat-template variable as ``KEY=VALUE``, repeatable.
+   * - ``--seed``
+     - 42
+     - Seed for chunk-alignment filler and the ``reordered`` permutation.
+   * - ``--reference-repeats``
+     - 2
+     - Reference runs. Two or more report the flip rate.
+   * - ``--verdict-metric``
+     - *(see Scoring)*
+     - ``judge``, ``match`` or ``f1``.
+   * - ``--tolerance``
+     - 0.05
+     - Acceptable blend-vs-reference score difference, in either direction,
+       in score units.
+   * - ``--min-blend-share``
+     - 0.3
+     - Minimum blend share, overall and per 10-question window.
+   * - ``--judge-url``
+     - *(unset)*
+     - OpenAI-compatible endpoint serving the judge model.
+   * - ``--judge-model``
+     - ``--model``
+     - Judge model name.
+   * - ``--judge-api-key``
+     - ``$LMCACHE_JUDGE_API_KEY``
+     - API key for the judge endpoint (``EMPTY`` when unset).
+   * - ``--judge-max-tokens``
+     - 4096
+     - Completion budget per judge call, reasoning included.
+   * - ``--judge-concurrency``
+     - 8
+     - Answers judged at once.
+   * - ``--output-dir``
+     - ``quality_results``
+     - Results root. Each run writes into a new timestamped subdirectory;
+       the judge cache is shared at the top level.
+
+
+Quality output
+~~~~~~~~~~~~~~
+
+The terminal summary shows each arm's mean score, its difference from the
+first reference run, and the verdict:
+
+.. code-block:: text
+
+   bench quality: 100 questions, scenario=independent, metric=judge
+   arm              score    delta    2*SE  empty  abstain
+   reference_1      0.905                       0        1
+   reference_2      0.900   -0.005   0.019      0        1
+   blend            0.768   -0.137   0.064      0        9
+   reference flip rate: 0.030
+   blend share: 0.912 (min window 0.874), stale chunks: 0, fingerprints registered: 4180
+   evidence passages identified: dataset 100, answer_string 0, none 0
+   verdict: FAIL
+
+Each run writes into its own subdirectory of ``--output-dir``, named for
+when it started (a run starting in the same second as an existing directory
+gets a ``-2``, ``-3``, ... suffix), so reruns never mix files:
+
+.. code-block:: text
+
+   quality_results/
+     judge_cache.jsonl          shared by every run
+     20261012-183005/           one run
+       summary.json
+       rows.jsonl
+       manifest.jsonl
+       answers_reference_1.jsonl
+       ...
+
+Files in a run's directory, plus the shared judge cache:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - File
+     - Contents
+   * - ``summary.json``
+     - Verdict (with ``invalid_reasons``), metric, tolerance, Δ, SE, flip
+       rate, engagement, per-arm counts, evidence sources, judge model,
+       unscored questions and ``run_fingerprint``.
+   * - ``rows.jsonl``
+     - One row per question: gold answers, each arm's answer and score, loss
+       tag, whether the reference flipped, blend share and evidence. With
+       the judge, also each arm's ``match`` score as a cross-check.
+   * - ``answers_<arm>.jsonl``
+     - Raw responses per arm run: parsed answer, TTFT, output tokens and
+       blend counter deltas.
+   * - ``manifest.jsonl``
+     - The reuse manifest: for every passage of every question, where it was
+       stored, where it was measured, whether it holds the evidence, and
+       which earlier questions also held it (``measured_earlier_in``). The
+       blend arm caches measured prompts too, so a recurring passage may be
+       reused from an earlier question's prompt rather than from its store
+       request; ``summary.json`` reports the share as
+       ``measured_earlier_share``, and the terminal summary prints it when it
+       is not zero.
+   * - ``judge_cache.jsonl``
+     - Judge ratings, at the top of ``--output-dir``, reused by every later
+       run into it.
+
+Two summaries are comparable **only when their** ``run_fingerprint``
+**values match**. It covers the model, dataset, task, ``--limit``, scenario,
+chunk size, output budget, template kwargs, seed, verdict metric, judge
+model, and every measured prompt.
+
+
+Quality exit codes
+~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 15 85
+
+   * - Code
+     - Meaning
+   * - ``0``
+     - The verdict is ``PASS`` or ``UNDERPOWERED``.
+   * - ``1``
+     - The verdict is ``FAIL`` or ``INVALID`` (an unreachable engine makes it
+       ``INVALID``), or the run stopped on an error: for example an
+       unreachable judge or blend-server metrics endpoint, a refused
+       dataset, or an option value outside its range (such as
+       ``--tolerance 2`` or ``--limit -1``).
+   * - ``2``
+     - Invalid invocation, rejected before anything runs: a required flag is
+       missing, a value is not one of a flag's choices, or a number does not
+       parse.
