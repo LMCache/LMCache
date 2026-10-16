@@ -25,6 +25,16 @@ from lmcache.cli.commands.quota._helpers import (
     unescape_salt,
 )
 
+_SALT_CASES = [
+    ("tenant1", "tenant1"),
+    ("tenant?blue", "tenant%3Fblue"),
+    ("tenant#blue", "tenant%23blue"),
+    ("tenant%2Fblue", "tenant%252Fblue"),
+    ("tenant blue", "tenant%20blue"),
+    ("租户", "%E7%A7%9F%E6%88%B7"),
+    ("_default", "_default"),
+]
+
 
 @pytest.fixture
 def cmd() -> QuotaCommand:
@@ -59,6 +69,7 @@ class TestQuotaCommandMetadata:
 
 
 class TestQuotaCommandExecute:
+    @pytest.mark.parametrize("salt,path", _SALT_CASES)
     @patch("lmcache.cli.commands.quota.set_command.http_request")
     def test_set(
         self,
@@ -66,23 +77,26 @@ class TestQuotaCommandExecute:
         cmd,
         parser,
         capsys,
+        salt: str,
+        path: str,
     ) -> None:
         mock_http.return_value = {
-            "cache_salt": "tenant1",
+            "cache_salt": salt,
             "limit_gb": 10.5,
             "status": "ok",
         }
-        args = parser.parse_args(["quota", "set", "tenant1", "--limit-gb", "10.5"])
+        args = parser.parse_args(["quota", "set", salt, "--limit-gb", "10.5"])
         cmd.execute(args)
 
         mock_http.assert_called_once_with(
             "PUT",
-            "http://localhost:8080/quota/tenant1",
+            f"http://localhost:8080/quota/{path}",
             data={"limit_gb": 10.5},
         )
         out = capsys.readouterr().out
-        assert "Quota Set" in out and "tenant1" in out
+        assert "Quota Set" in out and salt in out
 
+    @pytest.mark.parametrize("salt,path", _SALT_CASES)
     @patch("lmcache.cli.commands.quota.get_command.http_request")
     def test_get(
         self,
@@ -90,17 +104,19 @@ class TestQuotaCommandExecute:
         cmd,
         parser,
         capsys,
+        salt: str,
+        path: str,
     ) -> None:
         mock_http.return_value = {
-            "cache_salt": "tenant1",
+            "cache_salt": salt,
             "limit_gb": 10.5,
             "current_usage_gb": 3.27,
             "exists": True,
         }
-        args = parser.parse_args(["quota", "get", "tenant1"])
+        args = parser.parse_args(["quota", "get", salt])
         cmd.execute(args)
 
-        mock_http.assert_called_once_with("GET", "http://localhost:8080/quota/tenant1")
+        mock_http.assert_called_once_with("GET", f"http://localhost:8080/quota/{path}")
         out = capsys.readouterr().out
         assert "Quota Info" in out and "3.27" in out
 
@@ -125,6 +141,7 @@ class TestQuotaCommandExecute:
         out = capsys.readouterr().out
         assert "tenant1" in out and "_default" in out
 
+    @pytest.mark.parametrize("salt,path", _SALT_CASES)
     @patch("lmcache.cli.commands.quota.delete_command.http_request")
     def test_delete(
         self,
@@ -132,14 +149,16 @@ class TestQuotaCommandExecute:
         cmd,
         parser,
         capsys,
+        salt: str,
+        path: str,
     ) -> None:
-        mock_http.return_value = {"cache_salt": "tenant1", "status": "removed"}
-        args = parser.parse_args(["quota", "delete", "tenant1"])
+        mock_http.return_value = {"cache_salt": salt, "status": "removed"}
+        args = parser.parse_args(["quota", "delete", salt])
         cmd.execute(args)
 
         mock_http.assert_called_once_with(
             "DELETE",
-            "http://localhost:8080/quota/tenant1",
+            f"http://localhost:8080/quota/{path}",
         )
         out = capsys.readouterr().out
         assert "Quota Delete" in out and "removed" in out

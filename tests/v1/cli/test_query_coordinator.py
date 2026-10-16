@@ -271,6 +271,21 @@ class TestPaths:
         # An empty salt is a real tenant, not "unset".
         assert APIS["quota"].path(_args(cache_salt="")) == "/quota/"
 
+    @pytest.mark.parametrize(
+        "salt,path",
+        [
+            ("tenant1", "tenant1"),
+            ("tenant?blue", "tenant%3Fblue"),
+            ("tenant#blue", "tenant%23blue"),
+            ("tenant%2Fblue", "tenant%252Fblue"),
+            ("tenant blue", "tenant%20blue"),
+            ("租户", "%E7%A7%9F%E6%88%B7"),
+            ("_default", "_default"),
+        ],
+    )
+    def test_quota_salt_is_one_url_component(self, salt: str, path: str) -> None:
+        assert APIS["quota"].path(_args(cache_salt=salt)) == f"/quota/{path}"
+
     def test_every_api_builds_a_path(self) -> None:
         args = _args(instance="mp-1", request_id="r1", cache_salt="s")
         for name, api in APIS.items():
