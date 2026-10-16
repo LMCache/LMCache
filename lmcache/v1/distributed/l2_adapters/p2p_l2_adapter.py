@@ -330,14 +330,17 @@ class P2PL2Adapter(L2AdapterInterface):
         if task.failed:
             del self._load_tasks[task_id]
             return Bitmap(len(task.keys))
-        if time.monotonic() > task.deadline:
+
+        # Query the transfer first: a read that already reached a terminal state
+        # is reported as such even when this poll lands after the deadline. The
+        # deadline is applied only while the read is still reported as in flight.
+        result = self._tc_client.query_read_status(task.read_task_id)
+        if not result.is_finished():
+            if time.monotonic() <= task.deadline:
+                return None
             del self._load_tasks[task_id]
             logger.warning("P2P load task %d timed out; treating as a failure", task_id)
             return Bitmap(len(task.keys))
-
-        result = self._tc_client.query_read_status(task.read_task_id)
-        if not result.is_finished():
-            return None
 
         bitmap = Bitmap(len(task.keys))
         for i, succeeded in enumerate(result.succeeded_mask):
