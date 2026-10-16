@@ -4,6 +4,7 @@ stubbed (see ``fake_adapter``); no GPU or live server needed. End-to-end
 recovery: multiprocess ``workloads/common/restart-recovery.sh``."""
 
 # Standard
+from collections.abc import Iterator
 from dataclasses import replace
 from typing import Any, Callable, ClassVar, cast
 from unittest.mock import MagicMock
@@ -34,6 +35,7 @@ from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_CAPABILITY,
     KVEventBatch,
     KVEventRecord,
+    RequestSnapshotEntry,
 )
 from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -388,6 +390,88 @@ def fake_adapter(monkeypatch):
     adapter = _make_worker_adapter()
     req_client.reset_mock()
     return adapter, req_client, future
+
+
+@pytest.fixture
+def snapshot_scheduler(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[tuple[LMCacheMPSchedulerAdapter, dict[str, MagicMock]]]:
+    """Construct a scheduler with independent mock clients for two servers."""
+    clients = {url: MagicMock(spec=RequestClient) for url in ("server-a", "server-b")}
+    for client in clients.values():
+        client.report_request_snapshot.return_value.query.return_value = False
+    monkeypatch.setattr(
+        adapter_mod.RequestClientFactory,
+        "create",
+        lambda url, **kwargs: clients[url],
+    )
+    adapter = LMCacheMPSchedulerAdapter(
+        server_urls=list(clients),
+        context=MagicMock(),
+        model_name="test-model",
+        vllm_block_size=16,
+        parallel_strategy=ParallelStrategy(
+            mla_only=False,
+            vllm_world_size=2,
+            vllm_worker_id=0,
+            tp_size=2,
+            pp_size=1,
+            n_servers=2,
+        ),
+    )
+    try:
+        yield adapter, clients
+    finally:
+        adapter.shutdown()
+
+
+def test_request_snapshots_do_not_wait_for_previous_reports(
+    snapshot_scheduler: tuple[LMCacheMPSchedulerAdapter, dict[str, MagicMock]],
+) -> None:
+    """Send every step, including empty snapshots, without waiting for replies."""
+    adapter, clients = snapshot_scheduler
+    requests = (RequestSnapshotEntry("waiting", (1, 2, 3), -1, 1.0, "WAITING"),)
+    adapter.report_request_snapshot(requests, "priority")
+    first = clients["server-a"].report_request_snapshot.call_args.args[0]
+    assert first.requests == requests
+    assert first.model_name == "test-model"
+    assert first.scheduling_policy == "priority"
+    assert first.scheduler_id
+    assert first.sequence > 0
+    clients["server-b"].report_request_snapshot.assert_called_once_with(first)
+
+    adapter.report_request_snapshot((), "priority")
+    for client in clients.values():
+        assert client.report_request_snapshot.call_count == 2
+        future = client.report_request_snapshot.return_value
+        future.result.assert_not_called()
+        future.wait.assert_not_called()
+
+    latest = clients["server-a"].report_request_snapshot.call_args.args[0]
+    assert latest.requests == ()
+    assert latest.scheduler_id == first.scheduler_id
+    assert latest.sequence > first.sequence
+    clients["server-b"].report_request_snapshot.assert_called_with(latest)
+
+
+def test_request_snapshots_skip_unhealthy_servers(
+    snapshot_scheduler: tuple[LMCacheMPSchedulerAdapter, dict[str, MagicMock]],
+) -> None:
+    """Snapshot reporting respects the adapter's existing health decision."""
+    adapter, clients = snapshot_scheduler
+    adapter.maybe_submit_lookup_request("lookup", list(range(256)))
+    FakeHeartbeatThread.instances[0].health_event.clear()
+    assert not adapter.is_healthy
+    adapter.report_request_snapshot((), "fcfs")
+    for client in clients.values():
+        client.report_request_snapshot.assert_not_called()
+
+    FakeHeartbeatThread.instances[0].health_event.set()
+    assert adapter.is_healthy
+    adapter.report_request_snapshot((), "fcfs")
+    for client in clients.values():
+        client.report_request_snapshot.assert_called_once()
 
 
 def test_scheduler_reset_cache_clears_every_server_without_force(

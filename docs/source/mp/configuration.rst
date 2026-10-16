@@ -878,6 +878,10 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        allowing L2-to-L1 KV staging to overlap with scheduler queue wait.
        Resumable requests are skipped because their token IDs may be incomplete
        at enqueue time.
+   * - ``lmcache.mp.request_snapshot``
+     - ``false``
+     - Publish observed active requests to the server EventBus each scheduling
+       step. See :ref:`mp-request-snapshot`.
    * - ``lmcache.mp.autostart``
      - ``false``
      - Whether vLLM worker 0 should start a local ``lmcache server`` process
@@ -1014,6 +1018,32 @@ auto-start disabled in vLLM:
                 "lmcache.mp.autostart": false
             }
         }'
+
+.. _mp-request-snapshot:
+
+Request snapshots
+~~~~~~~~~~~~~~~~~
+
+Snapshots are disabled by default. Enable them for a custom server EventBus subscriber:
+
+.. code-block:: bash
+
+    vllm serve meta-llama/Llama-3.1-8B-Instruct \
+        --kv-transfer-config \
+        '{"kv_connector": "LMCacheMPConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"lmcache.mp.request_snapshot": true}}'
+
+Each step reports request IDs, tokens, priority, arrival time, and status.
+Reporting is independent of eager prefetch and does not change scheduling or
+start cache transfers.
+
+Subscribe to ``EventType.MP_REQUEST_SNAPSHOT`` and read
+``event.metadata["snapshot"]`` with server observability enabled
+(omit ``--disable-observability``). Consumers must handle missed or stale
+snapshots; the server does not retain them.
+
+Reporting copies and sends all active requests' known tokens each step. It
+requires vLLM's ``on_new_request`` callback and a server supporting this RPC.
+See ``docs/design/integration/vllm/request_snapshot.md`` for the contract.
 
 Environment Variables
 ---------------------

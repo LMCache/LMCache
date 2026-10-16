@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
+from weakref import ref
 
 # Third Party
 import pytest
@@ -30,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (  # noqa: E402
     MultiConnector,
 )
+from vllm.sampling_params import SamplingParams  # noqa: E402
 from vllm.v1.core.sched.output import SchedulerOutput  # noqa: E402
 from vllm.v1.kv_cache_interface import (  # noqa: E402
     FullAttentionSpec,
@@ -51,6 +53,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.utils import CacheStoreEvent  # noqa: E402
+from lmcache.v1.multiprocess.custom_types import RequestSnapshotEntry
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -122,6 +125,9 @@ def _request(request_id: str = "request") -> Request:
             all_token_ids=list(range(12)),
             num_prompt_tokens=12,
             status=RequestStatus.WAITING,
+            priority=0,
+            arrival_time=1.0,
+            resumable=False,
             num_computed_tokens=0,
             kv_transfer_params=None,
         ),
@@ -229,6 +235,147 @@ def connectors(
     finally:
         worker.shutdown()
         scheduler.shutdown()
+
+
+@pytest.fixture
+def snapshot_connector(mock_io: SimpleNamespace) -> Iterator[LMCacheMPConnector]:
+    """Enable scheduler snapshots with the regular transport stubs."""
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"lmcache.mp.request_snapshot": True},
+        )
+    )
+    config.scheduler_config.policy = "priority"
+    connector = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    try:
+        yield connector
+    finally:
+        connector.shutdown()
+
+
+@pytest.mark.parametrize("enabled", [None, False])
+def test_disabled_request_snapshots_do_not_read_tokens(
+    mock_io: SimpleNamespace, enabled: bool | None
+) -> None:
+    """Default and explicit opt-out preserve the existing no-lookup arrival path."""
+    options = {} if enabled is None else {"lmcache.mp.request_snapshot": enabled}
+    connector = LMCacheMPConnector(
+        _config(
+            KVTransferConfig(
+                kv_connector="LMCacheMPConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config=options,
+            )
+        ),
+        KVConnectorRole.SCHEDULER,
+    )
+    request = _request()
+    tokens = MagicMock()
+    tokens.__iter__.side_effect = AssertionError("disabled snapshots read tokens")
+    request.all_token_ids = tokens
+    try:
+        connector.on_new_request(request)
+        connector.build_connector_meta(_schedule())
+        mock_io.scheduler.report_request_snapshot.assert_not_called()
+        mock_io.scheduler.maybe_submit_lookup_request.assert_not_called()
+    finally:
+        connector.shutdown()
+
+
+def test_request_snapshot_includes_waiting_and_resumable_requests_once(
+    snapshot_connector: LMCacheMPConnector, mock_io: SimpleNamespace
+) -> None:
+    """Arrival bookkeeping includes unscheduled requests without initiating lookup."""
+    waiting = _request("waiting")
+    resumable = _request("resumable")
+    resumable.resumable = True
+    for request in (waiting, resumable, waiting):
+        snapshot_connector.on_new_request(request)
+    mock_io.scheduler.report_request_snapshot.assert_not_called()
+
+    snapshot_connector.build_connector_meta(_schedule())
+
+    mock_io.scheduler.report_request_snapshot.assert_called_once()
+    entries, policy = mock_io.scheduler.report_request_snapshot.call_args.args
+    assert isinstance(entries, tuple)
+    assert len(entries) == 2
+    assert set(entries) == {
+        RequestSnapshotEntry("waiting", tuple(range(12)), 0, 1.0, "WAITING"),
+        RequestSnapshotEntry("resumable", tuple(range(12)), 0, 1.0, "WAITING"),
+    }
+    assert policy == "priority"
+    mock_io.scheduler.maybe_submit_lookup_request.assert_not_called()
+
+
+def test_request_snapshot_copies_live_state_at_each_step(
+    snapshot_connector: LMCacheMPConnector, mock_io: SimpleNamespace
+) -> None:
+    """Later tokens and preemption update the next snapshot, preserving old copies."""
+    request = _request()
+    tokens = list(range(12))
+    request.all_token_ids = tokens
+    snapshot_connector.on_new_request(request)
+    snapshot_connector.build_connector_meta(_schedule())
+    first_snapshot = mock_io.scheduler.report_request_snapshot.call_args.args[0]
+
+    for status in (RequestStatus.RUNNING, RequestStatus.PREEMPTED):
+        request.status = status
+        request.priority = -1
+        tokens.append(len(tokens))
+        snapshot_connector.build_connector_meta(_schedule())
+        mock_io.scheduler.report_request_snapshot.assert_called_with(
+            (RequestSnapshotEntry("request", tuple(tokens), -1, 1.0, status.name),),
+            "priority",
+        )
+
+    assert first_snapshot == (
+        RequestSnapshotEntry("request", tuple(range(12)), 0, 1.0, "WAITING"),
+    )
+    assert mock_io.scheduler.report_request_snapshot.call_count == 3
+
+
+def test_request_snapshot_shutdown_releases_observed_requests(
+    snapshot_connector: LMCacheMPConnector,
+) -> None:
+    """Shutdown releases scheduler references even when requests have not finished."""
+    request = Request(
+        request_id="request",
+        prompt_token_ids=[1, 2],
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+    )
+    request_ref = ref(request)
+    snapshot_connector.on_new_request(request)
+    del request
+    assert request_ref() is not None
+
+    snapshot_connector.shutdown()
+
+    assert request_ref() is None
+
+
+@pytest.mark.parametrize("lookup_started", [False, True])
+def test_request_snapshot_removes_finished_or_cancelled_requests(
+    snapshot_connector: LMCacheMPConnector,
+    mock_io: SimpleNamespace,
+    lookup_started: bool,
+) -> None:
+    """Completion and cancellation before lookup both produce an empty next snapshot."""
+    request = _request()
+    snapshot_connector.on_new_request(request)
+    snapshot_connector.build_connector_meta(_schedule())
+    if lookup_started:
+        assert snapshot_connector.get_num_new_matched_tokens(request, 0) == (0, False)
+        request.status = RequestStatus.FINISHED_STOPPED
+    else:
+        request.status = RequestStatus.FINISHED_ABORTED
+
+    snapshot_connector.request_finished(request, [])
+    snapshot_connector.build_connector_meta(_schedule())
+
+    mock_io.scheduler.report_request_snapshot.assert_called_with((), "priority")
 
 
 @pytest.mark.parametrize("save_decode_cache", [None, False, True])

@@ -204,6 +204,7 @@ to correlate START/END pairs.
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
+| `MP_REQUEST_SNAPSHOT` | `snapshot` | [`RequestSnapshot`](../../integration/vllm/request_snapshot.md) |
 
 ### `MP_TRANSFER_PHASE_SAMPLES`
 

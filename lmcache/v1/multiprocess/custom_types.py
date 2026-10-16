@@ -220,6 +220,48 @@ class BlockAllocationRecord:
     new_token_ids: list[int]
 
 
+@dataclass(frozen=True)
+class RequestSnapshotEntry:
+    """Copied scheduler observations for one active request.
+
+    Attributes:
+        request_id: Request identifier within the scheduler.
+        token_ids: Raw observed tokens, including generated tokens when present.
+            These are observations, not a resolved LMCache cache key.
+        priority: Scheduler priority; smaller values have higher priority in vLLM.
+        arrival_time: Request arrival time used by vLLM.
+        status: Name of the observed scheduler request status.
+    """
+
+    request_id: str
+    token_ids: tuple[int, ...]
+    priority: int
+    arrival_time: float
+    status: str
+
+
+@dataclass(frozen=True)
+class RequestSnapshot:
+    """Immutable, best-effort snapshot of requests observed by one scheduler.
+
+    A snapshot is not the complete scheduler queue and its entries do not
+    guarantee execution order. Receivers may observe loss or reordering.
+
+    Attributes:
+        scheduler_id: Unique identifier for one scheduler adapter lifetime.
+        sequence: Increasing snapshot number within that scheduler lifetime.
+        model_name: Model served by the scheduler.
+        scheduling_policy: Scheduler policy name, such as ``fcfs`` or ``priority``.
+        requests: Active request observations; empty means none remain.
+    """
+
+    scheduler_id: str
+    sequence: int
+    model_name: str
+    scheduling_policy: str
+    requests: tuple[RequestSnapshotEntry, ...]
+
+
 @dataclass
 class CBMatchResult:
     """Result of a sub-sequence match from BlendTokenRangeMatcher.
