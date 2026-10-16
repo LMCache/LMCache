@@ -3,7 +3,8 @@
 File-system based L2 adapter using aiofiles for async I/O.
 
 Stores KV cache objects as raw tensor bytes on disk (no metadata
-header).  Each ObjectKey maps to a separate ``.data`` file whose
+header), optionally followed by a CRC32 trailer (``checksum="crc32"``).
+Each ObjectKey maps to a separate ``.data`` file whose
 name encodes all key fields so it can be reversed on startup.
 """
 
@@ -14,8 +15,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 import asyncio
+import mmap
 import os
+import struct
 import threading
+import zlib
 
 if TYPE_CHECKING:
     # First Party
@@ -56,6 +60,11 @@ _KEY_SEP = "@"
 _PATH_SLASH_REPLACEMENT = "-SEP-"
 _FILE_EXT = ".data"
 
+# Trailer written right after the payload when ``checksum="crc32"``.
+_CRC32_TRAILER = struct.Struct("<4sI")  # magic, zlib.crc32(payload)
+_CRC32_MAGIC = b"LMC1"
+_CHECKSUM_ALGORITHMS = ("none", "crc32")
+
 
 def _readinto_full(
     f,  # typing: IO[bytes]
@@ -94,6 +103,20 @@ async def _async_readinto_full(
             break
         total += n
     return total
+
+
+def _crc32_trailer_matches(
+    payload: Union[bytearray, memoryview, bytes], trailer: bytes
+) -> bool:
+    """Return True if *trailer* is a CRC32 trailer matching *payload*.
+
+    A short trailer (old-format or truncated file) or a wrong magic is a
+    mismatch.
+    """
+    if len(trailer) < _CRC32_TRAILER.size:
+        return False
+    magic, stored_crc = _CRC32_TRAILER.unpack_from(trailer)
+    return magic == _CRC32_MAGIC and zlib.crc32(payload) == stored_crc
 
 
 def _object_key_to_filename(key: ObjectKey) -> str:
@@ -172,6 +195,10 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
     - base_path: directory for storing KV cache files.
     - relative_tmp_dir: optional relative sub-dir for
       temp files (same as fs_connector_relative_tmp_dir).
+    - checksum: ``"none"`` (default) or ``"crc32"``. With ``"crc32"``
+      every file carries a CRC32 trailer that is verified on load; a
+      mismatch is served as a miss and the key's next store rewrites the
+      file. Loads never modify files.
     """
 
     def __init__(
@@ -180,6 +207,7 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         relative_tmp_dir: Optional[str] = None,
         read_ahead_size: Optional[int] = None,
         use_odirect: bool = False,
+        checksum: str = "none",
     ):
         """Initialize FSL2AdapterConfig.
 
@@ -194,11 +222,21 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
                 using O_DIRECT for both reads and writes.
                 Requires buffer sizes aligned to the
                 filesystem block size.
+            checksum: Integrity check for stored objects, one of
+                ``"none"`` or ``"crc32"``.
+
+        Raises:
+            ValueError: If ``checksum`` is not a supported algorithm.
         """
+        if checksum not in _CHECKSUM_ALGORITHMS:
+            raise ValueError(
+                f"checksum must be one of {_CHECKSUM_ALGORITHMS}, got {checksum!r}"
+            )
         self.base_path = base_path
         self.relative_tmp_dir = relative_tmp_dir
         self.read_ahead_size = read_ahead_size
         self.use_odirect = use_odirect
+        self.checksum = checksum
 
     @classmethod
     def from_dict(cls, d: dict) -> "FSL2AdapterConfig":
@@ -216,11 +254,15 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         use_odirect = d.get("use_odirect", False)
         if not isinstance(use_odirect, bool):
             raise ValueError("use_odirect must be a boolean")
+        checksum = d.get("checksum", "none")
+        if not isinstance(checksum, str):
+            raise ValueError("checksum must be a string")
         return cls(
             base_path=base_path,
             relative_tmp_dir=relative_tmp_dir,
             read_ahead_size=read_ahead_size,
             use_odirect=use_odirect,
+            checksum=checksum,
         )
 
     @classmethod
@@ -236,7 +278,9 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
             "readahead by reading this many bytes first "
             "(optional)\n"
             "- use_odirect (bool): bypass page cache "
-            "via O_DIRECT (optional, default false)"
+            "via O_DIRECT (optional, default false)\n"
+            "- checksum (str): 'none' (default) or 'crc32'; "
+            "crc32 verifies every load and treats a mismatch as a miss"
         )
 
 
@@ -245,8 +289,10 @@ class FSL2Adapter(L2AdapterInterface):
     File-system backed L2 adapter with async I/O via *aiofiles*.
 
     Each file stores **only** the raw tensor bytes (no metadata
-    header), which gives maximum I/O throughput.  The file name
-    itself encodes the full ``ObjectKey`` so it is reversible.
+    header), which gives maximum I/O throughput.  With
+    ``checksum="crc32"`` an 8-byte trailer (padded to one block under
+    O_DIRECT) follows the payload and is verified on every load.  The file
+    name itself encodes the full ``ObjectKey`` so it is reversible.
 
     Thread safety is ensured via a lock for shared bookkeeping
     and an asyncio event loop running on a dedicated daemon
@@ -280,6 +326,10 @@ class FSL2Adapter(L2AdapterInterface):
         # I/O tuning options aligned with FSConnector
         self._read_ahead_size = config.read_ahead_size
         self._use_odirect = config.use_odirect
+        self._use_crc32 = config.checksum == "crc32"
+        # Keys whose file failed verification; their next store rewrites it.
+        # Touched only on the adapter's event loop.
+        self._unverified_keys: set[ObjectKey] = set()
         self._os_disk_bs = 0
         if self._use_odirect:
             stat = os.statvfs(self._base_path)
@@ -415,6 +465,7 @@ class FSL2Adapter(L2AdapterInterface):
             "type": "FSL2Adapter",
             "base_path": str(self._base_path),
             "use_odirect": self._use_odirect,
+            "checksum": self._config.checksum,
             "event_loop_alive": self._loop_thread.is_alive(),
         }
 
@@ -537,11 +588,13 @@ class FSL2Adapter(L2AdapterInterface):
         self,
         file_path: Path,
         dst_buf: Union[bytearray, memoryview, bytes],
-    ) -> int:
+    ) -> tuple[int, bool]:
         """Synchronous O_DIRECT read into *dst_buf*.
 
-        Returns the number of bytes actually read.
-        Runs in an executor (not on the event loop).
+        Returns the number of payload bytes read and whether the payload
+        verified against its CRC32 trailer (always True when checksums are
+        disabled). Verifying here keeps the read and the hash in one
+        executor call. Runs in an executor (not on the event loop).
         """
         fd = -1
         size = len(dst_buf)
@@ -553,7 +606,11 @@ class FSL2Adapter(L2AdapterInterface):
                     file_path,
                 )
                 with open(file_path, "rb") as f:
-                    return _readinto_full(f, dst_buf)
+                    num_read = _readinto_full(f, dst_buf)
+                    if not self._use_crc32:
+                        return num_read, True
+                    trailer = f.read(_CRC32_TRAILER.size)
+                    return num_read, _crc32_trailer_matches(dst_buf, trailer)
 
             fd = os.open(
                 str(file_path),
@@ -561,10 +618,20 @@ class FSL2Adapter(L2AdapterInterface):
             )
             with os.fdopen(fd, "rb", buffering=0) as fdo:
                 fd = -1  # now managed by fdopen
-                return _readinto_full(fdo, dst_buf)
+                num_read = _readinto_full(fdo, dst_buf)
+                if not self._use_crc32 or num_read != size:
+                    return num_read, not self._use_crc32
+                # One aligned read; a buffered-written trailer is shorter.
+                block = mmap.mmap(-1, self._os_disk_bs)
+                try:
+                    got = fdo.readinto(block) or 0
+                    trailer = block[: min(got, _CRC32_TRAILER.size)]
+                finally:
+                    block.close()
+                return num_read, _crc32_trailer_matches(dst_buf, trailer)
         except Exception:
             logger.exception("Failed to O_DIRECT read %s", file_path)
-            return 0
+            return 0, False
         finally:
             if fd >= 0:
                 try:
@@ -572,19 +639,40 @@ class FSL2Adapter(L2AdapterInterface):
                 except OSError:
                     pass
 
-    def _write_with_odirect(self, file_path: Path, buf: bytes) -> None:
-        """Synchronous O_DIRECT write of *buf*.
+    def _write_with_odirect(self, file_path: Path, buf: bytes, trailer: bytes) -> int:
+        """Synchronous O_DIRECT write of *buf*, then *trailer* padded to a block.
 
         Runs in an executor (not on the event loop).
+
+        Returns:
+            The number of bytes written to the file.
+
+        Raises:
+            OSError: If the file could not be written completely.
         """
         fd = -1
         try:
             fd = os.open(
                 str(file_path),
-                os.O_CREAT | os.O_WRONLY | getattr(os, "O_DIRECT", 0),
+                os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_DIRECT", 0),
                 0o644,
             )
-            os.write(fd, buf)
+            written = os.write(fd, buf)
+            if written != len(buf):
+                raise OSError(f"short O_DIRECT write: {written} of {len(buf)} bytes")
+            if trailer:
+                block = mmap.mmap(-1, self._os_disk_bs)
+                try:
+                    block[: len(trailer)] = trailer
+                    n = os.write(fd, block)
+                finally:
+                    block.close()
+                if n != self._os_disk_bs:
+                    raise OSError(
+                        f"short O_DIRECT trailer write: {n} of {self._os_disk_bs} bytes"
+                    )
+                written += n
+            return written
         except Exception:
             logger.exception("Failed to O_DIRECT write %s", file_path)
             raise
@@ -607,12 +695,16 @@ class FSL2Adapter(L2AdapterInterface):
         bytes_written = 0
         stored_keys: list[ObjectKey] = []
         stored_sizes: list[int] = []
+        replaced_keys: list[ObjectKey] = []
+        replaced_sizes: list[int] = []
         try:
             for key, obj in zip(keys, objects, strict=True):
                 file_path, tmp_path = self._key_to_file_and_tmp_path(key)
 
-                # Skip if already stored on disk
-                if await aiofiles.os.path.exists(file_path):
+                # Skip if already stored on disk, unless that file failed
+                # verification: then rewrite it.
+                rewrite = key in self._unverified_keys
+                if not rewrite and await aiofiles.os.path.exists(file_path):
                     continue
                 buf = obj.byte_array
                 size = len(buf)
@@ -633,21 +725,42 @@ class FSL2Adapter(L2AdapterInterface):
                             )
                             do_odirect = False
 
+                    trailer = b""
+                    if self._use_crc32:
+                        crc = await self._loop.run_in_executor(None, zlib.crc32, buf)
+                        trailer = _CRC32_TRAILER.pack(_CRC32_MAGIC, crc)
+
                     if do_odirect:
-                        await self._loop.run_in_executor(
+                        file_size = await self._loop.run_in_executor(
                             None,
                             self._write_with_odirect,
                             tmp_path,
                             buf,
+                            trailer,
                         )
                     else:
                         async with aiofiles.open(tmp_path, "wb") as f:
                             await f.write(buf)
+                            if trailer:
+                                await f.write(trailer)
+                        file_size = size + len(trailer)
 
+                    replaced_size = 0
+                    if rewrite:
+                        try:
+                            replaced_size = (await aiofiles.os.stat(file_path)).st_size
+                        except FileNotFoundError:
+                            pass
+                    # Atomic: a concurrent reader keeps the inode it opened.
                     await aiofiles.os.replace(tmp_path, file_path)
-                    bytes_written += size
+                    self._unverified_keys.discard(key)
+                    if replaced_size:
+                        replaced_keys.append(key)
+                        replaced_sizes.append(replaced_size)
+                    # File length, so delete()'s st_size-based accounting matches.
+                    bytes_written += file_size
                     stored_keys.append(key)
-                    stored_sizes.append(size)
+                    stored_sizes.append(file_size)
                     logger.debug(
                         "FSL2Adapter stored key %s (%d bytes)",
                         file_path.name,
@@ -668,6 +781,8 @@ class FSL2Adapter(L2AdapterInterface):
             )
             success = False
 
+        if replaced_keys:
+            self._notify_keys_deleted(replaced_keys, replaced_sizes)
         if stored_keys:
             self._notify_keys_stored(stored_keys, stored_sizes)
 
@@ -694,6 +809,32 @@ class FSL2Adapter(L2AdapterInterface):
 
     # ---- load -----------------------------------------------------------
 
+    async def _read_buffered(
+        self,
+        file_path: Path,
+        dst_buf: Union[bytearray, memoryview, bytes],
+    ) -> tuple[int, bytes]:
+        """Read the payload into *dst_buf* with optional read-ahead.
+
+        Returns the number of payload bytes read and, when checksums are
+        enabled, the trailer bytes that follow (empty when disabled).
+        """
+        async with aiofiles.open(file_path, "rb") as f:
+            if self._read_ahead_size is None:
+                num_read = await _async_readinto_full(f, dst_buf)
+            else:
+                if not isinstance(dst_buf, memoryview):
+                    dst_buf = memoryview(dst_buf)
+                # Trigger readahead with a small initial read
+                ra = self._read_ahead_size
+                num_read = await _async_readinto_full(f, dst_buf[:ra])
+                if num_read == ra:
+                    num_read += await _async_readinto_full(f, dst_buf[ra:])
+            trailer = b""
+            if self._use_crc32 and num_read == len(dst_buf):
+                trailer = await f.read(_CRC32_TRAILER.size)
+        return num_read, trailer
+
     async def _execute_load(
         self,
         keys: list[ObjectKey],
@@ -710,7 +851,7 @@ class FSL2Adapter(L2AdapterInterface):
 
                 # O_DIRECT path (sync, via executor)
                 if self._use_odirect:
-                    num_read = await self._loop.run_in_executor(
+                    num_read, verified = await self._loop.run_in_executor(
                         None,
                         self._read_with_odirect,
                         file_path,
@@ -723,34 +864,9 @@ class FSL2Adapter(L2AdapterInterface):
                             expected,
                             num_read or 0,
                         )
-                    else:
-                        bitmap.set(i)
-                        logger.debug(
-                            "FSL2Adapter loaded key %s (%d bytes, O_DIRECT)",
-                            file_path.name,
-                            num_read,
-                        )
-                    continue
-
-                # Standard async path with optional
-                # read-ahead
-                expected = len(dst_buf)
-                async with aiofiles.open(file_path, "rb") as f:
-                    if self._read_ahead_size is None:
-                        num_read = await _async_readinto_full(f, dst_buf)
-                    else:
-                        if not isinstance(dst_buf, memoryview):
-                            dst_buf = memoryview(dst_buf)
-                        # Trigger readahead with a
-                        # small initial read
-                        ra = self._read_ahead_size
-                        n_head = await _async_readinto_full(f, dst_buf[:ra])
-                        if n_head == ra:
-                            n_tail = await _async_readinto_full(f, dst_buf[ra:])
-                            num_read = n_head + n_tail
-                        else:
-                            num_read = n_head
-
+                        continue
+                else:
+                    num_read, trailer = await self._read_buffered(file_path, dst_buf)
                     if num_read != expected:
                         logger.warning(
                             "Incomplete read for %s: expected %d, got %d",
@@ -759,13 +875,28 @@ class FSL2Adapter(L2AdapterInterface):
                             num_read,
                         )
                         continue
-
-                    bitmap.set(i)
-                    logger.debug(
-                        "FSL2Adapter loaded key %s (%d bytes)",
-                        file_path.name,
-                        num_read,
+                    verified = not self._use_crc32 or await self._loop.run_in_executor(
+                        None, _crc32_trailer_matches, dst_buf, trailer
                     )
+
+                if not verified:
+                    # Never delete here: a concurrent store may already have
+                    # replaced the file we read. The next store rewrites it.
+                    self._unverified_keys.add(key)
+                    logger.warning(
+                        "FSL2Adapter checksum mismatch for %s; serving a miss, "
+                        "the next store of this key rewrites it",
+                        file_path.name,
+                    )
+                    continue
+
+                self._unverified_keys.discard(key)
+                bitmap.set(i)
+                logger.debug(
+                    "FSL2Adapter loaded key %s (%d bytes)",
+                    file_path.name,
+                    num_read,
+                )
             except FileNotFoundError:
                 continue
             except Exception:
@@ -793,6 +924,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         async def _delete_one(key: ObjectKey) -> tuple[ObjectKey, int] | None:
             file_path = self._key_to_path(key)
+            self._unverified_keys.discard(key)
             async with sem:
                 try:
                     size = (await aiofiles.os.stat(file_path)).st_size
