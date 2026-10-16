@@ -68,6 +68,9 @@ Commonly used flags include:
      - Base number of request worker threads.
    * - ``--grpc-server-workers N``
      - gRPC dispatch threads (used only with ``--transport grpc``).
+   * - ``--grpc-server-mode {sync,aio}``
+     - gRPC server implementation (used only with ``--transport grpc``).
+       Default is ``sync``.
    * - ``--coordinator-url URL``
      - Register with an MP coordinator at this base URL (e.g.
        ``http://coordinator:9300``). Opt-in; enables fleet registration. See
