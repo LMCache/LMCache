@@ -97,28 +97,6 @@ def evict_stale(registry: InstanceRegistry, instance_timeout: float) -> list[str
     return evicted
 
 
-def unreturned_instances(
-    registry: InstanceRegistry, restored: Iterable[str]
-) -> list[str]:
-    """Return the restored instances that never registered again.
-
-    Args:
-        registry: The shared instance registry.
-        restored: Instances that came back from the checkpoint.
-
-    Returns:
-        The ids still missing from the registry.
-    """
-    missing = []
-    for instance_id in restored:
-        if not registry.contains(instance_id):
-            logger.warning(
-                "Instance %s did not re-register after restore; evicted", instance_id
-            )
-            missing.append(instance_id)
-    return missing
-
-
 def create_app(config: MPCoordinatorConfig) -> FastAPI:
     """Build the coordinator FastAPI app.
 
@@ -230,14 +208,13 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         """
         while True:
             await asyncio.sleep(config.health_check_interval)
-            for instance_id in evict_stale(registry, config.instance_timeout):
+            departed = evict_stale(registry, config.instance_timeout)
+            if restored_instances and time.monotonic() >= restored_deadline:
+                departed += _unreturned_instances(registry, restored_instances)
+                restored_instances.clear()
+            for instance_id in departed:
                 event_gate.drop_instance(instance_id)
                 server_configs.forget(instance_id)
-            if restored_instances and time.monotonic() >= restored_deadline:
-                for instance_id in unreturned_instances(registry, restored_instances):
-                    event_gate.drop_instance(instance_id)
-                    server_configs.forget(instance_id)
-                restored_instances.clear()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -328,3 +305,25 @@ def _artifact_store(path: str) -> ArtifactStore:
         path: Configured location, empty when the operator wants none.
     """
     return LocalArtifactStore(Path(path)) if path else NullArtifactStore()
+
+
+def _unreturned_instances(
+    registry: InstanceRegistry, restored: Iterable[str]
+) -> list[str]:
+    """Return the restored instances that never registered again.
+
+    Args:
+        registry: The shared instance registry.
+        restored: Instances that came back from the checkpoint.
+
+    Returns:
+        The ids still missing from the registry.
+    """
+    missing = []
+    for instance_id in restored:
+        if not registry.contains(instance_id):
+            logger.warning(
+                "Instance %s did not re-register after restore; evicted", instance_id
+            )
+            missing.append(instance_id)
+    return missing
