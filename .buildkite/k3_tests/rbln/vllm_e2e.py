@@ -71,6 +71,21 @@ def _metric(name: str) -> int:
     return int(total)
 
 
+def _wait_for_increase(name: str, base: int, timeout: float = 60.0) -> int:
+    """Poll counter ``name`` until it exceeds ``base``; return the increase.
+
+    LMCache updates its counters from a background EventBus thread, so a
+    counter can lag the request that caused it. Returns the last increase
+    seen (0 or less) if ``timeout`` expires first.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        increase = _metric(name) - base
+        if increase > 0 or time.monotonic() >= deadline:
+            return increase
+        time.sleep(0.5)
+
+
 def _wait_until_ready(url: str, proc: subprocess.Popen, timeout: float) -> None:
     """Poll ``url`` until it answers, failing if ``proc`` exits first."""
     deadline = time.monotonic() + timeout
@@ -115,15 +130,16 @@ def _check(model: str) -> None:
     """Run the two requests and assert store, hit, and equal outputs."""
     writes = _metric("lmcache_mp_l1_write_chunks_total")
     first = _complete(model)
-    time.sleep(2)  # the store is asynchronous
-    stored = _metric("lmcache_mp_l1_write_chunks_total") - writes
+    # vLLM can answer before the store lands; waiting here also keeps the
+    # second request from racing the store into a miss.
+    stored = _wait_for_increase("lmcache_mp_l1_write_chunks_total", writes)
     print(f"first completion: {first!r}; L1 chunks written: {stored}")
     if stored < 1:
         raise SystemExit("first request stored nothing into LMCache")
 
     reads = _metric("lmcache_mp_l1_read_chunks_total")
     second = _complete(model)
-    read = _metric("lmcache_mp_l1_read_chunks_total") - reads
+    read = _wait_for_increase("lmcache_mp_l1_read_chunks_total", reads)
     print(f"second completion: {second!r}; L1 chunks read: {read}")
     if read < 1:
         raise SystemExit("second request did not hit LMCache")
