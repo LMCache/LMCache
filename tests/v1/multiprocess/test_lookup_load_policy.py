@@ -170,30 +170,3 @@ def test_default_policy_honors_skip_load(
     module.lookup(_key(request_configs), tp_size=1)
 
     assert ctx.storage_manager.submit_prefetch_task.called is prefetched
-
-
-@pytest.mark.parametrize(
-    "hint_tokens, prefetched",
-    [
-        # 3-chunk lookup. Two chunks covered leaves one chunk: recomputing
-        # it beats a lookup + lock + fetch round trip.
-        (2 * CHUNK_SIZE, False),
-        # One chunk covered leaves two: worth serving.
-        (1 * CHUNK_SIZE, True),
-        # Sub-chunk hit floors to no covered chunks: worth serving.
-        (CHUNK_SIZE - 1, True),
-        # Fully covered loads nothing anyway; serving it keeps the engine's
-        # stored-token accounting from re-offloading the prompt.
-        (3 * CHUNK_SIZE, True),
-    ],
-)
-def test_default_policy_skips_single_chunk_loads(
-    hint_tokens: int, prefetched: bool
-) -> None:
-    """The default declines when the engine's hit leaves at most one chunk."""
-    ctx = _ctx()
-    module = LookupModule(ctx)
-
-    module.lookup(_key({"lmcache.hint.engine_computed_tokens": hint_tokens}), tp_size=1)
-
-    assert ctx.storage_manager.submit_prefetch_task.called is prefetched

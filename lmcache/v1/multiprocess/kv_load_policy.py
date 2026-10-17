@@ -99,16 +99,7 @@ class DefaultKVLoadPolicy(KVLoadPolicy):
         Returns:
             Whether the request did not set ``lmcache.skip_load``.
         """
-        configs = ctx.request_configs or {}
-        if configs.get("lmcache.skip_load", False):
-            return False
-        hint = int(configs.get("lmcache.hint.engine_computed_tokens", 0))
-        covered = hint // ctx.chunk_size * ctx.chunk_size
-        if covered <= 0:
-            return True
-        remaining = ctx.num_lookup_tokens - covered
-        # If the engine needs to load no more than 1 chunk, skip the load.
-        return remaining <= 0 or remaining > ctx.chunk_size * 1
+        return not (ctx.request_configs or {}).get("lmcache.skip_load", False)
 
 
 _BUILTIN_POLICIES: dict[str, type[KVLoadPolicy]] = {
