@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, cast
+import json
+import math
 import os
+import threading
 
 # Third Party
 import pytest
@@ -10,7 +14,11 @@ import pytest
 # First Party
 from lmcache import torch_device_type
 from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
-from lmcache.v1.config_base import apply_remote_configs, validate_and_set_config_value
+from lmcache.v1.config_base import (
+    apply_remote_configs,
+    fetch_remote_config,
+    validate_and_set_config_value,
+)
 
 BASE_DIR = Path(__file__).parent
 
@@ -557,6 +565,68 @@ class TestApplyRemoteConfigs:
         # Should not raise, just log warning
         result = apply_remote_configs(config, remote_response)
         assert result is config  # Returns the config object
+
+
+class TestFetchRemoteConfig:
+    """Test fetch_remote_config against a loopback HTTP config server."""
+
+    @pytest.fixture
+    def config_server(self, monkeypatch):
+        """Serve one remote config item and record each request body."""
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"):
+            monkeypatch.delenv(var, raising=False)
+            monkeypatch.delenv(var.lower(), raising=False)
+        bodies: list[bytes] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                bodies.append(self.rfile.read(length))
+                body = json.dumps(
+                    {"configs": [{"key": "chunk_size", "value": 512}]}
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}/config", bodies
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_default_config_is_sent_as_strict_json(self, config_server):
+        """The default config carries an infinite PD allocation timeout,
+        which must not stop the request from being sent."""
+        url, bodies = config_server
+        config = LMCacheEngineConfig.from_defaults(chunk_size=256)
+        assert math.isinf(config.pd_allocation_timeout_sec)
+
+        response = fetch_remote_config(url, "demo", config)
+
+        assert len(bodies) == 1
+        assert response is not None
+        apply_remote_configs(config, response)
+        assert config.chunk_size == 512
+
+        def reject_constant(name):
+            raise ValueError(f"non-standard JSON constant: {name}")
+
+        payload = json.loads(bodies[0], parse_constant=reject_constant)
+        current = payload["current_config"]
+        assert current["pd_allocation_timeout_sec"] is None
+        assert current["chunk_size"] == 256
+        # The local config object keeps its original value.
+        assert math.isinf(config.pd_allocation_timeout_sec)
 
 
 class TestUserSetKeysTracking:
