@@ -10,9 +10,10 @@ The controller runs a background thread with an event-driven loop that:
 """
 
 # Standard
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass
 import enum
+import os
 import select
 import threading
 import time
@@ -36,6 +37,12 @@ from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
+from lmcache.v1.mp_observability.propagation import capture_trace_context
+from lmcache.v1.mp_observability.store_tracing import (
+    StoreTraceContributors,
+    mark_store_trace_error,
+    run_with_store_trace,
+)
 from lmcache.v1.platform import (
     consume_fd,
     create_event_notifier,
@@ -45,6 +52,8 @@ logger = init_logger(__name__)
 
 # Poll timeout in milliseconds for the store loop
 STORE_LOOP_POLL_TIMEOUT_MS = 500
+MAX_TRACKED_WRITER_KEYS = 10_000
+MAX_LINKS_PER_KEY = 8
 
 
 def _group_keys_by_shape(
@@ -80,6 +89,9 @@ class StoreListener(L1ManagerListener):
 
     def __init__(self) -> None:
         self._pending_keys: list[ObjectKey] = []
+        self._pending_contributors = StoreTraceContributors()
+        self._writers: OrderedDict[ObjectKey, StoreTraceContributors] = OrderedDict()
+        self._writer_history_evicted = False
         self._lock = threading.Lock()
         self._event_fd = create_event_notifier()
 
@@ -107,10 +119,22 @@ class StoreListener(L1ManagerListener):
         Returns:
             list[ObjectKey]: All keys enqueued since the last pop.
         """
+        keys, _ = self.pop_pending_batch()
+        return keys
+
+    def pop_pending_batch(self) -> tuple[list[ObjectKey], StoreTraceContributors]:
+        """Atomically pop pending keys and their observed writer summary.
+
+        Returns:
+            Keys since the previous pop and bounded links with sampling flags.
+            Missing or evicted reservations are marked as unknown contributors.
+        """
         with self._lock:
             keys = self._pending_keys
+            contributors = self._pending_contributors
             self._pending_keys = []
-        return keys
+            self._pending_contributors = StoreTraceContributors()
+        return keys, contributors
 
     def pending_count(self) -> int:
         """Return the number of pending keys waiting to be processed."""
@@ -131,6 +155,12 @@ class StoreListener(L1ManagerListener):
         """
         with self._lock:
             self._pending_keys.extend(keys)
+            for key in keys:
+                writers = self._writers.pop(key, None)
+                if writers is None:
+                    self._pending_contributors.has_unknown = True
+                else:
+                    self._pending_contributors.merge(writers)
         self._event_fd.notify()
 
     def on_l1_keys_reserved_read(self, keys: list[ObjectKey]) -> None:
@@ -140,21 +170,58 @@ class StoreListener(L1ManagerListener):
         pass
 
     def on_l1_keys_reserved_write(self, keys: list[ObjectKey]) -> None:
-        pass
+        """Remember observed reservation contributors without changing L1 admission.
+
+        Args:
+            keys: Keys reported by the L1 reservation callback.
+        """
+        if os.environ.get("LMCACHE_MP_TRACE_CONTEXT") != "1":
+            return
+        carrier = capture_trace_context()
+        with self._lock:
+            for key in keys:
+                writers = self._writers.setdefault(
+                    key,
+                    StoreTraceContributors(
+                        max_links=MAX_LINKS_PER_KEY,
+                        has_unknown=self._writer_history_evicted,
+                    ),
+                )
+                writers.add(carrier)
+                self._writers.move_to_end(key)
+                if len(self._writers) > MAX_TRACKED_WRITER_KEYS:
+                    self._writers.popitem(last=False)
+                    # A later reservation may reuse an evicted key. Without an
+                    # unbounded tombstone set, new records must stay conservative.
+                    self._writer_history_evicted = True
 
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]) -> None:
-        pass
+        """Discard attribution for deleted keys.
+
+        Args:
+            keys: Keys deleted by the L1 manager.
+        """
+        with self._lock:
+            for key in keys:
+                self._writers.pop(key, None)
 
     def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]) -> None:
-        # No op here because we don't want to trigger store when the
-        # objects are prefetched to L1.
-        pass
+        """Discard attribution for prefetch completions without scheduling stores.
+
+        Args:
+            keys: Keys prefetched into L1 and reserved for reading.
+        """
+        self.on_l1_keys_deleted_by_manager(keys)
 
     def on_l1_keys_accessed(self, keys: list[ObjectKey]) -> None:
         pass
 
     def close(self) -> None:
-        """Close the notifier."""
+        """Close the notifier and release tracing metadata."""
+        with self._lock:
+            self._writers.clear()
+            self._writer_history_evicted = False
+            self._pending_contributors = StoreTraceContributors()
         self._event_fd.close()
 
 
@@ -478,9 +545,11 @@ class StoreController(StorageControllerInterface):
 
                 try:
                     if fd == listener_efd:
-                        keys = self._listener.pop_pending_keys()
+                        keys, contributors = self._listener.pop_pending_batch()
                         if keys:
-                            self._process_new_keys(keys)
+                            run_with_store_trace(
+                                contributors, self._process_new_keys, keys
+                            )
                     else:
                         adapter_idx = self._efd_to_adapter_index.get(fd)
                         if adapter_idx is not None:
@@ -675,6 +744,7 @@ class StoreController(StorageControllerInterface):
             try:
                 task_id = adapter.submit_store_task(successful_keys, successful_objs)
             except Exception:
+                mark_store_trace_error()
                 logger.exception(
                     "Failed to submit store task to adapter %d for %d keys.",
                     adapter_index,
