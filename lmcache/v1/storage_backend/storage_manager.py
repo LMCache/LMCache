@@ -321,8 +321,17 @@ class StorageManager:
                 allocator_backend = self.storage_backends["LocalCPUBackend"]
             else:
                 allocator_backend = self.storage_backends["MaruBackend"]
-        else:
+        elif "LocalCPUBackend" in self.storage_backends:
             allocator_backend = self.storage_backends["LocalCPUBackend"]
+        else:
+            for backend in self.storage_backends.values():
+                if isinstance(backend, AllocatorBackendInterface):
+                    return backend
+            raise RuntimeError(
+                "No backend can allocate for the engine. Configure a backend "
+                "that allocates its own staging buffers, or set "
+                "max_local_cpu_size > 0 to get a local CPU backend."
+            )
         assert isinstance(allocator_backend, AllocatorBackendInterface)
         return allocator_backend
 
