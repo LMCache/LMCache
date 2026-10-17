@@ -201,6 +201,9 @@ contribute to histograms; counters above always count all events.
 
 **What it answers:** How effective is L2 prefetching? What is the L2 hit rate?
 
+Requests that L1 alone serves submit no L2 lookup, so neither
+`l2_prefetch_lookup` counter includes them.
+
 **Per-backend IOPS.**  `lmcache_mp.l2_store_completed` (attr `l2_name`) counts
 completed L1→L2 store tasks; `lmcache_mp.l2_load_completed` (attr `l2_name`)
 counts completed per-adapter L2→L1 load tasks.  Derive per-backend ops/sec on
