@@ -24,8 +24,9 @@ EXPECTED_TOTAL_INPUT_TOKENS=$((NUM_PROMPTS * RANDOM_INPUT_LEN))
 EXPECTED_COMPLETED=$NUM_PROMPTS
 MAX_SLOWDOWN_PERCENT="${MAX_SLOWDOWN_PERCENT:-5}"
 
-# Generate a random seed once for reproducibility across both benchmarks
-RANDOM_SEED="${RANDOM_SEED:-$(date +%s)}"
+# Stable default seed for reproducibility across retries
+DEFAULT_RANDOM_SEED=42
+RANDOM_SEED="${RANDOM_SEED:-$DEFAULT_RANDOM_SEED}"
 
 # Output directory (subdirectory of shared RESULTS_DIR)
 VLLM_BENCH_DIR="$RESULTS_DIR/vllm_bench"
