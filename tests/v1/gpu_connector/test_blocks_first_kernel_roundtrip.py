@@ -89,7 +89,7 @@ def test_kernel_roundtrip_matches_torch(order, pad_layers):
         int(lmcache_native.TransferDirection.D2H),
         int(fmt),
         BS,
-        CS // 2,
+        CS,
         0,
         block_stride,
     )
@@ -110,7 +110,7 @@ def test_kernel_roundtrip_matches_torch(order, pad_layers):
         int(lmcache_native.TransferDirection.H2D),
         int(fmt),
         BS,
-        CS // 2,
+        CS,
         0,
         block_stride,
     )
