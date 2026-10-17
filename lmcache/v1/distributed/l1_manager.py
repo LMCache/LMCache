@@ -615,46 +615,26 @@ class L1Manager(L1ManagerInterface):
             is discarded, the resident object is kept and ``SUCCESS`` is
             still reported: the data is in L1 either way.
         """
-        ret: dict[ObjectKey, L1Error] = {}
-        notification_keys: list[ObjectKey] = []
-        notification_keys_meta: list[L1ObjectMeta] = []
-        discarded: list[MemoryObj] = []
+        return self._finish_write(keys, tag, prefetched=False)
 
-        for key in keys:
-            err, entry = self._take_staging(key, tag, "finish write")
-            ret[key] = err
-            if err != L1Error.SUCCESS or entry is None:
-                continue
-            if key in self._objects:
-                logger.debug(
-                    "L1Manager: discarding staging object for key %s (tag %r): "
-                    "the key is already resident",
-                    key,
-                    tag,
-                )
-                discarded.append(entry.memory_obj)
-                continue
-            self._objects[key] = entry
-            if not entry.is_temporary:
-                notification_keys.append(key)
-                notification_keys_meta.append(self._object_meta(entry.memory_obj))
+    @l1_mgr_synchronized
+    def finish_prefetch(
+        self,
+        keys: list[ObjectKey],
+        tag: str = "",
+    ) -> dict[ObjectKey, L1Error]:
+        """Admit prefetched staging objects without taking read locks.
 
-        self._memory_manager.free(discarded)
+        Retained objects become evictable without triggering an L2 store.
 
-        if notification_keys:
-            for listener in self._registered_listeners:
-                listener.on_l1_keys_write_finished(notification_keys)
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.L1_WRITE_FINISHED,
-                    metadata={
-                        "l1_tag": self._config.tag,
-                        "keys": notification_keys,
-                        "meta": notification_keys_meta,
-                    },
-                )
-            )
-        return ret
+        Args:
+            keys: Keys whose loads have completed.
+            tag: The writer's tag passed to ``reserve_write``.
+
+        Returns:
+            Per-key status as in :meth:`finish_write`; existing residents stay.
+        """
+        return self._finish_write(keys, tag, prefetched=True)
 
     @l1_mgr_synchronized
     def finish_write_and_reserve_read(
@@ -1382,6 +1362,54 @@ class L1Manager(L1ManagerInterface):
             size_bytes=memory_obj.get_size(),
             backend=self._memory_manager.get_backend_type(memory_obj),
         )
+
+    def _finish_write(
+        self, keys: list[ObjectKey], tag: str, *, prefetched: bool
+    ) -> dict[ObjectKey, L1Error]:
+        """Admit staging objects and notify listeners with the L1 lock held."""
+        ret: dict[ObjectKey, L1Error] = {}
+        notification_keys: list[ObjectKey] = []
+        notification_keys_meta: list[L1ObjectMeta] = []
+        discarded: list[MemoryObj] = []
+
+        for key in keys:
+            err, entry = self._take_staging(key, tag, "finish write")
+            ret[key] = err
+            if err != L1Error.SUCCESS or entry is None:
+                continue
+            if key in self._objects:
+                logger.debug(
+                    "L1Manager: discarding staging object for key %s (tag %r): "
+                    "the key is already resident",
+                    key,
+                    tag,
+                )
+                discarded.append(entry.memory_obj)
+                continue
+            self._objects[key] = entry
+            if not entry.is_temporary:
+                notification_keys.append(key)
+                notification_keys_meta.append(self._object_meta(entry.memory_obj))
+
+        self._memory_manager.free(discarded)
+
+        if notification_keys:
+            for listener in self._registered_listeners:
+                if prefetched:
+                    listener.on_l1_keys_finish_write_and_reserve_read(notification_keys)
+                else:
+                    listener.on_l1_keys_write_finished(notification_keys)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_WRITE_FINISHED,
+                    metadata={
+                        "l1_tag": self._config.tag,
+                        "keys": notification_keys,
+                        "meta": notification_keys_meta,
+                    },
+                )
+            )
+        return ret
 
     def _require_devdax_memory_manager(self) -> DevDaxL1MemoryManager:
         """Return the Device-DAX manager or raise a reconfiguration error."""

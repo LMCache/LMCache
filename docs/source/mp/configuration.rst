@@ -380,6 +380,12 @@ single-L1 interface.
        DAX L2 adapter with the same ``device_path`` is registered, that
        adapter's ``max_dax_size_gb`` is used as the L1 Device-DAX overflow
        size.
+   * - ``--l2-prefetch-load-timeout``
+     - *(not set)*
+     - Read-locked L2 prefetch budget in seconds, including queueing and lookup.
+       On expiry, return usable hits for recompute fallback. ``NO_LOCK``
+       prefetches are exempt. Must be finite and positive; unset disables it.
+       Keep ``lmcache.mp.mq_timeout`` larger so the RPC does not time out first.
    * - ``--l1-mlock``
      - ``False``
      - ROCm only. ``mlock`` the DRAM L1 so memory compaction cannot migrate

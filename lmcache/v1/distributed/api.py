@@ -484,6 +484,8 @@ class PrefetchTaskSpec:
             reader that will retrieve it. Ignored under ``NO_LOCK``.
         fetching_policy: See :data:`FetchingPolicy`.
         lock_mode: See :class:`PrefetchLockMode`.
+        deadline_at: Controller-assigned monotonic deadline for this submission;
+            None when disabled. Not a cross-process timestamp.
 
     Note:
         Every key group holds the same number of keys (``group_size``). The
@@ -495,6 +497,7 @@ class PrefetchTaskSpec:
     num_kv_readers: int = 1
     fetching_policy: FetchingPolicy = "prefix"
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
+    deadline_at: float | None = None
 
     def __post_init__(self) -> None:
         if not self.key_groups:
