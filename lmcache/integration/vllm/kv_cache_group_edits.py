@@ -50,9 +50,13 @@ from vllm.v1.kv_cache_interface import (
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
+)
+from lmcache.v1.gpu_connector.kv_format.detectors.vllm import (
+    resolve_vllm_kv_layout,
 )
 from lmcache.v1.gpu_connector.kv_format.types import KV_LAYOUT_NAMES
 from lmcache.v1.gpu_connector.utils import LayoutHints
@@ -326,10 +330,12 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
 
     Both stay reachable: ``hpc_attn`` still registers rank 5 in 0.26.0.
 
-    Cost: before this fix ``kv_caches[:, 0]`` is just the K tensor; after, it
-    interleaves K and V at kernel-page granularity. The bytes round-trip
-    correctly (store and retrieve share the mapping), but the dims are no
-    longer semantic, so content-aware processing does not apply.
+    Rank-5 views interleave K and V at kernel-page granularity. Rank-4 views
+    keep fused K/V and preserve NHD/HND identity so format detection reads the
+    logical block size from the correct axis. In both cases the bytes
+    round-trip correctly (store and retrieve share the mapping), but the
+    synthetic head/content dims are addressing metadata rather than semantic
+    model dimensions, so content-aware processing does not apply.
     """
 
     name = "subpaged-attention-view"
@@ -352,15 +358,18 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
         self,
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
-        _layout_hints: LayoutHints,
+        layout_hints: LayoutHints,
     ) -> torch.Tensor:
         """Re-view ``kv_cache`` at logical-block granularity.
 
         The tensor is kernel-paged, either as ``(num_kernel_pages, 2,
         kernel_block_size, num_kv_heads, head_size)`` (vLLM <= 0.25.x) or as
         ``(num_kernel_pages, num_kv_heads, kernel_block_size, 2 * head_size)``
-        (vLLM >= 0.26.0); the result is ``(num_logical_blocks, 2,
-        spec.block_size, num_heads, head_size)`` over the same storage.
+        (vLLM >= 0.26.0). Rank 5 becomes ``(num_logical_blocks, 2,
+        spec.block_size, num_heads, head_size)``. Rank 4 stays fused and emits
+        ``(num_logical_blocks, spec.block_size, 1, content_size)`` for NHD or
+        ``(num_logical_blocks, 1, spec.block_size, content_size)`` for HND.
+        Every result is a view over the same storage.
 
         A rank-4 tensor is re-viewed in memory order, since vLLM registers it
         as a permute view of the backend's physical layout. A rank-5 tensor
@@ -412,6 +421,9 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
                 f"not tile the logical page ({spec.page_size_bytes} bytes)"
             )
         if kv_cache.ndim == 4:
+            kv_layout = resolve_vllm_kv_layout(
+                layout_hints, cpu_attention_backend=torch_device_type == "cpu"
+            )
             # vLLM registers the rank-4 tensor as a permute view of the
             # backend's physical layout (get_kv_cache_stride_order), so it need
             # not be contiguous. Pages only tile by byte range in memory order:
@@ -449,6 +461,26 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
         num_heads, head_size = _synthetic_attention_shape(
             elems_per_page, logical_block_size
         )
+        if kv_cache.ndim == 4:
+            # Preserve fused rank-4 identity: the vLLM detector uses the
+            # resolved layout hint to choose which middle axis is the token
+            # axis. Converting to the legacy rank-5 NHD-shaped view loses that
+            # identity and makes HND detection read the synthetic head count
+            # (1) as the block size.
+            content_size = 2 * head_size
+            if kv_layout in ("NHD", "BLNHC"):
+                return ordered.view(
+                    num_blocks,
+                    logical_block_size,
+                    num_heads,
+                    content_size,
+                )
+            return ordered.view(
+                num_blocks,
+                num_heads,
+                logical_block_size,
+                content_size,
+            )
         return ordered.view(num_blocks, 2, logical_block_size, num_heads, head_size)
 
 
