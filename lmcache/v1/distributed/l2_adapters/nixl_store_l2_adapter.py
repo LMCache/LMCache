@@ -693,7 +693,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             "backend": self._config.backend,
             "stored_object_count": stored_object_count,
             "pinned_object_count": pinned_object_count,
-            "pool_size": self._config.pool_size,
+            "pool_size": pool.total_objs,
             "pool_free_slots": pool_free_slots,
             "event_loop_alive": self._loop_thread.is_alive(),
         }

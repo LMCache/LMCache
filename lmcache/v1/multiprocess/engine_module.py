@@ -127,7 +127,7 @@ class ModuleBuildContext:
         self.mp_config = mp_config
         self.coordinator_config = coordinator_config
         self.liveness_targets: list[InstanceLivenessTarget] = []
-        self.experimental_transfer = list(mp_config.enable)
+        self.experimental: list[str] = []
         self._module_configs = {
             module_type: dict(config)
             for module_type, config in (module_configs or {}).items()
@@ -170,10 +170,17 @@ class ModuleBuildContext:
         if _is_liveness_target(module):
             self.liveness_targets.append(module)
 
-    def add_experimental_transfer(self, capability: str) -> None:
-        """Advertise a capability contributed by a constructed module."""
-        if capability not in self.experimental_transfer:
-            self.experimental_transfer.append(capability)
+    def add_experimental(self, feature: str) -> None:
+        """Advertise an experimental feature contributed by a constructed module.
+
+        The collected names are returned to clients by the management
+        module's ``get_experimental`` handler.
+
+        Args:
+            feature: Feature identifier (e.g. ``TRANSFER_QUERY``).
+        """
+        if feature not in self.experimental:
+            self.experimental.append(feature)
 
 
 class DiscoverableModule(abc.ABC):
