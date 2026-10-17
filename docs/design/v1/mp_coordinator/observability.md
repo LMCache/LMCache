@@ -147,12 +147,13 @@ view-completeness gauge, not an alert.
 | --- | --- | --- | --- |
 | `background_loop.last_success_timestamp_seconds` | gauge | `loop` = health, checkpoint, eviction | When each loop last finished a pass |
 | `background_loop.interval_seconds` | gauge | `loop` | Configured period, for alerts |
-| `background_loop.runs` | counter | `loop`, `result` = ok, error | Passes that failed |
+| `background_loop.passes` | counter | `loop`, `result` = ok, failed | Passes that failed |
 | `controller.up` | gauge | `controller` | 1 up, 0 failed to start |
-| `event_loop.blocked_seconds` | histogram | | How long the request thread was stuck (ingest and checkpoints can stall heartbeats) |
+| `event_loop.blocked_seconds` | counter | | Total time the request thread was stuck (ingest and checkpoints can stall heartbeats); its rate is the fraction of time the loop was stalled |
 
-Today a loop that raises dies silently. P0 makes each loop catch the error, log
-it and keep going; the metric alone would only report the death.
+Every loop runs on one runner (`BackgroundLoops`): a pass that raises is logged
+and counted, and the loop keeps going. Without that, a loop that raised died
+silently, and a metric alone would only report the death.
 
 ### Views: what the coordinator holds
 
@@ -213,8 +214,10 @@ skips keys no server can delete. So controller metrics follow three rules:
   the private package imports them. Its `vX.Y.Z` targets LMCache `vX.Y.Z`, so a
   rename is a breaking change for both.
 
-A controller that runs its own loop reports it with the `background_loop.*`
-metrics, `loop` set to its role (`eviction`).
+A controller that runs its own loop starts it with
+`runtime.background_loops.start(...)` (from `ControllerRuntime`), named after
+its role (`eviction`). It is then reported with the `background_loop.*`
+metrics and gets the same catch-and-continue as the coordinator's own loops.
 
 | Role | Metric | Type | Labels | Tells you | Phase |
 | --- | --- | --- | --- | --- | --- |
@@ -312,7 +315,7 @@ an example Prometheus rules file. Names leave out the prefix, as in section 3.
 | Events being lost | `rate(ingest_event_batches_missing_total[5m]) > 0 or rate(ingest_events_dropped_by_servers_total[5m]) > 0` for 10 min | Ticket | P0 | `ingest_server_event_batches_missing` and `ingest_server_events_dropped` show which server |
 | Server silent | `ingest_server_seconds_since_last_event > 120` while `registry_server_seconds_since_heartbeat < 30` | Ticket | P0 | The server's event flush (it rides the L1 eviction tick) |
 | Kafka falling behind | `kafka_unread_records` rising for 10 min and above 10,000 | Ticket | P0 | `event_loop_blocked_seconds`, `ingest_batch_apply_time_seconds_total` ÷ `ingest_batches_delivered_total` |
-| Event loop stalled | p99 of `event_loop_blocked_seconds` above 1 s for 5 min | Ticket | P0 | `checkpoint_file_write_duration_seconds`, `/events` load |
+| Event loop stalled | `rate(event_loop_blocked_seconds_total[5m]) > 0.1` (stalled more than 10% of the time) | Ticket | P0 | `checkpoint_file_write_duration_seconds`, `/events` load |
 | Checkpoint stale | `time() - checkpoint_file_last_write_timestamp_seconds > 600` | Ticket | P1 | `/status` checkpoint `last_error`, disk |
 | Pin or quota not saved | `increase(metadata_file_writes_total{result="error"}[1h]) > 0` | Ticket | P1 | Disk at the metadata path (callers already got a 503) |
 | Evictions failing | `rate(eviction_delete_requests_sent_total{result="error"}[10m]) > 0` | Ticket | P1 | Target mp server reachable; its `DELETE /cache/objects` |
@@ -356,11 +359,38 @@ Three steps, each one or more small PRs. Tests read public state only:
 | Step | Scope | Tests |
 | --- | --- | --- |
 | P0 | `lmcache_coordinator.` names and the rename of the two existing gauges; `dropped_events` on each batch, counted by the mp server; ingest counters and per-server gauges; consumer errors and apply time; running totals in the key directory and blend index so gauges never walk them; Kafka lag, partitions, bad records; loop watchdog and the catch-and-continue fix; controller up; event-loop blocked time; event delivery delay; `/status`; example alert rules | `test_event_gate.py`, `test_event_broadcaster.py`, `test_kafka_event_source.py`, `test_kafka_event_sink.py`, `test_cache_events.py`, `test_health.py`, `test_observability.py`, `test_metrics_api.py` |
-| P1 | View and controller metrics (registry, directory, blend, usage, eviction, quota, pins, prefetch); checkpoint metrics; if P0 shows a blocked event loop (p99 of `event_loop.blocked_seconds` above 100 ms), move `POST /events` ingest to a worker thread; metric name constants exported for private controllers, and the private `EvictionController` emitting the same eviction metrics (in coordinator-controllers, released against the same LMCache version); metadata write failures undo the change and return 503 | `persistence/` tests, `test_eviction_controller.py`, `test_quota_api.py`, `test_registry.py` |
+| P1 | View and controller metrics (registry, directory, blend, usage, eviction, quota, pins, prefetch); checkpoint metrics; if P0 shows a blocked event loop (`event_loop.blocked_seconds` rate above 0.05, i.e. stalled more than 5% of the time), move `POST /events` ingest to a worker thread; metric name constants exported for private controllers, and the private `EvictionController` emitting the same eviction metrics (in coordinator-controllers, released against the same LMCache version); metadata write failures undo the change and return 503 | `persistence/` tests, `test_eviction_controller.py`, `test_quota_api.py`, `test_registry.py` |
 | P2 | HTTP server and outbound metrics; tracing once trace context exists | `test_metrics_api.py`, `test_directory_api.py`, `test_cache_api.py` |
 
 Components keep plain running totals and `stats()` snapshots and create no
-instruments. Every instrument is registered in `observability.py`, reading
-those snapshots; its `register_*_metrics` functions take an optional `meter`.
-Production passes nothing and gets the global one; tests pass a private meter
-so readings don't leak between tests.
+instruments. A component with metrics is a `MetricSource` (it has `stats()`)
+and calls `register_metric_source(self)` (from `metric_sources.py`) as the
+last line of its `__init__`; every metric is defined in `observability.py`,
+one list per component type, read from that component's `stats()`. Which
+controllers started is a component too, `ControllerStatus`, which the
+lifespan marks as it enters each controller. When metrics are on, the app
+calls `register_coordinator_metrics()` once, after building everything: it
+takes the registered components and creates their instruments. So the app
+names no component for metrics.
+
+```python
+class EventGate:
+    def __init__(self, broadcaster, quiesce) -> None:
+        ...
+        register_metric_source(self)
+
+# observability.py
+def _specs_for(component: object) -> list[_MetricSpec]:
+    match component:
+        case EventGate():
+            return _event_gate_specs(component)
+        ...
+```
+
+Registration is keyed by class, since a coordinator process builds one of each;
+a later component of the same class replaces the earlier. Adding a component
+with metrics means one `register_metric_source(self)` line and one `case` with
+its metric list.
+`register_coordinator_metrics` takes an optional `meter`: production passes
+nothing and gets the global one; tests pass a private meter so readings don't
+leak between tests, and clear the registered components before each test.
