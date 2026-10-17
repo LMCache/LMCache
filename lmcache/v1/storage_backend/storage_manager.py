@@ -633,7 +633,11 @@ class StorageManager:
             # Release the tail rounded off by actual_chunks; else staging buffer leaks.
             tail_start = actual_chunks * keys_per_chunk
             for _, mem_obj in tier_result[tail_start:]:
+                if mem_obj.is_pinned:
+                    mem_obj.unpin()
                 mem_obj.ref_count_down()
+            # Released here, so drop them from the result the retrieve reads.
+            del tier_result[tail_start:]
 
             # If a tier retrieved fewer chunks than expected, we stop counting
             # because subsequent chunks are not contiguous
@@ -641,7 +645,10 @@ class StorageManager:
                 # Release all chunks in subsequent tiers since they won't be used
                 for subsequent_tier in res[tier_idx + 1 :]:
                     for _, mem_obj in subsequent_tier:
+                        if mem_obj.is_pinned:
+                            mem_obj.unpin()
                         mem_obj.ref_count_down()
+                    subsequent_tier.clear()
                 break
 
         retrieved_length = cum_chunk_lengths_total[total_retrieved_chunks]
