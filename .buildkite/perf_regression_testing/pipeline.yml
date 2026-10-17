@@ -1,0 +1,11 @@
+# PRT, one suite per build; env comes from buildkite-pipeline.yml.
+steps:
+  - label: ":chart_with_downwards_trend: PRT ${PRT_SUITE?set PRT_SUITE (nightly or weekly) on the Buildkite schedule}"
+    command: bash .buildkite/perf_regression_testing/run.sh
+    # A hung suite blocks every pipeline on this one-build-at-a-time queue.
+    timeout_in_minutes: 240
+    artifact_paths: "prt-report/**/*"
+    # 2 and 75 are host problems; only 1 (a gated regression) fails the build.
+    soft_fail:
+      - exit_status: 2
+      - exit_status: 75
