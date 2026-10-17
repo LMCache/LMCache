@@ -4,6 +4,7 @@
 # Standard
 from pathlib import Path
 import json
+import os
 import time
 
 # Third Party
@@ -19,6 +20,7 @@ from lmcache.v1.distributed.config import (
     parse_args,
 )
 from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l2_adapters.reconfiguration import L2ReconfigureError
 from lmcache.v1.distributed.storage_manager import StorageManager
 from tests.v1.distributed.utils import single_row_spec
 import lmcache.v1.distributed.storage_manager as storage_module
@@ -282,3 +284,79 @@ def test_adapter_startup_failure_closes_all_created_l1s(
     with pytest.raises(ValueError, match="adapter failed to open"):
         StorageManager(config)
     assert closed == ["dax", "_default"]
+
+
+@pytest.mark.parametrize("first_owner", ["l1", "l2"])
+@pytest.mark.parametrize("offset, overlaps", [(8192, False), (4096, True)])
+def test_startup_maps_dax_l2_only_outside_mapped_ranges(
+    tmp_path: Path, first_owner: str, offset: int, overlaps: bool
+) -> None:
+    backing = tmp_path / "dax"
+    backing.write_bytes(b"\0" * 16384)
+    alias = tmp_path / "dax-alias"
+    os.link(backing, alias)
+    gib = 1 << 30
+    size_gb = 8192 / gib
+    l1s: list[dict[str, object]] = [
+        {"type": "DRAM", "tag": "_default", "size_gb": size_gb, "use_lazy": False}
+    ]
+    if first_owner == "l1":
+        l1s.append(
+            {"type": "DEVDAX", "tag": "dax", "size_gb": size_gb, "path": str(backing)}
+        )
+
+    def dax_l2(path: Path, offset_gb: float) -> list[str]:
+        device = {
+            "device_path": str(path),
+            "max_dax_size_gb": size_gb,
+            "offset_gb": offset_gb,
+        }
+        spec = {"type": "dax", "slot_bytes": 4096, "devices": [device]}
+        return ["--l2-adapter", json.dumps(spec)]
+
+    # The first owner maps [0, 8192); the alias asks for [offset, offset + 8192).
+    argv = _args(l1s)
+    if first_owner == "l2":
+        argv += dax_l2(backing, 0)
+    argv += dax_l2(alias, offset / gib)
+    if overlaps:
+        with pytest.raises(ValueError, match="already mapped"):
+            StorageManager(parse_args(argv))
+    else:
+        StorageManager(parse_args(argv)).close()
+
+
+def test_dax_l2_resize_cannot_grow_into_the_devdax_l1(tmp_path: Path) -> None:
+    backing = tmp_path / "dax"
+    backing.write_bytes(b"\0" * 16384)
+    alias = tmp_path / "dax-alias"
+    os.link(backing, alias)
+    gib = 1 << 30
+    l1s: list[dict[str, object]] = [
+        {"type": "DRAM", "tag": "_default", "size_gb": 8192 / gib, "use_lazy": False},
+        {
+            "type": "DEVDAX",
+            "tag": "dax",
+            "size_gb": 8192 / gib,
+            "offset_gb": 8192 / gib,
+            "path": str(backing),
+        },
+    ]
+    device = {"device_path": str(alias), "max_dax_size_gb": 4096 / gib}
+    spec = {
+        "type": "dax",
+        "slot_bytes": 4096,
+        "hotplug_enabled": True,
+        "devices": [device],
+    }
+    storage = StorageManager(
+        parse_args(_args(l1s) + ["--l2-adapter", json.dumps(spec)])
+    )
+    try:
+        with pytest.raises(L2ReconfigureError) as exc_info:
+            storage.reconfigure_l2_adapter(
+                0, "resize", {"device_path": str(alias), "size_bytes": 12288}
+            )
+        assert exc_info.value.status_code == 409
+    finally:
+        storage.close()

@@ -281,7 +281,13 @@ def _infer_l1_devdax_overflow_from_dax_adapter(
     if matched_dax_device is None:
         return
     max_dax_size_gb = matched_dax_device.max_dax_size_gb
+    if max_dax_size_gb is None:
+        raise ValueError(
+            "The DAX device matching l1-devdax-path needs max_dax_size_gb "
+            "to size the hybrid L1"
+        )
     memory_config.devdax_size_in_bytes = int(max_dax_size_gb * (1 << 30))
+    memory_config.devdax_offset_in_bytes = matched_dax_device.offset_bytes
     l2_adapter_config.adapters = remaining_adapters
 
 
@@ -315,6 +321,9 @@ class L1MemoryManagerConfig:
     devdax_size_in_bytes: int = 0
     """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
 
+    devdax_offset_in_bytes: int = 0
+    """ Device-DAX offset the L1 arena starts at. """
+
     mlock: bool = False
     """ mlock the L1 buffer so compaction cannot migrate it (ROCm only). """
 
@@ -328,6 +337,10 @@ class L1MemoryManagerConfig:
             raise ValueError("devdax_size_in_bytes must be >= 0")
         if self.devdax_size_in_bytes and not self.devdax_path:
             raise ValueError("devdax_size_in_bytes requires devdax_path")
+        if self.devdax_offset_in_bytes < 0:
+            raise ValueError("devdax_offset_in_bytes must be >= 0")
+        if self.devdax_offset_in_bytes and not self.devdax_path:
+            raise ValueError("devdax_offset_in_bytes requires devdax_path")
 
         if self.devdax_path and self.use_lazy:
             raise ValueError(
@@ -584,9 +597,21 @@ class DevDaxL1ManagerConfig(L1ManagerConfig):
         Raises:
             ValueError: A field is unknown, malformed, or incompatible.
         """
-        config = _parse_l1_common(cls, values, defaults, read_ttl, write_ttl, {"path"})
+        config = _parse_l1_common(
+            cls, values, defaults, read_ttl, write_ttl, {"path", "offset_gb"}
+        )
+        offset_gb = values.get("offset_gb", 0)
+        if (
+            isinstance(offset_gb, bool)
+            or not isinstance(offset_gb, (int, float))
+            or not math.isfinite(offset_gb)
+            or offset_gb < 0
+        ):
+            raise ValueError("offset_gb must be a finite non-negative number")
         config.memory_config = replace(
-            config.memory_config, devdax_path=_l1_path(values)
+            config.memory_config,
+            devdax_path=_l1_path(values),
+            devdax_offset_in_bytes=int(offset_gb * (1 << 30)),
         )
         return config
 

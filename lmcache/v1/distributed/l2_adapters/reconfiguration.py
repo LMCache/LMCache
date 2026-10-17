@@ -43,15 +43,25 @@ class L2ReconfigureStatus(TypedDict):
 class L2DeviceOwner(Protocol):
     """Protocol for L2 adapters that own a local physical device."""
 
-    def owns_device(self, device_path: str) -> bool:
-        """Return whether the adapter currently maps ``device_path``.
+    def owns_device(
+        self,
+        device_path: str,
+        *,
+        offset_bytes: int = 0,
+        size_bytes: int | None = None,
+    ) -> bool:
+        """Return whether the adapter maps a byte range of ``device_path``.
 
         Args:
             device_path: Path whose physical backing identity should be checked.
+            offset_bytes: Start of the range to check.
+            size_bytes: Length of the range, or ``None`` for the rest of the
+                device.
 
         Returns:
-            ``True`` when the adapter owns the same physical device, even if it
-            was opened through another path; otherwise ``False``.
+            ``True`` when the adapter maps bytes of the same physical device
+            inside the range, even if it was opened through another path;
+            otherwise ``False``.
         """
         ...
 
@@ -69,16 +79,17 @@ class L2ReconfigurableAdapter(Protocol):
         operation: str,
         payload: dict[str, object],
         *,
-        device_owners: Callable[[str], list[str]],
+        device_owners: Callable[[str, int, int | None], list[str]],
     ) -> dict:
         """Apply an adapter-specific runtime reconfiguration operation.
 
         Args:
             operation: Adapter-specific operation name.
             payload: Adapter-specific operation payload.
-            device_owners: Query other L1 or L2 owners on each add, before
-                acquiring the adapter's device lock. The caller holds the
-                lifecycle lock through add completion. The callback must not
+            device_owners: Query other L1 or L2 owners of a device byte range
+                (path, offset, size) on each add or resize, before acquiring
+                the adapter's device lock. The caller holds the
+                lifecycle lock until the operation completes. The callback must not
                 reacquire it; it may acquire other owners' locks one at a time.
 
         Returns:

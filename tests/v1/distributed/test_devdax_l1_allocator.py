@@ -1657,3 +1657,46 @@ def test_hybrid_manager_get_backend_type_reports_per_object_medium(tmp_path):
         gc.collect()
     finally:
         manager.close()
+
+
+def test_devdax_allocator_maps_from_its_offset(tmp_path):
+    path = _make_mmap_file(tmp_path, size=2 * 1024 * 1024)
+    allocator = DevDaxMemoryAllocator(
+        size=1024 * 1024,
+        device_path=path,
+        align_bytes=4096,
+        offset=1024 * 1024,
+    )
+    try:
+        allocator.buffer[0] = 0x5A
+        with open(path, "rb") as f:
+            f.seek(1024 * 1024)
+            assert f.read(1) == b"\x5a"
+        assert not allocator.owns_device(path, offset_bytes=0, size_bytes=1024 * 1024)
+    finally:
+        allocator.close()
+
+
+def test_cli_hybrid_l1_takes_the_offset_of_its_dax_device(tmp_path):
+    path = _make_mmap_file(tmp_path)
+    config = _parse_mp_storage_args(
+        [
+            "--l1-size-gb",
+            "1",
+            "--eviction-policy",
+            "LRU",
+            "--no-l1-use-lazy",
+            "--shm-name",
+            "",
+            "--l1-devdax-path",
+            path,
+            "--l2-adapter",
+            (
+                '{"type":"dax","device_path":"%s","max_dax_size_gb":2,'
+                '"offset_gb":1,"slot_bytes":4096}'
+            )
+            % path,
+        ]
+    )
+
+    assert config.l1_manager_config.memory_config.devdax_offset_in_bytes == 1 << 30

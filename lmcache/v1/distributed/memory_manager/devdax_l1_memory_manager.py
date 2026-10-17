@@ -62,6 +62,7 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             shm_name=config.shm_name or None,
             align_bytes=config.align_bytes,
             use_hugepages=config.use_hugepages,
+            offset=config.devdax_offset_in_bytes,
         )
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
@@ -100,18 +101,32 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             align_bytes=self._align_bytes,
         )
 
-    def owns_device(self, device_path: str) -> bool:
-        """Return whether the allocator maps the physical device at a path.
+    def owns_device(
+        self,
+        device_path: str,
+        *,
+        offset_bytes: int = 0,
+        size_bytes: int | None = None,
+    ) -> bool:
+        """Return whether the allocator maps a byte range of a physical device.
 
         Args:
             device_path: Candidate device path or alias.
+            offset_bytes: Start of the range to check.
+            size_bytes: Length of the range, or ``None`` for the rest of the
+                device.
 
         Returns:
-            ``True`` while the device remains mapped; otherwise ``False``.
+            ``True`` while a mapping of the device overlaps the range;
+            otherwise ``False``.
         """
-        return cast(DevDaxMemoryAllocator, self._allocator).owns_device(device_path)
+        return cast(DevDaxMemoryAllocator, self._allocator).owns_device(
+            device_path, offset_bytes=offset_bytes, size_bytes=size_bytes
+        )
 
-    def add_device(self, device_path: str, size_in_bytes: int) -> DevDaxArenaStatus:
+    def add_device(
+        self, device_path: str, size_in_bytes: int, offset_in_bytes: int = 0
+    ) -> DevDaxArenaStatus:
         """Map an additional Device-DAX device into the L1 arena pool at runtime.
 
         The new device becomes overflow capacity available to subsequent
@@ -121,6 +136,7 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             device_path: Path to a readable and writable Device-DAX device that
                 is not already mapped.
             size_in_bytes: Number of bytes to map from the device.
+            offset_in_bytes: Device offset the arena starts at.
 
         Returns:
             The status of the newly added arena.
@@ -132,7 +148,7 @@ class DevDaxL1MemoryManager(L1MemoryManager):
         """
         allocator = cast(DevDaxMemoryAllocator, self._allocator)
         try:
-            return allocator.add_device(device_path, size_in_bytes)
+            return allocator.add_device(device_path, size_in_bytes, offset_in_bytes)
         except (ValueError, RuntimeError, OSError) as exc:
             raise L1ReconfigureError(409, str(exc)) from exc
 

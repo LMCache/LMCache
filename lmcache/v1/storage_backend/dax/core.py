@@ -17,7 +17,11 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import DiskCacheMetadata
+from lmcache.utils import (
+    DiskCacheMetadata,
+    get_device_alignment,
+    get_device_capacity,
+)
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 
 logger = init_logger(__name__)
@@ -91,32 +95,40 @@ class DaxCore(Generic[KeyT]):
         self,
         *,
         device_path: str,
-        max_dax_size_bytes: int,
+        max_dax_size_bytes: int | None,
         slot_bytes: int,
+        offset_bytes: int = 0,
     ) -> None:
         """Open and map a DAX arena.
 
         Args:
             device_path: Path to the mmap-able DAX device or file.
-            max_dax_size_bytes: Number of bytes to map from the device.
+            max_dax_size_bytes: Number of bytes to map from the device, or
+                ``None`` to map everything from ``offset_bytes`` to its end.
             slot_bytes: Fixed slot size used for each stored object.
+            offset_bytes: Device offset the arena starts at. Must be aligned
+                to the device's mapping alignment.
 
         Raises:
-            ValueError: If the path is empty, sizes are non-positive, or the
-                arena cannot fit at least one slot.
-            RuntimeError: If the device cannot be opened or mapped, or if
-                ``max_dax_size_bytes`` exceeds the reported device capacity.
+            ValueError: If the path is empty, sizes are non-positive, the
+                offset is negative or unaligned, or the arena cannot fit at
+                least one slot.
+            RuntimeError: If the device cannot be opened or mapped, or if the
+                arena ends past the reported device capacity.
         """
         self._device_path = device_path
-        self._arena_bytes = max_dax_size_bytes
+        self._arena_bytes = max_dax_size_bytes or 0
         self._slot_bytes = slot_bytes
+        self._offset_bytes = offset_bytes
 
         if not self._device_path:
             raise ValueError("device_path must be a non-empty string")
-        if self._arena_bytes <= 0:
+        if max_dax_size_bytes is not None and max_dax_size_bytes <= 0:
             raise ValueError("max_dax_size_bytes must be > 0")
         if self._slot_bytes <= 0:
             raise ValueError("slot_bytes must be > 0")
+        if self._offset_bytes < 0:
+            raise ValueError("offset_bytes must be >= 0")
 
         self._fd: Optional[int] = None
         self._mmap_obj: Optional[mmap.mmap] = None
@@ -148,6 +160,11 @@ class DaxCore(Generic[KeyT]):
     def device_path(self) -> str:
         """Return the path used to open the DAX arena."""
         return self._device_path
+
+    @property
+    def offset_bytes(self) -> int:
+        """Return the device offset the arena starts at."""
+        return self._offset_bytes
 
     @property
     def arena_bytes(self) -> int:
@@ -1035,17 +1052,33 @@ class DaxCore(Generic[KeyT]):
             ) from exc
 
         try:
+            alignment = get_device_alignment(fd)
+            if self._offset_bytes % alignment:
+                raise ValueError(
+                    f"offset_bytes ({self._offset_bytes}) must be a multiple of "
+                    f"the device alignment ({alignment} bytes)"
+                )
             try:
-                capacity_bytes = os.fstat(fd).st_size
-                if capacity_bytes > 0 and self._arena_bytes > capacity_bytes:
-                    raise RuntimeError(
-                        f"max_dax_size_bytes ({self._arena_bytes} bytes) exceeds "
-                        f"device capacity ({capacity_bytes} bytes)"
-                    )
+                capacity_bytes = get_device_capacity(fd)
             except OSError:
+                capacity_bytes = 0
                 logger.warning(
                     "Could not determine DAX device capacity via fstat; "
                     "skipping max_dax_size_bytes validation"
+                )
+            if not self._arena_bytes:
+                if capacity_bytes <= self._offset_bytes:
+                    raise RuntimeError(
+                        f"cannot map {self._device_path} up to its end: capacity "
+                        f"({capacity_bytes} bytes) is unknown or not past "
+                        f"offset_bytes ({self._offset_bytes})"
+                    )
+                self._arena_bytes = capacity_bytes - self._offset_bytes
+            end_bytes = self._offset_bytes + self._arena_bytes
+            if capacity_bytes > 0 and end_bytes > capacity_bytes:
+                raise RuntimeError(
+                    f"offset_bytes + max_dax_size_bytes ({end_bytes} bytes) "
+                    f"exceeds device capacity ({capacity_bytes} bytes)"
                 )
 
             mmap_obj = mmap.mmap(
@@ -1053,6 +1086,7 @@ class DaxCore(Generic[KeyT]):
                 self._arena_bytes,
                 flags=mmap.MAP_SHARED,
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
+                offset=self._offset_bytes,
             )
             base_ptr = ctypes.addressof(ctypes.c_char.from_buffer(mmap_obj))
             arena_view = memoryview(mmap_obj)
@@ -1062,7 +1096,7 @@ class DaxCore(Generic[KeyT]):
             self._base_ptr = base_ptr
         except Exception as exc:
             self._release_arena_resources(fd, mmap_obj, arena_view)
-            if isinstance(exc, RuntimeError):
+            if isinstance(exc, (RuntimeError, ValueError)):
                 raise
             raise RuntimeError(
                 f"Failed to mmap dax arena ({self._arena_bytes} bytes) from "

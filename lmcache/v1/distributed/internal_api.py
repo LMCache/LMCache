@@ -354,8 +354,14 @@ class L1ManagerInterface(Protocol):
         """Return one hot-pluggable Device-DAX arena's status."""
         ...
 
-    def owns_device(self, device_path: str) -> bool:
-        """Whether this L1 maps the physical device at ``device_path``."""
+    def owns_device(
+        self,
+        device_path: str,
+        *,
+        offset_bytes: int = 0,
+        size_bytes: int | None = None,
+    ) -> bool:
+        """Whether this L1 maps a byte range of the device at ``device_path``."""
         ...
 
     def memory_region_count(self) -> int:
@@ -363,7 +369,7 @@ class L1ManagerInterface(Protocol):
         ...
 
     def add_devdax_device(
-        self, device_path: str, size_in_bytes: int
+        self, device_path: str, size_in_bytes: int, offset_in_bytes: int = 0
     ) -> "DevDaxArenaStatus":
         """Hot-add a Device-DAX arena."""
         ...

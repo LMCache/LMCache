@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, TypeVar,
 import asyncio
 import functools
 import hashlib
+import mmap
 import os
 import re
 import stat
@@ -73,6 +74,69 @@ def get_device_identity(source: str | int) -> tuple[bool, int, int] | None:
     if stat.S_ISREG(info.st_mode):
         return False, info.st_dev, info.st_ino
     return None
+
+
+def _read_dax_sysfs_int(info: os.stat_result, name: str) -> int | None:
+    path = f"/sys/dev/char/{os.major(info.st_rdev)}:{os.minor(info.st_rdev)}/{name}"
+    try:
+        with open(path) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def get_device_capacity(fd: int) -> int:
+    """Return the byte capacity of an open DAX device or regular file.
+
+    Character devices report a zero ``st_size``, so their size comes from
+    sysfs.
+
+    Args:
+        fd: Open file descriptor of the device or file.
+
+    Returns:
+        Capacity in bytes, or ``0`` when it cannot be determined.
+    """
+    info = os.fstat(fd)
+    if stat.S_ISCHR(info.st_mode):
+        return _read_dax_sysfs_int(info, "size") or 0
+    return info.st_size
+
+
+def get_device_alignment(fd: int) -> int:
+    """Return the alignment a mapping offset into a DAX device must honor.
+
+    Args:
+        fd: Open file descriptor of the device or file.
+
+    Returns:
+        The device's sysfs ``align`` for character devices when available,
+        never less than ``mmap.ALLOCATIONGRANULARITY``.
+    """
+    info = os.fstat(fd)
+    align = _read_dax_sysfs_int(info, "align") if stat.S_ISCHR(info.st_mode) else None
+    return max(align or 0, mmap.ALLOCATIONGRANULARITY)
+
+
+def byte_ranges_overlap(
+    offset_a: int, size_a: int | None, offset_b: int, size_b: int | None
+) -> bool:
+    """Return whether two byte ranges of one device overlap.
+
+    Args:
+        offset_a: Start of the first range.
+        size_a: Length of the first range, or ``None`` for the rest of the
+            device.
+        offset_b: Start of the second range.
+        size_b: Length of the second range, or ``None`` for the rest of the
+            device.
+
+    Returns:
+        ``True`` if the ranges share at least one byte.
+    """
+    if size_b is not None and offset_a >= offset_b + size_b:
+        return False
+    return size_a is None or offset_b < offset_a + size_a
 
 
 def check_interprocess_event_support() -> None:

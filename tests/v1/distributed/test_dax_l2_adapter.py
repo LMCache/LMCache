@@ -54,6 +54,7 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.mp_observability.event_bus import EventBus
 from lmcache.v1.platform import consume_fd
+from lmcache.v1.storage_backend.dax.core import DaxCore
 
 # Test helpers
 from tests.v1.distributed.utils import single_row_spec
@@ -1023,3 +1024,45 @@ def test_storage_manager_dax_adapter_uses_global_l2_eviction(tmp_path):
         assert adapter.get_usage().usage_fraction == pytest.approx(1.0)
     finally:
         sm.close()
+
+
+def test_dax_core_maps_the_rest_of_the_device_from_its_offset(tmp_path):
+    device_path = tmp_path / "dax.bin"
+    device_path.write_bytes(bytes(4096 * 4))
+    core = DaxCore[ObjectKey](
+        device_path=str(device_path),
+        max_dax_size_bytes=None,
+        slot_bytes=4096,
+        offset_bytes=4096,
+    )
+    try:
+        assert core.arena_bytes == 4096 * 3
+        mmap_obj = core.mmap_obj
+        assert mmap_obj is not None
+        mmap_obj[0:1] = b"\x5a"
+        assert device_path.read_bytes()[4096] == 0x5A
+    finally:
+        core.close()
+
+
+def test_dax_hotplug_add_accepts_disjoint_ranges_of_one_device(tmp_path):
+    device_path = tmp_path / "dax.bin"
+    device_path.write_bytes(bytes(4096 * 4))
+    adapter = DaxL2Adapter(
+        DaxL2AdapterConfig(
+            devices=[],
+            hotplug_enabled=True,
+            slot_bytes=4096,
+            num_store_workers=1,
+            num_lookup_workers=1,
+            num_load_workers=1,
+        )
+    )
+    try:
+        adapter.hotplug_add_device(str(device_path), 4096, 0)
+        adapter.hotplug_add_device(str(device_path), 4096, 8192)
+        with pytest.raises(L2ReconfigureError) as exc_info:
+            adapter.hotplug_add_device(str(device_path), 8192, 4096)
+        assert exc_info.value.status_code == 409
+    finally:
+        adapter.close()
