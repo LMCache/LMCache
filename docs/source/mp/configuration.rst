@@ -534,6 +534,11 @@ Source: ``lmcache/v1/distributed/config.py``
      - ``300``
      - Time-to-live for each object's read lock (seconds).
 
+L2 prefetch buffers have additional I/O pins that keep them alive until the
+adapter finishes, even if the write TTL expires. An expired reservation is
+discarded and treated as a cache miss after completion. During shutdown,
+outstanding adapter operations are drained before their buffers are released.
+
 Eviction Policy
 ---------------
 
