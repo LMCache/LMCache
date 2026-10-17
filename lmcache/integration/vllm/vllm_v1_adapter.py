@@ -32,6 +32,7 @@ from lmcache import utils
 from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
+    add_lora_tag,
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
     extract_request_configs_from_sampling_params,
@@ -182,6 +183,7 @@ class RequestTracker:
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
         request_configs = extract_request_configs(new_request.sampling_params)
+        request_configs = add_lora_tag(request_configs, new_request.lora_request)
 
         mm_hashes, mm_positions = extract_mm_features(new_request, modify=True)
 
@@ -837,6 +839,7 @@ class LMCacheConnectorV1Impl:
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
+                        request_configs=request.request_configs,
                     )
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
@@ -845,6 +848,7 @@ class LMCacheConnectorV1Impl:
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
                         vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
+                        request_configs=request.request_configs,
                         sync=sync,
                     )
                     # NOTE: retrieve for two layers at the first layer
@@ -1092,6 +1096,7 @@ class LMCacheConnectorV1Impl:
                     slot_mapping=slot_mapping,
                     offset=skip_leading_tokens,
                     sync=is_first,
+                    request_configs=request.request_configs,
                     req_id=request.req_id,
                 )
                 self._layerwise_save_storers[request.req_id] = layerwise_storer
@@ -1425,6 +1430,7 @@ class LMCacheConnectorV1Impl:
                 token_ids = token_ids.tolist()
 
             request_configs = extract_request_configs(request.sampling_params)
+            request_configs = add_lora_tag(request_configs, request.lora_request)
             if self.skip_last_n_tokens > 0:
                 token_ids = token_ids[: -self.skip_last_n_tokens]
 

@@ -391,6 +391,10 @@ if hasattr(torch, "float8_e5m2fnuz"):
 
 STR_DTYPE_TO_TORCH_DTYPE = {v: k for k, v in TORCH_DTYPE_TO_STR_DTYPE.items()}
 
+# Cache key tag for vLLM LoRA adapters
+LORA_TAG_NAME = "lora"
+LORA_TAG_KEY = f"lmcache.tag.{LORA_TAG_NAME}"
+
 
 def parse_cache_key(key_str: str) -> Union[CacheEngineKey, LayerCacheEngineKey]:
     """Parse a key string into either a CacheEngineKey or LayerCacheEngineKey.
@@ -577,6 +581,20 @@ class CacheEngineKey:
         if isinstance(self.chunk_hash, bytes):
             return self.chunk_hash.hex()
         return f"{self.chunk_hash:x}"
+
+    @property
+    def lora_name(self) -> str:
+        """Return the LoRA adapter name carried in this key's tags.
+
+        Returns:
+            The value of the ``lora`` tag, or ``""`` for a key without one
+            (a base-model key).
+        """
+        if self.tags is not None:
+            for k, v in self.tags:
+                if k == LORA_TAG_NAME:
+                    return str(v)
+        return ""
 
 
 @dataclass(slots=True)

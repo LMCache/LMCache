@@ -405,6 +405,14 @@ class TestCacheEngineKey:
         )
         assert key.tags is None
 
+    def test_lora_name_with_tags(self, key_with_tags: CacheEngineKey) -> None:
+        assert key_with_tags.lora_name == "adapter1"
+        restored = CacheEngineKey.from_string(key_with_tags.to_string())
+        assert restored.lora_name == "adapter1"
+
+    def test_lora_name_basic(self, basic_key: CacheEngineKey) -> None:
+        assert basic_key.lora_name == ""
+
 
 # ============================================================
 # LayerCacheEngineKey
