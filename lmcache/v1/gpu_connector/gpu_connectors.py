@@ -7,7 +7,7 @@ import abc
 import torch
 
 # First Party
-from lmcache import device_ops
+from lmcache import device_ops, torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
@@ -133,6 +133,23 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
     def get_shape(self, num_tokens: int) -> torch.Size:
         """Get the shape of the data given the number of tokens."""
         raise NotImplementedError
+
+    def synchronize_load(self) -> None:
+        """Wait until destination writes no longer use their source buffers.
+
+        Call before recycling retrieval staging memory, including after a load
+        raises. Connectors with a ``load_stream`` use that stream; others use a
+        device fence. Connectors using multiple streams may override this method.
+
+        Raises:
+            RuntimeError: If device execution failed. The caller must recover the
+                device before reusing source buffers or destination KV pages.
+        """
+        load_stream = getattr(self, "load_stream", None)
+        if load_stream is not None:
+            load_stream.synchronize()
+        else:
+            torch_dev.synchronize()
 
     def initialize_kvcaches_ptr(self, **kwargs):
         """Initialize the kvcaches pointers if not already initialized."""

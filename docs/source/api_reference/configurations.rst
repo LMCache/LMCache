@@ -96,6 +96,9 @@ Basic cache settings that control the core functionality of LMCache.
    * - retrieve_locations
      - LMCACHE_RETRIEVE_LOCATIONS
      - List of storage backend names to search when retrieving or looking up KV caches. When specified, only the listed backends are searched. Valid values are the backend class names registered in the storage manager, including: ``"LocalCPUBackend"``, ``"LocalDiskBackend"``, ``"RemoteBackend"``, ``"PDBackend"``, ``"P2PBackend"``, ``"GdsBackend"``, etc, and any storage plugin backends. Default: null (search all active backends)
+   * - retrieve_window_bytes
+     - LMCACHE_RETRIEVE_WINDOW_BYTES
+     - Target size in bytes of the device staging window that a first-rank MLA engine (``extra_config.save_only_first_rank``) uses to broadcast cache hits to its tensor-parallel peers. The window holds as many whole KV chunks as fit the target, never fewer than one, and stays resident for the life of the engine. Unused with a single rank. See :doc:`/kv_cache/bounded_retrieval`. Default: 67108864 (64 MiB)
    * - extra_config
      - LMCACHE_EXTRA_CONFIG={"key": value, ...}
      - Additional configuration as JSON dict. For NUMA manual mode, include "gpu_to_numa_mapping": {gpu_id: numa_node, ...}. Default: {}

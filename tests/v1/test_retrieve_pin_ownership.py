@@ -10,7 +10,6 @@ separate ownership contracts.
 # Standard
 from collections import OrderedDict
 from collections.abc import Generator, Sequence
-from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Literal, cast
 from unittest.mock import MagicMock, call
@@ -25,6 +24,7 @@ import torch
 # First Party
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.broadcast_transfer import Window, plan_staging
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventStatus, EventType
@@ -532,9 +532,12 @@ def test_async_cleanup_releases_one_prefetch_pin(
 
     if completion == "retrieve":
         assert engine.retrieve(cache_case.tokens, req_id="A").all()
-        # Successful retrieve retains the event record. Remove only the record,
-        # not its already-consumed references; aborted lookups use lookup_unpin.
-        engine.event_manager.pop_event(EventType.LOADING, "A")
+        # Successful retrieve consumes the event record, so the request's
+        # lookup_unpin() at wait_for_save does not release the objects again.
+        assert engine.event_manager.get_event_status(EventType.LOADING, "A") == (
+            EventStatus.NOT_FOUND
+        )
+        engine.lookup_unpin("A")
     else:
         engine.lookup_unpin("A")
         engine.lookup_unpin("A")
@@ -550,30 +553,85 @@ def test_async_cleanup_releases_one_prefetch_pin(
     assert "is negative" not in caplog.text
 
 
-@pytest.mark.parametrize("received_pins", [0, 1])
-def test_passive_retrieve_keeps_received_object_cleanup(
-    cache_case: _CacheCase,
-    monkeypatch: pytest.MonkeyPatch,
-    received_pins: int,
+def test_async_retrieve_releases_pins_of_skipped_prefetched_chunks(
+    cache_case: _CacheCase, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Passive ranks still release their temporary broadcast object's pin and ref.
+    """Prefetched chunks the mask skips give back their pin, not only their ref.
+
+    Consuming the LOADING event makes this retrieval the last owner of every
+    prefetched object, so a chunk vLLM already holds must still be unpinned
+    here; lookup_unpin() can no longer reach it.
 
     Args:
-        cache_case: Engine whose broadcast transport is replaced by CPU operations.
-        monkeypatch: Substitutes only device/transport boundaries, not token cleanup.
-        received_pins: Temporary transport pin acquired on the received object.
+        cache_case: Three CPU objects returned through a real completed event.
+        caplog: Captures double-unpin and double-free warnings.
     """
     engine = cache_case.engine
-    engine.save_only_first_rank = True
-    engine.metadata.worker_id = 1
-    engine.broadcast_stream = MagicMock()
-    device = MagicMock()
-    device.stream.return_value = nullcontext()
-    device.device_count.return_value = 1
-    monkeypatch.setattr(cache_engine_module, "torch_dev", device)
-    monkeypatch.setattr(cache_engine_module, "torch_device_type", "cpu")
-    metadata = cache_case.memory_objs[0].metadata.to_dict()
-    engine.broadcast_object_fn = MagicMock(side_effect=[1, (0, 4, metadata)])
+    engine.async_loading = True
+    caplog.set_level(logging.WARNING, logger="lmcache")
+    for key in cache_case.keys:
+        assert cache_case.backend.pin(key)
+    prefetched = asyncio.run(
+        cache_case.backend.batched_get_non_blocking("A", cache_case.keys)
+    )
+    _assert_counts(prefetched, [1, 1, 1], refs=2)
+    _complete_prefetch(engine, list(zip(cache_case.keys, prefetched, strict=True)))
+
+    mask = torch.tensor([False] * CHUNK_SIZE + [True] * (2 * CHUNK_SIZE))
+    assert engine.retrieve(cache_case.tokens, mask=mask, req_id="A").tolist() == (
+        [False] * CHUNK_SIZE + [True] * (2 * CHUNK_SIZE)
+    )
+    engine.lookup_unpin("A")
+
+    _assert_counts(cache_case.memory_objs, [0, 0, 0])
+    assert all(obj.can_evict for obj in cache_case.memory_objs)
+    assert engine.event_manager.get_event_status(EventType.LOADING, "A") == (
+        EventStatus.NOT_FOUND
+    )
+    assert "Double unpin" not in caplog.text
+    assert "is negative" not in caplog.text
+
+
+@pytest.mark.parametrize("received_pins", [0, 1])
+def test_passive_retrieve_touches_no_cache_objects(
+    cache_case: _CacheCase, received_pins: int
+) -> None:
+    """Passive ranks write received windows from staging views and own nothing.
+
+    Args:
+        cache_case: Supplies the chunk layout, the recording connector and the
+            cache objects a passive rank must never reference, pin or release.
+        received_pins: Transport pins a connector may take on the received view.
+    """
+    config = LMCacheEngineConfig.from_defaults(
+        chunk_size=CHUNK_SIZE,
+        retrieve_window_bytes=4096,
+        lmcache_instance_id="test_retrieve_pin_ownership",
+    )
+    metadata = LMCacheMetadata(
+        model_name="test_model",
+        world_size=2,
+        local_world_size=2,
+        worker_id=1,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(1, 2, CHUNK_SIZE, 1, 1),
+        use_mla=True,
+        chunk_size=CHUNK_SIZE,
+    )
+    # The first rank's side of the exchange: admission, one window, the end.
+    window = Window.from_chunks([(cache_case.memory_objs[0], 0, CHUNK_SIZE)])
+    plan = plan_staging(metadata, CHUNK_SIZE, config.retrieve_window_bytes)
+    reservation = (plan, len(cache_case.tokens), "passive")
+    engine = LMCacheEngine(
+        config,
+        metadata,
+        cache_case.engine.token_database,
+        cache_case.connector,
+        MagicMock(),
+        MagicMock(side_effect=[reservation, window, None]),
+        lambda ready: ready,
+    )
 
     def copy_received_objects(
         memory_objs: list[MemoryObj],
@@ -581,10 +639,10 @@ def test_passive_retrieve_keeps_received_object_cleanup(
         ends: list[int],
         **kwargs: object,
     ) -> None:
-        """Model a transport pin while observing the real broadcast-created object.
+        """Model a transport pin while observing the real staging view.
 
         Args:
-            memory_objs: Temporary received objects passed to the GPU connector.
+            memory_objs: Views over the staging buffer passed to the connector.
             starts: Start token offsets supplied by retrieve.
             ends: End token offsets supplied by retrieve.
             **kwargs: Connector options; req_id identifies this passive request.
@@ -597,17 +655,22 @@ def test_passive_retrieve_keeps_received_object_cleanup(
         _assert_counts(memory_objs, [received_pins])
 
     cache_case.connector.batched_to_gpu.side_effect = copy_received_objects
-
-    assert engine.retrieve(cache_case.tokens, req_id="passive").tolist() == (
-        [True] * 4 + [False] * 8
-    )
+    try:
+        assert engine.retrieve(cache_case.tokens, req_id="passive").tolist() == (
+            [True] * CHUNK_SIZE + [False] * (len(cache_case.tokens) - CHUNK_SIZE)
+        )
+    finally:
+        engine.close()
 
     cache_case.connector.batched_to_gpu.assert_called_once()
     received = cast(
         list[MemoryObj], cache_case.connector.batched_to_gpu.call_args.args[0]
     )
+    # The view aliases the staging buffer and owns no cache memory, so there is
+    # nothing for the passive rank to release, whatever the connector pinned.
     assert received[0] is not cache_case.memory_objs[0]
-    _assert_counts(received, [0], refs=0)
+    assert received[0].parent() is None
+    assert not engine.lookup_pins
     _assert_counts(cache_case.memory_objs, [0, 0, 0])
 
 

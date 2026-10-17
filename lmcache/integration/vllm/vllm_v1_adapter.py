@@ -36,6 +36,7 @@ from lmcache.integration.vllm.utils import (
     extract_mm_features,
     extract_request_configs_from_sampling_params,
     lmcache_get_or_create_config,
+    validate_retrieval_memory_budget,
 )
 from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
 from lmcache.logging import init_logger
@@ -44,7 +45,6 @@ from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.config_base import validate_and_set_config_value
 from lmcache.v1.manager import LMCacheManager
 
 if TYPE_CHECKING:
@@ -463,12 +463,14 @@ class LMCacheConnectorV1Impl:
         self.worker_count = vllm_config.parallel_config.tensor_parallel_size
 
         # Load and configure LMCache config
-        config = lmcache_get_or_create_config()
+        config = lmcache_get_or_create_config(vllm_config)
         assert isinstance(config, LMCacheEngineConfig), (
             "LMCache v1 configuration is should be passed for vLLM v1."
         )
-        self._apply_extra_config(config, vllm_config)
         self.config = config
+
+        if role == KVConnectorRole.WORKER:
+            validate_retrieval_memory_budget(vllm_config)
 
         service_factory = VllmServiceFactory(config, vllm_config, role.name.lower())
         self._manager = LMCacheManager(config, service_factory, connector=self)
@@ -490,23 +492,6 @@ class LMCacheConnectorV1Impl:
             VLLM_VERSION,
             getattr(self.lmcache_engine, "metadata", None),
         )
-
-    def _apply_extra_config(
-        self, config: LMCacheEngineConfig, vllm_config: "VllmConfig"
-    ) -> None:
-        """Apply extra config from vLLM to LMCache config."""
-        kv_connector_extra_config = (
-            vllm_config.kv_transfer_config.kv_connector_extra_config
-        )
-        if kv_connector_extra_config:
-            for key, value in kv_connector_extra_config.items():
-                if key.startswith("lmcache."):
-                    config_key = key[8:]  # Remove "lmcache." prefix
-                    if validate_and_set_config_value(config, config_key, value):
-                        logger.info(
-                            "Updated config %s from vLLM extra config",
-                            config_key,
-                        )
 
     def _init_connector_state(
         self,
