@@ -5,6 +5,7 @@ PluginL2AdapterConfig.
 """
 
 # Standard
+from typing import cast
 import os
 import tempfile
 import types
@@ -563,6 +564,25 @@ class TestLazyLoading:
         with pytest.raises(ImportError, match="bad_b"):
             fmod.ensure_adapter_loaded("missing")
 
+    def test_ensure_skips_non_import_error_until_found(self, monkeypatch) -> None:
+        """An optional adapter's import-time error does not block another."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import factory as fmod
+
+        def _selective_import(path: str) -> None:
+            if path == "broken_optional":
+                raise TypeError("incompatible protobuf")
+            fmod._L2_ADAPTER_FACTORY_REGISTRY["target"] = cast(
+                fmod.L2AdapterFactory, lambda c, d: None
+            )
+
+        monkeypatch.setattr("importlib.import_module", _selective_import)
+        fmod._PENDING_MODULES.extend(["broken_optional", "target_module"])
+
+        fmod.ensure_adapter_loaded("target")
+
+        assert "target" in fmod._L2_ADAPTER_FACTORY_REGISTRY
+
     def test_ensure_no_error_when_not_found_silently(self, monkeypatch):
         """When pending modules import OK but name is
         still missing, no error is raised (no last_err).
@@ -609,6 +629,26 @@ class TestLazyLoading:
 
         monkeypatch.setattr("importlib.import_module", _selective_import)
         fmod._PENDING_MODULES.extend(["good1", "bad", "good2"])
+        fmod.load_all_adapters()
+
+        assert imported == ["good1", "good2"]
+        assert len(fmod._PENDING_MODULES) == 0
+
+    def test_load_all_adapters_skips_non_import_errors(self, monkeypatch) -> None:
+        """CLI adapter discovery survives optional dependency incompatibility."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import factory as fmod
+
+        imported: list[str] = []
+
+        def _selective_import(path: str) -> None:
+            if path == "broken_bigtable":
+                raise TypeError("Descriptors cannot be created directly")
+            imported.append(path)
+
+        monkeypatch.setattr("importlib.import_module", _selective_import)
+        fmod._PENDING_MODULES.extend(["good1", "broken_bigtable", "good2"])
+
         fmod.load_all_adapters()
 
         assert imported == ["good1", "good2"]
