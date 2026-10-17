@@ -88,9 +88,9 @@ def test_fingerprint_queue_drains_in_order():
     worker.start()
     try:
         jobs = [
-            ([1, 2, 3], [b"h1"], 0, 0, "req-a"),
-            ([4, 5, 6], [b"h2"], 1, 3, "req-b"),
-            ([7, 8, 9], [b"h3"], 0, 6, "req-c"),
+            ([1, 2, 3], [b"h1"], 0, 0, "req-a", None),
+            ([4, 5, 6], [b"h2"], 1, 3, "req-b", None),
+            ([7, 8, 9], [b"h3"], 0, 6, "req-c", None),
         ]
         for j in jobs:
             eng._fingerprint_queue.put(j)
@@ -114,7 +114,11 @@ def test_fingerprint_queue_drains_in_order():
     assert calls[1].args[0] == [4, 5, 6]
     assert calls[2].args[0] == [7, 8, 9]
     # kwargs are preserved (start_chunk_idx, position_offset).
-    assert calls[1].kwargs == {"start_chunk_idx": 1, "position_offset": 3}
+    assert calls[1].kwargs == {
+        "start_chunk_idx": 1,
+        "position_offset": 3,
+        "predecessor_hash": None,
+    }
 
 
 def test_fingerprint_worker_survives_kernel_exception():
@@ -133,8 +137,8 @@ def test_fingerprint_worker_survives_kernel_exception():
     worker = threading.Thread(target=eng._drain_fingerprint_queue, daemon=True)
     worker.start()
     try:
-        eng._fingerprint_queue.put(([1], [b"h1"], 0, 0, "req-a"))
-        eng._fingerprint_queue.put(([2], [b"h2"], 0, 1, "req-b"))
+        eng._fingerprint_queue.put(([1], [b"h1"], 0, 0, "req-a", None))
+        eng._fingerprint_queue.put(([2], [b"h2"], 0, 1, "req-b", None))
         deadline = time.monotonic() + 2.0
         while (
             eng._token_range_matcher.on_new_token_hashes.call_count < 2

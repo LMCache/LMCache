@@ -210,7 +210,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             assert tp_size == 2
             return CBUnifiedLookupResult(
                 prefix_coverage_tokens=16,
-                non_prefix_segments=[CBMatchResult(0, 2, 4, 6, b"hash")],
+                non_prefix_segments=[CBMatchResult(0, 2, 4, 6, b"hash", b"pred")],
             )
 
         @request_handler(HandlerType.BLOCKING)
@@ -582,7 +582,7 @@ def test_generated_grpc_services_communicate_end_to_end(
     blend_result = client.cb_unified_lookup(key, 2).result(5)
     assert blend_result == CBUnifiedLookupResult(
         prefix_coverage_tokens=16,
-        non_prefix_segments=[CBMatchResult(0, 2, 4, 6, b"hash")],
+        non_prefix_segments=[CBMatchResult(0, 2, 4, 6, b"hash", b"pred")],
     )
 
     task_id = client.p2p_lookup_and_lock(
