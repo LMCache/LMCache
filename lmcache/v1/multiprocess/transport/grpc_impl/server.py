@@ -136,7 +136,7 @@ class _GeneratedServicer:
                 )
                 raise RuntimeError("gRPC context abort unexpectedly returned")
             payloads = registered.request_decoder(request)
-            if registered.handler_type is HandlerType.SYNC:
+            if registered.handler_type is HandlerType.SERIALIZED:
                 with self._sync_handler_lock:
                     result = registered.handler(*payloads)
             elif registered.handler_type is HandlerType.BLOCKING and (
@@ -194,7 +194,7 @@ class GrpcMultiprocessServer(RequestServer):
             thread_name_prefix="grpc-affinity",
         )
         self._affinity_submit_lock = threading.Lock()
-        # HandlerType.SYNC is a transport-neutral single-main-loop contract.
+        # HandlerType.SERIALIZED is a transport-neutral single-main-loop contract.
         self._sync_handler_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(
             max_workers=grpc_server_workers,
@@ -255,7 +255,7 @@ class GrpcMultiprocessServer(RequestServer):
                 handler_type=(
                     bound_handler.options.handler_type
                     if bound_handler is not None
-                    else HandlerType.SYNC
+                    else HandlerType.SERIALIZED
                 ),
                 requires_client_affinity=(
                     bound_handler.options.requires_client_affinity
