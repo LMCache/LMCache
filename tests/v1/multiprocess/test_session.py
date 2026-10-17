@@ -40,6 +40,14 @@ class TestSession:
         session.set_tokens([4, 5, 6])
         assert session.token_ids == [4, 5, 6]
 
+    def test_set_tokens_snapshots_caller_input(self, session: Session) -> None:
+        tokens = [1, 2, 3, 4]
+        session.set_tokens(tokens)
+
+        tokens[0] = 999
+
+        assert session.token_ids == [1, 2, 3, 4]
+
     def test_get_hashes_basic(self, session: Session) -> None:
         """8 tokens, chunk_size=4 produces 2 hashes."""
         session.set_tokens(list(range(8)))
