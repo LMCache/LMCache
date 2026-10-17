@@ -29,25 +29,19 @@ def _import_adapter_symbols() -> tuple[
     Callable[[bool], MessagingFuture],
     type,
     type,
-    type,
 ]:
     # First Party
     from lmcache.integration.sglang import multi_process_adapter as adapter_mod
+    from lmcache.integration.sglang.metadata import LoadMetadata, StoreMetadata
     from lmcache.integration.sglang.multi_process_adapter import (
         LMCacheMPConnector,
         _completed_future,
-    )
-    from lmcache.integration.sglang.sglang_adapter import (
-        LMCacheLayerwiseConnector,
-        LoadMetadata,
-        StoreMetadata,
     )
 
     return (
         adapter_mod,
         LMCacheMPConnector,
         _completed_future,
-        LMCacheLayerwiseConnector,
         LoadMetadata,
         StoreMetadata,
     )
@@ -62,7 +56,7 @@ def _make_connector(healthy: bool = True) -> Any:
     Sets only the attributes the store paths touch; anything a given
     test needs beyond this it stubs itself.
     """
-    _, LMCacheMPConnector, _, _, _, _ = _import_adapter_symbols()
+    _, LMCacheMPConnector, _, _, _ = _import_adapter_symbols()
     conn: Any = object.__new__(LMCacheMPConnector)
     conn._health_event = threading.Event()
     if healthy:
@@ -162,7 +156,7 @@ class _FakeTorchDev:
 
 
 def test_completed_future_resolves_to_given_result() -> None:
-    _, _, _completed_future, _, _, _ = _import_adapter_symbols()
+    _, _, _completed_future, _, _ = _import_adapter_symbols()
     done_true = _completed_future(True)
     assert done_true.query() is True
     assert done_true.result(timeout=0) is True
@@ -176,7 +170,7 @@ def test_wrap_sglang_kv_caches_uses_platform_wrapper_in_kv_order(
     monkeypatch,
 ) -> None:
     """Registration dispatches each tensor through the platform wrapper."""
-    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    adapter_mod, _, _, _, _ = _import_adapter_symbols()
     k_pool = [torch.tensor([1]), torch.tensor([2])]
     v_pool = [torch.tensor([3]), torch.tensor([4])]
     wrapped_tensors: list[torch.Tensor] = []
@@ -203,7 +197,7 @@ def test_wrap_sglang_kv_caches_requires_full_handle_capability(
     monkeypatch,
 ) -> None:
     """Registration fails before export when a platform capability is absent."""
-    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    adapter_mod, _, _, _, _ = _import_adapter_symbols()
     monkeypatch.setattr(
         adapter_mod,
         "get_device_spec",
@@ -219,7 +213,7 @@ def test_wrap_sglang_kv_caches_requires_full_handle_capability(
 
 def test_wrap_sglang_kv_caches_rejects_mismatched_layers() -> None:
     """Registration rejects a wire payload that cannot split into K/V pairs."""
-    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    adapter_mod, _, _, _, _ = _import_adapter_symbols()
     with pytest.raises(ValueError, match="matching K and V layers"):
         adapter_mod._wrap_sglang_kv_caches(
             [torch.tensor([1]), torch.tensor([2])],
@@ -229,7 +223,7 @@ def test_wrap_sglang_kv_caches_rejects_mismatched_layers() -> None:
 
 def test_mp_connector_registration_marks_kv_list_layout(monkeypatch) -> None:
     """Registration identifies flat single-head pools as split K/V MHA."""
-    adapter_mod, LMCacheMPConnector, _, _, _, _ = _import_adapter_symbols()
+    adapter_mod, LMCacheMPConnector, _, _, _ = _import_adapter_symbols()
     req_client = MagicMock(name="rpc_client")
     req_client.register_kv_cache.return_value = SimpleNamespace(
         result=MagicMock(return_value=None)
@@ -307,7 +301,7 @@ def test_mp_connector_validates_pools_before_opening_mq(
     message: str,
 ) -> None:
     """Invalid registration fails before reading the first tensor or opening MQ."""
-    _, LMCacheMPConnector, _, _, _, _ = _import_adapter_symbols()
+    _, LMCacheMPConnector, _, _, _ = _import_adapter_symbols()
     with pytest.raises(ValueError, match=message):
         LMCacheMPConnector(
             sgl_config=SimpleNamespace(model_path="test-model"),
@@ -322,7 +316,7 @@ def test_mp_connector_validates_pools_before_opening_mq(
 
 
 def test_store_kv_async_unhealthy_returns_failed_future_no_send(monkeypatch) -> None:
-    _, _, _, _, _, _ = _import_adapter_symbols()
+    _, _, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=False)
     conn.req_client = MagicMock(name="rpc_client")
 
@@ -338,7 +332,7 @@ def test_store_kv_async_unhealthy_returns_failed_future_no_send(monkeypatch) -> 
 def test_store_kv_async_no_aligned_range_returns_completed_future_no_send(
     monkeypatch,
 ) -> None:
-    _, _, _, _, _, _ = _import_adapter_symbols()
+    _, _, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=True)
     conn.req_client = MagicMock(name="rpc_client")
 
@@ -353,7 +347,7 @@ def test_store_kv_async_no_aligned_range_returns_completed_future_no_send(
 def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
     monkeypatch,
 ) -> None:
-    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    adapter_mod, _, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=True)
     conn.req_client = MagicMock(name="rpc_client")
     conn.instance_id = 123
@@ -384,7 +378,7 @@ def test_store_kv_timeout_retains_exported_event_on_raw_future(
     monkeypatch,
 ) -> None:
     """Timeouts must not drop the exported event before daemon import."""
-    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    adapter_mod, _, _, _, _ = _import_adapter_symbols()
     conn = _make_connector(healthy=True)
     conn.req_client = MagicMock(name="rpc_client")
     conn.instance_id = 123
@@ -407,7 +401,7 @@ def test_store_kv_timeout_retains_exported_event_on_raw_future(
 
 def test_submit_retrieve_retains_exported_device_event(monkeypatch) -> None:
     """The producer event outlives daemon import through the returned future."""
-    adapter_mod, _, _, _, _, _ = _import_adapter_symbols()
+    adapter_mod, _, _, _, _ = _import_adapter_symbols()
     connector = _make_connector(healthy=True)
     connector.req_client = MagicMock(name="rpc_client")
     connector.instance_id = 123
@@ -451,7 +445,7 @@ def test_retrieve_failure_uses_single_cleanup_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An event-free failure must not repeat server-side lock cleanup."""
-    adapter_mod, _, _completed_future, _, LoadMetadata, _ = _import_adapter_symbols()
+    adapter_mod, _, _completed_future, LoadMetadata, _ = _import_adapter_symbols()
     connector = _make_connector(healthy=True)
     connector.req_client = MagicMock(name="rpc_client")
     connector.model_name = "test-model"
@@ -494,34 +488,3 @@ def test_retrieve_failure_uses_single_cleanup_owner(
 
     assert free_ranges == expected_free_ranges
     assert connector._pending_lookups["request-1"].locks_held is False
-
-
-def test_layerwise_load_forwards_partial_slot_mapping_offset() -> None:
-    """Layerwise retrieval tells the GPU connector where its slot map begins."""
-    _, _, _, LMCacheLayerwiseConnector, LoadMetadata, _ = _import_adapter_symbols()
-    connector: Any = object.__new__(LMCacheLayerwiseConnector)
-    connector.lmcache_engine = MagicMock()
-    connector.lmcache_engine.lookup.return_value = 6
-    connector.lmcache_engine.retrieve_layer.return_value = iter([None, None, None])
-    connector.sgl_config = SimpleNamespace(num_hidden_layers=2)
-    connector.tp_size = 1
-    connector.rank = 0
-    connector.tp_group = None
-    connector.kvcaches = [[], []]
-    connector.layerwise_retrievers = []
-    connector.layer_load_layer = []
-    connector.lookup_id_list = []
-    metadata = LoadMetadata(
-        token_ids=list(range(8)),
-        slot_mapping=torch.tensor([10, 11, 12, 13, 14]),
-        offset=3,
-    )
-
-    assert connector.start_load_kv(metadata) == 3
-
-    retrieve_kwargs = connector.lmcache_engine.retrieve_layer.call_args.kwargs
-    assert retrieve_kwargs["offset"] == 3
-    assert torch.equal(
-        retrieve_kwargs["slot_mapping"].cpu(),
-        metadata.slot_mapping.cpu(),
-    )

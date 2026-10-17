@@ -23,7 +23,7 @@ maps:
 
 | Preset | Module | Scheduler | Worker |
 |---|---|---|---|
-| `lmcache` | `lmcache.integration.tensorrt_llm.tensorrt_adapter` | `LMCacheKvConnectorScheduler` | `LMCacheKvConnectorWorker` |
+| `lmcache` | `lmcache.inprocess.integration.tensorrt_llm.tensorrt_adapter` | `LMCacheKvConnectorScheduler` | `LMCacheKvConnectorWorker` |
 | `lmcache-mp` | `lmcache.integration.tensorrt_llm.tensorrt_mp_adapter` | `LMCacheMPKvConnectorScheduler` | `LMCacheMPKvConnectorWorker` |
 
 ## Lifecycle

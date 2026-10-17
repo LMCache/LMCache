@@ -9,10 +9,41 @@ import pytest
 import torch
 
 # First Party
-from lmcache.integration.sglang import sglang_adapter as adapter_mod
+from lmcache.inprocess.integration.sglang import sglang_adapter as adapter_mod
+from lmcache.integration.sglang.metadata import LoadMetadata
 from lmcache.utils import EngineType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.metadata import LMCacheMetadata
+
+
+def test_layerwise_load_forwards_partial_slot_mapping_offset() -> None:
+    """Layerwise retrieval tells the GPU connector where its slot map begins."""
+    connector = object.__new__(adapter_mod.LMCacheLayerwiseConnector)
+    connector.lmcache_engine = MagicMock()
+    connector.lmcache_engine.lookup.return_value = 6
+    connector.lmcache_engine.retrieve_layer.return_value = iter([None, None, None])
+    connector.sgl_config = SimpleNamespace(num_hidden_layers=2)
+    connector.tp_size = 1
+    connector.rank = 0
+    connector.tp_group = None
+    connector.kvcaches = [[], []]
+    connector.layerwise_retrievers = []
+    connector.layer_load_layer = []
+    connector.lookup_id_list = []
+    metadata = LoadMetadata(
+        token_ids=list(range(8)),
+        slot_mapping=torch.tensor([10, 11, 12, 13, 14]),
+        offset=3,
+    )
+
+    assert connector.start_load_kv(metadata) == 3
+
+    retrieve_kwargs = connector.lmcache_engine.retrieve_layer.call_args.kwargs
+    assert retrieve_kwargs["offset"] == 3
+    assert torch.equal(
+        retrieve_kwargs["slot_mapping"].cpu(),
+        metadata.slot_mapping.cpu(),
+    )
 
 
 @pytest.mark.parametrize(
