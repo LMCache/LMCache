@@ -17,11 +17,13 @@ from __future__ import annotations
 
 # Standard
 from typing import Any
+import os
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+from lmcache.v1.mp_observability.propagation import extract_trace_context
 from lmcache.v1.mp_observability.subscribers.tracing.span_registry import SpanRegistry
 
 logger = init_logger(__name__)
@@ -148,7 +150,9 @@ class MPServerTracingSubscriber(EventSubscriber):
         """
         if not _HAS_OTEL:
             return
-        self._get_or_create_request_span(event.session_id, event.timestamp)
+        self._get_or_create_request_span(
+            event.session_id, event.timestamp, event.trace_context
+        )
 
     def _on_store_submitted(self, event: Event) -> None:
         """Increment the in-flight store counter for the session.
@@ -163,6 +167,10 @@ class MPServerTracingSubscriber(EventSubscriber):
             return
         sid = event.session_id
         self._pending_store_count[sid] = self._pending_store_count.get(sid, 0) + 1
+        # Capture the CPU-side parent before native GPU event recording,
+        # whose callbacks do not retain Python thread context.
+        if event.trace_context:
+            self._get_or_create_request_span(sid, event.timestamp, event.trace_context)
 
     def _on_retrieve_submitted(self, event: Event) -> None:
         """Increment the in-flight retrieve counter for the session.
@@ -177,6 +185,8 @@ class MPServerTracingSubscriber(EventSubscriber):
             return
         sid = event.session_id
         self._pending_retrieve_count[sid] = self._pending_retrieve_count.get(sid, 0) + 1
+        if event.trace_context:
+            self._get_or_create_request_span(sid, event.timestamp, event.trace_context)
 
     def _on_session_end(self, event: Event) -> None:
         """Close the root span, or defer if GPU stores/retrieves are still in flight.
@@ -214,7 +224,9 @@ class MPServerTracingSubscriber(EventSubscriber):
         if not _HAS_OTEL:
             return
         sid = event.session_id
-        _, root_ctx = self._get_or_create_request_span(sid, event.timestamp)
+        _, root_ctx = self._get_or_create_request_span(
+            sid, event.timestamp, event.trace_context
+        )
 
         span_name = self._SPAN_NAMES[event.event_type]
         span = _tracer.start_span(
@@ -325,7 +337,7 @@ class MPServerTracingSubscriber(EventSubscriber):
     # ------------------------------------------------------------------
 
     def _get_or_create_request_span(
-        self, session_id: str, ts: float
+        self, session_id: str, ts: float, carrier: dict[str, str] | None = None
     ) -> tuple[Any, Any]:
         """Return the root span and its OTel context, creating them if absent.
 
@@ -338,6 +350,7 @@ class MPServerTracingSubscriber(EventSubscriber):
             session_id: The request session identifier.
             ts: Wall-clock timestamp (``time.time()``) to use as span start
                 if the root is created now.
+            carrier: Optional W3C headers captured by the originating event.
 
         Returns:
             ``(root_span, root_otel_context)`` tuple.
@@ -347,6 +360,11 @@ class MPServerTracingSubscriber(EventSubscriber):
             return entry
         root_span = _tracer.start_span(
             "request",
+            context=(
+                extract_trace_context(carrier)
+                if os.environ.get("LMCACHE_MP_TRACE_CONTEXT") == "1"
+                else None
+            ),
             start_time=int(ts * 1e9),
         )
         root_span.set_attribute("session_id", session_id)
