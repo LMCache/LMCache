@@ -29,11 +29,13 @@ from __future__ import annotations
 
 # Standard
 from typing import Any
+import os
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+from lmcache.v1.mp_observability.propagation import extract_trace_context
 from lmcache.v1.mp_observability.subscribers.tracing.span_registry import SpanRegistry
 
 logger = init_logger(__name__)
@@ -183,6 +185,11 @@ class BlendTracingSubscriber(EventSubscriber):
             return
         root_span = _tracer.start_span(
             "cb.request",
+            context=(
+                extract_trace_context(event.trace_context)
+                if os.environ.get("LMCACHE_MP_TRACE_CONTEXT") == "1"
+                else None
+            ),
             start_time=int(event.timestamp * 1e9),
         )
         root_span.set_attribute("session_id", sid)
