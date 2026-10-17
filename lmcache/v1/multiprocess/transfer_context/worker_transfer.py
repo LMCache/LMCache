@@ -4,7 +4,6 @@
 # Standard
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from enum import Enum
 from typing import Any, Callable, Protocol, cast
 import os
 import threading
@@ -31,6 +30,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
+from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import (
     get_device_spec,
@@ -48,8 +48,8 @@ logger = init_logger(__name__)
 # Environment variable that lets the user override the default routing
 # performed by :func:`create_transfer_context`. Accepted values match the
 # string values of :class:`MPTransferMode` (``auto`` / ``engine_driven`` /
-# ``lmcache_driven``); ``auto`` reproduces the historical device-type-based
-# dispatch.
+# ``lmcache_driven``); ``auto`` defers to the device spec's declared
+# default (:meth:`DeviceSpec.default_mp_transfer_mode`).
 ENV_MP_TRANSFER_MODE = "LMCACHE_MP_TRANSFER_MODE"
 
 
@@ -118,23 +118,6 @@ def _build_engine_driven_context(
     return EngineDrivenTransferContext(instance_id, req_client)
 
 
-class MPTransferMode(str, Enum):
-    """Routing mode used by :func:`create_transfer_context`.
-
-    * ``AUTO``: dispatch by ``tensor.device.type`` (CUDA -> lmcache-driven,
-      others -> engine-driven). Preserves the historical behaviour.
-    * ``ENGINE_DRIVEN``: force :class:`EngineDrivenTransferContext`
-      (worker-side gather / scatter copy path).
-    * ``LMCACHE_DRIVEN``: force :class:`LMCacheDrivenTransferContext`
-      (IPC / SHM zero-copy path). Requires a registered KV-wrapper factory
-      for the device.
-    """
-
-    AUTO = "auto"
-    ENGINE_DRIVEN = "engine_driven"
-    LMCACHE_DRIVEN = "lmcache_driven"
-
-
 def _resolve_mode(mode: "str | MPTransferMode | None") -> MPTransferMode:
     """Coerce ``mode`` into :class:`MPTransferMode`, falling back to env."""
     raw = (
@@ -165,14 +148,14 @@ def _build_lmcache_driven_context(
         raise ValueError(
             "MP transfer mode 'lmcache_driven' is not supported for device type "
             "%r: no KV-cache wrapper factory is registered. "
-            "Use mode 'engine_driven' or 'auto' instead." % device_type
+            "Use mode 'engine_driven' instead." % device_type
         ) from exc
     device_spec = get_device_spec(device_type)
-    if device_spec and not device_spec.is_handle_transfer_available():
+    if device_spec and not device_spec.is_lmcache_driven_available():
         raise ValueError(
             "MP transfer mode 'lmcache_driven' is not available for device type "
             "%r: required platform capability checks failed. "
-            "Use mode 'engine_driven' or 'auto' instead." % device_type
+            "Use mode 'engine_driven' instead." % device_type
         )
     return LMCacheDrivenTransferContext(instance_id, req_client)
 
@@ -286,15 +269,14 @@ class TransferContext(ABC):
             kv_caches: Worker KV cache tensors keyed by layer name.
             model_name: Model name used by cache keys.
             world_size: KV world size.
-            blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
+            blocks_in_chunk: Number of engine blocks per LMCache chunk.
             mq_timeout: Timeout in seconds for synchronous request wait.
             layout_hints: Optional inference-engine-provided layout hints.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
-            engine_type: Serving engine that produced the caches. Only
-                consumed by the handle path; adapters should pass their
-                own :class:`EngineType` so this transport stays engine-
-                neutral. Defaults to :attr:`EngineType.VLLM` for
-                backwards compatibility.
+            engine_type: Serving engine that produced the caches. Transfer
+                contexts use it to normalize engine-specific KV layouts.
+                Adapters should pass their own :class:`EngineType`; the
+                default is :attr:`EngineType.VLLM` for backwards compatibility.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -411,10 +393,10 @@ class TransferContext(ABC):
             request_id: External request identifier.
             key: LMCache key object for the store range.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to store, indexed by LMCache KV group id.
+            block_ids: Engine block IDs to store, indexed by LMCache KV group id.
             event: Synchronization event object, or ``None`` when the concrete
                 context does not require one.
-            blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
+            blocks_in_chunk: Number of engine blocks per LMCache chunk.
 
         Returns:
             A future compatible with adapter-side ``query()``/``result()`` flow.
@@ -440,11 +422,11 @@ class TransferContext(ABC):
             request_id: External request identifier.
             key: LMCache key object for the retrieve range.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to retrieve into, indexed by LMCache KV
+            block_ids: Engine block IDs to retrieve into, indexed by LMCache KV
                 group id.
             event: Synchronization event object, or ``None`` when the concrete
                 context does not require one.
-            blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
+            blocks_in_chunk: Number of engine blocks per LMCache chunk.
             skip_first_n_tokens: Number of initial tokens to skip when writing.
 
         Returns:
@@ -764,7 +746,7 @@ class LMCacheDrivenTransferContext(TransferContext):
 
 
 class EngineDrivenTransferContext(TransferContext):
-    """Engine-driven transfer context for non-CUDA workers.
+    """Transfer context for worker-managed KV copies.
 
     In this mode the engine (worker side) owns the data movement: the
     worker adapter gathers/packs KV into CPU buffers, commits via
@@ -782,10 +764,11 @@ class EngineDrivenTransferContext(TransferContext):
         self._engine_driven_context: EngineDrivenContext | None = None
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None
+        self._engine_type = EngineType.VLLM
 
     @property
     def engine_driven_context(self) -> EngineDrivenContext:
-        """Return the underlying SHM/pickle context created by ``register``.
+        """Return the underlying SHM/inline context created by ``register``.
 
         Raises:
             RuntimeError: If accessed before ``register`` has run.
@@ -807,15 +790,22 @@ class EngineDrivenTransferContext(TransferContext):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
     ) -> None:
-        """Register KV caches with the non-GPU context server.
+        """Register KV caches with the engine-driven context server.
 
-        ``engine_group_infos`` and ``engine_type`` are accepted to satisfy
-        the base interface but are currently a no-op: the non-GPU transfer
-        path does not support hybrid KV cache groups and rejects multi-
-        group transfers at store / retrieve time (see
-        ``_single_group_block_ids``).
+        ``engine_type`` selects the KV layout normalization used during
+        registration and subsequent gather/scatter operations.
+        Engine-driven transfer currently supports exactly one physical KV
+        transfer group.
+
+        Raises:
+            ValueError: If more than one physical KV transfer group is
+                registered.
         """
-        del engine_type  # unused on the engine-driven path
+        if len(engine_group_infos) > 1:
+            raise ValueError(
+                "engine-driven transfer does not support multiple KV "
+                "transfer groups now"
+            )
         # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
         # the tensor-detected slot count, e.g. DeepSeek V4) is only handled
         # on the CUDA path. The non-CUDA path is yet to be implemented.
@@ -826,9 +816,14 @@ class EngineDrivenTransferContext(TransferContext):
             dtype_str,
             engine_kv_format,
             kv_size,
-        ) = compute_kv_layout(kv_caches, layout_hints=layout_hints)
+        ) = compute_kv_layout(
+            kv_caches,
+            layout_hints=layout_hints,
+            engine_type=engine_type,
+        )
         self._layout_hints = layout_hints
         self._engine_kv_format = engine_kv_format
+        self._engine_type = engine_type
 
         # The wire field is named use_mla but only drives the object plane
         # count: single-plane (kv_size == 1) covers MLA and fused-K/V formats.
@@ -879,9 +874,9 @@ class EngineDrivenTransferContext(TransferContext):
             shm_name=shm_name,
             pool_size=pool_size,
         )
-        supported_transfer_mode = "SHM" if shm_name and pool_size > 0 else "pickle"
+        supported_transfer_mode = "SHM" if shm_name and pool_size > 0 else "inline"
         logger.info(
-            "Worker non-GPU transfer context registered (instance_id=%d, mode=%s)",
+            "Worker engine-driven context registered (instance_id=%d, mode=%s)",
             self._instance_id,
             supported_transfer_mode,
         )
@@ -948,12 +943,13 @@ class EngineDrivenTransferContext(TransferContext):
             engine_kv_format=self._engine_kv_format,
             out=out_buffers,
             chunk_indices=chunk_indices,
+            engine_type=self._engine_type,
         )
         # Gather issues async device->CPU copies on BOTH transports: into the
         # SHM slots when out_buffers is given, otherwise into fresh buffers that
         # commit_store serializes immediately. Either way the copies must be
         # complete first, so this is unconditional -- guarding it on out_buffers
-        # left the pickle path serializing a buffer still being written.
+        # left the inline path serializing a buffer still being written.
         synchronize_device(device)
         ok = self._engine_driven_context.commit_store(
             key, self._instance_id, cpu_chunks
@@ -969,7 +965,7 @@ class EngineDrivenTransferContext(TransferContext):
         key: Any,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        _event: IPCEvent | None,
+        event: IPCEvent | None,
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
     ) -> MessagingFuture:
@@ -980,20 +976,30 @@ class EngineDrivenTransferContext(TransferContext):
             )
 
         device = _get_kv_device(kv_caches)
+        full_block_ids = _single_group_block_ids(block_ids)
+        if len(full_block_ids) % blocks_in_chunk != 0:
+            raise ValueError(
+                "Engine block count must be divisible by blocks_in_chunk: "
+                f"blocks={len(full_block_ids)}, blocks_in_chunk={blocks_in_chunk}"
+            )
+        expected_count = len(full_block_ids) // blocks_in_chunk
         src_buffers = self._engine_driven_context.prepare_retrieve(
-            key, self._instance_id
+            key, self._instance_id, expected_count
         )
         ok = src_buffers is not None
         if src_buffers is not None:
             try:
+                if event is not None:
+                    event.wait()
                 scatter_cpu_to_paged_kv(
                     kv_caches,
-                    _single_group_block_ids(block_ids),
+                    full_block_ids,
                     src_buffers,
                     blocks_in_chunk,
                     skip_first_n_tokens=skip_first_n_tokens,
                     layout_hints=self._layout_hints,
                     engine_kv_format=self._engine_kv_format,
+                    engine_type=self._engine_type,
                 )
             except (RuntimeError, ValueError, TypeError, IndexError):
                 logger.exception("Failed to scatter retrieved CPU context chunks")
@@ -1030,6 +1036,8 @@ def create_transfer_context(
     The device check is intentionally centralized here. Routing can be
     overridden via the ``mode`` argument or the ``LMCACHE_MP_TRANSFER_MODE``
     environment variable; see :class:`MPTransferMode` for accepted values.
+    ``auto`` resolves to the device spec's declared default
+    (:meth:`DeviceSpec.default_mp_transfer_mode`).
 
     Args:
         kv_caches: Worker KV cache tensors keyed by layer name.
@@ -1038,7 +1046,7 @@ def create_transfer_context(
             ownership and must close it after the context.
         mode: Optional routing override. When ``None`` the value of
             ``LMCACHE_MP_TRANSFER_MODE`` is consulted, defaulting to
-            :attr:`MPTransferMode.AUTO`.
+            :attr:`MPTransferMode.AUTO` (the device-declared default).
         **kwargs: Unused placeholder for forward-compatible factory extension.
 
     Returns:
@@ -1058,6 +1066,13 @@ def create_transfer_context(
         )
     device_type = next(iter(device_types))
     resolved_mode = _resolve_mode(mode)
+    if resolved_mode is MPTransferMode.AUTO:
+        device_spec = get_device_spec(device_type)
+        resolved_mode = (
+            device_spec.default_mp_transfer_mode()
+            if device_spec is not None
+            else MPTransferMode.ENGINE_DRIVEN
+        )
     logger.info(
         "Creating transfer context (device_type=%s, mode=%s)",
         device_type,
@@ -1065,9 +1080,4 @@ def create_transfer_context(
     )
     if resolved_mode is MPTransferMode.LMCACHE_DRIVEN:
         return _build_lmcache_driven_context(device_type, instance_id, req_client)
-    if resolved_mode is MPTransferMode.ENGINE_DRIVEN:
-        return _build_engine_driven_context(instance_id, req_client)
-    # AUTO: dispatch by device type (CUDA -> handle path, else -> data path).
-    if device_type == "cuda":
-        return LMCacheDrivenTransferContext(instance_id, req_client)
     return _build_engine_driven_context(instance_id, req_client)

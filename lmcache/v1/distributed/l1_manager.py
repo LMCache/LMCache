@@ -17,6 +17,7 @@ from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKe
 from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError
 from lmcache.v1.distributed.internal_api import (
+    L1ManagerInterface,
     L1ManagerListener,
     L1ObjectMeta,
     L1OperationResult,
@@ -141,7 +142,7 @@ def _l1_staging_bytes_or_zero(target: "L1Manager | None") -> int:
 # Main classes
 
 
-class L1Manager:
+class L1Manager(L1ManagerInterface):
     """
     Object lifecycle state machine for L1 cache
 

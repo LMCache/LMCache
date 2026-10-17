@@ -104,11 +104,11 @@ class KVFormatSpec(ABC):
     shape (``is_cross_layer`` / ``is_kv_list`` / ``is_layer_list``, exactly one
     true) plus the ``is_mla`` / ``is_hnd`` / ``is_fused_packed`` /
     ``is_two_major`` / ``is_pbs_fused`` / ``is_kv_second_tuple`` /
-    ``is_single_kv`` / ``is_blocked_scale`` modifiers. They default to
-    ``False``, so a spec
-    only declares what applies to it, and every consumer reads them
-    through ``get_spec_class(fmt)`` -- no format lists at call sites. The device
-    kernels keep their own copy in ``csrc/engine_kv_format.h``.
+    ``is_single_kv`` / ``requires_blocked_scale_repacking`` modifiers. They
+    default to ``False``, so a spec only declares what applies to it, and
+    every consumer reads them through ``get_spec_class(fmt)`` -- no format
+    lists at call sites. The device kernels keep their own copy in
+    ``csrc/engine_kv_format.h``.
 
     Method usage by mode -- every spec is consumed through the ``get_*``
     facade in ``gpu_connector.utils``:
@@ -166,8 +166,10 @@ class KVFormatSpec(ABC):
     is_kv_second_tuple: ClassVar[bool] = False
     # Each list entry is one independent K or V tensor rather than a K/V pair.
     is_single_kv: ClassVar[bool] = False
-    # Values and scales occupy separate regions inside each physical block.
-    is_blocked_scale: ClassVar[bool] = False
+    # Each block stores all tokens' values before all tokens' scales, so a
+    # token-major chunk needs the two regions repacked rather than the block
+    # copied whole.
+    requires_blocked_scale_repacking: ClassVar[bool] = False
 
     @classmethod
     def paged_layer_shape(cls, nb: int, bs: int, nh: int, hs: int) -> tuple[int, ...]:

@@ -6,6 +6,7 @@ Overview
 
    request_transport
    multi_l1
+   chunk_size_negotiation
 
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
 vLLM instances reach through a configurable ZMQ or gRPC request transport.
@@ -110,17 +111,18 @@ it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
 instances assembled by ``_build_modules()`` (in ``server.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
-**``server.py``** -- The transport-neutral server compositor. Creates an
-``MPCacheServer``, assembles the engine modules
-(``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
-and/or ``EngineDrivenTransferModule`` depending on
-``--supported-transfer-mode`` — ``lmcache_driven`` (default) or
-``engine_driven`` loads just one,
-``auto`` loads both — plus the blend module when
-``--engine-type blend`` is set). It calls ``create_request_server()`` to build
-the ZMQ or gRPC request server selected by ``--transport``, discovers the
-annotated operations exposed by the loaded modules, and blocks in a keep-alive
-loop.
+**``server.py``** -- The transport-neutral server compositor. It discovers
+``DiscoverableModule`` classes under the ``modules`` package, orders their
+class-referenced ``module_dependencies``, and calls ``create()`` with a shared
+``ModuleBuildContext``. Out-of-tree ``--server-module`` paths explicitly add
+classes to the same graph and lifecycle; their configuration comes from
+``ModuleBuildContext.config_for()``. This includes ``KVEventModule`` and the
+transfer, lookup, management, P2P, and blend modules; opt-in modules under
+``plugin_modules/`` (for example ``qstore``) join the same graph only when
+named by ``--server-module``. The
+compositor then creates the ZMQ or gRPC request server selected by
+``--transport``, registers module handlers and optional transport services,
+and blocks in a keep-alive loop.
 
 **``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
 blend pipeline that enables non-prefix KV cache reuse (e.g. across
@@ -175,7 +177,7 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
        ``--supported-transfer-mode`` is ``engine_driven`` or ``auto``.
        Returns a ``RegisterEngineDrivenContextResponse`` carrying the
        SHM segment name and pool size when the SHM path is in use
-       (empty for the pickle path).
+       (empty for the inline path).
    * - ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
      - SYNC
      - Unregister an engine-driven KV cache context.
@@ -197,12 +199,12 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
    * - ``COMMIT_STORE``
      - BLOCKING
      - (Engine-driven path) Worker commits the chunk's serialized bytes
-       (pickle path) or releases the prepared SHM slot (SHM path) so the
+       (typed inline path) or releases the prepared SHM slot (SHM path) so the
        server can persist into L1 storage.
    * - ``PREPARE_RETRIEVE``
      - BLOCKING
      - (Engine-driven path) Worker asks the server to prepare the
-       retrieval payload for a key. The pickle path returns the bytes
+       retrieval payload for a key. The typed inline path returns the bytes
        inline; the SHM path returns slot info so the worker can read
        from shared memory.
    * - ``COMMIT_RETRIEVE``
@@ -494,7 +496,8 @@ and are grouped by concern: ``metrics/`` (OTel counters and lifecycle
 histograms), ``logging/`` (Python logging handlers, lookup-hash JSONL),
 and ``tracing/`` (OTel spans built from START/END event pairs).
 ``init_observability()`` registers the set selected by CLI flags
-(``--disable-metrics``, ``--disable-logging``, ``--enable-tracing``).
+(``--disable-metrics``, ``--disable-grpc-metrics``,
+``--disable-logging``, ``--enable-tracing``).
 
 **OTel providers** are set up via ``otel_init.py`` before subscribers
 are constructed, so module-level ``get_meter()`` / ``get_tracer()``
@@ -590,7 +593,8 @@ Key Source Files
      - gRPC service binding, handler scheduling, and request-server construction
    * - ``lmcache/v1/multiprocess/modules/``
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
-       ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
+       ``management.py`` (``ManagementModule``), ``kv_events.py``
+       (``KVEventModule``, CPU event subscriptions), ``lmcache_driven_transfer.py``
        (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
        (``EngineDrivenTransferModule``), and ``blend.py``
        (``BlendModule``, the paged-aware blend pipeline selected by
