@@ -120,11 +120,24 @@ The two legs trim opposite ways:
 | Result | leading-ones count via the window-aware fold — truncate at the first gap; `SEGMENTED_PREFIX` additionally retains fully-loaded post-gap chunks (off for recurrent registrations) | keep every chunk whose **entire (read-group × rank) key set** loaded; no contiguity |
 | Why | vLLM consumes the prefix as one `num_computed_tokens`; recurrent state needs unbroken history | chunks relocate independently; the forward recomputes the holes |
 
-A chunk missing **any** rank's or **any** read group's key is dropped whole
-and takes a stale strike (evicted from the matcher at the strike threshold);
-the rest of the request proceeds. The found set's object keys are stashed in
-`Session.extras` for the retrieve; whatever no retrieve consumes is released
-by the session-destroy listener.
+A chunk missing **any** rank's or **any** read group's key is dropped whole;
+the rest of the request proceeds. Classification splits the drop into two
+cases, keyed on `PrefetchResult.found_cells` (what existed at plan time):
+
+- **Partial** — the sparse prefetch is best-effort, so a chunk whose cells
+  were pinned in L2 but did not all land in L1 (reservation shortfall) is
+  classified as partial: **no stale strike**, and its landed keys are released
+  immediately via `storage_manager.finish_read_prefetched`, so an L1-pressure
+  shortfall does not permanently gut the fingerprint index and does not keep
+  unusable rows locked for the read TTL.
+- **Stale** — a chunk with no cells pinned in L2 (genuinely absent) still
+  takes a stale strike and is evicted from the matcher at the strike
+  threshold.
+
+Without `found_cells` (older prefetch controllers) the classifier falls back
+to any-key-loaded as the existence proxy. The found set's object keys are
+stashed in `Session.extras` for the retrieve; whatever no retrieve consumes
+is released by the session-destroy listener.
 
 ## Retrieve (plan-then-execute, all-or-nothing)
 
