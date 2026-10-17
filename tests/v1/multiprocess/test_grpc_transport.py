@@ -9,6 +9,8 @@ from typing import Any, cast
 import importlib
 import subprocess
 import sys
+import threading
+import time
 
 # Third Party
 import pytest
@@ -113,8 +115,10 @@ class _Calls:
     chunk_negotiation: int | None = None
 
 
-@pytest.fixture
-def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
+@pytest.fixture(params=["sync", "aio"])
+def grpc_client(
+    request: pytest.FixtureRequest,
+) -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
     calls = _Calls()
 
     class FakeModules:
@@ -242,13 +246,16 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             )
 
     modules: Any = FakeModules()
-    server = GrpcMultiprocessServer(
-        "grpc://127.0.0.1:0",
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=0,
         max_cpu_workers=2,
         max_gpu_workers=1,
         grpc_server_workers=4,
+        grpc_server_mode=request.param,
     )
-    server.add_modules([modules])
+    server = build_grpc_request_server([modules], config)
     server.start()
     client = GrpcMultiprocessClient(  # type: ignore[abstract]
         f"grpc://127.0.0.1:{server.bound_port}"
@@ -609,3 +616,76 @@ def test_generated_grpc_server_module_call_round_trips(
         payload=b"grpc:hello",
         error="",
     )
+
+
+@pytest.mark.parametrize("grpc_server_mode", ["sync", "aio"])
+def test_grpc_server_keeps_handler_concurrency(grpc_server_mode: str) -> None:
+    """Normal handlers stay within max_cpu_workers, and a client's affinity
+    handlers all run on one worker."""
+    lock = threading.Lock()
+    running = peak = 0
+    affinity_threads: dict[int, set[int]] = {}
+
+    class Module:
+        @request_handler(HandlerType.BLOCKING)
+        def ping(self, instance_id: int | None) -> bool:
+            nonlocal running, peak
+            with lock:
+                running += 1
+                peak = max(peak, running)
+            time.sleep(0.02)
+            with lock:
+                running -= 1
+            return True
+
+        @request_handler(HandlerType.BLOCKING, requires_client_affinity=True)
+        def clear(self, force: bool = False) -> None:
+            affinity_threads.setdefault(int(force), set()).add(threading.get_ident())
+
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=0,
+        max_cpu_workers=2,
+        max_gpu_workers=4,
+        grpc_server_mode=cast(Any, grpc_server_mode),
+    )
+    server = build_grpc_request_server([cast(Any, Module())], config)
+    server.start()
+    url = f"grpc://127.0.0.1:{server.bound_port}"
+    clients = [GrpcMultiprocessClient(url) for _ in range(2)]  # type: ignore[abstract]
+    try:
+        assert all(f.result(5) for f in [clients[0].ping(i) for i in range(8)])
+        for client, force in zip(clients, (False, True), strict=True):
+            for future in [client.clear(force=force) for _ in range(8)]:
+                future.result(5)
+    finally:
+        for client in clients:
+            client.close()
+        server.close()
+
+    assert peak == 2
+    assert [len(threads) for threads in affinity_threads.values()] == [1, 1]
+
+
+def test_aio_server_releases_threads_when_bind_fails() -> None:
+    """A failed bind leaves no event loop or worker threads behind."""
+    before = set(threading.enumerate())
+    config = MPServerConfig(
+        transport="grpc",
+        host="nonexistent.invalid",
+        port=0,
+        max_cpu_workers=2,
+        max_gpu_workers=2,
+        grpc_server_mode="aio",
+    )
+
+    with pytest.raises(RuntimeError):
+        build_grpc_request_server([], config)
+
+    leaked = [
+        thread.name
+        for thread in set(threading.enumerate()) - before
+        if thread.name.startswith("grpc-")
+    ]
+    assert leaked == []
