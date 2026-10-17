@@ -613,3 +613,4 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             # returning and the notify running.
             for evt in delete_done_events:
                 evt.set()
+

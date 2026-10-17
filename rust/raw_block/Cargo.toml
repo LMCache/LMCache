@@ -10,6 +10,8 @@ name = "lmcache_rust_raw_block_io"
 crate-type = ["cdylib"]
 
 [features]
+default = []
+blkio = []
 # Disable extension-module for cargo test so test binaries link to libpython.
 default = ["extension-module"]
 extension-module = ["pyo3/extension-module"]
@@ -18,3 +20,6 @@ extension-module = ["pyo3/extension-module"]
 pyo3 = "0.24"
 libc = "0.2"
 io-uring = "0.7"
+
+[build-dependencies]
+pkg-config = "0.3"
