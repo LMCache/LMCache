@@ -1655,6 +1655,21 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "num_lmcache_extra_cached_tokens": max(0, num_lmcache - num_vllm),
             }
 
+        tracker = self.request_trackers.get(request.request_id)
+        if (
+            tracker is not None
+            and tracker.state == LMCacheMPRequestState.PREFETCHING
+            and tracker.num_lmcache_hit_tokens > 0
+        ):
+            self.scheduler_adapter.free_lookup_locks(
+                token_ids=tracker.get_token_ids(),
+                start=0,
+                end=tracker.num_lmcache_hit_tokens,
+                request_id=request.request_id,
+                cache_salt=tracker.cache_salt,
+                request_configs=tracker.request_configs,
+            )
+
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
 
