@@ -13,16 +13,15 @@ import time
 
 # First Party
 from lmcache import torch_dev
+from lmcache.cli.commands.bench.server_bench import helpers
 from lmcache.cli.commands.bench.server_bench.config import (
     BenchConfig,
     WorkerSpec,
 )
 
 if TYPE_CHECKING:
-    # Third Party
-    import torch
-
     # First Party
+    from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
     from lmcache.v1.multiprocess.transfer_context import TransferContext
     from lmcache.v1.multiprocess.transport.base import RequestClient
 
@@ -133,10 +132,10 @@ class RequestContext:
 
 @dataclass
 class WorkerContext:
-    """Live resources for one simulated Worker."""
+    """Worker routing, owned KV buffers, and their registered transfer context."""
 
     spec: WorkerSpec
-    kv_caches: "dict[str, torch.Tensor]"
+    buffers: "KVCacheBuffers"
     transfer_context: "TransferContext"
 
 
@@ -178,7 +177,7 @@ class ServerBenchClient:
         self._kv_world_size = 0
 
     def start(self) -> None:
-        """Connect, allocate KV resources, and register Workers.
+        """Connect, allocate worker-owned KV buffers, and register Workers.
 
         Raises:
             ValueError: If the KV layout is invalid.
@@ -363,7 +362,7 @@ class ServerBenchClient:
             future = worker.transfer_context.submit_store(
                 request.request_id,
                 key,
-                worker.kv_caches,
+                worker.buffers.kv_caches,
                 block_ids_per_group,
                 event,
                 self._blocks_in_chunk,
@@ -462,7 +461,7 @@ class ServerBenchClient:
             future = worker.transfer_context.submit_retrieve(
                 request.request_id,
                 key,
-                worker.kv_caches,
+                worker.buffers.kv_caches,
                 block_ids_per_group,
                 event,
                 self._blocks_in_chunk,
@@ -527,20 +526,11 @@ class ServerBenchClient:
             return
         self._validate_token_range(request, start_token, token_count)
 
-        # First Party
-        from lmcache.cli.commands.bench.server_bench.helpers import (
-            _zero_fill_client_blocks,
-        )
-
         block_offset = request.block_offset + (start_token // self._block_size)
         num_blocks = token_count // self._block_size
         for worker in self._workers:
             if worker.spec.retrieve_enabled:
-                _zero_fill_client_blocks(
-                    list(worker.kv_caches.values()),
-                    block_offset,
-                    num_blocks,
-                )
+                worker.buffers.zero_blocks(block_offset, num_blocks)
 
     def compute_checksums(
         self,
@@ -550,7 +540,7 @@ class ServerBenchClient:
     ) -> list[str] | None:
         """Compute checksums for a request range.
 
-        Data mode hashes local tensors; handle mode queries the Server.
+        Data mode hashes worker buffers; handle mode queries the Server.
 
         Args:
             request: Request to hash.
@@ -571,7 +561,6 @@ class ServerBenchClient:
 
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
-            _compute_client_checksums,
             _query_checksum,
         )
 
@@ -595,13 +584,7 @@ class ServerBenchClient:
                 if not worker.spec.store_enabled:
                     continue
                 parts.extend(
-                    _compute_client_checksums(
-                        list(worker.kv_caches.values()),
-                        block_offset,
-                        num_blocks,
-                        self._block_size,
-                        self._chunk_size,
-                    )
+                    worker.buffers.checksums(block_offset, num_blocks, self._chunk_size)
                 )
             checksums = parts or None
 
@@ -628,7 +611,10 @@ class ServerBenchClient:
         _send_end_session(req_client, request.request_id)
 
     def close(self) -> None:
-        """Idempotently release resources, including after partial startup."""
+        """Close transfer contexts before releasing their worker-owned buffers.
+
+        Cleanup is idempotent, including after partial startup.
+        """
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
             _DEFAULT_RPC_TIMEOUT_S,
@@ -665,7 +651,7 @@ class ServerBenchClient:
 
         # Drop tensors after contexts release their local transfer resources.
         for worker in self._workers:
-            worker.kv_caches.clear()
+            worker.buffers.release()
 
         if self._req_client is not None:
             try:
@@ -698,9 +684,7 @@ class ServerBenchClient:
             _INSTANCE_ID_BASE,
             _MODEL_NAME,
             DTYPE_MAP,
-            _allocate_kv_cache,
             _get_chunk_size,
-            _is_mla_kv_size,
         )
         from lmcache.utils import EngineType
         from lmcache.v1.gpu_connector.utils import LayoutHints
@@ -708,7 +692,6 @@ class ServerBenchClient:
             format_kvcache_shape_spec,
             parse_kvcache_shape_spec,
         )
-        from lmcache.v1.multiprocess.group_view import EngineGroupInfo
         from lmcache.v1.multiprocess.transfer_context import (
             EngineDrivenTransferContext,
             create_transfer_context,
@@ -799,14 +782,6 @@ class ServerBenchClient:
             dtype_string = "mixed"
 
         layout_hints: LayoutHints = {"kv_layout": "NHD"}
-        engine_group_infos = [
-            EngineGroupInfo(
-                engine_group_id=group_index,
-                layer_indices=tuple(group.layer_indices),
-                tokens_per_block=self._block_size,
-            )
-            for group_index, group in enumerate(layer_groups)
-        ]
 
         self._log(
             "Each request: %d tokens (%d full chunks)"
@@ -830,13 +805,9 @@ class ServerBenchClient:
         )
 
         use_mla = config.use_mla or (
-            isinstance(kv_size_display, int) and _is_mla_kv_size(kv_size_display)
+            isinstance(kv_size_display, int) and kv_size_display == 1
         )
-        if (
-            use_mla
-            and isinstance(kv_size_display, int)
-            and not _is_mla_kv_size(kv_size_display)
-        ):
+        if use_mla and isinstance(kv_size_display, int) and kv_size_display != 1:
             raise ValueError(
                 "--use-mla requires --kvcache-shape-spec with kv_size=1 "
                 "(single-plane MLA group), got kv_size=%s" % kv_size_display
@@ -846,17 +817,15 @@ class ServerBenchClient:
         for rank in range(config.tp_size):
             instance_id = _INSTANCE_ID_BASE + self._client_index * config.tp_size + rank
             kv_worker_id = 0 if use_mla else rank
-            tensors = _allocate_kv_cache(
+            buffers = helpers.KVCacheBuffers(
                 groups=layer_groups,
                 device=None if use_gpu else "cpu",
+                block_size=self._block_size,
             )
-            kv_caches = {
-                "layer.%d" % layer_index: tensor
-                for layer_index, tensor in enumerate(tensors)
-            }
+            kv_caches = buffers.kv_caches
             self._log(
                 "[rank %d] Allocated %d KV tensors on %s"
-                % (rank, len(tensors), tensors[0].device)
+                % (rank, len(kv_caches), next(iter(kv_caches.values())).device)
             )
             # CPU bench tensors can coexist with process-global accelerator
             # support. Keep this workaround local until factory dispatch is
@@ -883,7 +852,7 @@ class ServerBenchClient:
                     store_enabled=(rank == 0) if use_mla else True,
                     retrieve_enabled=True,
                 ),
-                kv_caches=kv_caches,
+                buffers=buffers,
                 transfer_context=transfer_context,
             )
             self._workers.append(worker)
@@ -905,7 +874,7 @@ class ServerBenchClient:
                     self._blocks_in_chunk,
                     _DEFAULT_RPC_TIMEOUT_S,
                     layout_hints=layout_hints,
-                    engine_group_infos=engine_group_infos,
+                    engine_group_infos=buffers.engine_group_infos,
                     engine_type=EngineType.VLLM,
                 )
             except TimeoutError:
