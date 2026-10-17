@@ -1814,8 +1814,8 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                 else:
                     device_ops.single_layer_kv_transfer_sgl(
                         memory_obj.tensor,
-                        self.kvcaches[0][layer_id],
-                        self.kvcaches[1][layer_id],
+                        self.kvcaches[0][layer_id].unsqueeze(1),
+                        self.kvcaches[1][layer_id].unsqueeze(1),
                         slot_mapping[start:end],
                         lmcache_native.TransferDirection.H2D,
                         token_major=True,
@@ -1939,8 +1939,8 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                 else:
                     device_ops.single_layer_kv_transfer_sgl(
                         memory_obj.tensor,
-                        self.kvcaches[0][layer_id],
-                        self.kvcaches[1][layer_id],
+                        self.kvcaches[0][layer_id].unsqueeze(1),
+                        self.kvcaches[1][layer_id].unsqueeze(1),
                         slot_mapping[start:end],
                         lmcache_native.TransferDirection.D2H,
                         token_major=True,
