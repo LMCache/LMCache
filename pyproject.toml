@@ -123,7 +123,6 @@ ignore = [
 "lmcache/sdk/context.py" = ["G004"]
 "lmcache/storage_backend/serde/cachegen_basics.py" = ["G004"]
 "lmcache/utils.py" = ["G004"]
-"lmcache/v1/distributed/l2_adapters/bigtable_l2_adapter.py" = ["G004"]
 "lmcache/v1/storage_backend/connector/__init__.py" = ["G004"]
 "lmcache/v1/storage_backend/connector/base_connector.py" = ["G004"]
 "lmcache/v1/storage_backend/connector/external_adapter.py" = ["G004"]
