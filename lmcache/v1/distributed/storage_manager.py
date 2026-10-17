@@ -1125,6 +1125,10 @@ class StorageManager:
     def add_l2_adapter(self, config: L2AdapterConfigBase) -> int:
         """Blocking function to add a new L2 adapter at runtime. Thread-safe.
 
+        On a controller attachment timeout, cancel the pending attachment,
+        drain any attached store work, and close the adapter before raising.
+        Draining accepted stores may exceed the attachment deadline.
+
         Args:
             config: The adapter configuration.
 
@@ -1136,6 +1140,7 @@ class StorageManager:
                 while L1 spans more than one (hybrid DRAM + Device-DAX, or
                 more than one Device-DAX arena), or a DAX device is already
                 mapped by L1 or another L2 adapter.
+            RuntimeError: If a controller did not attach the adapter in time.
         """
         with self._lifecycle_lock:
             # Mirror of the check in add_l1_devdax_device: a single-region
@@ -1170,8 +1175,21 @@ class StorageManager:
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
             owner = self._l1_by_tag[config.affinity_tag].l1_manager_id
-            self._store_controllers[owner].add_adapter(adapter_id, adapter, descriptor)
-            self._prefetch_controller.add_adapter(adapter_id, adapter, descriptor)
+            store_controller = self._store_controllers[owner]
+            store_attached = False
+            try:
+                store_controller.add_adapter(adapter_id, adapter, descriptor)
+                store_attached = True
+                self._prefetch_controller.add_adapter(adapter_id, adapter, descriptor)
+            except RuntimeError:
+                if store_attached:
+                    # Accepted stores must finish before their adapter is closed.
+                    store_controller.request_remove_adapter(adapter_id).wait()
+                with self._adapters_lock:
+                    self._l2_adapters.pop(adapter_id)
+                    self._adapter_descriptors.pop(adapter_id)
+                adapter.close()
+                raise
             if self._should_enable_l2_eviction(adapter, config.eviction_config):
                 assert config.eviction_config is not None  # make linter happy
                 self._l2_eviction_controller.add_adapter_state(
