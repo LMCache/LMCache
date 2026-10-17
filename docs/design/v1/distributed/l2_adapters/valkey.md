@@ -337,9 +337,14 @@ JSON schema (CLI `--l2-adapter`):
   "tls_enable": true,
   "request_timeout": 5.0,
   "connection_timeout": 10.0,
-  "max_capacity_gb": 0
+  "max_capacity_gb": 0,
+  "transport": "tcp"
 }
 ```
+
+`"transport": "rdma"` moves values by RDMA instead of in the RESP stream,
+with the `rdma_provider` and `rdma_interface` fields; see the
+[RDMA transport design doc](valkey_rdma.md).
 
 ## Non-goals
 

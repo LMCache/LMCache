@@ -294,6 +294,7 @@ class ValkeyWorkerPool:
                 glide_sync.GlideClusterClientConfiguration
             ):
                 cfg_kwargs["client_info_tag"] = _lmcache_client_info_tag()
+            cfg_kwargs.update(self._client_config_extras(glide_sync))
             config = glide_sync.GlideClusterClientConfiguration(**cfg_kwargs)
             client = glide_sync.GlideClusterClient.create(config)
         else:
@@ -320,6 +321,7 @@ class ValkeyWorkerPool:
                 glide_sync.GlideClientConfiguration
             ):
                 cfg_kwargs["client_info_tag"] = _lmcache_client_info_tag()
+            cfg_kwargs.update(self._client_config_extras(glide_sync))
             config = glide_sync.GlideClientConfiguration(**cfg_kwargs)
             client = glide_sync.GlideClient.create(config)
 
@@ -334,6 +336,14 @@ class ValkeyWorkerPool:
                 )
 
         return client
+
+    def _client_config_extras(self, glide_sync: Any) -> dict[str, Any]:
+        """Extra glide client configuration arguments; a subclass hook.
+
+        Called on the worker thread building its client, with the lazily
+        imported ``glide_sync`` module.
+        """
+        return {}
 
     @property
     def has_buffer_get(self) -> bool:
