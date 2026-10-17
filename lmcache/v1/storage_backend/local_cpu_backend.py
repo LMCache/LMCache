@@ -15,6 +15,7 @@ from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
+from lmcache.v1 import pcp_shard
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
@@ -353,6 +354,11 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # Effective memory: min(configured_size, available_memory - reserve_size)
         if system_available_memory_gb > 0:
             max_usable_memory = max(0, system_available_memory_gb - reserve_cpu_size)
+            # PCP shard mode: all ranks of the node allocate: each gets its share.
+            if metadata is not None and pcp_shard.shard_store_enabled(
+                config, metadata.use_mla, metadata.world_size
+            ):
+                max_usable_memory = max_usable_memory / metadata.world_size
             effective_cpu_size = min(configured_cpu_size, max_usable_memory)
             logger.info(
                 "Adjusted CPU memory size from %.2f GB "
@@ -393,6 +399,21 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 cpu_size = config.get_extra_config_value(
                     "first_rank_max_local_cpu_size", cpu_size
                 )
+
+            # PCP shard mode: every rank holds 1/world_size of the chunks: split the
+            # configured size (or use pcp_shard_max_local_cpu_size per rank).
+            if save_only_first_rank and pcp_shard.shard_store_enabled(
+                config, metadata.use_mla, metadata.world_size
+            ):
+                per_rank = config.get_extra_config_value(
+                    pcp_shard.PER_RANK_CPU_KEY, None
+                )
+                cpu_size = (
+                    float(per_rank)
+                    if per_rank is not None
+                    else config.max_local_cpu_size / metadata.world_size
+                )
+                logger.info("PCP shard store: L1 size per rank: %.2f GB", cpu_size)
 
         # Detect the numa mapping
         numa_mapping = NUMADetector.get_numa_mapping(config)
