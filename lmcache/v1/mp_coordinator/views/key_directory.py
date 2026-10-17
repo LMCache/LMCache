@@ -34,6 +34,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventType,
 )
 from lmcache.v1.mp_coordinator.blend_index import BlendIndex, BlendIndexStats
+from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
@@ -172,6 +173,7 @@ class KeyDirectory(View):
         self._blend_lookup_enabled = False
         self._blend_chunk_size: int | None = None
         self._blend_probe_stride = 1
+        register_metric_source(self)
 
     @classmethod
     def from_config(

@@ -20,7 +20,7 @@ Runtime test gating:
 
 # Standard
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import os
 import shutil
 import time
@@ -45,6 +45,10 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.lmcache_hf3fs import LMCacheHf3fsClient
 
 logger = init_logger(__name__)
 
@@ -722,6 +726,25 @@ class TestHf3fsNativeConnector:
         assert client is not None
         # Verify the client can be closed without error
         client.close()
+
+    def test_concurrent_same_key_stores_publish_whole_object(
+        self, hf3fs_native_client: tuple["LMCacheHf3fsClient", str, str]
+    ) -> None:
+        """Concurrent writers publish one complete value without leftover files."""
+        client, _, base_path = hf3fs_native_client
+        object_key = create_object_key(1102)
+        key = _object_key_to_string(object_key)
+        payloads = [bytes([i]) * (4 * 1024 * 1024) for i in range(8)]
+        client.submit_batch_set(
+            [key] * len(payloads), [memoryview(data) for data in payloads]
+        )
+        assert _wait_for_completions(client)[0][1]
+        result = bytearray(len(payloads[0]))
+        client.submit_batch_get([key], [memoryview(result)])
+        assert _wait_for_completions(client)[0][3] == [True]
+        assert bytes(result) in payloads
+        path = Path(base_path) / _object_key_to_filename(object_key)
+        assert list(Path(base_path).iterdir()) == [path]
 
     def test_single_put_get_roundtrip(self, hf3fs_native_client):
         """Test single key write-read cycle with data verification."""
