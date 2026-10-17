@@ -374,12 +374,8 @@ class TestMultiRoundChatStep:
         # Next wakeup at 1 * 0.1 = 0.1
         assert abs(result - 0.1) < 1e-9
         assert w._global_index == 1
-        # Wait for task
-        if w._pending_tasks:
-            # Standard
-            import asyncio
-
-            await asyncio.gather(*w._pending_tasks)
+        while await w.step(cfg.duration) >= 0:
+            pass
         assert sender.send_request.call_count == 1
 
     @pytest.mark.asyncio
@@ -422,15 +418,8 @@ class TestMultiRoundChatStep:
 
         # Dispatch one request at time 0
         await w.step(0.0)
-        assert len(w._pending_tasks) > 0
-
-        # Standard
-        import asyncio
-
-        # Let task finish
-        await asyncio.gather(*w._pending_tasks)
-
-        # Now past duration with no pending → done
+        # The duration cutoff waits for the already dispatched request.
+        assert await w.step(1.0) == 0.0
         result = await w.step(1.0)
         assert result == -1.0
 
