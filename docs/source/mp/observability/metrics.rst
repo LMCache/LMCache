@@ -299,6 +299,11 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
    * - ``lmcache_mp.lookup_hit_l2_keys``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Hit keys loaded from L2 into L1.
+   * - ``lmcache_mp.lookup_apc_covered``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Tokens the engine's prefix cache already held when the lookup ran.
+       LMCache skips them, so they are excluded from ``lookup_requested``
+       and ``lookup_hit``.
    * - ``lmcache_mp.lookups``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Completed lookups (denominator for ``lookup_early_exit``).
@@ -334,6 +339,12 @@ per tenant or isolation domain); drop it at scrape time with
     # Share of hit tokens L1 could serve on its own:
     rate(lmcache_mp_lookup_hit_l1_tokens_total[5m])
     / rate(lmcache_mp_lookup_hit_tokens_total[5m])
+
+    # Share of prompt tokens served by the engine's prefix cache or LMCache:
+    (rate(lmcache_mp_lookup_apc_covered_tokens_total[5m])
+     + rate(lmcache_mp_lookup_hit_tokens_total[5m]))
+    / (rate(lmcache_mp_lookup_apc_covered_tokens_total[5m])
+       + rate(lmcache_mp_lookup_requested_tokens_total[5m]))
 
     # Fraction of lookups that early-exited, by reason:
     sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)

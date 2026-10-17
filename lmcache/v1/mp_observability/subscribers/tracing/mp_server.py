@@ -291,6 +291,10 @@ class MPServerTracingSubscriber(EventSubscriber):
                 root_span.set_attribute("l1_hit_rate", l1_hit_tokens / denom)
                 root_span.set_attribute("l2_hit_rate", l2_hit_tokens / denom)
                 root_span.set_attribute(
+                    "apc_covered_tokens",
+                    int(event.metadata.get("apc_covered_tokens", 0)),
+                )
+                root_span.set_attribute(
                     "l1_hit_keys", int(event.metadata.get("l1_hit_keys", 0))
                 )
                 root_span.set_attribute(

@@ -24,14 +24,14 @@ from lmcache.v1.multiprocess.modules.lookup import LookupModule
 CHUNK_SIZE = 256
 
 
-def _lookup_key(world_size: int) -> IPCCacheServerKey:
+def _lookup_key(world_size: int, start_chunks: int = 0) -> IPCCacheServerKey:
     """A lookup-side IPC key (worker_id None -> expand over all workers)."""
     return IPCCacheServerKey(
         model_name="m",
         world_size=world_size,
         worker_id=None,
         token_ids=(0,),
-        start=0,
+        start=start_chunks * CHUNK_SIZE,
         end=0,
         request_id="req-1",
         cache_salt="salt",
@@ -69,6 +69,7 @@ def _end_metadata(
     l2_rows: list[str] | None = None,
     layout_found: bool = True,
     group_layouts_found: bool = True,
+    start_chunks: int = 0,
 ) -> dict:
     """Drive a full lookup/poll cycle and return the END event's metadata.
 
@@ -85,13 +86,15 @@ def _end_metadata(
         layout_found: False triggers the ``no_gpu_context`` early exit.
         group_layouts_found: False triggers the ``no_group_layout_descs``
             early exit.
+        start_chunks: Engine-covered chunks the key skips; the hit patterns
+            then cover only the chunks after them.
 
     Returns:
         The metadata dict of the published ``MP_LOOKUP_PREFETCH_END`` event.
     """
     windows = windows if windows is not None else [-1]
     num_rows = len(windows) * world_size
-    miss_rows = ["0" * len(chunk_hashes)] * num_rows
+    miss_rows = ["0" * (len(chunk_hashes) - start_chunks)] * num_rows
     l1_rows = l1_rows if l1_rows is not None else miss_rows
     l2_rows = l2_rows if l2_rows is not None else miss_rows
 
@@ -121,7 +124,7 @@ def _end_metadata(
     ctx.storage_manager.query_prefetch_status.return_value = _result(l1_rows, l2_rows)
 
     module = LookupModule(ctx)
-    module.lookup(_lookup_key(world_size), tp_size=1)
+    module.lookup(_lookup_key(world_size, start_chunks), tp_size=1)
     module.query_prefetch_status("req-1")
 
     for call in ctx.event_bus.publish.call_args_list:
@@ -206,6 +209,49 @@ def test_end_event_splits_hits_by_tier(
 
 
 @pytest.mark.parametrize(
+    ("l1_row", "l2_row", "l1_chunks", "l2_chunks"),
+    [
+        ("11", "00", 2, 0),
+        ("00", "11", 0, 2),
+        ("10", "01", 1, 1),
+        ("00", "00", 0, 0),
+    ],
+    ids=["all_l1", "all_l2", "l2_extends_l1", "cold_miss"],
+)
+def test_engine_covered_prefix_is_not_an_l1_hit(l1_row, l2_row, l1_chunks, l2_chunks):
+    """A prefix skipped via ``key.start`` is never looked up, so it is kept
+    out of the hit-rate fields and reported as ``apc_covered_tokens``; only
+    ``found_count`` stays absolute for the engine."""
+    meta = _end_metadata(
+        chunk_hashes=[f"c{i}".encode() for i in range(5)],
+        l1_rows=[l1_row],
+        l2_rows=[l2_row],
+        start_chunks=3,
+    )
+
+    assert meta["apc_covered_tokens"] == 3 * CHUNK_SIZE
+    assert meta["requested_tokens"] == 2 * CHUNK_SIZE
+    assert meta["l1_hit_tokens"] == l1_chunks * CHUNK_SIZE
+    assert meta["l2_hit_tokens"] == l2_chunks * CHUNK_SIZE
+    assert meta["l1_hit_tokens"] + meta["l2_hit_tokens"] == meta["hit_tokens"]
+    assert meta["found_count"] == 3 + l1_chunks + l2_chunks
+
+
+def test_fully_engine_covered_lookup_reports_no_hit_tokens():
+    """When the engine covers every chunk nothing is looked up, so nothing
+    is requested or hit; the engine still sees the covered prefix."""
+    meta = _end_metadata(
+        chunk_hashes=[f"c{i}".encode() for i in range(4)], start_chunks=4
+    )
+
+    assert meta["apc_covered_tokens"] == 4 * CHUNK_SIZE
+    assert meta["requested_tokens"] == 0
+    assert meta["hit_tokens"] == 0
+    assert meta["l1_hit_tokens"] == 0
+    assert meta["found_count"] == 4
+
+
+@pytest.mark.parametrize(
     ("kwargs", "reason"),
     [
         ({"chunk_hashes": [b"c0"], "layout_found": False}, "no_gpu_context"),
@@ -223,6 +269,7 @@ def test_early_exit_reason(kwargs, reason):
 
     assert meta["early_exit_reason"] == reason
     assert meta["requested_tokens"] == 0
+    assert meta["apc_covered_tokens"] == 0
     assert meta["hit_tokens"] == 0
     assert meta["l1_hit_keys"] == 0
     assert meta["l2_hit_keys"] == 0

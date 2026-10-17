@@ -80,6 +80,11 @@ breakdown of ``hit_tokens`` (prefix / segmented-prefix / non-prefix).
      - ``l2_hit_tokens / requested_tokens``; ``0.0`` when the denominator
        is zero.  Sums with ``l1_hit_rate`` to ``hit_rate`` up to float
        rounding.  ``request`` span only.
+   * - ``apc_covered_tokens``
+     - ``int``
+     - Prefix tokens the engine's prefix cache already held.  The lookup
+       skips them, so they are not in ``requested_tokens`` or any hit
+       count.  ``request`` span only.
    * - ``l1_hit_keys``
      - ``int``
      - Hit keys (one per object group, kv rank and chunk) L1 already

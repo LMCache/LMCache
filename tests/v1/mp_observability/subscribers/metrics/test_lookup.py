@@ -396,6 +396,33 @@ class TestAttributionCounters:
         assert delta["lmcache_mp.lookups"] == 1
         assert delta.get("lmcache_mp.lookup_early_exit", 0) == 0
 
+    def test_apc_covered_has_its_own_counter(self, bus, subscriber, snapshot):
+        """The engine-covered prefix lands only in lookup_apc_covered."""
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id="req-apc-1",
+                metadata={
+                    "found_count": 6,
+                    "requested_tokens": 512,
+                    "apc_covered_tokens": 1024,
+                    "hit_tokens": 512,
+                    "l1_hit_tokens": 256,
+                    "l2_hit_tokens": 256,
+                    "early_exit_reason": "",
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        delta = snapshot()
+        assert delta["lmcache_mp.lookup_apc_covered"] == 1024
+        assert delta["lmcache_mp.lookup_requested"] == 512
+        assert delta["lmcache_mp.lookup_hit"] == 512
+        assert delta["lmcache_mp.lookup_hit_l1"] == 256
+
     def test_early_exit_labeled_by_reason(self, bus, subscriber):
         """Early exits count once on the reason-labeled series (with the
         model/salt attrs preserved) and still count as a completed lookup."""

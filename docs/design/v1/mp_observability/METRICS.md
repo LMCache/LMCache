@@ -241,6 +241,7 @@ scrape time with `metric_relabel_configs` if storage cost matters.
 | `lmcache_mp.lookup_hit_l2` | `lmcache_mp_lookup_hit_l2_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l2_hit_tokens` (0 if absent); `l1 + l2 == lookup_hit` per event |
 | `lmcache_mp.lookup_hit_l1_keys` | `lmcache_mp_lookup_hit_l1_keys_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l1_hit_keys` (0 if absent) |
 | `lmcache_mp.lookup_hit_l2_keys` | `lmcache_mp_lookup_hit_l2_keys_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l2_hit_keys` (0 if absent) |
+| `lmcache_mp.lookup_apc_covered` | `lmcache_mp_lookup_apc_covered_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+apc_covered_tokens` (0 if absent); excluded from `lookup_requested` and `lookup_hit` |
 | `lmcache_mp.lookups` | `lmcache_mp_lookups_requests_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+1` per completed lookup |
 | `lmcache_mp.lookup_early_exit` | `lmcache_mp_lookup_early_exit_requests_total` | Counter (attrs: `model_name`, `cache_salt`, `reason` ∈ {`no_gpu_context`, `empty_chunk_hashes`, `no_group_layout_descs`}) | `MP_LOOKUP_PREFETCH_END` | `+1` when `early_exit_reason != ""` |
 
