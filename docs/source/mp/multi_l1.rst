@@ -23,6 +23,8 @@ For example, use a dedicated Device-DAX device and a GDS-capable directory:
        --l1-manager '{"type":"GDS","tag":"gds","size_gb":32,"path":"/mnt/nvme/lmcache"}' \
        --l2-adapter '{"type":"fs","base_path":"/mnt/archive/lmcache","affinity_tag":"dax"}'
 
+For an end-to-end CXL / Device-DAX deployment walkthrough see
+:ref:`mp-devdax-l1`.
 A Device-DAX L1 in this interface has no implicit DRAM pool. Its size applies
 to the mapped device. Use dedicated, physically disjoint regions: different
 Device-DAX paths can alias the same CXL memory. Independent managers must not
