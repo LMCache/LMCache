@@ -71,7 +71,7 @@ MP server (store/lookup)
   Coordinator health loop (every health_check_interval)
         │
         ▼
-  evict_stale() reaps a timed-out instance
+  the health loop reaps a timed-out instance
     └─ EventGate.drop_instance → broadcaster.fence_instance
          ├─ KeyDirectory:      its L1 placements
          └─ CacheUsageManager: its L1 bytes
