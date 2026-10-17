@@ -1283,6 +1283,11 @@ class StorageManager:
         """Whether owner metadata is required to resolve a serving read."""
         return len(self._l1_managers_by_id) > 1
 
+    @property
+    def read_ttl_seconds(self) -> int:
+        """Shortest read-lock TTL across L1 tiers, for stale lookup rejection."""
+        return min(m.config.read_ttl_seconds for m in self._l1_managers_by_id.values())
+
     def report_status(self) -> dict:
         """Return per-L1 status and aggregate health; retain single-L1 field names."""
         managers = list(self._l1_managers_by_id.values())

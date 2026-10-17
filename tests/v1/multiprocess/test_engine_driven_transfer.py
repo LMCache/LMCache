@@ -1420,6 +1420,8 @@ def server_module_factory(
         )
 
         session_cls.return_value.get_or_create.return_value = mock_session
+        session_cls.return_value.get.return_value = mock_session
+        mock_session.lookup_expired.return_value = False
         if storage_manager_config is None:
             storage_manager_config = MagicMock()
             # GDS L1 is off in these tests. A bare MagicMock would auto-vivify
