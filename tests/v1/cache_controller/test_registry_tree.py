@@ -9,7 +9,9 @@ Tests verify that the object-based locking mechanism provides:
 """
 
 # Standard
+from collections.abc import Iterator, MutableMapping
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any, cast
 import threading
 import time
 
@@ -20,6 +22,77 @@ from lmcache.v1.cache_controller.utils import (
     RegistryTree,
     WorkerNode,
 )
+
+
+class _GatedDict(MutableMapping[Any, Any]):
+    def __init__(self, values: dict[Any, Any]) -> None:
+        self._values = dict(values)
+        self.iteration_paused = threading.Event()
+        self.mutation_attempted = threading.Event()
+        self.mutation_finished = threading.Event()
+
+    def __getitem__(self, key: Any) -> Any:
+        return self._values[key]
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        self._values[key] = value
+
+    def __delitem__(self, key: Any) -> None:
+        del self._values[key]
+
+    def __iter__(self) -> Iterator[Any]:
+        for index, key in enumerate(self._values):
+            yield key
+            if index == 0:
+                self.iteration_paused.set()
+                self.mutation_attempted.wait(timeout=2)
+                # Let an unlocked writer mutate; otherwise resume the locked reader.
+                self.mutation_finished.wait(timeout=0.5)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+
+def _read_all_worker_nodes_during_registration(
+    registry: RegistryTree,
+    mapping: _GatedDict,
+    instance_id: str,
+    worker_id: int,
+) -> tuple[list[tuple[str, WorkerNode]], list[Exception]]:
+    errors = []
+
+    def register_worker() -> None:
+        if not mapping.iteration_paused.wait(timeout=2):
+            return
+        mapping.mutation_attempted.set()
+        try:
+            registry.register_worker(
+                instance_id=instance_id,
+                worker_id=worker_id,
+                ip="127.0.0.1",
+                port=8001,
+                peer_init_url=None,
+                socket=None,
+                registration_time=time.time(),
+            )
+        except Exception as error:
+            errors.append(error)
+        finally:
+            mapping.mutation_finished.set()
+
+    writer = threading.Thread(target=register_worker, daemon=True)
+    writer.start()
+    try:
+        result = registry.get_all_worker_nodes_cached(timeout_seconds=0)
+    except Exception as error:
+        errors.append(error)
+        result = []
+
+    writer.join(timeout=3)
+    assert not writer.is_alive(), "Writer thread did not finish"
+    assert mapping.mutation_attempted.is_set()
+    assert mapping.mutation_finished.is_set()
+    return result, errors
 
 
 class TestWorkerNodeLocking:
@@ -600,6 +673,47 @@ class TestRegistryTreeFineGrainedLocking:
             t.join()
 
         assert not errors, "Errors occurred: %s" % errors
+
+    def test_get_all_worker_nodes_snapshots_instances_under_lock(self) -> None:
+        registry = RegistryTree()
+        existing_worker = registry.register_worker(
+            instance_id="instance_0",
+            worker_id=0,
+            ip="127.0.0.1",
+            port=8000,
+            peer_init_url=None,
+            socket=None,
+            registration_time=time.time(),
+        )
+        gated_instances = _GatedDict(registry.instances)
+        registry.instances = cast(dict[str, InstanceNode], gated_instances)
+        result, errors = _read_all_worker_nodes_during_registration(
+            registry, gated_instances, "instance_1", 1
+        )
+        assert not errors
+        assert result == [("instance_0", existing_worker)]
+        assert registry.get_worker("instance_1", 1) is not None
+
+    def test_get_all_worker_nodes_snapshots_workers_under_lock(self) -> None:
+        registry = RegistryTree()
+        existing_worker = registry.register_worker(
+            instance_id="instance_0",
+            worker_id=0,
+            ip="127.0.0.1",
+            port=8000,
+            peer_init_url=None,
+            socket=None,
+            registration_time=time.time(),
+        )
+        instance = registry.instances["instance_0"]
+        gated_workers = _GatedDict(instance.workers)
+        instance.workers = cast(dict[int, WorkerNode], gated_workers)
+        result, errors = _read_all_worker_nodes_during_registration(
+            registry, gated_workers, "instance_0", 1
+        )
+        assert not errors
+        assert result == [("instance_0", existing_worker)]
+        assert registry.get_worker("instance_0", 1) is not None
 
     def test_instance_cleanup_on_last_worker_deregister(self):
         """Test that empty instances are cleaned up correctly."""

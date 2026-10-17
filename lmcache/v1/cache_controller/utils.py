@@ -531,11 +531,17 @@ class RegistryTree:
     def _get_all_worker_nodes_fresh(self) -> list[tuple[str, WorkerNode]]:
         """Internal method to get fresh (instance_id, WorkerNode) tuples
         without cache."""
-        # Snapshot to avoid RuntimeError if dict changes during iteration
-        result = []
-        for instance_id, instance_node in self.instances.items():
-            for worker_node in instance_node.workers.values():
-                result.append((instance_id, worker_node))
+        # Snapshot each level under its own lock without holding both together.
+        with self._rwlock.read_lock(timeout=10):
+            instances_snapshot = list(self.instances.items())
+
+        result: list[tuple[str, WorkerNode]] = []
+        for instance_id, instance_node in instances_snapshot:
+            with instance_node._rwlock.read_lock(timeout=10):
+                workers_snapshot = list(instance_node.workers.values())
+            result.extend(
+                (instance_id, worker_node) for worker_node in workers_snapshot
+            )
         return result
 
     def update_heartbeat(
