@@ -25,8 +25,9 @@ in-process mode and as a historical reference while MP closes any remaining
 gaps; where a feature already has an MP equivalent, prefer the MP docs.
 
 The corresponding serving-engine entry points live under
-``lmcache.inprocess.integration``. The previous ``lmcache.integration`` import
-paths remain available as compatibility aliases for existing deployments.
+``lmcache.inprocess.integration``. The previous vLLM import paths remain
+temporarily available for compatibility with upstream vLLM; other in-process
+integrations use only the new package boundary.
 
 .. toctree::
    :hidden:
