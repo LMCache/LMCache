@@ -7,6 +7,9 @@ from __future__ import annotations
 # Standard
 from typing import TYPE_CHECKING
 
+# First Party
+from lmcache.v1.multiprocess.transport.auth import load_request_authentication
+
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.multiprocess.config import MPServerConfig
@@ -34,6 +37,9 @@ def create_request_server(
         )
 
         return build_grpc_request_server(modules, mp_config)
+
+    if load_request_authentication(mp_config.api_key_files).enabled:
+        raise ValueError("Request API-key authentication is not yet supported by ZMQ")
 
     # First Party
     from lmcache.v1.multiprocess.transport.zmq_impl.server import (

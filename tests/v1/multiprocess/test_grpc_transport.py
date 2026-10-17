@@ -435,12 +435,14 @@ def test_build_grpc_request_server_uses_configured_server_workers(
             max_cpu_workers: int,
             max_gpu_workers: int,
             grpc_server_workers: int,
+            authentication: Any,
         ) -> None:
             self.args = (
                 bind_url,
                 max_cpu_workers,
                 max_gpu_workers,
                 grpc_server_workers,
+                authentication,
             )
             self.modules: Any = None
 
@@ -466,7 +468,8 @@ def test_build_grpc_request_server_uses_configured_server_workers(
         build_grpc_request_server(modules, config),
     )
 
-    assert server.args == ("grpc://127.0.0.1:6000", 2, 3, 7)
+    assert server.args[:4] == ("grpc://127.0.0.1:6000", 2, 3, 7)
+    assert server.args[4].enabled is False
     assert server.modules is modules
 
 
