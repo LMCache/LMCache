@@ -18,7 +18,7 @@ import sys
 import pytest
 
 # First Party
-from lmcache.v1.platform import resolve_device_ops
+from lmcache.v1.platform import resolve_device_ops, synchronize_device
 from lmcache.v1.platform._device_detect import _detect_device, get_device_spec
 from lmcache.v1.platform.devices.neuron import (
     NeuronDeviceSpec,
@@ -204,6 +204,20 @@ def test_shims_are_idempotent() -> None:
     first = stub.synchronize
     _install_device_module_shims(stub)
     assert stub.synchronize is first
+
+
+def test_synchronize_device_reaches_the_shim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``synchronize_device`` passes the device, so the shim must accept it."""
+    # Third Party
+    import torch
+
+    neuron = SimpleNamespace()
+    _install_device_module_shims(neuron)
+    monkeypatch.setattr(torch, "neuron", neuron, raising=False)
+    device = SimpleNamespace(type="neuron", index=0)
+    synchronize_device(device)  # type: ignore[arg-type]
 
 
 def test_set_device_accepts_and_ignores_a_core_index() -> None:
