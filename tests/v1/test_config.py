@@ -769,7 +769,7 @@ def test_lmcache_get_or_create_config_validates_pd_settings():
 
 def test_sglang_lmcache_get_config_validates_pd_settings(tmp_path):
     # First Party
-    from lmcache.integration.sglang.utils import lmcache_get_config
+    from lmcache.inprocess.integration.sglang.utils import lmcache_get_config
 
     config_path = tmp_path / "lmcache_pd.yaml"
     config_path.write_text(

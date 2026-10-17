@@ -15,10 +15,7 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
-from lmcache.integration.sglang.sglang_adapter import (
-    LoadMetadata,
-    StoreMetadata,
-)
+from lmcache.integration.sglang.metadata import LoadMetadata, StoreMetadata
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_MQ_TIMEOUT,

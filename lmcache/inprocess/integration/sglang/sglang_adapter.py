@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional
 import uuid
 
@@ -13,7 +12,8 @@ import torch.distributed as dist
 
 # First Party
 from lmcache import torch_device_type
-from lmcache.integration.sglang.utils import ENGINE_NAME, lmcache_get_config
+from lmcache.inprocess.integration.sglang.utils import ENGINE_NAME, lmcache_get_config
+from lmcache.integration.sglang.metadata import LoadMetadata, StoreMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import (
     CacheStoreEvent,
@@ -44,24 +44,6 @@ def _model_uses_mla(model_config: ModelConfig) -> bool:
     """
     attention_arch = getattr(model_config, "attention_arch", None)
     return getattr(attention_arch, "name", attention_arch) == "MLA"
-
-
-@dataclass
-class StoreMetadata:
-    last_node: object
-    token_ids: List[int]
-    kv_indices: torch.Tensor
-    offset: int
-    request_id: str = ""
-
-
-@dataclass
-class LoadMetadata:
-    token_ids: List[int]
-    slot_mapping: torch.Tensor
-    offset: int
-    prefix_pad: int = 0
-    request_id: str = ""
 
 
 def init_lmcache_engine(

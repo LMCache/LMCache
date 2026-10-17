@@ -31,7 +31,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.integration.tensorrt_llm.utils import (
+from lmcache.inprocess.integration.tensorrt_llm.utils import (
     ENGINE_NAME,
     create_trtllm_metadata,
     lmcache_get_config,
