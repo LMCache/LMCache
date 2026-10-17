@@ -1,0 +1,250 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-28 09:40+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/lazy_offload.rst:2
+msgid "Lazy KV Cache Offload"
+msgstr "惰性 KV Cache 卸载"
+
+#: ../../source/mp/lazy_offload.rst:4
+msgid ""
+"Lazy offload lets the vLLM ``LMCacheMPConnector`` defer GPU-to-LMCache "
+"store operations instead of submitting them on the step that computed the"
+" KV. It moves store work out of the normal per-step path, which can "
+"improve serving throughput when immediate cache availability is less "
+"important than reducing per-request offload overhead."
+msgstr "懒惰卸载允许 vLLM ``LMCacheMPConnector`` 延迟 GPU 到 LMCache 的存储操作，而不是在计算 KV 的步骤中提交它们。它将存储工作移出正常的每步路径，这可以在立即缓存可用性不如减少每个请求的卸载开销重要时提高服务吞吐量。"
+
+#: ../../source/mp/lazy_offload.rst:10
+msgid ""
+"Two drain policies decide when a buffered store is submitted. "
+"``EVICTION_AWARE`` is the default: it releases a store when the GPU "
+"blocks holding its data approach vLLM's eviction head, so KV that is "
+"about to be lost is offloaded and KV that stays resident on the GPU is "
+"not. ``FIFO``, the count-triggered policy described in the rest of this "
+"page, remains available by setting "
+"``lmcache.mp.lazy_offload_policy=FIFO``. The eviction-aware knobs are "
+"listed in :doc:`configuration`."
+msgstr "两个排水策略决定了何时提交缓冲存储。``EVICTION_AWARE`` 是默认策略：当持有其数据的 GPU 块接近 vLLM 的逐出头时，它会释放存储，因此即将丢失的 KV 会被卸载，而保留在 GPU 上的 KV 则不会。通过设置 ``lmcache.mp.lazy_offload_policy=FIFO``，可以使用页面其余部分描述的计数触发策略 ``FIFO``。逐出感知的控制选项列在 :doc:`configuration` 中。"
+
+#: ../../source/mp/lazy_offload.rst:18
+msgid ""
+"Lazy offload requires vLLM prefix caching "
+"(``enable_prefix_caching=True``): eviction detection reads block hashes, "
+"which only exist while prefix caching maintains them."
+msgstr "懒惰卸载需要 vLLM 前缀缓存（``enable_prefix_caching=True``）：逐出检测读取块哈希，这些哈希仅在前缀缓存维护它们时存在。"
+
+#: ../../source/mp/lazy_offload.rst:22
+msgid ""
+"This feature is disabled by default and is available only with vLLM and "
+"``LMCacheMPConnector``. The LMCache server needs no additional flags."
+msgstr "此功能默认是禁用的，仅在使用 vLLM 和 ``LMCacheMPConnector`` 时可用。LMCache 服务器无需额外的标志。"
+
+#: ../../source/mp/lazy_offload.rst:26
+msgid "Enable Lazy Offload"
+msgstr "启用懒惰卸载"
+
+#: ../../source/mp/lazy_offload.rst:28
+msgid ""
+"Pass the lazy-offload options in vLLM's ``kv_connector_extra_config``. "
+"The example below selects the FIFO policy explicitly, starting offload "
+"after 20 requests have finished and selecting up to 10 requests per "
+"batch; omit ``lmcache.mp.lazy_offload_policy`` to get the eviction-aware "
+"default:"
+msgstr "在 vLLM 的 ``kv_connector_extra_config`` 中传递懒加载卸载选项。下面的示例明确选择 FIFO 策略，在 20 个请求完成后开始卸载，并每批选择最多 10 个请求；省略 ``lmcache.mp.lazy_offload_policy`` 将获得考虑逐出的默认值："
+
+#: ../../source/mp/lazy_offload.rst:39
+msgid "The options are:"
+msgstr "选项如下："
+
+#: ../../source/mp/lazy_offload.rst:45
+msgid "Key"
+msgstr "键"
+
+#: ../../source/mp/lazy_offload.rst:46
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/mp/lazy_offload.rst:47
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/mp/lazy_offload.rst:48
+msgid "``lmcache.mp.lazy_offload``"
+msgstr "``lmcache.mp.lazy_offload``"
+
+#: ../../source/mp/lazy_offload.rst:49
+msgid "``false``"
+msgstr "``false``"
+
+#: ../../source/mp/lazy_offload.rst:50
+msgid "Enable deferred, batched store submission."
+msgstr "启用延迟的批量存储提交。"
+
+#: ../../source/mp/lazy_offload.rst:51
+msgid "``lmcache.mp.lazy_offload_policy``"
+msgstr "``lmcache.mp.lazy_offload_policy``"
+
+#: ../../source/mp/lazy_offload.rst:52
+msgid "``EVICTION_AWARE``"
+msgstr "``EVICTION_AWARE``"
+
+#: ../../source/mp/lazy_offload.rst:53
+msgid ""
+"Drain policy. ``EVICTION_AWARE`` releases a store when its GPU blocks "
+"near the eviction head; ``FIFO`` selects finished requests in insertion "
+"order once the threshold below is met."
+msgstr "驱逐策略。 ``EVICTION_AWARE`` 在其显存块接近逐出头时释放存储； ``FIFO`` 在满足以下阈值后按插入顺序选择已完成的请求。"
+
+#: ../../source/mp/lazy_offload.rst:56
+msgid "``lmcache.mp.lazy_offload_threshold``"
+msgstr "``lmcache.mp.lazy_offload_threshold``"
+
+#: ../../source/mp/lazy_offload.rst:57
+msgid "``100``"
+msgstr "``100``"
+
+#: ../../source/mp/lazy_offload.rst:58
+msgid ""
+"Number of finished pending requests required to make a batch eligible for"
+" offload."
+msgstr "完成的待处理请求数量，要求使批次符合卸载条件。"
+
+#: ../../source/mp/lazy_offload.rst:60
+msgid "``lmcache.mp.lazy_offload_select_count``"
+msgstr "``lmcache.mp.lazy_offload_select_count``"
+
+#: ../../source/mp/lazy_offload.rst:61
+msgid "``10``"
+msgstr "``10``"
+
+#: ../../source/mp/lazy_offload.rst:62
+msgid ""
+"Maximum number of finished requests selected each time the threshold is "
+"met."
+msgstr "每次达到阈值时选择的最大完成请求数量。"
+
+#: ../../source/mp/lazy_offload.rst:66
+msgid "How It Works"
+msgstr "如何运作"
+
+#: ../../source/mp/lazy_offload.rst:68
+msgid ""
+"Lazy offload changes when stores are submitted, but it uses the same "
+"LMCache server store path as the default eager behavior:"
+msgstr "懒惰卸载在提交存储时会发生变化，但它使用与默认的急切行为相同的 LMCache 服务器存储路径："
+
+#: ../../source/mp/lazy_offload.rst:91
+msgid ""
+"Before a request is selected, lazy offload does not pin its GPU blocks. "
+"vLLM may reuse those blocks for other requests. The connector records "
+"each block's hash when it buffers the store metadata and checks the hash "
+"again before offload. If a block has been reused, the connector logs a "
+"warning and skips the stale store metadata instead of caching incorrect "
+"KV data. A later lookup for the missing data therefore becomes a cache "
+"miss and vLLM recomputes the tokens; inference correctness is unaffected."
+msgstr "在请求被选择之前，懒惰卸载不会固定其 GPU 块。vLLM 可能会将这些块重用于其他请求。连接器在缓冲存储元数据时记录每个块的哈希，并在卸载之前再次检查哈希。如果一个块被重用，连接器会记录警告并跳过过时的存储元数据，而不是缓存不正确的 KV 数据。因此，后续对缺失数据的查找将成为缓存未命中，vLLM 将重新计算令牌；推理的正确性不受影响。"
+
+#: ../../source/mp/lazy_offload.rst:99
+msgid ""
+"The trigger is evaluated only on scheduling steps that process at least "
+"one token. Pending requests below the threshold, or the remaining tail "
+"after traffic becomes idle, are not flushed automatically. Lazy offload "
+"is therefore best suited to continuous serving workloads rather than jobs"
+" that require every request's KV cache to be persisted immediately."
+msgstr "触发器仅在处理至少一个 token 的调度步骤上进行评估。低于阈值的待处理请求，或在流量变为空闲后剩余的尾部，不会自动刷新。因此，懒惰卸载最适合持续服务的工作负载，而不是需要每个请求的 KV Cache 立即持久化的作业。"
+
+#: ../../source/mp/lazy_offload.rst:105
+msgid ""
+"Selected requests are removed from the ready count. For example, with a "
+"threshold of 20 and a select count of 10, the first trigger submits 10 "
+"requests and leaves 10 ready. Another 10 requests must finish before the "
+"count reaches 20 and triggers the next batch. Configure both values as "
+"positive integers."
+msgstr "所选请求从就绪计数中移除。例如，阈值为 20，选择计数为 10，第一次触发提交 10 个请求，留下 10 个就绪。另 10 个请求必须完成，计数才能达到 20 并触发下一批。将这两个值配置为正整数。"
+
+#: ../../source/mp/lazy_offload.rst:111
+msgid "Tuning"
+msgstr "调优"
+
+#: ../../source/mp/lazy_offload.rst:113
+msgid ""
+"Lower ``lmcache.mp.lazy_offload_threshold`` when caches must become "
+"reusable sooner or when traffic arrives in short bursts. This causes more"
+" frequent offload batches."
+msgstr "当缓存必须更早变得可重用，或者流量以短暂的突发形式到达时，降低 ``lmcache.mp.lazy_offload_threshold``。这会导致更频繁的卸载批次。"
+
+#: ../../source/mp/lazy_offload.rst:116
+msgid ""
+"Raise the threshold to defer more store work, accepting a longer delay "
+"and a greater chance that vLLM reuses a pending GPU block before it is "
+"offloaded."
+msgstr "提高阈值以推迟更多存储工作，接受更长的延迟，并增加 vLLM 在卸载之前重用待处理 GPU 块的机会。"
+
+#: ../../source/mp/lazy_offload.rst:118
+msgid ""
+"Raise ``lmcache.mp.lazy_offload_select_count`` to drain more requests per"
+" trigger. Larger values create larger store bursts; smaller values spread"
+" the work across more threshold crossings."
+msgstr "提高 ``lmcache.mp.lazy_offload_select_count`` 以在每次触发时处理更多请求。较大的值会产生更大的存储突发；较小的值会在更多阈值交叉中分散工作。"
+
+#: ../../source/mp/lazy_offload.rst:121
+msgid ""
+"Use ``lmcache.mp.lazy_offload_threshold=1`` for the earliest eligibility,"
+" while remembering that submission still needs a later non-empty "
+"scheduling step."
+msgstr "使用 ``lmcache.mp.lazy_offload_threshold=1`` 以实现最早的资格，同时请记住，提交仍然需要后续的非空调度步骤。"
+
+#: ../../source/mp/lazy_offload.rst:125
+msgid ""
+"To confirm that the connector enabled lazy offload, check the vLLM log "
+"for a message similar to:"
+msgstr "要确认连接器启用了懒卸载，请检查 vLLM 日志中是否有类似的消息："
+
+#~ msgid ""
+#~ "Lazy offload lets the vLLM "
+#~ "``LMCacheMPConnector`` defer GPU-to-LMCache"
+#~ " store operations and submit finished "
+#~ "requests in FIFO batches. It moves "
+#~ "store work out of the normal "
+#~ "per-step path, which can improve "
+#~ "serving throughput when immediate cache "
+#~ "availability is less important than "
+#~ "reducing per-request offload overhead."
+#~ msgstr ""
+
+#~ msgid ""
+#~ "Pass the lazy-offload options in "
+#~ "vLLM's ``kv_connector_extra_config``. For example,"
+#~ " the following configuration starts "
+#~ "offloading after 20 requests have "
+#~ "finished and selects up to 10 "
+#~ "requests per FIFO batch:"
+#~ msgstr ""
+
+#~ msgid "``FIFO``"
+#~ msgstr ""
+
+#~ msgid ""
+#~ "Select finished requests in insertion "
+#~ "order. ``FIFO`` is currently the only"
+#~ " supported policy."
+#~ msgstr ""
+
