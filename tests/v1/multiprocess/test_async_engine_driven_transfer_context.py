@@ -164,6 +164,51 @@ def test_create_recorded_event_uses_local_device_event(
     ctx.close()
 
 
+def test_submit_retrieve_waits_for_event_before_scatter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retrieve must wait for the producer event before scattering KV data."""
+    gather_gate = threading.Event()
+    monkeypatch.setattr(async_engine_driven, "torch_dev", _FakeTorchDev(gather_gate))
+    transfer = MagicMock()
+    transfer.prepare_retrieve.return_value = [torch.zeros(1)]
+    monkeypatch.setattr(
+        worker_transfer,
+        "create_engine_driven_context",
+        lambda *_args, **_kwargs: transfer,
+    )
+    call_order: list[str] = []
+    event = MagicMock()
+    event.wait.side_effect = lambda: call_order.append("wait")
+    monkeypatch.setattr(
+        worker_transfer,
+        "scatter_cpu_to_paged_kv",
+        lambda *_args, **_kwargs: call_order.append("scatter"),
+    )
+    kv_caches = {
+        "layer_0": torch.zeros(2, 4, 4, 2, 8, dtype=torch.float32),
+    }
+    ctx = AsyncEngineDrivenTransferContext(1, MagicMock())
+    ctx.register(
+        kv_caches,
+        model_name="test",
+        world_size=1,
+        blocks_in_chunk=4,
+        mq_timeout=1.0,
+        layout_hints={"kv_layout": "NHD"},
+    )
+
+    try:
+        future = ctx.submit_retrieve(
+            "request", "key", kv_caches, [[0, 1, 2, 3]], event, 4
+        )
+
+        assert future.result(timeout=1) is True
+        assert call_order == ["wait", "scatter"]
+    finally:
+        ctx.close()
+
+
 def test_submit_store_commit_waits_for_gather_done(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -276,7 +321,8 @@ def test_sync_engine_driven_context_returns_resolved_future(
     # Sync path resolves inline.
     assert future.query()
     assert future.result(timeout=1) is True
-    assert fake.synchronize_calls >= 1
+    # CPU copies complete inline without synchronizing the global accelerator.
+    assert fake.synchronize_calls == 0
     # flush_inflight_stores is the inherited base no-op; must not raise.
     ctx.flush_inflight_stores()
     ctx.close()

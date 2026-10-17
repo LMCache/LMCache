@@ -12,7 +12,10 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.mp_coordinator.cache_events import CacheEventSink
+from lmcache.v1.mp_coordinator import cache_events as cache_events_module
+from lmcache.v1.mp_coordinator.cache_events import (
+    CacheEventSink,
+)
 from lmcache.v1.mp_observability.config import ObservabilityConfig
 from lmcache.v1.multiprocess import http_server as http_server_module
 from lmcache.v1.multiprocess.config import (
@@ -135,7 +138,7 @@ def test_event_reporting_builds_sink_from_transport_config(
     _patch_lifespan_dependencies(
         monkeypatch, coordinator_config, request_server, engine, event_bus
     )
-    monkeypatch.setattr(http_server_module, "create_cache_event_sink", create_sink)
+    monkeypatch.setattr(cache_events_module, "create_cache_event_sink", create_sink)
 
     async def exercise_lifespan() -> None:
         async with http_server_module.lifespan(FastAPI()):
@@ -159,7 +162,7 @@ def test_http_event_reporting_without_coordinator_url_registers_no_subscriber(
     _patch_lifespan_dependencies(
         monkeypatch, coordinator_config, MagicMock(), MagicMock(), event_bus
     )
-    monkeypatch.setattr(http_server_module, "create_cache_event_sink", create_sink)
+    monkeypatch.setattr(cache_events_module, "create_cache_event_sink", create_sink)
 
     async def exercise_lifespan() -> None:
         async with http_server_module.lifespan(FastAPI()):

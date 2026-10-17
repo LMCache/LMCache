@@ -14,7 +14,7 @@ modularity, and future maintainability and readability.
 
 Read these files for project standards:
 - `docs/coding_standards.md` — **authoritative** coding quality and review standard
-- `AGENTS.md` — coding conventions, testing practices, review checklist
+- `AGENTS.md` — coding conventions, testing practices, AI coding discipline, review rules
 - `CONTRIBUTING.md` — contribution guidelines
 
 ## What to check

@@ -6,6 +6,7 @@ import msgspec
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess.custom_types import KVEventBatch
 from lmcache.v1.multiprocess.rpc import get_rpc_spec, get_rpc_specs
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
@@ -28,7 +29,6 @@ FROZEN_LEGACY_OPERATION_IDS = {
     "lookup": 8,
     "query_prefetch_status": 9,
     "wait_prefetch_status": 10,
-    "query_prefetch_lookup_hits": 11,
     "free_lookup_locks": 12,
     "end_session": 13,
     "register_kv_cache_engine_driven_context": 14,
@@ -94,7 +94,7 @@ def test_rpc_types_come_from_request_client_annotations() -> None:
     assert lookup.payload_types[1] is int
     assert lookup.response_type is type(None)
 
-    query = get_rpc_spec("query_prefetch_lookup_hits")
+    query = get_rpc_spec("query_prefetch_status")
     assert query.payload_types == (str,)
     assert query.response_type == int | None
 
@@ -103,3 +103,12 @@ def test_rpc_types_come_from_request_client_annotations() -> None:
     assert clear.bind_payloads((), {}) == (False,)
     assert clear.bind_payloads((), {"force": True}) == (True,)
     assert clear.response_type is type(None)
+
+    stream = get_rpc_spec("subscribe_kv_events")
+    assert stream.payload_types == (int, str, int, int)
+    assert stream.response_type is KVEventBatch
+    assert stream.streaming
+
+    negotiate = get_rpc_spec("negotiate_chunk_size")
+    assert negotiate.payload_types == (int,)
+    assert negotiate.response_type is int

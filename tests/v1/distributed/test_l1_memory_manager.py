@@ -18,6 +18,7 @@ interface docstrings. The tests focus on:
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from unittest.mock import MagicMock
 import threading
 
 # Third Party
@@ -27,7 +28,11 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.distributed.config import L1MemoryManagerConfig
+from lmcache.v1.distributed.config import (
+    HUGEPAGE_SIZE_BYTES,
+    L1MemoryManagerConfig,
+    _check_hugepage_availability,
+)
 from lmcache.v1.distributed.error import L1Error
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
@@ -560,3 +565,145 @@ class TestErrorCodeSemantics:
     def test_error_codes_are_distinct(self):
         """Test that error codes are distinct values."""
         assert L1Error.SUCCESS != L1Error.OUT_OF_MEMORY
+
+
+# =============================================================================
+# Tests for MP-mode L1 hugepage support
+# =============================================================================
+
+
+def test_use_hugepages_defaults_to_false():
+    """use_hugepages defaults to False so existing behavior is unchanged."""
+    config = L1MemoryManagerConfig(
+        size_in_bytes=1 << 30,
+        use_lazy=False,
+        shm_name="",
+    )
+    assert config.use_hugepages is False
+
+
+def test_use_hugepages_accepted_with_eager_non_shm():
+    """use_hugepages is accepted for a non-shared, eagerly allocated pool."""
+    config = L1MemoryManagerConfig(
+        size_in_bytes=1 << 30,
+        use_lazy=False,
+        shm_name="",
+        use_hugepages=True,
+    )
+    assert config.use_hugepages is True
+
+
+def test_use_hugepages_rejects_shared_memory():
+    """use_hugepages is incompatible with a non-empty shm_name."""
+    with pytest.raises(ValueError, match="incompatible with shared memory"):
+        L1MemoryManagerConfig(
+            size_in_bytes=1 << 30,
+            use_lazy=False,
+            shm_name="lmcache_l1_pool_test",
+            use_hugepages=True,
+        )
+
+
+def test_use_hugepages_rejects_lazy_allocation():
+    """use_hugepages is incompatible with lazy allocation."""
+    with pytest.raises(ValueError, match="incompatible with lazy allocation"):
+        L1MemoryManagerConfig(
+            size_in_bytes=1 << 30,
+            use_lazy=True,
+            shm_name="",
+            use_hugepages=True,
+        )
+
+
+def _patch_open(monkeypatch, contents):
+    """Patch builtins.open to return queued ``contents`` strings per call.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        contents: Iterable of strings (file contents) to return in order.
+    """
+    calls = list(contents)
+    state = {"index": 0}
+
+    def fake_open(file, mode="r"):
+        assert file == "/sys/kernel/mm/hugepages/hugepages-2048kB/free_hugepages"
+        if state["index"] >= len(calls):
+            raise FileNotFoundError(file)
+        content = calls[state["index"]]
+        state["index"] += 1
+        mock = MagicMock()
+        mock.__enter__.return_value.read.return_value = content
+        mock.__exit__.return_value = False
+        return mock
+
+    monkeypatch.setattr("builtins.open", fake_open)
+
+
+def test_check_hugepage_availability_passes_when_sufficient(monkeypatch):
+    """No error when the pool has enough free 2 MiB pages for the buffer."""
+    # 1 GiB buffer needs 512 pages; pool has 1000 free.
+    _patch_open(monkeypatch, ["1000"])
+    _check_hugepage_availability(1 << 30)
+
+
+def test_check_hugepage_availability_raises_when_insufficient(monkeypatch):
+    """RuntimeError when the pool has fewer free pages than the buffer needs."""
+    # 1 GiB buffer needs 512 pages; pool has only 100 free.
+    _patch_open(monkeypatch, ["100"])
+    with pytest.raises(RuntimeError, match="Insufficient hugepages"):
+        _check_hugepage_availability(1 << 30)
+
+
+def test_check_hugepage_availability_rounds_up_pages(monkeypatch):
+    """A buffer that is not an exact multiple of the page size rounds up."""
+    # 2 MiB + 1 byte needs 2 pages; pool has exactly 2 free.
+    _patch_open(monkeypatch, ["2"])
+    _check_hugepage_availability(HUGEPAGE_SIZE_BYTES + 1)
+
+
+def test_check_hugepage_availability_skips_when_unavailable(monkeypatch):
+    """When the 2 MiB pool is unreadable the check is a no-op (best effort)."""
+    monkeypatch.setattr(
+        "builtins.open",
+        lambda *a, **k: (_ for _ in ()).throw(
+            FileNotFoundError(
+                "/sys/kernel/mm/hugepages/hugepages-2048kB/free_hugepages"
+            )
+        ),
+    )
+    # Should not raise.
+    _check_hugepage_availability(1 << 30)
+
+
+def test_create_memory_allocator_passes_use_hugepages(monkeypatch):
+    """create_memory_allocator forwards use_hugepages to MixedMemoryAllocator.
+
+    The allocator is stubbed so no real (hugepage) allocation happens; we only
+    verify the flag is forwarded, matching the docstring contract.
+    """
+    # First Party
+    from lmcache.v1.distributed.memory_manager import l1_memory_manager
+
+    captured = {}
+
+    def fake_mixed_init(self, size, **kwargs):
+        captured.update(kwargs)
+        self.size = size
+
+    monkeypatch.setattr(
+        l1_memory_manager.MixedMemoryAllocator,
+        "__init__",
+        fake_mixed_init,
+    )
+
+    config = L1MemoryManagerConfig(
+        size_in_bytes=1 << 30,
+        use_lazy=False,
+        shm_name="",
+        use_hugepages=True,
+    )
+    allocator = l1_memory_manager.create_memory_allocator(config)
+
+    assert allocator is not None
+    assert captured.get("use_hugepages") is True
+    assert captured.get("align_bytes") == config.align_bytes

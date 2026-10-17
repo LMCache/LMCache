@@ -45,11 +45,52 @@ pr_base_merge_mode() {
     esac
 }
 
+pr_has_label() {
+    local wanted_label="${1:?label name is required}"
+    [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",${wanted_label},"* ]]
+}
+
+should_skip_expensive_k3_pipeline() {
+    local pipeline_name="${1:?pipeline name is required}"
+
+    if [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]]; then
+        return 1
+    fi
+
+    if pr_has_label "force-ci"; then
+        echo "--- :label: PR has 'force-ci'; running ${pipeline_name} tests"
+        return 1
+    fi
+
+    if pr_has_label "skip expensive ci"; then
+        echo "--- :label: PR has 'skip expensive ci'; skipping ${pipeline_name} tests"
+        return 0
+    fi
+
+    return 1
+}
+
+should_skip_expensive_multiprocess_pipeline() {
+    should_skip_expensive_k3_pipeline "multiprocess"
+}
+
 # Merge the PR base branch into the current checkout for Buildkite PR builds.
 # Buildkite's checkout step may leave the pod on the raw PR head commit rather
 # than a synthetic merge commit, so tests can miss conflicts/regressions that
 # only appear once the latest base branch is merged in.
 merge_pr_base_branch() {
+    if [[ "${XPU_CANDIDATE_VALIDATION:-0}" == "1" ]]; then
+        local expected_commit="${XPU_SOURCE_COMMIT:?XPU candidate validation requires XPU_SOURCE_COMMIT}"
+        local checkout_commit
+        checkout_commit="$(git rev-parse HEAD)"
+        if [[ ! "${expected_commit}" =~ ^[0-9a-f]{40}$ || "${checkout_commit}" != "${expected_commit}" ]]; then
+            echo "ERROR: XPU wheel was built from ${expected_commit}, but tests checked out ${checkout_commit}" >&2
+            return 1
+        fi
+        echo "--- :git: Validated XPU wheel source commit ${checkout_commit}; skipping PR-base pre-merge"
+        return 0
+    fi
+
     local merge_mode
     merge_mode="$(pr_base_merge_mode)"
     case "${merge_mode}" in

@@ -51,6 +51,9 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.gpu_connector.kv_format.contiguity import (
+    attempt_permute_to_contiguous_view,
+)
 from lmcache.v1.gpu_connector.kv_format.types import KV_LAYOUT_NAMES
 from lmcache.v1.gpu_connector.utils import LayoutHints
 
@@ -295,11 +298,13 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
     """Re-view a kernel-paged attention tensor as logical-block pages.
 
     For a Mamba-hybrid model vLLM inflates the attention block size to align
-    with the Mamba page (e.g. 544 for Qwen3.5-0.8B), and that size is used for
-    all prefix-caching logic at the scheduler. But at the worker the attention
-    kernel has to run at block size 32 for numerical stability (vLLM #27753,
-    working around the NaN-propagation issue
-    Dao-AILab/flash-attention#1974), so the registered tensor is paged as
+    with the Mamba page (``vllm/platforms/interface.py:_align_hybrid_block_size``;
+    e.g. 544 for Qwen3.5-0.8B), and that size is used for all prefix-caching
+    logic at the scheduler. But the backend can only page the physical tensor
+    at a *kernel* block size it actually supports: ``select_common_block_size``
+    (``vllm/v1/worker/utils.py``) returns the largest advertised size dividing
+    the logical one, so a backend advertising fixed sizes (FlashInfer's
+    ``[16, 32, 64]``, ROCm AITER FA's ``[16, 32]``) re-pages the tensor as
 
         ``[#blocks, 2, 32, #heads, head_size]``
 
@@ -309,6 +314,17 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
     block size (one logical block = its 17 contiguous kernel pages),
 
         ``[#blocks / 17, 2, 544, 1, head_size']``
+
+    Backends advertising ``MultipleOf(16)`` (FlashAttention) page at the
+    logical size directly and never need the edit.
+
+    Registered non-MLA attention KV layouts (the block dim is index 2 in both,
+    so only the rank tells them apart):
+
+        rank 5 (<= 0.25.x): ``(num_blocks, 2, block_size, num_heads, head_size)``
+        rank 4 (>= 0.26.0): ``(num_blocks, num_heads, block_size, 2 * head_size)``
+
+    Both stay reachable: ``hpc_attn`` still registers rank 5 in 0.26.0.
 
     Cost: before this fix ``kv_caches[:, 0]`` is just the K tensor; after, it
     interleaves K and V at kernel-page granularity. The bytes round-trip
@@ -324,11 +340,11 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
             # compression (DeepSeek) belong to other transfer paths.
             get_kv_cache_spec_kind(spec) in _SUBPAGEABLE_ATTENTION_KINDS
             and not _declares_slot_compression(spec)
-            # (num_blocks, 2, block_size, num_heads, head_size) layout whose
-            # block dim disagrees with the scheduler block-id unit -- the
-            # backend re-paged the tensor at its kernel block size.
+            # A rank-5 or rank-4 layout whose block dim disagrees with the
+            # scheduler block-id unit, i.e. the backend re-paged the tensor at
+            # its kernel block size.
             and isinstance(kv_cache, torch.Tensor)
-            and kv_cache.ndim == 5
+            and kv_cache.ndim in (5, 4)
             and kv_cache.shape[2] != spec.block_size
         )
 
@@ -340,18 +356,25 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
     ) -> torch.Tensor:
         """Re-view ``kv_cache`` at logical-block granularity.
 
-        The tensor is kernel-paged as ``(num_kernel_pages, 2,
-        kernel_block_size, num_kv_heads, head_size)``; the result is
-        ``(num_logical_blocks, 2, spec.block_size, num_heads, head_size)``
-        over the same storage.
+        The tensor is kernel-paged, either as ``(num_kernel_pages, 2,
+        kernel_block_size, num_kv_heads, head_size)`` (vLLM <= 0.25.x) or as
+        ``(num_kernel_pages, num_kv_heads, kernel_block_size, 2 * head_size)``
+        (vLLM >= 0.26.0); the result is ``(num_logical_blocks, 2,
+        spec.block_size, num_heads, head_size)`` over the same storage.
+
+        A rank-4 tensor is re-viewed in memory order, since vLLM registers it
+        as a permute view of the backend's physical layout. A rank-5 tensor
+        must already be contiguous in logical order.
 
         Raises:
-            ValueError: If the layout is not the expected kernel-paged shape,
-                the sizes do not divide evenly, or the kernel pages of one
-                logical block do not tile its page bytes exactly (which would
-                indicate an undeclared packed layout that must not be edited).
+            ValueError: If the layout is not a recognized kernel-paged shape,
+                the sizes do not divide evenly, the pages are not contiguous
+                (in memory order for rank 4, logical order for rank 5), or the
+                kernel pages of one logical block do not tile its page bytes
+                exactly (which would indicate an undeclared packed layout that
+                must not be edited).
         """
-        if not isinstance(kv_cache, torch.Tensor) or kv_cache.shape[1] != 2:
+        if not isinstance(kv_cache, torch.Tensor) or kv_cache.ndim not in (5, 4):
             got = (
                 tuple(kv_cache.shape)
                 if isinstance(kv_cache, torch.Tensor)
@@ -359,7 +382,13 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
             )
             raise ValueError(
                 f"expected a (num_blocks, 2, block_size, num_heads, head_size) "
+                f"or (num_blocks, num_heads, block_size, 2 * head_size) "
                 f"attention KV tensor, got {got}"
+            )
+        if kv_cache.ndim == 5 and kv_cache.shape[1] != 2:
+            raise ValueError(
+                f"expected a (num_blocks, 2, block_size, num_heads, head_size) "
+                f"attention KV tensor, got {tuple(kv_cache.shape)}"
             )
         logical_block_size = spec.block_size
         kernel_block_size = kv_cache.shape[2]
@@ -382,18 +411,45 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
                 f"{ratio} kernel pages ({kernel_page_bytes * ratio} bytes) do "
                 f"not tile the logical page ({spec.page_size_bytes} bytes)"
             )
-        if not kv_cache.is_contiguous():
-            raise ValueError(
-                "kernel-paged attention KV tensor must be contiguous to "
-                "re-view as logical pages"
-            )
+        if kv_cache.ndim == 4:
+            # vLLM registers the rank-4 tensor as a permute view of the
+            # backend's physical layout (get_kv_cache_stride_order), so it need
+            # not be contiguous. Pages only tile by byte range in memory order:
+            # re-view dims outermost-first by stride (a no-op if contiguous).
+            ordered = attempt_permute_to_contiguous_view(kv_cache)
+            if not isinstance(ordered, torch.Tensor) or not ordered.is_contiguous():
+                raise ValueError(
+                    "kernel-paged attention KV tensor must be contiguous in "
+                    "memory order to re-view as logical pages (shape "
+                    f"{tuple(kv_cache.shape)}, strides {tuple(kv_cache.stride())})"
+                )
+            if ordered.shape[0] != num_kernel_pages:
+                raise ValueError(
+                    f"expected a num-blocks-first KV cache layout; outermost "
+                    f"memory dim is {ordered.shape[0]}, not the kernel page "
+                    f"count {num_kernel_pages}"
+                )
+        else:
+            # Rank 5 deliberately keeps the stricter logical-order guard.
+            # Extending the rank-4 memory-order normalization to rank 5 would
+            # let a permuted tensor (vLLM <= 0.25.x under HND) re-view
+            # successfully and then be misread downstream: the edited view is
+            # NHD-shaped, so the HND detector branch reads its block size from
+            # the synthetic ``num_heads`` axis and resolves 1. Failing loudly
+            # here is strictly better than that silent corruption.
+            ordered = kv_cache
+            if not ordered.is_contiguous():
+                raise ValueError(
+                    "kernel-paged attention KV tensor must be contiguous to "
+                    "re-view as logical pages"
+                )
 
         num_blocks = num_kernel_pages // ratio
         elems_per_page = spec.page_size_bytes // kv_cache.element_size()
         num_heads, head_size = _synthetic_attention_shape(
             elems_per_page, logical_block_size
         )
-        return kv_cache.view(num_blocks, 2, logical_block_size, num_heads, head_size)
+        return ordered.view(num_blocks, 2, logical_block_size, num_heads, head_size)
 
 
 ######################
