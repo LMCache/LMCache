@@ -7,7 +7,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 import hashlib
 import time
 
@@ -323,84 +323,7 @@ class ServerBenchClient:
             RuntimeError: If the client is not started.
             ValueError: If a non-empty range is invalid or not chunk-aligned.
         """
-        self._require_started()
-        if token_count == 0:
-            return None
-        self._validate_token_range(request, start_token, token_count)
-
-        # First Party
-        from lmcache.cli.commands.bench.server_bench.helpers import (
-            _TIMEOUT,
-            _make_key,
-            _wait_for_result,
-        )
-
-        attempted: list[int] = []
-        successful: list[int] = []
-        failed: list[int] = []
-        status = "stored"
-        started_at = time.monotonic()
-        block_offset = request.block_offset + (start_token // self._block_size)
-        num_blocks = token_count // self._block_size
-        block_ids = list(range(block_offset, block_offset + num_blocks))
-        for worker in self._workers:
-            if not worker.spec.store_enabled:
-                continue
-            attempted.append(worker.spec.rank)
-            key = _make_key(
-                request.token_ids,
-                request.request_id,
-                start=start_token,
-                end=start_token + token_count,
-                worker_id=worker.spec.kv_worker_id,
-                world_size=self._kv_world_size,
-            )
-            block_ids_per_group = [
-                block_ids.copy() for _ in range(self._num_engine_group_infos)
-            ]
-            event = worker.transfer_context.create_recorded_event()
-            future = worker.transfer_context.submit_store(
-                request.request_id,
-                key,
-                worker.buffers.kv_caches,
-                block_ids_per_group,
-                event,
-                self._blocks_in_chunk,
-            )
-            reply = _wait_for_result(
-                future, retain_refs=(event,) if event is not None else ()
-            )
-            if reply is _TIMEOUT:
-                worker_status = "timeout"
-            else:
-                worker_status = "stored" if reply else "store_failed"
-            if worker_status == "stored":
-                successful.append(worker.spec.rank)
-            else:
-                failed.append(worker.spec.rank)
-                status = worker_status
-
-        latency_ms = (time.monotonic() - started_at) * 1000
-        result = TransferResult(
-            operation="store",
-            token_count=token_count,
-            latency_ms=latency_ms,
-            attempted_worker_ranks=tuple(attempted),
-            successful_worker_ranks=tuple(successful),
-            failed_worker_ranks=tuple(failed),
-        )
-        self._log(
-            "  [seq %d/%s] STORE: %s (%d tokens, %.1f ms, %d writers)"
-            % (
-                request.sequence_id,
-                request.request_kind,
-                status,
-                token_count,
-                latency_ms,
-                len(attempted),
-            )
-        )
-        return result
+        return self._transfer("store", request, start_token, token_count)
 
     def retrieve(
         self,
@@ -422,85 +345,7 @@ class ServerBenchClient:
             RuntimeError: If the client is not started.
             ValueError: If a non-empty range is invalid or not chunk-aligned.
         """
-        self._require_started()
-        if token_count == 0:
-            return None
-        self._validate_token_range(request, start_token, token_count)
-
-        # First Party
-        from lmcache.cli.commands.bench.server_bench.helpers import (
-            _TIMEOUT,
-            _make_key,
-            _wait_for_result,
-        )
-
-        attempted: list[int] = []
-        successful: list[int] = []
-        failed: list[int] = []
-        status = "retrieved"
-        started_at = time.monotonic()
-        block_offset = request.block_offset + (start_token // self._block_size)
-        num_blocks = token_count // self._block_size
-        block_ids = list(range(block_offset, block_offset + num_blocks))
-        for worker in self._workers:
-            if not worker.spec.retrieve_enabled:
-                continue
-            attempted.append(worker.spec.rank)
-            key = _make_key(
-                request.token_ids,
-                request.request_id,
-                start=start_token,
-                end=start_token + token_count,
-                worker_id=worker.spec.kv_worker_id,
-                world_size=self._kv_world_size,
-            )
-            block_ids_per_group = [
-                block_ids.copy() for _ in range(self._num_engine_group_infos)
-            ]
-            event = worker.transfer_context.create_recorded_event()
-            future = worker.transfer_context.submit_retrieve(
-                request.request_id,
-                key,
-                worker.buffers.kv_caches,
-                block_ids_per_group,
-                event,
-                self._blocks_in_chunk,
-                skip_first_n_tokens=0,
-            )
-            reply = _wait_for_result(
-                future, retain_refs=(event,) if event is not None else ()
-            )
-            if reply is _TIMEOUT:
-                worker_status = "timeout"
-            else:
-                worker_status = "retrieved" if reply else "retrieve_failed"
-            if worker_status == "retrieved":
-                successful.append(worker.spec.rank)
-            else:
-                failed.append(worker.spec.rank)
-                status = worker_status
-
-        latency_ms = (time.monotonic() - started_at) * 1000
-        result = TransferResult(
-            operation="retrieve",
-            token_count=token_count,
-            latency_ms=latency_ms,
-            attempted_worker_ranks=tuple(attempted),
-            successful_worker_ranks=tuple(successful),
-            failed_worker_ranks=tuple(failed),
-        )
-        self._log(
-            "  [seq %d/%s] RETRIEVE: %s (%d tokens, %.1f ms, %d workers)"
-            % (
-                request.sequence_id,
-                request.request_kind,
-                status,
-                token_count,
-                latency_ms,
-                len(attempted),
-            )
-        )
-        return result
+        return self._transfer("retrieve", request, start_token, token_count)
 
     def zero_destination(
         self,
@@ -670,6 +515,105 @@ class ServerBenchClient:
 
         self._workers.clear()
         self._started = False
+
+    def _transfer(
+        self,
+        operation: Literal["store", "retrieve"],
+        request: RequestContext,
+        start_token: int,
+        token_count: int,
+    ) -> TransferResult | None:
+        """Run either public transfer operation with shared validation and waiting."""
+        self._require_started()
+        if token_count == 0:
+            return None
+        self._validate_token_range(request, start_token, token_count)
+
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import (
+            _TIMEOUT,
+            _make_key,
+            _wait_for_result,
+        )
+
+        attempted: list[int] = []
+        successful: list[int] = []
+        failed: list[int] = []
+        is_store = operation == "store"
+        success_status = "stored" if is_store else "retrieved"
+        status = success_status
+        started_at = time.monotonic()
+        block_offset = request.block_offset + (start_token // self._block_size)
+        num_blocks = token_count // self._block_size
+        block_ids = list(range(block_offset, block_offset + num_blocks))
+        for worker in self._workers:
+            enabled = (
+                worker.spec.store_enabled if is_store else worker.spec.retrieve_enabled
+            )
+            if not enabled:
+                continue
+            attempted.append(worker.spec.rank)
+            key = _make_key(
+                request.token_ids,
+                request.request_id,
+                start=start_token,
+                end=start_token + token_count,
+                worker_id=worker.spec.kv_worker_id,
+                world_size=self._kv_world_size,
+            )
+            block_ids_per_group = [
+                block_ids.copy() for _ in range(self._num_engine_group_infos)
+            ]
+            event = worker.transfer_context.create_recorded_event()
+            submit = (
+                worker.transfer_context.submit_store
+                if is_store
+                else worker.transfer_context.submit_retrieve
+            )
+            future = submit(
+                request.request_id,
+                key,
+                worker.buffers.kv_caches,
+                block_ids_per_group,
+                event,
+                self._blocks_in_chunk,
+            )
+            reply = _wait_for_result(
+                future, retain_refs=(event,) if event is not None else ()
+            )
+            if reply is _TIMEOUT:
+                worker_status = "timeout"
+            else:
+                worker_status = success_status if reply else f"{operation}_failed"
+            if worker_status == success_status:
+                successful.append(worker.spec.rank)
+            else:
+                failed.append(worker.spec.rank)
+                status = worker_status
+
+        latency_ms = (time.monotonic() - started_at) * 1000
+        result = TransferResult(
+            operation=operation,
+            token_count=token_count,
+            latency_ms=latency_ms,
+            attempted_worker_ranks=tuple(attempted),
+            successful_worker_ranks=tuple(successful),
+            failed_worker_ranks=tuple(failed),
+        )
+        self._log(
+            "  [seq %d/%s] %s: %s (%d tokens, %.1f ms, %d %s)"
+            % (
+                request.sequence_id,
+                request.request_kind,
+                operation.upper(),
+                status,
+                token_count,
+                latency_ms,
+                len(attempted),
+                "writers" if is_store else "workers",
+            )
+        )
+        return result
 
     def _initialize(self) -> None:
         """Allocate resources and register Workers."""
