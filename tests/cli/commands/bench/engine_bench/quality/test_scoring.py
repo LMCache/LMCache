@@ -221,7 +221,7 @@ class TestAnswerMatch:
             ("$1.5B", "$1500M"),
             ("$2.5bn", "$2500mn"),
             ("0 million", "0 billion"),
-            ("$3 million and $2 billion", "$0.003 billion and $2000 million"),
+            ("$3 million and $2 billion", "$0.003 billion and $2,000 million"),
         ],
     )
     def test_equivalent_explicit_scales_match(
@@ -229,6 +229,17 @@ class TestAnswerMatch:
     ) -> None:
         """Unit conversion and rounding still recognize equivalent quantities."""
         assert answer_match(prediction, [reference])
+
+    @pytest.mark.parametrize(
+        "prediction",
+        ["$3 million", "$3 million and $7 billion"],
+        ids=["missing-second-figure", "wrong-second-figure"],
+    )
+    def test_every_explicitly_scaled_gold_number_must_appear(
+        self, prediction: str
+    ) -> None:
+        """A matching first quantity cannot hide a missing or wrong second one."""
+        assert not answer_match(prediction, ["$0.003 billion and $2,000 million"])
 
     @pytest.mark.parametrize(
         "prediction,reference",
