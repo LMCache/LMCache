@@ -10,6 +10,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.gpu_connector.musa_connectors import (
     VLLMPagedMemLayerwiseMUSAConnector,
     VLLMPagedMemMUSAConnectorV2,
@@ -30,7 +31,7 @@ pytestmark = pytest.mark.musa
 
 
 def _skip_if_no_musa() -> None:
-    if not hasattr(torch, "musa") or not torch.musa.is_available():
+    if torch_device_type != "musa" or not torch_dev.is_available():
         pytest.skip("torch.musa is not available")
 
 
