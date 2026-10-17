@@ -514,6 +514,34 @@ verify the installation.
      - ``True``
      - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
        ext4). Ignored by ``ugds``, whose IO bypasses the kernel entirely.
+   * - ``--gds-l1-io-concurrency``
+     - ``0``
+     - Number of concurrent cuFile async slots, from 0 to 4. Zero retains
+       the original single-stream path. Other backends use that path.
+   * - ``--gds-l1-max-inflight-bytes``
+     - ``134217728``
+     - Maximum useful object bytes in flight per process. Also limits each
+       registered CUDA context's existing staging allocation; larger layouts
+       require increasing this value before registration.
+
+For the LMCache-driven CUDA path, enable four concurrent slots with
+``--gds-l1-io-concurrency 4``. Each slot reuses an existing staging slice and
+uses a separate stream for asynchronous cuFile I/O and gather/scatter. This
+adds no CPU worker threads or GPU staging allocation. Stores retain one
+object per gather kernel. A slot becomes available only after its I/O has
+been validated and its GPU work has completed. Completion waits run in the
+existing affinity handler; the transport event loop remains available.
+
+Staging uses four times the sum of actual object-group sizes per registered
+cache context, even when concurrency is one. For example, four 64 MiB slots
+need ``--gds-l1-max-inflight-bytes 268435456``. Multiple registered contexts
+have separate staging allocations.
+
+cuFile may use its compatibility path; enabling concurrency does not establish
+native direct DMA. Compare completed KV transfers and request latency on the
+actual GPU and storage configuration. Set ``--gds-l1-io-concurrency 0`` to
+disable the optimization. Both paths reject short or failed I/O before
+successful LMCache-driven publication. Completion adds no ``fsync`` requirement.
 
 L1 Manager TTLs
 ----------------
