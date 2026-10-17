@@ -30,7 +30,7 @@ from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
-from lmcache.v1.mp_coordinator.metric_sources import get_metric_sources
+from lmcache.v1.mp_coordinator.metric_sources import get_and_clear_metric_sources
 from lmcache.v1.mp_coordinator.views import build_views
 
 _OUT_OF_TREE_ROUTES = '''
@@ -443,7 +443,9 @@ def test_a_controller_failing_to_start_does_not_take_the_others_down(
     assert fleet.status_code == 200
     assert greeting.status_code == 200
     # The app's controller status, registered as a metric source.
-    (status,) = [s for s in get_metric_sources() if isinstance(s, ControllerStatus)]
+    (status,) = [
+        s for s in get_and_clear_metric_sources() if isinstance(s, ControllerStatus)
+    ]
     controllers_up = status.stats()
     assert controllers_up["ZzzFailingController"] is False
     assert controllers_up["FleetEvictionController"] is True

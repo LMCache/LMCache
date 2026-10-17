@@ -12,6 +12,7 @@ while ``observability`` imports both it and the components.
 
 # Standard
 from typing import Protocol
+import threading
 
 
 class MetricSource(Protocol):
@@ -23,29 +24,33 @@ class MetricSource(Protocol):
 
 
 # Keyed by class: a coordinator process builds one of each, so the latest
-# one built is the one the app runs.
+# one built is the one the app runs. Locked because a component may be built
+# on any thread, while one call takes and clears them all.
 _metric_sources: dict[type, MetricSource] = {}
+_lock = threading.Lock()
 
 
 def register_metric_source(component: MetricSource) -> None:
     """Record ``component`` so its metrics are registered when metrics are on.
 
-    Call at the end of ``__init__``. Replaces an earlier component of the
-    same class.
+    Call at the end of ``__init__``, from any thread. Replaces an earlier
+    component of the same class.
 
     Args:
         component: A component whose metrics ``observability`` defines.
     """
-    _metric_sources[type(component)] = component
+    with _lock:
+        _metric_sources[type(component)] = component
 
 
-def get_metric_sources() -> list[MetricSource]:
-    """Return every registered component, in construction order, and forget them.
+def get_and_clear_metric_sources() -> list[MetricSource]:
+    """Return every registered component, in construction order, and clear them.
 
     Returns:
         The registered components; the next call returns only those built
         after this one.
     """
-    components = list(_metric_sources.values())
-    _metric_sources.clear()
-    return components
+    with _lock:
+        sources = list(_metric_sources.values())
+        _metric_sources.clear()
+    return sources

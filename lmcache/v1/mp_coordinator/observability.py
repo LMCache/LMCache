@@ -35,7 +35,10 @@ from lmcache.v1.mp_coordinator.ingest.event_gate import (
 from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
     KafkaCacheEventSource,
 )
-from lmcache.v1.mp_coordinator.metric_sources import MetricSource, get_metric_sources
+from lmcache.v1.mp_coordinator.metric_sources import (
+    MetricSource,
+    get_and_clear_metric_sources,
+)
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import (
     DirectoryStats,
@@ -94,8 +97,8 @@ def register_coordinator_metrics(meter: "Meter | None" = None) -> None:
     """
     if meter is None:
         meter = metrics.get_meter("lmcache.mp_coordinator")
-    for component in get_metric_sources():
-        for spec in _specs_for(component):
+    for source in get_and_clear_metric_sources():
+        for spec in _specs_for(source):
             create = (
                 meter.create_observable_gauge
                 if spec.kind == "gauge"
@@ -120,26 +123,26 @@ class _MetricSpec:
     unit: str = ""
 
 
-def _specs_for(component: MetricSource) -> list[_MetricSpec]:
-    """Return the metrics of one registered component."""
-    match component:
+def _specs_for(source: MetricSource) -> list[_MetricSpec]:
+    """Return the metrics of one registered source."""
+    match source:
         case KeyDirectory():
-            return _key_directory_specs(component)
+            return _key_directory_specs(source)
         case EventGate():
-            return _event_gate_specs(component)
+            return _event_gate_specs(source)
         case CacheEventBroadcaster():
-            return _broadcaster_specs(component)
+            return _broadcaster_specs(source)
         case BackgroundLoops():
-            return _background_loop_specs(component)
+            return _background_loop_specs(source)
         case EventLoopMonitor():
-            return _event_loop_monitor_specs(component)
+            return _event_loop_monitor_specs(source)
         case InstanceRegistry():
-            return _instance_registry_specs(component)
+            return _instance_registry_specs(source)
         case KafkaCacheEventSource():
-            return _kafka_specs(component)
+            return _kafka_specs(source)
         case ControllerStatus():
-            return _controller_status_specs(component)
-    raise TypeError(f"no metrics are defined for {type(component).__name__}")
+            return _controller_status_specs(source)
+    raise TypeError(f"no metrics are defined for {type(source).__name__}")
 
 
 def _key_directory_specs(key_directory: KeyDirectory) -> list[_MetricSpec]:
