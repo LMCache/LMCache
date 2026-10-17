@@ -94,6 +94,7 @@ _KV_EVENT_RESYNCS = Counter(
 )
 # Maximum records in each pushed batch.
 _KV_EVENT_BATCH_SIZE = 1024
+_KV_EVENT_RECONNECT_DELAY = 1.0
 
 
 class ExtraConfigDefault(enum.Enum):
@@ -2635,6 +2636,8 @@ class LMCacheMPWorkerAdapter:
                     stream.close()
                 with self._kv_event_lock:
                     self._kv_event_stream = None
+            if self._kv_event_stop.wait(_KV_EVENT_RECONNECT_DELAY):
+                return
 
     def _disable_kv_event_stream(self, reason: str) -> None:
         """Withdraw placements and resume completed-store reporting after failure."""

@@ -988,3 +988,36 @@ The freshness metrics say how old the coordinator's view is.
      - ObservableGauge (attr: ``partition``)
      - Records not yet read per partition.  Kafka's own lag tools cannot report
        this, because the coordinator never commits offsets.
+
+The liveness metrics say whether the coordinator's loops and controllers are
+still doing their work.  A failed pass of a background loop is logged and
+counted, and the loop keeps running.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_coordinator.background_loop.last_success_timestamp_seconds``
+     - ObservableGauge (attr: ``loop``)
+     - Wall-clock time each loop (``health``, ``checkpoint``, ``eviction``)
+       last finished a pass without an error.  More than three intervals ago
+       means the loop has stopped making progress.
+   * - ``lmcache_coordinator.background_loop.interval_seconds``
+     - ObservableGauge (attr: ``loop``)
+     - Configured seconds between the loop's passes.
+   * - ``lmcache_coordinator.background_loop.passes``
+     - ObservableCounter (attrs: ``loop``, ``result``)
+     - Loop passes, ``ok`` or ``failed``.
+   * - ``lmcache_coordinator.controller.up``
+     - ObservableGauge (attr: ``controller``)
+     - ``1`` if the controller is running, ``0`` if it failed to start.
+   * - ``lmcache_coordinator.event_loop.blocked_seconds``
+     - ObservableCounter
+     - Total time the coordinator's event loop was blocked.  Its rate is the
+       fraction of time request handlers, heartbeats and loops were stalled.
+   * - ``lmcache_coordinator.registry.server_seconds_since_heartbeat``
+     - ObservableGauge (attr: ``instance_id``)
+     - Seconds since each registered server's last heartbeat.
