@@ -101,7 +101,6 @@ Step-by-Step Setup
               CUDA_VISIBLE_DEVICES=1 \
               vllm serve meta-llama/Llama-3.1-8B-Instruct \
               --port 7200 \
-              --disable-log-requests \
               --kv-transfer-config \
               '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1"}}'
 
@@ -114,7 +113,6 @@ Step-by-Step Setup
               CUDA_VISIBLE_DEVICES=0 \
               vllm serve meta-llama/Llama-3.1-8B-Instruct \
               --port 7100 \
-              --disable-log-requests \
               --kv-transfer-config \
               '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}'
 
