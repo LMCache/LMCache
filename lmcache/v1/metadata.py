@@ -90,17 +90,8 @@ class LMCacheMetadata:
             num_tokens = self.chunk_size
         klg_manager = self.kv_layer_groups_manager
         if klg_manager is not None and klg_manager.kernel_groups:
-            # Read kv_size from each group's shape_desc rather than self.use_mla
-            # so heterogeneous groups (should any ever co-exist) are handled.
             return [
-                torch.Size(
-                    [
-                        group.shape_desc.kv_size,
-                        group.num_layers,
-                        num_tokens,
-                        group.hidden_dim_size,
-                    ]
-                )
+                group.get_lmcache_shape(num_tokens)
                 for group in klg_manager.kernel_groups
             ]
         return [
