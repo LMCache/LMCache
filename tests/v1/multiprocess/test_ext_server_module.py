@@ -32,6 +32,9 @@ from lmcache.v1.multiprocess.ext_server_module import (
 )
 from lmcache.v1.multiprocess.modules import lookup as lookup_mod
 from lmcache.v1.multiprocess.modules import management as management_mod
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    LMCacheDrivenTransferModule,
+)
 from lmcache.v1.multiprocess.protocols.server_module import ServerModuleCallRequest
 from lmcache.v1.multiprocess.request_handler import iter_request_handlers
 
@@ -306,3 +309,67 @@ def test_build_modules_loads_plugin_and_registers_liveness_target(
         for m in modules
     )
     assert "fake_plugin(dependencies=[lookup])" in log_message
+
+
+class _FakeTransferReplacement(LMCacheDrivenTransferModule):
+    module_name = "fake_transfer_replacement"
+    replaces = LMCacheDrivenTransferModule
+
+    def __init__(self, ctx) -> None:
+        self._ctx = ctx
+
+
+class _FakeTransferDependent(DiscoverableModule):
+    module_name = "fake_transfer_dependent"
+    module_dependencies = (LMCacheDrivenTransferModule,)
+    last_dependency: ClassVar[EngineModule | None] = None
+
+    def __init__(self, ctx) -> None:
+        self._ctx = ctx
+
+    @property
+    def context(self):
+        return self._ctx
+
+    def report_status(self) -> dict:
+        return {}
+
+    def close(self) -> None:
+        return None
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        cls.last_dependency = build_ctx.require(LMCacheDrivenTransferModule)
+        return cls(build_ctx.engine_context)
+
+
+def test_build_modules_builds_replacement_in_place_of_builtin(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_module_resources,
+) -> None:
+    ctx = MagicMock(name="ctx")
+    replacement_module = _install_fake_module(
+        monkeypatch, _FakeTransferReplacement, module_name="fake_replacement"
+    )
+    dependent_module = _install_fake_module(
+        monkeypatch, _FakeTransferDependent, module_name="fake_dependent"
+    )
+    modules = server_mod._build_modules(
+        ctx,
+        MPServerConfig(
+            worker_reap_timeout_seconds=0,
+            server_modules=[
+                ExtServerModuleSpec(dependent_module),
+                ExtServerModuleSpec(replacement_module),
+            ],
+        ),
+        CoordinatorConfig(),
+    )
+
+    transfers = [m for m in modules if isinstance(m, LMCacheDrivenTransferModule)]
+    assert [type(m) for m in transfers] == [_FakeTransferReplacement]
+    stub_module_resources[LMCacheDrivenTransferModule].assert_not_called()
+    replacement = transfers[0]
+    assert _FakeTransferDependent.last_dependency is replacement
+    dependents = [m for m in modules if isinstance(m, _FakeTransferDependent)]
+    assert modules.index(replacement) < modules.index(dependents[0])

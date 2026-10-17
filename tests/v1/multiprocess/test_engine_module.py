@@ -13,6 +13,7 @@ from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
     EngineModule,
     ModuleBuildContext,
+    apply_replacements,
     order_modules,
 )
 
@@ -67,3 +68,61 @@ def test_dependency_graph_rejects_invalid_modules(
         monkeypatch.setattr(_Dependency, "module_dependencies", (_Dependent,))
     with pytest.raises(ValueError, match=message):
         order_modules([_Dependency, _Dependent])
+
+
+class _Replacement(_Dependency):
+    module_name = "replacement"
+    replaces = _Dependency
+
+
+def test_replacement_is_built_in_place_of_replaced_module() -> None:
+    module_classes, replacements = apply_replacements(
+        [_Dependent, _Dependency, _Replacement]
+    )
+    assert module_classes == [_Dependent, _Replacement]
+    assert replacements == {_Dependency: _Replacement}
+    assert order_modules(module_classes, replacements=replacements) == [
+        _Replacement,
+        _Dependent,
+    ]
+    build_ctx = ModuleBuildContext(
+        MagicMock(),
+        MPServerConfig(),
+        CoordinatorConfig(),
+        replacements=replacements,
+    )
+    module = MagicMock(spec=EngineModule)
+    build_ctx.register(_Replacement, module)
+    assert build_ctx.require(_Dependency) is module
+    assert build_ctx.require(_Replacement) is module
+
+
+class _NotSubclass(_Module):
+    module_name = "not_subclass"
+    replaces = _Dependency
+
+
+class _SecondReplacement(_Dependency):
+    module_name = "second_replacement"
+    replaces = _Dependency
+
+
+class _ChainedReplacement(_Replacement):
+    module_name = "chained_replacement"
+    replaces = _Replacement
+
+
+@pytest.mark.parametrize(
+    ("module_classes", "message"),
+    [
+        ([_Replacement], "not a discoverable module"),
+        ([_Dependency, _NotSubclass], "must subclass"),
+        ([_Dependency, _Replacement, _SecondReplacement], "replaced by both"),
+        ([_Dependency, _Replacement, _ChainedReplacement], "replaced and replaces"),
+    ],
+)
+def test_apply_replacements_rejects_invalid_replacements(
+    module_classes: list[type[DiscoverableModule]], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        apply_replacements(module_classes)
