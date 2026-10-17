@@ -17,10 +17,11 @@ its endpoints with it; either way this file names no controller.
 """
 
 # Standard
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 import asyncio
+import time
 
 # Third Party
 from fastapi import FastAPI
@@ -148,6 +149,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     event_loop_monitor = EventLoopMonitor()
     # Whether each controller's run() was entered; the lifespan marks it.
     controller_status = ControllerStatus(type(c).__name__ for c in controllers.all())
+    restored_instances = set(event_gate.stats().streams)
+    restored_deadline = time.monotonic() + config.instance_timeout
     if config.metrics_enabled:
         # Every component with metrics registered itself as it was built.
         register_coordinator_metrics()
@@ -185,7 +188,11 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         as on ``DELETE /instances``; a server that was only slow
         redeclares when it re-registers.
         """
-        for instance_id in _evict_stale(registry, config.instance_timeout):
+        departed = _evict_stale(registry, config.instance_timeout)
+        if restored_instances and time.monotonic() >= restored_deadline:
+            departed += _unreturned_instances(registry, restored_instances)
+            restored_instances.clear()
+        for instance_id in departed:
             event_gate.drop_instance(instance_id)
             server_configs.forget(instance_id)
 
@@ -308,3 +315,25 @@ def _evict_stale(registry: InstanceRegistry, instance_timeout: float) -> list[st
             logger.warning("Instance %s timed out; evicted", instance_id)
             evicted.append(instance_id)
     return evicted
+
+
+def _unreturned_instances(
+    registry: InstanceRegistry, restored: Iterable[str]
+) -> list[str]:
+    """Return the restored instances that never registered again.
+
+    Args:
+        registry: The shared instance registry.
+        restored: Instances that came back from the checkpoint.
+
+    Returns:
+        The ids still missing from the registry.
+    """
+    missing = []
+    for instance_id in restored:
+        if not registry.contains(instance_id):
+            logger.warning(
+                "Instance %s did not re-register after restore; evicted", instance_id
+            )
+            missing.append(instance_id)
+    return missing
