@@ -290,7 +290,7 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
 **Handler types:**
 
 - **SERIALIZED** -- Run one at a time by the request transport (the ZMQ main
-  loop or the gRPC sync-handler lock) for fast, non-blocking work.
+  loop or the gRPC serialized-handler lock) for fast, non-blocking work.
 - **BLOCKING** -- Dispatched to a normal or client-affinity thread pool (may
   involve GPU copies or I/O).
 

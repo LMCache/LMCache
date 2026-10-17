@@ -44,7 +44,9 @@ def _unused_tcp_port() -> int:
 
 
 @pytest.mark.parametrize("request_transport", REQUEST_TRANSPORTS)
-def test_sync_handlers_are_serialized(request_transport: RequestTransport) -> None:
+def test_serialized_handlers_run_one_at_a_time(
+    request_transport: RequestTransport,
+) -> None:
     """SERIALIZED handlers must retain the single-main-loop execution contract."""
     state = _DispatchState()
 

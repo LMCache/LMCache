@@ -952,7 +952,7 @@ def test_add_affinity_thread_pool():
     server.close()
 
 
-def test_normal_pool_error_on_sync_handler():
+def test_normal_pool_error_on_serialized_handler():
     """
     Test that add_normal_thread_pool raises TypeError for SERIALIZED handlers.
     """
@@ -967,7 +967,7 @@ def test_normal_pool_error_on_sync_handler():
     server.close()
 
 
-def test_affinity_pool_error_on_sync_handler():
+def test_affinity_pool_error_on_serialized_handler():
     """
     Test that add_affinity_thread_pool raises TypeError for SERIALIZED handlers.
     """
