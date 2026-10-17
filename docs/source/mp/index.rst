@@ -117,7 +117,9 @@ class-referenced ``module_dependencies``, and calls ``create()`` with a shared
 ``ModuleBuildContext``. Out-of-tree ``--server-module`` paths explicitly add
 classes to the same graph and lifecycle; their configuration comes from
 ``ModuleBuildContext.config_for()``. This includes ``KVEventModule`` and the
-transfer, lookup, management, P2P, blend, and experimental modules. The
+transfer, lookup, management, P2P, and blend modules; opt-in modules under
+``plugin_modules/`` (for example ``qstore``) join the same graph only when
+named by ``--server-module``. The
 compositor then creates the ZMQ or gRPC request server selected by
 ``--transport``, registers module handlers and optional transport services,
 and blocks in a keep-alive loop.
