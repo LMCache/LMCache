@@ -124,7 +124,7 @@ compositor then creates the ZMQ or gRPC request server selected by
 ``--transport``, registers module handlers and optional transport services,
 and blocks in a keep-alive loop.
 
-**``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
+**``modules/blend/module.py``** -- Defines ``BlendModule``, the paged-aware
 blend pipeline that enables non-prefix KV cache reuse (e.g. across
 document paragraphs) on the sparse-prefetch path. KV-cache registration
 rides the standard ``REGISTER_KV_CACHE``; the module adds only the CB RPCs
@@ -596,7 +596,7 @@ Key Source Files
        ``management.py`` (``ManagementModule``), ``kv_events.py``
        (``KVEventModule``, CPU event subscriptions), ``lmcache_driven_transfer.py``
        (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
-       (``EngineDrivenTransferModule``), and ``blend.py``
+       (``EngineDrivenTransferModule``), and ``blend/module.py``
        (``BlendModule``, the paged-aware blend pipeline selected by
        ``--engine-type blend``).
    * - ``lmcache/v1/multiprocess/http_server.py``
