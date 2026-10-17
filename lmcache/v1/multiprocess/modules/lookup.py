@@ -221,22 +221,7 @@ class LookupModule(DiscoverableModule):
                 model_name,
                 world_size,
             )
-            self._register_prefetch_job(
-                _PrefetchJob(
-                    handle=PrefetchHandle(
-                        prefetch_request_id=-1,
-                        external_request_id=key.request_id,
-                        total_requested_keys=0,
-                        submit_time=time.monotonic(),
-                    ),
-                    row_windows=(),
-                    request_id=key.request_id,
-                    requested_tokens=0,
-                    model_name=model_name,
-                    cache_salt=key.cache_salt,
-                    early_exit_reason="no_gpu_context",
-                )
-            )
+            self._register_empty_prefetch_job(key, early_exit_reason="no_gpu_context")
             return
 
         num_kv_readers = key.require_num_kv_readers()
@@ -245,21 +230,8 @@ class LookupModule(DiscoverableModule):
             list(key.token_ids), end=key.end
         )
         if not chunk_hashes:
-            self._register_prefetch_job(
-                _PrefetchJob(
-                    handle=PrefetchHandle(
-                        prefetch_request_id=-1,
-                        external_request_id=key.request_id,
-                        total_requested_keys=0,
-                        submit_time=time.monotonic(),
-                    ),
-                    row_windows=(),
-                    request_id=key.request_id,
-                    requested_tokens=0,
-                    model_name=model_name,
-                    cache_salt=key.cache_salt,
-                    early_exit_reason="empty_chunk_hashes",
-                )
+            self._register_empty_prefetch_job(
+                key, early_exit_reason="empty_chunk_hashes"
             )
             return
 
@@ -311,21 +283,8 @@ class LookupModule(DiscoverableModule):
                 model_name,
                 world_size,
             )
-            self._register_prefetch_job(
-                _PrefetchJob(
-                    handle=PrefetchHandle(
-                        prefetch_request_id=-1,
-                        external_request_id=key.request_id,
-                        total_requested_keys=0,
-                        submit_time=time.monotonic(),
-                    ),
-                    row_windows=(),
-                    request_id=key.request_id,
-                    requested_tokens=0,
-                    model_name=model_name,
-                    cache_salt=key.cache_salt,
-                    early_exit_reason="no_group_layout_descs",
-                )
+            self._register_empty_prefetch_job(
+                key, early_exit_reason="no_group_layout_descs"
             )
             return
 
@@ -342,23 +301,12 @@ class LookupModule(DiscoverableModule):
             # and no read lock is taken, so the engine has nothing to release.
             # requested_tokens stays non-zero so hit-rate metrics count the
             # declined tokens as unserved.
-            self._register_prefetch_job(
-                _PrefetchJob(
-                    handle=PrefetchHandle(
-                        prefetch_request_id=-1,
-                        external_request_id=key.request_id,
-                        total_requested_keys=0,
-                        submit_time=time.monotonic(),
-                    ),
-                    row_windows=(),
-                    request_id=key.request_id,
-                    requested_tokens=requested_tokens,
-                    num_object_groups=attn_desc.num_object_groups,
-                    attn_desc=attn_desc,
-                    model_name=model_name,
-                    cache_salt=key.cache_salt,
-                    early_exit_reason="load_policy_recompute",
-                )
+            self._register_empty_prefetch_job(
+                key,
+                requested_tokens=requested_tokens,
+                num_object_groups=attn_desc.num_object_groups,
+                attn_desc=attn_desc,
+                early_exit_reason="load_policy_recompute",
             )
             return
 
@@ -382,23 +330,12 @@ class LookupModule(DiscoverableModule):
         if not suffix_hashes:
             # Everything is engine-covered: nothing to lock or prefetch. The
             # empty job still reports the covered prefix as the hit.
-            self._register_prefetch_job(
-                _PrefetchJob(
-                    handle=PrefetchHandle(
-                        prefetch_request_id=-1,
-                        external_request_id=key.request_id,
-                        total_requested_keys=0,
-                        submit_time=time.monotonic(),
-                    ),
-                    row_windows=(),
-                    request_id=key.request_id,
-                    requested_tokens=requested_tokens,
-                    num_object_groups=attn_desc.num_object_groups,
-                    attn_desc=attn_desc,
-                    start_chunk=start_chunk,
-                    model_name=model_name,
-                    cache_salt=key.cache_salt,
-                )
+            self._register_empty_prefetch_job(
+                key,
+                requested_tokens=requested_tokens,
+                num_object_groups=attn_desc.num_object_groups,
+                attn_desc=attn_desc,
+                start_chunk=start_chunk,
             )
             return
 
@@ -672,6 +609,48 @@ class LookupModule(DiscoverableModule):
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:
         with self._prefetch_job_lock:
             self._prefetch_jobs[job.request_id] = job
+
+    def _register_empty_prefetch_job(
+        self,
+        key: IPCCacheServerKey,
+        requested_tokens: int = 0,
+        num_object_groups: int = 1,
+        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
+        start_chunk: int = 0,
+        early_exit_reason: str = "",
+    ) -> None:
+        """Register a job that resolves immediately without a prefetch.
+
+        Args:
+            key: The lookup's cache key.
+            requested_tokens: Hit-rate denominator tokens; 0 on early exits.
+            num_object_groups: Object groups of the request's layout.
+            attn_desc: The request's attention window descriptor.
+            start_chunk: First chunk of the looked-up range; reported as the
+                hit when everything below it is engine-covered.
+            early_exit_reason: The ``lookup()`` branch that returned before
+                submitting a prefetch; empty when the lookup simply had
+                nothing to fetch.
+        """
+        self._register_prefetch_job(
+            _PrefetchJob(
+                handle=PrefetchHandle(
+                    prefetch_request_id=-1,
+                    external_request_id=key.request_id,
+                    total_requested_keys=0,
+                    submit_time=time.monotonic(),
+                ),
+                row_windows=(),
+                request_id=key.request_id,
+                requested_tokens=requested_tokens,
+                num_object_groups=num_object_groups,
+                attn_desc=attn_desc,
+                start_chunk=start_chunk,
+                model_name=key.model_name,
+                cache_salt=key.cache_salt,
+                early_exit_reason=early_exit_reason,
+            )
+        )
 
     def _consume_prefetch_result(self, job: _PrefetchJob) -> int | None:
         """Hand a finished prefetch result over to the request's session.
