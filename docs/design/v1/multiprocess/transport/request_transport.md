@@ -86,6 +86,12 @@ server-streaming call is read on its own thread, so idle subscriptions never
 occupy a handler worker. In `aio` mode, the `grpc_server_workers` threads only
 run out-of-tree services that register plain functions instead of coroutines.
 
+Both servers subclass `BaseGrpcMultiprocessServer` in `grpc_impl/server_base.py`,
+which owns the handler pools, port binding, service registration and the close
+sequence. `GrpcMultiprocessServer` (sync) and `GrpcAioMultiprocessServer` only
+provide the gRPC server object, the servicer for each generated service, and
+how the server starts and stops.
+
 ## Adding an RPC
 
 An ordinary RPC requires three changes:

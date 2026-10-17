@@ -2,7 +2,7 @@
 """gRPC request server on grpc.aio for multiprocess requests."""
 
 # Standard
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 import asyncio
@@ -13,24 +13,15 @@ import grpc
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
-from lmcache.v1.multiprocess.ext_server_module import register_grpc_services
 from lmcache.v1.multiprocess.futures import MessagingStream
-from lmcache.v1.multiprocess.request_handler import (
-    BoundRequestHandler,
-    HandlerType,
-)
-from lmcache.v1.multiprocess.transport.base import RequestServer
-from lmcache.v1.multiprocess.transport.grpc_impl.client import parse_grpc_target
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
-    ServiceBinding,
-    get_service_bindings,
+from lmcache.v1.multiprocess.request_handler import HandlerType
+from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import ServiceBinding
+from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
+    BaseGrpcMultiprocessServer,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     GRPC_SERVER_OPTIONS,
     GrpcRequestHandler,
-    bind_module_handlers,
-    build_service_handlers,
     client_affinity_key,
 )
 
@@ -77,8 +68,8 @@ class _AioServicer:
         return invoke
 
 
-class GrpcAioMultiprocessServer(RequestServer):
-    """Serve the same handlers as ``GrpcMultiprocessServer`` on grpc.aio.
+class GrpcAioMultiprocessServer(BaseGrpcMultiprocessServer):
+    """Serve the gRPC request services on grpc.aio.
 
     Calls are received on one event loop thread and handed to the handler
     pools, so no gRPC thread sits waiting while a handler runs.
@@ -94,24 +85,12 @@ class GrpcAioMultiprocessServer(RequestServer):
         max_gpu_workers: int,
         grpc_server_workers: int,
     ) -> None:
-        self._bind_url = bind_url
-        self._normal_pool = ThreadPoolExecutor(
-            max_workers=max_cpu_workers,
-            thread_name_prefix="grpc-normal",
-        )
-        self._affinity_pool = AffinityThreadPool(
-            max_workers=max_gpu_workers,
-            thread_name_prefix="grpc-affinity",
+        super().__init__(
+            bind_url, max_cpu_workers, max_gpu_workers, grpc_server_workers
         )
         self._sync_pool = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="grpc-sync",
-        )
-        # Out-of-tree services may register plain functions, which grpc.aio
-        # runs on this pool.
-        self._executor = ThreadPoolExecutor(
-            max_workers=grpc_server_workers,
-            thread_name_prefix="grpc-server",
         )
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(
@@ -122,23 +101,11 @@ class GrpcAioMultiprocessServer(RequestServer):
         self._loop_thread.start()
         try:
             self._server: grpc.aio.Server = self._run(self._create_server())
-            self._bound_port = self._server.add_insecure_port(
-                parse_grpc_target(bind_url)
-            )
-            if self._bound_port == 0:
-                raise RuntimeError(
-                    f"Failed to bind gRPC multiprocess server: {bind_url}"
-                )
+            self._bind(self._server)
         except BaseException:
             # Nothing has been submitted yet, so waiting for the workers is quick.
             self._release_threads(wait=True)
             raise
-        self._closed = threading.Event()
-
-    @property
-    def bound_port(self) -> int:
-        """Return the TCP port selected by gRPC, including for port zero."""
-        return self._bound_port
 
     async def dispatch(
         self,
@@ -237,43 +204,10 @@ class GrpcAioMultiprocessServer(RequestServer):
         finally:
             stream.close()
 
-    def add_modules(self, modules: Sequence[object]) -> None:
-        """Register decorated module methods as generated gRPC services.
-
-        Args:
-            modules: Ordered business modules. A later module overrides an
-                earlier handler for the same request type.
-
-        Raises:
-            TypeError: If a module handler does not match its protocol types.
-            ValueError: If a module exposes invalid handler metadata.
-        """
-        handlers_by_operation = bind_module_handlers(modules)
-        for binding in get_service_bindings().values():
-            self._add_generated_service(binding, handlers_by_operation)
-        register_grpc_services(modules, self._server)
-
     def start(self) -> None:
         """Start accepting gRPC requests."""
         self._run(self._server.start())
         logger.info("LMCache gRPC cache server (aio) is running on %s", self._bind_url)
-
-    def close(self) -> None:
-        """Stop the gRPC server, its event loop and its request executors."""
-        if self._closed.is_set():
-            return
-        self._closed.set()
-        self._run(self._server.stop(grace=None))
-        self._release_threads(wait=False)
-
-    def _release_threads(self, wait: bool) -> None:
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._loop_thread.join()
-        self._loop.close()
-        self._normal_pool.shutdown(wait=wait)
-        self._sync_pool.shutdown(wait=wait)
-        self._affinity_pool.shutdown(wait=wait)
-        self._executor.shutdown(wait=wait)
 
     async def _create_server(self) -> grpc.aio.Server:
         return grpc.aio.server(
@@ -284,14 +218,22 @@ class GrpcAioMultiprocessServer(RequestServer):
     def _run(self, coro: Any) -> Any:
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
 
-    def _add_generated_service(
+    def _grpc_server(self) -> grpc.aio.Server:
+        return self._server
+
+    def _make_servicer(
         self,
         binding: ServiceBinding,
-        handlers_by_operation: dict[str, BoundRequestHandler],
-    ) -> None:
-        service_handlers = build_service_handlers(binding, handlers_by_operation)
-        add_servicer = getattr(
-            binding.grpc_module,
-            f"add_{binding.descriptor.name}Servicer_to_server",
-        )
-        add_servicer(_AioServicer(binding, service_handlers, self), self._server)
+        handlers: dict[str, GrpcRequestHandler],
+    ) -> object:
+        return _AioServicer(binding, handlers, self)
+
+    def _stop_server(self) -> None:
+        self._run(self._server.stop(grace=None))
+
+    def _release_threads(self, wait: bool) -> None:
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._loop_thread.join()
+        self._loop.close()
+        self._sync_pool.shutdown(wait=wait)
+        super()._release_threads(wait)
