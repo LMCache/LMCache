@@ -18,6 +18,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
@@ -196,7 +197,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # empty_cache (leaf-lock invariant: no thread holds two locks).
         self._lock = threading.Lock()
 
-        # Route finish_write / finish_read_prefetched through a C++ host
+        # Route write completion/abort and read completion through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
         self._device_host_func_dispatcher = DeviceHostFuncDispatcher()
         self._device_host_func_dispatcher.register(
@@ -207,6 +208,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._device_host_func_dispatcher.register(
             "finish_write_by_owner",
             self._ctx.storage_manager.finish_write_by_owner,
+            payload_type=L1WriteCompletion,
+        )
+        self._device_host_func_dispatcher.register(
+            "abort_write_by_owner",
+            self._ctx.storage_manager.abort_write_by_owner,
             payload_type=L1WriteCompletion,
         )
         self._device_host_func_dispatcher.register(
@@ -762,6 +768,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
             reserved_dict: dict[ObjectKey, MemoryObj] = {}
             all_dict: dict[ObjectKey, MemoryObj] = {}
+            completion_by_owner: dict[int, list[ObjectKey]] = {}
             total_bytes: int = 0
             store_succeeded = False
             try:
@@ -776,10 +783,48 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         self._ctx.chunk_size,
                         object_group_id=obj_group_id,
                     )
-                    reserved_dict = self._ctx.storage_manager.reserve_write(
-                        keys_to_reserve, layout_desc
+                    reserve_result = (
+                        self._ctx.storage_manager.reserve_write_with_status(
+                            keys_to_reserve, layout_desc
+                        )
                     )
+                    reserved_dict = {
+                        obj_key: memory_obj
+                        for obj_key, (_, memory_obj) in reserve_result.items()
+                        if memory_obj is not None
+                    }
                     all_dict.update(reserved_dict)
+                    # Capture ownership while each reservation is known to be
+                    # valid. A failed device copy may invalidate the memory
+                    # object's owner metadata before the completion callback is
+                    # scheduled, but rollback must still reach the manager that
+                    # created the reservation.
+                    group_completion: L1WriteCompletion = []
+                    if reserved_dict:
+                        group_completion = (
+                            self._ctx.storage_manager.prepare_write_completion(
+                                reserved_dict
+                            )
+                        )
+                        for (
+                            owner,
+                            owner_keys,
+                        ) in group_completion:
+                            completion_by_owner.setdefault(owner, []).extend(owner_keys)
+                    allocation_failures = [
+                        obj_key
+                        for obj_key, (error, _) in reserve_result.items()
+                        if error == L1Error.OUT_OF_MEMORY
+                    ]
+                    if allocation_failures:
+                        logger.debug(
+                            "Skipping STORE request %s after %d L1 allocation "
+                            "failure(s) in object group %d",
+                            key.request_id,
+                            len(allocation_failures),
+                            obj_group_id,
+                        )
+                        break
                     if reserved_dict:
                         total_bytes += next(
                             iter(reserved_dict.values())
@@ -804,17 +849,30 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         transfer_key=transfer_key,
                         block_ids_host=gpu_block_ids,
                     )
-
-                completion = (
-                    self._ctx.storage_manager.prepare_write_completion(all_dict)
-                    if all_dict
-                    else []
-                )
-                store_succeeded = True
+                    if reserved_dict:
+                        current_completion = (
+                            self._ctx.storage_manager.prepare_write_completion(
+                                reserved_dict
+                            )
+                        )
+                        if current_completion != group_completion:
+                            logger.error(
+                                "Skipping STORE request %s because L1 reservation "
+                                "ownership changed in object group %d: expected=%s "
+                                "current=%s",
+                                key.request_id,
+                                obj_group_id,
+                                group_completion,
+                                current_completion,
+                            )
+                            break
+                else:
+                    store_succeeded = True
             except Exception:
                 logger.exception("Cannot store keys due to exception")
             finally:
                 event_backend.record_event(event, cache_context.stream)
+                completion: L1WriteCompletion = list(completion_by_owner.items())
                 # Fail closed: commit the reserved objects only when every chunk
                 # copied successfully; otherwise the whole store is skipped.
                 stored_count = len(all_dict) if store_succeeded else 0
@@ -826,6 +884,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     )
                 else:
                     total_bytes = 0
+                    if all_dict:
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream,
+                            "abort_write_by_owner",
+                            completion,
+                        )
                 num_tokens = num_chunks * self._ctx.chunk_size if stored_count else 0
                 self._ctx.event_bus.publish_on_stream(
                     cache_context.cupy_stream,
