@@ -79,6 +79,7 @@ class StatsCollector:
         self._lock = threading.Lock()
         self._results: list[RequestResult] = []
         self._start_time: float = time.monotonic()
+        self._end_time: float | None = None
 
         # Running accumulators (updated under lock)
         self._successful: int = 0
@@ -108,6 +109,20 @@ class StatsCollector:
             result.successful,
         )
 
+    def finish(self) -> None:
+        """Stop the elapsed-time clock for the measured run. Thread-safe.
+
+        Call after all measured requests and their callbacks finish, before
+        client/display cleanup or reporting. Repeated calls preserve the
+        first end time. Call :meth:`reset` before recording another run.
+
+        Returns:
+            None.
+        """
+        with self._lock:
+            if self._end_time is None:
+                self._end_time = time.monotonic()
+
     def reset(self) -> None:
         """Clear all accumulated results and restart the timer.
 
@@ -117,6 +132,7 @@ class StatsCollector:
         with self._lock:
             self._results.clear()
             self._start_time = time.monotonic()
+            self._end_time = None
             self._successful = 0
             self._failed = 0
             self._sum_ttft = 0.0
@@ -127,11 +143,18 @@ class StatsCollector:
         logger.debug("Stats collector reset")
 
     def get_current_stats(self) -> AggregatedStats:
-        """Return current aggregated stats snapshot. Thread-safe."""
+        """Return running statistics, using the fixed end time after finish.
+
+        Returns:
+            AggregatedStats: A thread-safe snapshot of the recorded results.
+        """
         with self._lock:
             successful = self._successful
             failed = self._failed
-            elapsed = time.monotonic() - self._start_time
+            end_time = (
+                self._end_time if self._end_time is not None else time.monotonic()
+            )
+            elapsed = end_time - self._start_time
             sum_ttft = self._sum_ttft
             sum_decode = self._sum_decode_speed
             sum_latency = self._sum_request_latency
@@ -157,8 +180,15 @@ class StatsCollector:
     def get_final_stats(self) -> FinalStats:
         """Compute and return final stats with percentiles.
 
-        Should be called once after the benchmark completes.
+        Stops the timer if :meth:`finish` has not already been called.
+        Call only after all measured requests finish; use
+        :meth:`get_current_stats` for running statistics. Subsequent calls
+        and JSON exports use the same measured interval until :meth:`reset`.
+
+        Returns:
+            FinalStats: The completed run's aggregate and percentile metrics.
         """
+        self.finish()
         with self._lock:
             results = list(self._results)
 
