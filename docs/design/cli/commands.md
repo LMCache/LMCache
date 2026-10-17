@@ -183,11 +183,8 @@ Checksum:                                OK
 **`bench server`** -- end-to-end sanity test for a running LMCache MP cache
 server (ZMQ + HTTP). For each sequence in ``[--start, --end)`` the tool runs a
 cold pass (``LOOKUP`` miss → ``STORE``) and a warm pass (``LOOKUP`` hit →
-``RETRIEVE``), then compares every receiving rank's per-chunk checksums with
-the corresponding writer's cold-pass reference. MLA ranks all use rank 0's
-reference; non-MLA ranks each use their own shard. Engine-driven mode hashes
-local tensors; handle mode queries the server's HTTP API per ``instance_id``.
-Mismatch output identifies the rank and chunk. Exercises the full RPC path
+``RETRIEVE``), then verifies the retrieved data using per-chunk checksums.
+Exercises the full RPC path
 (``REGISTER_KV_CACHE → GET_CHUNK_SIZE → LOOKUP → QUERY_PREFETCH_STATUS →
 RETRIEVE → STORE → END_SESSION``).
 
