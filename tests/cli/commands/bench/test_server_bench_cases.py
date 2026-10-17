@@ -32,8 +32,8 @@ def _request(request_kind: str) -> RequestContext:
         num_full_tokens=2,
         total_chunks=1,
         chunk_size=2,
-        block_offset=0,
-        num_blocks=1,
+        block_size=2,
+        block_ids=(((0,),),),
     )
 
 
@@ -67,7 +67,7 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
     client = _client("same", "same")
     messages: list[str] = []
 
-    result = BaselineBenchCase(sequence_count=1, interval_seconds=0).run(
+    result = BaselineBenchCase(sequence_count=1, interval_seconds=0, num_tokens=1).run(
         client,
         messages.append,
     )
@@ -84,17 +84,22 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
         if method_call not in no_op_calls
     ]
     assert meaningful_calls == [
-        call.create_request(0, request_id="req-0-cold", request_kind="cold"),
+        call.create_request(
+            0, request_id="req-0-cold", request_kind="cold", token_ids=(0, 9906)
+        ),
         call.lookup(cold),
+        call.fill_deterministic_kv(cold),
         call.compute_checksums(cold, start_token=0, token_count=2),
         call.store(cold, start_token=0, token_count=2),
-        call.end_session(cold),
-        call.create_request(0, request_id="req-0-warm", request_kind="warm"),
+        call.release_request(cold),
+        call.create_request(
+            0, request_id="req-0-warm", request_kind="warm", token_ids=(0, 9906)
+        ),
         call.lookup(warm),
         call.zero_destination(warm, start_token=0, token_count=2),
         call.retrieve(warm, start_token=0, token_count=2),
         call.compute_checksums(warm, start_token=0, token_count=2),
-        call.end_session(warm),
+        call.release_request(warm),
     ]
     assert result.completed_runs == 1
     assert result.succeeded
@@ -122,7 +127,7 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
 def test_baseline_case_records_checksum_mismatch() -> None:
     messages: list[str] = []
 
-    result = BaselineBenchCase(sequence_count=1, interval_seconds=0).run(
+    result = BaselineBenchCase(sequence_count=1, interval_seconds=0, num_tokens=1).run(
         _client("cold", "warm"),
         messages.append,
     )
@@ -264,3 +269,15 @@ def test_run_concurrently_needs_one_client_per_case() -> None:
             threading.Event(),
             lambda _message: None,
         )
+
+
+@pytest.mark.parametrize(
+    "operation", ["lookup", "fill_deterministic_kv", "store", "release_request"]
+)
+def test_baseline_releases_request_on_error(operation: str) -> None:
+    client = _client("same", "same")
+    method = getattr(client, operation)
+    method.side_effect = RuntimeError("injected failure")
+    with pytest.raises(RuntimeError, match="injected failure"):
+        BaselineBenchCase(1, 0, num_tokens=1).run(client, lambda message: None)
+    client.release_request.assert_called_once_with(_request("cold"))
