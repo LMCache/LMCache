@@ -54,9 +54,11 @@ pytest.importorskip("vllm")
 from vllm.v1.request import RequestStatus  # noqa: E402
 
 # First Party
-from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+from lmcache.inprocess.integration.vllm.vllm_v1_adapter import (
+    LMCacheConnectorV1Impl,
+)
 
-_ADAPTER_LOGGER_NAME = "lmcache.integration.vllm.vllm_v1_adapter"
+_ADAPTER_LOGGER_NAME = "lmcache.inprocess.integration.vllm.vllm_v1_adapter"
 
 
 @contextmanager
