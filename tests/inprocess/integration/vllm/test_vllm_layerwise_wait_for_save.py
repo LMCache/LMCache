@@ -10,7 +10,7 @@ import torch
 pytest.importorskip("vllm")
 
 # First Party
-from lmcache.integration.vllm.vllm_v1_adapter import (
+from lmcache.inprocess.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorMetadata,
     LMCacheConnectorV1Impl,
     SaveSpec,
