@@ -120,11 +120,19 @@ class GrpcAioMultiprocessServer(RequestServer):
             name="grpc-aio-loop",
         )
         self._loop_thread.start()
-        self._server: grpc.aio.Server = self._run(self._create_server())
-        self._bound_port = self._server.add_insecure_port(parse_grpc_target(bind_url))
-        if self._bound_port == 0:
-            self._stop_loop()
-            raise RuntimeError(f"Failed to bind gRPC multiprocess server: {bind_url}")
+        try:
+            self._server: grpc.aio.Server = self._run(self._create_server())
+            self._bound_port = self._server.add_insecure_port(
+                parse_grpc_target(bind_url)
+            )
+            if self._bound_port == 0:
+                raise RuntimeError(
+                    f"Failed to bind gRPC multiprocess server: {bind_url}"
+                )
+        except BaseException:
+            # Nothing has been submitted yet, so waiting for the workers is quick.
+            self._release_threads(wait=True)
+            raise
         self._closed = threading.Event()
 
     @property
@@ -256,16 +264,16 @@ class GrpcAioMultiprocessServer(RequestServer):
             return
         self._closed.set()
         self._run(self._server.stop(grace=None))
-        self._stop_loop()
-        self._normal_pool.shutdown(wait=False)
-        self._sync_pool.shutdown(wait=False)
-        self._affinity_pool.shutdown(wait=False)
-        self._executor.shutdown(wait=False)
+        self._release_threads(wait=False)
 
-    def _stop_loop(self) -> None:
+    def _release_threads(self, wait: bool) -> None:
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._loop_thread.join()
         self._loop.close()
+        self._normal_pool.shutdown(wait=wait)
+        self._sync_pool.shutdown(wait=wait)
+        self._affinity_pool.shutdown(wait=wait)
+        self._executor.shutdown(wait=wait)
 
     async def _create_server(self) -> grpc.aio.Server:
         return grpc.aio.server(
