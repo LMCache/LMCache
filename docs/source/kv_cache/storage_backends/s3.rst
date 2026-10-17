@@ -104,8 +104,9 @@ whose ``"type": "s3"`` field selects the S3 adapter.
 
    {
      "type": "s3",
-     "s3_endpoint": "s3://my-bucket",
+     "s3_endpoint": "s3://my-bucket.s3.us-east-1.amazonaws.com",
      "s3_region": "us-east-1",
+     "s3_addressing_style": "virtual",
      "s3_num_io_threads": 64,
      "s3_prefer_http2": true,
      "s3_enable_s3express": false,
@@ -122,9 +123,15 @@ S3 L2 Adapter Fields
 ~~~~~~~~~~~~~~~~~~~~
 
 * **type** (required): must be ``"s3"``.
-* **s3_endpoint** (required): bucket URL. Accepts either ``s3://bucket`` or
-  the bare host form (e.g. ``bucket.s3.us-east-1.amazonaws.com``).
+* **s3_endpoint** (required): bucket URL, optionally prefixed with ``s3://``.
+  ``<bucket>.<host>[:port]`` for virtual-hosted addressing (e.g.
+  ``bucket.s3.us-east-1.amazonaws.com``), ``<host>[:port]/<bucket>`` for
+  path-style (e.g. ``minio.local:9000/bucket``).
 * **s3_region** (required): AWS region for the S3 client.
+* **s3_addressing_style**: ``"virtual"`` (default) or ``"path"``. MinIO and
+  other S3-compatible servers usually need ``"path"``; MinIO only accepts
+  virtual-hosted requests when ``MINIO_DOMAIN`` is set on the server. See
+  :doc:`/mp/l2_storage/s3` for troubleshooting.
 * **s3_num_io_threads**: number of CRT IO threads (default ``64``).
 * **s3_prefer_http2**: attempt HTTP/2 via ALPN negotiation (default ``true``).
 * **s3_enable_s3express**: enable S3 Express One Zone signing (default ``false``).
