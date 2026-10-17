@@ -1039,6 +1039,26 @@ Environment Variables
    * - ``LMCACHE_USAGE_TRACK_INTERVAL``
      - Seconds between continuous usage-telemetry flushes (default
        ``600``). See :ref:`usage-stats-collection`.
+   * - ``LMCACHE_INSTANCE_ID``
+     - Stable unique identifier for this LMCache instance, used as the
+       prefix of POSIX SHM segment names in ``lmcache_driven`` (CPU)
+       mode (``/lmcache_kv_<id>_<n>``). When unset, a per-process UUID
+       is generated at import time. Set this when multiple vLLM containers
+       share ``/dev/shm`` (``ipc: host`` / ``hostIPC: true``) but run in
+       **independent PID namespaces** (the default for Docker, Podman, and
+       Kubernetes without ``hostPID``): without it, two containers that
+       recycle the same low PIDs collide on
+       ``shm_open(O_CREAT|O_EXCL)`` and the second worker fails with
+       ``FileExistsError``. In Kubernetes, inject the pod UID via the
+       Downward API so each pod gets a guaranteed cluster-unique value:
+
+       .. code-block:: yaml
+
+           env:
+           - name: LMCACHE_INSTANCE_ID
+             valueFrom:
+               fieldRef:
+                 fieldPath: metadata.uid
 
 Full Example
 ------------

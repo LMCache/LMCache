@@ -367,6 +367,50 @@ def test_wrapper_rejects_view_larger_than_segment():
         CpuShmTensorWrapper(view, "/lmcache_test_never_created", segment_nbytes=100 * 4)
 
 
+def test_shm_name_does_not_embed_pid():
+    """SHM names must not contain the raw process PID.
+
+    Two containers with independent PID namespaces both recycle the same
+    low PIDs.  If the name is /lmcache_kv_<pid>_<n>, both call
+    shm_open(O_CREAT|O_EXCL) with the same name and the second gets
+    EEXIST.  The name must embed a stable per-instance unique ID instead.
+    """
+    src = torch.zeros((2, 2), dtype=torch.float32)
+    w = migrate_to_shm_and_wrap(src)
+    try:
+        pid_infix = "_%d_" % os.getpid()
+        assert pid_infix not in w.shm_name, (
+            f"SHM name {w.shm_name!r} embeds the process PID; "
+            "use _LMCACHE_INSTANCE_ID or uuid to avoid cross-container collisions"
+        )
+        assert w.shm_name.startswith(CpuShmTensorWrapper.SHM_NAME_PREFIX)
+    finally:
+        shm_unlink(w.shm_name)
+
+
+def test_shm_name_honours_injected_instance_id(monkeypatch):
+    """LMCACHE_INSTANCE_ID env var (modelled as module attr) appears in SHM name.
+
+    In Kubernetes, callers inject the pod UID via the Downward API
+    (fieldRef: metadata.uid) so SHM names are unique across pods sharing
+    /dev/shm, without requiring hostPID: true.
+    """
+    # First Party
+    import lmcache.v1.platform.devices.cpu.shm as shm_mod
+
+    custom_id = "testpoduid1234ab"
+    monkeypatch.setattr(shm_mod, "_LMCACHE_INSTANCE_ID", custom_id)
+    # Fresh tensor so the idempotency cache does not return an old name.
+    src = torch.zeros((3, 3), dtype=torch.float32)
+    w = migrate_to_shm_and_wrap(src)
+    try:
+        assert custom_id in w.shm_name, (
+            f"Expected custom instance ID {custom_id!r} in SHM name, got {w.shm_name!r}"
+        )
+    finally:
+        shm_unlink(w.shm_name)
+
+
 def test_migrate_ignores_stale_entry_from_id_reuse():
     """A cached entry whose weakref is dead must not be reused.
 
