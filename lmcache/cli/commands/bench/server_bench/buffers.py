@@ -12,6 +12,14 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.platform import synchronize_device
+
+
+def _block_bytes(tensor: torch.Tensor, dim: int, block_ids: Sequence[int]) -> bytes:
+    """Gather block bytes in logical order."""
+    indices = torch.tensor(block_ids, dtype=torch.long, device=tensor.device)
+    selected = tensor.index_select(dim, indices)
+    return selected.contiguous().view(torch.uint8).cpu().numpy().tobytes()
 
 
 class KVCacheBuffers:
@@ -65,39 +73,93 @@ class KVCacheBuffers:
                 self.kv_caches[name] = tensor
                 self._block_dims[name] = block_dim
 
-    def block_views(self, block_offset: int, num_blocks: int) -> Iterator[torch.Tensor]:
-        """Yield writable block-range views in layer order."""
-        for name, tensor in self.kv_caches.items():
-            yield tensor.narrow(self._block_dims[name], block_offset, num_blocks)
+    def block_views(
+        self, block_ids_per_group: Sequence[Sequence[int]]
+    ) -> Iterator[torch.Tensor]:
+        """Yield validated block views in group/layer/logical-block order."""
+        for tensor, dim, block_ids in self._layers(block_ids_per_group):
+            for block_id in block_ids:
+                yield tensor.narrow(dim, block_id, 1)
 
-    def zero_blocks(self, block_offset: int, num_blocks: int) -> None:
-        """Zero the selected block range in every layer."""
-        for view in self.block_views(block_offset, num_blocks):
+    def fill_deterministic_kv(
+        self,
+        block_ids_per_group: Sequence[Sequence[int]],
+        token_ids: Sequence[int],
+        worker_id: int,
+    ) -> None:
+        """Fill bound blocks with reproducible pseudorandom KV in [1, 127].
+
+        Seed: token prefix, worker_id, layer; independent of block IDs.
+        Requires matching shape, dtype, and device for reproducibility.
+        """
+        prefix = hashlib.sha256()
+        seeds = []
+        for start in range(0, len(token_ids) - self.block_size + 1, self.block_size):
+            prefix.update(
+                str(tuple(token_ids[start : start + self.block_size])).encode()
+            )
+            seeds.append(prefix.hexdigest())
+        for layer, (tensor, dim, block_ids) in enumerate(
+            self._layers(block_ids_per_group)
+        ):
+            generator = torch.Generator(device=tensor.device)
+            for logical_block, block_id in enumerate(block_ids):
+                identity = f"{seeds[logical_block]}:{worker_id}:{layer}".encode()
+                seed = int.from_bytes(hashlib.sha256(identity).digest()[:8], "little")
+                generator.manual_seed(seed)
+                view = tensor.narrow(dim, block_id, 1)
+                view.copy_(
+                    torch.randint(
+                        1,
+                        128,
+                        view.shape,
+                        dtype=tensor.dtype,
+                        device=tensor.device,
+                        generator=generator,
+                    )
+                )
+
+    def set_blocks_to_zero(self, block_ids_per_group: Sequence[Sequence[int]]) -> None:
+        """Set bound blocks to zero."""
+        for view in self.block_views(block_ids_per_group):
             view.zero_()
 
     def checksums(
-        self, block_offset: int, num_blocks: int, chunk_size: int
+        self, block_ids_per_group: Sequence[Sequence[int]], chunk_size: int
     ) -> list[str]:
-        """Hash selected CPU blocks per chunk across layers.
-
-        ``chunk_size`` counts tokens; incomplete trailing chunks are ignored.
-        """
-        if chunk_size % self.block_size != 0:
-            raise ValueError(
-                "chunk_size %d must be a multiple of block_size %d"
-                % (chunk_size, self.block_size)
-            )
+        """Hash full token chunks across layers in logical block order."""
+        if chunk_size <= 0 or chunk_size % self.block_size:
+            raise ValueError("chunk_size must be a positive multiple of block_size")
         blocks_per_chunk = chunk_size // self.block_size
-        checksums: list[str] = []
-        for chunk in range(num_blocks // blocks_per_chunk):
-            start = block_offset + chunk * blocks_per_chunk
+        checksums = []
+        for start in range(
+            0, len(block_ids_per_group[0]) - blocks_per_chunk + 1, blocks_per_chunk
+        ):
             digest = hashlib.md5()
-            for view in self.block_views(start, blocks_per_chunk):
-                digest.update(view.contiguous().view(torch.uint8).numpy().tobytes())
+            for tensor, dim, block_ids in self._layers(block_ids_per_group):
+                digest.update(
+                    _block_bytes(
+                        tensor, dim, block_ids[start : start + blocks_per_chunk]
+                    )
+                )
             checksums.append(digest.hexdigest())
         return checksums
+
+    def synchronize(self) -> None:
+        """Wait for buffer preparation outside transfer timing."""
+        synchronize_device(next(iter(self.kv_caches.values())).device)
 
     def release(self) -> None:
         """Drop owned references without synchronizing or unregistering."""
         self.kv_caches.clear()
         self._block_dims.clear()
+
+    def _layers(
+        self, block_ids_per_group: Sequence[Sequence[int]]
+    ) -> Iterator[tuple[torch.Tensor, int, Sequence[int]]]:
+        for group, block_ids in zip(
+            self.engine_group_infos, block_ids_per_group, strict=True
+        ):
+            for layer in group.layer_indices:
+                name = f"layer.{layer}"
+                yield self.kv_caches[name], self._block_dims[name], block_ids

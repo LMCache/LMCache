@@ -4,17 +4,15 @@
 Covers:
 - Sub-command registration under ``lmcache bench``
 - Argument registration and defaults
-- Pure helper functions (_build_token_ids, _make_key, _query_checksum)
+- Pure helper functions (_build_token_ids, _make_key)
 """
 
 # Standard
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 import argparse
 import gc
-import json
 import threading
 import weakref
 
@@ -31,7 +29,6 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _build_token_ids,
     _make_key,
     _poll_prefetch_status,
-    _query_checksum,
     _send_lookup,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, parse_kvcache_shape_spec
@@ -171,6 +168,7 @@ class TestCaseDelegation:
             sequence_id_offset=5,
             sequence_id_stride=1,
             interval_seconds=0.0,
+            num_tokens=512,
             stop=ANY,
         )
         client_factory.assert_called_once_with(ANY, ANY, client_index=0)
@@ -184,7 +182,7 @@ class TestCaseDelegation:
                 call("total_requests", "Total requests", 2),
                 call("checksum_ok", "Checksum OK", 1),
                 call("checksum_fail", "Checksum FAIL", 1),
-                call("pass_rate", "Pass rate (%)", 50.0),
+                call("pass_rate", "Checksum pass rate (%)", 50.0),
             ]
         )
         metrics.emit.assert_called_once_with()
@@ -247,6 +245,7 @@ class TestCaseDelegation:
                 sequence_id_offset=10,
                 sequence_id_stride=2,
                 interval_seconds=0.0,
+                num_tokens=512,
                 stop=ANY,
             ),
             call(
@@ -254,6 +253,7 @@ class TestCaseDelegation:
                 sequence_id_offset=11,
                 sequence_id_stride=2,
                 interval_seconds=0.0,
+                num_tokens=512,
                 stop=ANY,
             ),
         ]
@@ -466,91 +466,6 @@ class TestMakeKey:
             worker_id=0,
         )
         assert key.worker_id == 0
-
-
-# ------------------------------------------------------------------ #
-#  _query_checksum
-# ------------------------------------------------------------------ #
-
-
-class _ChecksumHandler(BaseHTTPRequestHandler):
-    """Tiny HTTP handler that records the POST body and returns fake checksums.
-
-    Mirrors the MP server's ``POST /cache/checksums`` (the old ``GET
-    /kvcache/check`` was removed). The received JSON is stored on the server so
-    the test can assert the request shape ``_query_checksum`` sends.
-    """
-
-    def do_POST(self):
-        if "/cache/checksums" not in self.path:
-            self.send_response(404)
-            self.end_headers()
-            return
-        length = int(self.headers.get("Content-Length", 0))
-        payload = json.loads(self.rfile.read(length).decode())
-        self.server.received_payloads.append(payload)
-        body = json.dumps(
-            {
-                "status": "success",
-                "chunk_checksums": ["a" * 32, "b" * 32],
-            }
-        ).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format, *args):
-        pass  # suppress logs
-
-
-class TestQueryChecksum:
-    @pytest.fixture(autouse=True)
-    def _start_server(self):
-        """Start a tiny HTTP server for the test."""
-        self.server = HTTPServer(
-            ("127.0.0.1", 0),
-            _ChecksumHandler,
-        )
-        self.server.received_payloads = []
-        self.port = self.server.server_address[1]
-        self.thread = threading.Thread(
-            target=self.server.serve_forever,
-        )
-        self.thread.daemon = True
-        self.thread.start()
-        yield
-        self.server.shutdown()
-
-    def test_success(self):
-        base = "http://127.0.0.1:%d" % self.port
-        result = _query_checksum(
-            base,
-            block_offset=0,
-            num_blocks=2,
-            block_size=2,
-            chunk_size=2,
-        )
-        assert result is not None
-        assert len(result) == 2
-        assert result[0] == "a" * 32
-        # The POST body matches the MP /cache/checksums contract: block-native
-        # ids and a block-level chunk_size (token chunk_size 2 / block_size 2).
-        assert len(self.server.received_payloads) == 1
-        sent = self.server.received_payloads[0]
-        assert sent["block_ids"] == [0, 1]
-        assert sent["chunk_size"] == 1
-        assert sent["layerwise"] is False
-
-    def test_unreachable_returns_none(self):
-        result = _query_checksum(
-            "http://127.0.0.1:1",
-            block_offset=0,
-            num_blocks=2,
-            block_size=2,
-            chunk_size=2,
-        )
-        assert result is None
 
 
 # ------------------------------------------------------------------ #
@@ -1167,7 +1082,9 @@ class TestClientMultiWorker:
         gc.collect()
         assert all(ref() is not None for ref in tensor_refs)
         try:
-            request = bench_client.create_request(0, "req-0-test", "test")
+            request = bench_client.create_request(
+                0, "req-0-test", "test", token_ids=tuple(range(32))
+            )
             assert request is not None
             lookup = bench_client.lookup(request)
             store = bench_client.store(
@@ -1180,7 +1097,7 @@ class TestClientMultiWorker:
                 start_token=0,
                 token_count=request.num_full_tokens,
             )
-            bench_client.end_session(request)
+            bench_client.release_request(request)
             result = (lookup, store, retrieve)
         finally:
             bench_client.close()
@@ -1320,6 +1237,7 @@ class TestClientMultiWorker:
             "LOOKUP should fire exactly once regardless of tp_size "
             "(is_mla=%s, tp=%d)" % (is_mla, tp)
         )
+        assert lookups[0][1][0].num_kv_readers == (tp if is_mla else 1)
         # Reader count comes from the key; tp_size is a legacy wire field.
         assert lookups[0][1][1] == tp, (
             "LOOKUP payload tp_size must equal simulated tp "
@@ -1425,7 +1343,9 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     )
     bench.start()
     try:
-        request = bench.create_request(0, "req-event", "test")
+        request = bench.create_request(
+            0, "req-event", "test", token_ids=tuple(range(4))
+        )
         assert request is not None
         result = getattr(bench, operation)(request, start_token=0, token_count=4)
         assert result is not None
