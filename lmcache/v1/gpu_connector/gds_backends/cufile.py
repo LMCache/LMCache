@@ -10,6 +10,7 @@ import os
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
 from lmcache.v1.gpu_connector.gds_backends._file import FDGDSHandle, FileGDSBackend
 from lmcache.v1.gpu_connector.gds_backends.base import Submission
@@ -65,6 +66,10 @@ def _check(err: "CUfileError", op: str) -> None:
 
 _STREAM_REGISTER_FLAGS = 0x7
 
+# Device types whose pointers cuFile can register. ROCm tensors report
+# ``cuda``; on XPU the same ABI is served by the xFile shim.
+_REGISTRABLE_DEVICE_TYPES = ("cuda", "xpu")
+
 
 class Backend(FileGDSBackend):
     """Own the cufile driver and its registration operations."""
@@ -74,11 +79,20 @@ class Backend(FileGDSBackend):
 
     @classmethod
     def is_default(cls) -> bool:
-        return torch.version.cuda is not None and torch.version.hip is None
+        """Default on a CUDA or XPU build; ROCm defers to hipfile."""
+        return (
+            torch.version.cuda is not None or torch.version.xpu is not None
+        ) and torch.version.hip is None
 
     def validate_environment(self) -> None:
-        if torch.version.cuda is None:
-            raise ValueError("cufile requires a CUDA PyTorch build")
+        """Accept a CUDA/XPU build. XPU reuses the same cuFile API/ABI."""
+        if torch.version.cuda is not None or torch.version.xpu is not None:
+            return
+        raise ValueError(
+            "cufile requires a CUDA PyTorch build, or an XPU build with a "
+            "cuFile-compatible xFile shim; "
+            f"detected device type {torch_device_type!r}"
+        )
 
     def open_handle(self, fd: int, path: str) -> "AsyncHandle":
         try:
@@ -103,8 +117,12 @@ class Backend(FileGDSBackend):
 
     def register_buffer(self, buf: torch.Tensor) -> None:
         """Use the raw API to preserve cuFile status codes in raised errors."""
-        if not buf.is_cuda:
-            raise ValueError("register_buffer: tensor must be on CUDA")
+        if buf.device.type not in _REGISTRABLE_DEVICE_TYPES:
+            raise ValueError(
+                "register_buffer: tensor must be on a GDS-capable device "
+                f"({' or '.join(_REGISTRABLE_DEVICE_TYPES)}); "
+                f"got {buf.device.type}"
+            )
         self._ensure_driver_open()
         # Third Party
         from cufile.bindings import libcufile
