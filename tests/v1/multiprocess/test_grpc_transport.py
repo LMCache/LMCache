@@ -666,3 +666,26 @@ def test_grpc_server_keeps_handler_concurrency(grpc_server_mode: str) -> None:
 
     assert peak == 2
     assert [len(threads) for threads in affinity_threads.values()] == [1, 1]
+
+
+def test_aio_server_releases_threads_when_bind_fails() -> None:
+    """A failed bind leaves no event loop or worker threads behind."""
+    before = set(threading.enumerate())
+    config = MPServerConfig(
+        transport="grpc",
+        host="nonexistent.invalid",
+        port=0,
+        max_cpu_workers=2,
+        max_gpu_workers=2,
+        grpc_server_mode="aio",
+    )
+
+    with pytest.raises(RuntimeError):
+        build_grpc_request_server([], config)
+
+    leaked = [
+        thread.name
+        for thread in set(threading.enumerate()) - before
+        if thread.name.startswith("grpc-")
+    ]
+    assert leaked == []
