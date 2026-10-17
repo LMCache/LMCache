@@ -279,9 +279,12 @@ class L1ManagerInterface(Protocol):
         ...
 
     def finish_read(
-        self, keys: list[ObjectKey], read_locks: int = 1
+        self, keys: list[ObjectKey], read_locks: int = 1, consumed: bool = True
     ) -> dict[ObjectKey, L1Error]:
-        """Release ``read_locks`` read locks on each key."""
+        """Release ``read_locks`` read locks on each key.
+
+        ``consumed=False`` marks a release of locks whose data was never read.
+        """
         ...
 
     def reserve_write(

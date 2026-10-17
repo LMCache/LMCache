@@ -79,7 +79,10 @@ L1 Metrics
      - Description
    * - ``lmcache_mp.l1_read``
      - Counter (attr: ``cache_salt``)
-     - Number of chunks read from L1, grouped by tenant.
+     - Number of chunks read from L1, grouped by tenant. Read locks taken
+       during lookup and released without the chunks being read (for
+       example, because the engine's own prefix cache already holds them)
+       are not counted.
    * - ``lmcache_mp.l1_write``
      - Counter (attr: ``cache_salt``)
      - Number of chunks written to L1, grouped by tenant.
