@@ -40,18 +40,17 @@ def _args(**overrides: object) -> argparse.Namespace:
 
 
 @pytest.mark.parametrize(
-    ("mode", "transfer_mode", "uses_handle"),
+    ("mode", "transfer_mode"),
     [
-        ("gpu", "auto", True),
-        ("cpu", "auto", False),
-        ("cpu", "lmcache_driven", True),
-        ("gpu", "engine_driven", False),
+        ("gpu", "auto"),
+        ("cpu", "auto"),
+        ("cpu", "lmcache_driven"),
+        ("gpu", "engine_driven"),
     ],
 )
 def test_bench_config_preserves_cli_routing(
     mode: str,
     transfer_mode: str,
-    uses_handle: bool,
 ) -> None:
     config = parse_args_to_config(
         _args(mode=mode, transfer_mode=transfer_mode, tp_size=0)
@@ -60,7 +59,6 @@ def test_bench_config_preserves_cli_routing(
     assert config.mode == mode
     assert config.transfer_mode == transfer_mode
     assert config.tp_size == 1
-    assert config.uses_handle_transfer is uses_handle
 
 
 def test_worker_spec_is_immutable_and_validated() -> None:

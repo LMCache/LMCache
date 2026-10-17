@@ -1021,8 +1021,8 @@ server
 The ``lmcache bench server`` command is an end-to-end sanity test for the
 LMCache Multi-Process (MP) cache server. It connects to a running server
 over ZMQ and exercises the full KV-cache data path for a sequence of
-synthetic requests, then optionally verifies per-chunk checksums through
-the HTTP API.
+synthetic requests, then verifies per-chunk checksums locally or through
+the HTTP API, depending on the transfer mode.
 
 .. code-block:: bash
 
@@ -1030,7 +1030,8 @@ the HTTP API.
 
 Unlike :ref:`lmcache bench engine <lmcache-bench-engine>`, this command does
 **not** require an inference engine. It only needs a running LMCache MP
-server (ZMQ + HTTP). GPU mode additionally requires a CUDA-capable device.
+server. Handle-mode checksum verification also requires its HTTP endpoint.
+GPU mode additionally requires a supported accelerator.
 It also requires the full ``lmcache`` install (not the lightweight
 ``lmcache-cli`` package).
 
@@ -1052,10 +1053,11 @@ The full RPC path exercised is::
      → QUERY_PREFETCH_STATUS → RETRIEVE → STORE
      → END_SESSION
 
-When ``--url`` points to the server's HTTP endpoint, per-chunk checksums
-are additionally cross-checked against the server-side computation, so a
-mismatch between producer and consumer surfaces as a loud
-``CHECKSUM MISMATCH`` log line.
+Verification follows the created transfer context, including when
+``--transfer-mode auto`` selects the mode. Engine-driven transfers clear
+the destination blocks before RETRIEVE and compute checksums from the
+local tensors. Handle transfers query the server's checksum API at
+``--url``. A checksum mismatch produces a ``CHECKSUM MISMATCH`` log line.
 
 
 Quick start
@@ -1101,9 +1103,9 @@ Options
        verify per-chunk checksums end-to-end.
    * - ``--mode {gpu,cpu}``
      - ``gpu``
-     - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
-       (lmcache-driven handle path). ``cpu`` allocates regular CPU tensors and
-       uses the engine-driven (worker-side gather/scatter) path by default.
+     - Tensor placement. ``gpu`` allocates tensors on the detected
+       accelerator. ``cpu`` allocates regular CPU tensors and uses the
+       engine-driven (worker-side gather/scatter) path by default.
    * - ``--transfer-mode {auto,engine_driven,lmcache_driven}``
      - ``auto``
      - Transport routing for STORE/RETRIEVE. ``lmcache_driven`` forces the
@@ -1111,7 +1113,8 @@ Options
        which supports both CUDA IPC and CPU SHM zero-copy transfers.
        ``engine_driven`` forces the worker-side gather/scatter path
        (``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` + ``PREPARE``/``COMMIT``).
-       ``auto`` maps gpu→lmcache_driven and cpu→engine_driven.
+       ``auto`` uses the device's default transfer mode for GPU tensors
+       and engine-driven transfer for CPU tensors.
    * - ``--num-tokens N``
      - ``512``
      - Tokens per synthetic request.
