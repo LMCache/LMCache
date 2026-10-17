@@ -571,10 +571,13 @@ class StorageManager:
             convert each tier's per-key result count back to chunk units.
         """
         assert self.async_lookup_server is not None
+        # Resolve the result before marking the event DONE. If ``task.result()``
+        # raises, the event must not be advertised as DONE, otherwise a later
+        # ``cleanup_memory_objs`` pops a future that re-raises when awaited.
+        res = task.result()
         self.event_manager.update_event_status(
             EventType.LOADING, lookup_id, status=EventStatus.DONE
         )
-        res = task.result()
 
         # Calculate total retrieved chunks across all tiers based on actual results
         # from batched_get_non_blocking, not the batched_async_contains results.
@@ -630,18 +633,25 @@ class StorageManager:
             expected_chunks = tier_expected_chunks[tier_idx]
             total_retrieved_chunks += actual_chunks
 
-            # Release the tail rounded off by actual_chunks; else staging buffer leaks.
+            # Release the tail rounded off by actual_chunks; else staging buffer
+            # leaks. The released objects are also dropped from ``res`` (which
+            # is the result published on the LOADING event) so downstream
+            # consumers do not release them a second time (#5391).
             tail_start = actual_chunks * keys_per_chunk
             for _, mem_obj in tier_result[tail_start:]:
                 mem_obj.ref_count_down()
+            del tier_result[tail_start:]
 
             # If a tier retrieved fewer chunks than expected, we stop counting
             # because subsequent chunks are not contiguous
             if actual_chunks < expected_chunks:
-                # Release all chunks in subsequent tiers since they won't be used
+                # Release all chunks in subsequent tiers since they won't be
+                # used, and drop them from the published result for the same
+                # single-ownership reason as above.
                 for subsequent_tier in res[tier_idx + 1 :]:
                     for _, mem_obj in subsequent_tier:
                         mem_obj.ref_count_down()
+                    subsequent_tier.clear()
                 break
 
         retrieved_length = cum_chunk_lengths_total[total_retrieved_chunks]
@@ -803,13 +813,28 @@ class StorageManager:
         #  Tuple(loading_task_keys[1][0] : MemoryObj2)
         #  Tuple(loading_task_keys[1][1] : MemoryObj3)
         async def gather_with_keys() -> list[list[tuple[CacheEngineKey, MemoryObj]]]:
-            loading_results = await asyncio.gather(*loading_tasks)
-            return [
-                list(zip(keys, results, strict=False))
-                for keys, results in zip(
-                    loading_task_keys, loading_results, strict=False
-                )
-            ]
+            # A single failed loading task must not abort the whole gather:
+            # otherwise prefetch_all_done_callback never reaches
+            # send_response_to_scheduler and the pins taken for the other tiers
+            # leak (see #5391). Treat a failed tier as an empty result so the
+            # caller responds with the contiguous prefix and releases the rest.
+            loading_results = await asyncio.gather(
+                *loading_tasks, return_exceptions=True
+            )
+            gathered: list[list[tuple[CacheEngineKey, MemoryObj]]] = []
+            for tier_keys, results in zip(
+                loading_task_keys, loading_results, strict=False
+            ):
+                if isinstance(results, BaseException):
+                    logger.error(
+                        "Prefetch loading task failed for lookup id %s: %r",
+                        lookup_id,
+                        results,
+                    )
+                    gathered.append([])
+                else:
+                    gathered.append(list(zip(tier_keys, results, strict=False)))
+            return gathered
 
         all_done = asyncio.create_task(gather_with_keys())
         # Register the event before adding the callback to avoid race conditions
