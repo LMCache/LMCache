@@ -472,6 +472,7 @@ class SegmentTokenDatabase(TokenDatabase):
 
         if self.sep_len == 0 or len(tokens) < self.sep_len:
             yield tokens
+            return
 
         # Unfold into sliding windows
         # shape: (num_tokens-sep_len+1, sep_len)
