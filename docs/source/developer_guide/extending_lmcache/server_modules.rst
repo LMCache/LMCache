@@ -3,8 +3,8 @@ Server Module Plugins
 
 The multiprocess ``lmcache server`` is composed from transport-neutral
 server modules. Built-in modules handle lookup, management, transfer, P2P,
-and optional experimental flows. A server module plugin lets an installed
-Python package add extra modules at startup without modifying LMCache source.
+KV events, and blend. A server module plugin lets an installed Python package
+add extra modules at startup without modifying LMCache source.
 
 This mechanism is explicit opt-in. Installing a package is not enough to
 change server behavior; the operator must pass ``--server-module``.
@@ -72,6 +72,34 @@ flag may contain a JSON list of module specs.
      - no
      - Plugin-specific JSON object available through
        ``ModuleBuildContext.config_for()``.
+
+Opt-in modules shipped with LMCache
+-----------------------------------
+
+Some modules ship inside the LMCache package but are not built by default.
+They live under ``lmcache.v1.multiprocess.plugin_modules``, outside the
+built-in discovery root ``lmcache.v1.multiprocess.modules``, so the server
+never composes them on its own. Load one exactly like an out-of-tree module,
+by naming its Python module:
+
+.. code-block:: bash
+
+   lmcache server \
+       --supported-transfer-mode auto \
+       --server-module '{"module_path": "lmcache.v1.multiprocess.plugin_modules.qstore"}'
+
+Currently shipped:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Module path
+     - Purpose
+   * - ``lmcache.v1.multiprocess.plugin_modules.qstore``
+     - ``QStoreModule``: stores per-layer query tensors captured by the vLLM
+       connector (``"lmcache.mp.transfer_intermediate_tensors": true``).
+       Requires the LMCache-driven transfer path; see :doc:`/mp/sdk`.
 
 Module contract
 ---------------

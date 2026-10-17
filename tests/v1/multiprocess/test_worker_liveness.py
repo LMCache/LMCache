@@ -23,7 +23,6 @@ from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
-from lmcache.v1.multiprocess.custom_types import KV_EVENT_CAPABILITY
 from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
 from lmcache.v1.multiprocess.modules import engine_driven_transfer as non_gpu_mod
 from lmcache.v1.multiprocess.modules import kv_events as kv_events_mod
@@ -529,7 +528,6 @@ def test_event_subscription_pushes_without_polling_and_keeps_requests_live(
     management = ManagementModule(
         module.context,
         liveness_targets=[module],
-        experimental_transfer=[KV_EVENT_CAPABILITY],
     )
     server: Any = create_request_server([management, module], config)
     if transport == "grpc":

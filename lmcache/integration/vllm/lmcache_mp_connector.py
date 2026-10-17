@@ -780,7 +780,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     FeatureContext,
                     init_dispatcher,
                 )
-                from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
+                from lmcache.v1.multiprocess.custom_types import TRANSFER_QUERY
 
                 ctx = FeatureContext(
                     worker_adapter=self.worker_adapter,
