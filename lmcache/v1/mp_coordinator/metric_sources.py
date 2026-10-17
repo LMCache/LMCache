@@ -10,12 +10,24 @@ This module imports nothing from the coordinator: components import it,
 while ``observability`` imports both it and the components.
 """
 
+# Standard
+from typing import Protocol
+
+
+class MetricSource(Protocol):
+    """A component whose metrics are read from its ``stats()`` snapshot."""
+
+    def stats(self) -> object:
+        """Return a snapshot of what the component's metrics report."""
+        ...
+
+
 # Keyed by class: a coordinator process builds one of each, so the latest
 # one built is the one the app runs.
-_metric_sources: dict[type, object] = {}
+_metric_sources: dict[type, MetricSource] = {}
 
 
-def register_metric_source(component: object) -> None:
+def register_metric_source(component: MetricSource) -> None:
     """Record ``component`` so its metrics are registered when metrics are on.
 
     Call at the end of ``__init__``. Replaces an earlier component of the
@@ -27,7 +39,7 @@ def register_metric_source(component: object) -> None:
     _metric_sources[type(component)] = component
 
 
-def get_metric_sources() -> list[object]:
+def get_metric_sources() -> list[MetricSource]:
     """Return every registered component, in construction order, and forget them.
 
     Returns:

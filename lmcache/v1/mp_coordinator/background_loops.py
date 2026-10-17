@@ -109,6 +109,18 @@ class BackgroundLoops:
             stats.last_success_timestamp = time.time()
 
 
+@dataclass(frozen=True)
+class EventLoopStats:
+    """How long the event loop was blocked.
+
+    Attributes:
+        blocked_seconds: Total seconds the event loop was blocked since
+            monitoring began.
+    """
+
+    blocked_seconds: float
+
+
 class EventLoopMonitor:
     """Measures how long the event loop was blocked.
 
@@ -122,10 +134,9 @@ class EventLoopMonitor:
         self._blocked_seconds = 0.0
         register_metric_source(self)
 
-    @property
-    def blocked_seconds(self) -> float:
-        """Total seconds the event loop was blocked since monitoring began."""
-        return self._blocked_seconds
+    def stats(self) -> EventLoopStats:
+        """Return how long the event loop was blocked so far."""
+        return EventLoopStats(blocked_seconds=self._blocked_seconds)
 
     async def run(self) -> None:
         """Measure until cancelled. Run as a task on the monitored loop."""

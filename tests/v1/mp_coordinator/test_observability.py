@@ -21,8 +21,10 @@ from lmcache.v1.mp_coordinator.background_loops import (
     BackgroundLoops,
     BackgroundLoopStats,
     EventLoopMonitor,
+    EventLoopStats,
 )
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.controllers.base import ControllerStatus
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
@@ -154,7 +156,7 @@ def test_key_directory_gauges_report_the_registered_directory() -> None:
     )
     meter, reader = private_meter()
 
-    observability.register_coordinator_metrics({}, meter)
+    observability.register_coordinator_metrics(meter)
 
     points = _by_tier(read_values(reader))
     expected_placements = {"l1": 2, "l2": 1}
@@ -168,7 +170,7 @@ def test_key_directory_gauges_keep_the_pre_rename_names_for_one_release() -> Non
     directory.consume(_batch(tier=Tier.L1, keys=[_key(1)], size_bytes=100, seq=1))
     meter, reader = private_meter()
 
-    observability.register_coordinator_metrics({}, meter)
+    observability.register_coordinator_metrics(meter)
 
     points = _by_tier(read_values(reader))
     assert points["lmcache_mp.key_directory_placement_count"] == {"l1": 1, "l2": 0}
@@ -181,7 +183,7 @@ def test_key_directory_gauges_keep_the_pre_rename_names_for_one_release() -> Non
 def test_key_directory_gauges_follow_later_changes() -> None:
     directory = KeyDirectory()
     meter, reader = private_meter()
-    observability.register_coordinator_metrics({}, meter)
+    observability.register_coordinator_metrics(meter)
 
     directory.consume(_batch(tier=Tier.L1, keys=[_key(1)], size_bytes=100, seq=1))
 
@@ -196,7 +198,7 @@ def test_event_gate_gauges_report_each_tracked_server() -> None:
     gate.ingest(_stream_batch("node-b", seq=1))
     meter, reader = private_meter()
 
-    observability.register_coordinator_metrics({}, meter)
+    observability.register_coordinator_metrics(meter)
 
     values = read_values(reader)
     assert values["lmcache_coordinator.ingest.server_event_batches_missing"] == {
@@ -218,7 +220,7 @@ def test_event_gate_gauges_drop_a_server_that_leaves() -> None:
     gate.ingest(_stream_batch("node-a", seq=1))
     gate.ingest(_stream_batch("node-b", seq=1))
     meter, reader = private_meter()
-    observability.register_coordinator_metrics({}, meter)
+    observability.register_coordinator_metrics(meter)
 
     gate.drop_instance("node-a")
 
@@ -235,7 +237,7 @@ def test_event_gate_counters_report_the_fleet_totals() -> None:
     gate.ingest(_stream_batch("node-a", seq=4))  # duplicate
     meter, reader = private_meter()
 
-    observability.register_coordinator_metrics({}, meter)
+    observability.register_coordinator_metrics(meter)
 
     values = read_values(reader)
     assert values["lmcache_coordinator.ingest.event_batches_received"] == {
@@ -265,7 +267,7 @@ def test_broadcaster_counters_report_each_consumer() -> None:
     broadcaster.fence_instance("node-a")
     meter, reader = private_meter()
 
-    observability.register_coordinator_metrics({}, meter)
+    observability.register_coordinator_metrics(meter)
 
     values = read_values(reader)
     assert values["lmcache_coordinator.ingest.batches_delivered"] == {
@@ -290,7 +292,7 @@ def test_event_gate_freshness_gauges_report_each_server() -> None:
     gate.ingest(_stream_batch("node-b", seq=1))  # no send time
     meter, reader = private_meter()
 
-    observability.register_coordinator_metrics({}, meter)
+    observability.register_coordinator_metrics(meter)
 
     values = read_values(reader)
     since = values["lmcache_coordinator.ingest.server_seconds_since_last_event"]
@@ -321,7 +323,7 @@ def test_kafka_source_metrics_report_reads_partitions_and_lag() -> None:
     )
     meter, reader = private_meter()
 
-    observability.register_coordinator_metrics({}, meter)
+    observability.register_coordinator_metrics(meter)
 
     values = read_values(reader)
     assert values["lmcache_coordinator.kafka.records_read"] == {
@@ -359,7 +361,7 @@ def test_background_loop_metrics_report_each_loop() -> None:
     )
     meter, reader = private_meter()
 
-    observability.register_coordinator_metrics({}, meter)
+    observability.register_coordinator_metrics(meter)
 
     values = read_values(reader)
     prefix = "lmcache_coordinator.background_loop."
@@ -380,10 +382,11 @@ def test_background_loop_metrics_report_each_loop() -> None:
 
 
 def test_controller_metric_reports_each_controller_s_state() -> None:
-    controllers_up = {"FleetEvictionController": True, "Broken": False}
+    status = ControllerStatus(["FleetEvictionController", "Broken"])
     meter, reader = private_meter()
+    observability.register_coordinator_metrics(meter)
 
-    observability.register_coordinator_metrics(controllers_up, meter)
+    status.mark_up("FleetEvictionController")
 
     assert read_values(reader)["lmcache_coordinator.controller.up"] == {
         labels(controller="FleetEvictionController"): 1,
@@ -392,16 +395,15 @@ def test_controller_metric_reports_each_controller_s_state() -> None:
 
 
 class _StubMonitor(EventLoopMonitor):
-    @property
-    def blocked_seconds(self) -> float:
-        return 1.5
+    def stats(self) -> EventLoopStats:
+        return EventLoopStats(blocked_seconds=1.5)
 
 
 def test_event_loop_metric_reports_the_blocked_time() -> None:
     _StubMonitor()
     meter, reader = private_meter()
 
-    observability.register_coordinator_metrics({}, meter)
+    observability.register_coordinator_metrics(meter)
 
     assert read_values(reader)["lmcache_coordinator.event_loop.blocked_seconds"] == {
         labels(): 1.5
@@ -421,7 +423,7 @@ def test_registry_metric_reports_each_server_s_heartbeat_age() -> None:
     )
     meter, reader = private_meter()
 
-    observability.register_coordinator_metrics({}, meter)
+    observability.register_coordinator_metrics(meter)
 
     ages = read_values(reader)[
         "lmcache_coordinator.registry.server_seconds_since_heartbeat"
@@ -433,18 +435,23 @@ def test_registry_metric_reports_each_server_s_heartbeat_age() -> None:
 def test_a_component_s_metrics_are_registered_once() -> None:
     KeyDirectory()
     first_meter, first_reader = private_meter()
-    observability.register_coordinator_metrics({}, first_meter)
+    observability.register_coordinator_metrics(first_meter)
     second_meter, second_reader = private_meter()
 
-    observability.register_coordinator_metrics({"Controller": True}, second_meter)
+    observability.register_coordinator_metrics(second_meter)
 
     assert "lmcache_coordinator.key_directory.placements" in read_values(first_reader)
-    assert set(read_values(second_reader)) == {"lmcache_coordinator.controller.up"}
+    assert read_values(second_reader) == {}
+
+
+class _NoMetrics:
+    def stats(self) -> None:
+        return None
 
 
 def test_a_registered_component_without_metrics_is_rejected() -> None:
-    register_metric_source(object())
+    register_metric_source(_NoMetrics())
     meter, _reader = private_meter()
 
-    with pytest.raises(TypeError, match="object"):
-        observability.register_coordinator_metrics({}, meter)
+    with pytest.raises(TypeError, match="_NoMetrics"):
+        observability.register_coordinator_metrics(meter)

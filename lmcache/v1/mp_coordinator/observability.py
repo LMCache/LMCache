@@ -10,11 +10,10 @@ each registered component to its metrics. See
 """
 
 # Standard
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 import socket
-import time
 
 # Third Party
 from opentelemetry import metrics
@@ -25,6 +24,7 @@ from lmcache.v1.mp_coordinator.background_loops import (
     EventLoopMonitor,
 )
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.controllers.base import ControllerStatus
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
     CacheEventBroadcaster,
 )
@@ -35,7 +35,7 @@ from lmcache.v1.mp_coordinator.ingest.event_gate import (
 from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
     KafkaCacheEventSource,
 )
-from lmcache.v1.mp_coordinator.metric_sources import get_metric_sources
+from lmcache.v1.mp_coordinator.metric_sources import MetricSource, get_metric_sources
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import (
     DirectoryStats,
@@ -77,19 +77,15 @@ def init_coordinator_metrics(config: MPCoordinatorConfig) -> None:
     )
 
 
-def register_coordinator_metrics(
-    controllers_up: Mapping[str, bool], meter: "Meter | None" = None
-) -> None:
-    """Register the metrics of every registered component, and the controllers'.
+def register_coordinator_metrics(meter: "Meter | None" = None) -> None:
+    """Register the metrics of every registered component.
 
-    Takes every component registered so far (see :mod:`.metric_sources`), so
-    call it after the app has built them all. Each instrument is
+    Takes every component registered so far (see :mod:`.metric_sources`),
+    so call it after the app has built them all. Each instrument is
     observable: it reads a component's ``stats()`` at scrape time, so
     nothing in the components records into OTel.
 
     Args:
-        controllers_up: Whether each controller, keyed by class name,
-            started. The app fills it in as it enters each controller.
         meter: Meter to register on. Defaults to the global provider's
             coordinator meter; tests pass one from a private provider.
 
@@ -98,31 +94,19 @@ def register_coordinator_metrics(
     """
     if meter is None:
         meter = metrics.get_meter("lmcache.mp_coordinator")
-    specs = [spec for c in get_metric_sources() for spec in _specs_for(c)]
-    specs.append(
-        _MetricSpec(
-            _PREFIX + "controller.up",
-            "gauge",
-            "1 if the controller is running, 0 if it failed to start and the "
-            "work it does is not happening.",
-            lambda: [
-                (int(up), {"controller": controller})
-                for controller, up in controllers_up.items()
-            ],
-        )
-    )
-    for spec in specs:
-        create = (
-            meter.create_observable_gauge
-            if spec.kind == "gauge"
-            else meter.create_observable_counter
-        )
-        create(
-            spec.name,
-            callbacks=[_make_observation_callback(spec.read)],
-            unit=spec.unit,
-            description=spec.description,
-        )
+    for component in get_metric_sources():
+        for spec in _specs_for(component):
+            create = (
+                meter.create_observable_gauge
+                if spec.kind == "gauge"
+                else meter.create_observable_counter
+            )
+            create(
+                spec.name,
+                callbacks=[_make_observation_callback(spec.read)],
+                unit=spec.unit,
+                description=spec.description,
+            )
 
 
 @dataclass(frozen=True)
@@ -136,7 +120,7 @@ class _MetricSpec:
     unit: str = ""
 
 
-def _specs_for(component: object) -> list[_MetricSpec]:
+def _specs_for(component: MetricSource) -> list[_MetricSpec]:
     """Return the metrics of one registered component."""
     match component:
         case KeyDirectory():
@@ -153,6 +137,8 @@ def _specs_for(component: object) -> list[_MetricSpec]:
             return _instance_registry_specs(component)
         case KafkaCacheEventSource():
             return _kafka_specs(component)
+        case ControllerStatus():
+            return _controller_status_specs(component)
     raise TypeError(f"no metrics are defined for {type(component).__name__}")
 
 
@@ -329,7 +315,7 @@ def _event_loop_monitor_specs(monitor: EventLoopMonitor) -> list[_MetricSpec]:
             _PREFIX + "event_loop.blocked_seconds",
             "counter",
             "Total time the coordinator's event loop was blocked.",
-            lambda: [(monitor.blocked_seconds, {})],
+            lambda: [(monitor.stats().blocked_seconds, {})],
             unit="s",
         ),
     ]
@@ -342,7 +328,28 @@ def _instance_registry_specs(registry: InstanceRegistry) -> list[_MetricSpec]:
             _PREFIX + "registry.server_seconds_since_heartbeat",
             "gauge",
             "Seconds since each registered server's last heartbeat.",
-            lambda: _heartbeat_age_points(registry),
+            lambda: [
+                (seconds, {"instance_id": instance_id})
+                for instance_id, seconds in (
+                    registry.stats().seconds_since_heartbeat.items()
+                )
+            ],
+        ),
+    ]
+
+
+def _controller_status_specs(status: ControllerStatus) -> list[_MetricSpec]:
+    """Return whether each controller started."""
+    return [
+        _MetricSpec(
+            _PREFIX + "controller.up",
+            "gauge",
+            "1 if the controller is running, 0 if it failed to start and the "
+            "work it does is not happening.",
+            lambda: [
+                (int(up), {"controller": controller})
+                for controller, up in status.stats().items()
+            ],
         ),
     ]
 
@@ -440,15 +447,6 @@ def _loop_pass_points(loops: BackgroundLoops) -> Points:
         points.append((stats.passes_ok, {"loop": name, "result": "ok"}))
         points.append((stats.passes_failed, {"loop": name, "result": "failed"}))
     return points
-
-
-def _heartbeat_age_points(registry: InstanceRegistry) -> Points:
-    """Return the seconds since each registered server's last heartbeat."""
-    now = time.monotonic()
-    return [
-        (now - instance.last_heartbeat_time, {"instance_id": instance.instance_id})
-        for instance in registry.all_instances()
-    ]
 
 
 def _records_read_points(source: KafkaCacheEventSource) -> Points:

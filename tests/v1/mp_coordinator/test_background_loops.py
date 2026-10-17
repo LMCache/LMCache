@@ -90,4 +90,4 @@ async def test_the_monitor_adds_up_time_the_loop_was_blocked():
     await asyncio.sleep(0.05)
     task.cancel()
 
-    assert monitor.blocked_seconds >= 0.2
+    assert monitor.stats().blocked_seconds >= 0.2

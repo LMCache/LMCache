@@ -37,7 +37,10 @@ from lmcache.v1.mp_coordinator.config import (
     MPCoordinatorConfig,
 )
 from lmcache.v1.mp_coordinator.controllers import build_controllers
-from lmcache.v1.mp_coordinator.controllers.base import ControllerRuntime
+from lmcache.v1.mp_coordinator.controllers.base import (
+    ControllerRuntime,
+    ControllerStatus,
+)
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
 from lmcache.v1.mp_coordinator.http_routes import HttpRoutes
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
@@ -143,11 +146,11 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     load_checkpoint(checkpoint_store, checkpoint_components)
     background_loops = BackgroundLoops()
     event_loop_monitor = EventLoopMonitor()
-    # Whether each controller's run() was entered; the lifespan flips it.
-    controllers_up = {type(c).__name__: False for c in controllers.all()}
+    # Whether each controller's run() was entered; the lifespan marks it.
+    controller_status = ControllerStatus(type(c).__name__ for c in controllers.all())
     if config.metrics_enabled:
         # Every component with metrics registered itself as it was built.
-        register_coordinator_metrics(controllers_up)
+        register_coordinator_metrics()
 
     ctx = CoordinatorContext(
         views=views,
@@ -232,7 +235,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
                         "Controller %s failed to start", type(controller).__name__
                     )
                     continue
-                controllers_up[type(controller).__name__] = True
+                controller_status.mark_up(type(controller).__name__)
             await event_source.start()
             stack.push_async_callback(event_source.stop)
             # Nested, so they stop before the stack unwinds. Awaited too:

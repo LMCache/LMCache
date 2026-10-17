@@ -363,12 +363,15 @@ Three steps, each one or more small PRs. Tests read public state only:
 | P2 | HTTP server and outbound metrics; tracing once trace context exists | `test_metrics_api.py`, `test_directory_api.py`, `test_cache_api.py` |
 
 Components keep plain running totals and `stats()` snapshots and create no
-instruments. A component with metrics calls `register_metric_source(self)` (from
-`metric_sources.py`) as the last line of its `__init__`; every metric is
-defined in `observability.py`, one list per component type. When metrics are
-on, the app calls `register_coordinator_metrics(controllers_up)` once, after
-building everything: it takes the registered components and creates their
-instruments. So the app names no component for metrics.
+instruments. A component with metrics is a `MetricSource` (it has `stats()`)
+and calls `register_metric_source(self)` (from `metric_sources.py`) as the
+last line of its `__init__`; every metric is defined in `observability.py`,
+one list per component type, read from that component's `stats()`. Which
+controllers started is a component too, `ControllerStatus`, which the
+lifespan marks as it enters each controller. When metrics are on, the app
+calls `register_coordinator_metrics()` once, after building everything: it
+takes the registered components and creates their instruments. So the app
+names no component for metrics.
 
 ```python
 class EventGate:

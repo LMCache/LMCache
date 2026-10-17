@@ -9,11 +9,13 @@ from lmcache.v1.mp_coordinator.metric_sources import (
 
 
 class _First:
-    pass
+    def stats(self) -> None:
+        return None
 
 
 class _Second:
-    pass
+    def stats(self) -> None:
+        return None
 
 
 def test_sources_are_taken_in_construction_order_then_forgotten() -> None:

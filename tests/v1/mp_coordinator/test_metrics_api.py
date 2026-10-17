@@ -98,7 +98,7 @@ def test_enabled_app_registers_metrics_over_its_own_components(
 
     with patch(
         "lmcache.v1.mp_coordinator.app.register_coordinator_metrics",
-        lambda controllers_up: register_coordinator_metrics(controllers_up, meter),
+        lambda: register_coordinator_metrics(meter),
     ):
         create_app(config)
 
