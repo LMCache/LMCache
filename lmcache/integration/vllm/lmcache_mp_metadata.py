@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import enum
 
 # Third Party
+from vllm.distributed.kv_events import KVConnectorKVEvents
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
@@ -78,6 +79,16 @@ class LMCacheMPRequestTracker:
     max_offload_tokens: int | None = None
     lookup_started_at: float | None = None
 
+    # Prefix tokens the LMCache lookup skipped because vLLM's APC covers them,
+    # chunk-aligned; frozen at submit, unlike the per-poll num_vllm_hit_tokens.
+    apc_covered_tokens: int = 0
+
+    # Sticky: after a shrink, the request looks up the full prefix from token 0.
+    need_full_lookup: bool = False
+
+    # Lock ranges left by abandoned lookups, released with the next FREE.
+    pending_free_ranges: list[tuple[int, int]] = field(default_factory=list)
+
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
     def __init__(self, request: "Request"):
@@ -94,6 +105,9 @@ class LMCacheMPRequestTracker:
         self.num_stored_tokens = 0
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
+        self.apc_covered_tokens = 0
+        self.need_full_lookup = False
+        self.pending_free_ranges = []
         self.state = LMCacheMPRequestState.PREFETCHING
         self.mm_adjusted_prompt_ids = []
         mm_hashes, mm_positions = extract_mm_features(request)
@@ -456,10 +470,16 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             breaks the request's stored-prefix chain so later chunks are not
             stored unreachable. ``aggregate()`` unions the sets: one rank's
             failure breaks the chain even when the other ranks succeeded.
+        kv_events: Completed-store KV events, carried here only when vLLM does
+            not call ``get_kv_connector_kv_cache_events`` on the connector
+            (e.g. as a ``MultiConnector`` child, which forwards each child's
+            worker metadata but not that hook). ``aggregate()`` merges them the
+            way vLLM merges ``kv_cache_events`` across workers.
     """
 
     completed_store_requests: dict[str, int]
     failed_store_requests: set[str] = field(default_factory=set)
+    kv_events: KVConnectorKVEvents | None = None
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -470,16 +490,24 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             other: The report of another rank, for the same scheduler step.
 
         Returns:
-            A new metadata whose completion counts are summed per request
-            and whose failed-request sets are unioned.
+            A new metadata whose completion counts are summed per request,
+            whose failed-request sets are unioned, and whose KV events are
+            merged.
         """
         assert isinstance(other, LMCacheMPWorkerMetadata)
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
+        kv_events = self.kv_events
+        if kv_events is None:
+            kv_events = other.kv_events
+        elif other.kv_events is not None:
+            kv_events.add_events(other.kv_events.get_all_events())
+            kv_events.increment_workers(other.kv_events.get_number_of_workers())
         return LMCacheMPWorkerMetadata(
             completed_store_requests=merged,
             failed_store_requests=(
                 self.failed_store_requests | other.failed_store_requests
             ),
+            kv_events=kv_events,
         )

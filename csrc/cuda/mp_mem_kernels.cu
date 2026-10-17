@@ -420,6 +420,23 @@ void multi_layer_block_kv_transfer_templated(
   const at::cuda::OptionalCUDAGuard device_guard(device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
+#if defined(USE_ROCM)
+  // hipHostRegister'd memory can be mapped at a different device address
+  // (hipDeviceAttributeCanUseHostPointerForRegisteredMem == 0 on MI300/MI355).
+  for (int i = 0; i < num_objects; ++i) {
+    hipPointerAttribute_t attrs;
+    const hipError_t err =
+        hipPointerGetAttributes(&attrs, lmcache_obj4.objects[i]);
+    TORCH_CHECK(err == hipSuccess,
+                "hipPointerGetAttributes failed: ", hipGetErrorString(err));
+    if (attrs.type == hipMemoryTypeHost) {
+      TORCH_CHECK(attrs.devicePointer != nullptr,
+                  "host LMCache object is not mapped on the device");
+      lmcache_obj4.objects[i] = static_cast<ScalarType*>(attrs.devicePointer);
+    }
+  }
+#endif
+
   // --- block_ids is a GPU int64 tensor, read directly ---
   const int64_t* block_ids_ptr = block_ids.data_ptr<int64_t>();
 
