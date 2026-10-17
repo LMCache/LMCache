@@ -67,7 +67,9 @@ class MooncakeLookupClient(LookupClientInterface):
         # process token_ids to cacheengine keys
         keys = []
         ends = []
-        for start, end, key in self.token_database.process_tokens(token_ids):
+        for start, end, key in self.token_database.process_tokens(
+            token_ids, request_configs=request_configs
+        ):
             assert isinstance(key, CacheEngineKey)
             keys.append(key.to_string())
             ends.append(end)
