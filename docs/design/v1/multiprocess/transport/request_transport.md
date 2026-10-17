@@ -123,8 +123,9 @@ store/remove/store transitions. Workers receive pushes while idle; vLLM still
 drains and publishes during engine steps, so idle routing entries can remain
 stale until stepping resumes.
 
-Both transports advertise `kv_event_stream`. Enable the event
-bus and vLLM KV events, and match hash algorithms and chunk sizes. Workers
-subscribe automatically to capable servers. See
+Both transports expose the subscription over the shared RPC contract. Enable
+the event bus and vLLM KV events, and match hash algorithms and chunk sizes.
+Workers subscribe automatically; a batch reporting `enabled=False` makes the
+subscriber fall back to publishing its own completed stores. See
 `docs/source/mp/configuration.rst` for the server's log-size/disable control.
 L2 events, access events and salted hash interoperability are outside scope.
