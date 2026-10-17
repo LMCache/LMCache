@@ -3,8 +3,9 @@
 lmcache bench
 =============
 
-The ``lmcache bench`` command runs sustained performance benchmarks. It has
-three sub-commands, each targeting a different layer of the stack:
+The ``lmcache bench`` command runs sustained performance benchmarks and
+offline cache analyses. It has four sub-commands, each targeting a different
+layer of the stack:
 
 .. list-table::
    :header-rows: 1
@@ -21,10 +22,14 @@ three sub-commands, each targeting a different layer of the stack:
    * - ``l2``
      - Throughput / latency benchmark against an L2 cache adapter
        (store / lookup / load).
+   * - ``trace-analyze``
+     - Offline replay of a recorded request trace through a simulated
+       cache: prefix and CacheBlend hit tokens over a capacity and
+       chunk-size grid, as an HTML report.
 
 .. code-block:: bash
 
-   lmcache bench {engine,server,l2} [options]
+   lmcache bench {engine,server,l2,trace-analyze} [options]
 
 
 .. _lmcache-bench-engine:
@@ -1891,3 +1896,121 @@ Exit codes
        env var was missing or could not be parsed, an option value was
        invalid, or ``--flamegraph on`` was requested but the profiling
        toolchain is unavailable.
+
+
+.. _lmcache-bench-trace-analyze:
+
+trace-analyze
+-------------
+
+The ``lmcache bench trace-analyze`` command answers "what hit rate would
+this workload get at cache size X with chunk size Y?" from a recorded
+request trace, without a GPU or a running server. It requires the full
+``lmcache`` install (the replay uses the server's token hasher and
+CacheBlend matcher).
+
+.. code-block:: bash
+
+   lmcache bench trace-analyze --input FILE [FILE ...] [options]
+
+
+Collecting a trace
+~~~~~~~~~~~~~~~~~~
+
+Start the MP server with ``--enable-token-trace``. Each lookup then
+emits a zero-duration ``mp.request.trace`` span under the request's root
+span, carrying ``lmcache.model``, ``lmcache.input_ids`` (the prompt token
+ids) and ``session_id``; the span's start time is the lookup timestamp.
+A request the engine looks up again (for example after preemption) emits
+one span per lookup; the analyzer keeps only its earliest span.
+
+Persist the spans with the Collector's ``file`` exporter. Starting from
+``examples/observability/otel-collector.yml``, add the exporter to the
+traces pipeline:
+
+.. code-block:: yaml
+
+   exporters:
+     file/traces:
+       path: /var/log/otel/lmcache-traces.jsonl
+
+   service:
+     pipelines:
+       traces:
+         receivers: [otlp]
+         exporters: [otlp/tempo, file/traces]
+
+The file holds OTLP JSON, one export batch per line. Prompt token ids are
+only exported when ``--enable-token-trace`` is set; treat the file as
+sensitive.
+
+
+What it does
+~~~~~~~~~~~~
+
+Requests are sorted by timestamp and replayed, for every ``(chunk size,
+capacity)`` pair in the grid, through one LRU cache keyed by chained chunk
+hashes (the trailing partial chunk is never cached):
+
+* **Prefix hit tokens** -- the leading run of chunks already in the cache,
+  as the prefix lookup counts them. Hits are touched, every chunk of the
+  request is inserted, and the least recently used chunks are evicted
+  over capacity.
+* **Non-prefix (CacheBlend) hit tokens** -- each stored request is also
+  registered with the real ``BlendTokenRangeMatcher``; each lookup probes
+  it and the matches are reconciled like the blend lookup: matches inside
+  the prefix are dropped, then a non-overlapping subset of the rest is
+  kept. Evicted chunks are removed from the matcher. Only matched tokens
+  are reported; CacheBlend's recompute is not modelled.
+
+Capacity is in tokens because the trace carries no KV shape. With
+``--kv-bytes-per-token`` the ``--capacity`` values are bytes instead and
+the report shows both units.
+
+
+Quick start
+~~~~~~~~~~~
+
+.. code-block:: bash
+
+   lmcache bench trace-analyze \
+     --input /var/log/otel/lmcache-traces.jsonl \
+     --chunk-size 256 512 \
+     --capacity 1G 4G 16G --kv-bytes-per-token 131072 \
+     --html trace_analysis.html
+
+The HTML report is self-contained: two sliders (capacity, chunk size)
+select a precomputed grid cell and show its prefix and non-prefix hit
+rates with their token counts, request count and token totals, plus a
+table of every capacity at the selected chunk size. Each cell is a full
+replay, so the slider steps over the capacities given; pass more for a
+smoother sweep. A plain-text summary with the same
+grid goes to stdout (``--format json`` for machine-readable output).
+
+
+Options
+~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Option
+     - Description
+   * - ``-i``, ``--input FILE [FILE ...]``
+     - OTLP JSON file(s) written by the Collector's ``file`` exporter.
+       Required.
+   * - ``--html FILE``
+     - Where to write the HTML report (default ``trace_analysis.html``).
+   * - ``--chunk-size TOKENS [TOKENS ...]``
+     - Chunk size(s) to simulate (default ``256``).
+   * - ``--capacity SIZE [SIZE ...]``
+     - Cache capacities to simulate, in tokens, or in bytes when
+       ``--kv-bytes-per-token`` is given. ``K``/``M``/``G``/``T``
+       suffixes are binary (``64k``, ``4G``, ``1.5GiB``). Default:
+       half-octave steps from 4096 tokens up to the trace size.
+   * - ``--kv-bytes-per-token BYTES``
+     - KV cache bytes per token; makes ``--capacity`` values bytes.
+   * - ``--model NAME``
+     - Only analyze requests for this model name. Use it when one trace
+       mixes models, since the simulated cache is shared.
