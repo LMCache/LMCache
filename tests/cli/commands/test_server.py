@@ -82,13 +82,14 @@ class TestServerCommandArguments:
         assert args.http_host == "127.0.0.1"
         assert args.http_port == 9000
 
-    def test_http_api_key_files_are_repeatable(self, parser):
+    @pytest.mark.parametrize("option", ["--api-key-file", "--http-api-key-file"])
+    def test_api_key_files_are_repeatable(self, parser, option):
         args = parser.parse_args(
             [
                 "server",
-                "--http-api-key-file",
+                option,
                 "/run/secrets/current-key",
-                "--http-api-key-file",
+                option,
                 "/run/secrets/next-key",
                 "--l1-size-gb",
                 "4",
@@ -96,7 +97,7 @@ class TestServerCommandArguments:
                 "LRU",
             ]
         )
-        assert args.http_api_key_file == [
+        assert args.api_key_file == [
             "/run/secrets/current-key",
             "/run/secrets/next-key",
         ]
