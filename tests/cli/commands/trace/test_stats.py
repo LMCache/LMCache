@@ -29,8 +29,25 @@ class TestPercentile:
 
     def test_p50_on_100_values(self):
         vals = [float(i) for i in range(1, 101)]
-        # nearest-rank with floor((50/100)*100)=50 → index 50 → value 51
-        assert _percentile(vals, 50) == 51.0
+        # nearest-rank ceil((50/100)*100)=50 → rank 50 → index 49 → value 50
+        assert _percentile(vals, 50) == 50.0
+
+    def test_whole_rank_does_not_advance_to_the_next_sample(self):
+        vals = [float(i) for i in range(1, 101)]
+        # (99/100)*100 lands exactly on rank 99, the case where treating the
+        # rank as a 0-based index reports the single worst sample as p99.
+        assert _percentile(vals, 99) == 99.0
+
+    def test_fractional_rank_rounds_up(self):
+        vals = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0]
+        # (50/100)*7 = 3.5 → rank 4 → index 3
+        assert _percentile(vals, 50) == 40.0
+
+    def test_whole_rank_survives_inexact_division(self):
+        vals = [float(i) for i in range(1, 101)]
+        # 7/100.0 rounds up, so computing the ratio before multiplying gives
+        # 7.000000000000001 and picks rank 8.
+        assert _percentile(vals, 7) == 7.0
 
 
 class TestReplayStatsCollector:
@@ -48,6 +65,14 @@ class TestReplayStatsCollector:
         assert stats.max_ms == pytest.approx(100.0)
         # 22 = mean of {1,2,3,4,100}
         assert stats.mean_ms == pytest.approx(22.0)
+
+    def test_p90_of_ten_samples_is_the_ninth(self):
+        s = ReplayStatsCollector()
+        for latency_ms in range(1, 11):
+            s.record("op.foo", latency_ms / 1000.0)
+        stats = s.summary()["op.foo"]
+        assert stats.p90_ms == pytest.approx(9.0)
+        assert stats.max_ms == pytest.approx(10.0)
 
     def test_records_failed_separately(self):
         s = ReplayStatsCollector()
