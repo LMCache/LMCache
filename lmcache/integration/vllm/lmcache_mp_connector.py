@@ -78,6 +78,7 @@ from lmcache.integration.vllm.lmcache_mp_metrics import (
 from lmcache.integration.vllm.mp_server_launcher import (
     is_mp_server_autostart_enabled,
 )
+from lmcache.integration.vllm.token_drop_apc_adapter import install_token_drop_apc_guard
 from lmcache.integration.vllm.utils import (
     mla_only,
     vllm_layout_hints,
@@ -1285,6 +1286,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         tracker = self._get_or_create_request_tracker(request)
         if tracker.token_drop_spec is not None:
+            self._admit_token_drop_request(request)
             return 0, False
 
         # A failed asynchronous load is bypassed until vLLM admits the request
@@ -1442,19 +1444,33 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
         return need_to_load, need_to_load > 0
 
-    def on_new_request(self, request: "Request") -> None:
-        """Submit an LMCache lookup when a request enters the waiting queue.
+    def _admit_token_drop_request(self, request: "Request") -> None:
+        """Validate supported TD mode and isolate vLLM prefix-cache access."""
+        cfg = self._vllm_config
+        if getattr(cfg.scheduler_config, "enable_chunked_prefill", False):
+            raise ValueError("Token dropping does not support chunked prefill")
+        if getattr(cfg, "speculative_config", None) is not None:
+            raise ValueError("Token dropping does not support speculative decoding")
+        if getattr(cfg.scheduler_config, "async_scheduling", False):
+            raise ValueError("Token dropping requires synchronous scheduling")
+        if cfg.parallel_config.world_size != 1:
+            raise ValueError("Token dropping requires a single GPU")
+        if len(self._group_tokens_per_block) != 1:
+            raise ValueError("Token dropping requires one KV cache group")
+        # vLLM's exact attention and block manager signatures are version-pinned.
+        install_token_drop_apc_guard()
+        request.skip_reading_prefix_cache = True
 
-        Args:
-            request (Request): The request object.
-        """
+    def on_new_request(self, request: "Request") -> None:
+        """Submit an LMCache lookup when a request enters the waiting queue."""
         if self.role != KVConnectorRole.SCHEDULER:
-            return
-        if not self._eager_prefetch or request.resumable:
             return
 
         tracker = self._get_or_create_request_tracker(request)
         if tracker.token_drop_spec is not None:
+            self._admit_token_drop_request(request)
+            return
+        if not self._eager_prefetch or request.resumable:
             return
         if tracker.lookup_started_at is None:
             tracker.lookup_started_at = time.monotonic()
