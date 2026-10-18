@@ -236,6 +236,12 @@ Cache Operations
 
 Clear cached KV data from the LMCache engine.
 
+Pinned entries are retained. For ``LocalDiskBackend``, clearing deletes the
+resident entries and their files; pending writes are not cancelled and may
+finish after the clear. Files not tracked by the backend are left untouched.
+``num_removed`` reports the number of tokens cleared, summed across the
+selected backends.
+
 - **Method**: ``DELETE``
 - **Path**: ``/cache/clear``
 - **Parameters**:

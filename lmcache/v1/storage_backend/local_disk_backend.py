@@ -270,15 +270,26 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
         force: bool = True,
     ) -> bool:
+        """Unlink a cached file before removing its metadata and usage.
+
+        Args:
+            key: The resident cache entry to remove.
+            force: Acquire the disk lock and update the eviction policy. When
+                False, the caller holds the lock and manages the policy.
+
+        Returns:
+            True if an entry was removed, or False if the key was absent.
+
+        Raises:
+            OSError: If unlinking fails; the entry remains tracked for retry.
+        """
         lock_context = self.disk_lock if force else nullcontext()
         with lock_context:
-            if not (meta := self.dict.pop(key, None)):
+            if not (meta := self.dict.get(key)):
                 return False
 
             path = meta.path
             size = meta.size
-            self.usage -= size
-            self.stats_monitor.update_local_storage_usage(self.usage)
 
             # NOTE: The following code will cause deadlock
             # res = asyncio.run_coroutine_threadsafe(
@@ -288,6 +299,9 @@ class LocalDiskBackend(StorageBackendInterface):
             # res.result()
 
             os.remove(path)
+            self.dict.pop(key)
+            self.usage -= size
+            self.stats_monitor.update_local_storage_usage(self.usage)
 
             if force:
                 self.cache_policy.update_on_force_evict(key)
@@ -300,6 +314,39 @@ class LocalDiskBackend(StorageBackendInterface):
             )
 
         return True
+
+    def clear(self) -> int:
+        """Remove unpinned resident entries and their files from disk.
+
+        Pin checks and removals share the disk lock. Pending writes are not
+        cancelled and may publish new entries after this call.
+
+        Returns:
+            Number of tokens removed, matching ``StorageManager.clear``.
+
+        Raises:
+            OSError: If a cached file cannot be removed.
+        """
+        num_cleared_tokens = 0
+        with self.disk_lock:
+            try:
+                for key, metadata in list(self.dict.items()):
+                    if not metadata.can_evict:
+                        continue
+                    assert metadata.shape is not None
+                    assert metadata.fmt is not None
+                    self.remove(key, force=False)
+                    # force=False uses the caller's lock and leaves reservation
+                    # accounting and eviction-policy cleanup to the caller.
+                    self.current_cache_size -= metadata.size
+                    self.cache_policy.update_on_force_evict(key)
+                    num_cleared_tokens += metadata.shape[metadata.fmt.token_dim()]
+            finally:
+                # A partial clear must not leave recency updates for deleted keys.
+                self.keys_in_request = [
+                    key for key in self.keys_in_request if key in self.dict
+                ]
+        return num_cleared_tokens
 
     def insert_key(
         self,
