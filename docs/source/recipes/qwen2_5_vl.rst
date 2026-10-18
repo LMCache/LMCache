@@ -74,7 +74,7 @@ Compression support
    * - Method
      - Status
      - Notes
-   * - :doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`
+   * - :doc:`CacheGen <../legacy/kv_cache_optimizations/compression/cachegen>`
      - Not validated
      -
 
@@ -83,7 +83,7 @@ Caveats
 
 - **KV cache only.** LMCache caches the decoder KV for multimodal requests.
   Vision-encoder outputs are a separate cache: see
-  :doc:`../non_kv_cache/encoder_cache` (in-process mode only; not yet
+  :doc:`../legacy/non_kv_cache/encoder_cache` (in-process mode only; not yet
   available in MP mode).
 - **Cross-user sharing.** Cache entries are content-addressed: two users
   sending the byte-identical image and prompt share an entry. For hard

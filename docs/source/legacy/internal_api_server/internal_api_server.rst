@@ -21,6 +21,7 @@ the LMCache engine at runtime. APIs are organized into three categories:
    common_apis
    vllm_apis
    controller_apis
+   dynamic_backend_management
 
 
 Configuration

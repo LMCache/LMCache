@@ -96,5 +96,5 @@ Related Documentation
 --------------------
 
 - :doc:`index` - Controller WebUI overview
-- :doc:`../api_reference/configurations` - API and configuration reference
-- :doc:`../storage_backend/index` - Storage backend architecture
+- :doc:`/legacy/api_reference/configurations` - API and configuration reference
+- :doc:`/legacy/kv_cache/storage_backends/index` - Storage backend architecture

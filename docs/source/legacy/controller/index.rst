@@ -1,6 +1,12 @@
 Controller WebUI
 ===============
 
+.. toctree::
+   :hidden:
+   :maxdepth: 1
+
+   freeze_mode
+
 .. warning::
 
    This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/coordinator`.
@@ -54,6 +60,6 @@ The Controller Dashboard provides:
 Related Documentation
 --------------------
 
-- :doc:`../api_reference/configurations` - Complete configuration reference
-- :doc:`../kv_cache_management/index` - KV cache management guide
+- :doc:`/legacy/api_reference/configurations` - Complete configuration reference
+- :doc:`/legacy/kv_cache_management/index` - KV cache management guide
 - :doc:`freeze_mode` - Freeze Mode safety mechanism guide

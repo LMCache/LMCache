@@ -294,7 +294,7 @@ MLA Configuration Tips
 Related Documentation
 ---------------------
 
-- :doc:`../quickstart`
-- :doc:`../../api_reference/configurations`
-- :doc:`../../kv_cache/storage_backends/index`
-- :doc:`../../kv_cache_management/index`
+- :doc:`/getting_started/quickstart`
+- :doc:`/legacy/api_reference/configurations`
+- :doc:`/legacy/kv_cache/storage_backends/index`
+- :doc:`/legacy/kv_cache_management/index`

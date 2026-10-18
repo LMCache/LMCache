@@ -1346,8 +1346,8 @@ dict). A successful DAX ``add`` looks like:
         -H 'Content-Type: application/json' \
         -d '{"device_path": "/dev/dax0.0", "size": "100GiB"}'
 
-See :doc:`/kv_cache/storage_backends/dax` for detailed request examples,
-mode semantics, and validation guidance.
+See :doc:`/mp/l2_storage/dax` for the DAX adapter configuration and runtime
+management guidance.
 
 Runtime L1 Reconfiguration (Device-DAX)
 ---------------------------------------

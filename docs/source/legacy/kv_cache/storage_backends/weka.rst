@@ -76,7 +76,7 @@ Setup Example
 
 - Weka already installed and mounted.
 
-- vllm and lmcache installed (:doc:`Installation Guide <../../getting_started/installation>`)
+- vllm and lmcache installed (:doc:`Installation Guide </getting_started/installation>`)
 
 - Hugging Face access to ``meta-llama/Llama-3.1-8B-Instruct``
 
@@ -133,5 +133,4 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
         --max-model-len 65536 \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
-
 

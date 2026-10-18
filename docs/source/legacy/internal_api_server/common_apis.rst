@@ -308,9 +308,7 @@ Quick health check for periodic threads. Returns healthy status if all
    ``app`` object and any allowed imports, treat it as full remote code
    execution. It is therefore **disabled by default** (requests return
    ``404``); enable it explicitly with ``run_script_api_enabled``
-   (``LMCACHE_RUN_SCRIPT_API_ENABLED=true``, or
-   ``--run-script-api-enabled`` on the standalone server) and only on a
-   trusted network.
+   (``LMCACHE_RUN_SCRIPT_API_ENABLED=true``) and only on a trusted network.
 
 Upload and execute a Python script in a restricted sandbox environment.
 The script has access to ``app`` (the FastAPI application instance) and

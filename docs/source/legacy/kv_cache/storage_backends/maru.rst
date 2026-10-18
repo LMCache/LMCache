@@ -14,7 +14,7 @@ Overview
 `Maru <https://github.com/xcena-dev/maru>`_ is a high-performance KV cache storage engine built on CXL shared memory,
 designed for LLM inference scenarios where multiple instances need to share a KV cache with minimal latency.
 
-.. image:: ../../assets/maru-kvcache.png
+.. image:: /assets/maru-kvcache.png
     :alt: KV Cache Sharing: Without vs With Maru
 
 For architecture details, see the `Maru documentation <https://xcena-dev.github.io/maru/>`_.
