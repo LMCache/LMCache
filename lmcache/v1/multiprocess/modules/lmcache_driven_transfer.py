@@ -483,7 +483,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
         # time so a stale entry is not reaped right after recovery. REGISTER
-        # is SYNC-serialized on the MQ main loop, so it is the sole inserter.
+        # is SERIALIZED on the MQ main loop, so it is the sole inserter.
         with self._lock:
             existing = self._cache_contexts.get(instance_id)
             if existing is not None:
