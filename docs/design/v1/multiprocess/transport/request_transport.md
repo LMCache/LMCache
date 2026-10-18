@@ -94,6 +94,28 @@ the aio event loop), and how the server starts and stops.
 `build_grpc_request_server` in `grpc_impl/server_builder.py` picks one of them
 from `grpc_server_mode` and returns it as a `GrpcMultiprocessServerBase`.
 
+## Failed requests
+
+A request that cannot produce a response is answered with a failure reply
+rather than dropped. Dropping it is indistinguishable on the wire from a
+handler that is merely slow, so the caller waits out its own timeout and
+reports that instead of the cause, which exists only in the server's log --
+a different process when the connector autostarts the server.
+
+gRPC carries the failure as a status code. ZMQ reuses the operation frame:
+the reply carries the reserved operation name `__handler_error__`
+(`HANDLER_ERROR_OPERATION`) and one payload frame holding the failing
+operation, exception type and message. The name is deliberately not routable,
+so a client built before the reply existed decodes it, finds it does not match
+the operation it sent, and fails the future on the existing mismatch path
+instead of hanging. A client therefore does not have to be upgraded in step
+with its server; the reverse is not true, since the server is the side that
+sends the reply.
+
+Callers see the failure as an exception on the future, not as a timeout. Code
+that distinguishes "the server is unreachable or stuck" from "the request
+failed" should catch `TimeoutError` and `ConnectionError` separately.
+
 ## Adding an RPC
 
 An ordinary RPC requires three changes:

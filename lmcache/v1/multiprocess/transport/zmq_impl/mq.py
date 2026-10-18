@@ -33,7 +33,10 @@ from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
+    HANDLER_ERROR_OPERATION,
+    decode_handler_error,
     decode_operation,
+    encode_handler_error,
     encode_operation,
 )
 from lmcache.v1.platform import EventNotifier, create_event_notifier
@@ -293,6 +296,18 @@ CONNECT_TIMEOUT_MS = 5000
 RECONNECT_IVL_MAX_MS = 1000
 
 
+def _handler_error_exception(
+    b_response: list[bytes],
+    rpc_spec: RpcSpec,
+) -> Exception:
+    """Rebuild a server-side handler failure as a client-side exception."""
+    try:
+        detail = decode_handler_error(b_response[0])
+    except Exception:
+        detail = "no detail sent"
+    return ConnectionError(f"Server failed to handle {rpc_spec.operation!r}: {detail}")
+
+
 # Main classes
 class MessageQueueClient:
     @dataclass
@@ -426,6 +441,9 @@ class MessageQueueClient:
         if request_uid in self.pending_futures:
             future, rpc_spec = self.pending_futures.pop(request_uid)
             operation = decode_operation(b_operation)
+            if operation == HANDLER_ERROR_OPERATION:
+                future.set_exception(_handler_error_exception(b_response, rpc_spec))
+                return
             if operation != rpc_spec.operation:
                 future.set_exception(
                     ValueError(
@@ -736,8 +754,9 @@ class MessageQueueServer(RequestServer):
                 self.output_queue.put(frames_to_send)
                 self._output_efd.notify()
 
-            except Exception:
+            except Exception as exc:
                 logger.exception("Error in blocking handler")
+                self._reply_handler_error(prefix_frames, exc)
 
         future.add_done_callback(_notify_response)
 
@@ -787,11 +806,28 @@ class MessageQueueServer(RequestServer):
                     payloads=payloads,
                     prefix_frames=[identity, b_request_uid, b_operation],
                 )
-            except Exception:
+            except Exception as exc:
                 logger.exception("Error handling operation %s", operation)
+                self._reply_handler_error([identity, b_request_uid, b_operation], exc)
         else:
             logger.error("No handler registered for operation %s", operation)
             logger.error("Available handlers: %s", list(self.handlers.keys()))
+            self._reply_handler_error(
+                [identity, b_request_uid, b_operation],
+                LookupError(f"No handler registered for operation {operation!r}"),
+            )
+
+    def _reply_handler_error(
+        self,
+        prefix_frames: list[bytes],
+        exc: BaseException,
+    ) -> None:
+        """Reply with the failure so the caller fails now instead of on timeout."""
+        try:
+            self.output_queue.put(prefix_frames[:2] + encode_handler_error(exc))
+            self._output_efd.notify()
+        except Exception:
+            logger.exception("Failed to reply with the handler error")
 
     def _send_responses(self) -> None:
         try:
