@@ -11,14 +11,14 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server import (
     GrpcMultiprocessServer,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
-    BaseGrpcMultiprocessServer,
+    GrpcMultiprocessServerBase,
 )
 
 
 def build_grpc_request_server(
     modules: list[EngineModule],
     mp_config: MPServerConfig,
-) -> BaseGrpcMultiprocessServer:
+) -> GrpcMultiprocessServerBase:
     """Build a gRPC request server for the supplied business modules.
 
     Args:
@@ -29,7 +29,7 @@ def build_grpc_request_server(
     Returns:
         Configured, but not yet started, gRPC request server.
     """
-    server_cls: type[BaseGrpcMultiprocessServer]
+    server_cls: type[GrpcMultiprocessServerBase]
     if mp_config.grpc_server_mode == "aio":
         server_cls = GrpcAioMultiprocessServer
     else:

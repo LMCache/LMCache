@@ -24,7 +24,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
 )
 
 
-class BaseGrpcMultiprocessServer(RequestServer):
+class GrpcMultiprocessServerBase(RequestServer):
     """Serve transport-neutral modules as the generated gRPC services.
 
     Owns what the sync and aio servers share: the affinity pool, the gRPC

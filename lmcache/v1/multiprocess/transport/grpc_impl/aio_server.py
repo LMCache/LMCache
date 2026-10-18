@@ -17,7 +17,7 @@ from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import ServiceBinding
 from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
-    BaseGrpcMultiprocessServer,
+    GrpcMultiprocessServerBase,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     GRPC_SERVER_OPTIONS,
@@ -68,7 +68,7 @@ class _AioServicer:
         return invoke
 
 
-class GrpcAioMultiprocessServer(BaseGrpcMultiprocessServer):
+class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
     """Serve the gRPC request services on grpc.aio.
 
     Calls are received on one event loop thread and handed to the handler

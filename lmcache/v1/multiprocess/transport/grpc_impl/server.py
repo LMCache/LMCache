@@ -15,7 +15,7 @@ from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import ServiceBinding
 from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
-    BaseGrpcMultiprocessServer,
+    GrpcMultiprocessServerBase,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     GRPC_SERVER_OPTIONS,
@@ -137,7 +137,7 @@ class _GeneratedServicer:
             raise RuntimeError("gRPC context abort unexpectedly returned") from exc
 
 
-class GrpcMultiprocessServer(BaseGrpcMultiprocessServer):
+class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
     """Serve the gRPC request services on grpc's thread-pool server.
 
     Each call runs on one of ``grpc_server_workers`` threads. Normal handlers
