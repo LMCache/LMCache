@@ -315,8 +315,10 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
     return msgspec.msgpack.Decoder(ext_hook=ext_hook, dec_hook=dec_hook, type=type)
 
 
-# Subscribe only to advertising servers; older versions expose a polling API.
-KV_EVENT_CAPABILITY = "kv_event_stream"
+# Experimental feature advertised through GET_EXPERIMENTAL by the opt-in qstore
+# server module (lmcache.v1.multiprocess.plugin_modules.qstore); the vLLM
+# connector requests it for ``lmcache.mp.transfer_intermediate_tensors``.
+TRANSFER_QUERY = "transfer_query"
 KV_EVENT_KIND_STORED = "stored"
 KV_EVENT_KIND_REMOVED = "removed"
 KV_EVENT_MEDIUM_CPU = "CPU"
