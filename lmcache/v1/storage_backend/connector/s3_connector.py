@@ -2,9 +2,9 @@
 # Standard
 from enum import IntEnum, auto
 from typing import List, Optional
-from urllib.parse import quote as url_quote
 import asyncio
 import ctypes
+import hashlib
 
 # Third Party
 from awscrt import auth, io, s3
@@ -167,13 +167,13 @@ class S3Connector(RemoteConnector):
         self.pq_executor = AsyncPQExecutor(loop)
 
     def _format_safe_path(self, key_str: str) -> str:
+        """Encode the complete cache identity in a bounded, versioned HTTP path.
+
+        Legacy slash-to-underscore names can alias different models, so they
+        must not be used as a fallback when this path is absent.
         """
-        Generate a safe HTTP path for the S3 key.
-        Flattens the key by replacing slashes with underscores and URL-encodes
-        any special characters.
-        """
-        flat_key_str = key_str.replace("/", "_")
-        return "/" + url_quote(flat_key_str)
+        digest = hashlib.sha256(key_str.encode("utf-8")).hexdigest()
+        return f"/lmcache-v2/{digest}"
 
     # TODO(Jiayi): optimize this with async
     def _get_object_size(self, key_str: str) -> int:
