@@ -4,11 +4,11 @@
 Reads:  glossary.md   (one H3 per term, preceded by an HTML-comment metadata block)
 Writes: <outdir>/<slug>.rst  for every tier 1-4 term
         <outdir>/index.rst   the glossary hub
-        <outdir>/../tier5-systems-terms.json
 
 Tier 5 (systems/Kubernetes) terms are NOT emitted as individual pages; they are
-handed to the hand-authored kubernetes.rst page as a JSON sidecar so that page
-stays a single SEO target rather than eleven thin ones.
+covered by the hand-authored kubernetes.rst so that page stays a single SEO
+target rather than eleven thin ones. Pass ``--sidecar PATH`` to dump them as
+JSON when editing that page.
 
 The RST carries a machine-readable metadata comment that Sphinx ignores and the
 WordPress sync tool reads. Keeping it inside the .rst (rather than a sidecar)
@@ -49,6 +49,11 @@ TIER_BLURBS = {
 META_RE = re.compile(r"<!--\n(.*?)\n-->\n### (.+?)\n(.*?)(?=\n<!--|\n## |\Z)", re.S)
 
 
+def _parse_list(value: str) -> tuple[str, ...]:
+    """Parse a ``[a, b, c]`` metadata value into a tuple of strings."""
+    return tuple(x.strip() for x in value.strip("[]").split(",") if x.strip())
+
+
 @dataclass(frozen=True)
 class GlossaryTerm:
     """One glossary entry parsed from the markdown source.
@@ -72,11 +77,6 @@ class GlossaryTerm:
     tier: str
     publish: str
     body: str
-
-
-def _parse_list(value: str) -> tuple[str, ...]:
-    """Parse a ``[a, b, c]`` metadata value into a tuple of strings."""
-    return tuple(x.strip() for x in value.strip("[]").split(",") if x.strip())
 
 
 def parse(md_text: str) -> list[GlossaryTerm]:
@@ -328,10 +328,9 @@ def render_index(terms: list[GlossaryTerm]) -> str:
 
 
 def build(src: Path, outdir: Path) -> None:
-    """Generate every glossary output from the markdown source.
+    """Generate the glossary RST pages from the markdown source.
 
-    Writes one page per tier 1-4 term and ``index.rst`` into ``outdir``, and
-    the tier-5 sidecar ``tier5-systems-terms.json`` into ``outdir.parent``.
+    Writes one page per tier 1-4 term and ``index.rst`` into ``outdir``.
     ``kubernetes.rst`` is hand-authored and never written.
 
     Args:
@@ -342,17 +341,29 @@ def build(src: Path, outdir: Path) -> None:
         ValueError: If ``src`` is not a valid glossary source; see :func:`parse`.
     """
     terms = parse(src.read_text())
-    published = [t for t in terms if t.tier in PAGE_TIERS]
-    systems = [t for t in terms if t.tier == SYSTEMS_TIER]
     # Tier-5 terms have no page of their own; every reference to one lands on
     # the single Kubernetes page instead.
-    redirect = {t.slug: "kubernetes" for t in systems}
+    redirect = {t.slug: "kubernetes" for t in terms if t.tier == SYSTEMS_TIER}
 
     outdir.mkdir(parents=True, exist_ok=True)
-    for t in published:
-        (outdir / f"{t.slug}.rst").write_text(render_term(t, redirect))
+    for t in terms:
+        if t.tier in PAGE_TIERS:
+            (outdir / f"{t.slug}.rst").write_text(render_term(t, redirect))
     (outdir / "index.rst").write_text(render_index(terms))
 
+
+def write_sidecar(src: Path, dest: Path) -> None:
+    """Write the tier-5 systems terms as JSON, for editing ``kubernetes.rst``.
+
+    Args:
+        src: Path to ``glossary.md``.
+        dest: JSON file to write. Each entry has ``slug``, ``title``,
+            ``question``, ``definition`` (the lead sentence), and ``body``
+            (the markdown body).
+
+    Raises:
+        ValueError: If ``src`` is not a valid glossary source; see :func:`parse`.
+    """
     sidecar = [
         {
             "slug": t.slug,
@@ -361,11 +372,10 @@ def build(src: Path, outdir: Path) -> None:
             "definition": first_sentence(t.body),
             "body": t.body,
         }
-        for t in systems
+        for t in parse(src.read_text())
+        if t.tier == SYSTEMS_TIER
     ]
-    (outdir.parent / "tier5-systems-terms.json").write_text(
-        json.dumps(sidecar, indent=2)
-    )
+    dest.write_text(json.dumps(sidecar, indent=2))
 
 
 def main() -> None:
@@ -373,8 +383,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("src", type=Path, help="path to glossary.md")
     parser.add_argument("outdir", type=Path, help="directory for the RST pages")
+    parser.add_argument(
+        "--sidecar",
+        type=Path,
+        help="also write the tier-5 systems terms as JSON to this path",
+    )
     args = parser.parse_args()
     build(args.src, args.outdir)
+    if args.sidecar:
+        write_sidecar(args.src, args.sidecar)
 
 
 if __name__ == "__main__":

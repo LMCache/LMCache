@@ -130,7 +130,7 @@ class TestRenderTerm:
 
 
 class TestBuild:
-    def test_writes_pages_index_and_sidecar(self, tmp_path: Path) -> None:
+    def test_writes_only_pages_and_index(self, tmp_path: Path) -> None:
         src = tmp_path / "glossary.md"
         src.write_text(SAMPLE_MD)
         outdir = tmp_path / "out" / "glossary"
@@ -138,10 +138,20 @@ class TestBuild:
         bg.build(src, outdir)
 
         assert sorted(p.name for p in outdir.iterdir()) == ["index.rst", "token.rst"]
-        sidecar = json.loads(
-            (tmp_path / "out" / "tier5-systems-terms.json").read_text()
-        )
+        assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["glossary"]
+
+    def test_write_sidecar_holds_systems_terms(self, tmp_path: Path) -> None:
+        src = tmp_path / "glossary.md"
+        src.write_text(SAMPLE_MD)
+        dest = tmp_path / "tier5.json"
+
+        bg.write_sidecar(src, dest)
+
+        sidecar = json.loads(dest.read_text())
         assert [t["slug"] for t in sidecar] == ["pod"]
+        assert sidecar[0]["definition"] == (
+            "A pod is the smallest deployable unit in Kubernetes."
+        )
 
     def test_checked_in_pages_match_source(self, tmp_path: Path) -> None:
         """The committed RST must be exactly what the generator produces."""
