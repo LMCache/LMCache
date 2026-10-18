@@ -145,7 +145,7 @@ def _server_process(
     server = MessageQueueServer(server_url, context)
 
     for operation, handler in request_handlers.items():
-        server.add_handler(operation, HandlerType.SYNC, handler)
+        server.add_handler(operation, HandlerType.SERIALIZED, handler)
 
     server.start()
 
@@ -952,9 +952,9 @@ def test_add_affinity_thread_pool():
     server.close()
 
 
-def test_normal_pool_error_on_sync_handler():
+def test_normal_pool_error_on_serialized_handler():
     """
-    Test that add_normal_thread_pool raises TypeError for SYNC handlers.
+    Test that add_normal_thread_pool raises TypeError for SERIALIZED handlers.
     """
     context = zmq.Context.instance()
     server = MessageQueueServer("tcp://127.0.0.1:15701", context)
@@ -967,9 +967,9 @@ def test_normal_pool_error_on_sync_handler():
     server.close()
 
 
-def test_affinity_pool_error_on_sync_handler():
+def test_affinity_pool_error_on_serialized_handler():
     """
-    Test that add_affinity_thread_pool raises TypeError for SYNC handlers.
+    Test that add_affinity_thread_pool raises TypeError for SERIALIZED handlers.
     """
     context = zmq.Context.instance()
     server = MessageQueueServer("tcp://127.0.0.1:15701", context)

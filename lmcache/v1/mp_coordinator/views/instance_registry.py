@@ -24,6 +24,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 from lmcache.v1.mp_coordinator.views.base import View
 
 logger = init_logger(__name__)
@@ -59,6 +60,18 @@ class MPInstance:
     mq_port: int = 0
 
 
+@dataclass(frozen=True)
+class InstanceRegistryStats:
+    """Heartbeat freshness of the registered mp servers.
+
+    Attributes:
+        seconds_since_heartbeat: Seconds since each registered server's
+            last heartbeat, keyed by instance id.
+    """
+
+    seconds_since_heartbeat: dict[str, float]
+
+
 class InstanceRegistry(View):
     """Thread-safe in-memory registry of mp servers.
 
@@ -74,6 +87,7 @@ class InstanceRegistry(View):
         """Initialize an empty registry."""
         self._lock = threading.Lock()
         self._instances: dict[str, MPInstance] = {}
+        register_metric_source(self)
 
     def register(self, instance: MPInstance) -> bool:
         """Insert or replace an mp server entry atomically.
@@ -138,6 +152,17 @@ class InstanceRegistry(View):
         """
         with self._lock:
             return list(self._instances.values())
+
+    def stats(self) -> InstanceRegistryStats:
+        """Return a snapshot of every registered server's heartbeat age."""
+        now = time.monotonic()
+        with self._lock:
+            return InstanceRegistryStats(
+                seconds_since_heartbeat={
+                    instance_id: now - instance.last_heartbeat_time
+                    for instance_id, instance in self._instances.items()
+                }
+            )
 
     def random_instance(self) -> "MPInstance | None":
         """Return a uniformly random registered instance, or ``None``

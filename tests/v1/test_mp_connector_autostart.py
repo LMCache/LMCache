@@ -38,7 +38,11 @@ def connector_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     monkeypatch.setattr(
         module,
         "LMCacheMPSchedulerAdapter",
-        MagicMock(return_value=SimpleNamespace(lmcache_tokens_per_chunk=256)),
+        MagicMock(
+            return_value=SimpleNamespace(
+                lmcache_tokens_per_chunk=256, experimental=set()
+            )
+        ),
     )
     monkeypatch.setattr(module, "LMCacheMPWorkerAdapter", MagicMock())
     monkeypatch.setattr(

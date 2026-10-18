@@ -42,6 +42,10 @@ def _captured_lookup_key_groups(
     reaching into a private helper.
     """
     ctx = MagicMock()
+    # No previous lookup to settle: ``lookup`` claims any unreleased
+    # result before ``begin_lookup`` resets it.
+    _sess = ctx.session_manager.get_or_create.return_value
+    _sess.take_prefetch_release.return_value = None
     ctx.chunk_size = 16
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = MagicMock()  # non-None layout
@@ -104,6 +108,10 @@ def test_lookup_single_group_matches_single_group_expansion():
 def test_lookup_hashing_stops_at_key_end() -> None:
     """LOOKUP must not hash chunks beyond the IPC key's requested range."""
     ctx = MagicMock()
+    # No previous lookup to settle: ``lookup`` claims any unreleased
+    # result before ``begin_lookup`` resets it.
+    _sess = ctx.session_manager.get_or_create.return_value
+    _sess.take_prefetch_release.return_value = None
     ctx.chunk_size = 16
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = MagicMock()
