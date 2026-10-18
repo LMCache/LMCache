@@ -58,6 +58,7 @@ def _make_req(req_id: str, can_save: bool = True):
         token_ids=[1, 2, 3, 4],
         slot_mapping=torch.arange(4, dtype=torch.long),
         save_spec=SaveSpec(skip_leading_tokens=0, can_save=can_save),
+        request_configs=None,
     )
 
 
