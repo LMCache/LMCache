@@ -9,14 +9,10 @@ import pytest
 
 # First Party
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 # Test helpers
-from tests.v1.multiprocess.test_mq import (
-    create_cache_key,
-)
 from tests.v1.multiprocess.transport_test_utils import (
     REQUEST_TRANSPORTS,
     RequestTransport,
@@ -29,10 +25,10 @@ _RESULT_TIMEOUT_S = 10.0
 
 
 class _RaisingHandler:
-    """Fail every FREE_LOOKUP_LOCKS request."""
+    """Fail every NOOP request."""
 
     @request_handler(HandlerType.BLOCKING)
-    def free_lookup_locks(self, key: IPCCacheServerKey, tp_size: int) -> None:
+    def noop(self) -> str:
         raise RuntimeError("handler blew up")
 
 
@@ -52,9 +48,7 @@ def test_handler_exception_reaches_the_caller(
     try:
         started = time.monotonic()
         with pytest.raises(Exception) as excinfo:
-            client.free_lookup_locks(create_cache_key(0), 1).result(
-                timeout=_RESULT_TIMEOUT_S
-            )
+            client.noop().result(timeout=_RESULT_TIMEOUT_S)
         elapsed = time.monotonic() - started
 
         assert not isinstance(excinfo.value, LMCacheTimeoutError), (
@@ -77,9 +71,7 @@ def test_unregistered_operation_reaches_the_caller() -> None:
     try:
         started = time.monotonic()
         with pytest.raises(Exception) as excinfo:
-            client.free_lookup_locks(create_cache_key(0), 1).result(
-                timeout=_RESULT_TIMEOUT_S
-            )
+            client.noop().result(timeout=_RESULT_TIMEOUT_S)
         elapsed = time.monotonic() - started
 
         assert not isinstance(excinfo.value, LMCacheTimeoutError)
