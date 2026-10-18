@@ -61,17 +61,17 @@ class _GeneratedServicer:
         self,
         binding: ServiceBinding,
         handlers: dict[str, _GrpcRequestHandler],
-        normal_pool: ThreadPoolExecutor,
+        normal_slots: threading.BoundedSemaphore,
         affinity_pool: AffinityThreadPool,
         affinity_submit_lock: threading.Lock,
-        sync_handler_lock: threading.Lock,
+        serialized_handler_lock: threading.Lock,
     ) -> None:
         self._binding = binding
         self._handlers = handlers
-        self._normal_pool = normal_pool
+        self._normal_slots = normal_slots
         self._affinity_pool = affinity_pool
         self._affinity_submit_lock = affinity_submit_lock
-        self._sync_handler_lock = sync_handler_lock
+        self._serialized_handler_lock = serialized_handler_lock
 
     def __getattr__(self, method_name: str) -> Callable[..., Any]:
         full_name = f"{self._binding.descriptor.full_name}.{method_name}"
@@ -136,8 +136,8 @@ class _GeneratedServicer:
                 )
                 raise RuntimeError("gRPC context abort unexpectedly returned")
             payloads = registered.request_decoder(request)
-            if registered.handler_type is HandlerType.SYNC:
-                with self._sync_handler_lock:
+            if registered.handler_type is HandlerType.SERIALIZED:
+                with self._serialized_handler_lock:
                     result = registered.handler(*payloads)
             elif registered.handler_type is HandlerType.BLOCKING and (
                 registered.requires_client_affinity
@@ -151,9 +151,10 @@ class _GeneratedServicer:
                     )
                 result = future.result()
             elif registered.handler_type is HandlerType.BLOCKING:
-                result = self._normal_pool.submit(
-                    registered.handler, *payloads
-                ).result()
+                # gRPC already runs this call on a worker. Bound handler
+                # concurrency without a second executor submission and wait.
+                with self._normal_slots:
+                    result = registered.handler(*payloads)
             else:
                 raise NotImplementedError(
                     f"{registered.handler_type.name} handlers are not supported"
@@ -185,17 +186,16 @@ class GrpcMultiprocessServer(RequestServer):
     ) -> None:
         self._bind_url = bind_url
         self._handlers: dict[str, _GrpcRequestHandler] = {}
-        self._normal_pool = ThreadPoolExecutor(
-            max_workers=max_cpu_workers,
-            thread_name_prefix="grpc-normal",
-        )
+        if max_cpu_workers <= 0:
+            raise ValueError("max_cpu_workers must be greater than 0")
+        self._normal_slots = threading.BoundedSemaphore(max_cpu_workers)
         self._affinity_pool = AffinityThreadPool(
             max_workers=max_gpu_workers,
             thread_name_prefix="grpc-affinity",
         )
         self._affinity_submit_lock = threading.Lock()
-        # HandlerType.SYNC is a transport-neutral single-main-loop contract.
-        self._sync_handler_lock = threading.Lock()
+        # HandlerType.SERIALIZED is a transport-neutral single-main-loop contract.
+        self._serialized_handler_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(
             max_workers=grpc_server_workers,
             thread_name_prefix="grpc-server",
@@ -255,7 +255,7 @@ class GrpcMultiprocessServer(RequestServer):
                 handler_type=(
                     bound_handler.options.handler_type
                     if bound_handler is not None
-                    else HandlerType.SYNC
+                    else HandlerType.SERIALIZED
                 ),
                 requires_client_affinity=(
                     bound_handler.options.requires_client_affinity
@@ -271,10 +271,10 @@ class GrpcMultiprocessServer(RequestServer):
         servicer = _GeneratedServicer(
             binding,
             service_handlers,
-            self._normal_pool,
+            self._normal_slots,
             self._affinity_pool,
             self._affinity_submit_lock,
-            self._sync_handler_lock,
+            self._serialized_handler_lock,
         )
         add_servicer = getattr(
             binding.grpc_module,
@@ -293,7 +293,6 @@ class GrpcMultiprocessServer(RequestServer):
             return
         self._closed.set()
         self._server.stop(grace=None)
-        self._normal_pool.shutdown(wait=False)
         self._affinity_pool.shutdown(wait=False)
         self._executor.shutdown(wait=False)
 
