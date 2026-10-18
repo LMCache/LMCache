@@ -683,4 +683,6 @@ Additional Resources
   ``lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py``
 - Design document:
   ``lmcache/v1/distributed/l2_adapters/design_docs/plugin.md``
-- RESP backend user guide: :doc:`RESP (Native Redis/Valkey) <../../kv_cache/storage_backends/resp>`
+- RESP non-MP backend guide:
+  :doc:`RESP (Native Redis/Valkey) </legacy/kv_cache/storage_backends/resp>`
+- RESP MP L2 adapter guide: :doc:`RESP (Redis/Valkey) </mp/l2_storage/resp>`

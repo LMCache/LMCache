@@ -12,5 +12,6 @@ commands, and HTTP endpoints.
    extending_lmcache/adding_a_new_device_backend
    extending_lmcache/server_modules
    extending_lmcache/musa_aiter_integration
+   usage/index
    cli
    extending_http_api
