@@ -7,10 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 import importlib
+import queue
 import subprocess
 import sys
+import threading
 
 # Third Party
+import grpc
 import pytest
 import torch
 
@@ -33,7 +36,6 @@ from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
 from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
@@ -41,6 +43,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
+from lmcache.v1.multiprocess.plugin_modules.qstore import QStoreModule
 from lmcache.v1.multiprocess.protocols.server_module import (
     ServerModuleCallRequest,
     ServerModuleCallResponse,
@@ -52,6 +55,9 @@ from lmcache.v1.multiprocess.request_handler import (
 )
 from lmcache.v1.multiprocess.transport.grpc_impl import server as grpc_server_module
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
+    CONNECT_TIMEOUT_MS,
+    INITIAL_RECONNECT_BACKOFF_MS,
+    MAX_RECONNECT_BACKOFF_MS,
     GrpcMultiprocessClient,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
@@ -422,6 +428,31 @@ def test_generated_protobuf_type_stubs_are_available() -> None:
         assert module_path.with_suffix(".pyi").is_file()
 
 
+def test_client_channel_bounds_connect_timeout_and_reconnect_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client channel uses the same reconnect bounds as the ZMQ client."""
+    captured: dict[str, Any] = {}
+    insecure_channel = grpc.insecure_channel
+
+    def record_channel(target: str, options: Any = None) -> grpc.Channel:
+        captured.update(options)
+        return insecure_channel(target, options=options)
+
+    monkeypatch.setattr(grpc, "insecure_channel", record_channel)
+
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        "grpc://127.0.0.1:15706"
+    )
+    client.close()
+
+    assert captured["grpc.min_reconnect_backoff_ms"] == CONNECT_TIMEOUT_MS
+    assert captured["grpc.initial_reconnect_backoff_ms"] == (
+        INITIAL_RECONNECT_BACKOFF_MS
+    )
+    assert captured["grpc.max_reconnect_backoff_ms"] == MAX_RECONNECT_BACKOFF_MS
+
+
 def test_build_grpc_request_server_uses_configured_server_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -609,3 +640,46 @@ def test_generated_grpc_server_module_call_round_trips(
         payload=b"grpc:hello",
         error="",
     )
+
+
+@pytest.mark.parametrize("max_cpu_workers", [1, 2])
+def test_grpc_normal_worker_limit_and_error_release(max_cpu_workers: int) -> None:
+    """Normal handlers honor capacity and release it even on exceptions."""
+    entered: queue.Queue[None] = queue.Queue()
+    release = threading.Event()
+
+    class BlockingModule:
+        @request_handler(HandlerType.BLOCKING)
+        def ping(self, instance_id: int | None) -> bool:
+            entered.put(None)
+            assert release.wait(10)
+            if instance_id == 0:
+                raise RuntimeError("handler failed")
+            return True
+
+    server = GrpcMultiprocessServer(
+        "grpc://127.0.0.1:0",
+        max_cpu_workers=max_cpu_workers,
+        max_gpu_workers=1,
+        grpc_server_workers=4,
+    )
+    server.add_modules([BlockingModule()])
+    server.start()
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        f"grpc://127.0.0.1:{server.bound_port}"
+    )
+    try:
+        futures = [client.ping(i) for i in range(max_cpu_workers + 1)]
+        for _ in range(max_cpu_workers):
+            entered.get(timeout=5)
+        with pytest.raises(queue.Empty):
+            entered.get(timeout=0.1)
+        release.set()
+        with pytest.raises(grpc.RpcError, match="handler failed"):
+            futures[0].result(5)
+        assert all(future.result(5) for future in futures[1:])
+        assert client.ping(1).result(5) is True
+    finally:
+        release.set()
+        client.close()
+        server.close()

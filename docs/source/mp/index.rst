@@ -117,7 +117,9 @@ class-referenced ``module_dependencies``, and calls ``create()`` with a shared
 ``ModuleBuildContext``. Out-of-tree ``--server-module`` paths explicitly add
 classes to the same graph and lifecycle; their configuration comes from
 ``ModuleBuildContext.config_for()``. This includes ``KVEventModule`` and the
-transfer, lookup, management, P2P, blend, and experimental modules. The
+transfer, lookup, management, P2P, and blend modules; opt-in modules under
+``plugin_modules/`` (for example ``qstore``) join the same graph only when
+named by ``--server-module``. The
 compositor then creates the ZMQ or gRPC request server selected by
 ``--transport``, registers module handlers and optional transport services,
 and blocks in a keep-alive loop.
@@ -163,13 +165,13 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - Handler Type
      - Description
    * - ``REGISTER_KV_CACHE``
-     - SYNC
+     - SERIALIZED
      - Register GPU KV cache tensors for a vLLM instance.
    * - ``UNREGISTER_KV_CACHE``
-     - SYNC
+     - SERIALIZED
      - Unregister KV cache tensors.
    * - ``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
-     - SYNC
+     - SERIALIZED
      - Register an engine-driven KV cache context (CPU/accelerator
        workers using the PREPARE/COMMIT transfer path). Loaded only when
        ``--supported-transfer-mode`` is ``engine_driven`` or ``auto``.
@@ -177,7 +179,7 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
        SHM segment name and pool size when the SHM path is in use
        (empty for the inline path).
    * - ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
-     - SYNC
+     - SERIALIZED
      - Unregister an engine-driven KV cache context.
    * - ``STORE``
      - BLOCKING
@@ -235,7 +237,7 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - Clear cached data. The optional ``force`` flag defaults to ``False``;
        when set, active locks may be ignored.
    * - ``GET_CHUNK_SIZE``
-     - SYNC
+     - SERIALIZED
      - Return the server's chunk size.
    * - ``PING``
      - BLOCKING
@@ -245,14 +247,14 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - Fire-and-forget channel for the vLLM scheduler to report GPU block
        allocation events to the observability subsystem.
    * - ``NOOP``
-     - SYNC
+     - SERIALIZED
      - Debug heartbeat -- returns a confirmation string.
    * - ``CB_REGISTER_ROPE``
-     - SYNC
+     - SERIALIZED
      - (Blend) Share the RoPE cos/sin cache onto a context already
        registered via ``REGISTER_KV_CACHE``.
    * - ``CB_UNREGISTER_ROPE``
-     - SYNC
+     - SERIALIZED
      - (Blend) Drop the RoPE state (paged KV cache lives on; use
        ``UNREGISTER_KV_CACHE`` to release that).
    * - ``CB_RETRIEVE_PRE_COMPUTED``
@@ -287,8 +289,8 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
 
 **Handler types:**
 
-- **SYNC** -- Serialized by the request transport (the ZMQ main loop or the
-  gRPC sync-handler lock) for fast, non-blocking work.
+- **SERIALIZED** -- Run one at a time by the request transport (the ZMQ main
+  loop or the gRPC serialized-handler lock) for fast, non-blocking work.
 - **BLOCKING** -- Dispatched to a normal or client-affinity thread pool (may
   involve GPU copies or I/O).
 
