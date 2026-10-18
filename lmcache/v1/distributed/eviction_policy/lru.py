@@ -10,7 +10,7 @@ import threading
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.eviction import EvictionPolicy
+from lmcache.v1.distributed.eviction import EvictionByteBudget, EvictionPolicy
 from lmcache.v1.distributed.internal_api import (
     EvictionAction,
     EvictionDestination,
@@ -130,6 +130,8 @@ class LRUEvictionPolicy(EvictionPolicy):
         expected_ratio: float,
         key_eligible_filter: Callable[[ObjectKey], bool] | None = None,
         cache_salt: str | None = None,
+        *,
+        byte_budget: EvictionByteBudget | None = None,
     ) -> list[EvictionAction]:
         """
         Get the eviction actions to evict objects from L1 cache.
@@ -145,6 +147,10 @@ class LRUEvictionPolicy(EvictionPolicy):
                 skipped. This is useful for skipping locked keys that
                 cannot be deleted.
             cache_salt: Ignored by LRU policy (not user-level).
+            byte_budget: Optional physical-byte target, overriding the ratio.
+                Keys with no reclaimable bytes are skipped. Whole objects are
+                selected in LRU order until the target is reached or eligible
+                keys run out; the final object may exceed the target.
 
         Returns:
             list[EvictionAction]: The eviction actions to perform. Each
@@ -154,7 +160,7 @@ class LRUEvictionPolicy(EvictionPolicy):
             The eviction action may not be successfully executed, or it
             may be executed asynchronously. Therefore, the eviction policy
             should not assume that the objects are evicted immediately, but
-            it should use `on_keys_deleted` to know when the objects are actually
+            it should use `on_keys_removed` to know when the objects are actually
             deleted.
         """
         with self._lock:
@@ -171,20 +177,28 @@ class LRUEvictionPolicy(EvictionPolicy):
             if expected_ratio > 0 and target_count == 0 and len(self._order) > 0:
                 target_count = 1
 
-            if target_count == 0:
+            target = target_count if byte_budget is None else byte_budget.target_bytes
+            if target <= 0:
                 return []
 
             # Get keys in LRU order (from beginning - least recently used),
             # skipping keys that fail the filter (e.g. locked keys).
             keys_to_evict: list[ObjectKey] = []
+            selected_weight = 0
 
             for key in self._order:
                 if key_eligible_filter is not None and not key_eligible_filter(key):
                     # Skip keys that are not eligible for eviction
                     # (e.g. currently locked by read/write operations)
                     continue
+                weight = (
+                    1 if byte_budget is None else byte_budget.get_evictable_size(key)
+                )
+                if weight <= 0:
+                    continue
                 keys_to_evict.append(key)
-                if len(keys_to_evict) >= target_count:
+                selected_weight += weight
+                if selected_weight >= target:
                     break
 
             if not keys_to_evict:

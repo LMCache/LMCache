@@ -8,7 +8,7 @@ import threading
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.eviction import EvictionPolicy
+from lmcache.v1.distributed.eviction import EvictionByteBudget, EvictionPolicy
 from lmcache.v1.distributed.internal_api import (
     EvictionAction,
     EvictionDestination,
@@ -23,11 +23,11 @@ class ARCEvictionPolicy(EvictionPolicy):
     ``T1`` and ``T2``. Recreating a key from ``B1`` grows the target size of
     ``T1``; recreating one from ``B2`` shrinks it.
 
-    The MP eviction API requests a fraction of the currently tracked keys and
-    does not expose a fixed entry capacity. The policy therefore uses the
-    largest observed resident-key count as its entry capacity. This matches
-    fixed-size KV chunks and fixed-slot adapters; it is not byte-weighted for
-    adapters whose objects have different sizes.
+    The policy uses the largest observed resident-key count as its entry
+    capacity. ARC's adaptive partition and ghost histories remain entry-based.
+    A caller can request an absolute byte budget for the selected victim batch
+    without changing this replacement ordering; other callers request a
+    fraction of tracked keys.
 
     Unlike the request-coupled ``REPLACE(x)`` operation in the original ARC
     paper, MP asks the policy for pressure-driven eviction batches after writes
@@ -196,6 +196,8 @@ class ARCEvictionPolicy(EvictionPolicy):
         expected_ratio: float,
         key_eligible_filter: Callable[[ObjectKey], bool] | None = None,
         cache_salt: str | None = None,
+        *,
+        byte_budget: EvictionByteBudget | None = None,
     ) -> list[EvictionAction]:
         """Choose ARC victims for a pressure-driven MP eviction cycle.
 
@@ -205,6 +207,9 @@ class ARCEvictionPolicy(EvictionPolicy):
             key_eligible_filter: Optional predicate used to skip locked or
                 otherwise ineligible keys.
             cache_salt: Ignored because ARC is a global, non-isolated policy.
+            byte_budget: Optional physical-byte target, overriding the ratio.
+                Zero-size candidates are skipped. Select whole objects in ARC
+                order until the target is reached or eligible keys run out.
 
         Returns:
             Zero or one eviction action containing eligible keys in ARC victim
@@ -220,7 +225,8 @@ class ARCEvictionPolicy(EvictionPolicy):
             target_count = int(resident_size * expected_ratio)
             if expected_ratio > 0 and target_count == 0:
                 target_count = 1
-            if target_count == 0:
+            target = target_count if byte_budget is None else byte_budget.target_bytes
+            if target <= 0:
                 return []
 
             self._capacity = max(self._capacity, resident_size)
@@ -229,35 +235,38 @@ class ARCEvictionPolicy(EvictionPolicy):
 
             selected: set[ObjectKey] = set()
             victims: list[ObjectKey] = []
+            selected_weight = 0
             virtual_t1_size = len(self._t1)
             t1_iter = iter(tuple(self._t1))
             t2_iter = iter(tuple(self._t2))
 
-            while len(victims) < target_count:
+            while selected_weight < target:
                 candidate = None
                 # MP eviction is decoupled from the incoming write, so use the
                 # request-independent equality rule used by vLLM's ARC policy.
                 if virtual_t1_size >= int(self._target_t1_size):
                     candidate = self._next_eligible(
-                        t1_iter, selected, key_eligible_filter
+                        t1_iter, selected, key_eligible_filter, byte_budget
                     )
                     if candidate is not None:
                         virtual_t1_size -= 1
                 if candidate is None:
                     candidate = self._next_eligible(
-                        t2_iter, selected, key_eligible_filter
+                        t2_iter, selected, key_eligible_filter, byte_budget
                     )
                 if candidate is None:
                     candidate = self._next_eligible(
-                        t1_iter, selected, key_eligible_filter
+                        t1_iter, selected, key_eligible_filter, byte_budget
                     )
                     if candidate is not None:
                         virtual_t1_size -= 1
                 if candidate is None:
                     break
 
-                selected.add(candidate)
-                victims.append(candidate)
+                key, weight = candidate
+                selected.add(key)
+                victims.append(key)
+                selected_weight += weight
 
             if not victims:
                 return []
@@ -294,13 +303,16 @@ class ARCEvictionPolicy(EvictionPolicy):
         entries: Iterator[ObjectKey],
         selected: set[ObjectKey],
         key_eligible_filter: Callable[[ObjectKey], bool] | None,
-    ) -> ObjectKey | None:
+        byte_budget: EvictionByteBudget | None,
+    ) -> tuple[ObjectKey, int] | None:
         for key in entries:
             if key in selected:
                 continue
             if key_eligible_filter is not None and not key_eligible_filter(key):
                 continue
-            return key
+            weight = 1 if byte_budget is None else byte_budget.get_evictable_size(key)
+            if weight > 0:
+                return key, weight
         return None
 
     def _retire(self, key: ObjectKey) -> None:

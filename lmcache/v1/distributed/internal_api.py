@@ -330,6 +330,22 @@ class L1ManagerInterface(Protocol):
         """Whether eviction may delete the key now."""
         ...
 
+    def get_evictable_size(self, key: ObjectKey) -> int:
+        """Return advisory reclaimable physical bytes without the manager lock.
+
+        Args:
+            key: Resident or staged object identity to inspect.
+
+        Returns:
+            Physical bytes from unlocked residents and expired staging
+            allocations, including padding; zero if nothing can be reclaimed.
+
+        Notes:
+            This callback may run under an eviction-policy lock. Deletion must
+            recheck locks, including staging writers protecting a resident.
+        """
+        ...
+
     def get_memory_usage(self) -> tuple[int, int]:
         """Return ``(used_bytes, total_bytes)``."""
         ...

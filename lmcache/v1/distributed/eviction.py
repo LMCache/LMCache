@@ -6,6 +6,7 @@ Eviction module to determine what to evict from L1 and L2 caches.
 # Standard
 from abc import abstractmethod
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
@@ -16,6 +17,23 @@ from lmcache.v1.distributed.internal_api import (
     L2AdapterListener,
 )
 from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
+
+
+@dataclass(frozen=True)
+class EvictionByteBudget:
+    """An absolute byte target for one eviction selection.
+
+    Attributes:
+        target_bytes: Bytes to reclaim; nonpositive targets select nothing.
+        get_evictable_size: Return a key's reclaimable physical allocation,
+            including padding, or zero when it cannot be reclaimed. The
+            callback runs under the policy lock and must not acquire the
+            manager lock: manager lifecycle callbacks acquire these locks
+            in the opposite order. Sizes are advisory; deletion rechecks locks.
+    """
+
+    target_bytes: int
+    get_evictable_size: Callable[[ObjectKey], int]
 
 
 class EvictionPolicy:
@@ -137,6 +155,8 @@ class EvictionPolicy:
         expected_ratio: float,
         key_eligible_filter: Callable[[ObjectKey], bool] | None = None,
         cache_salt: str | None = None,
+        *,
+        byte_budget: EvictionByteBudget | None = None,
     ) -> list[EvictionAction]:
         """
         Get the eviction actions to evict objects from cache.
@@ -157,6 +177,11 @@ class EvictionPolicy:
                 None, evict globally across all salts. Only meaningful for
                 policies where ``support_isolation`` is True; other policies
                 ignore this parameter.
+            byte_budget: When provided, replace the key-count ratio target
+                with this absolute physical-byte target. Select whole objects
+                in policy order until the target is reached or eligible keys
+                are exhausted. The last object may exceed the target. Policies
+                that disable eviction still return no actions.
 
         Returns:
             list[EvictionAction]: The eviction actions to perform. Each

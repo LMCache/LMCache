@@ -12,7 +12,7 @@ from collections.abc import Callable
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.eviction import EvictionPolicy
+from lmcache.v1.distributed.eviction import EvictionByteBudget, EvictionPolicy
 from lmcache.v1.distributed.internal_api import (
     EvictionAction,
     EvictionDestination,
@@ -46,5 +46,18 @@ class NoOpEvictionPolicy(EvictionPolicy):
         expected_ratio: float,
         key_eligible_filter: Callable[[ObjectKey], bool] | None = None,
         cache_salt: str | None = None,
+        *,
+        byte_budget: EvictionByteBudget | None = None,
     ) -> list[EvictionAction]:
+        """Return no actions, ignoring ratios, filters, salts and byte budgets.
+
+        Args:
+            expected_ratio: Ignored key-count ratio.
+            key_eligible_filter: Ignored eligibility predicate.
+            cache_salt: Ignored salt restriction.
+            byte_budget: Ignored byte target; eviction remains disabled.
+
+        Returns:
+            An empty action list.
+        """
         return []
