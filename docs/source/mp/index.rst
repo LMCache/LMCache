@@ -590,7 +590,9 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/``
      - Build-time protobuf generator and generated Python package
    * - ``lmcache/v1/multiprocess/transport/grpc_impl/server.py``
-     - gRPC service binding, handler scheduling, and request-server construction
+     - gRPC service binding and handler scheduling
+   * - ``lmcache/v1/multiprocess/transport/grpc_impl/server_builder.py``
+     - gRPC request-server construction, choosing the sync or aio server
    * - ``lmcache/v1/multiprocess/modules/``
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
        ``management.py`` (``ManagementModule``), ``kv_events.py``
