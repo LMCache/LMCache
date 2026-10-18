@@ -196,6 +196,13 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
+   :maxdepth: 1
+
+   glossary/index
+
+:raw-html:`<br />`
+
+.. toctree::
    :maxdepth: 2
 
    legacy/index
