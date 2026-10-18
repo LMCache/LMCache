@@ -2,7 +2,6 @@
 """gRPC request server construction for multiprocess requests."""
 
 # Standard
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 import threading
 
@@ -37,17 +36,17 @@ class _GeneratedServicer:
         self,
         binding: ServiceBinding,
         handlers: dict[str, GrpcRequestHandler],
-        normal_pool: ThreadPoolExecutor,
+        normal_slots: threading.BoundedSemaphore,
         affinity_pool: AffinityThreadPool,
         affinity_submit_lock: threading.Lock,
-        sync_handler_lock: threading.Lock,
+        serialized_handler_lock: threading.Lock,
     ) -> None:
         self._binding = binding
         self._handlers = handlers
-        self._normal_pool = normal_pool
+        self._normal_slots = normal_slots
         self._affinity_pool = affinity_pool
         self._affinity_submit_lock = affinity_submit_lock
-        self._sync_handler_lock = sync_handler_lock
+        self._serialized_handler_lock = serialized_handler_lock
 
     def __getattr__(self, method_name: str) -> Callable[..., Any]:
         full_name = f"{self._binding.descriptor.full_name}.{method_name}"
@@ -112,8 +111,8 @@ class _GeneratedServicer:
                 )
                 raise RuntimeError("gRPC context abort unexpectedly returned")
             payloads = registered.request_decoder(request)
-            if registered.handler_type is HandlerType.SYNC:
-                with self._sync_handler_lock:
+            if registered.handler_type is HandlerType.SERIALIZED:
+                with self._serialized_handler_lock:
                     result = registered.handler(*payloads)
             elif registered.handler_type is HandlerType.BLOCKING and (
                 registered.requires_client_affinity
@@ -127,9 +126,10 @@ class _GeneratedServicer:
                     )
                 result = future.result()
             elif registered.handler_type is HandlerType.BLOCKING:
-                result = self._normal_pool.submit(
-                    registered.handler, *payloads
-                ).result()
+                # gRPC already runs this call on a worker. Bound handler
+                # concurrency without a second executor submission and wait.
+                with self._normal_slots:
+                    result = registered.handler(*payloads)
             else:
                 raise NotImplementedError(
                     f"{registered.handler_type.name} handlers are not supported"
@@ -145,8 +145,9 @@ class _GeneratedServicer:
 class GrpcMultiprocessServer(BaseGrpcMultiprocessServer):
     """Serve the gRPC request services on grpc's thread-pool server.
 
-    Each call runs on one of ``grpc_server_workers`` threads, which hands the
-    handler to the pool its handler type calls for and waits for the result.
+    Each call runs on one of ``grpc_server_workers`` threads. Normal handlers
+    run on that thread, at most ``max_cpu_workers`` at a time, and affinity
+    handlers are handed to the worker chosen for their client.
     """
 
     def __init__(
@@ -159,9 +160,10 @@ class GrpcMultiprocessServer(BaseGrpcMultiprocessServer):
         super().__init__(
             bind_url, max_cpu_workers, max_gpu_workers, grpc_server_workers
         )
+        self._normal_slots = threading.BoundedSemaphore(max_cpu_workers)
         self._affinity_submit_lock = threading.Lock()
-        # HandlerType.SYNC is a transport-neutral single-main-loop contract.
-        self._sync_handler_lock = threading.Lock()
+        # HandlerType.SERIALIZED is a transport-neutral single-main-loop contract.
+        self._serialized_handler_lock = threading.Lock()
         self._server = grpc.server(self._executor, options=GRPC_SERVER_OPTIONS)
         self._bind(self._server)
 
@@ -181,10 +183,10 @@ class GrpcMultiprocessServer(BaseGrpcMultiprocessServer):
         return _GeneratedServicer(
             binding,
             handlers,
-            self._normal_pool,
+            self._normal_slots,
             self._affinity_pool,
             self._affinity_submit_lock,
-            self._sync_handler_lock,
+            self._serialized_handler_lock,
         )
 
     def _stop_server(self) -> None:

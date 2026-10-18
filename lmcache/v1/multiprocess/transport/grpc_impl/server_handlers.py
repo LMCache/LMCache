@@ -94,7 +94,7 @@ def build_service_handlers(
             handler_type=(
                 bound_handler.options.handler_type
                 if bound_handler is not None
-                else HandlerType.SYNC
+                else HandlerType.SERIALIZED
             ),
             requires_client_affinity=(
                 bound_handler.options.requires_client_affinity

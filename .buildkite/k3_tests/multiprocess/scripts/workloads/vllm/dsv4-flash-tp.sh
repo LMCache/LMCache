@@ -19,37 +19,9 @@
 #   linears, MoE experts, hyper-connection prenorm GEMM and attention o_proj
 #   einsum through DeepGEMM, so the arch must have DeepGEMM kernels.
 #
-#   On SM120 the vLLM wheel's *bundled* DeepGEMM does not, which is why this
-#   script provisions one (see "Provision DeepGEMM" below). That is a
-#   workaround for an upstream regression, not a permanent requirement:
-#
-#     vllm#47304 (07-02) pinned deepseek-ai/DeepGEMM@a6b593d2, whose
-#       csrc/apis/layout.hpp dispatches on `arch_major == 10 or == 12`.
-#       SM120 worked.
-#     vllm#50000 (07-30) repointed the pin to vllm-project/DeepGEMM@f5a76426,
-#       a fork branch based off DeepGEMM main. SM120 only ever lived on
-#       nv_dev, so the `== 12` branches silently vanished and weight loading
-#       began aborting at the fallthrough
-#       DG_HOST_UNREACHABLE("Unknown SF transformation"),
-#       csrc/apis/layout.hpp:60.
-#     vllm#51003 (08-04) rebased a CUDA FP8 header fix onto that same
-#       SM120-less base (e21c821f), which is the pin as of writing. Note
-#       tools/install_deepgemm.sh still carries the stale comment
-#       "targeting nv-dev branch due to sm120 support" above that SHA.
-#
-#   Delete this workaround once vLLM's pin carries SM120 again; the guard
-#   below then no-ops on its own, since the bundled DeepGEMM will work.
-#
-#   Disabling DeepGEMM instead (VLLM_USE_DEEP_GEMM=0) does not work on SM120.
-#   Only the fp8 linear and FP4 MoE call sites consult is_deep_gemm_supported();
-#   measured on an SM120 node, those do demote (CutlassFp8BlockScaledMMKernel,
-#   MARLIN) and the run then dies in mhc_pre_broadcast_tilelang, which calls
-#   DeepGEMM unconditionally. Patching that gate exposes the next wall --
-#   torch.ops._C.cutlass_scaled_mm has no SM120 block-scaled kernel in the
-#   wheel -- and behind it DSv4's per-layer _o_proj -> deep_gemm_fp8_o_proj,
-#   which has no non-DeepGEMM implementation on the CUDA path. (The ROCm and
-#   XPU model modules define alternative _o_proj implementations, but
-#   _select_dsv4_attn_cls only ever returns CUDA classes here.)
+#   Use the DeepGEMM bundled with vLLM so its kernels and bindings match the
+#   selected vLLM/PyTorch stack. The startup probe and completion requests
+#   below exercise the model's kernels rather than just checking imports.
 #
 # This test is self-contained: it launches its own LMCache server + a TP=N
 # vLLM instead of using launch-processes.sh / wait-for-servers.sh, since it
@@ -123,25 +95,6 @@ fi
 MAX_TOKENS="${MAX_TOKENS:-128}"
 # Seconds to let async LMCache stores drain before the retrieve run.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
-
-# vllm-project/DeepGEMM@codex/cuda129-fp8-include-5f33a180 (2fd67329).
-#
-# Chosen because it is a strict descendant of vLLM's current pin: `git compare
-# f5a76426...5f33a180` reports ahead_by 96, behind_by 0, so nothing the pinned
-# revision has is lost. It carries the byte-identical one-line commit
-# "[Build] Include CUDA FP8 type in MQA layout header" that produced the pin
-# (e21c821f), on top of nv_dev+situ, which has the SM120 kernels.
-#
-# Not a minimal delta, though: those 96 commits touch 70 files and include
-# SM90 (kv_block=32, next_n=4) and SM100 (paged indexer, MQA logits sync)
-# changes plus an upstream-main sync. That is acceptable here because this
-# install only happens on SM120, where the alternative is not booting at all --
-# but it is why the install is guarded by arch rather than applied everywhere.
-#
-# Its lineage also discharges the TODO vLLM left in deepgemm.cmake,
-# "switch to nv_dev branch after it support situ": nv_dev+situ is exactly that.
-DEEPGEMM_SM120_REF="${DEEPGEMM_SM120_REF:-2fd67329ec2942f65ba35d561256ab6ed3b903cb}"
-DEEPGEMM_REPO="${DEEPGEMM_REPO:-https://github.com/vllm-project/DeepGEMM.git}"
 
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 TP_DIR="$RESULTS_DIR/dsv4_flash_tp"
@@ -307,51 +260,6 @@ elif ! probe_ambient_vllm; then
         --index-strategy unsafe-best-match
     python3 -c "import vllm; print('vLLM for this test:', vllm.__version__)"
 fi
-
-# ── 0b. Provision DeepGEMM (SM120 only) ──────────────────────
-# vLLM's _import_deep_gemm() prefers a `deep_gemm` in site-packages over the
-# copy bundled in the wheel, so installing one overrides the arch-incomplete
-# bundled build without rebuilding vLLM. Build steps mirror vLLM's own
-# tools/install_deepgemm.sh. No-op on SM90/SM100, where the bundled copy is
-# correct and must be left alone.
-provision_deepgemm_sm120() {
-    local arch_major
-    arch_major=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader -i 0 \
-        | tr -d ' ' | cut -d. -f1)
-    if [ "$arch_major" != "12" ]; then
-        echo "=== SM${arch_major}0: using vLLM's bundled DeepGEMM ==="
-        return 0
-    fi
-
-    if python3 -c "import deep_gemm" 2>/dev/null; then
-        echo "=== SM120: deep_gemm already present in site-packages ==="
-        return 0
-    fi
-
-    echo "=== SM120: building DeepGEMM @ ${DEEPGEMM_SM120_REF:0:12} ==="
-    local build_dir build_log
-    build_dir="$(mktemp -d)"
-    build_log="$TP_DIR/deepgemm_build.log"
-    if ! {
-        git clone --recursive --shallow-submodules \
-            "$DEEPGEMM_REPO" "$build_dir/deepgemm" &&
-        cd "$build_dir/deepgemm" &&
-        git checkout "$DEEPGEMM_SM120_REF" &&
-        python3 setup.py bdist_wheel &&
-        { command -v uv >/dev/null 2>&1 && uv pip install dist/*.whl \
-            || python3 -m pip install dist/*.whl; }
-    } > "$build_log" 2>&1; then
-        cd "$REPO_ROOT"
-        echo "FAILED to build DeepGEMM. Tail of $build_log:"
-        tail -40 "$build_log"
-        rm -rf "$build_dir"
-        return 1
-    fi
-    cd "$REPO_ROOT"
-    rm -rf "$build_dir"
-    echo "DeepGEMM installed: $(python3 -c 'import deep_gemm; print(deep_gemm.__file__)')"
-}
-provision_deepgemm_sm120
 
 # ── 1. Launch LMCache MP server with an explicit L1 pool ────
 echo "=== Launching LMCache MP server (port $LMCACHE_PORT, L1 ${L1_SIZE_GB}GB) ==="

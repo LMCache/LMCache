@@ -73,7 +73,7 @@ class GrpcAioMultiprocessServer(BaseGrpcMultiprocessServer):
 
     Calls are received on one event loop thread and handed to the handler
     pools, so no gRPC thread sits waiting while a handler runs.
-    Handler types keep their meaning: ``SYNC`` handlers run one at a time,
+    Handler types keep their meaning: ``SERIALIZED`` handlers run one at a time,
     normal ``BLOCKING`` handlers run on up to ``max_cpu_workers`` threads, and
     affinity handlers stay on the worker chosen for their client.
     """
@@ -88,9 +88,15 @@ class GrpcAioMultiprocessServer(BaseGrpcMultiprocessServer):
         super().__init__(
             bind_url, max_cpu_workers, max_gpu_workers, grpc_server_workers
         )
-        self._sync_pool = ThreadPoolExecutor(
+        # The loop must not block, so normal handlers need their own threads
+        # here instead of the sync server's semaphore.
+        self._normal_pool = ThreadPoolExecutor(
+            max_workers=max_cpu_workers,
+            thread_name_prefix="grpc-normal",
+        )
+        self._serialized_pool = ThreadPoolExecutor(
             max_workers=1,
-            thread_name_prefix="grpc-sync",
+            thread_name_prefix="grpc-serialized",
         )
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(
@@ -134,8 +140,10 @@ class GrpcAioMultiprocessServer(BaseGrpcMultiprocessServer):
         loop = asyncio.get_running_loop()
         try:
             payloads = registered.request_decoder(request)
-            if registered.handler_type is HandlerType.SYNC:
-                result = await loop.run_in_executor(self._sync_pool, handler, *payloads)
+            if registered.handler_type is HandlerType.SERIALIZED:
+                result = await loop.run_in_executor(
+                    self._serialized_pool, handler, *payloads
+                )
             elif registered.handler_type is not HandlerType.BLOCKING:
                 raise NotImplementedError(
                     f"{registered.handler_type.name} handlers are not supported"
@@ -235,5 +243,6 @@ class GrpcAioMultiprocessServer(BaseGrpcMultiprocessServer):
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._loop_thread.join()
         self._loop.close()
-        self._sync_pool.shutdown(wait=wait)
+        self._serialized_pool.shutdown(wait=wait)
+        self._normal_pool.shutdown(wait=wait)
         super()._release_threads(wait)

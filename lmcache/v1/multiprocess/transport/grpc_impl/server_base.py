@@ -27,10 +27,11 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
 class BaseGrpcMultiprocessServer(RequestServer):
     """Serve transport-neutral modules as the generated gRPC services.
 
-    Owns what the sync and aio servers share: the handler pools, binding the
-    port, registering every generated service, and the close sequence.
-    Subclasses provide the gRPC server itself, a servicer for each service,
-    and how the server is started and stopped.
+    Owns what the sync and aio servers share: the affinity pool, the gRPC
+    server executor, binding the port, registering every generated service,
+    and the close sequence. Subclasses provide the gRPC server itself, a
+    servicer for each service, how normal handlers are bounded by
+    ``max_cpu_workers``, and how the server is started and stopped.
     """
 
     def __init__(
@@ -40,11 +41,9 @@ class BaseGrpcMultiprocessServer(RequestServer):
         max_gpu_workers: int,
         grpc_server_workers: int,
     ) -> None:
+        if max_cpu_workers <= 0:
+            raise ValueError("max_cpu_workers must be greater than 0")
         self._bind_url = bind_url
-        self._normal_pool = ThreadPoolExecutor(
-            max_workers=max_cpu_workers,
-            thread_name_prefix="grpc-normal",
-        )
         self._affinity_pool = AffinityThreadPool(
             max_workers=max_gpu_workers,
             thread_name_prefix="grpc-affinity",
@@ -101,7 +100,6 @@ class BaseGrpcMultiprocessServer(RequestServer):
             )
 
     def _release_threads(self, wait: bool) -> None:
-        self._normal_pool.shutdown(wait=wait)
         self._affinity_pool.shutdown(wait=wait)
         self._executor.shutdown(wait=wait)
 
