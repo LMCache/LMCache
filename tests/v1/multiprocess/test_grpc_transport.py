@@ -54,7 +54,9 @@ from lmcache.v1.multiprocess.request_handler import (
     iter_request_handlers,
     request_handler,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl import server as grpc_server_module
+from lmcache.v1.multiprocess.transport.grpc_impl import (
+    server_builder as grpc_server_builder,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
     CONNECT_TIMEOUT_MS,
     INITIAL_RECONNECT_BACKOFF_MS,
@@ -73,6 +75,8 @@ from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server import (
     GrpcMultiprocessServer,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
 )
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
@@ -485,7 +489,7 @@ def test_build_grpc_request_server_uses_configured_server_workers(
             self.modules = modules
 
     monkeypatch.setattr(
-        grpc_server_module,
+        grpc_server_builder,
         "GrpcMultiprocessServer",
         FakeGrpcServer,
     )

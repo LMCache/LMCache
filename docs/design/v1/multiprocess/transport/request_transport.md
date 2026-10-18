@@ -91,6 +91,8 @@ sequence. `GrpcMultiprocessServer` (sync) and `GrpcAioMultiprocessServer` only
 provide the gRPC server object, the servicer for each generated service, how
 normal handlers are bounded (a semaphore on the sync server, a thread pool on
 the aio event loop), and how the server starts and stops.
+`build_grpc_request_server` in `grpc_impl/server_builder.py` picks one of them
+from `grpc_server_mode` and returns it as a `BaseGrpcMultiprocessServer`.
 
 ## Adding an RPC
 
