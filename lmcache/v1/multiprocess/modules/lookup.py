@@ -720,7 +720,6 @@ class LookupModule(DiscoverableModule):
                 metadata={
                     "found_count": found_count,
                     "requested_tokens": job.requested_tokens,
-                    "start_chunk": job.start_chunk,
                     # Hit-rate counters cover only the looked-up range; the
                     # engine-covered prefix gets its own field.
                     "apc_covered_tokens": job.covered_chunks * self._ctx.chunk_size,
