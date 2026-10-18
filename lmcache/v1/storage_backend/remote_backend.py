@@ -272,12 +272,35 @@ class RemoteBackend(StorageBackendInterface):
         future.add_done_callback(put_done_callback)
         return future
 
-    def batched_put_callback(self, future: Future, keys: List[CacheEngineKey]):
+    def batched_put_callback(
+        self,
+        future: Future,
+        keys: List[CacheEngineKey],
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
+    ) -> None:
+        """Handle completion of a batched remote put.
+
+        Args:
+            future: Future returned by ``run_coroutine_threadsafe``.
+            keys: Keys submitted in this batch.
+            on_complete_callback: Optional callback invoked once per key
+                only when the batch succeeded.
         """
-        Callback function for batched put tasks.
-        """
-        with self.lock:
-            self.put_tasks.difference_update(keys)
+        try:
+            future.result()
+        except Exception:
+            self._put_failed_count += len(keys)
+            logger.exception("Batched put task failed for %d keys", len(keys))
+        else:
+            if on_complete_callback is not None:
+                for key in keys:
+                    try:
+                        on_complete_callback(key)
+                    except Exception:
+                        logger.exception("on_complete_callback failed for key %s", key)
+        finally:
+            with self.lock:
+                self.put_tasks.difference_update(keys)
 
     def batched_submit_put_task(
         self,
@@ -315,23 +338,22 @@ class RemoteBackend(StorageBackendInterface):
                 for memory_obj in memory_objs:
                     memory_obj.ref_count_down()
 
-            def batched_done_callback(f: Future) -> None:
-                self.batched_put_callback(f, list(keys))
-                # Invoke per-key callback for each key in the batch
-                if on_complete_callback is not None:
-                    for key in keys:
-                        try:
-                            on_complete_callback(key)
-                        except Exception as e:
-                            logger.warning(
-                                "on_complete_callback failed for key %s: %s", key, e
-                            )
+            with self.lock:
+                self.put_tasks.update(keys)
 
-            future = asyncio.run_coroutine_threadsafe(
-                self.connection.batched_put(keys, compressed_memory_objs),  # type: ignore
-                self.loop,
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self.connection.batched_put(keys, compressed_memory_objs),  # type: ignore
+                    self.loop,
+                )
+            except Exception:
+                with self.lock:
+                    self.put_tasks.difference_update(keys)
+                raise
+
+            future.add_done_callback(
+                lambda f: self.batched_put_callback(f, list(keys), on_complete_callback)
             )
-            future.add_done_callback(batched_done_callback)
         else:
             for key, memory_obj in zip(keys, memory_objs, strict=False):
                 self.submit_put_task(
