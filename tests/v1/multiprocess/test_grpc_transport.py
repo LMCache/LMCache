@@ -11,6 +11,7 @@ import subprocess
 import sys
 
 # Third Party
+import grpc
 import pytest
 import torch
 
@@ -52,6 +53,9 @@ from lmcache.v1.multiprocess.request_handler import (
 )
 from lmcache.v1.multiprocess.transport.grpc_impl import server as grpc_server_module
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
+    CONNECT_TIMEOUT_MS,
+    INITIAL_RECONNECT_BACKOFF_MS,
+    MAX_RECONNECT_BACKOFF_MS,
     GrpcMultiprocessClient,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
@@ -420,6 +424,31 @@ def test_generated_protobuf_type_stubs_are_available() -> None:
         assert module.__file__ is not None
         module_path = Path(module.__file__)
         assert module_path.with_suffix(".pyi").is_file()
+
+
+def test_client_channel_bounds_connect_timeout_and_reconnect_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client channel uses the same reconnect bounds as the ZMQ client."""
+    captured: dict[str, Any] = {}
+    insecure_channel = grpc.insecure_channel
+
+    def record_channel(target: str, options: Any = None) -> grpc.Channel:
+        captured.update(options)
+        return insecure_channel(target, options=options)
+
+    monkeypatch.setattr(grpc, "insecure_channel", record_channel)
+
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        "grpc://127.0.0.1:15706"
+    )
+    client.close()
+
+    assert captured["grpc.min_reconnect_backoff_ms"] == CONNECT_TIMEOUT_MS
+    assert captured["grpc.initial_reconnect_backoff_ms"] == (
+        INITIAL_RECONNECT_BACKOFF_MS
+    )
+    assert captured["grpc.max_reconnect_backoff_ms"] == MAX_RECONNECT_BACKOFF_MS
 
 
 def test_build_grpc_request_server_uses_configured_server_workers(
