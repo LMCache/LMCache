@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 import asyncio
 import os
 import shutil
@@ -14,6 +14,7 @@ import torch
 # First Party
 from lmcache import torch_device_type
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
+from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import _parse_local_disk
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
@@ -82,6 +83,29 @@ def create_test_key(key_id: int = 0) -> CacheEngineKey:
     )
 
 
+def put_on_disk(backend: LocalDiskBackend, key: CacheEngineKey, num_tokens: int) -> str:
+    """Store ``key`` through submit_put_task() and wait for the write to land.
+
+    Requires the backend's event loop to be running (see ``running_loop``).
+
+    Returns:
+        The path of the file the put wrote.
+    """
+    memory_obj = backend.local_cpu_backend.allocate(
+        torch.Size([2, num_tokens, 8, 128]),  # KV_T2D: tokens on dim 1
+        torch.bfloat16,
+        MemoryFormat.KV_T2D,
+    )
+    assert memory_obj is not None
+    written = threading.Event()
+    backend.submit_put_task(
+        key, memory_obj, on_complete_callback=lambda _: written.set()
+    )
+    memory_obj.ref_count_down()
+    assert written.wait(10), "disk write did not complete"
+    return backend.dict[key].path
+
+
 @pytest.fixture
 def temp_disk_path():
     """Create a temporary directory for disk storage tests."""
@@ -99,6 +123,16 @@ def async_loop():
     asyncio.set_event_loop(loop)
     yield loop
     loop.close()
+
+
+@pytest.fixture
+def running_loop(async_loop):
+    """Run ``async_loop`` on a thread so disk puts actually complete."""
+    thread = threading.Thread(target=async_loop.run_forever, daemon=True)
+    thread.start()
+    yield async_loop
+    async_loop.call_soon_threadsafe(async_loop.stop)
+    thread.join(timeout=10)
 
 
 # ----------------------------------------------------------------------------
@@ -654,3 +688,141 @@ class TestSubmitPutTask:
         memory_obj.get_physical_size.assert_not_called()
         memory_obj.ref_count_up.assert_not_called()
         callback.assert_not_called()
+
+
+class TestLocalDiskBackendClear:
+    """Contract tests for LocalDiskBackend.clear() (issue #5835)."""
+
+    def test_clear_removes_unpinned_entries_and_files(
+        self, local_disk_backend: LocalDiskBackend, running_loop
+    ) -> None:
+        try:
+            keys = [create_test_key(i) for i in range(3)]
+            paths = [put_on_disk(local_disk_backend, k, num_tokens=16) for k in keys]
+
+            assert local_disk_backend.clear() == 3 * 16
+            assert not any(local_disk_backend.contains(k) for k in keys)
+            assert not any(os.path.exists(path) for path in paths)
+            assert local_disk_backend.usage == 0
+            assert local_disk_backend.current_cache_size == 0
+        finally:
+            local_disk_backend.close()
+
+    def test_clear_keeps_pinned_entries(
+        self, local_disk_backend: LocalDiskBackend, running_loop
+    ) -> None:
+        try:
+            pinned_key, free_key = create_test_key(10), create_test_key(11)
+            pinned_path = put_on_disk(local_disk_backend, pinned_key, num_tokens=16)
+            free_path = put_on_disk(local_disk_backend, free_key, num_tokens=8)
+            pinned_size = local_disk_backend.dict[pinned_key].size
+            assert local_disk_backend.pin(pinned_key)
+
+            assert local_disk_backend.clear() == 8
+            assert local_disk_backend.contains(pinned_key)
+            assert os.path.exists(pinned_path)
+            assert not local_disk_backend.contains(free_key)
+            assert not os.path.exists(free_path)
+            assert local_disk_backend.usage == pinned_size
+            assert local_disk_backend.current_cache_size == pinned_size
+        finally:
+            local_disk_backend.close()
+
+    def test_clear_treats_missing_file_as_removed(
+        self, temp_disk_path, running_loop, local_cpu_backend
+    ) -> None:
+        """A file deleted outside LMCache must not abort clear() part-way.
+
+        Uses LFU: if a key left the dict without update_on_force_evict, its
+        frequency entry would go stale and the next capacity eviction would
+        raise KeyError.
+        """
+        entry_bytes = 2 * 8 * 8 * 128 * torch.bfloat16.itemsize  # num_tokens=8
+        config = create_test_config(
+            temp_disk_path, max_disk_size=2.5 * entry_bytes / 1024**3
+        )
+        config.cache_policy = "LFU"
+        backend = LocalDiskBackend(
+            config=config,
+            loop=running_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device=f"{torch_device_type}:0",
+        )
+        try:
+            keys = [create_test_key(i) for i in range(20, 22)]
+            paths = [put_on_disk(backend, key, num_tokens=8) for key in keys]
+            os.remove(paths[1])
+
+            assert backend.clear() == 2 * 8
+            assert not any(backend.contains(key) for key in keys)
+            assert not any(os.path.exists(path) for path in paths)
+
+            # Room for two entries: the third put has to evict one.
+            refill = [create_test_key(i) for i in range(30, 33)]
+            for key in refill:
+                put_on_disk(backend, key, num_tokens=8)
+            assert sum(backend.contains(key) for key in refill) == 2
+        finally:
+            backend.close()
+
+    def test_clear_failure_keeps_earlier_removals_consistent(
+        self, local_disk_backend: LocalDiskBackend, running_loop
+    ) -> None:
+        """An unlink error stops clear(); entries cleared before it stay cleared
+        and announced, and the failing entry stays tracked."""
+        try:
+            first, second = create_test_key(50), create_test_key(51)
+            put_on_disk(local_disk_backend, first, num_tokens=8)
+            second_path = put_on_disk(local_disk_backend, second, num_tokens=8)
+            second_size = local_disk_backend.dict[second].size
+            sender = MagicMock()
+            local_disk_backend.batched_msg_sender = sender
+            real_remove = os.remove
+
+            def fail_on_second(path: str) -> None:
+                if path == second_path:
+                    raise PermissionError(path)
+                real_remove(path)
+
+            with patch(
+                "lmcache.v1.storage_backend.local_disk_backend.os.remove",
+                side_effect=fail_on_second,
+            ):
+                with pytest.raises(PermissionError):
+                    local_disk_backend.clear()
+
+            assert not local_disk_backend.contains(first)
+            sender.add_kv_op.assert_called_once_with(
+                op_type=OpType.EVICT, key=first.chunk_hash
+            )
+            assert local_disk_backend.contains(second)
+            assert os.path.exists(second_path)
+            assert local_disk_backend.usage == second_size
+        finally:
+            local_disk_backend.close()
+
+    def test_clear_sends_evict_message_per_cleared_key(
+        self, local_disk_backend: LocalDiskBackend, running_loop
+    ) -> None:
+        try:
+            keys = [create_test_key(i) for i in range(40, 42)]
+            for key in keys:
+                put_on_disk(local_disk_backend, key, num_tokens=8)
+            sender = MagicMock()
+            local_disk_backend.batched_msg_sender = sender
+
+            local_disk_backend.clear()
+
+            sender.add_kv_op.assert_has_calls(
+                [call(op_type=OpType.EVICT, key=key.chunk_hash) for key in keys],
+                any_order=True,
+            )
+            assert sender.add_kv_op.call_count == len(keys)
+        finally:
+            local_disk_backend.close()
+
+    def test_clear_on_empty_cache_returns_zero(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        assert local_disk_backend.clear() == 0
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
