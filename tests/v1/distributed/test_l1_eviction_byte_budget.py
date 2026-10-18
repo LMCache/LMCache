@@ -24,12 +24,6 @@ from lmcache.v1.distributed.storage_controllers.eviction_controller import (
     L1EvictionController,
 )
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.mp_observability.event_bus import (
-    EventBus,
-    EventBusConfig,
-    init_event_bus,
-)
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -54,20 +48,8 @@ def write(manager: L1Manager, index: int, size: int) -> MemoryObj:
     return obj
 
 
-@pytest.fixture
-def event_bus() -> Iterator[EventBus]:
-    """Start the event bus before managers bind to it."""
-    bus = init_event_bus(EventBusConfig(enabled=True))
-    bus.start()
-    try:
-        yield bus
-    finally:
-        bus.stop()
-        init_event_bus(EventBusConfig(enabled=False))
-
-
 @pytest.fixture(params=[600])
-def manager(event_bus: EventBus, request: pytest.FixtureRequest) -> Iterator[L1Manager]:
+def manager(request: pytest.FixtureRequest) -> Iterator[L1Manager]:
     """Yield a real aligned allocator, with the requested writer TTL."""
     manager = L1Manager(
         L1ManagerConfig(
@@ -91,22 +73,24 @@ def manager(event_bus: EventBus, request: pytest.FixtureRequest) -> Iterator[L1M
 )
 def test_background_cycle_reclaims_allocated_byte_fraction(
     manager: L1Manager,
-    event_bus: EventBus,
+    monkeypatch: pytest.MonkeyPatch,
     policy: Literal["LRU", "ARC"],
     sizes: list[int],
 ) -> None:
-    """The first normal controller cycle releases 16 KiB, including padding."""
-    removed: list[ObjectKey] = []
-    cycles: Queue[list[ObjectKey]] = Queue()
+    """The first background eviction batch releases 16 KiB, including padding."""
+    completed: Queue[dict[ObjectKey, L1Error]] = Queue()
+    original_delete = manager.delete
 
-    def observe(event: Event) -> None:
-        if event.event_type == EventType.L1_KEYS_EVICTED:
-            removed.extend(event.metadata["keys"])
-        elif event.metadata.get("triggered"):
-            cycles.put(list(removed))
+    def observe_delete(
+        keys: list[ObjectKey], force: bool = False
+    ) -> dict[ObjectKey, L1Error]:
+        result = original_delete(keys, force=force)
+        completed.put(result)
+        return result
 
-    event_bus.subscribe(EventType.L1_KEYS_EVICTED, observe)
-    event_bus.subscribe(EventType.L1_EVICTION_LOOP_TICK, observe)
+    # Observe the real public deletion without replacing global event state
+    # or starting another consumer of the process-wide native event queue.
+    monkeypatch.setattr(manager, "delete", observe_delete)
     controller = L1EvictionController(
         manager, EvictionConfig(policy, trigger_watermark=0.65, eviction_ratio=0.25)
     )
@@ -117,7 +101,10 @@ def test_background_cycle_reclaims_allocated_byte_fraction(
     assert manager.get_memory_usage() == (65536, 81920)
     try:
         controller.start()
-        victims = cycles.get(timeout=5)
+        result = completed.get(timeout=5)
+        victims = [
+            victim for victim, error in result.items() if error == L1Error.SUCCESS
+        ]
         assert sum(physical_sizes[victim] for victim in victims) == 16384
         expected = 2 if sizes[0] == 8192 else 4
         assert victims == [key(index) for index in range(expected)]
