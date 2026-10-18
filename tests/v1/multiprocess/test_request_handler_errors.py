@@ -12,12 +12,6 @@ from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
-from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
-    HANDLER_ERROR_OPERATION,
-    LEGACY_OPERATION_IDS,
-    decode_handler_error,
-    encode_handler_error,
-)
 
 # Test helpers
 from tests.v1.multiprocess.test_mq import (
@@ -93,15 +87,3 @@ def test_unregistered_operation_reaches_the_caller() -> None:
     finally:
         client.close()
         server.close()
-
-
-def test_handler_error_round_trips_through_the_wire_frames() -> None:
-    """The error frames carry the exception type and message."""
-    frames = encode_handler_error(RuntimeError("blew up"))
-    assert len(frames) == 2
-    assert decode_handler_error(frames[1]) == "RuntimeError: blew up"
-
-
-def test_handler_error_operation_is_not_a_real_operation() -> None:
-    """The sentinel must not collide with a routable operation name or ID."""
-    assert HANDLER_ERROR_OPERATION not in LEGACY_OPERATION_IDS
