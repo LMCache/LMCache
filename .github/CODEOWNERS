@@ -62,7 +62,6 @@
 /lmcache/integration/vllm/             @sammshen @maobaolong @YaoJiayi @deng451e @hlin99
 /lmcache/inprocess/integration/vllm/   @sammshen @maobaolong @YaoJiayi @deng451e @hlin99
 /lmcache/integration/sglang/           @Oasis-git @DongDongJu @sammshen @Shaoting-Feng
-/lmcache/inprocess/integration/sglang/ @Oasis-git @DongDongJu @sammshen @Shaoting-Feng
 /lmcache/integration/tensorrt_llm/     @sammshen
 /lmcache/inprocess/integration/tensorrt_llm/ @sammshen
 

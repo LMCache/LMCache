@@ -16,10 +16,9 @@ LMCache acts as a caching middleware that sits between LLM inference engines and
 Supported Engines
 -----------------
 
-LMCache currently supports integration with:
+The in-process mode supports integration with:
 
 - **vLLM**
-- **SGLang**
 - **TRT-LLM** (coming soon)
 
 Integration with vLLM
@@ -52,25 +51,10 @@ When LMCache is integrated with vLLM, the inference pipeline is augmented to loo
 
 **Async Cache Write**: After processing the prompt, any newly generated KV cache chunks (corresponding to this prompt's content) are handed off to LMCache for storage. This put operation is done asynchronously (in the background) so it doesn't delay the response. The response is returned to the user promptly, and LMCache's background tasks will offload the new KV data to CPU, disk, or other backends for future reuse.
 
-SGLang on MUSA
---------------
+Integration with SGLang
+-----------------------
 
-LMCache supports SGLang on Moore Threads MUSA devices. In-process transfers
-use TorchMUSA ``index_select`` and ``index_copy_`` and support:
-
-* non-layerwise MHA with separate K/V layer pools;
-* non-layerwise MLA; and
-* layerwise MHA.
-
-Layerwise MLA and multiprocess MLA are not supported. For in-process mode,
-configure LMCache without ``mp_host``/``mp_port``:
-
-.. code-block:: yaml
-
-   chunk_size: 256
-   local_cpu: true
-   max_local_cpu_size: 20
-   use_layerwise: true  # MHA only; use false for non-layerwise MHA or MLA
-
-When SGLang passes a slot mapping for only the uncached suffix, LMCache applies
-the prefix offset before gathering or scattering rows.
+LMCache integrates with SGLang through ``LMCacheUnifiedRadixCache`` and a
+standalone LMCache multiprocess server. The legacy in-process, layerwise, and
+pre-unified multiprocess connectors are not supported. See the SGLang tab in
+:doc:`/getting_started/quickstart` for installation and startup commands.

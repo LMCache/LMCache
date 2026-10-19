@@ -84,6 +84,12 @@ pytest -xvs tests/v1/test_cache_engine.py::test_function_name
 
 Test dependencies: `uv pip install -r requirements/test.txt`
 
+For source-only macOS runs of `tests/v1/test_config.py`, use `-m "not cuda"`
+to exclude GPU-mode cases: `torch_device_type` is `cpu` there, so those cases
+do not exercise their intended configuration. The vLLM config validation test
+also requires the native `lmcache.device_ops` extension. Report these limits
+separately from failures reproduced on the PR's base revision.
+
 Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
 
 ### Testing Practices
