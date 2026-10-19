@@ -200,9 +200,11 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         def _unlock_keys(keys: list[ObjectKey]) -> None:
-            for key in keys:
-                if (obj := self._memory_objects.get(key)) is not None:
-                    obj.decrease_pin_count()
+            """Unlock keys on the event loop thread under the adapter lock."""
+            with self._lock:
+                for key in keys:
+                    if (obj := self._memory_objects.get(key)) is not None:
+                        obj.decrease_pin_count()
 
         self._loop.call_soon_threadsafe(_unlock_keys, keys)
 

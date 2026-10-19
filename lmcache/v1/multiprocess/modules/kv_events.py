@@ -14,7 +14,6 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
-    KV_EVENT_CAPABILITY,
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
     KV_EVENT_MEDIUM_CPU,
@@ -65,14 +64,11 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
-        """Build the event channel and advertise it when enabled."""
-        module = cls(
+        """Build the event channel; a disabled channel still serves subscribers."""
+        return cls(
             build_ctx.engine_context,
             kv_event_log_size=build_ctx.mp_config.kv_event_log_size,
         )
-        if module.enabled:
-            build_ctx.add_experimental_transfer(KV_EVENT_CAPABILITY)
-        return module
 
     def __init__(
         self,
