@@ -52,10 +52,13 @@ publish() {
     "$PYTHON" -m perf_regression_testing.publish "$out/report.json" \
       "$dir/data/runs.jsonl" --host "$(hostname -s)" \
       --build-url "${BUILDKITE_BUILD_URL:-}" &&
-    git -C "$dir" add data/runs.jsonl &&
-    git -C "$dir" -c user.name=prt-ci -c user.email=prt-ci@users.noreply.github.com \
-      commit -q -m "$PRT_SUITE $(basename "$out")" &&
-    git -C "$dir" -c http.extraHeader="$auth" push -q
+    # A suite with no usable images appends no lines: nothing to push.
+    { git -C "$dir" diff --quiet || {
+      git -C "$dir" add data/runs.jsonl &&
+        git -C "$dir" -c user.name=prt-ci -c user.email=prt-ci@users.noreply.github.com \
+          commit -q -m "$PRT_SUITE $(basename "$out")" &&
+        git -C "$dir" -c http.extraHeader="$auth" push -q
+    }; }
   rc=$?
   rm -rf "$dir"
   return $rc

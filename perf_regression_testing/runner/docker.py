@@ -177,6 +177,23 @@ def image_label(image: str, key: str) -> str | None:
     return (json.loads(out.stdout) or {}).get(key)
 
 
+def image_exists(image: str) -> bool:
+    """Return whether an image is present locally.
+
+    Args:
+        image: Image tag or id.
+
+    Returns:
+        True if ``docker image inspect`` finds it.
+    """
+    return (
+        subprocess.run(
+            ["docker", "image", "inspect", image], capture_output=True
+        ).returncode
+        == 0
+    )
+
+
 def remove(names: list[str], stop_s: int = STOP_S, timeout_s: float = 600) -> list[str]:
     """Stop and remove containers, retrying until they are gone.
 

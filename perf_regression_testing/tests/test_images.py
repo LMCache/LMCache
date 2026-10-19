@@ -22,6 +22,7 @@ def builds(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(images, "build", build)
     monkeypatch.setattr(images.docker, "image_label", lambda image, key: image)
+    monkeypatch.setattr(images.docker, "image_exists", lambda image: True)
     return built
 
 
@@ -55,6 +56,17 @@ def test_suite_without_lmcache_builds_nothing_on_a_young_pin(
     assert res["usable"] and res["serving"] == "prt-serving:old"
     assert "lmcache" not in res
     assert builds == []
+
+
+def test_young_pin_whose_image_was_removed_builds_the_nightly(
+    builds: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pin(tmp_path, 3 * 86400)
+    monkeypatch.setattr(images.docker, "image_exists", lambda image: False)
+    res = images.tonight(tmp_path, tmp_path, tmp_path / "out", need_lmcache=True)
+    assert res["vllm_source"] == "nightly"
+    assert res["usable"] and res["serving"] == "prt-serving:new"
+    assert builds == ["serving", "lmcache"]
 
 
 def test_week_old_pin_builds_the_nightly_and_pins_it_only_when_told(

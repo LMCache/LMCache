@@ -3,7 +3,8 @@
 
 Flow::
 
-    pinned serving image younger than VLLM_REFRESH_S: reuse it   ("pinned")
+    pinned serving image younger than VLLM_REFRESH_S and still
+    present locally: reuse it                                     ("pinned")
     else: build serving@nightly                                   ("nightly")
     -> build lmcache FROM it (when a pair of the suite uses LMCache)
 
@@ -85,7 +86,12 @@ def tonight(
     pinned = json.loads(pin_path.read_text()) if pin_path.exists() else None
     res: dict[str, Any] = {"usable": False, "time": time.time()}
     try:
-        if pinned is not None and res["time"] - pinned["time"] < VLLM_REFRESH_S:
+        # Another pipeline on the host may prune images under the pin.
+        if (
+            pinned is not None
+            and res["time"] - pinned["time"] < VLLM_REFRESH_S
+            and docker.image_exists(pinned["serving"])
+        ):
             res["vllm_source"], res["pinned_since"] = "pinned", pinned["time"]
             serving = pinned["serving"]
         else:
