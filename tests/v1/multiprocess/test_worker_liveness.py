@@ -512,9 +512,13 @@ def test_unknown_and_expired_token_bindings_skip_stores(monkeypatch) -> None:
     assert module.report_status()["kv_events"]["unbound_stores"] == 2
 
 
-@pytest.mark.parametrize("transport", ["zmq", "grpc"])
+@pytest.mark.parametrize(
+    ("transport", "grpc_server_mode"),
+    [("zmq", "sync"), ("grpc", "sync"), ("grpc", "aio")],
+)
 def test_event_subscription_pushes_without_polling_and_keeps_requests_live(
     transport: Literal["zmq", "grpc"],
+    grpc_server_mode: Literal["sync", "aio"],
 ) -> None:
     """Real sockets: one subscription pushes store/remove and wakes on shutdown."""
     module, bus = _event_module()
@@ -524,6 +528,7 @@ def test_event_subscription_pushes_without_polling_and_keeps_requests_live(
         port=0,
         max_cpu_workers=1,
         grpc_server_workers=1,
+        grpc_server_mode=grpc_server_mode,
     )
     management = ManagementModule(
         module.context,
