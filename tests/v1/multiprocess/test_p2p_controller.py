@@ -18,6 +18,7 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, PrefetchResult
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.modules import p2p_controller
 from lmcache.v1.multiprocess.modules.p2p_controller import (
@@ -551,6 +552,78 @@ def test_reconcile_removes_peer_after_grace():
 
     ctx.storage_manager.delete_l2_adapter.assert_called_once_with(7)
     assert controller.report_status()["p2p_peers"] == []
+
+
+@pytest.mark.parametrize("replacement_url", [None, "b:2"])
+def test_poll_retries_removal_before_forgetting_or_replacing_peer(
+    monkeypatch: pytest.MonkeyPatch, replacement_url: str | None
+) -> None:
+    """A failed drain stays tracked until a later poll removes or replaces it."""
+    ctx = MagicMock()
+    ctx.storage_manager.add_l2_adapter.side_effect = [7, 8]
+    ctx.storage_manager.delete_l2_adapter.side_effect = [
+        LMCacheTimeoutError("boom"),
+        None,
+        None,
+    ]
+    client = MagicMock()
+    thread_factory = MagicMock()
+    monkeypatch.setattr(httpx, "Client", MagicMock(return_value=client))
+    monkeypatch.setattr(p2p_controller, "create_periodic_thread", thread_factory)
+    monkeypatch.setattr(
+        p2p_controller, "initialize_transfer_channel_context", MagicMock()
+    )
+    monkeypatch.setattr(p2p_controller, "delete_transfer_channel_context", MagicMock())
+    controller = P2PController(
+        ctx,
+        P2PConfig(advertise_url="me:1"),
+        CoordinatorConfig(url="http://coordinator"),
+        instance_id="self",
+    )
+    poll_cycle = thread_factory.call_args.kwargs["execute_fn"]
+    own_instance = _entry("self", "me:1")
+
+    try:
+        client.get.return_value = _instances_response(
+            [own_instance, _entry("peerA", "a:1")]
+        )
+        poll_cycle()
+        instances = [own_instance]
+        if replacement_url is not None:
+            instances.append(_entry("peerA", replacement_url))
+        client.get.return_value = _instances_response(instances)
+        if replacement_url is None:
+            for _ in range(_MAX_MISSES):
+                poll_cycle()
+        ctx.storage_manager.delete_l2_adapter.assert_not_called()
+
+        failed = poll_cycle()
+
+        assert failed.message.endswith("added=0 removed=0")
+        assert controller.report_status()["p2p_peers"] == ["peerA"]
+        ctx.storage_manager.delete_l2_adapter.assert_called_once_with(7)
+        assert ctx.storage_manager.add_l2_adapter.call_count == 1
+
+        retried = poll_cycle()
+
+        expected_added = int(replacement_url is not None)
+        assert retried.message.endswith(f"added={expected_added} removed=1")
+        assert [
+            call.args[0]
+            for call in ctx.storage_manager.delete_l2_adapter.call_args_list
+        ] == [7, 7]
+        assert controller.report_status()["p2p_peers"] == (
+            ["peerA"] if replacement_url is not None else []
+        )
+        if replacement_url is not None:
+            latest = ctx.storage_manager.add_l2_adapter.call_args.args[0]
+            assert latest.peer_transfer_channel_server_url == replacement_url
+
+        assert poll_cycle().message.endswith("added=0 removed=0")
+        assert ctx.storage_manager.add_l2_adapter.call_count == 1 + expected_added
+        assert ctx.storage_manager.delete_l2_adapter.call_count == 2
+    finally:
+        controller.close()
 
 
 def test_reconcile_readds_on_url_change():

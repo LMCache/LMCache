@@ -596,7 +596,7 @@ class P2PController(DiscoverableModule):
             upstream: The peers that should each have a live adapter.
 
         Returns:
-            A ``(added, removed)`` count of adapter changes this cycle.
+            A ``(added, removed)`` count of successful adapter changes this cycle.
         """
         added = 0
         removed = 0
@@ -606,10 +606,10 @@ class P2PController(DiscoverableModule):
                 if self._add_adapter(inst):
                     added += 1
             elif self._peer_changed(current, inst):
-                self._remove_adapter(peer_id)
-                removed += 1
-                if self._add_adapter(inst):
-                    added += 1
+                if self._remove_adapter(peer_id):
+                    removed += 1
+                    if self._add_adapter(inst):
+                        added += 1
             else:
                 current.consecutive_misses = 0
 
@@ -618,8 +618,9 @@ class P2PController(DiscoverableModule):
                 continue
             adapter = self._adapters[peer_id]
             adapter.consecutive_misses += 1
-            if adapter.consecutive_misses > _MAX_MISSES:
-                self._remove_adapter(peer_id)
+            if adapter.consecutive_misses > _MAX_MISSES and self._remove_adapter(
+                peer_id
+            ):
                 removed += 1
         return added, removed
 
@@ -675,22 +676,28 @@ class P2PController(DiscoverableModule):
         )
         return True
 
-    def _remove_adapter(self, peer_id: str) -> None:
+    def _remove_adapter(self, peer_id: str) -> bool:
         """Drain and remove the peer L2 adapter for ``peer_id``.
 
         Args:
             peer_id: Instance id of the peer whose adapter to remove.
+
+        Returns:
+            ``True`` if the adapter was removed, otherwise ``False``.
         """
         with self._orch_lock:
-            adapter = self._adapters.pop(peer_id, None)
+            adapter = self._adapters.get(peer_id)
         if adapter is None:
-            return
+            return False
         try:
             self._ctx.storage_manager.delete_l2_adapter(adapter.adapter_id)
         except Exception:
             logger.exception("Failed to remove P2P adapter for peer %s", peer_id)
-            return
+            return False
+        with self._orch_lock:
+            self._adapters.pop(peer_id, None)
         logger.debug("Removed P2P adapter for peer %s", peer_id)
+        return True
 
     def _active_job_count(self) -> int:
         """Return the number of active P2P lookup jobs (thread-safe)."""
