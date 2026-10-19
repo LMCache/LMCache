@@ -3,15 +3,17 @@
 
 Flow::
 
-    pinned serving image younger than VLLM_REFRESH_S and still
-    present locally: reuse it                                     ("pinned")
+    pinned serving image younger than VLLM_REFRESH_S: reuse it,
+    loading its saved tar if the image was removed               ("pinned")
     else: build serving@nightly                                   ("nightly")
     -> build lmcache FROM it (when a pair of the suite uses LMCache)
 
 A failed build leaves the night with no images; there is no fallback. A new
 serving image is pinned (:func:`pin`) only after a valid suite, so a broken
 vLLM nightly is retried the next night. State lives in
-``<host.root>/prt-images/pinned.json``.
+``<host.root>/prt-images/``: ``pinned.json`` and the pinned image saved as a
+tar, because other jobs on the host may ``docker system prune`` and a load
+(a few minutes) is far cheaper than a serving build (about 27 min).
 """
 
 # Standard
@@ -35,6 +37,37 @@ NIGHTLY_REPOS = ("prt-serving", "prt-lmcache", "prt-mooncake")
 # A new vLLM is a long build plus cold compile, and pinning it leaves LMCache
 # as the only thing that changes between nights.
 VLLM_REFRESH_S = 7 * 86400
+
+
+def _tar(pin_dir: Path, image: str) -> Path:
+    return pin_dir / (image.replace(":", "_") + ".tar")
+
+
+def _restore(pin_dir: Path, image: str) -> bool:
+    """Make the pinned image present, loading its tar if it was removed.
+
+    Args:
+        pin_dir: ``<host.root>/prt-images``.
+        image: The pinned serving image.
+
+    Returns:
+        Whether the image is present afterwards.
+    """
+    if docker.image_exists(image):
+        return True
+    tar = _tar(pin_dir, image)
+    if not tar.exists():
+        logger.info("pinned %s is gone and has no saved tar", image)
+        return False
+    logger.info("pinned %s is gone; loading %s", image, tar)
+    t0 = time.monotonic()
+    try:
+        docker.load(tar)
+    except subprocess.CalledProcessError:
+        logger.exception("loading %s failed", tar)
+        return False
+    logger.info("loaded %s in %.0f s", image, time.monotonic() - t0)
+    return True
 
 
 def build(args: list[str], log: Path) -> str:
@@ -81,16 +114,16 @@ def tonight(
         usable ``serving`` and ``vllm_commit``, plus ``lmcache`` and
         ``lmcache_commit`` when an LMCache image was built.
     """
-    pin_path = root / "prt-images" / "pinned.json"
+    pin_dir = root / "prt-images"
+    pin_path = pin_dir / "pinned.json"
     out.mkdir(parents=True)
     pinned = json.loads(pin_path.read_text()) if pin_path.exists() else None
     res: dict[str, Any] = {"usable": False, "time": time.time()}
     try:
-        # Another pipeline on the host may prune images under the pin.
         if (
             pinned is not None
             and res["time"] - pinned["time"] < VLLM_REFRESH_S
-            and docker.image_exists(pinned["serving"])
+            and _restore(pin_dir, pinned["serving"])
         ):
             res["vllm_source"], res["pinned_since"] = "pinned", pinned["time"]
             serving = pinned["serving"]
@@ -116,15 +149,35 @@ def tonight(
 def pin(root: Path, images: dict[str, Any]) -> None:
     """Pin tonight's serving image after a valid suite, if it was a new one.
 
+    Saves the image as a tar next to ``pinned.json`` and removes the previous
+    pin's tar and any partial save. A failed save is logged and the image is
+    pinned anyway.
+
     Args:
         root: ``[host].root``.
         images: :func:`tonight`'s result.
     """
     if images["vllm_source"] != "nightly":
         return
-    pin_path = root / "prt-images" / "pinned.json"
-    pin_path.parent.mkdir(parents=True, exist_ok=True)
-    pin_path.write_text(
+    pin_dir = root / "prt-images"
+    pin_dir.mkdir(parents=True, exist_ok=True)
+    tar = _tar(pin_dir, images["serving"])
+    part = tar.with_suffix(".part")
+    logger.info("saving %s to %s", images["serving"], tar)
+    # A failed save (disk full, say) must not turn a valid suite's exit code
+    # into a crash; the image is still pinned, just not restorable if pruned.
+    try:
+        docker.save(images["serving"], part)
+        part.rename(tar)
+    except (subprocess.CalledProcessError, OSError):
+        logger.exception("saving %s failed", images["serving"])
+    # Also clears a .part left by a save that was cancelled.
+    for old in [*pin_dir.glob("*.tar"), *pin_dir.glob("*.part")]:
+        if old != tar:
+            old.unlink(missing_ok=True)
+    # Replaced whole, so a full disk cannot leave a truncated pin behind.
+    tmp = pin_dir / "pinned.json.part"
+    tmp.write_text(
         json.dumps(
             {
                 "serving": images["serving"],
@@ -133,6 +186,7 @@ def pin(root: Path, images: dict[str, Any]) -> None:
             indent=1,
         )
     )
+    tmp.replace(pin_dir / "pinned.json")
 
 
 def prune(keep: list[str]) -> list[str]:

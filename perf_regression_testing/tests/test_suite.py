@@ -67,6 +67,7 @@ def test_only_a_suite_that_ran_lmcache_pins_a_new_vllm(
     monkeypatch.setattr(suite.images, "tonight", tonight)
     monkeypatch.setattr(suite.images, "build", lambda args, log: f"prt-{args[0]}")
     monkeypatch.setattr(suite.images, "prune", lambda keep: [])
+    monkeypatch.setattr(suite.docker, "save", lambda image, path: path.touch())
     monkeypatch.setattr(suite, "run", run)
     assert suite.suite(name, tmp_path / "s") == suite.EXIT_VALID
     pin = Path(cfg["host"]["root"]) / "prt-images" / "pinned.json"

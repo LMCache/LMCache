@@ -194,6 +194,33 @@ def image_exists(image: str) -> bool:
     )
 
 
+def save(image: str, path: Path) -> None:
+    """Write a local image to a tar file, as ``docker save`` does.
+
+    Args:
+        image: Image tag.
+        path: Output file; overwritten.
+
+    Raises:
+        subprocess.CalledProcessError: the image is missing or the write failed.
+    """
+    subprocess.run(
+        ["docker", "save", "-o", str(path), image], capture_output=True, check=True
+    )
+
+
+def load(path: Path) -> None:
+    """Load an image from a tar file written by :func:`save`.
+
+    Args:
+        path: The tar file.
+
+    Raises:
+        subprocess.CalledProcessError: docker could not load it.
+    """
+    subprocess.run(["docker", "load", "-i", str(path)], capture_output=True, check=True)
+
+
 def remove(names: list[str], stop_s: int = STOP_S, timeout_s: float = 600) -> list[str]:
     """Stop and remove containers, retrying until they are gone.
 
