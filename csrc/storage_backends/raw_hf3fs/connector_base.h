@@ -413,7 +413,8 @@ class ConnectorBase : public IStorageConnector {
                              const std::vector<size_t>& lens) {
     // Allow either:
     // 1. One buffer per key (bufs.size() == keys.size())
-    // 2. A single contiguous buffer (bufs.size() == 1) - Python side optimization
+    // 2. A single contiguous buffer (bufs.size() == 1) - Python side
+    // optimization
     if (bufs.size() != 1 && keys.size() != bufs.size()) {
       throw std::runtime_error("keys, bufs, and lens size mismatch");
     }
@@ -492,7 +493,8 @@ class ConnectorBase : public IStorageConnector {
 
   void push_completion(Completion&& c) {
     if (dbg_enabled_) {
-      fprintf(stderr, "[DBG push_completion START future_id=%lu\n", (unsigned long)c.future_id);
+      fprintf(stderr, "[DBG push_completion START future_id=%lu\n",
+              (unsigned long)c.future_id);
     }
     {
       std::lock_guard<std::mutex> lk(comp_mu_);
@@ -593,7 +595,7 @@ class ConnectorBase : public IStorageConnector {
         }
 
         if (dbg_enabled_) {
-          fprintf(stderr, "[DBG worker_loop FORK: future_id=%lu op=%d\n", 
+          fprintf(stderr, "[DBG worker_loop FORK: future_id=%lu op=%d\n",
                   (unsigned long)req.future_id, (int)req.op);
         }
 
@@ -636,7 +638,9 @@ class ConnectorBase : public IStorageConnector {
           comp.ok = false;
           comp.error = e.what();
           if (dbg_enabled_) {
-            fprintf(stderr, "[DBG worker_loop AFTER op with exception future_id=%lu error=%s\n", 
+            fprintf(stderr,
+                    "[DBG worker_loop AFTER op with exception future_id=%lu "
+                    "error=%s\n",
                     (unsigned long)req.future_id, e.what());
           }
           // if shutting down, errors are expected
@@ -646,7 +650,8 @@ class ConnectorBase : public IStorageConnector {
         }
 
         if (dbg_enabled_) {
-          fprintf(stderr, "[DBG worker_loop AFTER op execution future_id=%lu ok=%d\n", 
+          fprintf(stderr,
+                  "[DBG worker_loop AFTER op execution future_id=%lu ok=%d\n",
                   (unsigned long)req.future_id, (int)comp.ok);
         }
         // 3. update shared batch state and push completion when done
@@ -661,7 +666,9 @@ class ConnectorBase : public IStorageConnector {
 
   void handle_tile_completion(const Request& req, const Completion& comp) {
     if (dbg_enabled_) {
-      fprintf(stderr, "[DBG handle_tile_completion START future_id=%lu remaining_tiles_before=%d\n", 
+      fprintf(stderr,
+              "[DBG handle_tile_completion START future_id=%lu "
+              "remaining_tiles_before=%d\n",
               (unsigned long)req.future_id, req.batch->remaining_tiles.load());
     }
     // record failure if any
@@ -673,9 +680,9 @@ class ConnectorBase : public IStorageConnector {
       }
     }
 
-    // Also check per_key_results: if any individual key failed, mark the batch as failed.
-    // This catches cases like GET where do_batch_get returns early (entries.empty())
-    // and per_key_results has 0s, but comp.ok is still true.
+    // Also check per_key_results: if any individual key failed, mark the batch
+    // as failed. This catches cases like GET where do_batch_get returns early
+    // (entries.empty()) and per_key_results has 0s, but comp.ok is still true.
     if (req.batch->batch_op == Op::BATCH_TILE_GET) {
       for (size_t i = 0; i < req.keys.size(); ++i) {
         if (req.batch->per_key_results[req.start_idx + i] == 0) {

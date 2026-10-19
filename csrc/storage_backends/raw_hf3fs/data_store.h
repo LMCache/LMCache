@@ -10,7 +10,8 @@
 //
 // When data_size changes, new store files are created (old files untouched).
 // The offset_map is persisted to chunk 0 (meta region) of the .store file via
-// StorageClient RDMA (not the FUSE mount), so it can be recovered after restart.
+// StorageClient RDMA (not the FUSE mount), so it can be recovered after
+// restart.
 
 #include <atomic>
 #include <chrono>
@@ -53,7 +54,7 @@ namespace connector {
 class DataStore {
  public:
   // Internal stride for buffer layout: 1MB for tight packing.
-  static constexpr uint32_t INTERNAL_STRIDE = 1024 * 1024; // 1 MB
+  static constexpr uint32_t INTERNAL_STRIDE = 1024 * 1024;  // 1 MB
   // 3FS layout chunk cap for large keys. Keys over STRIPE_THRESHOLD are
   // stored as multiple STRIPE_CHUNK_SIZE chunks striped across chains, so a
   // big key is read from several chains in parallel (~8.5GB/s) instead of
@@ -80,25 +81,27 @@ class DataStore {
   DataStore() = default;
   DataStore(uint32_t file_index, uint32_t data_size,
             uint32_t chain_table_id = 1)
-      : file_index_(file_index), stride_(INTERNAL_STRIDE), chunk_size_(data_size),
-        layout_chunk_size_(data_size > STRIPE_THRESHOLD ? effective_stripe_chunk_size()
-                                                        : data_size) {
+      : file_index_(file_index),
+        stride_(INTERNAL_STRIDE),
+        chunk_size_(data_size),
+        layout_chunk_size_(data_size > STRIPE_THRESHOLD
+                               ? effective_stripe_chunk_size()
+                               : data_size) {
     // Set in the body (not the init list) to keep declaration order simple.
     chain_table_id_ = chain_table_id;
   }
 
   // Create the data_<index>.store file and cache chain/chunk ID info.
   // When data_size differs from existing store, creates a new store file.
-  // base_dir: 3FS root-relative directory holding this file (default "lmcache").
-  // num_files_: total number of data files (for distributing chains across files).
+  // base_dir: 3FS root-relative directory holding this file (default
+  // "lmcache"). num_files_: total number of data files (for distributing chains
+  // across files).
   void init_file(hf3fs::meta::client::MetaClient* mc,
                  hf3fs::storage::client::StorageClient* sc,
                  const hf3fs::flat::UserInfo& ui,
                  const hf3fs::flat::RoutingInfo& routing_info,
-                 uint32_t chunk_size,
-                 const std::string& base_dir = "lmcache",
-                 uint32_t num_files = 1,
-                 uint32_t file_permission = 0644);
+                 uint32_t chunk_size, const std::string& base_dir = "lmcache",
+                 uint32_t num_files = 1, uint32_t file_permission = 0644);
 
   // Look up offset for key only (no allocation). Returns (offset, size).
   // Size is 0 if the key is not found.
@@ -107,8 +110,9 @@ class DataStore {
   // Look up offset for key, or allocate a new one with given data_len.
   // Thread-safe. Uses key_stride for per-key region allocation (matches
   // RDMA buffer layout). Returns (offset, size). Size is 0 if newly allocated.
-  std::pair<uint64_t, uint32_t> get_or_allocate_offset(
-      const std::string& key, size_t data_len, size_t key_stride = 0);
+  std::pair<uint64_t, uint32_t> get_or_allocate_offset(const std::string& key,
+                                                       size_t data_len,
+                                                       size_t key_stride = 0);
 
   // Remove key from offset map (for delete). Returns true if key was found.
   bool remove_offset(const std::string& key);
@@ -145,7 +149,9 @@ class DataStore {
   const hf3fs::meta::InodeId& get_inode_id() const { return cached_inode_id_; }
 
   // Get the cached routing info.
-  const hf3fs::flat::RoutingInfo& get_routing_info() const { return routing_info_; }
+  const hf3fs::flat::RoutingInfo& get_routing_info() const {
+    return routing_info_;
+  }
 
   // Refresh routing info from a fresh RoutingInfo snapshot.
   // Called after MgmtdClient session reset to update cached stripe size,
@@ -162,14 +168,12 @@ class DataStore {
 
   // Sync file metadata to persist the current file size.
   void sync_file_size(hf3fs::meta::client::MetaClient* mc,
-                      const hf3fs::flat::UserInfo& ui,
-                      bool written);
+                      const hf3fs::flat::UserInfo& ui, bool written);
 
   // Sync file metadata only if dirty_count_ >= threshold.
-void sync_if_dirty(hf3fs::meta::client::MetaClient* mc,
-                      const hf3fs::flat::UserInfo& ui,
-                      bool written,
-                      int threshold = 128);
+  void sync_if_dirty(hf3fs::meta::client::MetaClient* mc,
+                     const hf3fs::flat::UserInfo& ui, bool written,
+                     int threshold = 128);
 
   // Mark meta as dirty (call when offset_map changes).
   void mark_meta_dirty();
@@ -180,9 +184,11 @@ void sync_if_dirty(hf3fs::meta::client::MetaClient* mc,
   // Stop the periodic meta saver background thread.
   void stop_meta_saver();
 
-  // Batch look up or allocate offsets for multiple keys in a single lock acquisition.
+  // Batch look up or allocate offsets for multiple keys in a single lock
+  // acquisition.
   std::vector<std::pair<uint64_t, uint32_t>> batch_lookup_or_allocate(
-      const std::vector<std::string>& keys, const std::vector<size_t>& data_lens);
+      const std::vector<std::string>& keys,
+      const std::vector<size_t>& data_lens);
 
   uint32_t get_chunk_size() const { return chunk_size_; }
   uint32_t get_layout_chunk_size() const { return layout_chunk_size_; }
@@ -195,15 +201,18 @@ void sync_if_dirty(hf3fs::meta::client::MetaClient* mc,
   // Lock and lookup/allocate a single key's offset.
   // allocatedRegion uses key_stride for per-key offset spacing (must match
   // the RDMA buffer layout stride, which is key_size).
-  std::pair<uint64_t, uint32_t> lookup_or_alloc(
-      const std::string& key, size_t data_len, size_t key_stride = 0);
+  std::pair<uint64_t, uint32_t> lookup_or_alloc(const std::string& key,
+                                                size_t data_len,
+                                                size_t key_stride = 0);
 
   // Lock and lookup/allocate a batch of keys' offsets.
   std::vector<std::pair<uint64_t, uint32_t>> batch_lookup_or_alloc(
-      const std::vector<std::string>& keys, const std::vector<size_t>& data_lens,
-      size_t key_stride = 0);
+      const std::vector<std::string>& keys,
+      const std::vector<size_t>& data_lens, size_t key_stride = 0);
 
-  const std::vector<uint32_t>& get_chain_index_list() const { return chain_index_list_; }
+  const std::vector<uint32_t>& get_chain_index_list() const {
+    return chain_index_list_;
+  }
   const std::unordered_map<uint32_t, uint32_t>& get_chain_id_map();
 
   // Get the legacy FUSE meta path (unused for I/O).
@@ -235,13 +244,14 @@ void sync_if_dirty(hf3fs::meta::client::MetaClient* mc,
   hf3fs::meta::Layout layout_;
   hf3fs::flat::RoutingInfo routing_info_;
   std::string base_dir_{"lmcache"};
-  std::string file_path_;    // "<base_dir>/data_<index>.store"
-  std::string meta_path_;    // legacy FUSE meta path (no longer used for I/O)
+  std::string file_path_;  // "<base_dir>/data_<index>.store"
+  std::string meta_path_;  // legacy FUSE meta path (no longer used for I/O)
   std::vector<uint32_t> chain_index_list_;
   mutable std::unordered_map<uint32_t, uint32_t> chain_id_map_;
 
   // Clients for RDMA-based offset_map persistence (set in init_file, read-only
-  // by the meta_saver thread; owners keep them alive until after stop_meta_saver).
+  // by the meta_saver thread; owners keep them alive until after
+  // stop_meta_saver).
   hf3fs::storage::client::StorageClient* storage_client_{nullptr};
   hf3fs::flat::UserInfo user_info_;
 
@@ -251,7 +261,8 @@ void sync_if_dirty(hf3fs::meta::client::MetaClient* mc,
   bool meta_dirty_{false};
   bool meta_save_stop_{false};
   std::thread meta_saver_thread_;
-  static constexpr std::chrono::milliseconds META_SAVE_INTERVAL = std::chrono::milliseconds(5000);
+  static constexpr std::chrono::milliseconds META_SAVE_INTERVAL =
+      std::chrono::milliseconds(5000);
 };
 
 }  // namespace connector

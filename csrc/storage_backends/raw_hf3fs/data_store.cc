@@ -9,8 +9,11 @@
 // Controlled by LMCACHE_DBG=1 env var (default off).
 // get_dbg_flag() is defined in hf3fs_connector.h and set in hf3fs_connector.cc.
 #include "hf3fs_connector.h"
-#define DBG(fmt, ...) \
-  do { if (get_dbg_flag()) fprintf(stderr, "[LMCache 3FS] " fmt "\n", ##__VA_ARGS__); } while(0)
+#define DBG(fmt, ...)                                            \
+  do {                                                           \
+    if (get_dbg_flag())                                          \
+      fprintf(stderr, "[LMCache 3FS] " fmt "\n", ##__VA_ARGS__); \
+  } while (0)
 
 #include <folly/executors/InlineExecutor.h>
 
@@ -52,15 +55,12 @@ static uint8_t* meta_buf_alloc(size_t sz) {
   return static_cast<uint8_t*>(p);
 }
 
-void DataStore::init_file(
-    hf3fs::meta::client::MetaClient* mc,
-    hf3fs::storage::client::StorageClient* sc,
-    const hf3fs::flat::UserInfo& ui,
-    const hf3fs::flat::RoutingInfo& routing_info,
-    uint32_t chunk_size,
-    const std::string& base_dir,
-    uint32_t num_files,
-    uint32_t file_permission) {
+void DataStore::init_file(hf3fs::meta::client::MetaClient* mc,
+                          hf3fs::storage::client::StorageClient* sc,
+                          const hf3fs::flat::UserInfo& ui,
+                          const hf3fs::flat::RoutingInfo& routing_info,
+                          uint32_t chunk_size, const std::string& base_dir,
+                          uint32_t num_files, uint32_t file_permission) {
   if (!mc) return;
 
   // Keep clients for RDMA-based offset_map persistence (save_meta/load_meta).
@@ -71,11 +71,13 @@ void DataStore::init_file(
   chunk_size_ = chunk_size;
   num_files_ = num_files > 0 ? num_files : 1;
   base_dir_ = base_dir.empty() ? "lmcache" : base_dir;
-  DBG("init_file: file_index=%u chunk_size=%u layout_chunk_size_=%u (env override=%u) base_dir=%s",
-      file_index_, chunk_size_, layout_chunk_size_, override_stripe_chunk_size(),
-      base_dir_.c_str());
+  DBG("init_file: file_index=%u chunk_size=%u layout_chunk_size_=%u (env "
+      "override=%u) base_dir=%s",
+      file_index_, chunk_size_, layout_chunk_size_,
+      override_stripe_chunk_size(), base_dir_.c_str());
 
-  // Build file path relative to 3FS root (MetaClient path resolution requires relative paths)
+  // Build file path relative to 3FS root (MetaClient path resolution requires
+  // relative paths)
   file_path_ = base_dir_ + "/data_" + std::to_string(file_index_) + ".store";
 
   // Number of chains in routing_info determines stripe size.
@@ -90,9 +92,7 @@ void DataStore::init_file(
   layout_ = hf3fs::meta::Layout::newChainRange(
       hf3fs::flat::ChainTableId(chain_table_id_),
       hf3fs::flat::ChainTableVersion(routing_info.routingInfoVersion),
-      layout_chunk_size_,
-      stripe_size_,
-      0);
+      layout_chunk_size_, stripe_size_, 0);
 
   // Cache routing info for chain ID computation.
   routing_info_ = routing_info;
@@ -106,7 +106,8 @@ void DataStore::init_file(
   auto openRes = folly::coro::blockingWait(
       mc->open(ui, hf3fs::meta::InodeId::root(), path, session,
                static_cast<int>(hf3fs::meta::OpenFlags(O_RDWR))));
-  DBG("init_file: open %s done, hasError=%d", file_path_.c_str(), (int)openRes.hasError());
+  DBG("init_file: open %s done, hasError=%d", file_path_.c_str(),
+      (int)openRes.hasError());
 
   hf3fs::meta::Inode fileInode;
   if (openRes.hasError()) {
@@ -117,10 +118,10 @@ void DataStore::init_file(
                    hf3fs::flat::Permission(file_permission),
                    static_cast<int>(hf3fs::meta::OpenFlags(O_RDWR | O_CREAT)),
                    std::nullopt));
-    DBG("init_file: create %s done, hasError=%d", file_path_.c_str(), (int)createRes.hasError());
+    DBG("init_file: create %s done, hasError=%d", file_path_.c_str(),
+        (int)createRes.hasError());
     if (createRes.hasError()) {
-      DBG("Failed to create data store %s: %s",
-          file_path_.c_str(),
+      DBG("Failed to create data store %s: %s", file_path_.c_str(),
           createRes.error().describe().c_str());
       return;
     }
@@ -129,10 +130,9 @@ void DataStore::init_file(
     // Sync the newly created file to persist it.
     hf3fs::meta::VersionedLength vlen{0, 0};
     auto syncRes = folly::coro::blockingWait(
-        mc->sync(ui, fileInode.id, /*read=*/ false, /*written=*/ false, vlen));
+        mc->sync(ui, fileInode.id, /*read=*/false, /*written=*/false, vlen));
     if (syncRes.hasError()) {
-      DBG("Failed to sync new file %s: %s",
-          file_path_.c_str(),
+      DBG("Failed to sync new file %s: %s", file_path_.c_str(),
           syncRes.error().describe().c_str());
     }
   } else {
@@ -150,7 +150,7 @@ void DataStore::init_file(
   rebuild_chain_id_map_from_tables();
   DBG("init_file: %s inode=%lu chain=%u map_size=%zu", file_path_.c_str(),
       (unsigned long)cached_inode_id_.u64(), chain_id_, chain_id_map_.size());
-  
+
   // Load existing offset_map from chunk 0 (via RDMA) if any.
   load_meta();
 
@@ -219,14 +219,14 @@ void DataStore::rebuild_chain_id_map_from_tables() {
   chain_id_ = fallbackChainId;
 }
 
-void DataStore::refresh_routing_info(const hf3fs::flat::RoutingInfo& new_routing_info) {
+void DataStore::refresh_routing_info(
+    const hf3fs::flat::RoutingInfo& new_routing_info) {
   // Only update if routing version actually changed.
   if (routing_info_.routingInfoVersion == new_routing_info.routingInfoVersion) {
     return;
   }
 
-  DBG("refresh_routing_info: %s version %u -> %u",
-      file_path_.c_str(),
+  DBG("refresh_routing_info: %s version %u -> %u", file_path_.c_str(),
       routing_info_.routingInfoVersion.toUnderType(),
       new_routing_info.routingInfoVersion.toUnderType());
 
@@ -235,9 +235,7 @@ void DataStore::refresh_routing_info(const hf3fs::flat::RoutingInfo& new_routing
   layout_ = hf3fs::meta::Layout::newChainRange(
       hf3fs::flat::ChainTableId(chain_table_id_),
       hf3fs::flat::ChainTableVersion(new_routing_info.routingInfoVersion),
-      layout_chunk_size_,
-      stripe_size_,
-      0);
+      layout_chunk_size_, stripe_size_, 0);
 
   routing_info_ = new_routing_info;
 
@@ -268,7 +266,8 @@ std::pair<uint64_t, uint32_t> DataStore::get_or_allocate_offset(
   uint64_t offset = next_offset_;
   uint32_t size = static_cast<uint32_t>(data_len);
   uint64_t allocatedRegion =
-      ((static_cast<uint64_t>(size) + chunk_size_ - 1) / chunk_size_) * chunk_size_;
+      ((static_cast<uint64_t>(size) + chunk_size_ - 1) / chunk_size_) *
+      chunk_size_;
 
   offset_map_[key] = {offset, size};
   next_offset_ += allocatedRegion;
@@ -280,8 +279,9 @@ std::pair<uint64_t, uint32_t> DataStore::get_or_allocate_offset(
   return {offset, size};
 }
 
-std::pair<uint64_t, uint32_t> DataStore::lookup_or_alloc(
-    const std::string& key, size_t data_len, size_t key_stride) {
+std::pair<uint64_t, uint32_t> DataStore::lookup_or_alloc(const std::string& key,
+                                                         size_t data_len,
+                                                         size_t key_stride) {
   std::lock_guard<std::mutex> lock(offset_mu_);
   auto it = offset_map_.find(key);
   if (it != offset_map_.end()) {
@@ -289,14 +289,17 @@ std::pair<uint64_t, uint32_t> DataStore::lookup_or_alloc(
     uint32_t new_size = static_cast<uint32_t>(data_len);
     if (new_size != stored_size) {
       it->second.second = new_size;
-      DBG("lookup_or_alloc HIT(size-mismatch key=%s): updating stored_size %u -> %u", key.c_str(), stored_size, new_size);
+      DBG("lookup_or_alloc HIT(size-mismatch key=%s): updating stored_size %u "
+          "-> %u",
+          key.c_str(), stored_size, new_size);
     }
     return it->second;
   }
   uint64_t offset = next_offset_;
   uint32_t size = static_cast<uint32_t>(data_len);
   uint64_t allocatedRegion =
-      ((static_cast<uint64_t>(size) + chunk_size_ - 1) / chunk_size_) * chunk_size_;
+      ((static_cast<uint64_t>(size) + chunk_size_ - 1) / chunk_size_) *
+      chunk_size_;
   offset_map_[key] = {offset, size};
   next_offset_ += allocatedRegion;
   if (next_offset_ > current_file_size_) {
@@ -336,7 +339,8 @@ std::vector<std::pair<uint64_t, uint32_t>> DataStore::batch_lookup_or_alloc(
       uint64_t offset = next_offset_;
       uint32_t size = static_cast<uint32_t>(data_lens[i]);
       uint64_t allocatedRegion =
-          ((static_cast<uint64_t>(size) + chunk_size_ - 1) / chunk_size_) * chunk_size_;
+          ((static_cast<uint64_t>(size) + chunk_size_ - 1) / chunk_size_) *
+          chunk_size_;
       offset_map_[keys[i]] = {offset, size};
       next_offset_ += allocatedRegion;
       if (next_offset_ > current_file_size_) {
@@ -350,7 +354,8 @@ std::vector<std::pair<uint64_t, uint32_t>> DataStore::batch_lookup_or_alloc(
 }
 
 std::vector<std::pair<uint64_t, uint32_t>> DataStore::batch_lookup_or_allocate(
-    const std::vector<std::string>& keys, const std::vector<size_t>& data_lens) {
+    const std::vector<std::string>& keys,
+    const std::vector<size_t>& data_lens) {
   std::vector<std::pair<uint64_t, uint32_t>> results;
   results.reserve(keys.size());
 
@@ -365,7 +370,8 @@ std::vector<std::pair<uint64_t, uint32_t>> DataStore::batch_lookup_or_allocate(
       uint64_t offset = next_offset_;
       uint32_t size = static_cast<uint32_t>(data_lens[i]);
       uint64_t allocatedRegion =
-          ((static_cast<uint64_t>(size) + chunk_size_ - 1) / chunk_size_) * chunk_size_;
+          ((static_cast<uint64_t>(size) + chunk_size_ - 1) / chunk_size_) *
+          chunk_size_;
 
       offset_map_[keys[i]] = {offset, size};
       next_offset_ += allocatedRegion;
@@ -421,13 +427,12 @@ std::string DataStore::get_meta_chunk_id(uint64_t offset) const {
 
   // Construct ChunkId directly from inode_id and chunk_index.
   hf3fs::meta::ChunkId chunkId(cached_inode_id_, 0,
-                                static_cast<uint32_t>(chunk_index));
+                               static_cast<uint32_t>(chunk_index));
   return chunkId.pack();
 }
 
 void DataStore::sync_file_size(hf3fs::meta::client::MetaClient* mc,
-                               const hf3fs::flat::UserInfo& ui,
-                               bool written) {
+                               const hf3fs::flat::UserInfo& ui, bool written) {
   if (!mc) return;
 
   // Snapshot the file size under the offset lock, then issue the blocking
@@ -443,12 +448,10 @@ void DataStore::sync_file_size(hf3fs::meta::client::MetaClient* mc,
   }
 
   hf3fs::meta::VersionedLength vlen{file_size, 0};
-  auto syncRes = folly::coro::blockingWait(
-      mc->sync(ui, cached_inode_id_, /*read=*/ !written, /*written=*/ written,
-               vlen));
+  auto syncRes = folly::coro::blockingWait(mc->sync(
+      ui, cached_inode_id_, /*read=*/!written, /*written=*/written, vlen));
   if (syncRes.hasError()) {
-      DBG("Failed to sync file size: %s",
-          syncRes.error().describe().c_str());
+    DBG("Failed to sync file size: %s", syncRes.error().describe().c_str());
   }
 }
 
@@ -460,8 +463,7 @@ int DataStore::get_and_reset_dirty_count() {
 }
 
 void DataStore::sync_if_dirty(hf3fs::meta::client::MetaClient* mc,
-                              const hf3fs::flat::UserInfo& ui,
-                              bool written,
+                              const hf3fs::flat::UserInfo& ui, bool written,
                               int threshold) {
   if (!mc) return;
   uint64_t file_size = 0;
@@ -473,12 +475,10 @@ void DataStore::sync_if_dirty(hf3fs::meta::client::MetaClient* mc,
   }
   if (file_size == 0) return;
   hf3fs::meta::VersionedLength vlen{file_size, 0};
-  auto syncRes = folly::coro::blockingWait(
-      mc->sync(ui, cached_inode_id_, /*read=*/ !written, /*written=*/ written,
-               vlen));
+  auto syncRes = folly::coro::blockingWait(mc->sync(
+      ui, cached_inode_id_, /*read=*/!written, /*written=*/written, vlen));
   if (syncRes.hasError()) {
-    DBG("Failed to sync file size: %s",
-        syncRes.error().describe().c_str());
+    DBG("Failed to sync file size: %s", syncRes.error().describe().c_str());
   }
 }
 
@@ -487,8 +487,8 @@ uint32_t DataStore::get_chain_id_for_chunk(uint64_t chunk_index) const {
   auto stripe = static_cast<size_t>(chunk_index % stripe_size_);
   uint32_t chainIndex = chain_index_list_[stripe];
   // Construct a ChainRef and look up the ChainId.
-  hf3fs::flat::ChainRef ref(
-      layout_.tableId, layout_.tableVersion, static_cast<uint64_t>(chainIndex));
+  hf3fs::flat::ChainRef ref(layout_.tableId, layout_.tableVersion,
+                            static_cast<uint64_t>(chainIndex));
   auto chainIdOpt = routing_info_.getChainId(ref);
   if (chainIdOpt) {
     return chainIdOpt->toUnderType();
@@ -570,7 +570,8 @@ void DataStore::save_meta() {
   if (num > max_entries) {
     entBlob.resize(max_entries * META_ENTRY_SIZE);
     num = max_entries;
-    DBG("save_meta: truncating to %zu entries (meta > %u bytes)", num, chunk_size);
+    DBG("save_meta: truncating to %zu entries (meta > %u bytes)", num,
+        chunk_size);
   }
 
   std::string blob;
@@ -610,19 +611,21 @@ void DataStore::save_meta() {
   auto reg = storage_client_->registerIOBuffer(buf, blob.size());
   if (reg.hasError()) {
     std::free(buf);
-    DBG("save_meta: registerIOBuffer failed: %s", reg.error().describe().c_str());
+    DBG("save_meta: registerIOBuffer failed: %s",
+        reg.error().describe().c_str());
     return;
   }
   hf3fs::storage::client::IOBuffer ioBuf(std::move(*reg));
-  auto wio = storage_client_->createWriteIO(hf3fs::flat::ChainId(chainIdRaw), chunkId,
-                                            0, static_cast<uint32_t>(blob.size()),
-                                            layout_chunk_size_, buf, &ioBuf);
+  auto wio = storage_client_->createWriteIO(
+      hf3fs::flat::ChainId(chainIdRaw), chunkId, 0,
+      static_cast<uint32_t>(blob.size()), layout_chunk_size_, buf, &ioBuf);
   hf3fs::flat::UserInfo ui = user_info_;
   hf3fs::storage::client::WriteOptions wo;
   auto res = folly::coro::blockingWait(storage_client_->batchWrite(
       std::span<hf3fs::storage::client::WriteIO>(&wio, 1), ui, wo));
   if (res.hasError()) {
-    DBG("save_meta: batchWrite meta failed: %s", res.error().describe().c_str());
+    DBG("save_meta: batchWrite meta failed: %s",
+        res.error().describe().c_str());
   }
   std::free(buf);
 }
@@ -663,9 +666,8 @@ void DataStore::meta_saver_loop() {
     bool stop = false;
     {
       std::unique_lock<std::mutex> lock(meta_save_mu_);
-      meta_save_cv_.wait_for(lock, META_SAVE_INTERVAL, [this] {
-        return meta_dirty_ || meta_save_stop_;
-      });
+      meta_save_cv_.wait_for(lock, META_SAVE_INTERVAL,
+                             [this] { return meta_dirty_ || meta_save_stop_; });
       stop = meta_save_stop_;
       should_save = meta_dirty_;
       meta_dirty_ = false;
@@ -703,8 +705,9 @@ bool DataStore::load_meta() {
     return false;
   }
   hf3fs::storage::client::IOBuffer ioBuf(std::move(*reg));
-  auto rio = storage_client_->createReadIO(hf3fs::flat::ChainId(chainIdRaw), chunkId,
-                                           0, static_cast<uint32_t>(reg_len), buf, &ioBuf);
+  auto rio = storage_client_->createReadIO(
+      hf3fs::flat::ChainId(chainIdRaw), chunkId, 0,
+      static_cast<uint32_t>(reg_len), buf, &ioBuf);
   hf3fs::flat::UserInfo ui = user_info_;
   hf3fs::storage::client::ReadOptions ro;
   ro.set_enableChecksum(false);
@@ -737,9 +740,11 @@ bool DataStore::load_meta() {
     };
     uint32_t cs = 0, stride = 0, num = 0;
     uint64_t no = 0, fsz = 0;
-    if (read32(cs) && read32(stride) && read64(no) && read64(fsz) && read32(num)) {
+    if (read32(cs) && read32(stride) && read64(no) && read64(fsz) &&
+        read32(num)) {
       if (cs != chunk_size_) {
-        DBG("load_meta: chunk_size mismatch %u != %u, discarding meta", cs, chunk_size_);
+        DBG("load_meta: chunk_size mismatch %u != %u, discarding meta", cs,
+            chunk_size_);
       } else {
         std::lock_guard<std::mutex> lock(offset_mu_);
         offset_map_.clear();
@@ -749,13 +754,18 @@ bool DataStore::load_meta() {
           if (off + META_ENTRY_SIZE > blob.size()) break;
           uint64_t hi = 0, lo = 0, ofs = 0;
           uint32_t sz = 0;
-          std::memcpy(&hi, blob.data() + off, 8); off += 8;
-          std::memcpy(&lo, blob.data() + off, 8); off += 8;
-          std::memcpy(&ofs, blob.data() + off, 8); off += 8;
-          std::memcpy(&sz, blob.data() + off, 4); off += 4;
+          std::memcpy(&hi, blob.data() + off, 8);
+          off += 8;
+          std::memcpy(&lo, blob.data() + off, 8);
+          off += 8;
+          std::memcpy(&ofs, blob.data() + off, 8);
+          off += 8;
+          std::memcpy(&sz, blob.data() + off, 4);
+          off += 4;
           char kb[48];
-          int kn = std::snprintf(kb, sizeof(kb), "%llu:%llu",
-                                 (unsigned long long)hi, (unsigned long long)lo);
+          int kn =
+              std::snprintf(kb, sizeof(kb), "%llu:%llu", (unsigned long long)hi,
+                            (unsigned long long)lo);
           offset_map_[std::string(kb, kn)] = {ofs, sz};
         }
         parsed = true;
@@ -770,9 +780,7 @@ bool DataStore::load_meta() {
   return parsed;
 }
 
-std::string DataStore::get_meta_path() const {
-  return meta_path_;
-}
+std::string DataStore::get_meta_path() const { return meta_path_; }
 
 void DataStore::clear_state() {
   std::lock_guard<std::mutex> lock(offset_mu_);
