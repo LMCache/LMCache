@@ -64,6 +64,14 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     KV; the one-block window reflects restore semantics and blend full-window
     forcing must not widen it. Defaulted field: wire-compatible."""
 
+    per_request_state: bool = False
+    """Pages hold per-request state that is not addressed by token position:
+    the request owns one block for its whole lifetime (e.g. vLLM's
+    ``CircularBufferSpec`` ring holding the raw keys of the compression group
+    that is still open). Every chunk of a transfer request carries that one
+    block, so the server sizes the group as one block per LMCache chunk and
+    ignores ``tokens_per_block``. Defaulted field: wire-compatible."""
+
 
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).
