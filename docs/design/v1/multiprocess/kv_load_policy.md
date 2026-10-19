@@ -85,7 +85,6 @@ hints it needs.
 | `integration/vllm/lmcache_mp_connector.py` | scheduler-time lookups; not eager-prefetch lookups, which run before the engine checks its prefix cache |
 | `integration/sglang/unified_lmcache_mp_connector.py` | every lookup (`local_hit_tokens`) |
 | `integration/tensorrt_llm/tensorrt_mp_adapter.py` | every lookup (`num_computed_tokens`) |
-| `integration/sglang/multi_process_adapter.py` | no (local hit not known at lookup) |
 
 Clients can also send `lmcache.*` keys, so a policy must treat hints as
 advisory.
