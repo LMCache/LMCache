@@ -78,7 +78,9 @@ tokens the engine already holds in its own prefix cache, to the
 identity (`IPCCacheServerKey.request_configs` has `compare=False`), so the
 hint does not change which chunks match. The server does not interpret the
 key; it passes `request_configs` through to the policy, which reads whatever
-hints it needs.
+hints it needs. The lookup module also reports the hint as
+`engine_hit_tokens` on `MP_LOOKUP_PREFETCH_END` for the request-level hit
+rate (see [EVENTS.md](../mp_observability/EVENTS.md)).
 
 | Integration | Sets the hint |
 |---|---|

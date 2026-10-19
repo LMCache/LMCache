@@ -17,6 +17,14 @@ labeled by ``reason``.  ``lookup_apc_covered`` counts the prefix the engine's
 own prefix cache already held, which LMCache skips and keeps out of both
 sides of the hit rate.
 
+The request-level trio ``lookup_prompt`` / ``lookup_engine_hit`` /
+``lookup_request_hit`` widens the view to the whole prompt: what fraction
+of each request's prompt was served by the engine's prefix cache alone, and
+by the engine plus LMCache together:
+
+    rate(lmcache_mp_lookup_request_hit_tokens_total[5m])
+    / rate(lmcache_mp_lookup_prompt_tokens_total[5m])
+
 All counters carry ``model_name`` and ``cache_salt`` attributes so they can
 be sliced per model and per tenant / isolation domain on the dashboard.
 
@@ -75,6 +83,14 @@ class LookupMetricsSubscriber(EventSubscriber):
       lookup key's ``start`` that the engine's prefix cache already held;
       skipped by LMCache and excluded from ``lookup_requested`` and
       ``lookup_hit``.
+    - ``lmcache_mp.lookup_prompt`` — whole prompt length of each looked-up
+      request, sub-chunk tail included (request-level denominator).
+    - ``lmcache_mp.lookup_engine_hit`` — tokens the engine's own prefix
+      cache held, from the connector's hint (the aligned covered prefix
+      when no hint was sent).
+    - ``lmcache_mp.lookup_request_hit`` — prefix of the prompt served by
+      the engine or LMCache: the longer of ``engine_hit`` and
+      ``apc_covered + lookup_hit`` (request-level numerator).
     - ``lmcache_mp.lookups`` — completed lookups (denominator for
       ``lookup_early_exit``).
     - ``lmcache_mp.lookup_early_exit`` — lookups that exited before a
@@ -140,6 +156,30 @@ class LookupMetricsSubscriber(EventSubscriber):
             ),
             unit="tokens",
         )
+        self._prompt_tokens = meter.create_counter(
+            "lmcache_mp.lookup_prompt",
+            description=(
+                "Whole prompt length of each looked-up request (denominator "
+                "of the request-level hit rate)."
+            ),
+            unit="tokens",
+        )
+        self._engine_hit_tokens = meter.create_counter(
+            "lmcache_mp.lookup_engine_hit",
+            description=(
+                "Tokens the engine's own prefix cache held for the request, "
+                "per the connector's hint."
+            ),
+            unit="tokens",
+        )
+        self._request_hit_tokens = meter.create_counter(
+            "lmcache_mp.lookup_request_hit",
+            description=(
+                "Prefix of the prompt served by the engine's prefix cache or "
+                "LMCache (numerator of the request-level hit rate)."
+            ),
+            unit="tokens",
+        )
         self._lookups = meter.create_counter(
             "lmcache_mp.lookups",
             description="Completed lookups (denominator for lookup_early_exit).",
@@ -175,6 +215,15 @@ class LookupMetricsSubscriber(EventSubscriber):
         )
         self._apc_covered_tokens.add(
             event.metadata.get("apc_covered_tokens", 0), attributes=attrs
+        )
+        self._prompt_tokens.add(
+            event.metadata.get("prompt_tokens", 0), attributes=attrs
+        )
+        self._engine_hit_tokens.add(
+            event.metadata.get("engine_hit_tokens", 0), attributes=attrs
+        )
+        self._request_hit_tokens.add(
+            event.metadata.get("request_hit_tokens", 0), attributes=attrs
         )
         self._l1_hit_keys.add(event.metadata.get("l1_hit_keys", 0), attributes=attrs)
         self._l2_hit_keys.add(event.metadata.get("l2_hit_keys", 0), attributes=attrs)

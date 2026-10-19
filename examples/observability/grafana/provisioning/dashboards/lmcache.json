@@ -1519,6 +1519,18 @@
           "expr": "rate(lmcache_mp_lookup_hit_tokens_total[$__rate_interval]) / rate(lmcache_mp_lookup_requested_tokens_total[$__rate_interval])",
           "legendFormat": "L1+L2 token hit rate [{{service_instance_id}}]",
           "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_lookup_engine_hit_tokens_total[$__rate_interval]) / rate(lmcache_mp_lookup_prompt_tokens_total[$__rate_interval])",
+          "legendFormat": "engine prefix-cache hit rate [{{service_instance_id}}]",
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_lookup_request_hit_tokens_total[$__rate_interval]) / rate(lmcache_mp_lookup_prompt_tokens_total[$__rate_interval])",
+          "legendFormat": "request-level hit rate (engine + LMCache) [{{service_instance_id}}]",
+          "refId": "C"
         }
       ],
       "title": "Cache Hit Rate",

@@ -304,6 +304,20 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
      - Tokens the engine's prefix cache already held when the lookup ran.
        LMCache skips them, so they are excluded from ``lookup_requested``
        and ``lookup_hit``.
+   * - ``lmcache_mp.lookup_prompt``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Whole prompt length of each looked-up request, sub-chunk tail
+       included (denominator of the request-level hit rate).
+   * - ``lmcache_mp.lookup_engine_hit``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Tokens the engine's own prefix cache held for the request, from the
+       connector's ``lmcache.hint.engine_computed_tokens`` hint (the aligned
+       covered prefix when no hint was sent).
+   * - ``lmcache_mp.lookup_request_hit``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Prefix of the prompt served by the engine or LMCache: the longer of
+       ``lookup_engine_hit`` and ``lookup_apc_covered + lookup_hit``
+       (numerator of the request-level hit rate).
    * - ``lmcache_mp.lookups``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Completed lookups (denominator for ``lookup_early_exit``).
@@ -314,9 +328,11 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
 
 All lookup counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``),
 so they always advance together per completed lookup. Early-exit lookups
-contribute ``0`` tokens to all four token counters, ``0`` keys to both
-key counters, and ``+1`` to
-``lookups`` / ``lookup_early_exit``, and abandoned lookups contribute to neither.
+contribute ``0`` tokens to the lookup-level token counters, ``0`` keys to
+both key counters, and ``+1`` to ``lookups`` / ``lookup_early_exit``; they
+still advance the request-level counters (``lookup_prompt``,
+``lookup_engine_hit``, ``lookup_request_hit``), which describe the request
+rather than the lookup. Abandoned lookups contribute to none of them.
 
 The ``model_name`` and ``cache_salt`` attributes are captured at lookup
 time from ``IPCCacheServerKey`` so dashboards can compute per-model or
@@ -340,11 +356,13 @@ per tenant or isolation domain); drop it at scrape time with
     rate(lmcache_mp_lookup_hit_l1_tokens_total[5m])
     / rate(lmcache_mp_lookup_hit_tokens_total[5m])
 
-    # Share of prompt tokens served by the engine's prefix cache or LMCache:
-    (rate(lmcache_mp_lookup_apc_covered_tokens_total[5m])
-     + rate(lmcache_mp_lookup_hit_tokens_total[5m]))
-    / (rate(lmcache_mp_lookup_apc_covered_tokens_total[5m])
-       + rate(lmcache_mp_lookup_requested_tokens_total[5m]))
+    # Request-level: share of prompt tokens served by the engine's own
+    # prefix cache, and by the engine or LMCache together:
+    rate(lmcache_mp_lookup_engine_hit_tokens_total[5m])
+    / rate(lmcache_mp_lookup_prompt_tokens_total[5m])
+
+    rate(lmcache_mp_lookup_request_hit_tokens_total[5m])
+    / rate(lmcache_mp_lookup_prompt_tokens_total[5m])
 
     # Fraction of lookups that early-exited, by reason:
     sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)

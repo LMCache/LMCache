@@ -43,6 +43,29 @@ logger = init_logger(__name__)
 _DEFAULT_LOAD_POLICY = DefaultKVLoadPolicy({})
 
 
+def _engine_hit_tokens(key: IPCCacheServerKey, covered_tokens: int) -> int:
+    """Return the tokens the engine's prefix cache already held for ``key``.
+
+    Reads the ``lmcache.hint.engine_computed_tokens`` hint the engine
+    connector attaches to ``request_configs`` (see
+    ``docs/design/v1/multiprocess/kv_load_policy.md``); it is the engine's
+    exact hit at submit time.  Without the hint the chunk-aligned covered
+    prefix (the key's ``start``) is the only lower bound the server has, so
+    it is reported instead.
+
+    Args:
+        key: The lookup's cache key.
+        covered_tokens: The engine-covered prefix LMCache skipped, in tokens.
+
+    Returns:
+        The engine's prefix-cache hit in tokens.
+    """
+    hint = (key.request_configs or {}).get("lmcache.hint.engine_computed_tokens")
+    if hint is None:
+        return covered_tokens
+    return int(hint)
+
+
 def resolve_prefetched_obj_keys(
     ctx: MPCacheServerContext,
     key: IPCCacheServerKey,
@@ -114,6 +137,13 @@ class _PrefetchJob:
     # hit-rate counters and reported as ``apc_covered_tokens`` instead; equals
     # ``start_chunk`` except on a declined lookup, which offsets no hits.
     covered_chunks: int = 0
+    # Request-level facts, reported on every path (early exits included) so
+    # the request-level hit rate has the full prompt as its denominator.
+    # ``prompt_tokens`` is the whole prompt, sub-chunk tail included;
+    # ``engine_hit_tokens`` is the engine's own prefix-cache hit (see
+    # ``_engine_hit_tokens``).
+    prompt_tokens: int = 0
+    engine_hit_tokens: int = 0
     # Captured at lookup time so the ``MP_LOOKUP_PREFETCH_END`` event can
     # carry them as labels.  ``model_name`` lets dashboards slice hit rate
     # per model in multi-model deployments; ``cache_salt`` slices per
@@ -372,6 +402,10 @@ class LookupModule(DiscoverableModule):
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
                 covered_chunks=start_chunk,
+                prompt_tokens=len(key.token_ids),
+                engine_hit_tokens=_engine_hit_tokens(
+                    key, start_chunk * self._ctx.chunk_size
+                ),
                 model_name=model_name,
                 cache_salt=key.cache_salt,
             )
@@ -660,6 +694,10 @@ class LookupModule(DiscoverableModule):
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
                 covered_chunks=covered_chunks,
+                prompt_tokens=len(key.token_ids),
+                engine_hit_tokens=_engine_hit_tokens(
+                    key, covered_chunks * self._ctx.chunk_size
+                ),
                 model_name=key.model_name,
                 cache_salt=key.cache_salt,
                 early_exit_reason=early_exit_reason,
@@ -713,6 +751,14 @@ class LookupModule(DiscoverableModule):
             result.l1_owners,
         )
 
+        chunk_size = self._ctx.chunk_size
+        covered_tokens = job.covered_chunks * chunk_size
+        hit_tokens = (l1_chunks + l2_chunks) * chunk_size
+        # Prefix of the prompt served by either cache.  Both ranges start at
+        # token 0 and the lookup starts at or below the engine hit, so the
+        # longer one is the union; summing would double count the sub-chunk
+        # gap between the raw engine hit and the aligned lookup start.
+        request_hit_tokens = max(job.engine_hit_tokens, covered_tokens + hit_tokens)
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_END,
@@ -722,10 +768,15 @@ class LookupModule(DiscoverableModule):
                     "requested_tokens": job.requested_tokens,
                     # Hit-rate counters cover only the looked-up range; the
                     # engine-covered prefix gets its own field.
-                    "apc_covered_tokens": job.covered_chunks * self._ctx.chunk_size,
-                    "hit_tokens": (l1_chunks + l2_chunks) * self._ctx.chunk_size,
-                    "l1_hit_tokens": l1_chunks * self._ctx.chunk_size,
-                    "l2_hit_tokens": l2_chunks * self._ctx.chunk_size,
+                    "apc_covered_tokens": covered_tokens,
+                    "hit_tokens": hit_tokens,
+                    "l1_hit_tokens": l1_chunks * chunk_size,
+                    "l2_hit_tokens": l2_chunks * chunk_size,
+                    # Request-level view: the whole prompt as denominator and
+                    # what the engine plus LMCache served as numerator.
+                    "prompt_tokens": job.prompt_tokens,
+                    "engine_hit_tokens": job.engine_hit_tokens,
+                    "request_hit_tokens": request_hit_tokens,
                     "l1_hit_keys": result.l1_hit_count,
                     "l2_hit_keys": result.l2_hit_count,
                     "early_exit_reason": job.early_exit_reason,

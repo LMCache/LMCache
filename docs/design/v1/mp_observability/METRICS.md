@@ -242,6 +242,9 @@ scrape time with `metric_relabel_configs` if storage cost matters.
 | `lmcache_mp.lookup_hit_l1_keys` | `lmcache_mp_lookup_hit_l1_keys_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l1_hit_keys` (0 if absent) |
 | `lmcache_mp.lookup_hit_l2_keys` | `lmcache_mp_lookup_hit_l2_keys_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l2_hit_keys` (0 if absent) |
 | `lmcache_mp.lookup_apc_covered` | `lmcache_mp_lookup_apc_covered_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+apc_covered_tokens` (0 if absent); excluded from `lookup_requested` and `lookup_hit` |
+| `lmcache_mp.lookup_prompt` | `lmcache_mp_lookup_prompt_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+prompt_tokens` (0 if absent); whole prompt, request-level denominator |
+| `lmcache_mp.lookup_engine_hit` | `lmcache_mp_lookup_engine_hit_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+engine_hit_tokens` (0 if absent); the engine's own prefix-cache hit |
+| `lmcache_mp.lookup_request_hit` | `lmcache_mp_lookup_request_hit_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+request_hit_tokens` (0 if absent); `max(engine_hit, apc_covered + hit)`, request-level numerator |
 | `lmcache_mp.lookups` | `lmcache_mp_lookups_requests_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+1` per completed lookup |
 | `lmcache_mp.lookup_early_exit` | `lmcache_mp_lookup_early_exit_requests_total` | Counter (attrs: `model_name`, `cache_salt`, `reason` ∈ {`no_gpu_context`, `empty_chunk_hashes`, `no_group_layout_descs`}) | `MP_LOOKUP_PREFETCH_END` | `+1` when `early_exit_reason != ""` |
 
@@ -255,6 +258,20 @@ rate(lmcache_mp_lookup_hit_tokens_total[5m])
 # Per-model hit rate:
 sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
 / sum(rate(lmcache_mp_lookup_requested_tokens_total[5m])) by (model_name)
+```
+
+**Request-level view** (whole prompt as denominator; see the
+`MP_LOOKUP_PREFETCH_END` notes in [EVENTS.md](EVENTS.md) for what it does
+and does not count):
+
+```promql
+# Share of prompt tokens the engine's own prefix cache served:
+rate(lmcache_mp_lookup_engine_hit_tokens_total[5m])
+/ rate(lmcache_mp_lookup_prompt_tokens_total[5m])
+
+# Share of prompt tokens served by the engine or LMCache:
+rate(lmcache_mp_lookup_request_hit_tokens_total[5m])
+/ rate(lmcache_mp_lookup_prompt_tokens_total[5m])
 ```
 
 **Per-tier split and early exits:**

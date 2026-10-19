@@ -294,6 +294,21 @@ class MPServerTracingSubscriber(EventSubscriber):
                     "apc_covered_tokens",
                     int(event.metadata.get("apc_covered_tokens", 0)),
                 )
+                # Request-level view over the whole prompt, not just the
+                # range LMCache looked up.
+                prompt_tokens = int(event.metadata.get("prompt_tokens", 0))
+                engine_hit_tokens = int(event.metadata.get("engine_hit_tokens", 0))
+                request_hit_tokens = int(event.metadata.get("request_hit_tokens", 0))
+                prompt_denom = prompt_tokens or 1  # 0.0 rates on an empty prompt
+                root_span.set_attribute("prompt_tokens", prompt_tokens)
+                root_span.set_attribute("engine_hit_tokens", engine_hit_tokens)
+                root_span.set_attribute("request_hit_tokens", request_hit_tokens)
+                root_span.set_attribute(
+                    "engine_hit_rate", engine_hit_tokens / prompt_denom
+                )
+                root_span.set_attribute(
+                    "request_hit_rate", request_hit_tokens / prompt_denom
+                )
                 root_span.set_attribute(
                     "l1_hit_keys", int(event.metadata.get("l1_hit_keys", 0))
                 )

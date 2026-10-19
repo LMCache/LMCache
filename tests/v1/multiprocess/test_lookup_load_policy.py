@@ -127,6 +127,27 @@ def test_declined_lookup_keeps_engine_covered_prefix_out_of_requested() -> None:
     assert metadata["hit_tokens"] == 0
 
 
+def test_declined_lookup_reports_request_level_fields_from_hint() -> None:
+    """A declined lookup still reports the whole prompt and the engine's own
+    hit, so the request-level hit rate counts the engine's share even though
+    LMCache served nothing."""
+    ctx = _ctx()
+    module = LookupModule(ctx, _RecordingPolicy(answer=False))
+    engine_hit = CHUNK_SIZE + 40
+
+    module.lookup(
+        _key({"lmcache.hint.engine_computed_tokens": engine_hit}, start_chunks=1),
+        tp_size=1,
+    )
+
+    assert module.query_prefetch_status("req-1") == 0
+    metadata = _end_metadata(ctx)
+    assert metadata["prompt_tokens"] == len(CHUNK_HASHES) * CHUNK_SIZE
+    assert metadata["engine_hit_tokens"] == engine_hit
+    assert metadata["request_hit_tokens"] == engine_hit
+    assert metadata["hit_tokens"] == 0
+
+
 def test_policy_sees_lookup_and_request_configs() -> None:
     """The policy receives the lookup length and the request configs as sent,
     engine hints included."""
