@@ -116,6 +116,20 @@ class MPCacheServer:
             status.update(module.report_status())
         return status
 
+    def report_readiness(self) -> dict[str, bool]:
+        """Return the liveness of every storage controller, keyed by name.
+
+        Unlike :meth:`report_status`, this is cheap enough to call on a
+        Kubernetes probe interval: it reads thread-liveness flags and takes no
+        storage lock. It therefore says nothing about allocator consistency or
+        L2 backend health; ``report_status`` still covers both.
+
+        Returns:
+            Controller name to liveness flag, as documented on
+            ``StorageManager.report_readiness``.
+        """
+        return self._context.storage_manager.report_readiness()
+
     def close(self) -> None:
         """Close modules in reverse build order, then release shared resources."""
         for module in reversed(self._modules):

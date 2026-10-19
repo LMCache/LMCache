@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for the report_status() interface across the StorageManager subtree.
+Tests for the report_status() and report_readiness() interfaces across the
+StorageManager subtree.
 """
 
 # Standard
@@ -103,6 +104,23 @@ def storage_manager_with_l2(basic_l1_config):
     sm = StorageManager(config)
     yield sm
     sm.close()
+
+
+@pytest.fixture
+def closed_storage_manager(basic_l1_config):
+    """A StorageManager that is already closed.
+
+    ``StorageManager.close()`` is not idempotent, so this owns the single
+    close instead of letting a test close a manager the fixture also tears
+    down.
+    """
+    config = StorageManagerConfig(
+        l1_manager_config=basic_l1_config,
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+    )
+    sm = StorageManager(config)
+    sm.close()
+    return sm
 
 
 def make_object_key(chunk_hash: int, model_name: str = "test_model", kv_rank: int = 0):
@@ -227,3 +245,65 @@ class TestStorageManagerReportStatus:
         assert status["store_controller"]["is_healthy"] is True
         assert status["prefetch_controller"]["is_healthy"] is True
         assert status["l1_eviction_controller"]["is_healthy"] is True
+
+
+class TestStorageManagerReportReadiness:
+    """Tests for StorageManager.report_readiness() shape and values."""
+
+    def test_reports_every_background_component(
+        self, storage_manager_no_l2, basic_l1_config
+    ):
+        readiness = storage_manager_no_l2.report_readiness()
+
+        tag = basic_l1_config.tag
+        assert set(readiness) == {
+            "prefetch_controller",
+            "l2_eviction_controller",
+            f"store_controller[{tag}]",
+            f"l1_eviction_controller[{tag}]",
+        }
+        assert all(readiness.values())
+
+    def test_skips_l1_managers_and_l2_adapters(self, storage_manager_with_l2):
+        """Both are too costly to answer on a probe interval."""
+        readiness = storage_manager_with_l2.report_readiness()
+
+        assert not any(name.startswith("l1_manager") for name in readiness)
+        assert not any(name.startswith("l2_adapter") for name in readiness)
+
+    def test_agrees_with_report_status_while_healthy(self, storage_manager_with_l2):
+        status = storage_manager_with_l2.report_status()
+        readiness = storage_manager_with_l2.report_readiness()
+
+        assert status["is_healthy"] is all(readiness.values())
+
+    def test_matches_each_controller_is_healthy_flag(
+        self, storage_manager_with_l2, basic_l1_config
+    ):
+        """is_healthy() must not drift from the flag report_status() shows."""
+        status = storage_manager_with_l2.report_status()
+        readiness = storage_manager_with_l2.report_readiness()
+
+        tag = basic_l1_config.tag
+        assert (
+            readiness["prefetch_controller"]
+            is status["prefetch_controller"]["is_healthy"]
+        )
+        assert (
+            readiness["l2_eviction_controller"]
+            is status["l2_eviction_controller"]["is_healthy"]
+        )
+        assert (
+            readiness[f"store_controller[{tag}]"]
+            is status["store_controllers"][tag]["is_healthy"]
+        )
+        assert (
+            readiness[f"l1_eviction_controller[{tag}]"]
+            is status["l1_eviction_controllers"][tag]["is_healthy"]
+        )
+
+    def test_turns_false_when_the_controllers_stop(self, closed_storage_manager):
+        """A stopped controller must show up as an unhealthy component."""
+        readiness = closed_storage_manager.report_readiness()
+
+        assert not all(readiness.values())

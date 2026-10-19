@@ -641,9 +641,13 @@ class PrefetchController(StorageControllerInterface):
                 lambda: request_id in self._completed_results, timeout=timeout
             )
 
+    def is_healthy(self) -> bool:
+        """Return whether the prefetch loop thread is still running."""
+        return self._thread.is_alive()
+
     def report_status(self) -> dict:
         """Return a status dict for the prefetch controller."""
-        is_healthy = self._thread.is_alive()
+        is_healthy = self.is_healthy()
         with self._submission_lock:
             submission_queue_size = len(self._submission_queue)
         with self._prefetch_results_lock:

@@ -331,9 +331,13 @@ class StoreController(StorageControllerInterface):
         if StoreController._gauge_targets.get(self._l1_manager.config.tag) is self:
             del StoreController._gauge_targets[self._l1_manager.config.tag]
 
+    def is_healthy(self) -> bool:
+        """Return whether the store loop thread is still running."""
+        return self._thread.is_alive()
+
     def report_status(self) -> dict:
         """Return a status dict for the store controller."""
-        is_healthy = self._thread.is_alive()
+        is_healthy = self.is_healthy()
         num_draining = len(self._draining)
         return {
             "is_healthy": is_healthy,
