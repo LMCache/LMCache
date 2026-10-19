@@ -1,4 +1,4 @@
-# Unfull Chunks
+# Unfull Chunks and Per-Request Ring State
 
 ## Summary
 
@@ -10,22 +10,21 @@ costs at most one chunk of recompute. For hybrid models it is worse:
   ~1152 tokens for Qwen3.8 / GLM-5.3 / DeepSeek-V4.1), so the dropped tail is
   large.
 - A linear-attention (Mamba/GDN) layer can only resume where a state snapshot
-  exists, so the recurrent state at the resume point must be stored too.
+  exists, and a compressed-attention layer (QSA, DSA kpool, DSV4.1
+  compressor) can only resume mid-compression-group if the raw keys of the
+  still-open group are available. vLLM keeps those keys in a per-request ring
+  (`CircularBufferSpec`) that LMCache skipped (#5042), which was correct only
+  because LMCache never resumed mid-chunk.
 
 This feature lets LMCache store and load the unfull chunk `[kC, P)` of a
-request, so a later request (a decode instance in PD disaggregation, or the
-next round of a chat) resumes at `P` instead of `kC`. It is the shared
-groundwork for PD handoff and multi-round reuse; neither policy lives here.
+request together with the ring, so a later request (a decode instance in PD
+disaggregation, or the next round of a chat) resumes at `P` instead of `kC`.
+It is the shared groundwork for PD handoff and multi-round reuse; neither
+policy lives here.
 
 Enabled per connector with `lmcache.mp.unfull_chunk: true`
 (`kv_connector_extra_config`). Off by default: nothing changes for existing
 deployments.
-
-Compressed-attention models (QSA, DSA kpool, DSV4.1 compressor) are not
-supported yet and are rejected at startup: resuming mid-chunk also needs the
-raw keys of the still-open compression group, which vLLM keeps in a
-per-request ring (`CircularBufferSpec`) that LMCache skips (#5042). Storing
-that ring is a follow-up.
 
 ## Concepts
 
@@ -33,8 +32,40 @@ that ring is a follow-up.
   and `0 < P - kC < C`, where `C` is the LMCache chunk size. It is stored as
   one object per object group with the regular chunk layout; only the blocks
   that cover `[kC, P)` are copied.
+- **Per-request state group**: a vLLM KV cache group whose request owns one
+  block for its whole lifetime (`CircularBufferSpec`; `KpoolTailSpec` on older
+  vLLM). It is not addressed by token position.
 - **Temporary object**: an L1 object deleted when its last read lock is
   released (`L1ObjectState.is_temporary`), i.e. read once.
+
+## Ring registration
+
+With the feature on, `create_engine_group_infos_from_vllm` registers ring
+groups as `EngineGroupInfo(per_request_state=True)` instead of excluding them
+with the other scratch groups (HiSparse pools and bounded-replay SWA stay
+excluded). Before format discovery, `_PerRequestStateOpaqueViewEdit`
+re-views each ring layer as `[NB, 1, 1, row]` where `row` is the layer's
+whole per-block span: GLM-5.3's kpool tail pads between its two heads, which
+format discovery rejects, and LMCache never needs per-token addressing of a
+ring.
+
+The server sizes a per-request group as **one block per chunk**
+(`tokens_per_block = chunk_size`). The connector passes the request's single
+ring block once per chunk of every store and retrieve, so the ring rides in
+every object:
+
+```text
+object for chunk i  =  [attention blocks of chunk i] + [ring block]
+```
+
+Why store it with every chunk instead of only with unfull chunks: the object
+layout stays one layout per object group, so lookup, prefetch, eviction and
+L2 need no change. The ring content stored with a full chunk is stale, and
+that is harmless: at a chunk boundary the open compression group is empty
+(block size is a multiple of the compression width, chunk size a multiple of
+block size), so nothing reads the ring before it is overwritten. The cost is
+the ring bytes per chunk (largest for DeepSeek-V4.1's fp32 compressor ring),
+paid only when the feature is on.
 
 ## Unfull chunk key
 
@@ -62,8 +93,8 @@ STORE [s, P), include_unfull_chunk         LOOKUP [0, L), include_unfull_chunk
   full chunks [s, kC) as today               chunk prefetch -> k full chunks hit
   + unfull chunk [kC, P):                    if k == floor(L/C): L1-only probe of the
     blocks: ceil(P/T_g) slices per group       unfull key, read-locked like a chunk
-    is_temporary from request config         reply k (+1 if the unfull chunk hit)
-                                           client: hit = min(reply * C, L)
+    ring: the request's ring block           reply k (+1 if the unfull chunk hit)
+    is_temporary from request config       client: hit = min(reply * C, L)
                                            RETRIEVE [s, L), include_unfull_chunk
 ```
 
@@ -77,7 +108,7 @@ all-or-nothing commit, same read-lock release on retrieve).
 The unfull chunk is a single object per object group. Its per-group block
 list is trimmed to the last `min(n, keep)` blocks, where `keep` is the
 group's per-chunk window in blocks (all blocks for full attention, the last
-window for sliding window, one block for Mamba state). Store
+window for sliding window, one block for Mamba state and for the ring). Store
 and load trim the same way, so block `i` maps to object offset `i` on both
 sides. The transfer kernel copies exactly the blocks it is given
 (`num_blocks_per_object = total_blocks / num_objects`), so a short list
@@ -115,15 +146,15 @@ separately from the chunk prefetch result:
 ## Connector behavior (vLLM MP connector)
 
 - **Store**: the step whose forward computes the prompt's last token `P`
-  (`computed == P`, so the Mamba state describes exactly `P`)
+  (`computed == P`, so the ring and Mamba state describe exactly `P`)
   extends its store to `[s, P)` when `P % C != 0` and every full chunk up to
   `kC` is stored by then. At most once per request; a request whose lookup
   already found the unfull chunk does not store it again.
   `num_stored_tokens` stays chunk-aligned.
 - **Store invariant**: the unfull chunk's blocks must not be written after
   its store is submitted. Unlike a full chunk, they are live: the next decode
-  step rewrites the Mamba running-state block in place (and the last
-  attention block gains rows), while the store copies asynchronously on the
+  step writes the ring at `position % capacity` and rewrites the Mamba
+  running-state block in place, while the store copies asynchronously on the
   server stream (nothing orders the next forward after it). The connector
   therefore stores the unfull chunk only for a request that ends at the
   prompt (`max_tokens == 1`, e.g. a disaggregated prefill, or a pooling
@@ -137,9 +168,12 @@ separately from the chunk prefetch result:
   `kC`, loading the unfull chunk would overwrite blocks other requests read,
   so the connector releases the unfull chunk's locks and keeps the hit at
   `kC`.
-- **Startup checks**: the option is rejected for models with a
-  `CircularBufferSpec` ring (see Summary), with speculative decoding (draft
-  rows sit past `P` in relocated Mamba blocks), with
+- **Ring blocks**: every store and retrieve carries the request's ring block
+  once per chunk (`slice_block_ids_per_group(per_request_state_groups=...)`).
+  The scheduler-side geometry (`group_tokens_per_block`, LCM, hit alignment)
+  keeps the ring at `0`: it never constrains chunk alignment.
+- **Startup checks**: the option is rejected with speculative decoding (draft
+  rows sit past `P` in the ring and in relocated Mamba blocks), with
   `lmcache.mp.lazy_offload`, and when the worker resolves to an
   engine-driven transfer mode.
 
@@ -153,6 +187,9 @@ separately from the chunk prefetch result:
   re-lookup (`apc_covered_lookup.md`), leaves the unfull chunk's read locks
   (and a temporary object) to the read-lock TTL: those releases resolve full
   chunks only.
+- The copy path is chosen per object group: when the ring's opaque layout is
+  not eligible for the direct-copy path, the object group holding it (the
+  attention one) takes the staging-kernel path for full chunks too.
 - Only the prompt-end tail is stored. Finding the tail of an earlier round
   (multi-round chat) needs a separate lookup policy; resuming a decode
   instance at the exact prompt end (PD) additionally needs the prefill side

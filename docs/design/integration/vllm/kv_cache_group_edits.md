@@ -33,8 +33,9 @@ the config + tensors already resolve.
 
 ## Edits
 
-Both rules apply only to Mamba-hybrid models (the registry is only consulted
-when `kv_cache_config.has_mamba_layers`).
+Rules 1-3 apply only to Mamba-hybrid models (the registry is only consulted
+when `kv_cache_config.has_mamba_layers`). Rule 4 applies to any model, and
+only when per-request rings are registered (`lmcache.mp.unfull_chunk`).
 
 ### 1. Mamba state pages
 
@@ -121,6 +122,19 @@ view and the compression path still derives it from
 leaf spec: GLM-5.3-Flash's MLA and indexer layers share one
 `UniformTypeKVCacheSpecs` group with different `num_states` (sparse MLA at 64
 rows and the kpool indexer at 32 under a 1152-token block).
+
+### 4. Per-request ring as an opaque row
+
+A `CircularBufferSpec` ring gives each request one block for its lifetime;
+LMCache copies that block whole and never addresses its rows by position.
+Its registered layout `[NB, H, capacity, C]` can carry padding between the
+heads (GLM-5.3-Flash's kpool tail: head stride 700 for a 560-element head
+pair), which format discovery rejects. `_PerRequestStateOpaqueViewEdit`
+re-views each block as `[NB, 1, 1, row]`, where `row` spans from the block
+base to this layer's last element (padding included, never a sibling layer's
+bytes) rounded up to the widest transfer alignment that divides the block
+step and fits in `spec.page_size_bytes`. See
+[unfull_chunk.md](../../v1/multiprocess/unfull_chunk.md).
 
 ## Startup validation
 

@@ -195,17 +195,35 @@ def test_slice_block_ids_scratch_group_yields_empty():
     assert sliced == [[0, 1], []]
 
 
-def test_slice_block_ids_unfull_chunk_takes_the_block_of_the_last_token():
-    """An unaligned end ends with the block holding its last token."""
-    allocated = {0: list(range(32)), 1: list(range(4))}
+def test_slice_block_ids_repeats_per_request_state_block_per_chunk():
+    """A per-request ring rides with every chunk of the range."""
+    allocated = {0: list(range(32)), 1: [7], 2: [9]}
     sliced = slice_block_ids_per_group(
         allocated,
-        group_tokens_per_block=[16, 128],
+        group_tokens_per_block=[16, 0, 0],
+        start_token_idx=256,
+        end_token_idx=512,
+        tokens_per_chunk=128,
+        per_request_state_groups=(1,),
+    )
+    # Group 2 is a scratch group that is not per-request state.
+    assert sliced == [list(range(16, 32)), [7, 7], []]
+
+
+def test_slice_block_ids_unfull_chunk_takes_the_block_of_the_last_token():
+    """An unaligned end ends with the block holding its last token, and the
+    unfull chunk counts as one more chunk for per-request state."""
+    allocated = {0: list(range(32)), 1: list(range(4)), 2: [7]}
+    sliced = slice_block_ids_per_group(
+        allocated,
+        group_tokens_per_block=[16, 128, 0],
         start_token_idx=128,
         end_token_idx=300,
+        tokens_per_chunk=128,
+        per_request_state_groups=(2,),
         include_unfull_chunk=True,
     )
-    assert sliced == [list(range(8, 19)), [1, 2]]
+    assert sliced == [list(range(8, 19)), [1, 2], [7, 7]]
 
 
 def test_slice_block_ids_unaligned_end_needs_unfull_chunk():

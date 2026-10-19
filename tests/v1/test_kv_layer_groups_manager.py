@@ -788,6 +788,25 @@ class TestKernelAndObjectGroups:
         assert by_layer[1].calculate_slots(256) == 2
         assert by_layer[0].calculate_slots(256) == 64
 
+    def test_per_request_state_group_is_one_block_per_chunk(self):
+        # A ring of 8 slots per block: whatever the slot count, its single
+        # per-request block covers a whole LMCache chunk.
+        tensors = [
+            torch.randn(2, 8, 16, 1, 64, dtype=torch.float16),
+            torch.randn(2, 8, 8, 1, 32, dtype=torch.float32),
+        ]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,), tokens_per_block=16),
+                EngineGroupInfo(1, (1,), per_request_state=True),
+            ],
+        )
+        by_layer = {g.layer_indices[0]: g for g in manager.kernel_groups}
+        assert by_layer[1].tokens_per_block == 256
+        assert manager.calculate_num_blocks(1, 256) == 1
+        assert manager.calculate_num_blocks(0, 256) == 16
+
     def test_calculate_num_blocks_compressed(self):
         # slots_per_block=8 (tensor), tokens_per_block=16 (engine spec) ->
         # compress_ratio=2; 256 logical tokens -> 128 physical slots ->

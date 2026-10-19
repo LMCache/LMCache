@@ -30,6 +30,9 @@ PROMPT = 337
 # state, one block per chunk; its last block holds the state at the end.
 GROUP_TOKENS_PER_BLOCK = [16, CHUNK]
 MAMBA_BLOCKS = [500, 501, 502]
+# Engine group 2: a per-request ring, one block for the request's lifetime.
+RING_GROUP = 2
+RING_BLOCK = 900
 
 
 def test_prompt_end_step_stores_full_chunks_and_the_unfull_chunk():
@@ -115,6 +118,55 @@ def test_unaligned_hit_retrieves_the_unfull_chunk():
     assert (meta.op.start, meta.op.end) == (0, PROMPT - 1)
     assert meta.op.include_unfull_chunk
     assert meta.op.block_ids == [list(range(21)), MAMBA_BLOCKS]
+
+
+def test_ring_block_rides_with_every_chunk_and_the_unfull_chunk():
+    tracker = _tracker()
+    tracker.append_block_ids(([], [], [RING_BLOCK]))
+    tracker.increase_num_scheduled_tokens(PROMPT)
+
+    meta = LMCacheMPRequestMetadata.GetStoreMetadata(
+        tracker,
+        CHUNK,
+        [*GROUP_TOKENS_PER_BLOCK, 0],
+        per_request_state_groups=(RING_GROUP,),
+        store_unfull_chunk=True,
+    )
+
+    assert meta is not None
+    assert meta.op.include_unfull_chunk
+    # Two full chunks plus the unfull one each carry the ring block.
+    assert meta.op.block_ids == [list(range(22)), MAMBA_BLOCKS, [RING_BLOCK] * 3]
+
+
+def test_ring_block_is_retrieved_with_every_chunk():
+    tracker = _tracker()
+    tracker.append_block_ids(([], [], [RING_BLOCK]))
+    tracker.num_lmcache_hit_tokens = PROMPT - 1
+    tracker.state = LMCacheMPRequestState.WAITING_FOR_LOAD
+
+    meta = LMCacheMPRequestMetadata.GetRetrieveMetadata(
+        tracker,
+        CHUNK,
+        [*GROUP_TOKENS_PER_BLOCK, 0],
+        per_request_state_groups=(RING_GROUP,),
+    )
+
+    assert meta is not None
+    assert meta.op.block_ids[RING_GROUP] == [RING_BLOCK] * 3
+
+
+def test_unregistered_ring_is_not_transferred():
+    tracker = _tracker()
+    tracker.append_block_ids(([], [], [RING_BLOCK]))
+    tracker.increase_num_scheduled_tokens(PROMPT)
+
+    meta = LMCacheMPRequestMetadata.GetStoreMetadata(
+        tracker, CHUNK, [*GROUP_TOKENS_PER_BLOCK, 0]
+    )
+
+    assert meta is not None
+    assert meta.op.block_ids[RING_GROUP] == []
 
 
 def test_lookup_asks_for_the_unfull_chunk_and_keeps_stores_aligned():

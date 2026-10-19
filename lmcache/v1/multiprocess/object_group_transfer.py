@@ -785,8 +785,9 @@ def trim_and_stage_unfull_chunk_block_ids(
     passes only the blocks of its own token range. Each list is cut to its
     last ``min(len, keep)`` blocks, where ``keep`` is the group's per-chunk
     window in blocks (every block for full attention, the last window for a
-    sliding window, one block for recurrent state). Store and retrieve trim
-    alike, so block ``i`` maps to the same object offset on both sides.
+    sliding window, one block for recurrent and per-request state). Store
+    and retrieve trim alike, so block ``i`` maps to the same object offset on
+    both sides.
 
     Args:
         cache_context: The cache context containing the KV cache information.

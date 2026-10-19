@@ -558,11 +558,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     - lmcache.mp.save_decode_cache: also store chunks containing generated
       tokens. Defaults to False; only complete prompt chunks are stored.
     - lmcache.mp.unfull_chunk: also store the unfull chunk at the prompt end
-      and let a lookup hit end mid-chunk. Defaults to False. A request whose
+      (with the per-request ring state of compressed-attention models) and
+      let a lookup hit end mid-chunk. Defaults to False. A request whose
       ``kv_transfer_params`` set ``lmcache.temporary_unfull_chunk`` stores
-      it read-once. Not yet supported for models with per-request ring state
-      (``CircularBufferSpec``). See
-      ``docs/design/v1/multiprocess/unfull_chunk.md``.
+      it read-once. See ``docs/design/v1/multiprocess/unfull_chunk.md``.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
@@ -632,25 +631,24 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             and spec_config is not None
             and (spec_config.num_speculative_tokens or 0) > 0
         ):
-            # Draft rows sit past the prompt end in relocated Mamba blocks,
-            # so the state at the prompt end is not isolated.
+            # Draft rows sit past the prompt end in the ring and in relocated
+            # Mamba blocks, so the state at the prompt end is not isolated.
             raise ValueError(
                 "lmcache.mp.unfull_chunk does not support speculative decoding"
             )
-        if (
-            self._unfull_chunk
-            and kv_cache_config is not None
-            and any(
-                is_per_request_state_spec(group.kv_cache_spec)
-                for group in kv_cache_config.kv_cache_groups
+        # Engine groups whose single per-request block (a ring) rides with
+        # every stored and retrieved chunk.
+        self._per_request_state_groups: tuple[int, ...] = (
+            tuple(
+                engine_group_idx
+                for engine_group_idx, group in enumerate(
+                    kv_cache_config.kv_cache_groups
+                )
+                if is_per_request_state_spec(group.kv_cache_spec)
             )
-        ):
-            # Resuming mid-chunk needs the ring's open compression group,
-            # which LMCache does not store yet: the hit would load garbage.
-            raise ValueError(
-                "lmcache.mp.unfull_chunk does not support models with "
-                "per-request ring state (CircularBufferSpec) yet"
-            )
+            if self._unfull_chunk and kv_cache_config is not None
+            else ()
+        )
 
         self._enable_kv_events = bool(
             getattr(vllm_config, "kv_events_config", None) is not None
@@ -919,13 +917,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # they see the same edited views.
         layout_hints = vllm_layout_hints(self._vllm_config)
         kv_caches = apply_kv_cache_group_edits(
-            kv_cache_config, kv_caches, layout_hints=layout_hints
+            kv_cache_config,
+            kv_caches,
+            layout_hints=layout_hints,
+            include_per_request_state=self._unfull_chunk,
         )
         engine_group_infos = create_engine_group_infos_from_vllm(
             kv_cache_config,
             kv_caches,
             layout_hints=layout_hints,
             dcp_size=self._dcp_size,
+            include_per_request_state=self._unfull_chunk,
         )
         self.worker_adapter.register_kv_caches(
             kv_caches,
@@ -1853,6 +1855,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request_tracker,
                 lmcache_tokens_per_chunk,
                 group_tokens_per_block=self._group_tokens_per_block,
+                per_request_state_groups=self._per_request_state_groups,
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
@@ -1879,6 +1882,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
+                per_request_state_groups=self._per_request_state_groups,
                 store_unfull_chunk=self._unfull_chunk,
             )
             if r_meta is not None:
@@ -1919,6 +1923,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
+                per_request_state_groups=self._per_request_state_groups,
                 store_unfull_chunk=self._unfull_chunk,
             )
 

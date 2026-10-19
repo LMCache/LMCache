@@ -166,6 +166,14 @@ and the ring holds nothing the next step reads. Resuming mid-group (for
 example a prefill-to-decode handoff at an arbitrary prompt length) does need
 the ring's content, and this path does not provide it.
 
+With `lmcache.mp.unfull_chunk` on, rings are registered instead: each forms
+an `EngineGroupInfo(per_request_state=True)` (`is_per_request_state_spec`;
+other scratch specs stay excluded), the server sizes it as one block per
+chunk, and every store and retrieve carries the request's ring block once per
+chunk. The ring stored with a full chunk is stale and never read; the one
+stored with the unfull chunk at the prompt end is what a mid-group resume
+needs. See [unfull_chunk.md](../../v1/multiprocess/unfull_chunk.md).
+
 **Store is all-or-nothing (fail-closed):** if the block IDs don't fully cover
 every chunk for every group (e.g. a caller bug), or a copy fails, the whole
 store is skipped and nothing is committed — a later retrieve simply misses and

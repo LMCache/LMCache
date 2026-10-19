@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 import enum
@@ -255,6 +256,7 @@ class LMCacheMPRequestMetadata:
         group_tokens_per_block: list[int],
         *,
         save_decode_cache: bool = False,
+        per_request_state_groups: Collection[int] = (),
         store_unfull_chunk: bool = False,
     ) -> "LMCacheMPRequestMetadata | None":
         """
@@ -271,13 +273,16 @@ class LMCacheMPRequestMetadata:
             save_decode_cache: Whether to store chunks containing generated
                 tokens. Defaults to storing only complete chunks within the
                 initial prompt, including when decode fills its partial tail.
+            per_request_state_groups: Engine groups holding per-request state;
+                their block rides with every stored chunk.
             store_unfull_chunk: Also store the unfull chunk at the prompt end
                 ``[floor(P / chunk) * chunk, P)``, once, in the step whose
-                forward computes the prompt's last token: only then does the
-                recurrent state describe exactly ``P``. Only for a request
-                that ends there (``max_tokens == 1``, e.g. a disaggregated
-                prefill): the store copies asynchronously, and a later decode
-                step would rewrite the recurrent-state block it is copying.
+                forward computes the prompt's last token: only then do the
+                per-request and recurrent states describe exactly ``P``. Only
+                for a request that ends there (``max_tokens == 1``, e.g. a
+                disaggregated prefill): the store copies asynchronously, and
+                a later decode step would rewrite the ring slot and the
+                recurrent-state block it is copying.
 
         Returns:
             Metadata for newly storable chunks (and the unfull chunk), or None
@@ -362,6 +367,8 @@ class LMCacheMPRequestMetadata:
                 group_tokens_per_block,
                 start_token_idx,
                 end_token_idx,
+                tokens_per_chunk=lmcache_tokens_per_chunk,
+                per_request_state_groups=per_request_state_groups,
                 include_unfull_chunk=include_unfull_chunk,
             )
             token_ids = tracker.get_token_ids()
@@ -393,6 +400,8 @@ class LMCacheMPRequestMetadata:
         tracker: LMCacheMPRequestTracker,
         lmcache_tokens_per_chunk: int,
         group_tokens_per_block: list[int],
+        *,
+        per_request_state_groups: Collection[int] = (),
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the retrieve metadata for the current request tracker.
@@ -405,6 +414,8 @@ class LMCacheMPRequestMetadata:
                 KV cache spec ``block_size``. Must each divide
                 ``lmcache_tokens_per_chunk`` (hybrid models can mix different
                 values); ``0`` marks a scratch group that is never retrieved.
+            per_request_state_groups: Engine groups holding per-request state;
+                their block rides with every retrieved chunk.
 
         Note:
             A hit that does not end on a chunk boundary ends with the unfull
@@ -435,6 +446,8 @@ class LMCacheMPRequestMetadata:
                 group_tokens_per_block,
                 start_token_idx,
                 end_token_idx,
+                tokens_per_chunk=lmcache_tokens_per_chunk,
+                per_request_state_groups=per_request_state_groups,
                 include_unfull_chunk=include_unfull_chunk,
             )
             token_ids = tracker.get_token_ids()

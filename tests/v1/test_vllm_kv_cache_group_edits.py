@@ -492,3 +492,63 @@ def test_flash_attention_hybrid_needs_no_attention_edit(edits):
     # Passed through untouched, and already at block-id granularity.
     assert edited["attn.0"] is kv_caches["attn.0"]
     assert edited["attn.0"].shape[2] == LOGICAL_BLOCK_SIZE
+
+
+# --------------------------------------------------------------------------
+# Per-request ring: re-viewed as one opaque row per block
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class CircularBufferSpec(_Spec):
+    """Stand-in for vLLM's per-request ring spec (matched by class name)."""
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
+def _padded_ring() -> tuple[torch.Tensor, CircularBufferSpec]:
+    """A GLM-5.3-style kpool tail: 2 heads with padding between them."""
+    num_blocks, capacity, head_size, block_step = 3, 4, 140, 1400
+    storage = torch.arange(num_blocks * block_step, dtype=torch.bfloat16)
+    ring = storage.as_strided(
+        (num_blocks, 2, capacity, head_size), (block_step, 700, head_size, 1)
+    )
+    spec = CircularBufferSpec(
+        kind=_SpecKind.FULL_ATTENTION,
+        block_size=capacity,
+        page_size_bytes=block_step * ring.element_size(),
+    )
+    return ring, spec
+
+
+def test_ring_edit_views_each_block_as_one_aligned_row(edits):
+    ring, spec = _padded_ring()
+    config = _Config(
+        kv_cache_groups=[_Group(layer_names=["ring.0"], kv_cache_spec=spec)],
+        has_mamba_layers=False,
+    )
+
+    edited = edits.apply_kv_cache_group_edits(
+        config, {"ring.0": ring}, layout_hints={}, include_per_request_state=True
+    )["ring.0"]
+
+    # Span 1 + 700 + 3 * 140 + 139 = 1260 elements, rounded up to 16 bytes.
+    assert edited.shape == (3, 1, 1, 1264)
+    assert edited.stride() == (1400, 1264, 1264, 1)
+    assert edited.data_ptr() == ring.data_ptr()
+    assert torch.equal(edited[1, 0, 0, :140], ring[1, 0, 0])
+    assert torch.equal(edited[1, 0, 0, 700:840], ring[1, 1, 0])
+
+
+def test_ring_edit_needs_per_request_state(edits):
+    ring, spec = _padded_ring()
+    config = _Config(
+        kv_cache_groups=[_Group(layer_names=["ring.0"], kv_cache_spec=spec)],
+        has_mamba_layers=True,
+    )
+
+    edited = edits.apply_kv_cache_group_edits(config, {"ring.0": ring}, layout_hints={})
+
+    assert edited["ring.0"] is ring
