@@ -110,6 +110,11 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--grpc-server-workers``
      - ``32``
      - gRPC request-dispatch threads. Used only with ``--transport grpc``.
+   * - ``--grpc-server-mode``
+     - ``sync``
+     - gRPC server implementation: ``sync`` or ``aio``. ``aio`` receives
+       requests on one event loop and hands only the handlers to worker
+       threads. Used only with ``--transport grpc``.
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.
