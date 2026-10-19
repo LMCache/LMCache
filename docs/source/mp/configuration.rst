@@ -395,7 +395,7 @@ single-L1 interface. For placing L1 on CXL-attached memory see
        Lets several LMCache servers share one CXL device by mapping disjoint
        ranges, for example offset 0 and 512 with ``--l1-size-gb 512`` each.
        The range must fit within the device, and offset and size must be
-       multiples of the device alignment (usually 2 MiB).
+       multiples of the device alignment.
        ``--l1-manager`` key: ``offset_gb``.
    * - ``--l1-mlock``
      - ``False``
@@ -413,14 +413,13 @@ allocates KV objects inside the mapping. The index is in server memory, so
 the tier restarts empty.
 
 **Device path and offset.** The mapping covers ``[offset, offset + size)``
-of the device, with the offset defaulting to 0. Several servers can share
-one CXL device by giving each a disjoint range: ``--l1-devdax-offset-gb``
-in the legacy form, ``offset_gb`` in the tagged form. LMCache does not
-coordinate offsets between servers; overlapping ranges, or two nodes that
-alias the same physical CXL range, write over each other. The device must
-be in ``devdax`` mode (CXL memory is often onlined as ``system-ram``), the
-range must fit within the device, and offset and size must be multiples of
-the device alignment (usually 2 MiB); a range that does not is rejected:
+of the device; the offset defaults to 0 (``--l1-devdax-offset-gb`` in the
+legacy form, ``offset_gb`` in the tagged form). To share one CXL device, give
+each server, and the ``dax`` L2 adapter in the same server, a disjoint range.
+Overlapping ranges within a server are rejected; LMCache does not coordinate
+offsets between servers. The device must be in ``devdax`` mode (CXL memory
+is often onlined as ``system-ram``), the range must fit within the device,
+and offset and size must be multiples of the device alignment:
 
 .. code-block:: bash
 

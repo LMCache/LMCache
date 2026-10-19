@@ -135,7 +135,9 @@ class _StorageManagerStub:
     def _single_region_adapter_names(self) -> list[str]:
         return StorageManager._single_region_adapter_names(cast("StorageManager", self))
 
-    def _l2_device_owner_names(self, _device_path: str) -> list[str]:
+    def _l2_device_owner_names(
+        self, _device_path: str, _offset: int = 0, _size: int = 0
+    ) -> list[str]:
         return []
 
     def _l1_devdax_arena_is_active(

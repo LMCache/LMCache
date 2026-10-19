@@ -262,6 +262,8 @@ def _infer_l1_devdax_overflow_from_dax_adapter(
             device
             for device in devices
             if getattr(device, "device_path", None) == l1_devdax_path
+            and getattr(device, "offset_bytes", 0)
+            == memory_config.devdax_offset_in_bytes
         ]
         if not matched_devices:
             remaining_adapters.append(adapter_config)
@@ -273,9 +275,7 @@ def _infer_l1_devdax_overflow_from_dax_adapter(
 
         matched_dax_device = matched_devices[0]
         remaining_devices = [
-            device
-            for device in devices
-            if getattr(device, "device_path", None) != l1_devdax_path
+            device for device in devices if device is not matched_dax_device
         ]
         if remaining_devices:
             remaining_dax_adapter = type(dax_adapter)(
