@@ -31,6 +31,7 @@ gaps; where a feature already has an MP equivalent, prefer the MP docs.
    /getting_started/quickstart/index
    /kv_cache/storage_backends/index
    /kv_cache/async_loading
+   /kv_cache/bounded_retrieval
    /kv_cache/caching_policies
    /kv_cache/p2p_sharing
    /non_kv_cache/encoder_cache

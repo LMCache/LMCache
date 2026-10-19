@@ -1,0 +1,255 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Exercise window planning and packing for first-rank broadcast retrieval."""
+
+# Standard
+import pickle
+
+# Third Party
+import pytest
+import torch
+
+# First Party
+from lmcache.v1.broadcast_transfer import (
+    CHUNK_ALIGNMENT,
+    StagedChunk,
+    Window,
+    chunk_bytes,
+    chunks_per_window,
+    pack,
+    plan_staging,
+    plan_windows,
+    staging_bytes,
+)
+from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.memory_management import (
+    MemoryFormat,
+    MemoryObj,
+    MemoryObjMetadata,
+    TensorMemoryObj,
+)
+
+pytestmark = pytest.mark.no_shared_allocator
+
+
+def make_object(tensors: list[torch.Tensor], *, grouped: bool = False) -> MemoryObj:
+    """Pack typed groups into the same flat format cache backends produce."""
+    raw = torch.cat([tensor.reshape(-1).view(torch.uint8) for tensor in tensors])
+    return TensorMemoryObj(
+        raw,
+        MemoryObjMetadata(
+            shape=tensors[0].shape,
+            dtype=tensors[0].dtype,
+            address=0,
+            phy_size=raw.numel(),
+            ref_count=1,
+            fmt=MemoryFormat.KV_MLA_FMT,
+            shapes=[tensor.shape for tensor in tensors] if grouped else None,
+            dtypes=[tensor.dtype for tensor in tensors] if grouped else None,
+        ),
+        None,
+    )
+
+
+def make_chunks(count: int, tokens: int) -> list[StagedChunk]:
+    """Consecutive float32 chunks of ``tokens`` tokens with distinct contents."""
+    return [
+        (
+            make_object(
+                [
+                    torch.arange(2 * tokens * 3, dtype=torch.float32).reshape(
+                        1, 2, tokens, 3
+                    )
+                    + index * 1000
+                ]
+            ),
+            index * tokens,
+            (index + 1) * tokens,
+        )
+        for index in range(count)
+    ]
+
+
+def test_plan_windows_packs_consecutive_chunks_within_capacity() -> None:
+    chunks = make_chunks(5, 2)  # 48 bytes each, each starting on an aligned offset
+    capacity = 2 * CHUNK_ALIGNMENT + 48  # exactly three chunks
+
+    groups = plan_windows(chunks, capacity)
+
+    assert [len(group) for group in groups] == [3, 2]
+    assert list(groups[0]) == chunks[:3]
+    assert list(groups[1]) == chunks[3:]
+    for group in groups:
+        assert Window.from_chunks(group).num_bytes <= capacity
+
+
+def test_plan_windows_puts_each_chunk_alone_when_only_one_fits() -> None:
+    chunks = make_chunks(3, 2)
+
+    groups = plan_windows(chunks, 48)
+
+    assert [list(group) for group in groups] == [[chunk] for chunk in chunks]
+
+
+def test_plan_windows_rejects_a_chunk_larger_than_the_capacity() -> None:
+    with pytest.raises(ValueError, match="exceeds the 47-byte staging buffer"):
+        plan_windows(make_chunks(3, 2), 47)
+
+
+def test_plan_windows_rejects_a_chunk_without_storage() -> None:
+    chunks = make_chunks(3, 2)
+    chunks[2][0].invalidate()
+
+    with pytest.raises(ValueError, match="no longer exposes its tensor"):
+        plan_windows(chunks, 1024)
+
+
+def test_plan_windows_returns_nothing_without_chunks() -> None:
+    assert plan_windows([], 1024) == []
+
+
+def test_window_requires_at_least_one_chunk() -> None:
+    with pytest.raises(ValueError, match="at least one chunk"):
+        Window.from_chunks([])
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_window_views_round_trip_packed_chunks(grouped: bool) -> None:
+    first = [
+        torch.arange(2 * 4 * 3, dtype=torch.float32).reshape(1, 2, 4, 3),
+        torch.arange(4 * 2, dtype=torch.float16).reshape(1, 1, 4, 2),
+    ]
+    second = [tensor + 7 for tensor in first]
+    if not grouped:
+        first, second = first[:1], second[:1]
+    chunks: list[StagedChunk] = [
+        (make_object(first, grouped=grouped), 0, 4),
+        (make_object(second, grouped=grouped), 4, 8),
+    ]
+    window = Window.from_chunks(chunks)
+    buffer = torch.full((window.num_bytes + 64,), 0xAB, dtype=torch.uint8)
+
+    views = window.views(buffer)
+    pack(chunks, views)
+
+    assert window.starts == (0, 4)
+    assert window.ends == (4, 8)
+    assert window.offsets == (0, CHUNK_ALIGNMENT)
+    assert window.num_bytes == CHUNK_ALIGNMENT + chunks[1][0].get_size()
+    for (source, _, _), view, expected in zip(
+        chunks, views, (first, second), strict=True
+    ):
+        assert view.parent() is None
+        assert view.get_size() == source.get_size()
+        assert view.metadata.fmt == MemoryFormat.KV_MLA_FMT
+        if grouped:
+            for index, tensor in enumerate(expected):
+                torch.testing.assert_close(view.get_tensor(index), tensor)
+        else:
+            torch.testing.assert_close(view.tensor, expected[0])
+        # Packing reads the source; it never takes or drops ownership.
+        assert source.get_ref_count() == 1
+        assert source.metadata.pin_count == 0
+    # Bytes between chunks and after the window are untouched.
+    assert (buffer[chunks[0][0].get_size() : CHUNK_ALIGNMENT] == 0xAB).all()
+    assert (buffer[window.num_bytes :] == 0xAB).all()
+
+
+def test_window_is_plain_data_that_survives_serialization() -> None:
+    """Headers cross ranks through object broadcasts, so they must pickle."""
+    chunks = make_chunks(2, 3)
+    window = Window.from_chunks(chunks)
+
+    restored = pickle.loads(pickle.dumps(window))
+
+    assert restored == window
+    buffer = torch.zeros(window.num_bytes, dtype=torch.uint8)
+    pack(chunks, window.views(buffer))
+    for (source, _, _), view in zip(chunks, restored.views(buffer), strict=True):
+        torch.testing.assert_close(view.tensor, source.tensor)
+
+
+def test_window_views_reject_a_buffer_that_is_too_small() -> None:
+    window = Window.from_chunks(make_chunks(1, 4))
+
+    with pytest.raises(ValueError, match="needs"):
+        window.views(torch.zeros(window.num_bytes - 1, dtype=torch.uint8))
+
+
+def test_pack_rejects_an_invalidated_source() -> None:
+    chunks = make_chunks(1, 4)
+    window = Window.from_chunks(chunks)
+    views = window.views(torch.zeros(window.num_bytes, dtype=torch.uint8))
+    chunks[0][0].invalidate()
+
+    with pytest.raises(ValueError, match="valid tensor storage"):
+        pack(chunks, views)
+
+
+def test_staging_bytes_fits_exactly_the_requested_chunks() -> None:
+    """A window sized for N chunks packs N of them and not one more."""
+    chunks = make_chunks(5, 2)  # 48 bytes each
+    one = chunks[0][0].get_size()
+    assert staging_bytes(one, 1) == one
+    assert staging_bytes(one, 2) == CHUNK_ALIGNMENT + one
+    for window_chunks in (1, 2, 3):
+        capacity = staging_bytes(one, window_chunks)
+        windows = plan_windows(chunks, capacity)
+        assert [len(group) for group in windows[:-1]] == [window_chunks] * len(
+            windows[:-1]
+        )
+        assert sum(len(group) for group in windows) == len(chunks)
+        assert Window.from_chunks(windows[0]).num_bytes <= capacity
+
+
+@pytest.mark.parametrize(("bytes_per_chunk", "window_chunks"), [(0, 1), (48, 0)])
+def test_staging_bytes_rejects_empty_windows(
+    bytes_per_chunk: int, window_chunks: int
+) -> None:
+    with pytest.raises(ValueError, match="at least one chunk"):
+        staging_bytes(bytes_per_chunk, window_chunks)
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [(10, 1), (48, 1), (48 + CHUNK_ALIGNMENT - 1, 1), (48 + CHUNK_ALIGNMENT, 2)],
+)
+def test_chunks_per_window_rounds_down_but_never_below_one(
+    target: int, expected: int
+) -> None:
+    assert chunks_per_window(target, 48) == expected
+    # The resulting window never exceeds the target unless one chunk already does.
+    assert staging_bytes(48, expected) <= max(target, 48)
+
+
+def deepseek_metadata() -> LMCacheMetadata:
+    """A DeepSeek-V3 class MLA layout: 61 layers of 576-wide bf16 latents."""
+    return LMCacheMetadata(
+        model_name="test",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(61, 1, 256, 1, 576),
+        use_mla=True,
+    )
+
+
+def test_chunk_bytes_follows_the_metadata_layout() -> None:
+    metadata = deepseek_metadata()
+    assert chunk_bytes(metadata, 256) == 61 * 576 * 2 * 256
+    assert chunk_bytes(metadata, 1024) == 4 * chunk_bytes(metadata, 256)
+
+
+def test_plan_staging_is_plain_data_sized_by_the_metadata_layout() -> None:
+    """The plan crosses ranks at admission, so it must pickle and be exact."""
+    metadata = deepseek_metadata()
+    target = 64 * 1024 * 1024
+
+    plan = plan_staging(metadata, 256, target)
+
+    assert plan.bytes_per_chunk == chunk_bytes(metadata, 256)
+    assert plan.window_chunks == chunks_per_window(target, plan.bytes_per_chunk)
+    assert plan.capacity == staging_bytes(plan.bytes_per_chunk, plan.window_chunks)
+    assert plan.capacity <= target
+    assert pickle.loads(pickle.dumps(plan)) == plan

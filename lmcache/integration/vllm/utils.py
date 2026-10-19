@@ -20,7 +20,11 @@ from lmcache import torch_device_type
 from lmcache.logging import init_logger
 from lmcache.utils import get_size_bytes as get_size_bytes
 from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
-from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
+from lmcache.v1.config_base import (
+    apply_remote_configs,
+    fetch_remote_config,
+    validate_and_set_config_value,
+)
 from lmcache.v1.gpu_connector.kv_format.types import KVLayoutName
 
 if TYPE_CHECKING:
@@ -160,7 +164,9 @@ def extract_request_configs_from_request(
     )
 
 
-def lmcache_get_or_create_config() -> LMCacheEngineConfig:
+def lmcache_get_or_create_config(
+    vllm_config: "VllmConfig | None" = None,
+) -> LMCacheEngineConfig:
     """Get the LMCache configuration from the environment variable
     `LMCACHE_CONFIG_FILE`. If the environment variable is not set, this
     function will return the default configuration.
@@ -172,6 +178,13 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
     this function will attempt to fetch additional configuration from the
     remote config service. The current config and LMCACHE environment
     variables will be sent to the service, along with 'appid' if set.
+
+    Args:
+        vllm_config: Apply the connector's ``lmcache.*`` overrides when provided.
+            Memory planning and worker initialization must use the same config.
+
+    Returns:
+        The shared LMCache configuration with any connector overrides applied.
     """
     global _config_instance
 
@@ -220,7 +233,113 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                             "Using local configuration only.",
                             remote_config_url,
                         )
+    if vllm_config is not None and vllm_config.kv_transfer_config is not None:
+        with _config_lock:
+            extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
+            for key, value in extra.items():
+                if key.startswith("lmcache."):
+                    config_key = key.removeprefix("lmcache.")
+                    if validate_and_set_config_value(
+                        _config_instance, config_key, value
+                    ):
+                        logger.info(
+                            "Updated config %s from vLLM extra config", config_key
+                        )
+            _config_instance.validate()
     return _config_instance
+
+
+def get_required_device_memory(vllm_config: "VllmConfig") -> int:
+    """Return per-worker retrieval staging bytes to reserve outside vLLM's KV pool.
+
+    Args:
+        vllm_config: Serving configuration, including LMCache connector overrides.
+
+    Returns:
+        The staging buffer size the worker will reserve, or zero when first-rank
+        retrieval is disabled or a single worker has no peers to broadcast to.
+        The size follows the KV layout derived from the model configuration,
+        the only one known before vLLM builds its KV caches; a worker whose
+        registered layout plans a different window logs the change at the
+        first retrieval after registration. This function does not initialize
+        an engine or allocate device memory.
+
+    Raises:
+        ValueError: If the LMCache configuration is invalid.
+    """
+    config = lmcache_get_or_create_config(vllm_config)
+    use_mla = mla_enabled(vllm_config.model_config)
+    if (
+        config.use_layerwise
+        or not use_mla
+        or not config.get_extra_config_value("save_only_first_rank", use_mla)
+        or vllm_config.parallel_config.world_size == 1
+    ):
+        return 0
+    # First Party
+    from lmcache.integration.vllm.vllm_service_factory import (
+        kv_layout_from_vllm_config,
+    )
+    from lmcache.v1.broadcast_transfer import plan_staging
+    from lmcache.v1.metadata import LMCacheMetadata
+
+    # The worker builds its metadata from the same layout function, so the chunk
+    # it sizes its buffer for is the one measured here.
+    kv_shape, kv_dtype, _ = kv_layout_from_vllm_config(config, vllm_config)
+    world_size = vllm_config.parallel_config.world_size
+    layout = LMCacheMetadata(
+        model_name=vllm_config.model_config.model,
+        world_size=world_size,
+        local_world_size=world_size,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=kv_dtype,
+        kv_shape=kv_shape,
+        use_mla=use_mla,
+        chunk_size=config.chunk_size,
+    )
+    return plan_staging(
+        layout, config.chunk_size, config.retrieve_window_bytes
+    ).capacity
+
+
+def validate_retrieval_memory_budget(vllm_config: "VllmConfig") -> None:
+    """Warn when automatic KV sizing cannot account for retrieval staging.
+
+    vLLM creates the worker's KV connector after it has sized its KV pages, so
+    the staging buffer is only part of the plan when vLLM asks the connector for
+    its device memory requirement beforehand. Without that hook, and without an
+    explicit ``kv_cache_memory_bytes`` budget, the buffer comes out of the
+    headroom left by ``gpu_memory_utilization``.
+
+    Args:
+        vllm_config: Configuration used by the worker before creating its engine.
+    """
+    required = get_required_device_memory(vllm_config)
+    if required == 0 or getattr(
+        vllm_config.cache_config, "kv_cache_memory_bytes", None
+    ):
+        return
+    try:
+        # Third Party
+        from vllm.distributed.kv_transfer.kv_connector.factory import (
+            KVConnectorFactory,
+        )
+    except ImportError:
+        reserve = None
+    else:
+        reserve = getattr(KVConnectorFactory, "get_required_device_memory", None)
+    if reserve is None or reserve(vllm_config) < required:
+        logger.warning(
+            "%d bytes of first-rank retrieval staging (retrieve_window_bytes=%d) "
+            "are not accounted for by vLLM's automatic KV sizing: this deployment "
+            "has no whole-device memory budget guarantee and the buffer comes out "
+            "of the gpu_memory_utilization headroom. Use a vLLM with connector "
+            "memory accounting (get_required_device_memory) or set "
+            "kv_cache_memory_bytes explicitly, leaving room for the staging buffer.",
+            required,
+            lmcache_get_or_create_config(vllm_config).retrieve_window_bytes,
+        )
 
 
 def create_lmcache_ec_config() -> LMCacheEngineConfig:
