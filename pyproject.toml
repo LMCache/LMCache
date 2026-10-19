@@ -46,7 +46,6 @@ dynamic = ["dependencies", "optional-dependencies", "version"]
 
 [project.scripts]
 lmcache="lmcache.cli.main:main"
-lmcache_server="lmcache.v1.server.__main__:main"
 lmcache_controller="lmcache.v1.api_server.__main__:main"
 
 [project.urls]
