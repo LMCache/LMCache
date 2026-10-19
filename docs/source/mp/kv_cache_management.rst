@@ -3,11 +3,15 @@
 KV Cache Management
 ===================
 
-.. note::
+Current MP operations are documented with their server APIs:
 
-   The multiprocess (MP) cache-management surface (operations such as
-   ``move``, ``pin``, and ``compress``) is **coming soon**.
+- :doc:`http_api`: cache inspection, clear/delete, prefetch, quotas, and
+  runtime L2 adapter configuration.
+- :doc:`coordinator`: multi-server discovery, lookup, prefetch, pin/unpin,
+  and delete operations.
+- :doc:`/cli/kvcache`: command-line cache operations.
 
-   Until it lands, the in-process management commands are documented in the
-   :doc:`Legacy section <../legacy/index>`:
-   :doc:`../legacy/kv_cache_management/index`.
+The old controller's ``move``, ``pin``, and ``compress`` request schemas are
+separate APIs, documented in :doc:`/legacy/kv_cache_management/index`.
+Their feature set does not imply API compatibility with the MP coordinator;
+use the MP reference for the operation and storage tier being managed.

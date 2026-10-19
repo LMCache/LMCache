@@ -46,8 +46,8 @@ estimate.
    Throughput (tokens/s):                   1100.64
    ================================================
 
-Options
-~~~~~~~
+Engine Query Options
+~~~~~~~~~~~~~~~~~~~~
 
 .. list-table::
    :header-rows: 1
@@ -373,8 +373,8 @@ to it.
    lmcache query coordinator --api metrics | promtool check metrics
    lmcache query coordinator --api metrics | grep lmcache_coordinator
 
-Options
-~~~~~~~
+KV Cache Query Options
+~~~~~~~~~~~~~~~~~~~~~~
 
 .. list-table::
    :header-rows: 1

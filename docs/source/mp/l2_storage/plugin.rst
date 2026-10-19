@@ -51,7 +51,9 @@ mismatch raises ``TypeError``).
     # Config-class mode: my_plugin.l2.MyL2AdapterConfig.from_dict(adapter_params) is built and passed
     --l2-adapter '{"type": "plugin", "module_path": "my_plugin.l2", "class_name": "MyL2Adapter", "config_class_name": "MyL2AdapterConfig", "adapter_params": {"host": "localhost"}}'
 
-See ``examples/lmc_external_l2_adapter/`` for a complete reference plugin.
+For the adapter contract, config discovery, and implementation example, see
+:doc:`/developer_guide/extending_lmcache/storage_plugins`. The source tree also
+contains a complete reference plugin in ``examples/lmc_external_l2_adapter/``.
 
 ``native_plugin``
 -----------------

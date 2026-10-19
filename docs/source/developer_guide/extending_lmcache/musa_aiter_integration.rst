@@ -124,46 +124,49 @@ engine-driven compatibility path instead:
    unset LMCACHE_MUSA_HANDLE_TRANSFER
    export LMCACHE_MP_TRANSFER_MODE=engine_driven
 
-Step 5: Create an LMCache config
---------------------------------
+Step 5: Start the MP server
+---------------------------
 
-Example local CPU offload config:
-
-.. code-block:: bash
-
-   cat > /tmp/lmcache_musa_e2e.yaml <<'YAML'
-   chunk_size: 256
-   local_cpu: true
-   max_local_cpu_size: 2
-   YAML
-
-   export LMCACHE_CONFIG_FILE=/tmp/lmcache_musa_e2e.yaml
-
-Step 6: Run vLLM with LMCache
------------------------------
-
-Example vLLM server command:
+Run in a terminal on the MUSA host, using the same device visibility and
+transfer environment as the vLLM worker:
 
 .. code-block:: bash
 
-   export PYTHONPATH=$LMCACHE_SRC:$PYTHONPATH
-   export LMCACHE_CONFIG_FILE=/tmp/lmcache_musa_e2e.yaml
+   # Select an available device in the current container or host.
+   export MUSA_VISIBLE_DEVICES=0
    export LMCACHE_MUSA_NATIVE_KV_TRANSFER=1
    export LMCACHE_MUSA_HANDLE_TRANSFER=1
    export LMCACHE_MP_TRANSFER_MODE=lmcache_driven
-   export VLLM_USE_V1=1
-   export MUSA_VISIBLE_DEVICES=7
 
-   python -m vllm.entrypoints.cli.main serve /path/to/model \
-     --served-model-name qwen3-8b \
-     --host 127.0.0.1 \
-     --port 18082 \
-     --trust-remote-code \
-     --max-model-len 2048 \
-     --gpu-memory-utilization 0.35 \
-     --enforce-eager \
+   lmcache server --host 127.0.0.1 --port 5555 \
+     --chunk-size 256 --l1-size-gb 2 --eviction-policy LRU \
+     --supported-transfer-mode lmcache_driven
+
+For engine-driven transfers, use ``--supported-transfer-mode engine_driven``
+and the engine-driven environment described above in both terminals.
+
+Step 6: Start vLLM in another terminal
+--------------------------------------
+
+Use the same Python environment and ``MUSA_VISIBLE_DEVICES`` value:
+
+.. code-block:: bash
+
+   export MUSA_VISIBLE_DEVICES=0
+   export LMCACHE_MUSA_NATIVE_KV_TRANSFER=1
+   export LMCACHE_MUSA_HANDLE_TRANSFER=1
+   export LMCACHE_MP_TRANSFER_MODE=lmcache_driven
+
+   vllm serve /path/to/model \
+     --served-model-name qwen3-8b --host 127.0.0.1 --port 18082 \
+     --max-model-len 2048 --gpu-memory-utilization 0.35 --enforce-eager \
      --no-enable-prefix-caching \
-     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+     --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"127.0.0.1","lmcache.mp.port":5555}}'
+
+See :doc:`/getting_started/compatibility` for bundled and external MP
+connector loading. This MP launch uses server CLI configuration, rather than
+``local_cpu`` YAML. The old YAML and ``LMCacheConnectorV1`` launch are kept
+separately in :doc:`/legacy/developer_guide/musa_aiter_integration`.
 
 Step 7: Validate cache store and hit
 ------------------------------------

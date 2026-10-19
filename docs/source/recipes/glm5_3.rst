@@ -94,7 +94,7 @@ Compression support
    * - Method
      - Status
      - Notes
-   * - :doc:`CacheGen <../legacy/kv_cache_optimizations/compression/cachegen>`
+   * - :doc:`CacheGen <../mp/cachegen>`
      - Not validated
      -
 

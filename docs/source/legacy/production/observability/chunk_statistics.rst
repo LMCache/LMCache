@@ -289,6 +289,7 @@ Auto-Stop Configuration
 Configure automatic stopping based on time or chunk count:
 
 .. code-block:: yaml
+
     chunk_statistics_auto_exit_timeout_hours: 1.0  # Stop after 1 hour
     chunk_statistics_auto_exit_target_unique_chunks: 100000  # Stop after 100K unique chunks
 

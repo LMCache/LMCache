@@ -5,7 +5,7 @@ Internal API Server
 
 .. warning::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/http_api`.
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the related MP documentation and its separate configuration, see :doc:`/mp/http_api`.
 
 
 The ``internal_api_server`` provides HTTP APIs for managing and inspecting
@@ -18,7 +18,6 @@ the LMCache engine at runtime. APIs are organized into three categories:
 .. toctree::
    :maxdepth: 2
 
-   common_apis
    vllm_apis
    controller_apis
    dynamic_backend_management
@@ -84,3 +83,6 @@ To add a new API endpoint:
 
 The endpoint will be automatically discovered and registered on the
 next server startup.
+
+Common diagnostic and version routes are documented in the shared
+:doc:`/internal_api_server/common_apis` reference.

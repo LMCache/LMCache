@@ -5,7 +5,7 @@ vLLM / Inference APIs
 
 .. warning::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/http_api`.
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the related MP documentation and its separate configuration, see :doc:`/mp/http_api`.
 
 
 These APIs are specific to vLLM inference workers and provide cache management,
@@ -19,50 +19,9 @@ configuration, freeze control, chunk statistics, and version information.
 Version & Info
 --------------
 
-``GET /lmc_version`` — LMCache Version
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Get the LMCache library version string.
-
-- **Method**: ``GET``
-- **Path**: ``/lmc_version``
-- **Parameters**: None
-- **Response**: Plain version string.
-
-.. code-block:: bash
-
-    curl http://localhost:7000/lmc_version
-
-
-``GET /commit_id`` — LMCache Commit ID
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Get the LMCache git commit ID.
-
-- **Method**: ``GET``
-- **Path**: ``/commit_id``
-- **Parameters**: None
-- **Response**: Plain commit ID string.
-
-.. code-block:: bash
-
-    curl http://localhost:7000/commit_id
-
-
-``GET /version`` — Full Version Info
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Get full version info (version + commit ID).
-
-- **Method**: ``GET``
-- **Path**: ``/version``
-- **Parameters**: None
-- **Response**: Combined version string.
-
-.. code-block:: bash
-
-    curl http://localhost:7000/version
-
+For ``/lmc_version``, ``/commit_id``, and ``/version``, see the shared
+:doc:`/internal_api_server/common_apis` reference. The inference routes below
+require the embedded engine adapter.
 
 ``GET /inference_info`` — Inference Information
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

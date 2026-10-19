@@ -1,5 +1,5 @@
 Controller WebUI
-===============
+================
 
 .. toctree::
    :hidden:
@@ -9,7 +9,7 @@ Controller WebUI
 
 .. warning::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/coordinator`.
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the related MP documentation and its separate configuration, see :doc:`/mp/coordinator`.
 
 
 Overview
@@ -38,7 +38,7 @@ After starting the controller, access the WebUI at:
     http://localhost:9000/
 
 Configuration Options
--------------------
+---------------------
 
 - ``--host``: Bind address for the API server (default: 0.0.0.0)
 - ``--port``: Port for the API server (default: 9000)
@@ -58,7 +58,7 @@ The Controller Dashboard provides:
 - Environment variables inspection
 
 Related Documentation
---------------------
+---------------------
 
 - :doc:`/legacy/api_reference/configurations` - Complete configuration reference
 - :doc:`/legacy/kv_cache_management/index` - KV cache management guide

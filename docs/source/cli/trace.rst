@@ -119,8 +119,8 @@ retrieve misses.
    host, and StorageManager reads/writes are async. Treat retrieve-miss
    counts as a signal about the replay environment, not a defect in the trace.
 
-Options
-~~~~~~~
+Replay Options
+~~~~~~~~~~~~~~
 
 .. list-table::
    :header-rows: 1
@@ -183,8 +183,8 @@ already admitted) and stale (an incarnation it had already moved past).
    Registering a recorded server replaces a live one's registration, and
    the coordinator would address the live server at the recorded address.
 
-Options
-~~~~~~~
+Event Query Options
+~~~~~~~~~~~~~~~~~~~
 
 .. list-table::
    :header-rows: 1

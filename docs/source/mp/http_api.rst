@@ -262,7 +262,7 @@ compatibility with the vLLM-embedded API server.
      - Prometheus exposition format.
    * - POST
      - ``/metrics/reset``
-     - Reset all observability metrics to their initial state.
+     - Reset the legacy Prometheus instruments; MP OTel counters are unaffected.
 
 **Diagnostics and debugging**
 
@@ -293,7 +293,7 @@ compatibility with the vLLM-embedded API server.
      - Dump process environment variables (JSON body, ``text/plain``).
    * - POST
      - ``/run_script``
-     - Execute an uploaded Python script in a restricted sandbox.
+     - Execute an uploaded Python script with restricted builtins.
        Disabled by default; requires ``--run-script-api-enabled``.
 
 Liveness and Health
@@ -1464,9 +1464,9 @@ metrics body.
 ``POST /metrics/reset``
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-Resets all LMCache observability metrics to their initial state
-(``reset_observability_metrics``). Intended for test harnesses and
-benchmarks — not for production.
+Calls ``reset_observability_metrics()`` to reset the legacy Prometheus
+instruments. MP OpenTelemetry counters are unaffected. This endpoint is
+intended for legacy metric tests and benchmarks.
 
 **Response** (``200 OK``, ``text/plain``):
 
@@ -1730,9 +1730,10 @@ piped directly to a terminal.
 
 .. warning::
 
-   The payload contains **every** environment variable, including any
-   secrets injected via the environment. There is no redaction or auth —
-   restrict network access to this endpoint in production.
+   ``LMCACHE_HTTP_API_KEY`` is redacted, but other secrets injected via
+   environment variables may still appear. When HTTP API authentication is
+   configured, this route requires a valid bearer key; restrict access to
+   trusted operators.
 
 **Response** (``200 OK``, ``text/plain``):
 
@@ -1829,3 +1830,13 @@ including its router from a group module under ``http_apis/`` (as
 When adding a new endpoint, please also add a matching section to this
 page documenting the endpoint's purpose, request/response schema, and
 an example ``curl`` invocation.
+
+
+Shared diagnostic reference
+---------------------------
+
+Detailed common-route and version reference:
+:doc:`/internal_api_server/common_apis`. Periodic-thread diagnostics are
+shared by both modes: :doc:`/production/observability/periodic_thread_api`.
+``POST /metrics/reset`` resets the legacy Prometheus instruments only; it
+does not reset MP OpenTelemetry counters.

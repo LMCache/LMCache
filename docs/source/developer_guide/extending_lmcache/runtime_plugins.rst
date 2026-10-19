@@ -13,7 +13,34 @@ Key Use Cases
 
 Configuration
 -------------
-Runtime plugins are configured through environment variables and configuration files:
+
+Runtime plugins work in both modes through ``RuntimePluginLauncher``.
+The MP HTTP server wraps it with ``MPRuntimePluginLauncher``.
+
+Multiprocess server
+~~~~~~~~~~~~~~~~~~~
+
+Launch from the LMCache source root to use the bundled examples:
+
+.. code-block:: bash
+
+   lmcache server --l1-size-gb 10 --eviction-policy LRU \
+     --runtime-plugin-locations examples/mp_runtime_plugins/
+
+Plugins receive ``LMCACHE_RUNTIME_PLUGIN_CONFIG`` as aggregated JSON with
+``mp_config``, ``storage_manager_config``, ``obs_config``, and, when provided,
+``http_config`` sections. ``--runtime-plugin-config`` adds a
+``runtime_plugin_extra_config`` section to that JSON. MP has no scheduler or
+worker roles: the role is empty, the worker ID is 0, and the worker count is 1.
+Filename role and worker filters are disabled in this mode. See
+:doc:`/mp/configuration` for the server options.
+
+In-process engine
+~~~~~~~~~~~~~~~~~
+
+The deprecated in-process integration passes a single ``LMCacheEngineConfig``
+JSON and uses the role and worker filters described below.
+
 
 Environment Variables:
 - ``LMCACHE_RUNTIME_PLUGIN_ROLE``: Process role (e.g., ``SCHEDULER``, ``WORKER``)
@@ -33,7 +60,7 @@ Configuration File (``lmcache.yaml``):
 
 Runtime Plugin Naming Convention
 --------------------------------
-Plugin filenames determine execution targets:
+For the in-process launcher, plugin filenames determine execution targets:
 
 Role-Specific Plugins:
 - Format: ``<ROLE>[_<WORKER_ID>][_<DESCRIPTION>].<EXTENSION>``
@@ -69,13 +96,13 @@ Example Runtime Plugins
 -----------------------
 Python Plugin (``scheduler_foo_plugin.py``):
 
-.. literalinclude:: ../../../../examples/plugins/scheduler_foo_plugin.py
+.. literalinclude:: ../../../../examples/runtime_plugins/scheduler_foo_plugin.py
    :language: python
    :linenos:
 
 Bash Plugin (``all_plugin.sh``):
 
-.. literalinclude:: ../../../../examples/plugins/all_plugin.sh
+.. literalinclude:: ../../../../examples/runtime_plugins/all_plugin.sh
    :language: bash
    :linenos:
 

@@ -3,12 +3,14 @@
 Common APIs
 ===========
 
-.. warning::
+These diagnostics are shared by the MP HTTP frontend and the deprecated
+in-process scheduler, worker, and controller API servers. The MP server imports
+the common routers from ``lmcache.v1.internal_api_server.common``.
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/http_api`.
-
-
-Common APIs are available across all components (scheduler, worker, controller).
+Examples use the MP HTTP address ``http://localhost:8080``. Start it with
+``lmcache server --l1-size-gb 10 --eviction-policy LRU``; see
+:doc:`/mp/http_api` for authentication and deployment configuration. For an
+in-process worker, substitute its configured API port (normally 7000).
 
 .. contents:: Endpoints
    :local:
@@ -18,7 +20,8 @@ Common APIs are available across all components (scheduler, worker, controller).
 ``GET /env`` — Environment Variables
 -------------------------------------
 
-Get all environment variables of the running process.
+Get environment variables of the running process. Secret values such as the
+HTTP API key are redacted by the endpoint.
 
 - **Method**: ``GET``
 - **Path**: ``/env``
@@ -27,7 +30,7 @@ Get all environment variables of the running process.
 
 .. code-block:: bash
 
-    curl http://localhost:7000/env
+    curl http://localhost:8080/env
 
 **Example Response**:
 
@@ -65,13 +68,13 @@ Get or set the log level for Python loggers. Behavior depends on query parameter
 .. code-block:: bash
 
     # List all loggers
-    curl http://localhost:7000/loglevel
+    curl http://localhost:8080/loglevel
 
     # Get a specific logger level
-    curl "http://localhost:7000/loglevel?logger_name=lmcache.v1.cache_engine"
+    curl "http://localhost:8080/loglevel?logger_name=lmcache.v1.cache_engine"
 
     # Set a specific logger level
-    curl "http://localhost:7000/loglevel?logger_name=lmcache.v1.cache_engine&level=DEBUG"
+    curl "http://localhost:8080/loglevel?logger_name=lmcache.v1.cache_engine&level=DEBUG"
 
 **Example Response** (list all):
 
@@ -112,13 +115,15 @@ Get Prometheus metrics data in the standard exposition format.
 
 .. code-block:: bash
 
-    curl http://localhost:7000/metrics
+    curl http://localhost:8080/metrics
 
 
 ``POST /metrics/reset`` — Reset Prometheus Metrics
 ----------------------------------------------------
 
-Reset all Prometheus metrics to their initial state.
+Reset the legacy ``lmcache`` observability metrics. This endpoint calls
+``reset_observability_metrics()``; it does not reset MP OpenTelemetry counters.
+For MP metric export and lifecycle, see :doc:`/mp/observability/metrics`.
 
 - **Method**: ``POST``
 - **Path**: ``/metrics/reset``
@@ -127,7 +132,7 @@ Reset all Prometheus metrics to their initial state.
 
 .. code-block:: bash
 
-    curl -X POST http://localhost:7000/metrics/reset
+    curl -X POST http://localhost:8080/metrics/reset
 
 
 ``GET /threads`` — Thread Information
@@ -151,13 +156,13 @@ Get information about active threads with optional filtering.
 .. code-block:: bash
 
     # Get all threads
-    curl http://localhost:7000/threads
+    curl http://localhost:8080/threads
 
     # Filter by name
-    curl "http://localhost:7000/threads?name=api-server"
+    curl "http://localhost:8080/threads?name=api-server"
 
     # Filter by thread ID
-    curl "http://localhost:7000/threads?thread_id=12345"
+    curl "http://localhost:8080/threads?thread_id=12345"
 
 
 ``GET /periodic-threads`` — Periodic Thread Status
@@ -182,13 +187,13 @@ Get information about registered periodic threads.
 .. code-block:: bash
 
     # Get all periodic threads
-    curl http://localhost:7000/periodic-threads
+    curl http://localhost:8080/periodic-threads
 
     # Filter by level
-    curl "http://localhost:7000/periodic-threads?level=critical"
+    curl "http://localhost:8080/periodic-threads?level=critical"
 
     # Only running threads
-    curl "http://localhost:7000/periodic-threads?running_only=true"
+    curl "http://localhost:8080/periodic-threads?running_only=true"
 
 **Example Response**:
 
@@ -244,7 +249,7 @@ Get detailed information about a specific periodic thread by name.
 
 .. code-block:: bash
 
-    curl http://localhost:7000/periodic-threads/heartbeat
+    curl http://localhost:8080/periodic-threads/heartbeat
 
 **Error Response** (not found, HTTP 404):
 
@@ -268,7 +273,7 @@ Quick health check for periodic threads. Returns healthy status if all
 
 .. code-block:: bash
 
-    curl http://localhost:7000/periodic-threads-health
+    curl http://localhost:8080/periodic-threads-health
 
 **Example Response** (healthy):
 
@@ -308,12 +313,13 @@ Quick health check for periodic threads. Returns healthy status if all
    ``app`` object and any allowed imports, treat it as full remote code
    execution. It is therefore **disabled by default** (requests return
    ``404``); enable it explicitly with ``run_script_api_enabled``
-   (``LMCACHE_RUN_SCRIPT_API_ENABLED=true``) and only on a trusted network.
+   (``LMCACHE_RUN_SCRIPT_API_ENABLED=true``) for in-process mode, or
+   ``--run-script-api-enabled`` on the MP server, and only on a trusted network.
 
-Upload and execute a Python script in a restricted sandbox environment.
+Upload and execute a Python script with restricted builtins.
 The script has access to ``app`` (the FastAPI application instance) and
 a limited set of builtins. Import is restricted to modules configured
-in ``script_allowed_imports``.
+in ``script_allowed_imports`` (in-process) or ``--script-allowed-imports`` (MP).
 
 - **Method**: ``POST``
 - **Path**: ``/run_script``
@@ -331,25 +337,19 @@ in ``script_allowed_imports``.
 
 .. code-block:: bash
 
-    curl -X POST http://localhost:7000/run_script \
+    curl -X POST http://localhost:8080/run_script \
       -F "script=@/path/to/scratch.py"
 
 **Example Script** (``scratch.py``):
 
 .. code-block:: python
 
-    lmcache_engine = app.state.lmcache_adapter.lmcache_engine
+    # MP server: report the standalone engine state.
+    result = app.state.engine.report_status()
 
-    result = {
-        "is_first_rank": lmcache_engine.metadata.is_first_rank(),
-        "model_version": lmcache_engine.metadata.kv_shape,
-    }
-
-**Example Response**:
-
-.. code-block:: text
-
-    {'is_first_rank': True, 'model_version': (27, 1, 64, 1, 576)}
+On an in-process worker, the engine instead lives at
+``app.state.lmcache_adapter.lmcache_engine``. Scripts accessing that adapter
+are specific to the deprecated embedded API server.
 
 **Error Response** (no script, HTTP 400):
 
@@ -362,3 +362,53 @@ in ``script_allowed_imports``.
 .. code-block:: text
 
     Error executing script: Import of 'os' is not allowed
+
+
+Version Information
+-------------------
+
+These routes are also shared with the MP server via its info router.
+
+``GET /lmc_version`` — LMCache Version
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Get the LMCache library version string.
+
+- **Method**: ``GET``
+- **Path**: ``/lmc_version``
+- **Parameters**: None
+- **Response**: Plain version string.
+
+.. code-block:: bash
+
+    curl http://localhost:8080/lmc_version
+
+
+``GET /commit_id`` — LMCache Commit ID
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Get the LMCache git commit ID.
+
+- **Method**: ``GET``
+- **Path**: ``/commit_id``
+- **Parameters**: None
+- **Response**: Plain commit ID string.
+
+.. code-block:: bash
+
+    curl http://localhost:8080/commit_id
+
+
+``GET /version`` — Full Version Info
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Get full version info (version + commit ID).
+
+- **Method**: ``GET``
+- **Path**: ``/version``
+- **Parameters**: None
+- **Response**: Combined version string.
+
+.. code-block:: bash
+
+    curl http://localhost:8080/version
