@@ -67,6 +67,16 @@ arenas. Each arena owns its own file descriptor, `mmap` (`MAP_SHARED`), flat
 arena-local address space, plus a best-effort CUDA host-memory pin and a
 lifecycle state.
 
+Each arena maps `[offset, offset + size)` of its device (`mmap(..., offset=)`),
+with `offset` defaulting to 0. The offset exists so that several LMCache
+servers can share one CXL device by mapping disjoint ranges, and so that one
+pool can hold several ranges of the same device. The allocator validates that
+the offset is a non-negative multiple of `mmap.ALLOCATIONGRANULARITY` and, when
+`fstat` reports a size, that `offset + size` fits; character devices report
+size 0, so the kernel enforces device bounds and alignment (usually 2 MiB) at
+`mmap` time. Nothing coordinates offsets between servers: the operator owns the
+partitioning, as with any shared device.
+
 Allocation order:
 
 1. DRAM local allocator first, if present (hybrid mode).
@@ -109,15 +119,18 @@ The manager and allocator expose the same return values. The manager translates
 request-validation and pre-transition state failures into
 `L1ReconfigureError` from `lmcache.v1.distributed.error` for the HTTP layer:
 
-- `add_device(device_path, size_in_bytes) -> DevDaxArenaStatus`
-- `remove_device(device_path, mode=DevDaxRemoveMode.DRAIN) -> DevDaxArenaStatus`
+- `add_device(device_path, size_in_bytes, offset_in_bytes=0) -> DevDaxArenaStatus`
+- `remove_device(device_path, mode=DevDaxRemoveMode.DRAIN, offset_in_bytes=0)
+  -> DevDaxArenaStatus`
 - `arena_statuses()` on the allocator / `get_arena_statuses()` on the manager,
   returning `list[DevDaxArenaStatus]` in pool order.
 
 Add:
 
-1. Validate the non-empty path, positive size, open allocator, and that the
-   same path is not already registered.
+1. Validate the non-empty path, positive size, page-aligned offset, open
+   allocator, and that `[offset, offset + size)` does not overlap a range
+   already mapped from the same physical device (compared by `st_rdev` /
+   inode, so aliases count). Disjoint ranges of one device are allowed.
 2. Open the device read-write, check capacity when `fstat.st_size` is positive,
    and map it with `mmap(MAP_SHARED, RW)`. Build a `TensorMemoryAllocator` and
    best-effort pin it.
@@ -168,6 +181,8 @@ l1 = L1Manager(
             use_lazy=False,
             shm_name="",
             devdax_path="/dev/dax0.0",
+            # Second server on the same device: map the next 32 GiB.
+            devdax_offset_in_bytes=32 << 30,
         )
     )
 )
@@ -200,10 +215,12 @@ while the path is still draining is safe and returns the current status; once
 the arena has been unmapped the path is no longer known and a repeat raises the
 404-mapped lookup error.
 
-`add_device` rejects a physical device that is already mapped, including its
-aliases, and `remove_device` rejects the primary arena (the initial device in
-pure Device-DAX mode). Status and removal use the exact path supplied when
-adding the arena.
+`add_device` rejects a range that overlaps one already mapped from the same
+physical device, including through aliases, and `remove_device` rejects the
+primary arena (the initial device in pure Device-DAX mode). An arena is
+identified by the `(device_path, offset_in_bytes)` pair exactly as supplied when
+it was added; status and removal take the same pair, with the offset defaulting
+to 0, and a pair that matches nothing is a 404.
 
 The manager translates request conflicts into `L1ReconfigureError` (409, or
 404 for an unregistered path). Devices must already be provisioned with the

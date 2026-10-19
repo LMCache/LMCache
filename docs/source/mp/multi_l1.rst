@@ -70,7 +70,10 @@ TTLs must be positive integers. Unknown fields are rejected.
        see :doc:`configuration`). Shared memory and
        hugepages require eager allocation. Shared-memory names must be unique.
    * - ``DEVDAX``
-     - Required ``path``; the allocator checks mapping size and device alignment.
+     - Required ``path``; optional ``offset_gb`` (0), the offset into the
+       device where the mapping starts, so several servers can share one
+       device with disjoint ranges. The allocator checks that the range fits
+       the device and that the offset is page aligned.
    * - ``GDS``
      - Required ``path``; ``backend`` (``auto``), ``direct_io`` (true).
        See :doc:`configuration` for backend requirements and location semantics.

@@ -389,6 +389,14 @@ single-L1 interface. For placing L1 on CXL-attached memory see
        ``--l1-devdax-path /dev/dax0.0 --l1-size-gb 512 --no-l1-use-lazy
        --shm-name ""``; find the node for a CXL region with ``daxctl list``.
        See *Device-DAX / CXL L1* below.
+   * - ``--l1-devdax-offset-gb``
+     - ``0``
+     - Offset into ``--l1-devdax-path``, in GiB, where the L1 mapping starts.
+       Lets several LMCache servers share one CXL device by mapping disjoint
+       ranges, for example offset 0 and 512 with ``--l1-size-gb 512`` each.
+       The mapping must fit in the device, land on a page boundary, and follow
+       the device alignment (usually 2 MiB) the kernel enforces.
+       ``--l1-manager`` key: ``offset_gb``.
    * - ``--l1-mlock``
      - ``False``
      - ROCm only. ``mlock`` the DRAM L1 so memory compaction cannot migrate
@@ -404,13 +412,15 @@ L1 can live on CXL or persistent memory exposed as a Device-DAX node
 allocates KV objects inside the mapping. The index is in server memory, so
 the tier restarts empty.
 
-**Device path and offset.** The mapping always starts at **offset 0** of the
-device and covers the configured size; there is no offset knob. One device
-therefore backs one L1 arena. Two servers or managers given the same node,
-or two nodes that alias the same physical CXL range, write over each other.
-The device must be in ``devdax`` mode (CXL memory is often onlined as
-``system-ram``), the mapped size must not exceed its capacity, and it should
-be a multiple of the device alignment (usually 2 MiB):
+**Device path and offset.** The mapping covers ``[offset, offset + size)``
+of the device, with the offset defaulting to 0. Several servers can share
+one CXL device by giving each a disjoint range: ``--l1-devdax-offset-gb``
+in the legacy form, ``offset_gb`` in the tagged form. LMCache does not
+coordinate offsets between servers; overlapping ranges, or two nodes that
+alias the same physical CXL range, write over each other. The device must
+be in ``devdax`` mode (CXL memory is often onlined as ``system-ram``), the
+range must fit its capacity, and offset and size should be multiples of the
+device alignment (usually 2 MiB):
 
 .. code-block:: bash
 
@@ -420,26 +430,28 @@ be a multiple of the device alignment (usually 2 MiB):
    ls -l /dev/dax0.0                             # path to pass to LMCache
 
 **Tagged form (recommended).** ``size_gb`` is mapped from ``path`` starting
-at offset 0; there is no implicit DRAM pool. Set every L2 adapter's
-``affinity_tag`` in a Device-DAX-only server, since the default
-``_default`` means DRAM:
+at ``offset_gb`` (default 0); there is no implicit DRAM pool. Set every L2
+adapter's ``affinity_tag`` in a Device-DAX-only server, since the default
+``_default`` means DRAM. This is the second of two servers sharing a 1 TiB
+device:
 
 .. code-block:: bash
 
    lmcache server --chunk-size 256 --eviction-policy LRU --port 6555 \
-       --l1-manager '{"type":"DEVDAX","tag":"cxl","size_gb":512,"path":"/dev/dax0.0"}' \
+       --l1-manager '{"type":"DEVDAX","tag":"cxl","size_gb":512,"offset_gb":512,"path":"/dev/dax0.0"}' \
        --l2-adapter '{"type":"fs","base_path":"/mnt/archive/lmcache","affinity_tag":"cxl"}'
 
 List a ``DRAM`` manager first to spill into CXL only on ``OUT_OF_MEMORY``.
 Schema in :doc:`multi_l1`.
 
-**Legacy form.** ``--l1-size-gb`` is the mapped size; lazy allocation and
-SHM must be off:
+**Legacy form.** ``--l1-size-gb`` is the mapped size and
+``--l1-devdax-offset-gb`` where it starts; lazy allocation and SHM must be
+off:
 
 .. code-block:: bash
 
    lmcache server --chunk-size 256 --eviction-policy LRU --port 6555 \
-       --l1-devdax-path /dev/dax0.0 --l1-size-gb 512 \
+       --l1-devdax-path /dev/dax0.0 --l1-size-gb 512 --l1-devdax-offset-gb 512 \
        --no-l1-use-lazy --shm-name ""
 
 Hybrid DRAM + Device-DAX has no overflow flag: a ``dax`` L2 adapter whose
@@ -453,11 +465,11 @@ the DRAM half.
 pinning of the mapping is best-effort; check the startup log for a
 fallback to pageable copies.
 
-**Runtime changes and limits.** With the legacy interface, whole devices
+**Runtime changes and limits.** With the legacy interface, whole ranges
 can be added and drained while serving via
-``/reconfigure/dax/l1/{status,add,remove}`` (:doc:`http_api`); the initial
-device is the primary arena and cannot be removed, and tagged multi-L1
-topologies are fixed at startup. P2P, NIXL, and Mooncake-over-RDMA L2
+``/reconfigure/dax/l1/{status,add,remove}`` (:doc:`http_api`), each with
+its own ``offset``; the initial range is the primary arena and cannot be
+removed, and tagged multi-L1 topologies are fixed at startup. P2P, NIXL, and Mooncake-over-RDMA L2
 adapters are unsupported because they need one contiguous L1 region; the
 SHM transfer channel is disabled; GDS L1 and ``--l1-mlock`` cannot be
 combined with it. For a persistent Device-DAX tier use the L2 adapter in

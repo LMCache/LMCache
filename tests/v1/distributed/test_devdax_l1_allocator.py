@@ -217,6 +217,22 @@ def test_devdax_config_accepts_explicit_lazy_and_shm_disable(tmp_path):
     assert cfg.shm_name == ""
 
 
+def test_devdax_config_validates_offset(tmp_path):
+    path = _make_mmap_file(tmp_path)
+    kwargs = dict(size_in_bytes=4096, use_lazy=False, shm_name="", devdax_path=path)
+
+    with pytest.raises(ValueError, match="devdax_offset_in_bytes must be >= 0"):
+        L1MemoryManagerConfig(**kwargs, devdax_offset_in_bytes=-4096)
+    with pytest.raises(ValueError, match="multiple of"):
+        L1MemoryManagerConfig(**kwargs, devdax_offset_in_bytes=1)
+    with pytest.raises(ValueError, match="requires devdax_path"):
+        L1MemoryManagerConfig(
+            size_in_bytes=4096, use_lazy=False, shm_name="", devdax_offset_in_bytes=4096
+        )
+    config = L1MemoryManagerConfig(**kwargs, devdax_offset_in_bytes=2 * 4096)
+    assert config.devdax_offset_in_bytes == 2 * 4096
+
+
 @pytest.mark.parametrize(
     ("adapter_name", "adapter_config"),
     [
@@ -276,6 +292,65 @@ def test_devdax_allocator_uses_mmap_backing_file(tmp_path):
 
     with open(path, "rb") as f:
         assert f.read(4096) == bytes([0x5A]) * 4096
+
+
+def test_devdax_allocator_maps_at_offset(tmp_path):
+    """Bytes land at ``offset`` in the device; the prefix stays untouched."""
+    path = _make_mmap_file(tmp_path, size=1024 * 1024)
+    offset = 256 * 1024
+    allocator = DevDaxMemoryAllocator(
+        size=64 * 1024, device_path=path, align_bytes=4096, offset=offset
+    )
+    (status,) = allocator.arena_statuses()
+    assert (status.offset_in_bytes, status.size_in_bytes) == (offset, 64 * 1024)
+
+    objs = allocator.batched_allocate(torch.Size([4096]), torch.uint8, 1)
+    assert objs is not None
+    objs[0].raw_tensor.fill_(0xA5)
+    allocator.batched_free(objs)
+    del objs
+    gc.collect()
+    allocator.close()
+
+    with open(path, "rb") as f:
+        assert f.read(offset) == bytes(offset)
+        assert f.read(4096) == bytes([0xA5]) * 4096
+
+
+def test_devdax_allocators_share_one_device_at_disjoint_offsets(tmp_path):
+    """Two independent pools (two servers) on one device do not clobber."""
+    path = _make_mmap_file(tmp_path, size=64 * 1024)
+    first = DevDaxMemoryAllocator(size=16 * 1024, device_path=path, align_bytes=4096)
+    second = DevDaxMemoryAllocator(
+        size=16 * 1024, device_path=path, align_bytes=4096, offset=32 * 1024
+    )
+    a = first.batched_allocate(torch.Size([4096]), torch.uint8, 1)
+    b = second.batched_allocate(torch.Size([4096]), torch.uint8, 1)
+    assert a is not None and b is not None
+    a[0].raw_tensor.fill_(0x11)
+    b[0].raw_tensor.fill_(0x22)
+    assert int(a[0].raw_tensor[0]) == 0x11
+    first.batched_free(a)
+    second.batched_free(b)
+    del a, b
+    gc.collect()
+    first.close()
+    second.close()
+
+    with open(path, "rb") as f:
+        data = f.read()
+    assert data[:4096] == bytes([0x11]) * 4096
+    assert data[32 * 1024 : 32 * 1024 + 4096] == bytes([0x22]) * 4096
+
+
+def test_devdax_allocator_rejects_invalid_offsets(tmp_path):
+    path = _make_mmap_file(tmp_path, size=16 * 1024)
+    with pytest.raises(ValueError, match="offset must be >= 0"):
+        DevDaxMemoryAllocator(size=4096, device_path=path, offset=-4096)
+    with pytest.raises(ValueError, match="multiple of"):
+        DevDaxMemoryAllocator(size=4096, device_path=path, offset=1)
+    with pytest.raises(RuntimeError, match="exceeds"):
+        DevDaxMemoryAllocator(size=8192, device_path=path, offset=12 * 1024)
 
 
 def test_devdax_allocator_registers_cuda_host_mapping(tmp_path, monkeypatch):
@@ -882,6 +957,45 @@ def test_cli_parses_l1_devdax_path(tmp_path):
     assert mem_cfg.devdax_path == path
     assert mem_cfg.use_lazy is False
     assert mem_cfg.shm_name == ""
+
+
+def test_cli_parses_l1_devdax_offset_gb(tmp_path):
+    path = _make_mmap_file(tmp_path)
+    config = _parse_mp_storage_args(
+        [
+            "--l1-size-gb",
+            "1",
+            "--eviction-policy",
+            "LRU",
+            "--no-l1-use-lazy",
+            "--shm-name",
+            "",
+            "--l1-devdax-path",
+            path,
+            "--l1-devdax-offset-gb",
+            "0.5",
+        ]
+    )
+
+    mem_cfg = config.l1_manager_config.memory_config
+    assert mem_cfg.devdax_offset_in_bytes == 512 * 1024 * 1024
+
+    with pytest.raises(ValueError, match="multiple of"):
+        _parse_mp_storage_args(
+            [
+                "--l1-size-gb",
+                "1",
+                "--eviction-policy",
+                "LRU",
+                "--no-l1-use-lazy",
+                "--shm-name",
+                "",
+                "--l1-devdax-path",
+                path,
+                "--l1-devdax-offset-gb",
+                "0.0000001",
+            ]
+        )
 
 
 def test_cli_rejects_devdax_l1_with_gds_l1(tmp_path):
@@ -1531,6 +1645,55 @@ def test_add_device_validates_arguments(tmp_path):
     with pytest.raises(L1ReconfigureError, match="size_in_bytes"):
         manager.add_device(str(tmp_path / "unused.bin"), 0)
 
+    manager.close()
+
+
+def test_add_device_same_path_requires_disjoint_ranges(tmp_path):
+    """One device may back several arenas as long as the ranges are disjoint."""
+    primary = _make_mmap_file(tmp_path, size=16 * 4096, name="shared.bin")
+    manager = _pure_devdax_manager(primary)
+
+    added = manager.add_device(primary, 4096, offset_in_bytes=4096)
+    assert (added.device_path, added.offset_in_bytes) == (primary, 4096)
+
+    with pytest.raises(L1ReconfigureError, match="overlaps") as overlap:
+        manager.add_device(primary, 2 * 4096, offset_in_bytes=0)
+    assert overlap.value.status_code == 409
+    with pytest.raises(L1ReconfigureError, match="already mapped"):
+        manager.add_device(primary, 4096, offset_in_bytes=4096)
+    with pytest.raises(L1ReconfigureError, match="multiple of"):
+        manager.add_device(primary, 4096, offset_in_bytes=4096 + 1)
+
+    manager.add_device(primary, 4096, offset_in_bytes=8 * 4096)
+    assert [s.offset_in_bytes for s in manager.get_arena_statuses()] == [
+        0,
+        4096,
+        8 * 4096,
+    ]
+    manager.close()
+
+
+def test_remove_and_status_identify_arena_by_path_and_offset(tmp_path):
+    """``(device_path, offset)`` names an arena; the offset defaults to 0."""
+    primary = _make_mmap_file(tmp_path, size=16 * 4096, name="shared.bin")
+    manager = _pure_devdax_manager(primary)
+    manager.add_device(primary, 4096, offset_in_bytes=4096)
+    manager.add_device(primary, 4096, offset_in_bytes=2 * 4096)
+
+    # Offset 0 is the primary arena, so the default addresses it.
+    with pytest.raises(L1ReconfigureError, match="primary") as exc_info:
+        manager.remove_device(primary)
+    assert exc_info.value.status_code == 409
+    assert manager.get_arena_status(primary).offset_in_bytes == 0
+    with pytest.raises(L1ReconfigureError, match="offset 12288") as missing:
+        manager.remove_device(primary, offset_in_bytes=3 * 4096)
+    assert missing.value.status_code == 404
+
+    removed = manager.remove_device(primary, offset_in_bytes=2 * 4096)
+    assert removed.state is DevDaxArenaState.REMOVED
+    assert removed.offset_in_bytes == 2 * 4096
+    assert manager.get_arena_status(primary, 4096).state is DevDaxArenaState.ACTIVE
+    assert len(manager.get_arena_statuses()) == 2
     manager.close()
 
 
