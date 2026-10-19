@@ -999,3 +999,96 @@ def test_restored_pins_on_other_groups_merge_into_one_entry():
     assert ctrl.filter_unpinned([k]) == []  # one of the two pins remains
     ctrl.unpin([k])
     assert ctrl.filter_unpinned([k]) == [k]
+
+
+# -- Stats ---------------------------------------------------------------------
+
+
+def _dispatch_handler(status: int):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={})
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_stats_count_sweeps_selections_and_delete_results():
+    ctrl, qs, kd = _setup(eviction_ratio=1.0, instances=(_instance("mp-1"),))
+    qs.set_quota("alice", 0)
+    _store(ctrl, kd, _make_key("alice", h="aa"), 100)
+    _store(ctrl, kd, _make_key("bob", h="bb"), 50)  # no explicit quota
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_dispatch_handler(200))
+    ) as client:
+        await ctrl.execute_evictions(client)
+        await ctrl.wait_for_in_flight_dispatches()
+
+    l2 = ctrl.stats().tiers["l2"]
+    assert l2.sweeps == {"idle": 0, "planned": 1, "no_target": 0}
+    assert l2.keys_selected == {"alice": 1, "_other": 1}
+    assert l2.bytes_selected == {"alice": 100, "_other": 50}
+    assert l2.delete_requests_sent == {"any_server": {"ok": 1, "error": 0}}
+
+
+@pytest.mark.asyncio
+async def test_stats_count_idle_sweeps_and_sweeps_with_no_server():
+    ctrl, qs, kd = _setup(eviction_ratio=1.0)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_dispatch_handler(200))
+    ) as client:
+        await ctrl.execute_evictions(client)
+        qs.set_quota("alice", 0)
+        _store(ctrl, kd, _make_key("alice"), 100)
+        await ctrl.execute_evictions(client)
+
+    l2 = ctrl.stats().tiers["l2"]
+    assert l2.sweeps == {"idle": 1, "planned": 0, "no_target": 1}
+    assert l2.delete_requests_skipped == {"no_server": 1}
+
+
+@pytest.mark.asyncio
+async def test_stats_count_failed_deletes():
+    ctrl, qs, kd = _setup(eviction_ratio=1.0, instances=(_instance("mp-1"),))
+    qs.set_quota("alice", 0)
+    _store(ctrl, kd, _make_key("alice"), 100)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_dispatch_handler(500))
+    ) as client:
+        await ctrl.execute_evictions(client)
+        await ctrl.wait_for_in_flight_dispatches()
+
+    sent = ctrl.stats().tiers["l2"].delete_requests_sent
+    assert sent == {"any_server": {"ok": 0, "error": 1}}
+
+
+def test_stats_count_pinned_keys_skipped_and_pins():
+    ctrl, qs, kd = _setup(eviction_ratio=1.0)
+    qs.set_quota("alice", 0)
+    pinned = _make_key("alice", h="aa")
+    _store(ctrl, kd, pinned, 100)
+    _store(ctrl, kd, _make_key("alice", h="bb"), 100)
+    ctrl.pin([pinned])
+
+    ctrl.compute_eviction_plan()
+
+    stats = ctrl.stats()
+    assert stats.tiers["l2"].keys_skipped == {"pinned": 1}
+    assert stats.keys_pinned == 1
+
+
+def test_stats_report_quota_headroom_and_tenants_due():
+    ctrl, qs, kd = _setup(default_limit_bytes=1000)
+    qs.set_quota("alice", 100)
+    qs.set_quota("carol", 500)
+    _store(ctrl, kd, _make_key("alice", h="aa"), 150)  # over its quota
+    _store(ctrl, kd, _make_key("bob", h="bb"), 20)
+    _store(ctrl, kd, _make_key("dave", h="cc"), 30)
+
+    l2 = ctrl.stats().tiers["l2"]
+
+    assert l2.tenant_bytes_used == {"alice": 150, "carol": 0, "_other": 50}
+    assert l2.tenant_bytes_limit == {"alice": 100, "carol": 500, "_other": 1000}
+    assert l2.tenants_over_watermark == 1
+    assert l2.lru_keys_tracked == 3

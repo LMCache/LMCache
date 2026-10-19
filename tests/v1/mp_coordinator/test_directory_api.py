@@ -547,3 +547,45 @@ def test_a_token_lookup_reports_every_object_group_it_is_stored_in():
     assert results["chunks"] == 1
     assert sorted(r["key"]["object_group_id"] for r in results["results"]) == [0, 1, 2]
     assert all(r["placements"] for r in results["results"])
+
+
+# -- Lookup counts -------------------------------------------------------------
+
+
+def test_prefix_lookups_are_counted_in_directory_stats():
+    with _client() as client:
+        _post_events(client, [_batch()])
+        _lookup(client, [_key("aa"), _key("bb")])
+
+        stats = client.get("/directory/stats").json()
+
+    prefix = stats["lookups"]["prefix"]
+    assert (prefix["lookups"], prefix["chunks_requested"], prefix["chunks_found"]) == (
+        1,
+        2,
+        1,
+    )
+    assert prefix["chunks_found_per_request"]["count"] == 1
+    assert stats["lookups"]["non_prefix"]["lookups"] == 0
+    assert stats["blend_lookup_enabled"] is False
+
+
+def test_blend_lookups_are_counted_as_non_prefix():
+    chunk_size = MPCoordinatorConfig().chunk_size
+    content = _chunk_tokens(1000, chunk_size)
+    with _blend_client() as client:
+        entry = {
+            "key": _key(),
+            "size_bytes": 1024,
+            "token_ids": content,
+            "token_offset": 512,
+        }
+        _post_events(client, [_batch(entries=[entry])])
+        _blend_lookup(client, [7, 8, 9] + content + [11, 12])
+
+        stats = client.get("/directory/stats").json()
+
+    non_prefix = stats["lookups"]["non_prefix"]
+    assert (non_prefix["lookups"], non_prefix["chunks_requested"]) == (1, 1)
+    assert non_prefix["chunks_found"] == 1
+    assert stats["blend_lookup_enabled"] is True

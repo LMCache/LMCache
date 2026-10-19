@@ -182,6 +182,16 @@ Prefix lookups (`/directory/lookup`) and non-prefix lookups
 (`/directory/blend-lookup`) share one set of lookup metrics, told apart by
 `lookup_type`. Both take tokens and return the chunks the fleet holds, so a
 chunk is the unit for both; a lookup by keys counts each key as one chunk.
+The two lookup endpoints count each request they serve through
+`KeyDirectory.record_lookup`; counting inside `lookup()` would also count the
+coordinator's own lookups (eviction routing, deletes).
+
+**Histograms.** OpenTelemetry has no instrument read at scrape time for a
+histogram, so a component keeps a `Histogram` (fixed bucket bounds, counts,
+sum, count) in its `stats()`, and `observability.py` exports it as
+`<name>_bucket` (cumulative, labelled `le`), `<name>_sum` and `<name>_count`
+counters. `histogram_quantile` works on them as on a native histogram; in
+Prometheus each carries the counter's `_total` suffix.
 
 **Requirement: keep these counts as you go (P0).** The directory gauges call
 `KeyDirectory.stats()` on every scrape, and it holds the directory's and the
@@ -209,10 +219,14 @@ skips keys no server can delete. So controller metrics follow three rules:
 - **A replacement may add, never rename.** It can add label values
   (`tier="l1"`, `reason="unreachable"`) and new metrics under the same role. It
   must emit every metric the built-in one does.
-- **Names are part of the versioned contract.** Upstream keeps the names,
-  labels and bucket boundaries as constants in `mp_coordinator/observability.py`;
-  the private package imports them. Its `vX.Y.Z` targets LMCache `vX.Y.Z`, so a
-  rename is a breaking change for both.
+- **Names are part of the versioned contract.** A controller enforcing
+  eviction returns `EvictionStats` (`controllers/eviction_stats.py`, per tier)
+  from `stats()` and calls `register_metric_source(self)`; `observability.py`
+  matches it by that stats type, not its class, and defines every name. The
+  private package fills the same type. Its `vX.Y.Z` targets LMCache `vX.Y.Z`,
+  so a change to the type is a breaking change for both.
+- **Tenants roll up.** `cache_salt` is a tenant with an explicit quota; every
+  other tenant is counted under `_other`, so series follow the quota table.
 
 A controller that runs its own loop starts it with
 `runtime.background_loops.start(...)` (from `ControllerRuntime`), named after
@@ -256,9 +270,11 @@ undoes the change and returns 503. The private controller's `/quota` and
 
 **Prefetch tracking.** The coordinator only relays prefetches today, so it
 cannot time them. To measure duration, in-flight and abandoned prefetches, it
-keeps a small in-memory table: `(instance_id, request_id)` → submit time and
-keys requested. An entry leaves on the first completed poll, a 404, the server
-leaving, or after 10 minutes (counted as abandoned). The table is as big as the
+keeps a small in-memory table: `(instance_id, request_id)` → submit time. An
+entry leaves on the first completed poll, a 404, or after 10 minutes (counted
+as abandoned; a server that left ends up here, since its prefetches are never
+polled to completion). Keys requested and found come from the completed
+poll. The table is as big as the
 number of prefetches in flight and is not checkpointed; a coordinator restart
 forgets in-flight prefetches without counting them.
 
@@ -275,6 +291,11 @@ The mp server sees that, and can report it as `lmcache_mp.prefetch_keys_used`.
 | `checkpoint_file.size_bytes` | gauge | | Checkpoint size |
 | `checkpoint_file.restored_on_start` | gauge | `outcome` = cold, restored, ignored | 1 for what happened at startup |
 | `metadata_file.writes` | counter | `result` = ok, error | Pin and quota changes not saved |
+
+`save_checkpoint` reports each write's result, phase timings and size, and
+`load_checkpoint` what startup did; a `CheckpointMonitor` keeps them for the
+metrics. A failed periodic write also fails that pass of the `checkpoint`
+background loop, so the loop metrics and `/status` show it.
 
 A failed metadata write undoes the change and returns 503, so the caller knows
 and can retry safely. Today it returns 200 and the change is lost on restart.

@@ -81,6 +81,16 @@ async def lookup_placements(
         obj_keys = directory.get_keys_across_object_groups(obj_keys)
         encoded_keys = [key.to_encoded_object_key() for key in obj_keys]
     placements = directory.lookup(obj_keys)
+    found = [
+        key
+        for key, key_placements in zip(obj_keys, placements, strict=True)
+        if key_placements
+    ]
+    # By tokens, a chunk counts once across its ranks and object groups.
+    chunks_found = len(found) if body.keys else len({key.chunk_hash for key in found})
+    directory.record_lookup(
+        "prefix", chunks_requested=chunks, chunks_found=chunks_found
+    )
     token_ids = directory.get_token_ids([key.chunk_hash for key in obj_keys])
     access_counts = directory.get_access_counts(obj_keys)
     return DirectoryLookupResponse(
@@ -119,7 +129,8 @@ async def blend_lookup(
     Returns:
         Matched chunks, ascending by query position.
     """
-    directory = get_context(request).views.get(KeyDirectory)
+    ctx = get_context(request)
+    directory = ctx.views.get(KeyDirectory)
     tokens = decode_tokens(body.tokens_b64)
     namespace = BlendNamespace(
         model_name=body.model_name,
@@ -127,8 +138,16 @@ async def blend_lookup(
         world_size=body.world_size,
     )
 
+    chunk_size = ctx.token_hasher.chunk_size
+
     def _match() -> BlendLookupResponse:
-        """Run the fragment match and shape it for the wire."""
+        """Run the fragment match, count it, and shape it for the wire."""
+        matches = directory.blend_match(tokens, namespace)
+        directory.record_lookup(
+            "non_prefix",
+            chunks_requested=len(tokens) // chunk_size,
+            chunks_found=len(matches),
+        )
         return BlendLookupResponse(
             matches=[
                 BlendMatchModel(
@@ -136,7 +155,7 @@ async def blend_lookup(
                     old_st=match.old_st,
                     cur_st=match.cur_st,
                 )
-                for match in directory.blend_match(tokens, namespace)
+                for match in matches
             ]
         )
 
