@@ -839,6 +839,17 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.save_decode_cache``
      - ``false``
      - Cache generated tokens in addition to prompt tokens.
+   * - ``lmcache.mp.unfull_chunk``
+     - ``false``
+     - Also cache the trailing partial chunk of each prompt, together with
+       the per-request compressor ring of compressed-attention models
+       (DeepSeek-V4.1, GLM-5.3, Qwen3.8-Flash-Next), so a later lookup can
+       hit up to the exact prompt end instead of the last chunk boundary.
+       A request whose ``kv_transfer_params`` set
+       ``"lmcache.temporary_unfull_chunk": true`` stores its partial chunk
+       read-once. Served from L1 only. Requires the ``lmcache_driven``
+       transfer mode; not supported with speculative decoding or
+       ``lmcache.mp.lazy_offload``.
    * - ``lmcache.mp.server_urls``
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of
