@@ -8,28 +8,26 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, TypeVar, cast
-import importlib
 import inspect
 import json
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.engine_module import EngineModule
+from lmcache.v1.multiprocess.engine_module import DiscoverableModule, EngineModule
 from lmcache.v1.multiprocess.protocols.server_module import (
     ServerModuleCallRequest,
     ServerModuleCallResponse,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 
 logger = init_logger(__name__)
 
 ExtServerModuleMethod = Callable[[bytes], bytes]
-TransportServiceRegistrar = Callable[[Any], None]
 _ServerModuleDecorated = TypeVar(
     "_ServerModuleDecorated",
     bound=Callable[..., bytes],
@@ -41,18 +39,16 @@ _ZMQ_SERVICE_REGISTRAR = "register_zmq_services"
 
 @dataclass(frozen=True)
 class ExtServerModuleSpec:
-    """Configuration for one dynamically loaded server-module factory.
+    """Configuration for explicitly importing out-of-tree module classes.
 
     Args:
-        module_path: Dotted Python import path containing the factory.
-        factory_name: Name of the callable inside ``module_path``. Defaults to
-            ``build_server_modules``.
-        config: Plugin-specific JSON-compatible configuration passed to the
-            factory in :class:`ExtServerModuleBuildContext`.
+        module_path: Dotted Python import path containing one or more concrete
+            :class:`DiscoverableModule` subclasses.
+        config: Plugin-specific JSON-compatible configuration exposed through
+            :meth:`ModuleBuildContext.config_for` to every class in the module.
     """
 
     module_path: str
-    factory_name: str = "build_server_modules"
     config: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -60,8 +56,8 @@ class ExtServerModuleSpec:
         """Create a spec from a parsed ``--server-module`` JSON object.
 
         Args:
-            data: JSON object containing ``module_path`` and optional
-                ``factory_name`` / ``config`` fields.
+            data: JSON object containing ``module_path`` and an optional
+                ``config`` field.
 
         Returns:
             A validated :class:`ExtServerModuleSpec`.
@@ -69,68 +65,21 @@ class ExtServerModuleSpec:
         Raises:
             ValueError: If the object has invalid field types.
         """
+        unknown_fields = sorted(set(data) - {"module_path", "config"})
+        if unknown_fields:
+            raise ValueError(
+                "unknown server module fields: %s" % ", ".join(unknown_fields)
+            )
+
         module_path = data.get("module_path")
         if not isinstance(module_path, str) or not module_path:
             raise ValueError("server module module_path must be a non-empty string")
-
-        factory_name = data.get("factory_name", "build_server_modules")
-        if not isinstance(factory_name, str) or not factory_name:
-            raise ValueError("server module factory_name must be a non-empty string")
 
         config = data.get("config", {})
         if not isinstance(config, dict):
             raise ValueError("server module config must be a JSON object")
 
-        return cls(
-            module_path=module_path,
-            factory_name=factory_name,
-            config=config,
-        )
-
-
-@dataclass(frozen=True)
-class ExtServerModuleBuildContext:
-    """Context passed to an out-of-tree server-module factory.
-
-    Args:
-        server_context: Shared :class:`MPCacheServerContext` used by built-in
-            modules.
-        mp_config: Parsed multiprocess server configuration.
-        coordinator_config: Parsed coordinator configuration.
-        modules: Built-in modules already assembled before this plugin runs.
-        config: Plugin-specific JSON-compatible configuration from the
-            corresponding :class:`ExtServerModuleSpec`.
-    """
-
-    server_context: MPCacheServerContext
-    mp_config: MPServerConfig
-    coordinator_config: CoordinatorConfig
-    modules: tuple[EngineModule, ...]
-    config: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class ExtServerModuleComponents:
-    """Out-of-tree server extension components returned by a factory.
-
-    Args:
-        modules: Transport-neutral business modules to compose into
-            :class:`MPCacheServer`.
-        grpc_service_registrars: Callables that register package-owned gRPC
-            services with the concrete ``grpc.Server``.
-        zmq_service_registrars: Callables that register or start package-owned
-            ZMQ services using the concrete ``MessageQueueServer``.
-    """
-
-    modules: Sequence[EngineModule] = ()
-    grpc_service_registrars: Sequence[TransportServiceRegistrar] = ()
-    zmq_service_registrars: Sequence[TransportServiceRegistrar] = ()
-
-
-ExtServerModuleFactory = Callable[
-    [ExtServerModuleBuildContext],
-    EngineModule | Sequence[EngineModule] | ExtServerModuleComponents | None,
-]
+        return cls(module_path=module_path, config=config)
 
 
 @dataclass(frozen=True)
@@ -278,60 +227,49 @@ def parse_server_module_specs(raw_specs: Sequence[str]) -> list[ExtServerModuleS
     return specs
 
 
-def load_server_module_components(
+def load_server_module_classes(
     specs: Sequence[ExtServerModuleSpec],
-    *,
-    server_context: MPCacheServerContext,
-    mp_config: MPServerConfig,
-    coordinator_config: CoordinatorConfig,
-    built_modules: Sequence[EngineModule],
-) -> ExtServerModuleComponents:
-    """Load out-of-tree modules and service registrars from factories.
+) -> list[tuple[type[DiscoverableModule], dict[str, Any]]]:
+    """Import configured out-of-tree ``DiscoverableModule`` classes.
 
     Args:
-        specs: Dynamic extension factories to load.
-        server_context: Shared server context passed to factories.
-        mp_config: Parsed multiprocess server configuration.
-        coordinator_config: Parsed coordinator configuration.
-        built_modules: Built-in modules assembled before plugin loading.
+        specs: Explicit Python modules to import, in command-line order.
 
     Returns:
-        Aggregated modules and transport-specific service registrars, ordered by
-        ``specs``.
+        Pairs of module class and plugin-specific configuration. Classes within
+        one Python module are ordered by qualified name.
 
     Raises:
         ImportError: If a plugin module cannot be imported.
-        AttributeError: If the configured factory is missing.
-        TypeError: If a factory is not callable or returns an invalid value.
+        TypeError: If a configured Python module defines no concrete
+            :class:`DiscoverableModule` subclass.
+        ValueError: If the same module class is configured more than once.
     """
-    loaded: list[EngineModule] = []
-    grpc_service_registrars: list[TransportServiceRegistrar] = []
-    zmq_service_registrars: list[TransportServiceRegistrar] = []
+    loaded: list[tuple[type[DiscoverableModule], dict[str, Any]]] = []
+    seen: set[type[DiscoverableModule]] = set()
     for spec in specs:
-        module = importlib.import_module(spec.module_path)
-        factory = getattr(module, spec.factory_name)
-        if not callable(factory):
-            raise TypeError(
-                "server module factory %s.%s is not callable"
-                % (spec.module_path, spec.factory_name)
-            )
-
-        build_context = ExtServerModuleBuildContext(
-            server_context=server_context,
-            mp_config=mp_config,
-            coordinator_config=coordinator_config,
-            modules=tuple([*built_modules, *loaded]),
-            config=spec.config,
+        module_classes = sorted(
+            discover_subclasses(
+                spec.module_path,
+                DiscoverableModule,  # type: ignore[type-abstract]
+                walk_submodules=False,
+            ),
+            key=lambda module_type: module_type.__qualname__,
         )
-        components = _coerce_components(factory(build_context), spec)
-        loaded.extend(components.modules)
-        grpc_service_registrars.extend(components.grpc_service_registrars)
-        zmq_service_registrars.extend(components.zmq_service_registrars)
-    return ExtServerModuleComponents(
-        modules=tuple(loaded),
-        grpc_service_registrars=tuple(grpc_service_registrars),
-        zmq_service_registrars=tuple(zmq_service_registrars),
-    )
+        if not module_classes:
+            raise TypeError(
+                f"server module {spec.module_path!r} defines no concrete "
+                "DiscoverableModule subclass"
+            )
+        for module_type in module_classes:
+            if module_type in seen:
+                raise ValueError(
+                    f"server module class {module_type.__module__}."
+                    f"{module_type.__qualname__} is configured more than once"
+                )
+            seen.add(module_type)
+            loaded.append((module_type, dict(spec.config)))
+    return loaded
 
 
 def build_server_module_router(
@@ -366,51 +304,35 @@ def build_server_module_router(
 def register_grpc_services(
     modules: Sequence[object],
     server: Any,
-    service_registrars: Sequence[TransportServiceRegistrar] = (),
 ) -> None:
     """Register out-of-tree gRPC services exposed by server modules.
-
-    Module methods already listed in ``service_registrars`` are called once.
 
     Args:
         modules: Ordered server modules to inspect for a
             ``register_grpc_services(server)`` method.
         server: The concrete ``grpc.Server`` owned by the gRPC transport.
-        service_registrars: Explicit package-owned gRPC service registrars
-            returned by server-module factories.
 
     Raises:
         TypeError: If a module exposes a non-callable registrar attribute.
     """
-    _call_transport_service_registrars(service_registrars, server)
-    _register_transport_services(
-        modules, server, _GRPC_SERVICE_REGISTRAR, service_registrars
-    )
+    _register_transport_services(modules, server, _GRPC_SERVICE_REGISTRAR)
 
 
 def register_zmq_services(
     modules: Sequence[object],
     server: Any,
-    service_registrars: Sequence[TransportServiceRegistrar] = (),
 ) -> None:
     """Register out-of-tree ZMQ services exposed by server modules.
-
-    Module methods already listed in ``service_registrars`` are called once.
 
     Args:
         modules: Ordered server modules to inspect for a
             ``register_zmq_services(server)`` method.
         server: The concrete ``MessageQueueServer`` owned by the ZMQ transport.
-        service_registrars: Explicit package-owned ZMQ service registrars
-            returned by server-module factories.
 
     Raises:
         TypeError: If a module exposes a non-callable registrar attribute.
     """
-    _call_transport_service_registrars(service_registrars, server)
-    _register_transport_services(
-        modules, server, _ZMQ_SERVICE_REGISTRAR, service_registrars
-    )
+    _register_transport_services(modules, server, _ZMQ_SERVICE_REGISTRAR)
 
 
 def iter_server_module_handlers(
@@ -449,7 +371,6 @@ def _register_transport_services(
     modules: Sequence[object],
     server: Any,
     registrar_name: str,
-    explicit_registrars: Sequence[TransportServiceRegistrar],
 ) -> None:
     """Call optional transport service registrars exposed by modules."""
     for module in modules:
@@ -460,96 +381,4 @@ def _register_transport_services(
             raise TypeError(
                 f"{type(module).__name__}.{registrar_name} must be callable"
             )
-        if registrar in explicit_registrars:
-            continue
-        cast(TransportServiceRegistrar, registrar)(server)
-
-
-def _call_transport_service_registrars(
-    service_registrars: Sequence[TransportServiceRegistrar],
-    server: Any,
-) -> None:
-    """Call explicit transport service registrars returned by factories."""
-    for registrar in service_registrars:
-        if not callable(registrar):
-            raise TypeError("transport service registrar must be callable")
-        registrar(server)
-
-
-def _coerce_components(
-    value: EngineModule | Sequence[EngineModule] | ExtServerModuleComponents | None,
-    spec: ExtServerModuleSpec,
-) -> ExtServerModuleComponents:
-    """Normalize one factory return value into extension components."""
-    if isinstance(value, ExtServerModuleComponents):
-        return ExtServerModuleComponents(
-            modules=tuple(_coerce_modules(value.modules, spec)),
-            grpc_service_registrars=tuple(
-                _coerce_service_registrars(
-                    value.grpc_service_registrars,
-                    spec,
-                    "grpc_service_registrars",
-                )
-            ),
-            zmq_service_registrars=tuple(
-                _coerce_service_registrars(
-                    value.zmq_service_registrars,
-                    spec,
-                    "zmq_service_registrars",
-                )
-            ),
-        )
-    return ExtServerModuleComponents(modules=tuple(_coerce_modules(value, spec)))
-
-
-def _coerce_modules(
-    value: EngineModule | Sequence[EngineModule] | None,
-    spec: ExtServerModuleSpec,
-) -> list[EngineModule]:
-    """Normalize one factory return value into a list of engine modules."""
-    if value is None:
-        return []
-    if _is_engine_module(value):
-        return [cast(EngineModule, value)]
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        modules: list[EngineModule] = []
-        for module in value:
-            if not _is_engine_module(module):
-                raise TypeError(
-                    "server module factory %s.%s returned a sequence containing "
-                    "a non-EngineModule value: %r"
-                    % (spec.module_path, spec.factory_name, module)
-                )
-            modules.append(cast(EngineModule, module))
-        return modules
-    raise TypeError(
-        "server module factory %s.%s must return an EngineModule, a sequence "
-        "of EngineModule, or None" % (spec.module_path, spec.factory_name)
-    )
-
-
-def _coerce_service_registrars(
-    values: Sequence[TransportServiceRegistrar],
-    spec: ExtServerModuleSpec,
-    field_name: str,
-) -> list[TransportServiceRegistrar]:
-    """Validate transport service registrars from one components object."""
-    registrars: list[TransportServiceRegistrar] = []
-    for registrar in values:
-        if not callable(registrar):
-            raise TypeError(
-                "server module factory %s.%s returned %s containing a "
-                "non-callable value: %r"
-                % (spec.module_path, spec.factory_name, field_name, registrar)
-            )
-        registrars.append(registrar)
-    return registrars
-
-
-def _is_engine_module(value: object) -> bool:
-    """Return whether *value* exposes the EngineModule structural contract."""
-    return (
-        hasattr(value, "context")
-        and callable(getattr(value, "report_status", None))
-        and callable(getattr(value, "close", None))
-    )
+        cast(Callable[[Any], None], registrar)(server)

@@ -768,7 +768,7 @@ class EngineDrivenTransferContext(TransferContext):
 
     @property
     def engine_driven_context(self) -> EngineDrivenContext:
-        """Return the underlying SHM/pickle context created by ``register``.
+        """Return the underlying SHM/inline context created by ``register``.
 
         Raises:
             RuntimeError: If accessed before ``register`` has run.
@@ -874,7 +874,7 @@ class EngineDrivenTransferContext(TransferContext):
             shm_name=shm_name,
             pool_size=pool_size,
         )
-        supported_transfer_mode = "SHM" if shm_name and pool_size > 0 else "pickle"
+        supported_transfer_mode = "SHM" if shm_name and pool_size > 0 else "inline"
         logger.info(
             "Worker engine-driven context registered (instance_id=%d, mode=%s)",
             self._instance_id,
@@ -949,7 +949,7 @@ class EngineDrivenTransferContext(TransferContext):
         # SHM slots when out_buffers is given, otherwise into fresh buffers that
         # commit_store serializes immediately. Either way the copies must be
         # complete first, so this is unconditional -- guarding it on out_buffers
-        # left the pickle path serializing a buffer still being written.
+        # left the inline path serializing a buffer still being written.
         synchronize_device(device)
         ok = self._engine_driven_context.commit_store(
             key, self._instance_id, cpu_chunks
@@ -976,8 +976,15 @@ class EngineDrivenTransferContext(TransferContext):
             )
 
         device = _get_kv_device(kv_caches)
+        full_block_ids = _single_group_block_ids(block_ids)
+        if len(full_block_ids) % blocks_in_chunk != 0:
+            raise ValueError(
+                "Engine block count must be divisible by blocks_in_chunk: "
+                f"blocks={len(full_block_ids)}, blocks_in_chunk={blocks_in_chunk}"
+            )
+        expected_count = len(full_block_ids) // blocks_in_chunk
         src_buffers = self._engine_driven_context.prepare_retrieve(
-            key, self._instance_id
+            key, self._instance_id, expected_count
         )
         ok = src_buffers is not None
         if src_buffers is not None:
@@ -986,7 +993,7 @@ class EngineDrivenTransferContext(TransferContext):
                     event.wait()
                 scatter_cpu_to_paged_kv(
                     kv_caches,
-                    _single_group_block_ids(block_ids),
+                    full_block_ids,
                     src_buffers,
                     blocks_in_chunk,
                     skip_first_n_tokens=skip_first_n_tokens,

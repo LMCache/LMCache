@@ -55,9 +55,10 @@ docker build \
 
 ```bash
 export HF_TOKEN=<your_huggingface_token>
+mkdir -p "$HOME/.cache/huggingface"
 
 docker run --runtime nvidia --gpus all \
-  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  -v "$HOME/.cache/huggingface:/home/lmcache/.cache/huggingface" \
   -p 8000:8000 \
   --ipc=host \
   lmcache/vllm-openai:latest \
@@ -65,6 +66,23 @@ docker run --runtime nvidia --gpus all \
   --kv-transfer-config \
   '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 ```
+
+**Note**: The image runs as the non-root user `lmcache` (uid 1000) by
+default, so Hugging Face caches under the user's home directory
+(`/home/lmcache/.cache/huggingface`).
+
+- The bind mount above reuses models already downloaded in the host's
+  `$HOME/.cache/huggingface`. The directory and its contents must be readable
+  and writable by container uid 1000. If the host cache has different ownership,
+  grant that user access using the host's permission or ACL configuration.
+- For a separate Docker-managed cache, use
+  `-v hf-cache:/home/lmcache/.cache/huggingface` instead. A new empty named volume
+  inherits the image's pre-created cache directory ownership; existing volumes
+  retain their permissions. This does not reuse the host's Hugging Face cache.
+- To reuse a cache previously populated under `/root` (or to run with
+  root for any other reason), use `docker run --user 0 ...`. On
+  Kubernetes, set `securityContext.runAsUser: 0` (or use the `lmcache`
+  uid 1000).
 
 ---
 
@@ -157,14 +175,14 @@ docker run --runtime nvidia --gpus all \
 
 **Description**: The official SGLang release image (`lmsysorg/sglang`) with the matching LMCache wheel from PyPI installed. SGLang supports only LMCache MP mode, so this image runs SGLang with `--enable-lmcache` and connects to a separate LMCache server (for example `lmcache/standalone`).
 
-LMCache's compiled extensions only load against the torch they were built with, so `SGLANG_VERSION` (default in the Dockerfile) must be an SGLang release that ships the torch pinned in `pyproject.toml`. The build fails if the two disagree, if installing LMCache would change SGLang's torch/CUDA stack, or if LMCache's native extension or SGLang connector does not load.
+Release builds use the newest SGLang release: the workflow resolves the `vX.Y.Z` tag that `lmsysorg/sglang:latest` points to and passes it as `SGLANG_VERSION`, so the image label names the SGLang it contains. LMCache's compiled extensions only load against the torch they were built with, so that SGLang release must ship the torch pinned in `pyproject.toml`. The build fails if the two disagree, if installing LMCache would change SGLang's torch/CUDA stack, or if LMCache's native extension or SGLang connector does not load.
 
 **Build Arguments**:
 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `LMCACHE_VERSION` | (required) | LMCache release on PyPI, e.g. `v0.5.6` |
-| `SGLANG_VERSION` | see Dockerfile | `lmsysorg/sglang` release tag |
+| `SGLANG_VERSION` | `latest` | `lmsysorg/sglang` tag, e.g. `v0.5.21` |
 | `EXPECTED_TORCH` | (empty, check skipped) | torch version from `pyproject.toml`; the release workflow always sets it |
 
 **Usage**:

@@ -51,13 +51,14 @@ Validated models
       |
 
       **Chunk size.** GLM-5.3 reports a single KV cache group with
-      ``tokens_per_block = 64``, so ``--chunk-size`` must be a multiple of
-      ``64``. Both ``256`` and ``1024`` were validated; prefer the smaller
-      value, because only **whole** chunks are stored and the remainder is
-      recomputed on every request. For a 5040-token prompt, ``--chunk-size
-      1024`` caches 4096 tokens (81%) while ``256`` caches 4864 (97%) -- a
-      measured external-hit-rate difference of 40.6% vs 48.3% on that prompt.
-      Choose a chunk size well below your typical prompt length.
+      ``tokens_per_block = 64``. The connector rounds the configured minimum
+      up to a multiple of ``64``; see :doc:`/mp/chunk_size_negotiation`. Both
+      ``256`` and ``1024`` were validated; prefer the smaller value, because
+      only **whole** chunks are stored and the remainder is recomputed on every
+      request. For a 5040-token prompt, ``--chunk-size 1024`` caches 4096
+      tokens (81%) while ``256`` caches 4864 (97%) -- a measured
+      external-hit-rate difference of 40.6% vs 48.3% on that prompt. Choose a
+      chunk-size minimum well below your typical prompt length.
 
       The connector logs the geometry it resolved at startup as
       ``group_tokens_per_block=[...], scheduler_block_size=...`` -- check that
