@@ -1,0 +1,113 @@
+Bounded first-rank retrieval
+============================
+
+In-process MLA deployments can keep one copy of each KV chunk on the first rank
+with ``extra_config.save_only_first_rank`` and broadcast it to the other ranks
+at retrieval time. Non-layerwise retrieval streams the cache hit through one
+fixed device staging buffer per engine instead of materializing a device copy
+of the whole hit, so device memory no longer grows with the length of the hit.
+A single rank has nobody to broadcast to: it writes its chunks into its KV
+pages directly, like any other model, and reserves no staging buffer.
+
+Configuration
+-------------
+
+.. code-block:: yaml
+
+   retrieve_window_bytes: 67108864  # 64 MiB, the default
+   extra_config:
+     save_only_first_rank: true
+
+``LMCACHE_RETRIEVE_WINDOW_BYTES`` is the equivalent environment override. The
+window holds as many whole KV chunks as fit in the target, so its effective
+size is a chunk multiple at or below the target (three 17 MiB chunks for a
+DeepSeek-V3 class model at ``chunk_size`` 256). A target smaller than one chunk
+is raised to one chunk, with a warning, because a chunk is the unit the
+exchange moves. The effective size is logged when the engine starts. The value
+must be positive and identical on all ranks: the first rank's window governs,
+and a rank whose buffer differs adjusts it when a retrieval is admitted, with
+a warning. The buffer never changes during a retrieval. With a single rank the
+setting is unused.
+
+How a retrieval proceeds
+------------------------
+
+1. All ranks agree to admit the retrieval with one host collective. The first
+   rank plans the window from the KV layout it holds now and announces the
+   plan; every rank must hold that buffer, be healthy, and be serving the same
+   request. Otherwise every rank returns an all-false mask without
+   transferring anything.
+2. The first rank acquires the hit chunks exactly as single-rank retrieval
+   does: from prefetch results or storage, with contiguous-prefix semantics
+   and the usual pinning.
+3. It packs consecutive chunks into the staging buffer until the next chunk
+   would not fit, then sends a small host header describing the window.
+4. Every rank broadcasts the packed bytes into its own staging buffer, writes
+   the window into its KV pages through the GPU connector, and fences the
+   write before the buffer is reused.
+5. Steps 3 and 4 repeat until the first rank sends an empty header. Sources
+   are released once the last window has been fenced.
+
+.. code-block:: text
+
+   all ranks:    admission (one host agreement)
+   first rank:   acquire chunks -> pack window -> header -> broadcast -> write -> fence
+   other ranks:                                   header -> broadcast -> write -> fence
+                                        ^                                        |
+                                        +------------ reuse the buffer ----------+
+
+Memory
+------
+
+The buffer is allocated when the worker's engine is created and stays resident
+for the life of the engine. Its size is checked again whenever a retrieval is
+admitted, against the KV layout the first rank holds then: a model whose
+registered layout differs from the one derived from its configuration (an
+extra KV group, for example; vLLM's V3 connector registers the layout at the
+first KV transfer) gets a buffer of the right size on every rank at the first
+retrieval after that, with a warning, and the difference is not part of the
+memory plan described below. Compared with the previous
+implementation, which allocated device copies per cache hit, this bounds the
+worst case of a large hit but adds one staging window of resident device memory
+even when nothing is retrieved.
+
+vLLM creates the KV connector after it has sized its KV pages and before it
+allocates them, so the buffer is part of the plan only when vLLM asks the
+connector for its device memory requirement first:
+
+- With a vLLM that provides the connector memory hook, LMCache reports
+  the window's byte size through ``get_required_device_memory`` using the
+  same configuration and ``lmcache.*`` overrides as the worker, and vLLM
+  subtracts it from the memory available for KV pages.
+- With an explicit ``kv_cache_memory_bytes`` budget, the deployment leaves room
+  for the staging buffer, model execution, and other workspaces itself.
+- With automatic sizing on a vLLM without the hook, the worker starts but logs
+  a warning: the buffer comes out of the ``gpu_memory_utilization`` headroom
+  and there is no whole-device memory budget guarantee.
+
+Engines in different processes hold separate buffers.
+
+Failures
+--------
+
+After admission every rank performs the same sequence of collectives through
+every recoverable local failure, so such a failure on one rank never leaves
+its peers waiting:
+
+- A missing chunk on the first rank truncates the hit to the contiguous prefix
+  before it, on every rank, exactly as in single-rank retrieval.
+- A rank whose page write fails fences the work it had already queued, stops
+  writing, keeps receiving the remaining windows, and returns the prefix it
+  committed. The integration reports the missing tokens to the serving engine
+  through its normal load-failure path.
+- A storage failure on the first rank, or a chunk it cannot send (larger than
+  the staging buffer, or without tensor storage), is detected before the first
+  window. It ends the exchange for its peers, which return all-false masks,
+  before the error propagates on the first rank, whose engine stays usable.
+- Device and collective failures propagate and are not cache misses. The
+  affected engine marks itself failed and refuses every later retrieval at
+  admission, so peers receive all-false results from then on; peers of the
+  request in flight may wait until their communicator times out. Terminating
+  and restarting the worker group is the serving engine's decision.
+
+Layerwise and multiprocess retrieval are unchanged.

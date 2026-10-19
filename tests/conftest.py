@@ -6,6 +6,8 @@
 #   Wenwen Chen <wenwen.chen@samsung.com>
 
 # Standard
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
@@ -13,6 +15,7 @@ from typing import Optional
 from unittest.mock import patch
 import asyncio
 import importlib.util
+import logging
 import os
 import random
 import shlex
@@ -35,6 +38,41 @@ if importlib.util.find_spec("pytest_benchmark") is None:
     @pytest.fixture
     def benchmark():
         pytest.skip("pytest-benchmark is not installed")
+
+
+@pytest.fixture
+def lmcache_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> Callable[[str, int], AbstractContextManager[None]]:
+    """Capture an LMCache logger into ``caplog`` for the duration of a block.
+
+    ``lmcache.logging.init_logger`` turns propagation off, so the capture
+    handler pytest keeps on the root logger never sees these records; pytest
+    attaches its handler to non-propagating loggers only from 9.1, and the
+    pinned test dependency is older. The returned context manager attaches
+    the handler of the current test phase to the named logger, so it must be
+    entered inside the test body::
+
+        with lmcache_logs("lmcache.v1.cache_engine", logging.WARNING):
+            ...
+        assert "..." in caplog.text
+    """
+
+    @contextmanager
+    def capture(name: str, level: int) -> Iterator[None]:
+        logger = logging.getLogger(name)
+        handler = caplog.handler
+        attach = handler not in logger.handlers
+        if attach:
+            logger.addHandler(handler)
+        try:
+            with caplog.at_level(level, logger=name):
+                yield
+        finally:
+            if attach:
+                logger.removeHandler(handler)
+
+    return capture
 
 
 @pytest.fixture(scope="session", autouse=True)

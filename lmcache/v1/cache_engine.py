@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -30,7 +30,11 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
-from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
+from lmcache.observability import (
+    LMCacheStatsLogger,
+    LMCStatsMonitor,
+    RetrieveRequestStats,
+)
 from lmcache.usage_telemetry import InitializeUsageContext
 from lmcache.utils import (
     CacheEngineKey,
@@ -38,6 +42,14 @@ from lmcache.utils import (
     _lmcache_nvtx_annotate,
     compress_slot_mapping,
     convert_tokens_to_list,
+)
+from lmcache.v1.broadcast_transfer import (
+    StagedChunk,
+    Window,
+    StagingPlan,
+    pack,
+    plan_windows,
+    plan_staging,
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
@@ -53,8 +65,6 @@ from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
-    MemoryObjMetadata,
-    TensorMemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.pin_monitor import PinMonitor
@@ -105,7 +115,8 @@ class LMCacheEngine:
         gpu_connector: Optional[GPUConnectorInterface],
         broadcast_fn: Callable[[torch.Tensor, int], None],
         broadcast_object_fn: Callable[[Any, int], Any],
-    ):
+        all_ranks_agree_fn: Optional[Callable[[bool], bool]] = None,
+    ) -> None:
         logger.info("Creating LMCacheEngine with config: %s", config)
         self.config = config
         self.metadata = metadata
@@ -113,26 +124,35 @@ class LMCacheEngine:
         self.gpu_connector = gpu_connector
         self.broadcast_fn = broadcast_fn
         self.broadcast_object_fn = broadcast_object_fn
+        self.all_ranks_agree_fn = all_ranks_agree_fn
         # save_only_first_rank only works when use mla
         self.save_only_first_rank = (
             self.config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
             and metadata.use_mla
         )
 
-        if self.save_only_first_rank and self.gpu_connector is not None:
+        # Fixed device staging for first-rank broadcast retrieval: as many whole
+        # chunks as ``retrieve_window_bytes`` holds, never fewer than one. Every
+        # rank must be able to receive any window the first rank can send. A
+        # single rank has nobody to broadcast to and retrieves directly, like
+        # any other model, so it reserves nothing.
+        self._staging: Optional[torch.Tensor] = None
+        if self._stages_retrievals():
+            assert self.gpu_connector is not None, "checked by _stages_retrievals"
             self.broadcast_stream = (
                 self.gpu_connector.load_stream
                 if hasattr(self.gpu_connector, "load_stream")
                 else torch_dev.Stream()
             )
-
-        # Holds GPU-resident copies of the broadcast send buffers on the
-        # leader rank so the subsequent batched_to_gpu can read from HBM
-        # rather than re-reading the same L1 bytes over PCIe. Always empty
-        # on non-leader ranks and outside the broadcast critical section.
-        # Typed as List[MemoryObj] (the supertype) so the list can be
-        # passed directly to batched_to_gpu without an invariance cast.
-        self._leader_gpu_substitute_objs: List[MemoryObj] = []
+            if all_ranks_agree_fn is None:
+                # Votes must travel over the integration's own host group; the
+                # object-broadcast callback addresses that group by its own
+                # rank space, not by worker_id, so it cannot stand in.
+                raise ValueError(
+                    "save_only_first_rank retrieval across ranks requires "
+                    "all_ranks_agree_fn"
+                )
+            self._reserve_staging(self._plan_staging())
 
         self.enable_controller = config.enable_controller
 
@@ -802,7 +822,7 @@ class LMCacheEngine:
         self,
         tokens: Union[torch.Tensor, list[int]],
         mask: Optional[torch.Tensor] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> torch.Tensor:
         """Retrieve the KV caches from the cache engine. And put the retrieved
         KV cache to the serving engine via the GPU connector.
@@ -829,8 +849,10 @@ class LMCacheEngine:
         retrieval, the caller must release its pins with ``lookup_unpin(lookup_id)``
         before issuing further blocking retrievals that may need cache space.
         """
-        # Health check: block operation if LMCache is unhealthy
-        if not self.is_healthy():
+        # Health check: block operation if LMCache is unhealthy. A rank of a
+        # broadcast retrieval must still join its peers' admission vote, where
+        # it votes not ready (see _retrieve_broadcast).
+        if not self.is_healthy() and not self._retrieves_by_broadcast():
             logger.warning("LMCache is unhealthy, skipping retrieve operation")
             return torch.zeros(len(tokens), dtype=torch.bool)
 
@@ -860,108 +882,31 @@ class LMCacheEngine:
 
         ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
 
-        reordered_chunks: List[ProcessedChunk] = []
-        if not self._is_passive():
+        if self._retrieves_by_broadcast():
+            tot_kv_size = self._retrieve_broadcast(
+                tokens, mask, ret_mask, retrieve_stats, **kwargs
+            )
+        else:
             with retrieve_stats.profile_process_tokens():
-                if self.async_loading:
-                    reordered_chunks, tot_kv_size = self._async_process_tokens_internal(  # noqa: E501
-                        tokens,
-                        mask,
-                        ret_mask,
-                        **kwargs,
-                    )
-                else:
-                    reordered_chunks, tot_kv_size = self._process_tokens_internal(
-                        tokens,
-                        mask,
-                        ret_mask,
-                        **kwargs,
-                    )
-
-        if self.save_only_first_rank:
-            with retrieve_stats.profile_broadcast():
-                with torch_dev.stream(self.broadcast_stream):
-                    self._broadcast_or_receive_memory_objs(
-                        reordered_chunks,
-                        ret_mask,
-                    )
-
-                # if self.gpu_connector has load_stream, self.broadcast_stream is equals
-                # to self.gpu_connector.load_stream, the broadcast and to_gpu operation
-                # will execute sequentially within the stream.
-                # if self.gpu_connector does not have load_stream, self.broadcast_stream
-                # is created by torch_dev.Stream(), we need to synchronize broadcast
-                # operation, and then process to_cpu operation.
-                if not hasattr(self.gpu_connector, "load_stream"):
-                    self.broadcast_stream.synchronize()
-
-        # NOTE(Jiayi): memory_obj doesn't have to be a pinned
-        # cpu tensor for the sake of performance.
-        # For example, disk->gpu is faster than disk->cpu->gpu.
-        # RDMA is another example.
-        if len(reordered_chunks) > 0:
-            with retrieve_stats.profile_to_gpu():
-                _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
-                # When save_only_first_rank is enabled, the leader rank's
-                # memory_objs from L1 are CPU-resident. The broadcast above
-                # already created GPU-resident copies on the leader to use as
-                # the NCCL send buffer. Substitute those here so this kernel
-                # reads from HBM rather than re-reading the same L1 bytes
-                # over PCIe via zero-copy mapped pinned memory. Without this
-                # swap, batched_to_gpu on the leader takes ~9 ms (PCIe-bound)
-                # while passive ranks take ~0.5 ms (HBM-bound) — a structural
-                # asymmetry on the critical path of every retrieve.
-                if self.save_only_first_rank and self.metadata.is_first_rank():
-                    if len(self._leader_gpu_substitute_objs) == len(memory_objs):
-                        memory_objs_for_togpu = self._leader_gpu_substitute_objs
-                    else:
-                        # Substitute list should always match memory_objs after
-                        # _broadcast_or_receive_memory_objs has run on the
-                        # leader.  A mismatch indicates a bug or stale state;
-                        # fall back to the CPU L1 source so retrieval is still
-                        # correct, but warn so the issue is visible.
-                        logger.warning(
-                            "Leader rank: GPU substitute count (%d) does not "
-                            "match memory_objs count (%d); falling back to "
-                            "CPU L1 source for batched_to_gpu (PCIe-bound, "
-                            "~9 ms slower).",
-                            len(self._leader_gpu_substitute_objs),
-                            len(memory_objs),
-                        )
-                        memory_objs_for_togpu = list(memory_objs)
-                else:
-                    memory_objs_for_togpu = list(memory_objs)
+                reordered_chunks, tot_kv_size = self._acquire_chunks(
+                    tokens, mask, ret_mask, **kwargs
+                )
+            if reordered_chunks:
                 try:
-                    self.gpu_connector.batched_to_gpu(
-                        memory_objs_for_togpu, list(starts), list(ends), **kwargs
-                    )
+                    with retrieve_stats.profile_to_gpu():
+                        _, memory_objs, starts, ends = zip(
+                            *reordered_chunks, strict=True
+                        )
+                        self.gpu_connector.batched_to_gpu(
+                            list(memory_objs), list(starts), list(ends), **kwargs
+                        )
                 finally:
-                    # Release GPU substitute references so the temporary
-                    # buffers can be freed; original memory_objs in
-                    # reordered_chunks are still tracked for the cleanup
-                    # loop below. Done in `finally` so a raise from
-                    # batched_to_gpu (e.g. CUDA OOM) does not leave the
-                    # references dangling on this long-lived engine.
-                    if self.save_only_first_rank and self.metadata.is_first_rank():
-                        self._leader_gpu_substitute_objs = []
-
-        # TODO(Jiayi): Remove the following for loop with batched operations
-        # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
-        for key, memory_obj, _, _ in reordered_chunks:
-            if self.remove_after_retrieve and not self._is_passive():
-                assert self.storage_manager is not None
-                self.storage_manager.remove(key, self.retrieve_locations)
-                # Sync PDBackend.remove() does NOT call ref_count_down() internally
-                # (unlike async PD and other backends), so we must call it manually.
-                # See pd_backend.py line 605 TODO comment.
-                if self._is_sync_pd_backend():
-                    memory_obj.ref_count_down()
-            else:
-                # Blocking gets acquire references, not ownership of lookup pins.
-                # The lookup owner releases those pins through lookup_unpin().
-                if (self.async_loading or self._is_passive()) and memory_obj.is_pinned:
-                    memory_obj.unpin()
-                memory_obj.ref_count_down()
+                    # Enqueued writes may still read the sources, even when the
+                    # connector raised. Fence before handing them back so a
+                    # failed load can neither leak nor free memory in use.
+                    self.gpu_connector.synchronize_load()
+                    for key, memory_obj, _, _ in reordered_chunks:
+                        self._release_retrieval_chunk(key, memory_obj)
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(
@@ -1662,6 +1607,7 @@ class LMCacheEngine:
         except Exception as e:
             logger.error("Error closing storage_manager: %s", e)
 
+        self._staging = None
         logger.info("LMCacheEngine closed.")
 
     def _async_process_tokens_internal(
@@ -1699,6 +1645,11 @@ class LMCacheEngine:
         except Exception as e:
             logger.error("Error popping event for request %s: %s", kwargs["req_id"], e)
             return [], 0
+        # This retrieval now owns every prefetched reference together with
+        # its prefetch pin. Drop the event so a later lookup_unpin cannot
+        # release the same objects a second time; from here on, every object
+        # this method does not hand out must be released here.
+        self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
 
         for backend_results in keyed_memory_objs:
             for key, memory_obj in backend_results:
@@ -1706,28 +1657,47 @@ class LMCacheEngine:
 
         # TODO(Jiayi): hashing inside `process_tokens` can be skipped.
         used_keys: set[CacheEngineKey] = set()
-        for start, end, key in self.token_database.process_tokens(
-            tokens=tokens,
-            mask=mask,
-            request_configs=request_configs,
-        ):
-            assert isinstance(key, CacheEngineKey)
-            memory_obj = memory_obj_map.get(key)
-            if memory_obj is None:
-                # returned chunks are expected to be contiguous.
-                # break at the first missing chunk.
-                break
-            chunks.append((key, memory_obj, start, end))
-            tot_kv_size += memory_obj.get_size()
-            ret_mask[start:end] = True
-            used_keys.add(key)
+        try:
+            for start, end, key in self.token_database.process_tokens(
+                tokens=tokens,
+                mask=mask,
+                request_configs=request_configs,
+            ):
+                assert isinstance(key, CacheEngineKey)
+                memory_obj = memory_obj_map.get(key)
+                if memory_obj is None:
+                    # returned chunks are expected to be contiguous.
+                    # break at the first missing chunk.
+                    break
+                chunks.append((key, memory_obj, start, end))
+                tot_kv_size += memory_obj.get_size()
+                ret_mask[start:end] = True
+                used_keys.add(key)
+        except BaseException:
+            # The caller never receives these chunks and the event is gone.
+            for memory_obj in memory_obj_map.values():
+                self._release_prefetched(memory_obj)
+            raise
 
-        # NOTE: free the memory objects that are not hit.
-        for key, mem_obj in memory_obj_map.items():
+        # Objects the mask skipped or that follow the first miss stay with
+        # the cache; give back the prefetch pin as well as the reference.
+        for key, memory_obj in memory_obj_map.items():
             if key not in used_keys:
-                mem_obj.ref_count_down()
+                self._release_prefetched(memory_obj)
 
         return chunks, tot_kv_size
+
+    @staticmethod
+    def _release_prefetched(memory_obj: MemoryObj) -> None:
+        """Release an async-prefetched object together with its prefetch pin.
+
+        Args:
+            memory_obj: An object returned by a completed prefetch event that
+                this retrieval will not hand to the GPU connector.
+        """
+        if memory_obj.is_pinned:
+            memory_obj.unpin()
+        memory_obj.ref_count_down()
 
     def _process_tokens_internal(
         self,
@@ -1837,106 +1807,284 @@ class LMCacheEngine:
             reordered_chunks = kept_chunks
         return reordered_chunks, tot_kv_size
 
-    def _broadcast_or_receive_memory_objs(
+    def _acquire_chunks(
         self,
-        reordered_chunks,
-        ret_mask,
-    ):
+        tokens: Union[torch.Tensor, list[int]],
+        mask: Optional[torch.Tensor],
+        ret_mask: torch.Tensor,
+        **kwargs: Any,
+    ) -> ProcessTokensInternalResult:
+        """Take ownership of the hit chunks from prefetch results or storage.
+
+        Args:
+            tokens: Tokens of the requested KV cache.
+            mask: Optional prefix mask; see :meth:`retrieve`.
+            ret_mask: Mask updated in place with the tokens the chunks cover.
+            **kwargs: Request identity and configuration for the storage layer.
+
+        Returns:
+            The token-ordered chunks and their total size in bytes. The caller
+            must release every chunk with :meth:`_release_retrieval_chunk`.
         """
-        Handles broadcasting or receiving memory objects in a distributed environment.
+        if self.async_loading:
+            return self._async_process_tokens_internal(tokens, mask, ret_mask, **kwargs)
+        return self._process_tokens_internal(tokens, mask, ret_mask, **kwargs)
 
-        This function implements the communication logic where:
-        - The first rank (coordinator) broadcasts memory objects and metadata to others
-        - Other ranks receive and reconstruct the memory objects
+    def _retrieve_broadcast(
+        self,
+        tokens: Union[torch.Tensor, list[int]],
+        mask: Optional[torch.Tensor],
+        ret_mask: torch.Tensor,
+        stats: RetrieveRequestStats,
+        **kwargs: Any,
+    ) -> int:
+        """Stream the first rank's chunks to every rank through the staging buffer.
 
-        Parameters:
-        reordered_chunks: List of tuples containing [key, memory object, start, end]
-        ret_mask: Boolean mask indicating which positions have been processed
+        After :meth:`_admit_broadcast_retrieval`, the first rank acquires its
+        chunks exactly as a single-rank retrieval would and packs consecutive
+        chunks into windows bounded by its buffer. Per window, every rank
+        receives the same host header, joins one tensor broadcast into its own
+        staging buffer, and writes the window into its KV pages. A ``None``
+        header ends the exchange.
 
-        Side Effects:
-        - On first rank:
-          * Broadcasts chunk count and each chunk's combined metadata
-          * Broadcasts tensor data
-        - On other ranks:
-          * Receives chunk data and populates reordered_chunks
-          * Updates ret_mask to mark received positions as True
+        Every rank performs the same sequence of collectives. A failure on the
+        first rank before its first header is local: it sends the ``None``
+        header, propagates, and leaves the engine usable. A failed write is
+        absorbed by :meth:`_write_window`, which shrinks that rank's committed
+        prefix only. Any other failure is a device or collective failure: the
+        engine disables itself and propagates, and peers of the request in
+        flight may wait until their communicator times out.
+
+        Args:
+            tokens: Tokens of the requested KV cache.
+            mask: Optional prefix mask; see :meth:`retrieve`.
+            ret_mask: Output mask updated in place with the tokens this rank
+                has written.
+            stats: Per-request statistics receiving the phase timings.
+            **kwargs: Serving-engine arguments forwarded to the GPU connector.
+
+        Returns:
+            Total bytes acquired by the first rank; zero on other ranks.
+
+        Raises:
+            RuntimeError: In layerwise mode, which retrieves through
+                :meth:`retrieve_layer`.
+            ValueError: If a chunk exposes no tensor or is larger than the
+                staging buffer. Peers are released with an empty result first.
+            Exception: A storage failure on the first rank, after its peers
+                were released; a device or collective failure, after the
+                engine disabled itself.
         """
+        if self.use_layerwise:
+            raise RuntimeError("Layerwise retrieval goes through retrieve_layer")
+        if not self._admit_broadcast_retrieval(len(tokens), kwargs.get("req_id")):
+            return 0
+        buffer = self._staging
+        assert buffer is not None, "admission requires a staging buffer"
+        chunks: list[ProcessedChunk] = []
+        windows: list[tuple[Sequence[StagedChunk], Window]] = []
+        tot_kv_size = 0
+        try:
+            with torch_dev.stream(self.broadcast_stream):
+                if self.metadata.is_first_rank():
+                    try:
+                        with stats.profile_process_tokens():
+                            chunks, tot_kv_size = self._acquire_chunks(
+                                tokens, mask, torch.zeros_like(ret_mask), **kwargs
+                            )
+                        staged = [(obj, start, end) for _, obj, start, end in chunks]
+                        windows = [
+                            (group, Window.from_chunks(group))
+                            for group in plan_windows(staged, buffer.numel())
+                        ]
+                    except Exception:
+                        # Peers are still waiting for the first header.
+                        self.broadcast_object_fn(None, self.metadata.first_rank)
+                        raise
+                writable = True
+                try:
+                    for window in self._announce_windows(windows, buffer):
+                        with stats.profile_broadcast():
+                            self.broadcast_fn(
+                                buffer[: window.num_bytes], self.metadata.first_rank
+                            )
+                        writable = writable and self._write_window(
+                            window, buffer, ret_mask, stats, **kwargs
+                        )
+                except Exception:
+                    # This rank's collective sequence can no longer be trusted.
+                    # Every later retrieval votes not ready at admission, until
+                    # the serving engine decides the worker's fate.
+                    self.mark_init_failed("Fatal KV retrieval transfer failure")
+                    raise
+        finally:
+            # Staging copies may still be reading the sources.
+            self.broadcast_stream.synchronize()
+            for key, memory_obj, _, _ in chunks:
+                self._release_retrieval_chunk(key, memory_obj)
+        return tot_kv_size
+
+    def _admit_broadcast_retrieval(
+        self, num_tokens: int, request_id: str | None
+    ) -> bool:
+        """Agree, once and before any tensor collective, that every rank can join.
+
+        The first rank plans the staging window from the KV layout its
+        metadata describes now, reserves it, and announces the plan with the
+        request; every other rank reserves the announced plan, because the
+        chunks it will receive are the first rank's. A rank is ready when it
+        is healthy, holds that buffer, and serves the same request as the
+        first rank. Readiness is agreed rather than decided per rank because
+        a rank that cannot join the tensor broadcasts would stall its peers;
+        with every rank holding the announced plan, any window the first rank
+        sends fits everywhere.
+
+        Args:
+            num_tokens: Length of the requested token sequence.
+            request_id: The serving engine's request id, if it supplied one.
+
+        Returns:
+            Whether every rank is ready; identical on every rank.
+        """
+        assert self.all_ranks_agree_fn is not None, "required at engine creation"
+        reservation = None
         if self.metadata.is_first_rank():
-            # Broadcast total chunk count
-            chunk_count = len(reordered_chunks)
-            self.broadcast_object_fn(chunk_count, self.metadata.first_rank)
+            plan = self._plan_staging()
+            if self.is_healthy():
+                self._reserve_staging(plan)
+            reservation = (plan, num_tokens, request_id)
+        source = self.broadcast_object_fn(reservation, self.metadata.first_rank)
+        if source is not None and reservation is None and self.is_healthy():
+            self._reserve_staging(source[0])
+        ready = (
+            source is not None
+            and self._staging is not None
+            and self._staging.numel() >= source[0].capacity
+            and (num_tokens, request_id) == source[1:]
+            and self.is_healthy()
+        )
+        if self.all_ranks_agree_fn(ready):
+            return True
+        logger.warning(
+            "[req_id=%s] rank %d: first-rank retrieval was not admitted "
+            "(this rank ready=%s)",
+            request_id,
+            self.metadata.worker_id,
+            ready,
+        )
+        return False
 
-            # Reset the GPU-resident copy list. We populate it during this
-            # broadcast loop so the caller's subsequent batched_to_gpu can
-            # read from HBM instead of re-reading the same CPU L1 buffer
-            # over PCIe. (Declared in __init__; reassigning to a fresh list
-            # rather than .clear() to drop any references the caller's
-            # finally block missed if a previous retrieve raised.)
-            self._leader_gpu_substitute_objs = []
+    def _announce_windows(
+        self,
+        windows: list[tuple[Sequence[StagedChunk], Window]],
+        buffer: torch.Tensor,
+    ) -> Generator[Window, None, None]:
+        """Yield the windows of a broadcast retrieval as every rank learns of them.
 
-            # Broadcast each chunk's data
-            for key, memory_obj, start, end in reordered_chunks:
-                # Combine (start, end) and metadata into single broadcast
-                metadata_dict = memory_obj.metadata.to_dict()
-                combined_metadata = (start, end, metadata_dict)
-                self.broadcast_object_fn(combined_metadata, self.metadata.first_rank)
+        The first rank packs each window into ``buffer`` before announcing it,
+        so a peer joining the tensor broadcast finds the payload already
+        queued, and ends with a ``None`` header. Other ranks yield the headers
+        they receive until that end.
 
-                # Broadcast tensor data
-                raw_tensor = memory_obj.raw_tensor
-                assert raw_tensor is not None
-                tensor_to_broadcast = raw_tensor.to(
-                    f"{torch_device_type}:{self.metadata.worker_id}"
+        Args:
+            windows: The first rank's windows with their source chunks; other
+                ranks pass an empty list.
+            buffer: This rank's staging buffer.
+
+        Yields:
+            The next window, identical on every rank.
+        """
+        source_rank = self.metadata.first_rank
+        if not self.metadata.is_first_rank():
+            while (window := self.broadcast_object_fn(None, source_rank)) is not None:
+                yield window
+            return
+        for group, window in windows:
+            pack(group, window.views(buffer))
+            self.broadcast_object_fn(window, source_rank)
+            yield window
+        self.broadcast_object_fn(None, source_rank)
+
+    def _write_window(
+        self,
+        window: Window,
+        buffer: torch.Tensor,
+        ret_mask: torch.Tensor,
+        stats: RetrieveRequestStats,
+        **kwargs: Any,
+    ) -> bool:
+        """Write a received window into this rank's KV pages and commit its tokens.
+
+        A failed write is logged, not raised, so this rank keeps joining the
+        remaining broadcasts and its peers never wait on it. Either way the
+        connector is fenced before returning: a write that raised may already
+        have queued reads of ``buffer``, which the next window overwrites.
+
+        Args:
+            window: The window whose payload ``buffer`` holds.
+            buffer: This rank's staging buffer.
+            ret_mask: Output mask; the window's tokens are set if it was written.
+            stats: Per-request statistics receiving the write timing.
+            **kwargs: Serving-engine arguments forwarded to the GPU connector.
+
+        Returns:
+            Whether the window was written and committed.
+
+        Raises:
+            RuntimeError: If the fence fails, which is a device failure.
+        """
+        assert self.gpu_connector is not None, "checked by retrieve"
+        connector = self.gpu_connector
+        written = True
+        try:
+            with stats.profile_to_gpu():
+                if not hasattr(connector, "load_stream"):
+                    # The connector writes on its own stream; the payload must
+                    # have landed before it reads the staging buffer.
+                    self.broadcast_stream.synchronize()
+                connector.batched_to_gpu(
+                    window.views(buffer),
+                    list(window.starts),
+                    list(window.ends),
+                    **kwargs,
                 )
-                self.broadcast_fn(tensor_to_broadcast, self.metadata.first_rank)
-
-                # Keep this GPU-resident copy alive so the subsequent
-                # batched_to_gpu can read from HBM rather than re-reading
-                # the L1 buffer over PCIe.
-                gpu_mo = TensorMemoryObj(
-                    raw_data=tensor_to_broadcast,
-                    metadata=memory_obj.metadata,
-                    parent_allocator=None,
-                )
-                self._leader_gpu_substitute_objs.append(gpu_mo)
-        else:
-            # Receive total chunk count
-            chunk_count = self.broadcast_object_fn(None, self.metadata.first_rank)
-            if chunk_count is None:
-                logger.warning(
-                    "rank=%d received None chunk_count", self.metadata.worker_id
-                )
-                return
-
-            # Fill reordered_chunks with received data
-            for _ in range(chunk_count):
-                # Receive combined metadata (start, end, metadata_dict)
-                combined_metadata = self.broadcast_object_fn(
-                    None, self.metadata.first_rank
-                )
-                if combined_metadata is None:
-                    logger.warning(
-                        "rank=%d received None combined_metadata",
-                        self.metadata.worker_id,
-                    )
-                    break
-                start, end, metadata_dict = combined_metadata
+        except Exception:
+            logger.exception(
+                "[req_id=%s] rank %d could not write a KV window; "
+                "reporting the prefix committed so far",
+                kwargs.get("req_id"),
+                self.metadata.worker_id,
+            )
+            written = False
+        connector.synchronize_load()
+        if written:
+            for start, end in zip(window.starts, window.ends, strict=True):
                 ret_mask[start:end] = True
+        return written
 
-                # Create tensor and receive data
-                metadata = MemoryObjMetadata.from_dict(metadata_dict)
-                local_rank = self.metadata.worker_id % torch_dev.device_count()
-                raw_tensor = torch.empty(
-                    torch.Size([metadata.get_size()]),
-                    dtype=torch.uint8,
-                    device=f"{torch_device_type}:{local_rank}",
-                )
-                self.broadcast_fn(raw_tensor, self.metadata.first_rank)
+    def _release_retrieval_chunk(
+        self, key: CacheEngineKey, memory_obj: MemoryObj
+    ) -> None:
+        """Give back one chunk acquired for retrieval.
 
-                # Create temporary memory object (key not needed for other ranks)
-                memory_obj = TensorMemoryObj(
-                    raw_data=raw_tensor, metadata=metadata, parent_allocator=None
-                )
-                reordered_chunks.append((None, memory_obj, start, end))
+        Args:
+            key: Cache key of the chunk.
+            memory_obj: The chunk's memory object, owned by this retrieval.
+        """
+        if self.remove_after_retrieve:
+            assert self.storage_manager is not None
+            self.storage_manager.remove(key, self.retrieve_locations)
+            # Sync PDBackend.remove() does NOT call ref_count_down() internally
+            # (unlike async PD and other backends), so we must call it manually.
+            if self._is_sync_pd_backend():
+                memory_obj.ref_count_down()
+        else:
+            # Blocking gets acquire references, not ownership of lookup pins;
+            # the lookup owner releases those through lookup_unpin(). Async
+            # prefetch results own their pins.
+            if self.async_loading and memory_obj.is_pinned:
+                memory_obj.unpin()
+            memory_obj.ref_count_down()
 
     def _is_passive(self):
         """
@@ -1944,6 +2092,89 @@ class LMCacheEngine:
         the data directly, but from the "active" worker (i.e., rank 0 in MLA)
         """
         return self.save_only_first_rank and not self.metadata.is_first_rank()
+
+    def _retrieves_by_broadcast(self) -> bool:
+        """Return whether retrieval streams the first rank's chunks to its peers.
+
+        Only the first rank stores KV under ``save_only_first_rank``. A single
+        rank has no peers, so it retrieves directly like any other model.
+        """
+        return self.save_only_first_rank and self.metadata.world_size > 1
+
+    def _stages_retrievals(self) -> bool:
+        """Return whether this engine holds a staging buffer for broadcasts.
+
+        Layerwise retrieval goes through :meth:`retrieve_layer`, and without
+        a GPU connector there is nothing to write windows into.
+        """
+        return (
+            self._retrieves_by_broadcast()
+            and not self.config.use_layerwise
+            and self.gpu_connector is not None
+        )
+
+    def _plan_staging(self) -> StagingPlan:
+        """Plan the staging window from the KV layout the metadata describes now."""
+        return plan_staging(
+            self.metadata, self.config.chunk_size, self.config.retrieve_window_bytes
+        )
+
+    def _reserve_staging(self, plan: StagingPlan) -> None:
+        """Hold a staging buffer of exactly ``plan.capacity`` bytes.
+
+        A matching buffer is kept. Any other is replaced, which happens at
+        creation and otherwise only at admission, before the vote and so
+        before any collective: the first rank re-plans from the layout its
+        metadata describes then, since a serving engine may register the real
+        KV layout after the engine exists (vLLM's V3 connector does so at the
+        first transfer), and every other rank reserves the plan it announced.
+        A reservation that fails leaves the engine without a buffer, and it
+        votes not ready.
+
+        Args:
+            plan: The chunk size and chunks per window to hold.
+        """
+        capacity = plan.capacity
+        if self._staging is not None:
+            if self._staging.numel() == capacity:
+                return
+            logger.warning(
+                "Retrieval staging changes from %d to %d bytes (%d chunks of %d "
+                "bytes); memory planning saw the earlier figure",
+                self._staging.numel(),
+                capacity,
+                plan.window_chunks,
+                plan.bytes_per_chunk,
+            )
+            # Give the old buffer back before asking for its replacement.
+            self._staging = None
+        if capacity > self.config.retrieve_window_bytes:
+            logger.warning(
+                "retrieve_window_bytes=%d is below one KV chunk of %d bytes; "
+                "the staging window is one chunk",
+                self.config.retrieve_window_bytes,
+                plan.bytes_per_chunk,
+            )
+        try:
+            # The device the serving engine made current for this worker. Rank
+            # ids do not identify it: under vLLM data parallelism every DP
+            # engine's TP world starts at rank 0.
+            self._staging = torch.empty(
+                capacity,
+                dtype=torch.uint8,
+                device=torch.device(torch_device_type, torch_dev.current_device()),
+            )
+        except (RuntimeError, MemoryError):
+            # Peers learn about this at retrieval admission, before any tensor
+            # collective, so this rank never leaves them waiting.
+            logger.exception("Could not reserve the KV retrieval staging buffer")
+        else:
+            logger.info(
+                "Reserved %d bytes of KV retrieval staging: %d chunks of %d bytes",
+                capacity,
+                plan.window_chunks,
+                plan.bytes_per_chunk,
+            )
 
     def _is_sync_pd_backend(self) -> bool:
         """Check if the PD backend is the sync variant.
@@ -2122,13 +2353,30 @@ class LMCacheEngineBuilder:
         gpu_connector: Optional[GPUConnectorInterface],
         broadcast_fn: Callable[[torch.Tensor, int], None],
         broadcast_object_fn: Callable[[Any, int], Any],
+        all_ranks_agree_fn: Optional[Callable[[bool], bool]] = None,
     ) -> LMCacheEngine:
         """
         Builds a new LMCacheEngine instance if it doesn't already exist for the
         given ID.
 
-        raises: ValueError if the instance already exists with a different
-            configuration.
+        Args:
+            instance_id: Engine identity within this process.
+            config: Cache and storage configuration.
+            metadata: Model layout and worker identity.
+            gpu_connector: Destination KV writer, or None for a scheduler.
+            broadcast_fn: Tensor broadcast callback accepting a source rank.
+            broadcast_object_fn: Host metadata broadcast returning the source object.
+            all_ranks_agree_fn: Host collective returning True only when every
+                retrieval rank voted True. Required for first-rank retrieval
+                when the metadata's world size is greater than one.
+
+        Returns:
+            The existing compatible engine or a newly initialized engine.
+
+        Raises:
+            ValueError: If an existing engine has a different configuration or
+                metadata, the retrieval budget cannot hold one KV chunk, or a
+                multi-rank first-rank retrieval has no agreement callback.
         """
         logger.info("Creating LMCacheEngine instance %s", instance_id)
         if instance_id not in cls._instances:
@@ -2148,6 +2396,7 @@ class LMCacheEngineBuilder:
                 gpu_connector,
                 broadcast_fn,
                 broadcast_object_fn,
+                all_ranks_agree_fn,
             )
 
             cls._instances[instance_id] = engine
