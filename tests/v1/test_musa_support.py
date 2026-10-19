@@ -7,7 +7,7 @@ These tests cover the design contract documented in
 
 - Device detection via the registry-driven
   :func:`lmcache.v1.platform._detect_device`.
-- Factory dispatch in :func:`lmcache.v1.gpu_connector.CreateGPUConnector`,
+- Factory dispatch in :func:`lmcache.inprocess.v1.gpu_connector.CreateGPUConnector`,
   including fail-fast validation when device-scoped features are requested on
   accelerators without connector support.
 
@@ -26,12 +26,12 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.gpu_connector import CreateGPUConnector
 from lmcache.utils import EngineType
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import CreateGPUConnector
 from lmcache.v1.metadata import LMCacheMetadata
 import lmcache as lmc
-import lmcache.v1.gpu_connector as gpu_connector_module
+import lmcache.inprocess.v1.gpu_connector as gpu_connector_module
 
 pytestmark = pytest.mark.musa
 
@@ -238,7 +238,7 @@ def test_create_gpu_connector_musa_dispatches_to_musa_connector(
     """
     _patch_device(monkeypatch, "musa")
     # First Party
-    from lmcache.v1.gpu_connector import musa_connectors as musa_mod
+    from lmcache.inprocess.v1.gpu_connector import musa_connectors as musa_mod
 
     monkeypatch.setattr(
         gpu_connector_module.torch, "device", lambda *_a, **_kw: "musa:0"

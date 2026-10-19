@@ -11,13 +11,14 @@ import pytest
 import torch
 
 # First Party
-from lmcache.lmcache_native import TransferDirection
-from lmcache.v1.gpu_connector import gpu_ops, musa_connectors
-from lmcache.v1.gpu_connector.kv_format.detectors import vllm as vllm_detector
-from lmcache.v1.gpu_connector.musa_connectors import (
+from lmcache.inprocess.v1.gpu_connector import musa_connectors
+from lmcache.inprocess.v1.gpu_connector.musa_connectors import (
     VLLMPagedMemLayerwiseMUSAConnector,
     VLLMPagedMemMUSAConnectorV2,
 )
+from lmcache.lmcache_native import TransferDirection
+from lmcache.v1.gpu_connector import gpu_ops
+from lmcache.v1.gpu_connector.kv_format.detectors import vllm as vllm_detector
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.platform.devices.musa import device_ops as musa_device_ops

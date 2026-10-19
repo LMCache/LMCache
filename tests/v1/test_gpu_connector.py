@@ -11,7 +11,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.gpu_connector.gpu_connectors import (
+from lmcache.inprocess.v1.gpu_connector.gpu_connectors import (
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemGPUConnectorV3,
