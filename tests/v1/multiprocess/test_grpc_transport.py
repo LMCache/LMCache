@@ -27,12 +27,15 @@ from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     CBUnifiedLookupResult,
     IPCCacheServerKey,
+    KVEventBatch,
+    KVEventRecord,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
+from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
@@ -700,6 +703,56 @@ def test_grpc_server_keeps_handler_concurrency(grpc_server_mode: str) -> None:
 
     assert peak == 2
     assert [len(threads) for threads in affinity_threads.values()] == [1, 1]
+
+
+@pytest.mark.parametrize("grpc_server_mode", ["sync", "aio"])
+def test_stalled_stream_subscriber_stops_server_reads(grpc_server_mode: str) -> None:
+    """A subscriber that stops reading leaves later batches unread in the
+    handler's stream instead of buffered on the server."""
+    reads = 0
+
+    class Module:
+        @request_handler()
+        def subscribe_kv_events(
+            self, instance_id: int, model_name: str, cursor: int, max_events: int
+        ) -> MessagingStream[KVEventBatch]:
+            def read(closed: threading.Event) -> KVEventBatch:
+                nonlocal reads
+                if closed.is_set():
+                    raise StopIteration
+                reads += 1
+                record = KVEventRecord(
+                    reads, "store", "cpu", model_name, [b"h"], None, [1] * 4096
+                )
+                return KVEventBatch(True, 1, reads, False, [record])
+
+            return MessagingStream(read, lambda: None)
+
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=0,
+        max_cpu_workers=2,
+        max_gpu_workers=1,
+        grpc_server_mode=cast(Any, grpc_server_mode),
+    )
+    server = build_grpc_request_server([cast(Any, Module())], config)
+    server.start()
+    client = GrpcMultiprocessClient(f"grpc://127.0.0.1:{server.bound_port}")  # type: ignore[abstract]
+    try:
+        stream = client.subscribe_kv_events(1, "model", 0, 16)
+        next(stream)
+        # Reads stop once the flow-control window is full.
+        deadline = time.monotonic() + 10
+        last = -1
+        while reads != last:
+            assert time.monotonic() < deadline, f"server kept reading: {reads}"
+            last = reads
+            time.sleep(0.5)
+        stream.close()
+    finally:
+        client.close()
+        server.close()
 
 
 def test_aio_server_releases_threads_when_bind_fails() -> None:

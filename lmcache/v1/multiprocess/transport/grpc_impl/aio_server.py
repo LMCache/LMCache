@@ -28,6 +28,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
 logger = init_logger(__name__)
 
 _STREAM_END = object()
+_STREAM_READ_AHEAD = 1
 
 
 class _AioServicer:
@@ -188,15 +189,28 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
         """
         loop = asyncio.get_running_loop()
         items: asyncio.Queue[Any] = asyncio.Queue()
+        # Don't read further ahead than the client drains.
+        credits = threading.Semaphore(_STREAM_READ_AHEAD)
+        done = threading.Event()
+
+        def put(item: Any) -> None:
+            try:
+                loop.call_soon_threadsafe(items.put_nowait, item)
+            except RuntimeError:
+                pass  # loop closed on shutdown
 
         def read() -> None:
             try:
-                for response in stream:
-                    loop.call_soon_threadsafe(items.put_nowait, response)
+                while credits.acquire() and not done.is_set():
+                    try:
+                        response = next(stream)
+                    except StopIteration:
+                        break
+                    put(response)
             except Exception as exc:
-                loop.call_soon_threadsafe(items.put_nowait, exc)
+                put(exc)
             finally:
-                loop.call_soon_threadsafe(items.put_nowait, _STREAM_END)
+                put(_STREAM_END)
 
         threading.Thread(target=read, daemon=True, name="grpc-event-stream").start()
         try:
@@ -209,7 +223,10 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
                     )
                     await context.abort(grpc.StatusCode.INTERNAL, str(item))
                 yield registered.response_encoder(item)
+                credits.release()
         finally:
+            done.set()
+            credits.release()
             stream.close()
 
     def start(self) -> None:
