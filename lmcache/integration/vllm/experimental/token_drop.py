@@ -64,3 +64,18 @@ def parse_token_drop_spec(
         raise ValueError("lmcache.token_drop.config must be a mapping")
 
     return TokenDropSpec(algorithm=algorithm, config=dict(config))
+
+
+@dataclass
+class LMCacheMPTokenDropRequestState:
+    """Scheduler-provided request data; the worker assigns its batch row."""
+
+    request_id: str
+    algorithm: str
+    config: dict[str, Any]
+    resident_kv_tokens: int
+    physical_block_ids: list[int] | None
+    is_genuine_decode: bool
+    num_decoded_tokens: int
+    num_new_tokens: int
+    worker_row: int = -1
