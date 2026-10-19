@@ -411,6 +411,9 @@ class LMCacheEngine:
 
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
+
+        When KV events are enabled, each stored chunk references the preceding
+        nonempty chunk's hash, including chunks excluded by the mask.
         """
         # Health check: block operation if LMCache is unhealthy
         if not self.is_healthy():
@@ -481,7 +484,7 @@ class LMCacheEngine:
             assert isinstance(request_configs, dict)
 
         with store_stats.profile_process_tokens():
-            prev_key = 0
+            prev_key: int | None = None
             for start, end, key in self.token_database.process_tokens(
                 tokens,
                 hashes,
@@ -533,9 +536,20 @@ class LMCacheEngine:
 
                 # Create KV event
                 if self.kv_events_enabled:
+                    if prev_key is None and start > 0:
+                        # Preserve segment boundaries while recovering masked parents.
+                        prefix_chunks = self.token_database.process_tokens(
+                            tokens, hashes, offsets, make_key=False
+                        )
+                        for prefix_start, prefix_end, prefix_hash in prefix_chunks:
+                            if prefix_start >= start:
+                                break
+                            if prefix_end > prefix_start:
+                                assert isinstance(prefix_hash, int)
+                                prev_key = prefix_hash
                     stored_event = CacheStoreEvent(
                         block_hashes=[key.chunk_hash],
-                        parent_block_hash=None if start == 0 else prev_key,
+                        parent_block_hash=prev_key,
                         token_ids=[],
                         block_size=num_tokens,
                         lora_id=None,
@@ -626,6 +640,9 @@ class LMCacheEngine:
             objects (on CPU) and puts the memory objects of layer i-1 to the
             storage backends. In the last iteration, it puts the memory objects
             of the last layer to the storage backends.
+
+        When KV events are enabled, each stored chunk references the preceding
+        nonempty chunk's hash, including masked or already stored chunks.
         """
         # Health check: block operation if LMCache is unhealthy
         if not self.is_healthy():
@@ -676,7 +693,7 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
-        prev_key = 0
+        prev_key: int | None = None
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens, mask=mask, request_configs=request_configs
         ):
@@ -697,6 +714,7 @@ class LMCacheEngine:
             if self.storage_manager.contains(
                 keys_multi_layer[0], self.retrieve_locations
             ):
+                prev_key = key.chunk_hash
                 continue
 
             # Allocate the memory object
@@ -726,9 +744,20 @@ class LMCacheEngine:
 
             # Create KV event
             if self.kv_events_enabled and tokens is not None:
+                if prev_key is None and start > 0:
+                    # Preserve segment boundaries while recovering masked parents.
+                    prefix_chunks = self.token_database.process_tokens(
+                        tokens, make_key=False
+                    )
+                    for prefix_start, prefix_end, prefix_hash in prefix_chunks:
+                        if prefix_start >= start:
+                            break
+                        if prefix_end > prefix_start:
+                            assert isinstance(prefix_hash, int)
+                            prev_key = prefix_hash
                 stored_event = CacheStoreEvent(
                     block_hashes=[key.chunk_hash],
-                    parent_block_hash=None if start == 0 else prev_key,
+                    parent_block_hash=prev_key,
                     token_ids=[],
                     block_size=num_tokens,
                     lora_id=None,
