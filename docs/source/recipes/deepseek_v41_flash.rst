@@ -107,7 +107,7 @@ Compression support
    * - Method
      - Status
      - Notes
-   * - :doc:`CacheGen <../mp/cachegen>`
+   * - :doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`
      - Not supported
      - Packed ``fp8_ds_mla`` records are byte-opaque.
 

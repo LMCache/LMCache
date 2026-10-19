@@ -12,8 +12,3 @@ coordination, and cache management.
    mp/p2p
    mp/coordinator
    mp/kv_cache_management
-
-.. toctree::
-   :maxdepth: 1
-
-   /disaggregated_prefill/shared_storage

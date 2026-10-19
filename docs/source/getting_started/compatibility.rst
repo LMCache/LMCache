@@ -142,7 +142,7 @@ same row or column are interchangeable.
      - vLLM ``0.13.0+``
      - This is the minimum version documented for the KV-events integration;
        event publishing still requires the corresponding vLLM configuration;
-       see :doc:`../legacy/production/kv_cache_events`.
+       see :doc:`../production/kv_cache_events`.
    * - :doc:`../recipes/glm5_2` (GLM-5.2 DSA)
      - vLLM ``0.23.0`` + LMCache ``0.4.7``
      - This exact model/engine combination is recorded as validated in the

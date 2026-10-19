@@ -1,11 +1,6 @@
 Hidden states
 =============
 
-.. warning::
-
-   This store is attached to the deprecated in-process ``LMCacheEngine``.
-   It is not exposed by the multiprocess server or SDK.
-
 The **HiddenStateStore** caches per-token *hidden-state* tensors
 (intermediate activations from an inference forward pass) alongside
 the KV cache, keyed by the same chunk keys. It exists to support any

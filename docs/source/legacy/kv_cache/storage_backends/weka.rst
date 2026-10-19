@@ -3,7 +3,7 @@ Weka
 
 .. warning::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the related MP documentation and its separate configuration, see :doc:`/mp/l2_storage/index`.
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/l2_storage/index`.
 
 
 .. _weka-overview:
@@ -76,7 +76,7 @@ Setup Example
 
 - Weka already installed and mounted.
 
-- vllm and lmcache installed (:doc:`Installation Guide </getting_started/installation>`)
+- vllm and lmcache installed (:doc:`Installation Guide <../../getting_started/installation>`)
 
 - Hugging Face access to ``meta-llama/Llama-3.1-8B-Instruct``
 
@@ -133,4 +133,5 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
         --max-model-len 65536 \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
+
 

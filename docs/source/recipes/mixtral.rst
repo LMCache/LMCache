@@ -82,7 +82,7 @@ Compression support
    * - Method
      - Status
      - Notes
-   * - :doc:`CacheGen <../mp/cachegen>`
+   * - :doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`
      - Not validated
      -
 

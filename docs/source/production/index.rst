@@ -7,7 +7,6 @@ Deploying, scaling, and operating LMCache in production.
    :maxdepth: 2
 
    /mp/deployment
-   /production/docker_deployment
    /production/kubernetes_deployment
    /mp/operator
    /developer_guide/extending_lmcache/runtime_plugins

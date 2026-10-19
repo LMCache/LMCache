@@ -1,11 +1,6 @@
 RESP (Native Redis/Valkey)
 ==========================
 
-.. warning::
-
-   This page documents the deprecated in-process RESP backend. For the MP mode
-   RESP L2 adapter, see :doc:`/mp/l2_storage/resp`.
-
 .. _resp-overview:
 
 Overview
@@ -20,10 +15,9 @@ Key advantages over the standard Redis connector:
 - **Multi-threaded C++ I/O**: Worker threads operate in parallel with zero-copy buffer passing and full GIL release
 - **Batched tiling**: Large batch operations are automatically split across worker threads for maximum parallelism
 - **eventfd-based completions**: The kernel wakes Python on completion -- no polling overhead
-- **Async non-MP client**: ``ConnectorClientBase`` integrates the connector
-  with the in-process storage backend.
+- **Dual-mode support**: The same C++ connector works in both non-MP mode (via ``ConnectorClientBase``) and MP mode (via ``NativeConnectorL2Adapter`` as an L2 adapter)
 
-The native C++ source lives in ``csrc/storage_backends/redis/``. See :doc:`Adding Native Connectors </developer_guide/extending_lmcache/native_connectors>` for the full architecture.
+The native C++ source lives in ``csrc/storage_backends/redis/``. See :doc:`Adding Native Connectors <../../developer_guide/extending_lmcache/native_connectors>` for the full architecture.
 
 
 Prerequisites
@@ -197,19 +191,33 @@ appearing in logged configuration at startup.
    * - Variable
      - Description
    * - ``LMCACHE_RESP_USERNAME``
-     - Redis ACL username. Used as default when ``username`` is not set in config.
+     - Redis ACL username. Used as default when ``username`` is not set in config/JSON.
    * - ``LMCACHE_RESP_PASSWORD``
-     - Redis AUTH password. Used as default when ``password`` is not set in config.
+     - Redis AUTH password. Used as default when ``password`` is not set in config/JSON.
    * - ``LMCACHE_RESP_HOST``
-     - Redis hostname or IP. Used as default when ``host`` is not set in config or URL.
+     - Redis hostname or IP. Used as default when ``host`` is not set in config/JSON/URL.
    * - ``LMCACHE_RESP_PORT``
-     - Redis port. Used as default when ``port`` is not set in config or URL.
+     - Redis port. Used as default when ``port`` is not set in config/JSON/URL.
 
-The non-MP config file takes precedence over environment variables.
-Environment variables serve as defaults — they are used when the corresponding
-config value is empty or unset. They are read at adapter creation time inside
-the adapter itself, so they are **never stored in the config object** and
-**never printed in startup logs**.
+Config files (non-MP) and ``--l2-adapter`` JSON (MP) take precedence over
+environment variables. Environment variables serve as defaults — they are used
+when the corresponding config value is empty or unset. They are read at adapter
+creation time inside the adapter itself, so they are **never stored in the
+config object** and **never printed in startup logs**.
+
+**Example — MP mode with env vars:**
+
+.. code-block:: bash
+
+    export LMCACHE_RESP_USERNAME="default"
+    export LMCACHE_RESP_PASSWORD="secret"
+
+    lmcache server \
+        --l1-size-gb 10 \
+        --eviction-policy LRU \
+        --chunk-size 16 \
+        --l2-adapter '{"type": "resp", "host": "localhost", "port": 6379, "num_workers": 8}' \
+        --port 6555
 
 **Example — Non-MP mode with env vars:**
 
@@ -259,6 +267,127 @@ under ``extra_config`` (see `Environment Variable Configuration`_ above).
 .. note::
    ``save_unfull_chunk`` must be off (default) and chunk metadata saving must be
    disabled for optimal throughput with the native RESP connector.
+
+
+MP Mode (Multiprocess)
+-----------------------
+
+In MP mode, LMCache runs as a separate server process communicating with vLLM
+over the configured ZMQ or gRPC request transport. The RESP connector serves as
+an L2 adapter with variable-size chunk support.
+
+**Step 1: Start Redis** (see `Redis Server Setup`_ above)
+
+**Step 2: Launch LMCache MP Server:**
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 10 \
+        --eviction-policy LRU \
+        --chunk-size 16 \
+        --l2-adapter '{"type": "resp", "host": "localhost", "port": 6379, "num_workers": 8}' \
+        --port 6555
+
+**Step 3: Launch vLLM with LMCache MP Connector:**
+
+.. code-block:: bash
+
+    PORT=8000
+    vllm serve meta-llama/Llama-3.1-8B-Instruct \
+        --kv-transfer-config '{
+            "kv_connector": "LMCacheMPConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "lmcache.mp.host": "tcp://localhost",
+                "lmcache.mp.port": 6555
+            }
+        }' \
+        --no-enable-prefix-caching \
+        --port $PORT \
+        --load-format dummy
+
+The example uses the default ZMQ transport. For gRPC, add ``--transport grpc``
+to ``lmcache server`` and change ``lmcache.mp.host`` to
+``grpc://localhost``.
+
+
+L2 Adapter Configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``--l2-adapter`` JSON accepts these fields:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 10 10 60
+
+   * - Field
+     - Type
+     - Default
+     - Description
+   * - ``type``
+     - str
+     - (required)
+     - Must be ``"resp"``
+   * - ``host``
+     - str
+     - (required)
+     - Redis/Valkey hostname or IP
+   * - ``port``
+     - int
+     - (required)
+     - Redis/Valkey port
+   * - ``num_workers``
+     - int
+     - 8
+     - C++ worker threads for parallel I/O
+   * - ``username``
+     - str
+     - ``""``
+     - Redis ACL username (leave empty for no auth). Falls back to ``LMCACHE_RESP_USERNAME`` env var if empty.
+   * - ``password``
+     - str
+     - ``""``
+     - Redis AUTH password (leave empty for no auth). Falls back to ``LMCACHE_RESP_PASSWORD`` env var if empty.
+   * - ``max_capacity_gb``
+     - float
+     - 0
+     - Maximum L2 storage capacity in GB for client-side usage tracking. Required for L2 eviction. Set to 0 (default) to disable usage tracking.
+
+L2 Eviction
+~~~~~~~~~~~~
+
+To enable automatic eviction of least-recently-used keys when the Redis backend fills up,
+set ``max_capacity_gb`` and add an ``"eviction"`` block:
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 10 \
+        --eviction-policy LRU \
+        --chunk-size 16 \
+        --l2-adapter '{
+            "type": "resp",
+            "host": "localhost",
+            "port": 6379,
+            "num_workers": 8,
+            "max_capacity_gb": 10,
+            "eviction": {
+                "eviction_policy": "LRU",
+                "trigger_watermark": 0.8,
+                "eviction_ratio": 0.2
+            }
+        }' \
+        --port 6555
+
+This configures a 10 GB capacity limit. When usage exceeds 80% (``trigger_watermark``),
+the eviction controller will delete the least-recently-used ~20% of stored keys
+(``eviction_ratio``) using the Redis ``DEL`` command.
+
+.. note::
+   ``max_capacity_gb`` enables **client-side** size tracking. It does not configure
+   the Redis server's ``maxmemory`` setting. You should set ``max_capacity_gb`` to
+   match or be slightly below your Redis server's available memory.
 
 
 Testing the Setup
@@ -329,4 +458,4 @@ Additional Resources
 - Benchmark script: ``examples/kv_cache_reuse/remote_backends/resp/benchmark_resp_client.py``
 - C++ source: ``csrc/storage_backends/redis/``
 - Native connector architecture: ``csrc/storage_backends/README.md``
-- Developer guide for adding new native connectors: :doc:`Adding Native Connectors </developer_guide/extending_lmcache/native_connectors>`
+- Developer guide for adding new native connectors: :doc:`Adding Native Connectors <../../developer_guide/extending_lmcache/native_connectors>`

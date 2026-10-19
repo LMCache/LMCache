@@ -3,7 +3,7 @@ InfiniStore
 
 .. warning::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the related MP documentation and its separate configuration, see :doc:`/mp/l2_storage/index`.
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/l2_storage/index`.
 
 
 .. _infinistore-overview:
@@ -18,7 +18,7 @@ There are two major scenarios how InfiniStore supports:
 * Prefill-Decoding disaggregation clusters: in such mode inference workloads are separated into two node pools: prefill nodes and decoding nodes. InfiniStore enables KV cache transfer among these two types of nodes, and also KV cache reuse.
 * Non-disaggregated clusters: in such mode prefill and decoding workloads are mixed on every node. InfiniStore serves as an extra large KV cache pool in addition to GPU cache and local CPU cache, and also enables cross-node KV cache reuse.
 
-.. image:: /assets/InfiniStore-usage.png
+.. image:: ../../assets/InfiniStore-usage.png
     :alt: InfiniStore Usage Diagram
 
 For more details, please refer to the `InfiniStore Documentation <https://bytedance.github.io/InfiniStore/index.html>`_.

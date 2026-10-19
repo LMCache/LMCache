@@ -1,34 +1,144 @@
 Basic Check Tool
 ================
 
-``python -m lmcache.v1.basic_check`` has separate checks for MP L2 adapters
-and deprecated in-process storage backends. Run in an installed LMCache
-Python environment with the dependencies of the selected backend.
+.. warning::
 
-MP L2 adapter check
--------------------
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
 
-The ``test_l2_adapter`` mode constructs an ``L2AdapterInterface`` directly
-and validates store, lookup, load, and data integrity with ``ObjectKey`` keys.
-It does not require a running MP server or an inference engine.
+
+The LMCache Basic Check Tool is a testing and validation utility that helps you verify your LMCache installation, configuration, and functionality. It provides multiple testing modes to validate different components of the LMCache system.
+
+Overview
+--------
+
+The basic check tool (``lmcache.v1.basic_check``) is designed to:
+
+* Test remote backend connectivity and functionality
+* Validate storage manager operations
+* Generate test keys for performance testing
+* Verify configuration settings
+* Provide diagnostic information for troubleshooting
+
+Available Check Modes
+---------------------
+
+The tool supports several check modes, each targeting specific functionality:
+
+test_remote
+~~~~~~~~~~~
+
+Tests the remote backend functionality including:
+
+* Connection establishment to remote backends (fs, etc.)
+* put/get operations with data integrity validation
+* put/get/exists operations with performance reports
+
+**Usage:**
 
 .. code-block:: bash
 
-   python -m lmcache.v1.basic_check --mode test_l2_adapter \
-     --l2-adapter '{"type":"mock","max_size_gb":1}' \
-     --num-keys 5 --obj-size 1024 --kv-dtype float32
+   python -m lmcache.v1.basic_check --mode test_remote
 
-Repeat ``--l2-adapter`` to check multiple adapters. Use ``--settle-time``
-for backends requiring a delay between store and lookup. See
-:doc:`/mp/l2_storage/supported_storages` for adapter configuration.
+test_storage_manager
+~~~~~~~~~~~~~~~~~~~~
 
-Other modes
------------
+Tests the storage manager operations including:
+
+* Configuration validation
+* batched_put/get operations with data integrity validation
+* batched_put/get/contains operations with performance reports
+
+**Usage:**
+
+.. code-block:: bash
+
+   python -m lmcache.v1.basic_check --mode test_storage_manager
+
+gen (Key Generation)
+~~~~~~~~~~~~~~~~~~~~
+
+Generates test keys for performance testing and benchmarking:
+
+* Configurable number of keys and concurrency levels
+* Memory-efficient batch processing
+* Progress tracking and performance metrics
+* Offset support for distributed testing
+
+**Usage:**
+
+.. code-block:: bash
+
+   python -m lmcache.v1.basic_check --mode gen --num-keys 1000 --concurrency 16
+
+Command Line Interface
+----------------------
+
+Basic Usage
+~~~~~~~~~~~
+
+.. code-block:: bash
+
+   python -m lmcache.v1.basic_check --mode <MODE> [OPTIONS]
+
+List Available Modes
+~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
    python -m lmcache.v1.basic_check --mode list
 
-The ``test_remote``, ``test_storage_manager``, and ``gen`` modes use the
-old storage backend interfaces. Their YAML configuration and examples are
-kept in :doc:`/legacy/developer_guide/usage/basic_check`.
+Command Line Options
+~~~~~~~~~~~~~~~~~~~~
+
+.. option:: --mode MODE
+
+   **Required.** Operation mode to run. Use ``list`` to see available modes.
+
+.. option:: --model MODEL
+
+   Model name for testing, just a part of key of persist kv-cache. Default: ``/lmcache_test_model/``
+
+.. option:: --num-keys NUM
+
+   Number of keys to generate (gen mode only). Default: 100
+
+.. option:: --concurrency NUM
+
+   Concurrency level for operations (gen mode only). Default: 16
+
+.. option:: --offset NUM
+
+   Offset for key generation (gen mode only). Default: 0
+
+Configuration
+-------------
+
+The basic check tool uses your existing LMCache configuration. You can specify configuration in several ways:
+
+Environment Variable
+~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+   export LMCACHE_CONFIG_PATH=/path/to/config.yaml
+   python -m lmcache.v1.basic_check --mode test_remote
+
+Example Configuration
+~~~~~~~~~~~~~~~~~~~~~
+
+Here's an example configuration optimized for basic checks:
+
+.. code-block:: yaml
+
+   # Basic cache settings
+   chunk_size: 256
+   local_cpu: true
+   max_local_cpu_size: 1.0  # 1GB for basic checks
+
+   # Remote backend (optional)
+   remote_url: "file:///tmp/lmcache_basic_check"
+
+Examples
+--------
+
+The ``examples/basic_check/`` directory contains comprehensive examples:

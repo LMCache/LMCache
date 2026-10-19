@@ -3,7 +3,7 @@ Configuring LMCache
 
 .. warning::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the related MP documentation and its separate configuration, see :doc:`/mp/configuration`.
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/configuration`.
 
 
 LMCache supports two types of configurations:
@@ -149,7 +149,7 @@ Settings related to cache blending functionality.
 .. note::
 
     We have an end-to-end `example <https://github.com/LMCache/LMCache/tree/dev/examples/blend_in_process>`_.
-    We also have more :doc:`detailed documentation </legacy/kv_cache_optimizations/blending>`.
+    We also have more :doc:`detailed documentation <../kv_cache_optimizations/blending>`.
 
 .. list-table::
    :header-rows: 1

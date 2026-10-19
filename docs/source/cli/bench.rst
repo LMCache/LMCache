@@ -51,8 +51,8 @@ There are three ways to configure the benchmark:
    ``--config``.
 
 
-Engine Quick Start
-~~~~~~~~~~~~~~~~~~
+Quick Start
+~~~~~~~~~~~
 
 **Minimal (with all required arguments):**
 
@@ -412,8 +412,7 @@ cache and samples a subset into each request:
 
 .. important::
 
-   This workload assumes **CacheBlend** (an MP ``--engine-type blend`` server and the
-   CacheBlend vLLM connector; see :doc:`/mp/operator`). Each request
+   This workload assumes **CacheBlend** (``enable_blending``). Each request
    concatenates a random subset of the pool in random order, so without
    blending a document is reused only when everything before it in the prompt
    also matches — which these prompts almost never satisfy. Such a run writes
@@ -888,8 +887,8 @@ tweak individual settings:
        --config my_bench.json --kv-cache-volume 200
 
 
-Engine Output
-~~~~~~~~~~~~~
+Output
+~~~~~~
 
 Terminal (real-time progress)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -999,8 +998,8 @@ diff can pair by ``sample_id`` and skip what either run failed to score,
 rather than averaging a parsing failure in as a wrong answer.
 
 
-Engine Exit Codes
-~~~~~~~~~~~~~~~~~
+Exit Codes
+~~~~~~~~~~
 
 .. list-table::
    :header-rows: 1
@@ -1036,8 +1035,8 @@ It also requires the full ``lmcache`` install (not the lightweight
 ``lmcache-cli`` package).
 
 
-What the Server Benchmark Does
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+What it does
+~~~~~~~~~~~~
 
 For each sequence in ``[--start, --end)``, the tool runs two passes:
 
@@ -1059,8 +1058,8 @@ mismatch between producer and consumer surfaces as a loud
 ``CHECKSUM MISMATCH`` log line.
 
 
-Server Quick Start
-~~~~~~~~~~~~~~~~~~
+Quick start
+~~~~~~~~~~~
 
 Start the MP server in one terminal:
 
@@ -1083,8 +1082,8 @@ By default the tool runs forever (``--end`` unset); stop it with
 ``Ctrl-C`` at any time. Pass ``--end N`` for a bounded run.
 
 
-Server Options
-~~~~~~~~~~~~~~
+Options
+~~~~~~~
 
 .. list-table::
    :header-rows: 1
@@ -1356,8 +1355,8 @@ that recording a live process is never free.
    numbers as indicative, not a clean baseline.
 
 
-Server Output
-~~~~~~~~~~~~~
+Output
+~~~~~~
 
 After the run completes (or is interrupted with ``Ctrl-C``), a structured
 metrics summary is printed. The summary includes:
@@ -1440,8 +1439,8 @@ Any ``CHECKSUM MISMATCH``, ``ERROR``, or Python traceback in the log
 indicates a real problem worth investigating.
 
 
-Server Exit Codes
-~~~~~~~~~~~~~~~~~
+Exit codes
+~~~~~~~~~~
 
 .. list-table::
    :header-rows: 1
@@ -1478,8 +1477,8 @@ only needs the adapter's own backing storage to be reachable (for the
 ``fs`` adapter, that simply means a writable directory).
 
 
-What the L2 Adapter Benchmark Does
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+What it does
+~~~~~~~~~~~~
 
 For each measured operation the tool drives the adapter directly via
 its public submit/wait API:
@@ -1541,8 +1540,8 @@ support a clean store -> load round-trip.
    pages.
 
 
-L2 Adapter Quick Start
-~~~~~~~~~~~~~~~~~~~~~~
+Quick start
+~~~~~~~~~~~
 
 Benchmark the local filesystem adapter with default parameters:
 
@@ -1610,8 +1609,8 @@ If you prefer to keep the JSON spec out of the command line, set the
    lmcache bench l2 --num-keys 32 --in-flight 2
 
 
-L2 Adapter Options
-~~~~~~~~~~~~~~~~~~
+Options
+~~~~~~~
 
 .. list-table::
    :header-rows: 1
@@ -1870,8 +1869,8 @@ The SVG is written to ``--flamegraph-output`` (default
 ``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``).
 
 
-L2 Adapter Exit Codes
-~~~~~~~~~~~~~~~~~~~~~
+Exit codes
+~~~~~~~~~~
 
 .. list-table::
    :header-rows: 1

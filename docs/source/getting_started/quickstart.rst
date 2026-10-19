@@ -24,7 +24,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
         standalone service and vLLM attaches via ``LMCacheMPConnector``.
         Scales better, exposes management/observability endpoints, and
         supports sharing one cache across multiple engine instances.
-      - **In-process mode (deprecated)** -- LMCache runs inside the vLLM process via
+      - **In-process mode** -- LMCache runs inside the vLLM process via
         ``LMCacheConnectorV1``. Single command, convenient for quick
         single-node experiments.
 
@@ -148,15 +148,8 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             For request-level statistics (hit ratio, bytes transferred) see
             :doc:`../mp/observability/index`.
 
-         .. tab-item:: In-process mode (deprecated)
+         .. tab-item:: In-process mode
             :sync: inproc
-
-            .. warning::
-
-               This mode embeds the deprecated engine in the serving process.
-               Use the MP tab for new deployments. Further engine-specific
-               configuration is in :doc:`/legacy/index`.
-
 
             Start vLLM with LMCache embedded in the engine process:
 
@@ -170,7 +163,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
             .. note::
                To customize further, create a config file. See
-               :doc:`../legacy/api_reference/configurations` for all options.
+               :doc:`../api_reference/configurations` for all options.
 
             **Alternative simpler command:**
 
@@ -183,7 +176,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
             The ``--disable-hybrid-kv-cache-manager`` flag is mandatory.
             All configuration options from the
-            :doc:`../legacy/api_reference/configurations` page still apply.
+            :doc:`../api_reference/configurations` page still apply.
 
             **Test** -- open a new terminal and send two requests whose
             prompts share a prefix:
@@ -414,7 +407,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       LMCache integrates with TensorRT-LLM via TRT-LLM's
       **KV Cache Connector** API and supports two deployment modes:
 
-      - **In-process mode (deprecated)** (``connector: lmcache``) -- LMCache runs as
+      - **In-process mode** (``connector: lmcache``) -- LMCache runs as
         a singleton inside the TRT-LLM process. Simplest setup; no
         extra service to manage.
       - **MP mode** (``connector: lmcache-mp``) -- LMCache runs as a
@@ -424,15 +417,8 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       .. tab-set::
          :sync-group: trtllm-mode
 
-         .. tab-item:: In-process mode (deprecated)
+         .. tab-item:: In-process mode
             :sync: inproc
-
-            .. warning::
-
-               This mode embeds the deprecated engine in the serving process.
-               Use the MP tab for new deployments. Further engine-specific
-               configuration is in :doc:`/legacy/index`.
-
 
             Configure LMCache via env vars:
 
@@ -511,7 +497,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          The TRT-LLM adapter reads :class:`LMCacheEngineConfig` the
          same way the vLLM adapter does: ``LMCACHE_CONFIG_FILE`` for
          a YAML file, otherwise individual ``LMCACHE_*`` environment
-         variables. See :doc:`../legacy/api_reference/configurations` for
+         variables. See :doc:`../api_reference/configurations` for
          all options.
 
 🎉 **You now have LMCache caching and reusing KV caches across all three engines.**
@@ -543,7 +529,7 @@ maps non-CUDA devices to ``engine_driven``, a worker-side gather/scatter
 copy path that the server only loads when started with
 ``--supported-transfer-mode engine_driven`` or ``auto``).
 
-**Docker** -- see :doc:`../mp/deployment`.
+**Docker** -- see :doc:`../production/docker_deployment`.
 
 **HTTP management endpoints** (health, clear-cache, status) -- see
 :doc:`../mp/http_api`.
