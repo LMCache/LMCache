@@ -162,6 +162,14 @@ class DeviceOps:
   kernel is bound. The helpers are plain functions rather than a shared base
   class, so every backend stays a direct `DeviceOps` subclass.
 
+  The block kernel is a required export of each supported extension, so
+  `ensure_native()` references it directly. An installed module without it
+  raises `AttributeError`, and `ensure_native()` (and `DeviceSpec.get_ops()`)
+  keeps failing rather than serving the torch baseline. The torch baseline
+  serves block transfers only when the CUDA or XPU extension is not installed
+  at all; NPU requires its plugin. Choosing the whole ops object at
+  initialization and removing `bind_native` are tracked as #4465 step 3.2.
+
   ```text
   gather_paged_kv_to_cpu / scatter_cpu_to_paged_kv        (tensors only)
     └─ device_ops.multi_layer_block_kv_transfer(KV tensors, chunk tensors, ...)

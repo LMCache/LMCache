@@ -172,9 +172,7 @@ def test_cpu_and_cuda_kv_can_share_one_process(
         gpu_first: Exercise native-first as well as CPU-first capability caching.
         output_kind: Allocate chunks or use unpinned shared-memory output buffers.
     """
-    native = pytest.importorskip("lmcache.cuda_ops")
-    if not hasattr(native, "multi_layer_block_kv_transfer"):
-        pytest.skip("requires the native CUDA block-transfer kernel")
+    pytest.importorskip("lmcache.cuda_ops")
     devices = ("cuda", "cpu", "cuda") if gpu_first else ("cpu", "cuda", "cpu")
     for device in devices:
         _assert_roundtrip(device, torch.float16, output_kind)

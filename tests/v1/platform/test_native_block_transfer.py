@@ -26,8 +26,12 @@ from lmcache.v1.gpu_connector.utils import (
 )
 from lmcache.v1.platform import native_block_transfer, resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
+from lmcache.v1.platform.base.device_spec import DeviceSpec
+from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
 from lmcache.v1.platform.devices.cuda.device_ops import CudaDeviceOps
+from lmcache.v1.platform.devices.npu import NpuDeviceSpec
 from lmcache.v1.platform.devices.npu.device_ops import NpuDeviceOps
+from lmcache.v1.platform.devices.xpu import XpuDeviceSpec
 from lmcache.v1.platform.devices.xpu.device_ops import XpuDeviceOps
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
@@ -44,6 +48,13 @@ _NATIVE_BACKENDS = [
     pytest.param(XpuDeviceOps, "lmcache.xpu_ops", id="xpu"),
     pytest.param(NpuDeviceOps, "lmcache_ascend.ops", id="npu"),
 ]
+_NATIVE_SPECS = [
+    pytest.param(CudaDeviceSpec, "lmcache.cuda_ops", id="cuda"),
+    pytest.param(XpuDeviceSpec, "lmcache.xpu_ops", id="xpu"),
+    pytest.param(NpuDeviceSpec, "lmcache_ascend.ops", id="npu"),
+]
+# NPU requires its plugin; only CUDA and XPU run on the baseline without one.
+_OPTIONAL_EXTENSION_BACKENDS = _NATIVE_BACKENDS[:2]
 
 
 @dataclass
@@ -101,16 +112,6 @@ def _native_ops(
     ops = ops_cls()
     ops.ensure_native()
     return ops, kernel
-
-
-def _partial_ops(
-    monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
-) -> DeviceOps:
-    """Return ``ops_cls`` bound to a module without the block kernel."""
-    _install_native(monkeypatch, module_name, calculate_cdf=lambda *_: None)
-    ops = ops_cls()
-    ops.ensure_native()
-    return ops
 
 
 def _paged_kv(
@@ -173,11 +174,43 @@ def _host_chunk(address: int, pinned: bool = True) -> MagicMock:
 
 
 @pytest.mark.parametrize(("ops_cls", "module_name"), _NATIVE_BACKENDS)
-def test_without_kernel_tensor_transfer_uses_baseline(
+def test_extension_without_kernel_fails_initialization(
     monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
 ) -> None:
-    """A module without the block kernel keeps the torch baseline, byte-exact."""
-    ops = _partial_ops(monkeypatch, ops_cls, module_name)
+    """An installed extension lacking the block kernel is a broken install.
+
+    It must not quietly serve the torch baseline, and a second attempt must
+    fail the same way instead of returning as already initialized.
+    """
+    _install_native(monkeypatch, module_name, calculate_cdf=lambda *_: None)
+    ops = ops_cls()
+
+    for _ in range(2):
+        with pytest.raises(AttributeError, match="multi_layer_block_kv_transfer"):
+            ops.ensure_native()
+
+
+@pytest.mark.parametrize(("spec_cls", "module_name"), _NATIVE_SPECS)
+def test_failed_initialization_is_not_cached(
+    monkeypatch: pytest.MonkeyPatch, spec_cls: type[DeviceSpec], module_name: str
+) -> None:
+    """Resolving a spec over a broken extension fails on every call."""
+    _install_native(monkeypatch, module_name, calculate_cdf=lambda *_: None)
+    spec = spec_cls()
+
+    for _ in range(2):
+        with pytest.raises(AttributeError, match="multi_layer_block_kv_transfer"):
+            spec.get_ops()
+
+
+@pytest.mark.parametrize(("ops_cls", "module_name"), _OPTIONAL_EXTENSION_BACKENDS)
+def test_missing_extension_tensor_transfer_uses_baseline(
+    monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
+) -> None:
+    """Without the CUDA or XPU extension, the torch baseline serves, byte-exact."""
+    monkeypatch.setitem(sys.modules, module_name, None)
+    ops = ops_cls()
+    ops.ensure_native()
     paged, fmt, desc = _paged_kv(num_blocks=6)
     chunk = torch.zeros(2, 2, _CHUNK_TOKENS, 16)
 
@@ -188,12 +221,14 @@ def test_without_kernel_tensor_transfer_uses_baseline(
     assert torch.equal(chunk, _expected_chunk(paged, [1, 3]))
 
 
-@pytest.mark.parametrize(("ops_cls", "module_name"), _NATIVE_BACKENDS)
-def test_without_kernel_output_allocation_is_plain(
+@pytest.mark.parametrize(("ops_cls", "module_name"), _OPTIONAL_EXTENSION_BACKENDS)
+def test_missing_extension_output_allocation_is_plain(
     monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
 ) -> None:
-    """Without the kernel, block-transfer output is an ordinary CPU tensor."""
-    ops = _partial_ops(monkeypatch, ops_cls, module_name)
+    """Without the extension, block-transfer output is an ordinary CPU tensor."""
+    monkeypatch.setitem(sys.modules, module_name, None)
+    ops = ops_cls()
+    ops.ensure_native()
 
     out = ops.allocate_block_transfer_output((2, 3), torch.float16)
 
@@ -318,9 +353,7 @@ def cuda_ops() -> DeviceOps:
     """The resolved CUDA ops, skipping unless the compiled kernel is present."""
     if not torch.cuda.is_available():
         pytest.skip("requires a CUDA device")
-    native = pytest.importorskip("lmcache.cuda_ops")
-    if not hasattr(native, "multi_layer_block_kv_transfer"):
-        pytest.skip("requires the native CUDA block-transfer kernel")
+    pytest.importorskip("lmcache.cuda_ops")
     return resolve_device_ops("cuda")
 
 

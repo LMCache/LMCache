@@ -293,8 +293,13 @@ def test_cuda_device_ops_loads_cuda_ops(
     def calculate_cdf(*_args: object) -> str:
         return "cuda-native"
 
+    def block_kernel(*_args: object) -> None:
+        raise AssertionError("block kernel must not run in this test")
+
     native = ModuleType("lmcache.cuda_ops")
     native.calculate_cdf = calculate_cdf  # type: ignore[attr-defined]
+    # Required export of every supported build.
+    native.multi_layer_block_kv_transfer = block_kernel  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "lmcache.cuda_ops", native)
     monkeypatch.setattr(lmcache, "cuda_ops", native, raising=False)
 

@@ -428,7 +428,10 @@ Implementation notes
   ``lmcache/v1/platform/native_block_transfer.py`` (they convert tensors to
   the kernel's addresses and pin host buffers), and pass
   ``skip={"multi_layer_block_kv_transfer"}`` to ``bind_native`` so the
-  compiled kernel does not shadow your override. See
+  compiled kernel does not shadow your override. Reference the kernel
+  directly (``native.multi_layer_block_kv_transfer``) rather than probing for
+  it: a module that imports but lacks a required kernel is a broken install
+  and should fail initialization. See
   ``lmcache/v1/platform/devices/cuda/device_ops.py``.
 - If you fall back to the generic path from inside a device-specific
   wrapper (e.g. when inputs are unsupported), call the corresponding

@@ -76,14 +76,14 @@ class NpuDeviceOps(DeviceOps):
 
     def __init__(self) -> None:
         super().__init__()
-        # The compiled address-taking block kernel, or None while the torch
-        # baseline serves block transfers.
+        # The compiled address-taking block kernel. It stays None only before
+        # ensure_native() runs or when the extension is not installed, and the
+        # torch baseline then serves block transfers.
         self._block_transfer_kernel: Callable[..., None] | None = None
 
     def ensure_native(self) -> None:
         if self._native_bound:
             return
-        self._native_bound = True  # set early to prevent repeated attempts
         try:
             # Third Party
             import lmcache_ascend.ops as native
@@ -92,10 +92,13 @@ class NpuDeviceOps(DeviceOps):
                 "NPU requires the LMCache-Ascend native ops (lmcache_ascend.ops): "
                 "Install LMCache-Ascend and retry."
             ) from exc
-        self._block_transfer_kernel = getattr(
-            native, "multi_layer_block_kv_transfer", None
-        )
+        # Every supported build exports the block kernel, so a module without
+        # it is a broken install: let the AttributeError propagate rather than
+        # serving the torch baseline. ``_native_bound`` stays False, so the
+        # next call fails the same way.
+        self._block_transfer_kernel = native.multi_layer_block_kv_transfer
         self.bind_native(native, skip={"multi_layer_block_kv_transfer"})
+        self._native_bound = True
 
     def allocate_block_transfer_output(
         self, shape: tuple[int, ...], dtype: torch.dtype
@@ -129,7 +132,7 @@ class NpuDeviceOps(DeviceOps):
         """Run the block transfer on the compiled Ascend kernel when it is bound.
 
         Operands follow :meth:`DeviceOps.multi_layer_block_kv_transfer`.
-        Without the kernel the torch baseline serves.
+        If the extension is not loaded, the torch baseline serves.
         """
         args = (
             paged_buffer_ptrs_tensor,

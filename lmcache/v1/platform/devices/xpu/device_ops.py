@@ -36,27 +36,32 @@ class XpuDeviceOps(DeviceOps):
 
     def __init__(self) -> None:
         super().__init__()
-        # The compiled address-taking block kernel, or None while the torch
-        # baseline serves block transfers.
+        # The compiled address-taking block kernel. It stays None only before
+        # ensure_native() runs or when the extension is not installed, and the
+        # torch baseline then serves block transfers.
         self._block_transfer_kernel: Callable[..., None] | None = None
 
     def ensure_native(self) -> None:
         if self._native_bound:
             return
-        self._native_bound = True  # set early to prevent repeated attempts
         try:
             # First Party
             import lmcache.xpu_ops as sycl
         except ImportError:
+            # Not installed: stay on the torch baseline without retrying.
+            self._native_bound = True
             logger.warning(
                 "lmcache.xpu_ops not built; XpuDeviceOps stays on the "
                 "torch baseline for all ops."
             )
             return
-        self._block_transfer_kernel = getattr(
-            sycl, "multi_layer_block_kv_transfer", None
-        )
+        # Every supported build exports the block kernel, so a module without
+        # it is a broken install: let the AttributeError propagate rather than
+        # serving the torch baseline. ``_native_bound`` stays False, so the
+        # next call fails the same way.
+        self._block_transfer_kernel = sycl.multi_layer_block_kv_transfer
         self.bind_native(sycl, skip={"multi_layer_block_kv_transfer"})
+        self._native_bound = True
 
     def allocate_block_transfer_output(
         self, shape: tuple[int, ...], dtype: torch.dtype
@@ -90,7 +95,7 @@ class XpuDeviceOps(DeviceOps):
         """Run the block transfer on the compiled SYCL kernel when it is bound.
 
         Operands follow :meth:`DeviceOps.multi_layer_block_kv_transfer`.
-        Without the kernel the torch baseline serves.
+        If the extension is not loaded, the torch baseline serves.
         """
         args = (
             paged_buffer_ptrs_tensor,
