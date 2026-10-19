@@ -56,8 +56,6 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // read_max_bytes_in_flight: bytes kept outstanding, connector-wide.
   //   Zero selects kDefaultReadMaxBytesInFlight when num_read_workers is
   //   positive.
-  // Throws std::runtime_error if num_read_workers is negative; threads
-  // started before a failure are joined first.
   FSConnector(std::string base_path, int num_workers,
               std::string relative_tmp_dir = "", bool use_odirect = false,
               size_t read_ahead_size = 0, int num_read_workers = 0,
