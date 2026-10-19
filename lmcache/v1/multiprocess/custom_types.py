@@ -69,6 +69,12 @@ class IPCCacheServerKey:
     # lookups reject it.
     num_kv_readers: int = field(default=0, compare=False)
 
+    # When set and ``end`` is not chunk-aligned, the range also addresses the
+    # unfull chunk ``[floor(end / chunk_size) * chunk_size, end)`` as its last
+    # chunk. Unset, a trailing partial chunk is discarded. Defaulted field:
+    # old payloads decode to False.
+    include_unfull_chunk: bool = field(default=False, compare=False)
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
@@ -145,7 +151,20 @@ class IPCCacheServerKey:
             request_id=self.request_id,
             cache_salt=self.cache_salt,
             request_configs=self.request_configs,
+            include_unfull_chunk=self.include_unfull_chunk,
         )
+
+    def has_unfull_chunk(self, chunk_size: int) -> bool:
+        """Return whether this key addresses an unfull trailing chunk.
+
+        Args:
+            chunk_size: The LMCache chunk size in tokens.
+
+        Returns:
+            True when ``include_unfull_chunk`` is set and ``end`` is not a
+            multiple of ``chunk_size``.
+        """
+        return self.include_unfull_chunk and self.end % chunk_size != 0
 
 
 # Type exports

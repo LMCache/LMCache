@@ -403,7 +403,9 @@ class MPCacheServerContext:
         """Resolve per-object-group object keys from an IPC cache key.
 
         Uses the session manager to track token state and the token hasher
-        to compute chunk hashes for the requested range.
+        to compute chunk hashes for the requested range. A key addressing an
+        unfull chunk (see :meth:`IPCCacheServerKey.has_unfull_chunk`) gets
+        the unfull chunk's key as its last entry.
 
         Args:
             key: IPC cache key describing model/session/token range.
@@ -420,9 +422,13 @@ class MPCacheServerContext:
         session.set_tokens(list(key.token_ids))
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
-        chunk_hashes = [
-            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
-        ]
+        if key.has_unfull_chunk(self.chunk_size):
+            full_end = key.end - key.end % self.chunk_size
+            hashes = session.get_hashes(key.start, full_end)
+            hashes.append(session.get_unfull_chunk_hash(key.end))
+        else:
+            hashes = session.get_hashes(key.start, key.end)
+        chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in hashes]
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
         return ipc_key_to_object_keys(key, chunk_hashes, object_group_ids)

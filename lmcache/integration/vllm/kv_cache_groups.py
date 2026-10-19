@@ -53,6 +53,32 @@ def is_scratch_spec(spec: Any) -> bool:
     return not getattr(spec, "prefix_cacheable", True)
 
 
+def is_per_request_state_spec(spec: Any) -> bool:
+    """Return whether the spec is a per-request ring LMCache can transfer.
+
+    vLLM's ``CircularBufferSpec`` (``KpoolTailSpec`` on older vLLM) gives each
+    request one block for its whole lifetime, written at ``position % capacity``
+    and holding the raw keys of the compression group that is still open. It
+    is a scratch spec (see :func:`is_scratch_spec`), but unlike the other
+    scratch specs its content is needed to resume a request mid-group, e.g. on
+    a prefill-to-decode handoff. Checked by class name so this module stays
+    importable without vLLM; ``UniformTypeKVCacheSpecs`` is unwrapped first.
+
+    Args:
+        spec: A vLLM KV cache spec, or a ``UniformTypeKVCacheSpecs`` container.
+
+    Returns:
+        ``True`` for a per-request ring spec.
+    """
+    inner = getattr(spec, "kv_cache_specs", None)
+    if isinstance(inner, dict) and inner:
+        spec = next(iter(inner.values()))
+    return is_scratch_spec(spec) and any(
+        cls.__name__ in ("CircularBufferSpec", "KpoolTailSpec")
+        for cls in type(spec).__mro__
+    )
+
+
 def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
     """Global tokens covered by one block id of ``kv_cache_spec``.
 
@@ -262,6 +288,7 @@ def create_engine_group_infos_from_vllm(
     kv_caches: Mapping[str, Any],
     layout_hints: "LayoutHints | None" = None,
     dcp_size: int = 1,
+    include_per_request_state: bool = False,
 ) -> list[EngineGroupInfo]:
     """Build the LMCache engine group infos from vLLM metadata and registered tensors.
 
@@ -282,6 +309,9 @@ def create_engine_group_infos_from_vllm(
         layout_hints: Optional engine-provided layout hints forwarded to format
             detection (e.g. ``NHD``/``HND`` and compression metadata).
         dcp_size: Decode context parallel size.
+        include_per_request_state: Register per-request ring groups (see
+            :func:`is_per_request_state_spec`) as ``per_request_state`` infos
+            instead of excluding them with the other scratch groups.
 
     Note:
         Under DCP each attention group's ``tokens_per_block`` is scaled by
@@ -289,7 +319,8 @@ def create_engine_group_infos_from_vllm(
         to the physical slot count is what sizes each rank's memory object.
         Mamba groups are replicated per rank and stay unscaled. Layers of
         scratch groups (see :func:`is_scratch_spec`) are excluded and never
-        form an info.
+        form an info, except per-request rings when
+        ``include_per_request_state`` is set.
 
     Returns:
         The list of ``EngineGroupInfo`` in protocol order, i.e. the LMCache group
@@ -319,6 +350,9 @@ def create_engine_group_infos_from_vllm(
         else ()
     )
 
+    def is_registered_per_request_state(spec: Any) -> bool:
+        return include_per_request_state and is_per_request_state_spec(spec)
+
     # Scratch groups skip format discovery: their layers are excluded below and
     # never transferred, so a layout the transfer kernels reject must not fail
     # registration.
@@ -326,6 +360,7 @@ def create_engine_group_infos_from_vllm(
         [layer_to_idx[name] for name in group.layer_names]
         for group in vllm_groups
         if not is_scratch_spec(group.kv_cache_spec)
+        or is_registered_per_request_state(group.kv_cache_spec)
     ]
 
     # CacheBlend fused-aux (presence-gated): the pool joins detection as
@@ -347,6 +382,7 @@ def create_engine_group_infos_from_vllm(
     # Scratch groups (tokens_per_block 0) are excluded the same way.
     per_layer_group_idx: list[int] | None = None
     group_tokens_per_block: dict[int, int] = {}
+    per_request_state_groups: set[int] = set()
     per_layer_sw_size = [-1] * num_layers
     per_layer_recurrent = [False] * num_layers
     if vllm_groups:
@@ -359,7 +395,9 @@ def create_engine_group_infos_from_vllm(
             group_tokens_per_block[engine_group_id] = get_tokens_per_block(
                 group.kv_cache_spec, dcp_size
             )
-            if group_tokens_per_block[engine_group_id] == 0:
+            if is_registered_per_request_state(group.kv_cache_spec):
+                per_request_state_groups.add(engine_group_id)
+            elif group_tokens_per_block[engine_group_id] == 0:
                 continue
             for name in group.layer_names:
                 per_layer_group_idx[layer_to_idx[name]] = engine_group_id
@@ -409,6 +447,7 @@ def create_engine_group_infos_from_vllm(
             # --separate-object-groups, after the regular groups.
             extra_object_group_tag=aux_group_tags.get(identity.engine_group_idx, 0),
             recurrent_state=_merge_layer_recurrent(per_layer_recurrent, indices),
+            per_request_state=identity.engine_group_idx in per_request_state_groups,
         )
         for identity, indices in group_layers_by_identity(
             normalized_kv_caches,
