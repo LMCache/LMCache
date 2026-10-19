@@ -60,7 +60,6 @@ If a test depends on a specific device/runtime, add matching pytest marks define
 - `@pytest.mark.cuda`
 - `@pytest.mark.xpu`
 - `@pytest.mark.musa`
-- `@pytest.mark.sglang` (for SGLang-specific tests)
 
 When the test is runtime-availability dependent, also gate with `skipif`, for example:
 
