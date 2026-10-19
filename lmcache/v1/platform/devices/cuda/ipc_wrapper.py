@@ -555,20 +555,26 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
             attempt_permute_to_contiguous_view,
         )
 
-        # Same layout normalization + contiguity contract as
-        # RawCudaIPCWrapper: flat-bytes reconstruction supports only
-        # contiguous tensors.
+        # Permute non-contiguous views (e.g. vLLM's NHD-over-HND) into
+        # contiguous ones, metadata-only. Anything still non-contiguous is a
+        # validated dim-0-padded view (other layouts raise there), which
+        # to_tensor() rebuilds from the shipped strides.
         tensor = attempt_permute_to_contiguous_view(tensor)
-        if not tensor.is_contiguous():
-            raise ValueError(
-                "VmmCudaIPCWrapper requires a tensor that is contiguous "
-                f"(possibly after permutation); got shape={tuple(tensor.shape)} "
-                f"stride={tuple(tensor.stride())}"
-            )
 
         data_ptr = tensor.data_ptr()
         device_index = tensor.device.index
-        nbytes = tensor.numel() * tensor.element_size()
+
+        # DeviceIPCWrapper interface fields, set first so byte_span() can
+        # size the chunk check below. ``storage_offset`` is 0 because
+        # ``data_ptr`` (folded into ``_alloc_offset``) already points at
+        # the tensor's first element.
+        self.dtype = tensor.dtype
+        self.shape = tuple(tensor.shape)
+        self.stride = tuple(tensor.stride())
+        self.storage_offset = 0
+        self.device_uuid = self._get_device_uuid(device_index)
+        # Byte range spans dim-0 padding too; equals numel bytes if contiguous.
+        nbytes = self.wire_metadata().byte_span()
 
         kind: str = ""
         payload: object = None
@@ -642,17 +648,9 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
         self._alloc_offset = alloc_offset
         self._nbytes = nbytes
 
-        # DeviceIPCWrapper interface fields. ``handle`` carries the
-        # export id so the base-class equality check compares identity;
-        # ``to_tensor`` is overridden and never reads it.
-        # ``storage_offset`` is 0 because ``data_ptr`` (folded into
-        # ``_alloc_offset``) already points at the tensor's first element.
+        # ``handle`` carries the export id so the base-class equality check
+        # compares identity; ``to_tensor`` is overridden and never reads it.
         self.handle = self._export_id
-        self.dtype = tensor.dtype
-        self.shape = tuple(tensor.shape)
-        self.stride = tuple(tensor.stride())
-        self.storage_offset = 0
-        self.device_uuid = self._get_device_uuid(device_index)
 
         # References this wrapper holds on the imported-mapping registry;
         # producer-side wrappers never import, so receivers start at 0.
@@ -745,7 +743,7 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
             cp_flat = cupy.ndarray(self._nbytes, dtype=cupy.uint8, memptr=memptr)
 
         raw = torch.from_dlpack(cp_flat)
-        return raw.view(self.dtype).reshape(self.shape)
+        return raw.view(self.dtype).as_strided(self.shape, self.stride)
 
     def close(self) -> None:
         """Release everything this wrapper holds, on either side.
