@@ -197,7 +197,7 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 4
 
    legacy/index
 
