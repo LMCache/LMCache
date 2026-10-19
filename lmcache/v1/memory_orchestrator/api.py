@@ -3,12 +3,15 @@
 
 These mirror the messages of ``protos/memory_orchestrator.proto`` as plain
 Python values so the state machine and the MP-side callers never handle
-protobuf objects. The module imports neither torch nor gRPC.
+protobuf objects. Object keys reuse the distributed storage API's class.
 """
 
 # Standard
 from dataclasses import dataclass
 import enum
+
+# First Party
+from lmcache.v1.distributed.api import ObjectKey as WireObjectKey
 
 DEFAULT_LAYOUT_FINGERPRINT: bytes = b"lmcache/kv_2ltd/v1"
 """Layout fingerprint of the region when the operator does not set one."""
@@ -57,21 +60,6 @@ class TokenStatus(enum.Enum):
 
     STALE_TOKEN = enum.auto()
     """The token is unknown, foreign, expired, retired, or used with the wrong call."""
-
-
-@dataclass(frozen=True)
-class WireObjectKey:
-    """Torch-free projection of ``distributed.api.ObjectKey`` for region state.
-
-    Fields match the shared P2P ``ObjectKey`` schema; a codec test checks the
-    field names of all three definitions and exercises wire round trips.
-    """
-
-    chunk_hash: bytes
-    model_name: str
-    kv_rank: int
-    object_group_id: int
-    cache_salt: str
 
 
 @dataclass(frozen=True)

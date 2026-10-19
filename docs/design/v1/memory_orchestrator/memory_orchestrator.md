@@ -58,11 +58,12 @@ write-side check does not replace precision-aware cache keys.
 | `reset_required` | The startup marker indicates potentially live users of lost metadata, such as after a crash or shutdown with registered clients. Only `DescribeRegion` is served until an offline reset. |
 
 Object keys, tensor shapes and layouts reuse `ObjectKey`, `TensorShape` and
-`MemoryLayoutDesc` from the MP transport's `protos/p2p_service.proto`. The
-orchestrator keeps primitive Python values so its state machine does not
-depend on torch. A codec test checks the Python key fields against this shared
-schema and verifies round trips; protobuf field numbers remain an explicit
-wire contract rather than being inferred from Python field order.
+`MemoryLayoutDesc` from the MP transport's `protos/p2p_service.proto`.
+`WireObjectKey` aliases `distributed.api.ObjectKey`, sharing its identity fields
+and validation. Invalid wire keys reject the entire reservation RPC with
+`INVALID_ARGUMENT` before changing region state. A codec test checks the shared
+class and schema and verifies round trips; protobuf field numbers remain an
+explicit wire contract rather than being inferred from Python field order.
 
 | RPC | Does |
 | --- | --- |

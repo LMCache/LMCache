@@ -2,7 +2,7 @@
 """Check the orchestrator's shared wire types and lossless conversions."""
 
 # Standard
-from dataclasses import asdict, fields
+from dataclasses import fields
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
@@ -18,12 +18,12 @@ from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import p2p_service_p
 
 
 def test_shared_object_key_and_layout_round_trip() -> None:
+    assert WireObjectKey is ObjectKey
     key = ObjectKey(b"\x00\xff", "model", 37, 11, "tenant-a")
     names = {field.name for field in fields(ObjectKey)}
-    assert names == {field.name for field in fields(WireObjectKey)}
     assert names == set(p2p_service_pb2.ObjectKey.DESCRIPTOR.fields_by_name)
     entry = WriteRequest(
-        WireObjectKey(**asdict(key)),
+        key,
         257,
         WireLayout(((2, 3), (4,)), ("float16", "int8")),
     )

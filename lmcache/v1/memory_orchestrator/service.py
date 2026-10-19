@@ -120,7 +120,12 @@ class OrchestratorServicer(MemoryOrchestratorServicer):
     ) -> pb2.ReserveWriteReply:
         """Reserve extents; see ``RegionState.reserve_write``."""
         env = codec.envelope_from_proto(request.env)
-        entries = [codec.write_request_from_proto(entry) for entry in request.entries]
+        try:
+            entries = [
+                codec.write_request_from_proto(entry) for entry in request.entries
+            ]
+        except ValueError as exc:
+            _abort(context, grpc.StatusCode.INVALID_ARGUMENT, str(exc))
 
         def execute() -> pb2.ReserveWriteReply:
             grants = self._state.reserve_write(env, entries)
@@ -145,7 +150,12 @@ class OrchestratorServicer(MemoryOrchestratorServicer):
     ) -> pb2.ReserveReadReply:
         """Lease committed objects; see ``RegionState.reserve_read``."""
         env = codec.envelope_from_proto(request.env)
-        entries = [codec.read_request_from_proto(entry) for entry in request.entries]
+        try:
+            entries = [
+                codec.read_request_from_proto(entry) for entry in request.entries
+            ]
+        except ValueError as exc:
+            _abort(context, grpc.StatusCode.INVALID_ARGUMENT, str(exc))
 
         def execute() -> pb2.ReserveReadReply:
             grants = self._state.reserve_read(env, entries)

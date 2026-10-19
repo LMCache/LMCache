@@ -230,6 +230,53 @@ def test_repeated_request_id_replays_or_rejects(shared, clients):
     assert client.finish_write([g.token for g in second.grants]) == [TokenStatus.OK] * 2
 
 
+@pytest.mark.parametrize("operation", ["write", "read"])
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("model_name", "bad@model"),
+        ("object_group_id", -1),
+        ("cache_salt", "bad/salt"),
+        ("cache_salt", "x" * 129),
+    ],
+    ids=["model-name", "group-id", "salt-character", "salt-length"],
+)
+def test_invalid_wire_key_rejects_entire_batch(
+    shared: Orchestrator,
+    clients: Callable[[str], MemoryOrchestratorClient],
+    operation: str,
+    field_name: str,
+    field_value: str | int,
+) -> None:
+    client = clients("mp-invalid-key")
+    valid_name = f"validation-{operation}-{field_name}-{field_value}"
+    request = raw_reserve_write(client, [valid_name, "invalid"])
+    setattr(request.entries[1].key, field_name, field_value)
+    if operation == "read":
+        grant = client.reserve_write([write(valid_name)])[0]
+        assert grant.token is not None
+        client.finish_write([grant.token])
+    before = client.usage()
+    with grpc.insecure_channel(shared.endpoint) as channel:
+        stub = MemoryOrchestratorStub(channel)
+        with pytest.raises(grpc.RpcError) as excinfo:
+            if operation == "write":
+                stub.ReserveWrite(request, timeout=5)
+            else:
+                stub.ReserveRead(
+                    pb2.ReserveReadRequest(
+                        env=request.env,
+                        entries=[
+                            pb2.ReadEntry(key=e.key, reader_count=1)
+                            for e in request.entries
+                        ],
+                    ),
+                    timeout=5,
+                )
+        assert excinfo.value.code() is grpc.StatusCode.INVALID_ARGUMENT
+    assert client.usage() == before
+
+
 @pytest.mark.parametrize("lost_replies", [1, 3])
 def test_write_reply_loss_and_expiry(
     monkeypatch: pytest.MonkeyPatch, lost_replies: int
