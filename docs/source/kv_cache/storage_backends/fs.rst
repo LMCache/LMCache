@@ -12,7 +12,7 @@ a simple persistent remote backend, or when multiple inference workers can see
 the same mounted directory through local disk, NFS, a parallel filesystem, or a
 container volume.
 
-This backend is different from :doc:`local_storage`. Local disk offloading is a
+This backend is different from :doc:`/legacy/kv_cache/storage_backends/local_storage`. Local disk offloading is a
 per-process local tier configured through ``local_disk``. ``FSConnector`` is a
 remote backend configured through ``remote_storage_plugins`` or the legacy
 ``remote_url`` field, so it participates in the same remote backend path as

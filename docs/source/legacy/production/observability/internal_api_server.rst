@@ -69,4 +69,4 @@ Therefore, the metrics endpoint curl command above uses port 7000.
 Advanced Usage
 --------------
 
-For comprehensive testing and configuration options, refer to :ref:`testing_internal_api_server` for detailed examples and best practices.
+For comprehensive testing and configuration options, refer to :doc:`/internal_api_server/internal_api_server` for detailed examples and best practices.

@@ -20,7 +20,7 @@ Prerequisites
 -------------
 
 - A Machine with at least one GPU. You can adjust the max model length of your vLLM instance depending on your GPU memory
-- vLLM and LMCache installed (:doc:`Installation Guide <../getting_started/installation>`)
+- vLLM and LMCache installed (:doc:`Installation Guide </getting_started/installation>`)
 - vLLM audio dependencies installed: ``pip install vllm[audio]``
 
 Examples

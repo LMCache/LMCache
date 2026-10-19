@@ -14,28 +14,11 @@ Supported Backends
 .. toctree::
    :maxdepth: 1
 
-   azure
-   cpu_ram
-   custom_backend
    dax
-   eic
    fs
-   gds
    hfbucket
-   infinistore
-   local_storage
-   maru
-   mock
-   mooncake
-   nixl
-   redis
-   bigtable
    resp
    s3
-   sagemaker_hyperpod
-   valkey
-   weka
-   3fs
    
    
   

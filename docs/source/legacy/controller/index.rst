@@ -57,3 +57,9 @@ Related Documentation
 - :doc:`../api_reference/configurations` - Complete configuration reference
 - :doc:`../kv_cache_management/index` - KV cache management guide
 - :doc:`freeze_mode` - Freeze Mode safety mechanism guide
+
+.. toctree::
+   :hidden:
+   :maxdepth: 1
+
+   freeze_mode
