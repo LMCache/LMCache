@@ -25,9 +25,10 @@ in-process mode and as a historical reference while MP closes any remaining
 gaps; where a feature already has an MP equivalent, prefer the MP docs.
 
 The corresponding serving-engine entry points live under
-``lmcache.inprocess.integration``. The previous vLLM import paths remain
-temporarily available for compatibility with upstream vLLM; other in-process
-integrations use only the new package boundary.
+``lmcache.inprocess.integration``. The previous vLLM import paths and the
+TensorRT-LLM ``tensorrt_adapter`` entry point remain temporarily available for
+compatibility with upstream serving engines. SGLang's in-process integration
+uses only the new package boundary.
 
 .. toctree::
    :hidden:
