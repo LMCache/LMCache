@@ -4,13 +4,14 @@
 VMM (``cuMemCreate``/``cuMemMap``) memory has no legacy CUDA IPC handle;
 :class:`VmmCudaIPCWrapper` shares it through
 ``cuMemExportToShareableHandle`` instead. POSIX-fd delivery is out of
-band -- these tests stand in for the fd transport with a
-``socket.send_fds`` pair and a test-installed resolver.
+band: most tests stand in for it with a ``socket.send_fds`` pair and a
+test-installed resolver; one runs the real MP-server fd channel.
 """
 
 # Standard
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
+import functools
 import os
 import socket
 
@@ -19,11 +20,13 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.multiprocess.vmm_fd import VmmFdResolver, send_fd
 from lmcache.v1.platform import resolve_kv_wrapper_factory
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.devices.cuda.ipc_wrapper import (
     VmmCudaIPCWrapper,
     set_vmm_fd_resolver,
+    set_vmm_fd_sender,
 )
 from lmcache.v1.platform.devices.cuda.utils import _cuda
 from lmcache.v1.platform.ipc_policy import (
@@ -75,6 +78,13 @@ def clear_fd_resolver():
     """Uninstall any test-installed fd resolver after the test."""
     yield
     set_vmm_fd_resolver(None)
+
+
+@pytest.fixture
+def clear_fd_sender():
+    """Uninstall any test-installed fd sender after the test."""
+    yield
+    set_vmm_fd_sender(None)
 
 
 class _VmmPool:
@@ -311,6 +321,96 @@ def test_exporter_close_closes_fd(vmm_pool) -> None:
         os.fstat(fd)
 
 
+def test_wrap_without_sender_keeps_fd(vmm_pool, clear_fd_sender) -> None:
+    """With no sender installed, wrap() leaves the fd with the wrapper."""
+    set_vmm_fd_sender(None)
+    wrapper = VmmCudaIPCWrapper.wrap(vmm_pool.tensor(0, 1024))
+    try:
+        assert wrapper.fd_payload() is not None
+    finally:
+        wrapper.close()
+
+
+def test_wrap_delivers_fd_through_sender(vmm_pool, clear_fd_sender) -> None:
+    """wrap() hands its fd to the sender under the export id the descriptor
+    carries (the id the importer resolves), then drops its fd."""
+    sent: list[tuple[bytes, int]] = []
+    set_vmm_fd_sender(lambda export_id, fd: sent.append((export_id, os.dup(fd))))
+
+    wrapper = VmmCudaIPCWrapper.wrap(vmm_pool.tensor(0, 1024))
+    try:
+        assert len(sent) == 1
+        export_id, fd = sent[0]
+        assert export_id == wrapper.handle
+        assert wrapper.fd_payload() is None
+        os.fstat(fd)  # the sender saw a live fd
+    finally:
+        os.close(sent[0][1])
+        wrapper.close()
+
+
+def test_wrap_closes_fd_when_sender_fails(vmm_pool, clear_fd_sender) -> None:
+    """A failed delivery propagates and does not leave the fd open."""
+    seen: list[tuple[int, int, int]] = []
+
+    def failing_sender(export_id: bytes, fd: int) -> None:
+        st = os.fstat(fd)
+        seen.append((fd, st.st_dev, st.st_ino))
+        raise RuntimeError("channel down")
+
+    set_vmm_fd_sender(failing_sender)
+    with pytest.raises(RuntimeError, match="channel down"):
+        VmmCudaIPCWrapper.wrap(vmm_pool.tensor(0, 1024))
+
+    fd, dev, ino = seen[0]
+    # The number may be reused by an unrelated open; only the same file
+    # behind it would mean the export leaked.
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        return
+    assert (st.st_dev, st.st_ino) != (dev, ino)
+
+
+def test_wrap_rejects_isolated_posix_fd_before_sending(
+    restore_switches, vmm_pool, clear_fd_sender
+) -> None:
+    """Under isolated_ipc a POSIX-fd allocation is rejected before any fd
+    reaches the sender."""
+    sent: list[bytes] = []
+    set_vmm_fd_sender(lambda export_id, fd: sent.append(export_id))
+    set_isolated_ipc(True)
+
+    with pytest.raises(RuntimeError, match="isolated_ipc"):
+        VmmCudaIPCWrapper.wrap(vmm_pool.tensor(0, 1024))
+    assert sent == []
+
+
+@pytest.mark.skipif(
+    not _imex_channel_present(),
+    reason="no IMEX channel on this node "
+    f"({IMEX_CHANNEL_DIR}; see NVreg_CreateImexChannel0)",
+)
+def test_wrap_never_sends_fabric_handles(clear_fd_sender) -> None:
+    """A fabric-kind wrapper carries its handle inline; an installed sender
+    is not called."""
+
+    def unexpected_sender(export_id: bytes, fd: int) -> None:
+        raise AssertionError("fabric wrappers must not reach the sender")
+
+    set_vmm_fd_sender(unexpected_sender)
+    driver = _cuda.driver
+    pool = _VmmPool(
+        handle_type=driver.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
+    )
+    try:
+        wrapper = VmmCudaIPCWrapper.wrap(pool.tensor(0, 1024))
+        assert wrapper.fd_payload() is None
+        wrapper.close()
+    finally:
+        pool.close()
+
+
 def test_to_tensor_without_resolver_raises(vmm_pool, clear_fd_resolver) -> None:
     """An fd-kind wrapper cannot import without the out-of-band fd."""
     set_vmm_fd_resolver(None)
@@ -411,6 +511,68 @@ def test_cross_process_round_trip_of_interior_view(clear_fd_resolver) -> None:
             assert bool((flat[:n_before] == 0).all().item())
             assert bool((flat[n_after_start:] == 0).all().item())
             parent_conn.send("release")
+        finally:
+            child.join(timeout=60)
+            if child.is_alive():
+                child.kill()
+                child.join()
+        assert child.exitcode == 0
+        wrapper.close()
+    finally:
+        pool.close()
+
+
+# ---------------------------------------------------------------------------
+# Cross-process round trip through the MP server's fd channel
+# ---------------------------------------------------------------------------
+
+
+def _channel_consumer(conn: Connection, path: str) -> None:
+    """Child, in the MP server's role: listen on the fd channel, resolve
+    the wrapper's fd through it, and verify the producer's bytes.
+    """
+    torch.cuda.init()
+    torch.cuda.set_device(0)
+    resolver = VmmFdResolver(path)
+    set_vmm_fd_resolver(resolver.resolve)
+    try:
+        conn.send("ready")
+        wrapper = DeviceIPCWrapper.Deserialize(conn.recv_bytes())
+        tensor = wrapper.to_tensor()
+        expected = torch.arange(
+            tensor.numel(), device=tensor.device, dtype=tensor.dtype
+        ).reshape(tensor.shape)
+        conn.send(bool(torch.equal(tensor, expected)))
+        wrapper.close()
+    finally:
+        set_vmm_fd_resolver(None)
+        resolver.close()
+
+
+def test_round_trip_through_fd_channel(tmp_path, clear_fd_sender) -> None:
+    """A POSIX-fd wrapper imports in another process once ``wrap`` has
+    delivered its fd through the installed sender to the server-side
+    resolver."""
+    pool = _VmmPool()
+    try:
+        view = pool.tensor(4096, 1024)
+        view.copy_(torch.arange(1024, device=DEVICE, dtype=torch.float32))
+        torch.cuda.synchronize()
+        path = str(tmp_path / "fd.sock")
+
+        ctx = get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe()
+        child = ctx.Process(target=_channel_consumer, args=(child_conn, path))
+        child.start()
+        try:
+            assert parent_conn.poll(120), "consumer died before listening"
+            assert parent_conn.recv() == "ready"
+            set_vmm_fd_sender(functools.partial(send_fd, path))
+            wrapper = VmmCudaIPCWrapper.wrap(view)
+            assert wrapper.fd_payload() is None  # exporter fd handed off
+            parent_conn.send_bytes(DeviceIPCWrapper.Serialize(wrapper))
+            assert parent_conn.poll(120), "consumer died before reporting"
+            assert parent_conn.recv() is True
         finally:
             child.join(timeout=60)
             if child.is_alive():

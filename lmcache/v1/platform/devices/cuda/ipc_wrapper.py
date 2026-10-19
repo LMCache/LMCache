@@ -160,6 +160,29 @@ def _resolve_vmm_fd(export_id: bytes) -> int:
     return _VMM_FD_RESOLVER(export_id)
 
 
+# Sender-side counterpart of the resolver: delivers a freshly exported
+# POSIX fd to the importer before the descriptor is sent. Installed by the
+# fd transport; unset means wrappers keep their fd (fd_payload) for the
+# caller to deliver.
+_VMM_FD_SENDER: Callable[[bytes, int], None] | None = None
+
+
+def set_vmm_fd_sender(sender: Callable[[bytes, int], None] | None) -> None:
+    """Install the process-wide export-id + fd sender.
+
+    When installed, :meth:`VmmCudaIPCWrapper.wrap` passes each POSIX-fd
+    wrapper's ``(export_id, fd)`` to it and then closes the wrapper's fd,
+    so the fd reaches the importer before the descriptor does. The sender
+    does not take ownership of the fd.
+
+    Args:
+        sender: Callable delivering ``(export_id, fd)`` out of band, or
+            ``None`` to uninstall.
+    """
+    global _VMM_FD_SENDER
+    _VMM_FD_SENDER = sender
+
+
 class CudaIPCWrapper(DeviceIPCWrapper):
     #: ``torch.device.type`` this wrapper handles. Kept as a class-level
     #: constant so external tooling / tests can introspect the binding.
@@ -541,13 +564,31 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
     def wrap(cls, tensor: torch.Tensor) -> "VmmCudaIPCWrapper":
         """Factory mirror of the other wrappers' ``wrap``.
 
+        With a sender installed (:func:`set_vmm_fd_sender`), a POSIX-fd
+        wrapper's fd is delivered here and then closed, so the returned
+        wrapper carries no fd.
+
         Args:
             tensor: A CUDA tensor backed by VMM (``cuMemMap``'d) memory.
 
         Returns:
             A new :class:`VmmCudaIPCWrapper` wrapping ``tensor``.
+
+        Raises:
+            RuntimeError: If the installed sender cannot deliver the fd
+                (e.g. the MP server's fd channel is unreachable).
+            OSError: If sending the fd fails.
         """
-        return cls(tensor)
+        wrapper = cls(tensor)
+        payload = wrapper.fd_payload()
+        if payload is not None and _VMM_FD_SENDER is not None:
+            try:
+                _VMM_FD_SENDER(*payload)
+            finally:
+                # The importer holds its own duplicate; a failed delivery
+                # fails registration, and a retry re-exports.
+                wrapper.close()
+        return wrapper
 
     def __init__(self, tensor: torch.Tensor) -> None:
         # First Party
@@ -594,11 +635,12 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
                 if kind == "posix_fd" and is_isolated_ipc():
                     raise RuntimeError(
                         "VMM allocation is only POSIX-fd exportable, but "
-                        "isolated_ipc is enabled: fd passing needs a shared "
-                        "filesystem path between the processes. Provision an "
-                        "IMEX channel (NVreg_CreateImexChannel0 / "
-                        "NVIDIA_IMEX_CHANNELS) so the pool is fabric-"
-                        "exportable, or disable isolated_ipc."
+                        "isolated_ipc is enabled: the fd is delivered over a "
+                        "Unix socket in /dev/shm, which isolated containers do "
+                        "not share. Provision an IMEX channel "
+                        "(NVreg_CreateImexChannel0 / NVIDIA_IMEX_CHANNELS) so "
+                        "the pool is fabric-exportable, or disable isolated_ipc "
+                        "on the workers and the server if they share /dev/shm."
                     )
 
                 # One exported handle maps exactly one physical chunk.
