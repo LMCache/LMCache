@@ -75,7 +75,7 @@ class WireLayout:
 
 
 @dataclass(frozen=True)
-class Handle:
+class ExtentHandle:
     """Location of an object's extent inside the shared region."""
 
     offset: int
@@ -147,7 +147,7 @@ class WriteGrantResult:
     only for ``WRITE_GRANTED``."""
 
     status: WriteStatus
-    handle: Handle | None = None
+    handle: ExtentHandle | None = None
     token: bytes | None = None
 
 
@@ -166,7 +166,7 @@ class ReadGrantResult:
     only for ``READ_GRANTED``."""
 
     status: ReadStatus
-    handle: Handle | None = None
+    handle: ExtentHandle | None = None
     leases: tuple[bytes, ...] = ()
     """``reader_count`` leases, each released by one finish_read."""
 

@@ -13,7 +13,7 @@ from google.protobuf.message import Message
 from lmcache.v1.memory_orchestrator._proto_gen import memory_orchestrator_pb2 as pb2
 from lmcache.v1.memory_orchestrator.api import (
     Envelope,
-    Handle,
+    ExtentHandle,
     OrchestratorError,
     ReadGrantResult,
     ReadRequest,
@@ -70,7 +70,7 @@ def _key_from_proto(msg: p2p_service_pb2.ObjectKey) -> WireObjectKey:
     )
 
 
-def _handle_to_proto(handle: Handle | None) -> pb2.Handle | None:
+def _handle_to_proto(handle: ExtentHandle | None) -> pb2.Handle | None:
     """Convert an extent handle to its wire form."""
     if handle is None:
         return None
@@ -79,9 +79,9 @@ def _handle_to_proto(handle: Handle | None) -> pb2.Handle | None:
     )
 
 
-def _handle_from_proto(msg: pb2.Handle) -> Handle:
+def _handle_from_proto(msg: pb2.Handle) -> ExtentHandle:
     """Convert a wire extent handle."""
-    return Handle(offset=msg.offset, length=msg.length, generation=msg.generation)
+    return ExtentHandle(offset=msg.offset, length=msg.length, generation=msg.generation)
 
 
 def _layout_to_proto(layout: WireLayout) -> p2p_service_pb2.MemoryLayoutDesc:

@@ -21,7 +21,7 @@ from lmcache.v1.memory_orchestrator.api import (
     VISIBILITY_MODES,
     CloseResult,
     Envelope,
-    Handle,
+    ExtentHandle,
     ReadGrantResult,
     ReadRequest,
     ReadStatus,
@@ -87,7 +87,7 @@ class _ObjectRecord:
     """A WRITING or VALID object; CONSUMED objects have no record."""
 
     state: _ObjectState
-    handle: Handle
+    handle: ExtentHandle
     payload_bytes: int
     layout: WireLayout
     writer_id: str
@@ -380,7 +380,7 @@ class RegionState:
             write_deadline = monotonic() + self._write_ttl_seconds
             for index in absent:
                 entry = entries[index]
-                handle = Handle(
+                handle = ExtentHandle(
                     offset=self._allocated_bytes,
                     length=_round_up(entry.payload_bytes, alignment),
                     generation=_GENERATION,
