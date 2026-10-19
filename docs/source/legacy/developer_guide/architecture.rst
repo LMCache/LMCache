@@ -1,11 +1,6 @@
 Architecture Overview
 =====================
 
-.. warning::
-
-   This page describes the deprecated engine and its ``StorageBackendInterface``
-   storage hierarchy. For the standalone MP architecture, see :doc:`/mp/index`.
-
 High-Level System Architecture
 ------------------------------
 

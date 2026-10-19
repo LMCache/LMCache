@@ -690,9 +690,7 @@ logging, tracing).
      - OTLP gRPC endpoint for exporting metrics and traces.
    * - ``--prometheus-port``
      - ``9090``
-     - Prometheus port for frontend-less entrypoints only. ``lmcache server``
-       uses ``--http-port`` (default 8080). With ``--otlp-endpoint``, metrics
-       are pushed to the collector instead.
+     - Port for the Prometheus ``/metrics`` endpoint.
    * - ``--metrics-sample-rate``
      - ``0.01``
      - Fraction of chunks/blocks in ``(0, 1.0]`` to track for lifecycle
@@ -1078,6 +1076,7 @@ Full Example
         --l2-prefetch-max-in-flight 8 \
         --periodic-notifier-interval-ms 5 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \
+        --prometheus-port 9090 \
         --metrics-sample-rate 0.01 \
         --enable-tracing \
         --otlp-endpoint http://localhost:4317

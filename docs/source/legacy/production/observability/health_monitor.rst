@@ -3,11 +3,6 @@
 Health Monitor
 ==============
 
-.. warning::
-
-   This framework monitors the deprecated engine and its storage backends.
-   For MP server health and diagnostics, see :doc:`/mp/http_api`.
-
 LMCache includes a comprehensive health monitoring framework that continuously monitors the health of the cache engine and its components. This feature is essential for production deployments to detect and respond to failures in remote storage backends.
 
 Overview

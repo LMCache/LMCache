@@ -5,7 +5,7 @@ KV Cache Events
 
 .. warning::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the related MP documentation and its separate configuration, see :doc:`/mp/observability/index`.
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/observability/index`.
 
 
 KV cache events are actions or lifecycle events that occur when managing the KV cache during inference. These events can be used for KV-cache-aware routing.

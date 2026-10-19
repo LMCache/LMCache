@@ -32,7 +32,7 @@ runtime, see :doc:`compatibility` before installing.
                         .. important::
 
                             You're all set! You can now start using LMCache. For hands-on guides and more
-                            usage examples, see the :doc:`quickstart` section.
+                            usage examples, see the :ref:`quickstart_examples` section.
 
                         .. note::
 
@@ -478,7 +478,7 @@ runtime, see :doc:`compatibility` before installing.
         ``/home/lmcache/.cache/huggingface``; existing volumes and bind mounts
         must be writable by that uid.
 
-        See :doc:`/mp/deployment` for running the container and ROCm images.
+        See :ref:`docker_deployment` for running the container and ROCm images.
 
     .. tab-item:: CLI Only  
 

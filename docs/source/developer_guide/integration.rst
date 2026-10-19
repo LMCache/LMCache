@@ -1,11 +1,6 @@
 Integration
 ===========
 
-.. warning::
-
-   This page documents inference-engine integration for the deprecated
-   in-process mode. For current deployments, see :doc:`/mp/index`.
-
 LMCache acts as a caching middleware that sits between LLM inference engines and storage systems, enabling:
 
 - **Transparent Cache Reuse**: Automatic detection and reuse of previously computed KV caches
@@ -16,9 +11,10 @@ LMCache acts as a caching middleware that sits between LLM inference engines and
 Supported Engines
 -----------------
 
-The in-process mode supports integration with:
+LMCache currently supports integration with:
 
 - **vLLM**
+- **SGLang**
 - **TRT-LLM** (coming soon)
 
 Integration with vLLM
@@ -51,5 +47,10 @@ When LMCache is integrated with vLLM, the inference pipeline is augmented to loo
 
 **Async Cache Write**: After processing the prompt, any newly generated KV cache chunks (corresponding to this prompt's content) are handed off to LMCache for storage. This put operation is done asynchronously (in the background) so it doesn't delay the response. The response is returned to the user promptly, and LMCache's background tasks will offload the new KV data to CPU, disk, or other backends for future reuse.
 
-SGLang no longer uses this in-process integration. Its current standalone
-MP setup is documented in :doc:`/getting_started/quickstart`.
+Integration with SGLang
+-----------------------
+
+LMCache integrates with SGLang through ``LMCacheUnifiedRadixCache`` and a
+standalone LMCache multiprocess server. The legacy in-process, layerwise, and
+pre-unified multiprocess connectors are not supported. See the SGLang tab in
+:doc:`../getting_started/quickstart` for installation and startup commands.

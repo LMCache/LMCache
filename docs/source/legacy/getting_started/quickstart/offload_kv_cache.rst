@@ -12,14 +12,14 @@ In this example, we will show you how to offload KV cache to CPU memory.
 
 .. note::
     Besides CPU memory, LMCache also supports offloading KV cache to many different destinations.
-    See :ref:`legacy/getting_started/quickstart/offload_kv_cache:Supported offloading destinations` for more details.
+    See :ref:`getting_started/quickstart/offload_kv_cache:Supported offloading destinations` for more details.
 
 Prerequisites
 -------------
 
 Before you begin, make sure you have:
 
-- vLLM v1 with LMCache installed (see :doc:`Installation </getting_started/installation>`)
+- vLLM v1 with LMCache installed (see :doc:`Installation <../installation>`)
 - A GPU that can run a LLM
 
 
@@ -446,12 +446,12 @@ Supported offloading destinations
 
 LMCache now supports offloading KV cache to the following destinations:
 
-- :doc:`CPU memory </legacy/kv_cache/storage_backends/cpu_ram>`
-- :doc:`Local file system </legacy/kv_cache/storage_backends/local_storage>`
-- :doc:`Mooncake Storage </legacy/kv_cache/storage_backends/mooncake>`
-- :doc:`InfiniStore </legacy/kv_cache/storage_backends/infinistore>`
-- :doc:`Redis </legacy/kv_cache/storage_backends/redis>`
-- :doc:`ValKey </legacy/kv_cache/storage_backends/valkey>`
+- :doc:`CPU memory <../../kv_cache/storage_backends/cpu_ram>`
+- :doc:`Local file system <../../kv_cache/storage_backends/local_storage>`
+- :doc:`Mooncake Storage <../../kv_cache/storage_backends/mooncake>`
+- :doc:`InfiniStore <../../kv_cache/storage_backends/infinistore>`
+- :doc:`Redis <../../kv_cache/storage_backends/redis>`
+- :doc:`ValKey <../../kv_cache/storage_backends/valkey>`
 
 Troubleshooting
 ---------------

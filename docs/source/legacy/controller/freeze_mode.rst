@@ -1,9 +1,9 @@
 Freeze Mode
-===========
+==========
 
 .. warning::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the related MP documentation and its separate configuration, see :doc:`/mp/coordinator`.
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/coordinator`.
 
 
 Overview
@@ -93,8 +93,8 @@ Freeze mode can be manually controlled through the Controller API:
 - Monitoring and health checks continue normally
 
 Related Documentation
----------------------
+--------------------
 
 - :doc:`index` - Controller WebUI overview
-- :doc:`/legacy/api_reference/configurations` - API and configuration reference
-- :doc:`/legacy/kv_cache/storage_backends/index` - Storage backend architecture
+- :doc:`../api_reference/configurations` - API and configuration reference
+- :doc:`../storage_backend/index` - Storage backend architecture

@@ -3,11 +3,6 @@
 Metrics Reference
 =================
 
-.. warning::
-
-   This reference describes the deprecated engine metrics (``lmcache:*``).
-   For MP OpenTelemetry metrics, see :doc:`/mp/observability/metrics`.
-
 LMCache provides comprehensive metrics via Prometheus to help you monitor performance, cache efficiency, and system health. These metrics are exposed via the vLLM ``/metrics`` endpoint when LMCache is integrated with vLLM, or via the LMCache internal API server.
 
 Available Metrics

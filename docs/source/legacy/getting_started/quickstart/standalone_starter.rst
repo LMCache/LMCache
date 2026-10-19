@@ -3,13 +3,6 @@
 Standalone Starter
 ==================
 
-.. note::
-
-   This starter creates ``LMCacheEngine`` through the deprecated engine API.
-   Running it in a separate process does not make it the MP server. For the
-   current ``lmcache server`` deployment, see :doc:`/getting_started/quickstart`.
-
-
 .. warning::
 
    This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
@@ -50,7 +43,7 @@ CPU-Only Mode
        --world_size 1
 
 Remote P2P Mode
-~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~
 TO be added
 
 Configuration Section
@@ -304,7 +297,7 @@ MLA Configuration Tips
 Related Documentation
 ---------------------
 
-- :doc:`/getting_started/quickstart`
-- :doc:`/legacy/api_reference/configurations`
-- :doc:`/legacy/kv_cache/storage_backends/index`
-- :doc:`/legacy/kv_cache_management/index`
+- :doc:`../quickstart`
+- :doc:`../../api_reference/configurations`
+- :doc:`../../kv_cache/storage_backends/index`
+- :doc:`../../kv_cache_management/index`

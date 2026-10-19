@@ -3,7 +3,7 @@ Maru
 
 .. warning::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the related MP documentation and its separate configuration, see :doc:`/mp/l2_storage/index`.
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/l2_storage/index`.
 
 
 .. _maru-overview:
@@ -14,7 +14,7 @@ Overview
 `Maru <https://github.com/xcena-dev/maru>`_ is a high-performance KV cache storage engine built on CXL shared memory,
 designed for LLM inference scenarios where multiple instances need to share a KV cache with minimal latency.
 
-.. image:: /assets/maru-kvcache.png
+.. image:: ../../assets/maru-kvcache.png
     :alt: KV Cache Sharing: Without vs With Maru
 
 For architecture details, see the `Maru documentation <https://xcena-dev.github.io/maru/>`_.

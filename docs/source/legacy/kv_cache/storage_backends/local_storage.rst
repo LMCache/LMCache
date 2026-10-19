@@ -3,7 +3,7 @@ Local storage
 
 .. warning::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the related MP documentation and its separate configuration, see :doc:`/mp/l2_storage/index`.
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/l2_storage/index`.
 
 
 .. _local-storage-overview:
@@ -239,7 +239,7 @@ Let's feel the TTFT (time to first token) differential!
 
 - A Machine with at least one GPU. Adjust the max model length of your vllm instance depending on your GPU memory and the long context you want to use.
 
-- vllm and lmcache installed (:doc:`Installation Guide </getting_started/installation>`)
+- vllm and lmcache installed (:doc:`Installation Guide <../../getting_started/installation>`)
 
 - Hugging Face access to ``meta-llama/Meta-Llama-3.1-8B-Instruct``
 
