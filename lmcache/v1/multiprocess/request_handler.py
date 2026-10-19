@@ -18,7 +18,7 @@ _HANDLER_OPTIONS_ATTR = "__lmcache_request_handler_options__"
 class HandlerType(Enum):
     """Select how a request handler is executed."""
 
-    SYNC = auto()
+    SERIALIZED = auto()
     BLOCKING = auto()
     NON_BLOCKING = auto()
 
@@ -42,7 +42,7 @@ class BoundRequestHandler:
 
 
 def request_handler(
-    handler_type: HandlerType = HandlerType.SYNC,
+    handler_type: HandlerType = HandlerType.SERIALIZED,
     *,
     operation: RpcOperation | None = None,
     requires_client_affinity: bool = False,

@@ -296,7 +296,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
         # time so a stale entry is not reaped right after recovery.
-        # REGISTER_Q_CACHE is SYNC-serialized on the MQ main loop, so it is
+        # REGISTER_Q_CACHE is SERIALIZED on the MQ main loop, so it is
         # the sole inserter.
         with self._lock:
             existing = self._q_contexts.get(instance_id)

@@ -12,7 +12,7 @@ LMCache should be able to reduce the generation time of the second and following
 
 We have examples for the following types of across-instance KV cache sharing:
 
-- KV cache sharing through a centralized cache server: ``centralized_sharing``
+- KV cache sharing through Redis: ``centralized_sharing``
 - KV cache sharing through p2p cache transfer: ``p2p_sharing``
 
 Prerequisites
@@ -20,7 +20,7 @@ Prerequisites
 
 Your server should have at least 2 GPUs.
 
-For Centralized sharing, this will use the port 8000 and 8001 (for vLLM) and port 65432 (for LMCache).  
+For centralized sharing, this uses ports 8000 and 8001 for vLLM and port 6379 for Redis.
 
 For P2P sharing: 
 
@@ -36,7 +36,7 @@ For P2P sharing:
 Centralized KV cache sharing
 ----------------------------
 
-This section demonstrates how to share KV cache across multiple vLLM instances using a centralized LMCache server.
+This section demonstrates how to share KV cache across multiple vLLM instances using Redis.
 
 **Important**: For centralized cache sharing (which is cross-process cases), ensure all processes use the same `PYTHONHASHSEED` to keep the hash of the KV cache consistent across processes: ``export PYTHONHASHSEED=0``.
 
@@ -49,17 +49,17 @@ First, create a configuration file named ``lmcache_config.yaml`` with the follow
 
     chunk_size: 256
     local_cpu: true
-    remote_url: "lm://localhost:65432"
+    remote_url: "redis://localhost:6379"
     remote_serde: "cachegen"
 
 Run centralized sharing example
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-1. Start the LMCache centralized server,
+1. Start Redis,
 
 .. code-block:: bash
 
-    lmcache_server localhost 65432
+    docker run --rm -p 6379:6379 redis:7
 
 2. In a different terminal,
 

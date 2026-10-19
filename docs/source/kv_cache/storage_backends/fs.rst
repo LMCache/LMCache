@@ -186,8 +186,7 @@ LMCache enabled:
 .. code-block:: bash
 
    LMCACHE_CONFIG_FILE=fs.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct \
-       --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}' \
-       --disable-log-requests
+       --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 
 Then send the same long-prefix request twice. The first request stores chunks in
 the filesystem backend. The second request should report LMCache hit tokens and
