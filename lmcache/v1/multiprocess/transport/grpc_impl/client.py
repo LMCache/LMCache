@@ -26,9 +26,18 @@ from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
     get_method_codec_registry,
 )
 
+CONNECT_TIMEOUT_MS = 5000
+INITIAL_RECONNECT_BACKOFF_MS = 100
+MAX_RECONNECT_BACKOFF_MS = 1000
+
+# Same bounds as the ZMQ client (#4671); gRPC defaults are 20 s and 120 s.
+# "min_reconnect_backoff_ms" is gRPC's per-attempt connect timeout.
 _GRPC_OPTIONS = (
     ("grpc.max_send_message_length", -1),
     ("grpc.max_receive_message_length", -1),
+    ("grpc.min_reconnect_backoff_ms", CONNECT_TIMEOUT_MS),
+    ("grpc.initial_reconnect_backoff_ms", INITIAL_RECONNECT_BACKOFF_MS),
+    ("grpc.max_reconnect_backoff_ms", MAX_RECONNECT_BACKOFF_MS),
 )
 _CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
 

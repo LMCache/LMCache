@@ -33,7 +33,8 @@ Validated models
 
       As a Mamba / linear-attention hybrid, Kimi-Linear needs the same three
       settings as the other GDN hybrids: the ``align`` Mamba cache mode, prefix
-      caching, and a chunk size matched to vLLM's *unified block size* ``N``.
+      caching, and a chunk size negotiated from vLLM's *unified block size*
+      ``N``.
       That block size is model- and parallelism-specific — vLLM logs
       ``Setting attention block size to N tokens`` at startup. Because the KDA
       state is sharded across tensor-parallel ranks (while the MLA cache is
@@ -51,8 +52,7 @@ Validated models
            - 944
            - 2
 
-      Set the LMCache server's ``--chunk-size`` to that ``N`` (or a multiple of
-      it) and enable ``--separate-object-groups``, then set vLLM's
+      Enable ``--separate-object-groups`` on the LMCache server, then set vLLM's
       ``--max-num-batched-tokens`` to at least ``N``. Keeping it below ``2N``
       (e.g. ``2N-1``) snapshots the KDA state at every block boundary for the
       finest cache reuse; larger values raise prefill throughput at the cost of
@@ -68,10 +68,10 @@ Validated models
          least as large as a KDA state page, so a smaller per-rank KDA state
          yields a smaller ``N`` — and vice versa. Concretely, going from
          **TP=2 → TP=1** doubles the per-rank KDA state, so ``N`` doubles from
-         ``944`` to ``1888``; ``--chunk-size`` (``= N``) and the recommended
-         ``--max-num-batched-tokens`` (``2N-1``, i.e. ``3775``) both double to
-         match. Always re-read ``N`` from the startup log after changing the TP
-         degree — do not scale it by hand.
+         ``944`` to ``1888``; the server negotiates a compatible chunk size,
+         while the recommended ``--max-num-batched-tokens`` (``2N-1``, i.e.
+         ``3775``) doubles to match. Always re-read ``N`` from the startup log
+         after changing the TP degree — do not scale it by hand.
 
       Start the LMCache MP server (``N = 944``):
 
@@ -110,9 +110,9 @@ Validated models
         independently of the MLA layers. It is what allows
         ``--max-num-batched-tokens`` to exceed ``2N``; without it the budget
         must stay in ``[N, 2N)``.
-      - ``--chunk-size`` (server) must be a multiple of the unified block size
-        ``N`` — ``--chunk-size N`` is the simplest choice and gives the finest
-        cache granularity. LMCache raises at engine startup if it is not.
+      - ``--chunk-size`` (server) is a minimum. The connector negotiates the
+        smallest multiple of ``N`` that is at least that value. See
+        :doc:`/mp/chunk_size_negotiation`.
       - ``--max-num-batched-tokens`` must be **at least** ``N``: a scheduler
         step must advance at least one whole block, since ``align`` snapshots
         the KDA state only at the *end* of each step, on a block boundary, and
