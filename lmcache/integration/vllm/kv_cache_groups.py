@@ -53,6 +53,32 @@ def is_scratch_spec(spec: Any) -> bool:
     return not getattr(spec, "prefix_cacheable", True)
 
 
+def is_per_request_state_spec(spec: Any) -> bool:
+    """Return whether the spec is a per-request ring.
+
+    vLLM's ``CircularBufferSpec`` (``KpoolTailSpec`` on older vLLM) gives each
+    request one block for its whole lifetime, written at ``position % capacity``
+    and holding the raw keys of the compression group that is still open. It
+    is a scratch spec (see :func:`is_scratch_spec`), but unlike the other
+    scratch specs its content is needed to resume a request mid-group, e.g.
+    from an unfull chunk. Checked by class name so this module stays
+    importable without vLLM; ``UniformTypeKVCacheSpecs`` is unwrapped first.
+
+    Args:
+        spec: A vLLM KV cache spec, or a ``UniformTypeKVCacheSpecs`` container.
+
+    Returns:
+        ``True`` for a per-request ring spec.
+    """
+    inner = getattr(spec, "kv_cache_specs", None)
+    if isinstance(inner, dict) and inner:
+        spec = next(iter(inner.values()))
+    return is_scratch_spec(spec) and any(
+        cls.__name__ in ("CircularBufferSpec", "KpoolTailSpec")
+        for cls in type(spec).__mro__
+    )
+
+
 def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
     """Global tokens covered by one block id of ``kv_cache_spec``.
 
