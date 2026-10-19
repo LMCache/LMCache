@@ -265,7 +265,7 @@ def test_server_free_lookup_locks_floors_release_to_the_lookup_start():
     released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
     assert released == {(0, b"h2"), (0, b"h3")}
     # The range was floored before hashing: [512, 1024), not [0, 1024).
-    hash_call = ctx.token_hasher.compute_chunk_hashes.call_args
+    hash_call = ctx.token_hasher.compute_packed_chunk_hashes.call_args
     assert hash_call.kwargs["start"] == 512
 
 

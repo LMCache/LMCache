@@ -911,7 +911,9 @@ def test_store_kv_events_are_reported_after_successful_store(
 
         adapter.get_finished({"req-1"})
         events = adapter.get_kv_events()
-        expected_hashes = TokenHasher(chunk_size=chunk_size).compute_packed_chunk_hashes(
+        expected_hashes = TokenHasher(
+            chunk_size=chunk_size
+        ).compute_packed_chunk_hashes(
             pack_token_ids(token_ids),
             end=chunk_size * 2,
         )

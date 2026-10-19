@@ -1398,7 +1398,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.num_lmcache_hit_tokens = 0
             if self.scheduler_adapter.maybe_submit_lookup_request(
                 request.request_id,
-                token_ids=tracker.get_token_ids(),
+                packed_token_ids=tracker.packed_token_ids(),
                 cache_salt=tracker.cache_salt,
                 request_configs={
                     **(tracker.request_configs or {}),
