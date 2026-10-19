@@ -4,13 +4,11 @@
 Eviction metrics are named by role, not by class: any controller whose
 ``stats()`` returns :class:`EvictionStats` and that registers itself as a
 metric source (``register_metric_source(self)``) gets the
-``eviction.*``, ``quota.*`` and ``pins.*`` metrics. The built-in
-``FleetEvictionController`` and a replacement shipped in another package
-fill the same type, so swapping one for the other keeps every dashboard.
+``eviction.*``, ``quota.*`` and ``pins.*`` metrics. It is the contract
+for an eviction controller shipped in another package, which LMCache cannot
+name; the built-in ``FleetEvictionController`` reports none of them.
 
-A replacement may add tiers and label values (a ``pinned`` /
-``unreachable`` / ``stale`` skip reason, an ``owner`` delete target), never
-rename them. See ``docs/design/v1/mp_coordinator/observability.md``.
+See ``docs/design/v1/mp_coordinator/observability.md``.
 """
 
 # Standard

@@ -25,9 +25,6 @@ from lmcache.v1.mp_coordinator.background_loops import (
 )
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers.base import ControllerStatus
-from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
-    FleetEvictionController,
-)
 from lmcache.v1.mp_coordinator.controllers.eviction_stats import (
     EvictionStats,
     EvictionTierStats,
@@ -628,33 +625,6 @@ def test_metadata_metric_reports_saves_by_result() -> None:
         labels(result="ok"): 1,
         labels(result="error"): 0,
     }
-
-
-def test_the_built_in_eviction_controller_reports_eviction_quota_and_pins() -> None:
-    usage = CacheUsageManager()
-    controller = FleetEvictionController(
-        usage_manager=usage, registry=InstanceRegistry()
-    )
-    controller.quota.set_quota("alice", 100)
-    controller.pin([_key(1)])
-    meter, reader = private_meter()
-
-    observability.register_coordinator_metrics(meter)
-
-    values = read_values(reader)
-    assert values["lmcache_coordinator.eviction.sweeps_run"] == {
-        labels(tier="l2", outcome="idle"): 0,
-        labels(tier="l2", outcome="planned"): 0,
-        labels(tier="l2", outcome="no_target"): 0,
-    }
-    assert values["lmcache_coordinator.eviction.delete_requests_sent"] == {
-        labels(tier="l2", target="any_server", result="ok"): 0,
-        labels(tier="l2", target="any_server", result="error"): 0,
-    }
-    assert values["lmcache_coordinator.quota.tenant_bytes_limit"] == {
-        labels(tier="l2", cache_salt="alice"): 100
-    }
-    assert values["lmcache_coordinator.pins.keys_pinned"] == {labels(): 1}
 
 
 class _PrivateEvictionController:

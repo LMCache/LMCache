@@ -146,8 +146,8 @@ def _specs_for(source: MetricSource) -> list[_MetricSpec]:
     """Return the metrics of one registered source.
 
     A coordinator component is matched by class. An eviction controller is
-    matched by what its ``stats()`` returns, so a replacement shipped in
-    another package gets the same metrics as the built-in one.
+    matched by what its ``stats()`` returns, so one shipped in another
+    package, which LMCache cannot name, gets the eviction metrics.
     """
     match source:
         case KeyDirectory():

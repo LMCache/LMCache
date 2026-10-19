@@ -211,20 +211,18 @@ Controllers can be built in or loaded from a private package
 (`extra_config.controller_packages`). The private `EvictionController` in
 coordinator-controllers replaces the built-in `FleetEvictionController`. It
 adds an L1 budget, sends each delete to the server that holds the copy, and
-skips keys no server can delete. So controller metrics follow three rules:
+skips keys no server can delete. So controller metrics follow these rules:
 
-- **Named by role, not by class.** Whichever controller enforces eviction emits
-  `eviction.*`, `quota.*` and `pins.*`. A swap keeps every dashboard and alert
-  working.
-- **A replacement may add, never rename.** It can add label values
-  (`tier="l1"`, `reason="unreachable"`) and new metrics under the same role. It
-  must emit every metric the built-in one does.
+- **Named by role, not by class.** A controller enforcing eviction emits
+  `eviction.*`, `quota.*` and `pins.*`. The built-in `FleetEvictionController`
+  reports none; the private `EvictionController` does, and any other
+  replacement can.
 - **Names are part of the versioned contract.** A controller enforcing
   eviction returns `EvictionStats` (`controllers/eviction_stats.py`, per tier)
   from `stats()` and calls `register_metric_source(self)`; `observability.py`
   matches it by that stats type, not its class, and defines every name. The
-  private package fills the same type. Its `vX.Y.Z` targets LMCache `vX.Y.Z`,
-  so a change to the type is a breaking change for both.
+  private package's `vX.Y.Z` targets LMCache `vX.Y.Z`, so a change to the type
+  is a breaking change for both.
 - **Tenants roll up.** `cache_salt` is a tenant with an explicit quota; every
   other tenant is counted under `_other`, so series follow the quota table.
 
@@ -255,14 +253,14 @@ metrics and gets the same catch-and-continue as the coordinator's own loops.
 | Prefetch | `prefetch.status_polls` | counter | `result` = pending, completed, unknown_request, server_error | Polling load. `unknown_request` means the server lost the job (restart) or it was already collected | P1 |
 | Prefetch | `prefetch.requests_abandoned` | counter | | Submitted but never polled to completion within 10 minutes: the caller gave up, or the server left | P1 |
 
-What each eviction controller emits:
+What the private `EvictionController` emits:
 
-| Label value | Built-in `FleetEvictionController` | Private `EvictionController` |
-| --- | --- | --- |
-| `tier` | `l2` | `l1`, `l2` |
-| `eviction.keys_skipped` `reason` | `pinned` | `pinned`, `unreachable`, `stale` |
-| `eviction.delete_requests_sent` `target` | `any_server` | `any_server` (shared pool), `owner` (local L2, L1) |
-| `eviction.delete_requests_skipped` `reason` | `no_server` | `owner_left`, `no_server` |
+| Label | Values |
+| --- | --- |
+| `tier` | `l1`, `l2` |
+| `eviction.keys_skipped` `reason` | `pinned`, `unreachable`, `stale` |
+| `eviction.delete_requests_sent` `target` | `any_server` (shared pool), `owner` (local L2, L1) |
+| `eviction.delete_requests_skipped` `reason` | `owner_left`, `no_server` |
 
 The metadata rule applies to both: if saving a pin or quota fails, the endpoint
 undoes the change and returns 503. The private controller's `/quota` and
@@ -340,7 +338,7 @@ an example Prometheus rules file. Names leave out the prefix, as in section 3.
 | Checkpoint stale | `time() - checkpoint_file_last_write_timestamp_seconds > 600` | Ticket | P1 | `/status` checkpoint `last_error`, disk |
 | Pin or quota not saved | `increase(metadata_file_writes_total{result="error"}[1h]) > 0` | Ticket | P1 | Disk at the metadata path (callers already got a 503) |
 | Evictions failing | `rate(eviction_delete_requests_sent_total{result="error"}[10m]) > 0` | Ticket | P1 | Target mp server reachable; its `DELETE /cache/objects` |
-| Eviction not catching up | `eviction_tenants_over_watermark > 0` for 30 min | Ticket | P1 | `eviction_keys_skipped_total` by `reason`: `unreachable` means copies on servers that left; deletes sent to the wrong server (built-in controller on local L2) also look like this |
+| Eviction not catching up | `eviction_tenants_over_watermark > 0` for 30 min | Ticket | P1 | `eviction_keys_skipped_total` by `reason`: `unreachable` means copies on servers that left |
 
 Right after a cold start the coordinator has missed every server's history.
 `event_batches_missing` does not count a stream's first batch, so "Events being

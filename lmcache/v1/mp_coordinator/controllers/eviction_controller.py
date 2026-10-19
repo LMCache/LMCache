@@ -14,7 +14,6 @@ from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, cast
 import asyncio
 import contextlib
-import math
 
 # Third Party
 import httpx
@@ -33,12 +32,6 @@ from lmcache.v1.mp_coordinator.controllers.base import (
     ControllerRuntime,
 )
 from lmcache.v1.mp_coordinator.controllers.eviction_http_api import build_routers
-from lmcache.v1.mp_coordinator.controllers.eviction_stats import (
-    OTHER_TENANTS,
-    EvictionStats,
-    EvictionTierStats,
-)
-from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
@@ -114,14 +107,6 @@ class FleetEvictionController(Controller):
         self._policy = IsolatedLRUEvictionPolicy()
         self._in_flight_dispatches: set[asyncio.Task] = set()
         self._pin_counts: dict[ObjectKey, int] = {}
-        # The L2 counts; written only on the event loop (sweeps, dispatch
-        # callbacks), so they need no lock.
-        self._l2_counts = EvictionTierStats(
-            keys_skipped={"pinned": 0},
-            delete_requests_sent={"any_server": {"ok": 0, "error": 0}},
-            delete_requests_skipped={"no_server": 0},
-        )
-        register_metric_source(self)
 
     @property
     def quota(self) -> QuotaManager:
@@ -330,52 +315,6 @@ class FleetEvictionController(Controller):
         ]
         return len(matching), matching[offset : offset + limit]
 
-    def stats(self) -> EvictionStats:
-        """Return what this controller has done and the budgets it enforces.
-
-        It evicts L2 only: every key is skipped for being pinned, and every
-        delete goes to any server, since L2 is a pool the fleet shares.
-        """
-        explicit = {
-            entry.cache_salt: entry.limit_bytes
-            for entry in self._quota_manager.list_quotas()
-        }
-        used = dict.fromkeys(explicit, 0)
-        for cache_salt, n_bytes in self._usage_manager.get_bytes_by_salt(
-            Tier.L2
-        ).items():
-            label = cache_salt if cache_salt in explicit else OTHER_TENANTS
-            used[label] = used.get(label, 0) + n_bytes
-        limits = dict(explicit)
-        default_limit = self._quota_manager.get_default_limit_bytes()
-        if default_limit is not None:
-            limits[OTHER_TENANTS] = default_limit
-        counts = self._l2_counts
-        l2 = EvictionTierStats(
-            sweeps=dict(counts.sweeps),
-            keys_selected=dict(counts.keys_selected),
-            bytes_selected=dict(counts.bytes_selected),
-            keys_skipped=dict(counts.keys_skipped),
-            delete_requests_sent={
-                target: dict(results)
-                for target, results in counts.delete_requests_sent.items()
-            },
-            delete_requests_skipped=dict(counts.delete_requests_skipped),
-            lru_keys_tracked=self._policy.get_num_tracked_keys(),
-            tenants_over_watermark=sum(
-                1
-                for cache_salt in self._policy.get_tracked_salts()
-                if self._usage_over_watermark(cache_salt) is not None
-            ),
-            tenant_bytes_used=used,
-            tenant_bytes_limit=limits,
-        )
-        return EvictionStats(
-            tiers={Tier.L2.value: l2},
-            delete_requests_in_flight=len(self._in_flight_dispatches),
-            keys_pinned=len(self._pin_counts),
-        )
-
     def compute_eviction_plan(self) -> dict[str, list[ObjectKey]]:
         """Select eviction candidates per ``cache_salt``.
 
@@ -390,16 +329,24 @@ class FleetEvictionController(Controller):
         eviction_plan: dict[str, list[ObjectKey]] = {}
 
         for cache_salt in tracked_salts:
-            due = self._usage_over_watermark(cache_salt)
-            if due is None:
+            current_bytes = self._usage_manager.get_salt_bytes(Tier.L2, cache_salt)
+            if current_bytes <= 0:
                 continue
-            current_bytes, limit = due
+            limit = self._quota_manager.effective_limit_bytes(cache_salt)
+            if limit is None:
+                # No explicit quota and no default configured yet —
+                # exempt until the quota controller arms enforcement.
+                continue
+            if current_bytes < self._trigger_watermark * limit:
+                continue
 
             effective_ratio = 1.0 if limit == 0 else self._eviction_ratio
             actions = self._policy.get_eviction_actions(
                 effective_ratio,
                 cache_salt=cache_salt,
-                key_eligible_filter=self._is_unpinned,
+                key_eligible_filter=lambda key: (
+                    _pinned_chunk_key(key) not in self._pin_counts
+                ),
             )
             keys_to_evict: list[ObjectKey] = []
             for action in actions:
@@ -410,15 +357,6 @@ class FleetEvictionController(Controller):
                 evict_bytes = sum(
                     self._usage_manager.get_key_bytes(Tier.L2, k) for k in keys_to_evict
                 )
-                label = (
-                    cache_salt
-                    if self._quota_manager.has_quota(cache_salt)
-                    else OTHER_TENANTS
-                )
-                selected = self._l2_counts.keys_selected
-                selected[label] = selected.get(label, 0) + len(keys_to_evict)
-                selected_bytes = self._l2_counts.bytes_selected
-                selected_bytes[label] = selected_bytes.get(label, 0) + evict_bytes
                 logger.info(
                     "Eviction plan for cache_salt=%r: %d keys "
                     "(%d bytes) to free; usage=%d, quota=%d, "
@@ -485,10 +423,8 @@ class FleetEvictionController(Controller):
         """
         plan = self.compute_eviction_plan()
         if not plan:
-            self._l2_counts.sweeps["idle"] += 1
             return plan
 
-        all_keys: list[ObjectKey] = [k for keys in plan.values() for k in keys]
         target = self._registry.random_instance()
         if target is None:
             logger.warning(
@@ -496,15 +432,10 @@ class FleetEvictionController(Controller):
                 "registered; skipping dispatch",
                 len(plan),
             )
-            self._l2_counts.sweeps["no_target"] += 1
-            # The requests the plan would have sent: one per batch of keys.
-            self._l2_counts.delete_requests_skipped["no_server"] += math.ceil(
-                len(all_keys) / MAX_DELETE_BATCH
-            )
             return plan
 
-        self._l2_counts.sweeps["planned"] += 1
         url = f"http://{target.ip}:{target.http_port}/cache/objects"
+        all_keys: list[ObjectKey] = [k for keys in plan.values() for k in keys]
 
         for start in range(0, len(all_keys), MAX_DELETE_BATCH):
             chunk = all_keys[start : start + MAX_DELETE_BATCH]
@@ -527,30 +458,8 @@ class FleetEvictionController(Controller):
         """Await every outstanding fire-and-forget dispatch."""
         await asyncio.gather(*self._in_flight_dispatches, return_exceptions=True)
 
-    def _is_unpinned(self, key: ObjectKey) -> bool:
-        """Return whether ``key`` may be evicted, counting it if pinned."""
-        if _pinned_chunk_key(key) in self._pin_counts:
-            self._l2_counts.keys_skipped["pinned"] += 1
-            return False
-        return True
-
-    def _usage_over_watermark(self, cache_salt: str) -> tuple[int, int] | None:
-        """Return ``(bytes used, limit)`` if ``cache_salt`` is due for
-        eviction, else ``None``.
-
-        A tenant with no explicit quota and no default configured is
-        exempt until the quota controller arms enforcement.
-        """
-        current_bytes = self._usage_manager.get_salt_bytes(Tier.L2, cache_salt)
-        if current_bytes <= 0:
-            return None
-        limit = self._quota_manager.effective_limit_bytes(cache_salt)
-        if limit is None or current_bytes < self._trigger_watermark * limit:
-            return None
-        return current_bytes, limit
-
+    @staticmethod
     async def _dispatch_eviction(
-        self,
         http_client: httpx.AsyncClient,
         url: str,
         body: Mapping[str, object],
@@ -565,7 +474,6 @@ class FleetEvictionController(Controller):
             resp = await http_client.request("DELETE", url, json=body)
             resp.raise_for_status()
         except (httpx.HTTPError, ValueError) as e:
-            self._l2_counts.delete_requests_sent["any_server"]["error"] += 1
             logger.warning(
                 "Eviction dispatch to %s (%d keys) failed: %s",
                 instance_id,
@@ -573,7 +481,6 @@ class FleetEvictionController(Controller):
                 e,
             )
             return
-        self._l2_counts.delete_requests_sent["any_server"]["ok"] += 1
         logger.info(
             "Eviction dispatched to %s: %d keys across %d salts",
             instance_id,

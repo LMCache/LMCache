@@ -1139,10 +1139,10 @@ is written on every change.
      - Pin and quota saves, ``ok`` or ``error``.  An ``error`` is a change
        that will not survive a restart.
 
-The eviction, quota and pin metrics come from whichever controller enforces
-eviction: the built-in ``FleetEvictionController`` (``tier="l2"``) or a
-replacement loaded from ``extra_config.controller_packages``, which may add
-tiers and label values.  ``cache_salt`` is the tenant when it has an explicit
+The eviction, quota and pin metrics are reported by an eviction controller
+loaded from ``extra_config.controller_packages`` that supports them; the
+built-in ``FleetEvictionController`` does not report them.  ``cache_salt`` is
+the tenant when it has an explicit
 quota; every other tenant is counted under ``_other``, so the series count
 follows the quota table, not the number of tenants.
 
