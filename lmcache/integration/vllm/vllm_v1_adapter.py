@@ -740,6 +740,14 @@ class LMCacheConnectorV1Impl:
                     forward_context.virtual_engine
                 ]
 
+        if (
+            self.lmcache_engine is not None
+            and self.lmcache_engine.gpu_connector is not None
+        ):
+            self.lmcache_engine.gpu_connector.initialize_kvcaches_ptr(
+                kvcaches=list(self.kv_caches.values())
+            )
+
     ####################
     # Worker side APIs
     ####################
@@ -750,6 +758,13 @@ class LMCacheConnectorV1Impl:
         #  not called, we should consider removing it.
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0
         self.kv_caches = kv_caches
+        if (
+            self.lmcache_engine is not None
+            and self.lmcache_engine.gpu_connector is not None
+        ):
+            self.lmcache_engine.gpu_connector.initialize_kvcaches_ptr(
+                kvcaches=list(kv_caches.values())
+            )
         self._manager.post_init()
 
     @_lmcache_nvtx_annotate
