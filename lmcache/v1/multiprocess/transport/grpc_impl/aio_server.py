@@ -28,7 +28,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
 logger = init_logger(__name__)
 
 _STREAM_END = object()
-_STREAM_READ_AHEAD = 4
+_STREAM_READ_AHEAD = 1
 
 
 class _AioServicer:
