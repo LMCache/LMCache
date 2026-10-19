@@ -1,6 +1,11 @@
 Azure Blob Storage Backend
 ==========================
 
+.. warning::
+
+   This page uses the deprecated in-process storage backend interface.
+   For current storage adapters, see :doc:`/mp/l2_storage/index`.
+
 LMCache can offload KV cache to Azure Blob Storage via an async-native
 connector (parity with the S3 backend, no NIXL dependency). The connector is
 selected by an ``azure://`` ``remote_url``.
@@ -43,7 +48,7 @@ Example Configuration
      azure_account_key: "your-account-key"
 
 Configuration Parameters (in extra_config)
------------------------------------------
+------------------------------------------
 
 * **azure_account_url**: Storage account URL, e.g.
   ``https://<account>.blob.core.windows.net``. Required unless

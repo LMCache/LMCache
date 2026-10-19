@@ -116,7 +116,7 @@ The explicit external-connector configuration is:
 The external module path is important in a mixed environment: without it,
 vLLM may silently select a bundled connector whose protocol or feature set is
 older than the LMCache server. See :doc:`quickstart` for a complete MP command
-and the :doc:`../legacy/api_reference/dynamic_connector` page for the vLLM external
+and the :doc:`../api_reference/dynamic_connector` page for the vLLM external
 connector mechanism.
 
 Known version-specific validation points

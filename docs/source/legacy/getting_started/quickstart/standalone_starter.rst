@@ -3,6 +3,13 @@
 Standalone Starter
 ==================
 
+.. note::
+
+   This starter creates ``LMCacheEngine`` through the deprecated engine API.
+   Running it in a separate process does not make it the MP server. For the
+   current ``lmcache server`` deployment, see :doc:`/getting_started/quickstart`.
+
+
 .. warning::
 
    This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.

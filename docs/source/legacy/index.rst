@@ -33,24 +33,25 @@ gaps; where a feature already has an MP equivalent, prefer the MP docs.
    /legacy/kv_cache/async_loading
    /legacy/kv_cache/caching_policies
    /legacy/kv_cache/p2p_sharing
+   /legacy/non_kv_cache/hidden_states
    /legacy/non_kv_cache/encoder_cache
    /legacy/disaggregated_prefill/nixl/index
-   /legacy/disaggregated_prefill/shared_storage
    /legacy/kv_cache_optimizations/compression/index
    /legacy/kv_cache_optimizations/layerwise
    /legacy/kv_cache_management/index
    /legacy/kv_cache_optimizations/blending
    /legacy/api_reference/multimodality
-   /legacy/api_reference/storage_backends
    /legacy/api_reference/dynamic_connector
    /legacy/api_reference/configurations
    /legacy/internal_api_server/internal_api_server
    /legacy/controller/index
    /legacy/production/observability/index
+   /legacy/production/kubernetes_deployment
    /legacy/production/docker_deployment
    /legacy/production/performance_tuning
    /legacy/production/kv_cache_events
    /legacy/developer_guide/architecture
+   /legacy/developer_guide/musa_aiter_integration
    /legacy/developer_guide/integration
    /legacy/developer_guide/usage/basic_check
    /legacy/developer_guide/extending_lmcache/storage_plugins

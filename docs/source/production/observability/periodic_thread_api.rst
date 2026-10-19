@@ -3,13 +3,14 @@
 Periodic Thread Monitoring API
 ==============================
 
-.. warning::
+This API monitors ``PeriodicThreadRegistry`` in both deployment modes.
+The MP server uses it for session, management, completion, and P2P background
+threads. The embedded engine uses the same registry for its own workers.
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
-
-
-This document describes the Periodic Thread Monitoring API feature introduced
-in LMCache.
+Examples target the MP HTTP frontend (default port 8080); for the embedded
+API server, substitute its configured port. See
+:doc:`/internal_api_server/common_apis` for the shared route reference and
+:doc:`/mp/http_api` for MP authentication.
 
 Overview
 --------

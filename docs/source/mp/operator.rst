@@ -37,8 +37,8 @@ eliminates:
   (e.g., ``l1.sizeGB <= 0``, invalid port range) at ``kubectl apply`` time,
   before any pods are created.
 
-Prerequisites
--------------
+Installation Prerequisites
+--------------------------
 
 - Kubernetes 1.20+
 - ``kubectl`` configured to access your cluster
@@ -275,8 +275,8 @@ ignores the extra mount).  It fails open
 (``failurePolicy: Ignore``) and is idempotent (re-admitted pods carrying the
 ``lmcache.ai/lmcache-injected`` stamp are allowed unchanged).
 
-Prerequisites
-~~~~~~~~~~~~~
+Serving Pod Prerequisites
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - **cert-manager** + ``make deploy`` (not ``make run``, which is
   controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``) --
@@ -292,8 +292,8 @@ Prerequisites
   ``<engine>-connection`` ConfigMap directly, so the ``LMCacheEngine`` must
   already exist in the vLLM pod's namespace.
 
-Opting a vLLM Pod In
-~~~~~~~~~~~~~~~~~~~~
+Opting a KV Cache vLLM Pod In
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Add the opt-in label and the engine-binding annotation to the pod template, and
 launch vLLM via the image **ENTRYPOINT** (args only) -- a
@@ -344,8 +344,8 @@ not reach ``vllm serve``):
 A ready-to-edit manifest lives at
 ``operator/config/samples/vllm_lmcache_deployment.yaml``.
 
-Verifying Injection
-~~~~~~~~~~~~~~~~~~~
+Verifying KV Cache Injection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The webhook mutates **Pods**, not the Deployment, so inspect a pod (not the
 Deployment spec):
@@ -1144,7 +1144,7 @@ CacheBlend reuses cached KV at shifted (non-prefix) positions by recomputing a
 small subset of tokens.  The operator manages it as a second CRD,
 ``CacheBlendEngine``, plus a **mutating admission webhook** that injects the
 pure-Python ``lmcache-cacheblend`` vLLM plugin into your serving pods -- so you
-do **not** rebuild the vLLM image.  See :doc:`/legacy/kv_cache_optimizations/blending`
+do **not** rebuild the vLLM image.  See :doc:`/kv_cache_optimizations/cacheblend`
 for the technique itself.
 
 It has two halves the operator runs together:
@@ -1207,8 +1207,8 @@ emits a ``my-cacheblend-connection`` ConfigMap with the ``CBKVConnector``
 ``kv-transfer-config`` (the operator wires the node-local Service host/port and
 the ``cb.*`` tunables).
 
-Opting a vLLM Pod In
-~~~~~~~~~~~~~~~~~~~~~
+Opting a CacheBlend vLLM Pod In
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Label the pod template for the webhook and bind it to an engine by name.  Launch
 vLLM via the image **ENTRYPOINT** (args only) -- a
@@ -1250,8 +1250,8 @@ private-image pull secret, and the required CacheBlend vLLM flags
 ``--pipeline-parallel-size 1``, ``--no-enable-chunked-prefill``,
 ``--enforce-eager``).  You supply only the model and your non-CacheBlend flags.
 
-Verifying Injection
-~~~~~~~~~~~~~~~~~~~~~
+Verifying CacheBlend Injection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The webhook mutates **Pods**, not the Deployment, so inspect a pod:
 

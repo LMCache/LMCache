@@ -5,7 +5,7 @@ CacheGen
 
 .. warning::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/cachegen`.
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the related MP documentation and its separate configuration, see :doc:`/mp/cachegen`.
 
 
 Cachegen leverages KV cache's distributional properties to encode a KV cache into more compact bitstream representations with negligible decoding overhead.

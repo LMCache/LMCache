@@ -43,19 +43,29 @@ Required Docker flags:
 - ``--runtime nvidia --gpus all`` -- GPU access via the NVIDIA container
   runtime.
 
-**HTTP server variant:**
+The ``lmcache server`` command above also starts the HTTP frontend on
+``--http-port`` (default 8080), including health checks and cache-management
+APIs. See :doc:`http_api` for configuration.
 
-For health-check and cache management API support (useful with container
-orchestrators), use the HTTP server entry point:
+Container users and model cache
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. code-block:: bash
+The official CUDA vLLM and standalone images run as ``lmcache`` (uid 1000).
+A bind mount such as
+``--volume "$HOME/.cache/huggingface:/home/lmcache/.cache/huggingface"`` reuses the host's existing Hugging Face cache. Its directory
+and contents must be readable and writable by container uid 1000; configure host
+permissions or ACLs if the cache has different ownership.
 
-    docker run --runtime nvidia --gpus all \
-        --network host \
-        --ipc host \
-        lmcache/standalone:nightly \
-        /opt/venv/bin/lmcache server \
-        --l1-size-gb 60 --eviction-policy LRU --max-workers 4 --port 6555
+For a separate Docker-managed cache, replace the mount with
+``--volume hf-cache:/home/lmcache/.cache/huggingface``. A new empty named volume
+inherits the image's pre-created cache directory ownership; existing volumes
+retain their permissions. It does not reuse models in the host's cache.
+To reuse an old ``/root`` cache, use ``--user 0`` and retain its original mount path.
+
+For ROCm, XPU, and MUSA image selection and runtime prerequisites, see
+:doc:`/getting_started/installation`. Those installation instructions are
+shared across modes; use the matching MP server and connector rather than
+copying an in-process ``LMCacheConnectorV1`` launch command.
 
 Isolated IPC (running without ``--ipc host``)
 ---------------------------------------------
@@ -264,8 +274,8 @@ allowed.
 Health Checking (HTTP Server)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-For Kubernetes liveness/readiness probes, deploy the HTTP server variant
-instead.  Use the ``/healthcheck`` endpoint:
+For Kubernetes liveness/readiness probes, use the ``/healthcheck`` endpoint
+on the HTTP frontend started by ``lmcache server``:
 
 .. code-block:: yaml
 
@@ -285,7 +295,10 @@ instead.  Use the ``/healthcheck`` endpoint:
 Monitoring Integration
 ~~~~~~~~~~~~~~~~~~~~~~
 
-Prometheus metrics are enabled by default on port 9090.  Add a
+With the default pull exporter, ``lmcache server`` exposes ``/metrics`` on
+``--http-port`` (default 8080); ``--prometheus-port`` does not select a
+separate port for this entrypoint. With ``--otlp-endpoint``, metrics are
+pushed to the collector instead. Add a
 ``ServiceMonitor`` or Prometheus scrape annotation to collect metrics from the
 LMCache DaemonSet pods.  See :doc:`observability/index` for metric details.
 

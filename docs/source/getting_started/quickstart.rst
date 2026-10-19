@@ -24,7 +24,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
         standalone service and vLLM attaches via ``LMCacheMPConnector``.
         Scales better, exposes management/observability endpoints, and
         supports sharing one cache across multiple engine instances.
-      - **In-process mode** -- LMCache runs inside the vLLM process via
+      - **In-process mode (deprecated)** -- LMCache runs inside the vLLM process via
         ``LMCacheConnectorV1``. Single command, convenient for quick
         single-node experiments.
 
@@ -148,8 +148,15 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             For request-level statistics (hit ratio, bytes transferred) see
             :doc:`../mp/observability/index`.
 
-         .. tab-item:: In-process mode
+         .. tab-item:: In-process mode (deprecated)
             :sync: inproc
+
+            .. warning::
+
+               This mode embeds the deprecated engine in the serving process.
+               Use the MP tab for new deployments. Further engine-specific
+               configuration is in :doc:`/legacy/index`.
+
 
             Start vLLM with LMCache embedded in the engine process:
 
@@ -407,7 +414,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       LMCache integrates with TensorRT-LLM via TRT-LLM's
       **KV Cache Connector** API and supports two deployment modes:
 
-      - **In-process mode** (``connector: lmcache``) -- LMCache runs as
+      - **In-process mode (deprecated)** (``connector: lmcache``) -- LMCache runs as
         a singleton inside the TRT-LLM process. Simplest setup; no
         extra service to manage.
       - **MP mode** (``connector: lmcache-mp``) -- LMCache runs as a
@@ -417,8 +424,15 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       .. tab-set::
          :sync-group: trtllm-mode
 
-         .. tab-item:: In-process mode
+         .. tab-item:: In-process mode (deprecated)
             :sync: inproc
+
+            .. warning::
+
+               This mode embeds the deprecated engine in the serving process.
+               Use the MP tab for new deployments. Further engine-specific
+               configuration is in :doc:`/legacy/index`.
+
 
             Configure LMCache via env vars:
 
@@ -529,7 +543,7 @@ maps non-CUDA devices to ``engine_driven``, a worker-side gather/scatter
 copy path that the server only loads when started with
 ``--supported-transfer-mode engine_driven`` or ``auto``).
 
-**Docker** -- see :doc:`../legacy/production/docker_deployment`.
+**Docker** -- see :doc:`../mp/deployment`.
 
 **HTTP management endpoints** (health, clear-cache, status) -- see
 :doc:`../mp/http_api`.

@@ -5,7 +5,7 @@ Docker deployment
 
 .. warning::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/deployment`.
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the related MP documentation and its separate configuration, see :doc:`/mp/deployment`.
 
 
 **Prerequisites:** Docker Engine 27.0+
@@ -32,57 +32,6 @@ Running the container
 
 See the `docker run example <https://github.com/LMCache/LMCache/tree/dev/docker>`_ for more details.
 
-The official CUDA vLLM and standalone images run as ``lmcache`` (uid 1000).
-The bind mount above reuses the host's existing Hugging Face cache. Its directory
-and contents must be readable and writable by container uid 1000; configure host
-permissions or ACLs if the cache has different ownership.
-
-For a separate Docker-managed cache, replace the mount with
-``--volume hf-cache:/home/lmcache/.cache/huggingface``. A new empty named volume
-inherits the image's pre-created cache directory ownership; existing volumes
-retain their permissions. It does not reuse models in the host's cache.
-To reuse an old ``/root`` cache, use ``--user 0`` and retain its original mount path.
-
-ROCm (AMD)
-----------
-
-The `AMD Infinity hub <https://hub.docker.com/r/rocm/vllm-dev>`__ for vLLM offers a prebuilt,
-optimized image for the AMD Instinct™ MI300X. See
-`LLM inference performance validation on AMD Instinct MI300X <https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference/benchmark-docker/vllm.html?model=pyt_vllm_llama-3.1-8b>`__
-for full instructions.
-
-Validated environment: ``rocm/vllm-dev:nightly_0624_rc2_0624_rc2_20250620``, MI300X, vLLM V1.
-
-.. code-block:: bash
-
-    docker run -it \
-        --network=host \
-        --group-add=video \
-        --ipc=host \
-        --cap-add=SYS_PTRACE \
-        --security-opt seccomp=unconfined \
-        --device /dev/kfd \
-        --device /dev/dri \
-        -v <path_to_your_models>:/app/model \
-        -e HF_HOME="/app/model" \
-        --name lmcache_rocm \
-        rocm/vllm-dev:nightly_0624_rc2_0624_rc2_20250620 \
-        bash
-
-XPU (Intel)
------------
-
-The `Intel vLLM XPU hub <https://hub.docker.com/r/intel/vllm>`__ offers a prebuilt, optimized docker image designed for validating inference performance on the Intel GPU accelerators like ARC770, B60/B70, and future products.
-
-Validated environment: ``intel/vllm:0.17.0-xpu``, Intel B60 GPU, vLLM V1.
-
-.. code-block:: bash
-
-    docker run --privileged \
-        -it --rm --name vllm-xpu \
-        -u root \
-        --ipc=host --net=host \
-        --cap-add=ALL \
-        --device /dev/dri:/dev/dri \
-        -v /dev/dri/by-path:/dev/dri/by-path \
-        --entrypoint /bin/bash intel/vllm:0.17.0-xpu
+For container users, Hugging Face cache ownership, and other accelerator
+images, see the shared :doc:`/production/docker_deployment` and
+:doc:`/getting_started/installation` guides.
