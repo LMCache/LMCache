@@ -2,7 +2,6 @@
 # Standard
 from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable, cast
-from unittest.mock import MagicMock
 import multiprocessing as mp
 import socket
 import sys
@@ -112,7 +111,6 @@ def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
 def test_zmq_server_registers_out_of_tree_services() -> None:
     """Server modules may attach package-owned ZMQ services before start."""
     registered_servers: list[MessageQueueServer] = []
-    explicit_registrar = MagicMock(name="explicit_registrar")
 
     class ServiceModule:
         def register_zmq_services(self, server: MessageQueueServer) -> None:
@@ -121,11 +119,9 @@ def test_zmq_server_registers_out_of_tree_services() -> None:
     server = build_zmq_request_server(
         [cast(Any, ServiceModule())],
         MPServerConfig(port=_unused_tcp_port()),
-        service_registrars=[explicit_registrar],
     )
     try:
         assert registered_servers == [server]
-        explicit_registrar.assert_called_once_with(server)
     finally:
         server.close()
 
@@ -149,7 +145,7 @@ def _server_process(
     server = MessageQueueServer(server_url, context)
 
     for operation, handler in request_handlers.items():
-        server.add_handler(operation, HandlerType.SYNC, handler)
+        server.add_handler(operation, HandlerType.SERIALIZED, handler)
 
     server.start()
 
@@ -779,6 +775,29 @@ def test_invalid_outbound_request_does_not_block_later_requests() -> None:
         server.close()
 
 
+def test_server_answers_a_burst_larger_than_one_poll() -> None:
+    server_url = "tcp://127.0.0.1:16031"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, "noop", test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        num_requests = 3 * MessageQueueServer.MAX_REQUESTS_PER_POLL + 1
+        futures: list[MessagingFuture[str] | MessagingStream[str]] = [
+            client.submit_request("noop", []) for _ in range(num_requests)
+        ]
+        results = []
+        for future in futures:
+            assert isinstance(future, MessagingFuture)
+            results.append(future.result(timeout=10))
+        assert results == ["NOOP_OK"] * num_requests
+    finally:
+        client.close()
+        server.close()
+
+
 def test_client_survives_undecodable_response() -> None:
     """
     Test that an undecodable response does not stop later requests working.
@@ -933,9 +952,9 @@ def test_add_affinity_thread_pool():
     server.close()
 
 
-def test_normal_pool_error_on_sync_handler():
+def test_normal_pool_error_on_serialized_handler():
     """
-    Test that add_normal_thread_pool raises TypeError for SYNC handlers.
+    Test that add_normal_thread_pool raises TypeError for SERIALIZED handlers.
     """
     context = zmq.Context.instance()
     server = MessageQueueServer("tcp://127.0.0.1:15701", context)
@@ -948,9 +967,9 @@ def test_normal_pool_error_on_sync_handler():
     server.close()
 
 
-def test_affinity_pool_error_on_sync_handler():
+def test_affinity_pool_error_on_serialized_handler():
     """
-    Test that add_affinity_thread_pool raises TypeError for SYNC handlers.
+    Test that add_affinity_thread_pool raises TypeError for SERIALIZED handlers.
     """
     context = zmq.Context.instance()
     server = MessageQueueServer("tcp://127.0.0.1:15701", context)

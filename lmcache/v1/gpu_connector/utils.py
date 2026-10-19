@@ -74,20 +74,13 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
     """
     # Import at runtime to avoid circular dependency
     # First Party
-    from lmcache.v1.gpu_connector import (
-        gpu_connectors,
-        musa_connectors,
-        xpu_connectors,
-    )
+    from lmcache.v1.gpu_connector import gpu_connectors, xpu_connectors
 
     valid_connectors = (
         gpu_connectors.VLLMPagedMemLayerwiseGPUConnector,
         gpu_connectors.VLLMBufferLayerwiseGPUConnector,
-        gpu_connectors.SGLangLayerwiseGPUConnector,
         xpu_connectors.VLLMPagedMemLayerwiseXPUConnector,
         xpu_connectors.VLLMBufferLayerwiseXPUConnector,
-        xpu_connectors.SGLangLayerwiseXPUConnector,
-        musa_connectors.SGLangLayerwiseMUSAConnector,
     )
 
     assert isinstance(gpu_connector, valid_connectors)
@@ -182,7 +175,7 @@ def legible_print_engine_kv_format(engine_kv_format: "lmcache_native.EngineKVFor
     shape = get_engine_kv_shape_description(engine_kv_format)
     backend = get_attention_backend(engine_kv_format)
     if shape.startswith("Unknown"):
-        logger.warning(f"Unknown Engine KV Format: {engine_kv_format}")
+        logger.warning("Unknown Engine KV Format: %s", engine_kv_format)
     else:
         logger.info("Engine KV Format: %s", shape)
         logger.info("Currently used by:\n  - %s", backend)

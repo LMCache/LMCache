@@ -337,7 +337,7 @@ The server picks which paths to load via ``--supported-transfer-mode``:
 - ``lmcache_driven`` *(default)* -- load only the server-driven
   transfer path.  Supports CUDA devices (IPC) and CPU devices (SHM),
   and skips allocating the engine-driven prepare/commit resources
-  (pickle codec).
+  (inline tensor codec).
 - ``engine_driven`` -- load only the engine-driven path.  Use when
   serving CPU-only or non-CUDA accelerator workers.
 - ``auto`` -- load both paths.  Workers of either device
@@ -345,9 +345,13 @@ The server picks which paths to load via ``--supported-transfer-mode``:
   upfront knowledge of the connecting worker's device.
 
 When the engine-driven path is loaded (``auto`` or ``engine_driven``),
-KV transfers between the server and vLLM workers use a pickle-based
+KV transfers between the server and vLLM workers use a typed inline tensor
 path by default.  Pass ``--shm-name`` with a segment name to create a
 shared-memory (SHM) pool instead:
+
+The typed inline protocol is not compatible with older workers or servers.
+Upgrade both sides together; payloads from the previous untyped protocol are
+rejected rather than accepted as a fallback.
 
 .. list-table::
    :header-rows: 1
@@ -356,7 +360,7 @@ shared-memory (SHM) pool instead:
    * - Value
      - Effect
    * - ``""`` (empty string, default)
-     - No SHM pool; KV transfer uses the pickle-based path.  Works
+     - No SHM pool; KV transfer uses the typed inline path.  Works
        when ``/dev/shm`` is unavailable or when running without
        ``--ipc host`` in Docker.
    * - ``"my_pool"`` (any non-empty name)
@@ -368,7 +372,7 @@ shared-memory (SHM) pool instead:
 
 .. code-block:: bash
 
-    # Engine-driven path with pickle transfer (no SHM) -- the default:
+    # Engine-driven path with typed inline transfer (no SHM) -- the default:
     lmcache server --l1-size-gb 60 --eviction-policy LRU \
         --supported-transfer-mode engine_driven
 

@@ -7,7 +7,7 @@
 - Skip queued / cancel running branch builds: Yes
 
 Lightweight (1 GPU) — good candidate for a required GitHub status check.
-PRs labeled `"good first issue"` still trigger the upload step, but the repo
+PRs labeled `"skip expensive ci"` still trigger the upload step, but the repo
 wrapper exits green before uploading integration jobs. Add `force-ci` to run the
 full suite anyway.
 
