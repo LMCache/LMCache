@@ -383,6 +383,7 @@ class LookupMixin:
                         "seq_len": key.num_tokens,
                         "dtypes": [str(d) for d in layout_desc.dtypes],
                         "shapes": [list(s) for s in layout_desc.shapes],
+                        "token_ids": key.token_ids,
                     },
                 )
             )

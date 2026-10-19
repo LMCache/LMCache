@@ -84,6 +84,16 @@ class LMCacheMPRequestTracker:
     max_offload_tokens: int | None = None
     lookup_started_at: float | None = None
 
+    # Prefix tokens the LMCache lookup skipped because vLLM's APC covers them,
+    # chunk-aligned; frozen at submit, unlike the per-poll num_vllm_hit_tokens.
+    apc_covered_tokens: int = 0
+
+    # Sticky: after a shrink, the request looks up the full prefix from token 0.
+    need_full_lookup: bool = False
+
+    # Lock ranges left by abandoned lookups, released with the next FREE.
+    pending_free_ranges: list[tuple[int, int]] = field(default_factory=list)
+
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
     # Packed prefix of `get_token_ids()`, grown in place. A request emits one
@@ -105,6 +115,9 @@ class LMCacheMPRequestTracker:
         self.num_stored_tokens = 0
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
+        self.apc_covered_tokens = 0
+        self.need_full_lookup = False
+        self.pending_free_ranges = []
         self.state = LMCacheMPRequestState.PREFETCHING
         self.packed_tokens = bytearray()
         self.mm_adjusted_prompt_ids = []

@@ -179,18 +179,13 @@ def test_server_module_flags_are_parsed():
     config = _parse_mp(
         [
             "--server-module",
-            (
-                '{"module_path":"my_pkg.server_module",'
-                '"factory_name":"build_extra_modules",'
-                '"config":{"mode":"test"}}'
-            ),
+            ('{"module_path":"my_pkg.server_module","config":{"mode":"test"}}'),
         ]
     )
 
     assert len(config.server_modules) == 1
     spec = config.server_modules[0]
     assert spec.module_path == "my_pkg.server_module"
-    assert spec.factory_name == "build_extra_modules"
     assert spec.config == {"mode": "test"}
 
 

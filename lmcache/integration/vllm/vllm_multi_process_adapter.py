@@ -35,7 +35,6 @@ from lmcache.utils import (
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
-    KV_EVENT_CAPABILITY,
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
     BlockAllocationRecord,
@@ -100,6 +99,7 @@ _KV_EVENT_RESYNCS = Counter(
 )
 # Maximum records in each pushed batch.
 _KV_EVENT_BATCH_SIZE = 1024
+_KV_EVENT_RECONNECT_DELAY = 1.0
 
 
 class ExtraConfigDefault(enum.Enum):
@@ -919,7 +919,8 @@ class LMCacheMPSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         reserve_last_token: bool = False,
-    ) -> None:
+        start: int = 0,
+    ) -> bool:
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
 
@@ -937,9 +938,15 @@ class LMCacheMPSchedulerAdapter:
                 the IPC key.
             reserve_last_token: Whether to exclude the final token before
                 aligning the lookup range.
+            start: Chunk-aligned start token index of the lookup; tokens
+                below it are covered by the engine's prefix cache, so the
+                server touches but does not lock or prefetch them. A start
+                at the aligned end is valid: the server submits no prefetch
+                and reports the covered prefix as the hit.
 
         Returns:
-            None
+            Whether a LOOKUP actually went out. Key per-lookup state off
+            this so it cannot drift from what the server received.
 
         Notes:
             This function will have a side-effect: submitting a look up request to
@@ -951,11 +958,11 @@ class LMCacheMPSchedulerAdapter:
         self._ensure_heartbeat_started()
 
         if not self.is_healthy:
-            return
+            return False
 
         if request_id in self._pending_lookups:
             # Skip if there is already a lookup request
-            return
+            return False
 
         lookup_tokens = max(
             0, num_packed_tokens(packed_token_ids) - int(reserve_last_token)
@@ -966,7 +973,7 @@ class LMCacheMPSchedulerAdapter:
 
         key = self._create_key(
             packed_token_ids,
-            start=0,
+            start=start,
             end=aligned_end,
             request_id=request_id,
             cache_salt=cache_salt,
@@ -990,6 +997,7 @@ class LMCacheMPSchedulerAdapter:
             cache_salt,
             request_configs,
         )
+        return True
 
     def _free_inconsistent_lookup_locks(
         self,
@@ -1221,6 +1229,7 @@ class LMCacheMPSchedulerAdapter:
         request_id: str,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
+        extra_ranges: tuple[tuple[int, int], ...] = (),
     ) -> None:
         """Release read locks acquired during lookup without a full retrieve.
 
@@ -1244,11 +1253,14 @@ class LMCacheMPSchedulerAdapter:
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+            extra_ranges: Lock ranges left by this request's earlier,
+                abandoned lookups, as ``(start, end)`` token pairs ending at
+                that lookup's hit boundary. Released in the same RPC.
         """
         if not self.is_healthy:
             return
 
-        # Free [start, end) on every server.
+        # Free [start, end) and any extra ranges on every server.
         base_key = self._create_key(
             packed_token_ids,
             start=start,
@@ -1258,7 +1270,9 @@ class LMCacheMPSchedulerAdapter:
             request_configs=request_configs,
         ).no_worker_id_version()
         for url in self._server_urls:
-            self.req_clients[url].free_lookup_locks(base_key, self.tp_size)
+            self.req_clients[url].free_lookup_locks(
+                base_key, self.tp_size, extra_ranges
+            )
 
     def end_session(self, request_id: str) -> None:
         """
@@ -2633,6 +2647,8 @@ class LMCacheMPWorkerAdapter:
                     stream.close()
                 with self._kv_event_lock:
                     self._kv_event_stream = None
+            if self._kv_event_stop.wait(_KV_EVENT_RECONNECT_DELAY):
+                return
 
     def _disable_kv_event_stream(self, reason: str) -> None:
         """Withdraw placements and resume completed-store reporting after failure."""
@@ -2649,17 +2665,8 @@ class LMCacheMPWorkerAdapter:
     def _resolve_kv_event_source(
         self, enable_kv_events: bool, parallel_strategy: ParallelStrategy
     ) -> None:
-        """Use server records when advertised; elect one subscriber per server."""
+        """Use server records; elect one subscriber per server."""
         if not enable_kv_events:
-            return
-        if KV_EVENT_CAPABILITY not in self.experimental:
-            logger.warning(
-                "The LMCache server does not advertise the '%s' capability, "
-                "so this worker reports only its own completed stores and the "
-                "router will not learn LMCache host-cache evictions from it. "
-                "Check the server version and KV event configuration.",
-                KV_EVENT_CAPABILITY,
-            )
             return
         self._kv_event_server_source = True
         self._kv_event_subscriber = parallel_strategy.is_kv_event_subscriber
