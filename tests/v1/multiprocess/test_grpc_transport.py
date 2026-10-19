@@ -35,6 +35,7 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
+from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
@@ -51,7 +52,6 @@ from lmcache.v1.multiprocess.protocols.server_module import (
     ServerModuleCallRequest,
     ServerModuleCallResponse,
 )
-from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import (
     HandlerType,
     iter_request_handlers,
