@@ -26,10 +26,10 @@ import json
 import os
 
 # First Party
-from lmcache.cli.commands.bench.quality_bench.config import JudgeSettings
-from lmcache.cli.commands.bench.quality_bench.plan import QualityPlan
-from lmcache.cli.commands.bench.quality_bench.runner import ArmRun
-from lmcache.cli.commands.bench.quality_bench.verdict import ScoreTable
+from lmcache.cli.commands.bench.quality_bench.core.config import JudgeSettings
+from lmcache.cli.commands.bench.quality_bench.core.plan import QualityPlan
+from lmcache.cli.commands.bench.quality_bench.core.runner import ArmRun
+from lmcache.cli.commands.bench.quality_bench.core.verdict import ScoreTable
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)

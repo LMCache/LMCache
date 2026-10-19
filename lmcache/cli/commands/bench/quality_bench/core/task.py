@@ -14,7 +14,7 @@ import statistics
 # First Party
 from lmcache.cli.commands.bench.engine_bench.quality.dataset import Sample
 from lmcache.cli.commands.bench.engine_bench.quality.scoring import normalize_answer
-from lmcache.cli.commands.bench.quality_bench.config import TaskType
+from lmcache.cli.commands.bench.quality_bench.core.config import TaskType
 
 # Longest median reference, in words, a QA dataset may have. QA references
 # are a few words (HotpotQA, 2WikiMultihopQA and MuSiQue have a median of 2,

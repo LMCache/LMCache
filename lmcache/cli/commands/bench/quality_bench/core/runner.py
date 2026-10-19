@@ -12,12 +12,12 @@ from lmcache.cli.commands.bench.engine_bench.quality.scoring import (
 )
 from lmcache.cli.commands.bench.engine_bench.request_sender import RequestSender
 from lmcache.cli.commands.bench.engine_bench.stats import RequestResult
-from lmcache.cli.commands.bench.quality_bench.blend_counters import (
+from lmcache.cli.commands.bench.quality_bench.core.blend_counters import (
     BlendCounters,
     BlendCounterSource,
 )
-from lmcache.cli.commands.bench.quality_bench.config import ArmRole
-from lmcache.cli.commands.bench.quality_bench.plan import QualityPlan
+from lmcache.cli.commands.bench.quality_bench.core.config import ArmRole
+from lmcache.cli.commands.bench.quality_bench.core.plan import QualityPlan
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)

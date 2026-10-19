@@ -4,21 +4,27 @@
 # Standard
 from collections import Counter
 from dataclasses import asdict
-from datetime import datetime
 import hashlib
 import json
 import os
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.quality.scoring import is_abstention
-from lmcache.cli.commands.bench.quality_bench.config import (
-    QualityBenchConfig,
+from lmcache.cli.commands.bench.quality_bench.core.config import (
+    ArmRole,
+    QualityAnalyzeConfig,
     VerdictMetric,
 )
-from lmcache.cli.commands.bench.quality_bench.judge import JUDGE_METRIC
-from lmcache.cli.commands.bench.quality_bench.plan import QualityPlan
-from lmcache.cli.commands.bench.quality_bench.runner import ArmRun
-from lmcache.cli.commands.bench.quality_bench.verdict import (
+from lmcache.cli.commands.bench.quality_bench.core.judge import JUDGE_METRIC
+from lmcache.cli.commands.bench.quality_bench.core.plan import QualityPlan
+from lmcache.cli.commands.bench.quality_bench.core.run_files import (
+    ROWS_FILE,
+    SUMMARY_FILE,
+    ArmRecord,
+    PlanRecord,
+)
+from lmcache.cli.commands.bench.quality_bench.core.runner import ArmRun
+from lmcache.cli.commands.bench.quality_bench.core.verdict import (
     ArmComparison,
     QualityVerdict,
 )
@@ -26,29 +32,24 @@ from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
-MANIFEST_FILE = "manifest.jsonl"
-ROWS_FILE = "rows.jsonl"
-SUMMARY_FILE = "summary.json"
 
-# Name of each run's subdirectory of --output-dir: when the run started.
-RUN_DIR_FORMAT = "%Y%m%d-%H%M%S"
-
-
-def run_fingerprint(config: QualityBenchConfig, plan: QualityPlan) -> str:
+def run_fingerprint(plan_record: PlanRecord, config: QualityAnalyzeConfig) -> str:
     """Digest of everything that determines the prompts and their scoring.
 
-    Two result directories are comparable only when their fingerprints
-    match.
+    Two summaries are comparable only when their fingerprints match.
 
     Args:
-        config: The run's config.
-        plan: The run's plan.
+        plan_record: The results directory's plan.
+        config: The analysis's config.
 
     Returns:
         A 16-hex-digit digest.
     """
     material = json.dumps(
-        {"config": dict(config.fingerprint_material()), "prompts": plan.prompts_digest},
+        {
+            "config": {**plan_record.settings, **config.scoring_settings()},
+            "prompts": plan_record.plan.prompts_digest,
+        },
         sort_keys=True,
     )
     return hashlib.sha256(material.encode()).hexdigest()[:16]
@@ -72,115 +73,51 @@ def arm_counts(run: ArmRun) -> dict[str, int]:
     }
 
 
-def create_run_dir(output_dir: str, started: datetime) -> str:
-    """Create the subdirectory of *output_dir* that one run writes into.
-
-    Every run gets its own directory, so runs into the same ``--output-dir``
-    never mix files: a rerun with fewer arms cannot leave a stale
-    ``answers_apc.jsonl`` behind, and a run that aborts while judging cannot
-    leave its answers next to an earlier run's summary. Only the judge
-    cache is shared, directly under *output_dir*.
-
-    Args:
-        output_dir: The ``--output-dir`` root -- created if missing.
-        started: When the run started. Names the directory
-            (``YYYYmmdd-HHMMSS``).
-
-    Returns:
-        Path of the new directory. A run that starts in the same second as
-        an existing directory gets a ``-2``, ``-3``, … suffix.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    base = os.path.join(output_dir, started.strftime(RUN_DIR_FORMAT))
-    path, suffix = base, 1
-    while True:
-        try:
-            # mkdir claims the name atomically, even against a concurrent run.
-            os.mkdir(path)
-            return path
-        except FileExistsError:
-            suffix += 1
-            path = f"{base}-{suffix}"
-
-
-def write_answers(run_dir: str, plan: QualityPlan, runs: list[ArmRun]) -> None:
-    """Write what the arms produced, before any scoring.
-
-    Written first so that a judge failure during scoring does not lose the
-    arm runs, which are the expensive part. Files, under *run_dir*:
-
-    * ``manifest.jsonl`` — one reuse-manifest record per question.
-    * ``answers_<label>.jsonl`` — one record per question per arm run.
-
-    Args:
-        run_dir: The run's directory, from :func:`create_run_dir`.
-        plan: The run's plan.
-        runs: Every arm run.
-    """
-    _write_jsonl(
-        os.path.join(run_dir, MANIFEST_FILE),
-        [s.manifest_entry(plan.scenario, plan.chunk_size) for s in plan.samples],
-    )
-    for run in runs:
-        _write_jsonl(
-            os.path.join(run_dir, f"answers_{run.label}.jsonl"),
-            [
-                {
-                    "qid": a.sample_id,
-                    "request_id": a.request_id,
-                    "successful": a.successful,
-                    "answer": a.answer,
-                    "response": a.response,
-                    "ttft": round(a.ttft, 4),
-                    "num_output_tokens": a.num_output_tokens,
-                    "counters": asdict(a.counters) if run.engagement_measured else None,
-                }
-                for a in run.answers
-            ],
-        )
-    logger.info("Wrote manifest and answers to %s", run_dir)
-
-
 def write_results(
-    run_dir: str,
-    config: QualityBenchConfig,
-    plan: QualityPlan,
-    runs: list[ArmRun],
+    config: QualityAnalyzeConfig,
+    plan_record: PlanRecord,
+    arms: list[ArmRecord],
     verdict: QualityVerdict,
     rows: list[dict[str, object]],
 ) -> str:
-    """Write the scored results, next to :func:`write_answers`'s files.
+    """Write the scored results into the results directory.
 
-    Files, under *run_dir*:
+    Files, under ``config.results_dir``, next to what ``run`` saved:
 
     * ``rows.jsonl`` — the per-question comparison rows.
-    * ``summary.json`` — fingerprint, settings, verdict (with any reasons it
-      is INVALID), engagement, per-arm scores and failure counts.
+    * ``summary.json`` — fingerprint, settings, each arm's provenance,
+      verdict (with any reasons it is INVALID), engagement, per-arm scores
+      and failure counts.
 
     Args:
-        run_dir: The run's directory, from :func:`create_run_dir`.
-        config: The run's config.
-        plan: The run's plan.
-        runs: Every arm run.
+        config: The analysis's config.
+        plan_record: The results directory's plan.
+        arms: Every arm pass, as analyzed.
         verdict: The verdict.
         rows: The rows from ``build_rows``.
 
     Returns:
         Path of ``summary.json``.
     """
-    _write_jsonl(os.path.join(run_dir, ROWS_FILE), rows)
+    plan = plan_record.plan
+    runs = [arm.run for arm in arms]
+    blend = next(arm for arm in arms if arm.run.role is ArmRole.BLEND)
+    _write_jsonl(os.path.join(config.results_dir, ROWS_FILE), rows)
 
     summary = {
-        "run_fingerprint": run_fingerprint(config, plan),
+        "run_fingerprint": run_fingerprint(plan_record, config),
+        "plan_fingerprint": plan_record.fingerprint,
         "settings": {
-            **dict(config.fingerprint_material()),
-            "arms": {arm.role.value: arm.url for arm in config.arms},
-            "reference_repeats": config.reference_repeats,
-            "verdict_metric": config.verdict_metric.value,
+            **dict(plan_record.settings),
+            **dict(config.scoring_settings()),
+            "reference_repeats": sum(
+                1 for run in runs if run.role is ArmRole.REFERENCE
+            ),
             "tolerance": config.tolerance,
             "min_blend_share": config.min_blend_share,
-            "blend_metrics_url": config.blend_metrics_url,
+            "blend_metrics_url": blend.blend_metrics_url,
         },
+        "arms": {arm.run.label: arm.metadata() for arm in arms},
         "num_questions": len(plan.samples),
         "unscored_questions": verdict.unscored,
         "judge": (
@@ -204,11 +141,11 @@ def write_results(
             Counter(str(row["loss_tag"]) for row in rows if row["loss_tag"])
         ),
     }
-    summary_path = os.path.join(run_dir, SUMMARY_FILE)
+    summary_path = os.path.join(config.results_dir, SUMMARY_FILE)
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
         f.write("\n")
-    logger.info("Wrote quality results to %s", run_dir)
+    logger.info("Wrote quality results to %s", config.results_dir)
     return summary_path
 
 

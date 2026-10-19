@@ -6,8 +6,8 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.quality.dataset import Sample
-from lmcache.cli.commands.bench.quality_bench.config import ReuseScenario
-from lmcache.cli.commands.bench.quality_bench.plan import (
+from lmcache.cli.commands.bench.quality_bench.core.config import ReuseScenario
+from lmcache.cli.commands.bench.quality_bench.core.plan import (
     EvidenceSource,
     StoreOrigin,
     build_plan,

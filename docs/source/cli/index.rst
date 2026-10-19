@@ -33,7 +33,7 @@ The ``lmcache`` CLI ships in two packages:
    * - ``lmcache-cli``
      - ``pip install lmcache-cli``
      - CLI only: ``ping``, ``query``, ``describe``, ``kvcache``,
-       ``quota``, ``bench engine``, ``bench quality`` (also needs
+       ``quota``, ``bench engine``, ``bench quality`` (``run`` also needs
        ``pip install transformers``). No GPU required, any OS.
 
 .. note::

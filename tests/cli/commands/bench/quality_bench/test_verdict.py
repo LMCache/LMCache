@@ -6,15 +6,15 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.quality.dataset import Sample
-from lmcache.cli.commands.bench.quality_bench.blend_counters import BlendCounters
-from lmcache.cli.commands.bench.quality_bench.config import (
+from lmcache.cli.commands.bench.quality_bench.core.blend_counters import BlendCounters
+from lmcache.cli.commands.bench.quality_bench.core.config import (
     ArmRole,
     ReuseScenario,
     VerdictMetric,
 )
-from lmcache.cli.commands.bench.quality_bench.plan import build_plan
-from lmcache.cli.commands.bench.quality_bench.runner import ArmAnswer, ArmRun
-from lmcache.cli.commands.bench.quality_bench.verdict import (
+from lmcache.cli.commands.bench.quality_bench.core.plan import build_plan
+from lmcache.cli.commands.bench.quality_bench.core.runner import ArmAnswer, ArmRun
+from lmcache.cli.commands.bench.quality_bench.core.verdict import (
     ENGAGEMENT_WINDOW,
     MAX_UNSCORED_SHARE,
     LossTag,
@@ -24,6 +24,7 @@ from lmcache.cli.commands.bench.quality_bench.verdict import (
     check_engagement,
     decide,
     lexical_scores,
+    run_problems,
     score,
 )
 
@@ -218,6 +219,16 @@ class TestDecide:
         verdict = decide(plan, runs, VerdictMetric.MATCH, 0.05, 0.3)
         assert verdict.verdict is Verdict.INVALID
         assert verdict.invalid_reasons == ["blend: 3 store requests failed"]
+
+    def test_run_problems_judge_one_run_on_its_own(self, plan) -> None:
+        """What `bench quality run` reports before any other arm exists."""
+        samples = [s.sample for s in plan.samples]
+        assert run_problems(_run(ArmRole.BLEND, _correct(samples))) == []
+        down = _run(ArmRole.REFERENCE, [_failed(s) for s in samples], store_failures=2)
+        assert run_problems(down) == [
+            "reference_1: no request succeeded",
+            "reference_1: 2 store requests failed",
+        ]
 
     def test_unmeasured_engagement_is_reported_not_invalid(self, plan) -> None:
         samples = [s.sample for s in plan.samples]

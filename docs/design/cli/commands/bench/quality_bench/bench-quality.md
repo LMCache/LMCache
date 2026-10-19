@@ -8,6 +8,9 @@
 answers?** It sends the same QA prompts to a full-recompute reference engine
 and to a CacheBlend engine, scores both against gold answers, and prints one
 verdict — `PASS`, `FAIL`, `UNDERPOWERED`, or `INVALID` — that CI can gate on.
+The work is split into two stages that share a results directory (Section 6):
+`run` sends prompts to one or more arms and saves their answers; `analyze`
+scores the saved answers and reaches the verdict.
 
 `bench engine --workload rag-qa-quality` already scores one stack's answers.
 `bench quality` adds what a comparison needs on top of that: a plan shared by
@@ -16,18 +19,22 @@ every arm, an explicit description of how the passages got into the cache
 that blending actually happened, and a statistical verdict.
 
 ```bash
-lmcache bench quality \
-    --reference-url http://localhost:8000 \
-    --blend-url     http://localhost:8001 \
-    --blend-metrics-url http://localhost:9090/metrics \
-    --model Qwen/Qwen3-8B \
-    --dataset hotpotqa --limit 200 \
-    --scenario independent \
-    --chunk-size 256 \
+WORKLOAD="--model Qwen/Qwen3-8B --dataset hotpotqa --limit 200 \
+          --scenario independent --chunk-size 256"
+# One engine at a time, into one results directory
+lmcache bench quality run --reference-url http://gpu0:8000 $WORKLOAD --output-dir out
+lmcache bench quality run --blend-url http://gpu0:8000 \
+    --blend-metrics-url http://gpu0:9090/metrics $WORKLOAD --output-dir out
+# No engine needed: score and decide
+lmcache bench quality analyze out \
     --judge-url http://judge-host:8000 --judge-model openai/gpt-oss-120b
 ```
 
-Exit status is `1` on `FAIL` or `INVALID`, `0` otherwise.
+`analyze` exits `1` on `FAIL` or `INVALID`, `0` otherwise. `run` exits `1`
+when a pass already guarantees `INVALID` (no successful request, or failed
+store requests), so CI flags the job that broke. Both exit `2` when the
+results directory does not fit (Section 6), so a broken pipeline is never
+mistaken for a quality verdict.
 
 ### Scope
 
@@ -46,9 +53,12 @@ Any file in a supported QA schema loads with `--dataset <path>`.
 
 | Role | Flag | Engine | Stores passages first? |
 |---|---|---|---|
-| `reference` | `--reference-url` (required) | vLLM, prefix caching **off** | No |
+| `reference` | `--reference-url` | vLLM, prefix caching **off** | No |
 | `apc` | `--apc-url` (optional) | vLLM, prefix caching on, no LMCache | Yes |
-| `blend` | `--blend-url` (required) | vLLM + CBKVConnector + blend server | Yes |
+| `blend` | `--blend-url` | vLLM + CBKVConnector + blend server | Yes |
+
+Each `run` takes any subset of these flags (at least one); `analyze` needs a
+reference and a blend arm in the results directory.
 
 The reference runs `--reference-repeats` times (default 2). Its disagreement
 with itself is the **flip rate**, the noise floor below which no arm can be
@@ -56,11 +66,12 @@ told apart. The optional `apc` arm should match the reference exactly, since
 prefix caching reuses KV only at its original positions. A gap there points
 at the harness or the engine, not at CacheBlend.
 
-Arms run one after another (all reference passes, then `apc`, then `blend`)
-and questions run sequentially, so per-question counter deltas belong to that
-question. **Each caching arm must start from an empty cache**: restart its
-engine and the blend server before the run. The command does not do this for
-you yet.
+Within a `run`, arms run one after another (all reference passes, then
+`apc`, then `blend`) and questions run sequentially, so per-question counter
+deltas belong to that question. **Each caching arm must start from an empty
+cache**: restart its engine and the blend server before its `run`. Running one
+arm per engine lifetime, as the staged flow does, satisfies this; the command
+does not restart engines itself.
 
 ## 2. Plan and reuse scenarios
 
@@ -173,12 +184,12 @@ opening wait keeps late store-phase lookups, mostly misses, from diluting the
 measured share. Per-row shares are read without waiting and can lag by one
 question.
 
-A failed counter read aborts the run, and answers are written only after
-every arm has run, so the reads are guarded twice. The endpoint is read once
-before the arms run: otherwise a bad `--blend-metrics-url` would surface only
-when the blend pass starts, after every reference pass. Each read also retries
-a failed fetch (3 attempts, 1 s apart), so one flaky scrape does not discard
-an hours-long run.
+A failed counter read aborts the `run`, so the reads are guarded twice. The
+endpoint is read once before any arm runs: otherwise a bad
+`--blend-metrics-url` would surface only when the blend pass starts, after
+every other pass in the same `run`. Each read also retries a failed fetch (3
+attempts, 1 s apart), so one flaky scrape does not abort an hours-long run.
+Passes that finished before an abort are already saved (Section 6).
 
 ## 4. Shared modules
 
@@ -226,7 +237,7 @@ are copied directly from ragas 0.4.3 (`ragas/metrics/_nv_metrics.py`, Apache-2.0
 
 - **Endpoint.** The judge should be a separate deployment from the arms
   under test.
-- **Judge sanity check.** Before the arms run, the judge rates a right and a
+- **Judge sanity check.** Before scoring, the judge rates a right and a
   wrong answer to a sanity-check question on both prompts and must give 4 and 0.
   Reachability alone is not enough: under the ragas parser, a thinking model
   served without a reasoning parser has digits from its reasoning read as
@@ -238,12 +249,13 @@ are copied directly from ragas 0.4.3 (`ragas/metrics/_nv_metrics.py`, Apache-2.0
   per-request timeout. They do not consume the 5 rating retries, which are
   resamples, not recovery. A request that still fails aborts scoring: the
   judge is down, and marking answers unrated would only shrink the
-  comparison. The manifest and answers are written before scoring so the
-  arm runs survive, and the judge cache keeps finished judgments.
+  comparison. The arms' answers are already on disk, and the judge cache
+  keeps finished judgments, so rerunning `analyze` judges only the rest.
 - **What is judged.** The reference is the question's first gold answer.
   Unparsed answers score 0 without a judge call.
 - **Caching.** Identical (question, answer, reference) triples are judged
-  once, and judgments are cached in `judge_cache.jsonl` for later runs.
+  once, and judgments are cached in the results directory's
+  `judge_cache.jsonl` for later `analyze` runs.
 - **Unrated questions.** A question any arm has no rating for is left out
   of the comparison and counted as `unscored_questions`. Dropping it from
   every arm alike costs only power while the gaps are random. Above 5%
@@ -321,29 +333,68 @@ parsed answer), `wrong_value` (it answered with a string that appears in the
 prompt, i.e. read the wrong passage), or `wording` (anything else).
 `blend_higher` and `none` cover the other rows.
 
-## 6. Outputs (`--output-dir`, default `quality_results/`)
+## 6. Stages and the results directory
 
-Each run writes into `<output-dir>/<YYYYmmdd-HHMMSS>/`, named for its start
-(`-2`, `-3`, ... on a same-second collision -- `os.mkdir` claims the name
-atomically). A shared directory would let runs mix: a rerun without
-`--apc-url`, or with fewer `--reference-repeats`, would leave the earlier
-run's `answers_*.jsonl` behind, and a run that aborts while judging (answers
-are written before scoring) would leave its answers next to the earlier
-run's `summary.json`. Only `judge_cache.jsonl` sits at the top level, so
-reruns still share judgments.
+**Why two stages.** A single invocation needed every arm's engine, the blend
+server's metrics and the judge reachable for the whole run. On a GPU pool
+that is several GPU servers at once, although the arms only ever run one
+after another. `run` and `analyze` are separate commands that communicate
+only through files, so each engine (and the judge) can be up alone, each in
+its own CI job, and saved answers can be re-analyzed with another metric or
+tolerance. A long-lived process that paused between arms would save the
+engines' GPUs too, but not the judge's, and would allow neither re-analysis
+nor reuse of a saved reference.
 
-| File | Contents |
-|---|---|
-| `manifest.jsonl` | reuse manifest (Section 2) |
-| `answers_<label>.jsonl` | per question per arm run: response, parsed answer, TTFT, output tokens, counter delta |
-| `rows.jsonl` | per question: gold, score per arm, answers, loss tag, reference flipped, blend share, evidence; with the judge, also each arm's `match` score as a cross-check |
-| `summary.json` | verdict and `invalid_reasons`, metric, tolerance, Δ, SE, flip rate, engagement, per-arm counts, evidence sources (`dataset` / `answer_string` / `none`), `measured_earlier_share`, judge model and unscored questions, `run_fingerprint` |
-| `judge_cache.jsonl` | top level, not per run: judge ratings by (judge model, question, answer, reference), reused by every later run into the same `--output-dir`. An unparsable line (a partial append from a killed run) is skipped and re-judged, and terminated so the next append starts a fresh line. The key trusts the judge model name; change what serves it and the cache must be deleted |
+**The directory** (`--output-dir`, used as given; omitted, `run` creates
+`quality_results/<YYYYmmdd-HHMMSS>/`, with `-2`, `-3`, … on a same-second
+collision). Every JSON write is atomic (temporary file, then `os.replace`).
 
-`run_fingerprint` covers model, dataset, task type, `--limit`, scenario,
-chunk size, output budget, template kwargs, seed, verdict metric, the judge
-model when judging, and a digest of every measured prompt. Two summaries are
-comparable only when it matches.
+| File | Written by | Contents |
+|---|---|---|
+| `plan.json` | first `run` | `schema_version`, `plan_fingerprint`, `prompts_digest`, the lmcache version, the workload settings, and the whole plan: store requests and, per question, its manifest entry plus question, gold answers, passages and measured messages |
+| `manifest.jsonl` | first `run` | reuse manifest (Section 2) |
+| `arm_<label>.json` | `run` | per pass: role, repeat, URL, metrics URL, engine version (best-effort `GET /version`), lmcache version, start and finish times, run-level blend counters, store failures, `plan_fingerprint` |
+| `answers_<label>.jsonl` | `run` | per question: response, parsed answer, TTFT, output tokens, counter delta |
+| `rows.jsonl` | `analyze` | per question: gold, score per arm, answers, loss tag, reference flipped, blend share, evidence; with the judge, also each arm's `match` score as a cross-check |
+| `summary.json` | `analyze` | verdict and `invalid_reasons`, metric, tolerance, Δ, SE, flip rate, engagement, per-arm counts, each arm's provenance, evidence sources (`dataset` / `answer_string` / `none`), `measured_earlier_share`, judge model and unscored questions, `plan_fingerprint`, `run_fingerprint` |
+| `judge_cache.jsonl` | `analyze` | judge ratings by (judge model, question, answer, reference), reused by later `analyze` runs. An unparsable line (a partial append from a killed run) is skipped and re-judged, and terminated so the next append starts a fresh line. The key trusts the judge model name; change what serves it and the cache must be deleted |
+
+**What keeps the files consistent.**
+
+- **One plan per directory.** `run` always builds the plan from its own flags
+  (it needs the tokenizer anyway) and compares it with `plan.json` before any
+  request. Other settings are refused, listing each changed key; the same
+  settings with other prompts (a tokenizer, dataset revision or prompt-code
+  change) are refused too. `analyze` refuses any arm whose `plan_fingerprint`
+  differs, and re-checks `plan.json` against its own digests.
+- **Passes are saved as they finish**, answers first and the arm file last,
+  so the arm file marks a complete pass; answers without one are ignored.
+  A crash in a later pass keeps the earlier ones.
+- **A role comes from one `run`.** The first new pass of a role replaces that
+  role's earlier files (and the now-stale `rows.jsonl` and `summary.json`),
+  so reference repeats never mix engine lifetimes and fewer repeats never
+  leave a stale one behind.
+- **Schema versions.** Every file records `schema_version`; another version
+  is refused rather than misread.
+
+Every refusal above, and an `analyze` without `plan.json` or without the
+reference or blend arm, raises `ResultsDirError`. Both commands report it
+without a traceback and exit `2`, like an invalid invocation, rather than
+`1`: it is a setup problem, not a quality result, and CI can tell the two
+apart by exit code alone. A missing-arms message names every missing arm
+and one `run` command that supplies them all.
+
+**Reusing a reference.** Copy `plan.json`, `manifest.jsonl` and the
+`*reference*` files (optionally `judge_cache.jsonl`) into a fresh directory,
+run only the blend arm into it, and analyze. The plan check refuses the blend
+`run` if anything that shapes the prompts changed. Whether the *reference
+stack* is unchanged (engine image, model revision) is the caller's to decide;
+the recorded engine and lmcache versions and timestamps make it visible. A
+reused arm keeps the answers as its own lmcache version extracted them.
+
+**Fingerprints.** `plan_fingerprint` covers the workload settings and every
+prompt; it ties arms to a plan. `run_fingerprint` adds the verdict metric and
+the judge model; two summaries are comparable only when it matches.
 
 ## 7. Module layout
 
@@ -355,17 +406,27 @@ lmcache/cli/commands/bench/
 │   ├── dataset.py          # load_samples, Sample (with evidence_indices)
 │   └── scoring.py          # answer extraction, answer_match, is_abstention, F1
 └── quality_bench/
-    ├── __init__.py         # QualityBenchCommand ("lmcache bench quality")
-    ├── command.py          # arguments, config_from_args, orchestration
-    ├── config.py           # ArmRole, ReuseScenario, TaskType, VerdictMetric, JudgeSettings, QualityBenchConfig
-    ├── task.py             # check_task: refuse datasets that are not short-answer QA
-    ├── plan.py             # build_plan, SamplePlan, reuse manifest, evidence coverage
-    ├── blend_counters.py   # Prometheus counter parsing and sources
-    ├── runner.py           # ArmRunner: store, measure, per-question counters
-    ├── judge.py            # AnswerAccuracyJudge: RAGAS AnswerAccuracy port, cache
-    ├── verdict.py          # score tables, engagement, decide, rows, loss tags
-    └── report.py           # results files and terminal summary
+    ├── __init__.py         # QualityBenchCommand: the "lmcache bench quality" group
+    ├── run_command.py      # "run" leaf: defers to core.run_stage
+    ├── analyze_command.py  # "analyze" leaf: defers to core.analyze_stage
+    └── core/               # runtime, kept out of command discovery's imports
+        ├── config.py       # roles, scenarios, QualityRunConfig, QualityAnalyzeConfig
+        ├── task.py         # check_task: refuse datasets that are not short-answer QA
+        ├── plan.py         # build_plan, reuse manifest, plan records
+        ├── blend_counters.py   # Prometheus counter parsing and sources
+        ├── runner.py       # ArmRunner: store, measure, per-question counters
+        ├── run_files.py    # the results directory: plan.json, arm files, loaders
+        ├── run_stage.py    # run: arguments, plan, arms, saving each pass
+        ├── judge.py        # AnswerAccuracyJudge: RAGAS AnswerAccuracy port, cache
+        ├── verdict.py      # score tables, engagement, decide, rows, loss tags
+        ├── report.py       # rows.jsonl, summary.json, terminal summary
+        └── analyze_stage.py    # analyze: load, score, decide, report
 ```
+
+The command wrappers stay tiny because `CompositeCommand` discovery imports
+every module directly under `quality_bench/`; the runtime sits in `core/`, so
+`lmcache bench quality -h` imports none of it, `run -h` only `run_stage`'s
+side and `analyze -h` only `analyze_stage`'s (a routing test checks this).
 
 ## 8. Tests
 
@@ -373,13 +434,22 @@ lmcache/cli/commands/bench/
 `FakeSender` stands in for `RequestSender`, `SteppingCounters` for the
 Prometheus source, and the fake tokenizer from `engine_bench` for the model's.
 `FakeJudgeClient` stands in for the judge endpoint.
-- `test_command.py` drives `run_quality_bench` end to end for `PASS`,
-  `FAIL` and `INVALID`, with and without the judge, covers the task guard,
-  and checks that reruns get their own directory and share the judge cache.
+- `test_run_stage.py` drives `run`: flag rules, the files a run writes,
+  arms joining one directory, refusal of other settings or drifted prompts
+  before any request, role replacement, the timestamped default directory,
+  and that a crash in a later pass keeps the earlier ones.
+- `test_analyze_stage.py` drives `analyze` end to end for `PASS`, `FAIL` and
+  `INVALID`, staged and all-at-once, with and without the judge; checks it
+  needs no dataset or tokenizer, re-analyzes without requests, refuses
+  missing arms and arms from another plan, and reuses a saved reference.
+- `test_run_files.py` covers the results-directory contract: plan and arm
+  round trips, tamper detection, `ensure_plan`'s refusals, run-directory
+  naming.
 - `test_judge.py` pins the prompts to ragas's by hash, and covers ragas's
   parsing quirks, retries, the sanity check, caching (including a truncated cache
   file) and deduplication.
-- `test_report.py` covers run-directory naming and same-second collisions.
+- `tests/cli/commands/test_directed_registration.py` checks that each
+  `bench quality` route imports only its own stage.
 
 ## 9. Extending beyond QA
 

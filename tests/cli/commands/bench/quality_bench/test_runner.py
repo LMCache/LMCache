@@ -5,15 +5,15 @@
 import asyncio
 
 # First Party
-from lmcache.cli.commands.bench.quality_bench import runner
-from lmcache.cli.commands.bench.quality_bench.blend_counters import (
+from lmcache.cli.commands.bench.quality_bench.core import runner
+from lmcache.cli.commands.bench.quality_bench.core.blend_counters import (
     BlendCounters,
     BlendCounterSource,
     UnmeasuredBlendCounters,
 )
-from lmcache.cli.commands.bench.quality_bench.config import ArmRole, ReuseScenario
-from lmcache.cli.commands.bench.quality_bench.plan import build_plan
-from lmcache.cli.commands.bench.quality_bench.runner import ArmRunner, StorePhase
+from lmcache.cli.commands.bench.quality_bench.core.config import ArmRole, ReuseScenario
+from lmcache.cli.commands.bench.quality_bench.core.plan import build_plan
+from lmcache.cli.commands.bench.quality_bench.core.runner import ArmRunner, StorePhase
 
 # Local
 from .conftest import CHUNK

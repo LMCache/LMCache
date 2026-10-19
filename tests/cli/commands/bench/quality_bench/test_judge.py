@@ -10,18 +10,18 @@ import json
 import pytest
 
 # First Party
-from lmcache.cli.commands.bench.quality_bench import judge as judge_module
-from lmcache.cli.commands.bench.quality_bench.blend_counters import BlendCounters
-from lmcache.cli.commands.bench.quality_bench.config import ArmRole, ReuseScenario
-from lmcache.cli.commands.bench.quality_bench.judge import (
+from lmcache.cli.commands.bench.quality_bench.core import judge as judge_module
+from lmcache.cli.commands.bench.quality_bench.core.blend_counters import BlendCounters
+from lmcache.cli.commands.bench.quality_bench.core.config import ArmRole, ReuseScenario
+from lmcache.cli.commands.bench.quality_bench.core.judge import (
     JUDGE_RETRIES,
     AnswerAccuracyJudge,
     combine_ratings,
     judge_prompts,
     parse_rating,
 )
-from lmcache.cli.commands.bench.quality_bench.plan import build_plan
-from lmcache.cli.commands.bench.quality_bench.runner import ArmAnswer, ArmRun
+from lmcache.cli.commands.bench.quality_bench.core.plan import build_plan
+from lmcache.cli.commands.bench.quality_bench.core.runner import ArmAnswer, ArmRun
 
 # Local
 from .conftest import CHUNK

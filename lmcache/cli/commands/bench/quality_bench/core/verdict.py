@@ -21,10 +21,10 @@ from lmcache.cli.commands.bench.engine_bench.quality.scoring import (
     is_abstention,
     normalize_answer,
 )
-from lmcache.cli.commands.bench.quality_bench.blend_counters import BlendCounters
-from lmcache.cli.commands.bench.quality_bench.config import ArmRole, VerdictMetric
-from lmcache.cli.commands.bench.quality_bench.plan import QualityPlan, SamplePlan
-from lmcache.cli.commands.bench.quality_bench.runner import ArmAnswer, ArmRun
+from lmcache.cli.commands.bench.quality_bench.core.blend_counters import BlendCounters
+from lmcache.cli.commands.bench.quality_bench.core.config import ArmRole, VerdictMetric
+from lmcache.cli.commands.bench.quality_bench.core.plan import QualityPlan, SamplePlan
+from lmcache.cli.commands.bench.quality_bench.core.runner import ArmAnswer, ArmRun
 
 # Per run label, one score per question in plan order. ``None`` marks a
 # question the scorer could not score (an LLM judge that gave no rating).
@@ -235,6 +235,28 @@ def loss_tag(
     if found and f" {found} " in f" {normalize_answer(sample_plan.prompt_text)} ":
         return LossTag.WRONG_VALUE
     return LossTag.WORDING
+
+
+def run_problems(run: ArmRun) -> list[str]:
+    """List what makes one arm run unfit to compare, on its own.
+
+    Each problem makes the verdict INVALID, whatever the other runs show,
+    so ``bench quality run`` can report it as soon as the pass finishes.
+
+    Args:
+        run: One arm run.
+
+    Returns:
+        One reason per problem: no successful request (an unreachable
+        engine scores like a wrong one), or failed store requests (the arm
+        did not cache what the scenario says). Empty when the run is fit.
+    """
+    problems: list[str] = []
+    if not any(answer.successful for answer in run.answers):
+        problems.append(f"{run.label}: no request succeeded")
+    if run.store_failures:
+        problems.append(f"{run.label}: {run.store_failures} store requests failed")
+    return problems
 
 
 def check_engagement(blend: ArmRun, min_blend_share: float) -> EngagementCheck:
@@ -513,10 +535,7 @@ def _invalid_reasons(
             f"{MAX_UNSCORED_SHARE:.0%})"
         )
     for run in runs:
-        if not any(answer.successful for answer in run.answers):
-            reasons.append(f"{run.label}: no request succeeded")
-        if run.store_failures:
-            reasons.append(f"{run.label}: {run.store_failures} store requests failed")
+        reasons.extend(run_problems(run))
     if not engagement.engaged:
         reason = (
             f"blend share {engagement.blend_share:.3f} (min window "

@@ -5,11 +5,12 @@
 import pytest
 
 # First Party
-from lmcache.cli.commands.bench.quality_bench.config import (
+from lmcache.cli.commands.bench.quality_bench.core.config import (
     ArmEndpoint,
     ArmRole,
     JudgeSettings,
-    QualityBenchConfig,
+    QualityAnalyzeConfig,
+    QualityRunConfig,
     VerdictMetric,
 )
 
@@ -19,36 +20,47 @@ _ARMS = [
 ]
 
 
-def _config(**overrides) -> QualityBenchConfig:
+def _run_config(**overrides) -> QualityRunConfig:
     fields: dict[str, object] = {"model": "m", "dataset": "d", "arms": list(_ARMS)}
     fields.update(overrides)
-    return QualityBenchConfig(**fields)  # type: ignore[arg-type]
+    return QualityRunConfig(**fields)  # type: ignore[arg-type]
 
 
-class TestQualityBenchConfig:
+def _analyze_config(**overrides) -> QualityAnalyzeConfig:
+    fields: dict[str, object] = {"results_dir": "out"}
+    fields.update(overrides)
+    return QualityAnalyzeConfig(**fields)  # type: ignore[arg-type]
+
+
+class TestQualityRunConfig:
     def test_minimal_config_is_valid(self) -> None:
-        config = _config()
+        config = _run_config()
         assert config.arm(ArmRole.BLEND).url == "http://blend"
         assert not config.has_arm(ArmRole.PREFIX_CACHE)
 
-    @pytest.mark.parametrize("missing", [ArmRole.REFERENCE, ArmRole.BLEND])
-    def test_reference_and_blend_are_required(self, missing: ArmRole) -> None:
-        arms = [a for a in _ARMS if a.role is not missing]
-        with pytest.raises(ValueError, match=missing.value):
-            _config(arms=arms)
+    @pytest.mark.parametrize("role", list(ArmRole))
+    def test_a_single_arm_is_enough(self, role: ArmRole) -> None:
+        """Arms can be run one at a time, e.g. one per GPU server."""
+        config = _run_config(arms=[ArmEndpoint(role, "http://x")])
+        assert config.has_arm(role)
 
-    def test_duplicate_roles_are_rejected(self) -> None:
-        with pytest.raises(ValueError, match="blend"):
-            _config(arms=[*_ARMS, ArmEndpoint(ArmRole.BLEND, "http://b2")])
+    def test_at_least_one_arm_is_required(self) -> None:
+        with pytest.raises(ValueError, match="at least one"):
+            _run_config(arms=[])
 
-    def test_at_most_one_apc_arm(self) -> None:
-        apc = ArmEndpoint(ArmRole.PREFIX_CACHE, "http://apc")
-        with pytest.raises(ValueError, match="apc"):
-            _config(arms=[*_ARMS, apc, apc])
+    @pytest.mark.parametrize("role", list(ArmRole))
+    def test_duplicate_roles_are_rejected(self, role: ArmRole) -> None:
+        arm = ArmEndpoint(role, "http://x")
+        with pytest.raises(ValueError, match=role.value):
+            _run_config(arms=[arm, arm])
 
     def test_empty_url_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="url"):
-            _config(arms=[_ARMS[0], ArmEndpoint(ArmRole.BLEND, "")])
+            _run_config(arms=[_ARMS[0], ArmEndpoint(ArmRole.BLEND, "")])
+
+    def test_metrics_url_needs_a_blend_arm(self) -> None:
+        with pytest.raises(ValueError, match="--blend-url"):
+            _run_config(arms=[_ARMS[0]], blend_metrics_url="http://m/metrics")
 
     @pytest.mark.parametrize(
         ("field", "value"),
@@ -59,34 +71,44 @@ class TestQualityBenchConfig:
             ("chunk_size", 0),
             ("reference_repeats", 0),
             ("max_output_tokens", 0),
-            ("tolerance", 1.5),
-            ("min_blend_share", -0.1),
-            ("output_dir", ""),
         ],
     )
     def test_invalid_values_are_rejected(self, field: str, value: object) -> None:
         with pytest.raises(ValueError, match=field):
-            _config(**{field: value})
+            _run_config(**{field: value})
 
-    def test_missing_optional_arm_raises_key_error(self) -> None:
+    def test_missing_arm_raises_key_error(self) -> None:
         with pytest.raises(KeyError):
-            _config().arm(ArmRole.PREFIX_CACHE)
+            _run_config().arm(ArmRole.PREFIX_CACHE)
 
-    def test_fingerprint_changes_with_the_prompt_settings(self) -> None:
-        assert _config().fingerprint_material() != (
-            _config(chunk_size=128).fingerprint_material()
+    def test_plan_settings_change_with_the_prompt_settings(self) -> None:
+        assert _run_config().plan_settings() != (
+            _run_config(chunk_size=128).plan_settings()
         )
 
-    def test_fingerprint_ignores_the_arm_urls(self) -> None:
-        """Arms differ by design; their prompts must not."""
-        other = [ArmEndpoint(a.role, a.url + "x") for a in _ARMS]
-        assert _config().fingerprint_material() == (
-            _config(arms=other).fingerprint_material()
+    def test_plan_settings_ignore_the_arms(self) -> None:
+        """Runs of different arms into one directory must share a plan."""
+        only_blend = [ArmEndpoint(ArmRole.BLEND, "http://elsewhere")]
+        assert _run_config().plan_settings() == (
+            _run_config(arms=only_blend).plan_settings()
         )
+
+
+class TestQualityAnalyzeConfig:
+    def test_minimal_config_is_valid(self) -> None:
+        assert _analyze_config().verdict_metric is VerdictMetric.MATCH
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("results_dir", ""), ("tolerance", 1.5), ("min_blend_share", -0.1)],
+    )
+    def test_invalid_values_are_rejected(self, field: str, value: object) -> None:
+        with pytest.raises(ValueError, match=field):
+            _analyze_config(**{field: value})
 
     def test_judge_metric_needs_a_judge(self) -> None:
         with pytest.raises(ValueError, match="judge"):
-            _config(verdict_metric=VerdictMetric.JUDGE)
+            _analyze_config(verdict_metric=VerdictMetric.JUDGE)
 
     @pytest.mark.parametrize(
         "settings",
@@ -99,22 +121,21 @@ class TestQualityBenchConfig:
     )
     def test_invalid_judge_settings_are_rejected(self, settings: JudgeSettings) -> None:
         with pytest.raises(ValueError):
-            _config(verdict_metric=VerdictMetric.JUDGE, judge=settings)
+            _analyze_config(verdict_metric=VerdictMetric.JUDGE, judge=settings)
 
-    def test_fingerprint_records_the_metric_and_judge_model(self) -> None:
-        judged = _config(
+    def test_scoring_settings_record_the_metric_and_judge_model(self) -> None:
+        judged = _analyze_config(
             verdict_metric=VerdictMetric.JUDGE,
             judge=JudgeSettings(url="http://judge", model="j"),
-        ).fingerprint_material()
-        assert judged["verdict_metric"] == "judge"
-        assert judged["judge_model"] == "j"
-        assert judged != _config().fingerprint_material()
+        ).scoring_settings()
+        assert judged == {"verdict_metric": "judge", "judge_model": "j"}
+        assert _analyze_config().scoring_settings() == {"verdict_metric": "match"}
 
-    def test_fingerprint_ignores_the_judge_url(self) -> None:
+    def test_scoring_settings_ignore_the_judge_url(self) -> None:
         def judged(url: str) -> object:
-            return _config(
+            return _analyze_config(
                 verdict_metric=VerdictMetric.JUDGE,
                 judge=JudgeSettings(url=url, model="j"),
-            ).fingerprint_material()
+            ).scoring_settings()
 
         assert judged("http://a") == judged("http://b")

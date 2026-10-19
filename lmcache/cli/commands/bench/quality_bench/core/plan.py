@@ -9,7 +9,9 @@ its cached KV came from (the reuse manifest).
 """
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 import enum
 import hashlib
 import json
@@ -24,7 +26,7 @@ from lmcache.cli.commands.bench.engine_bench.quality.prompts import (
     compose_store_messages,
 )
 from lmcache.cli.commands.bench.engine_bench.quality.scoring import normalize_answer
-from lmcache.cli.commands.bench.quality_bench.config import ReuseScenario
+from lmcache.cli.commands.bench.quality_bench.core.config import ReuseScenario
 
 _STORE_REQUEST_PREFIX = "store"
 _MEASURED_REQUEST_PREFIX = "q"
@@ -225,6 +227,74 @@ class QualityPlan:
         passages = [p for sample in self.samples for p in sample.passages]
         return sum(1 for p in passages if p.measured_earlier_in) / len(passages)
 
+    def to_record(self) -> dict[str, object]:
+        """Return the whole plan as a JSON-serializable record.
+
+        ``bench quality run`` saves it so that ``bench quality analyze`` can
+        rebuild the plan without the tokenizer or the dataset. Each sample's
+        record is its :meth:`SamplePlan.manifest_entry` plus the question,
+        the gold answers, the passages and the measured messages.
+
+        Returns:
+            A record that :meth:`from_record` turns back into an equal plan.
+        """
+        return {
+            "scenario": self.scenario.value,
+            "chunk_size": self.chunk_size,
+            "store_requests": [
+                {"request_id": r.request_id, "messages": r.messages}
+                for r in self.store_requests
+            ],
+            "samples": [
+                {
+                    **s.manifest_entry(self.scenario, self.chunk_size),
+                    "question": s.sample.question,
+                    "answers": s.sample.answers,
+                    "documents": s.sample.documents,
+                    "evidence_indices": s.sample.evidence_indices,
+                    "messages": s.messages,
+                }
+                for s in self.samples
+            ],
+        }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> "QualityPlan":
+        """Rebuild a plan from a :meth:`to_record` record.
+
+        Args:
+            record: A record written by :meth:`to_record`.
+
+        Returns:
+            The plan.
+
+        Raises:
+            ValueError: If the record is malformed, or a question's messages
+                no longer match its recorded ``prompt_hash`` (the file was
+                edited or corrupted).
+        """
+        try:
+            scenario = ReuseScenario(record["scenario"])
+            plan = cls(
+                scenario=scenario,
+                chunk_size=int(record["chunk_size"]),
+                store_requests=[
+                    StoreRequest(r["request_id"], r["messages"])
+                    for r in record["store_requests"]
+                ],
+                samples=[_sample_plan_from_record(s) for s in record["samples"]],
+            )
+            recorded_hashes = [s["prompt_hash"] for s in record["samples"]]
+        except (KeyError, TypeError, ValueError) as e:
+            raise ValueError(f"malformed plan record: {e!r}") from e
+        for sample_plan, recorded in zip(plan.samples, recorded_hashes, strict=True):
+            if sample_plan.prompt_hash != recorded:
+                raise ValueError(
+                    f"question {sample_plan.sample.sample_id}: its messages do "
+                    f"not match the recorded prompt_hash (edited or corrupted)"
+                )
+        return plan
+
 
 def _digest(text: str) -> str:
     """Return a short, stable hex digest of *text*."""
@@ -234,6 +304,36 @@ def _digest(text: str) -> str:
 def _passage_id(passage: str) -> str:
     """Return the stable id of a raw passage."""
     return _digest(passage)[:12]
+
+
+def _sample_plan_from_record(record: Mapping[str, Any]) -> SamplePlan:
+    """Rebuild one question's plan from its ``QualityPlan.to_record`` entry."""
+    sample = Sample(
+        sample_id=record["qid"],
+        documents=list(record["documents"]),
+        question=record["question"],
+        answers=list(record["answers"]),
+        evidence_indices=list(record["evidence_indices"]),
+    )
+    passages = [
+        PassageProvenance(
+            passage_id=p["passage_id"],
+            origin=StoreOrigin(p["origin"]),
+            store_request_id=p["store_request_id"],
+            stored_position=int(p["stored_position"]),
+            measured_position=int(p["measured_position"]),
+            is_evidence=bool(p["is_evidence"]),
+            measured_earlier_in=tuple(p["measured_earlier_in"]),
+        )
+        for p in record["passages"]
+    ]
+    return SamplePlan(
+        sample=sample,
+        request_id=record["request_id"],
+        messages=record["messages"],
+        passages=passages,
+        evidence_source=EvidenceSource(record["evidence_source"]),
+    )
 
 
 def _evidence_indices(sample: Sample) -> tuple[set[int], EvidenceSource]:

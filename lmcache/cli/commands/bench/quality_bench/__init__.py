@@ -1,22 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``lmcache bench quality`` subpackage.
+"""``lmcache bench quality`` command group.
 
-Measures whether CacheBlend changes the model's answers: runs a full
-recompute reference, optionally vLLM prefix caching, and CacheBlend on
-byte-identical prompts, and reports per-question rows and a verdict.
+Measures whether CacheBlend changes the model's answers, in two stages:
 
-Exposes :class:`QualityBenchCommand` for auto-discovery by
-:class:`~lmcache.cli.commands.base.CompositeCommand`.
+* ``run`` sends byte-identical prompts to one or more arms (a full
+  recompute reference, optionally vLLM prefix caching, and CacheBlend) and
+  saves their answers to a results directory.
+* ``analyze`` scores the saved answers and reports per-question rows and a
+  verdict.
+
+Arms can be run one at a time into the same directory, so they never need
+to be served at once. The subcommands are auto-discovered from the
+``*_command`` modules in this package; the runtime lives in ``core`` so that
+discovery imports only these lightweight wrappers.
 """
 
-# Standard
-import argparse
-
 # First Party
-from lmcache.cli.commands.base import BaseCommand
+from lmcache.cli.commands.base import CompositeCommand
 
 
-class QualityBenchCommand(BaseCommand):
+class QualityBenchCommand(CompositeCommand):
     """Measure CacheBlend answer quality against full recompute."""
 
     def name(self) -> str:
@@ -24,31 +27,3 @@ class QualityBenchCommand(BaseCommand):
 
     def help(self) -> str:
         return "Measure CacheBlend answer quality against full recompute."
-
-    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
-        # The command module imports the engine-bench stack, which needs
-        # optional dependencies. Keep ``lmcache --help`` working without them.
-        # First Party
-        from lmcache.cli.commands.bench.quality_bench.command import (
-            add_quality_arguments,
-        )
-
-        add_quality_arguments(parser)
-
-    def register(self, subparsers: argparse._SubParsersAction) -> None:
-        """Register without the common output args (--format/--output).
-
-        Results go to ``--output-dir`` as files, so the generic output
-        flags do not apply.
-        """
-        parser = subparsers.add_parser(self.name(), help=self.help())
-        self.add_arguments(parser)
-        parser.set_defaults(func=self.execute)
-
-    def execute(self, args: argparse.Namespace) -> None:
-        # First Party
-        from lmcache.cli.commands.bench.quality_bench.command import (
-            run_quality_bench,
-        )
-
-        run_quality_bench(args)

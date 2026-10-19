@@ -7,11 +7,11 @@ from collections.abc import Callable
 # First Party
 from lmcache.cli.commands.bench.engine_bench.quality.dataset import Sample
 from lmcache.cli.commands.bench.engine_bench.stats import RequestResult
-from lmcache.cli.commands.bench.quality_bench.blend_counters import (
+from lmcache.cli.commands.bench.quality_bench.core.blend_counters import (
     BlendCounters,
     BlendCounterSource,
 )
-from lmcache.cli.commands.bench.quality_bench.judge import JudgeClient
+from lmcache.cli.commands.bench.quality_bench.core.judge import JudgeClient
 
 # (request_id, messages) -> response text
 Responder = Callable[[str, list[dict[str, str]]], str]

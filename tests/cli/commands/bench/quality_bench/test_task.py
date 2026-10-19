@@ -6,8 +6,8 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.quality.dataset import Sample
-from lmcache.cli.commands.bench.quality_bench.config import TaskType
-from lmcache.cli.commands.bench.quality_bench.task import (
+from lmcache.cli.commands.bench.quality_bench.core.config import TaskType
+from lmcache.cli.commands.bench.quality_bench.core.task import (
     QA_MAX_MEDIAN_REFERENCE_WORDS,
     check_task,
 )

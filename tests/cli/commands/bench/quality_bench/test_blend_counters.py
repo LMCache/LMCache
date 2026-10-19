@@ -9,7 +9,7 @@ import urllib.request
 import pytest
 
 # First Party
-from lmcache.cli.commands.bench.quality_bench.blend_counters import (
+from lmcache.cli.commands.bench.quality_bench.core.blend_counters import (
     FETCH_ATTEMPTS,
     BlendCounters,
     PrometheusBlendCounters,
