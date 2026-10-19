@@ -12,14 +12,14 @@ In this example, we will show you how to offload KV cache to CPU memory.
 
 .. note::
     Besides CPU memory, LMCache also supports offloading KV cache to many different destinations.
-    See :ref:`getting_started/quickstart/offload_kv_cache:Supported offloading destinations` for more details.
+    See :ref:`legacy/getting_started/quickstart/offload_kv_cache:Supported offloading destinations` for more details.
 
 Prerequisites
 -------------
 
 Before you begin, make sure you have:
 
-- vLLM v1 with LMCache installed (see :doc:`Installation <../installation>`)
+- vLLM v1 with LMCache installed (see :doc:`Installation </getting_started/installation>`)
 - A GPU that can run a LLM
 
 

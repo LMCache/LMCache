@@ -93,7 +93,7 @@ Remote Storage Example
 
 - A Machine with at least one GPU. You can adjust the max model length of your vllm instance depending on your GPU memory.
 
-- vllm and lmcache installed (:doc:`Installation Guide <../../getting_started/installation>`)
+- vllm and lmcache installed (:doc:`Installation Guide </getting_started/installation>`)
 
 - Hugging Face access to ``meta-llama/Meta-Llama-3.1-8B-Instruct``
 
