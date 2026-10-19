@@ -6,6 +6,8 @@ from types import ModuleType
 from typing import Any
 import importlib.util
 import shutil
+import subprocess
+import sys
 
 
 def _load_proto_generator() -> ModuleType:
@@ -46,9 +48,7 @@ def test_generated_import_check_does_not_import_lmcache_root(
     assert generator._check_generated_imports((pb2, pb2_grpc), package)
 
 
-def test_generate_packages_with_shared_p2p_types(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
+def test_generate_packages_with_shared_p2p_types(tmp_path: Path) -> None:
     generator = _load_proto_generator()
     for package in generator.GENERATED_PACKAGES:
         relative = Path(*package.split("."))
@@ -57,7 +57,7 @@ def test_generate_packages_with_shared_p2p_types(
             generator.PROJECT_ROOT / relative.parent / "protos",
             tmp_path / relative.parent / "protos",
         )
-    # The generator's import check must also resolve the cross-package import.
-    monkeypatch.setattr(generator, "PROJECT_ROOT", tmp_path)
-    for package in generator.GENERATED_PACKAGES:
-        generator.generate(package)
+    # Keep the native compiler out of the pytest process.
+    script = tmp_path.joinpath(*generator.GENERATED_PACKAGE.split("."), "_generate.py")
+    shutil.copyfile(generator.GENERATED_DIR / "_generate.py", script)
+    subprocess.run([sys.executable, str(script)], cwd=tmp_path, check=True, timeout=60)
