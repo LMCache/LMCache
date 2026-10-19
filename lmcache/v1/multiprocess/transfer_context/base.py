@@ -4,8 +4,8 @@
 This module provides:
 - ``EngineDrivenContextMetadata``: layout metadata dataclass for non-CUDA workers.
 - ``EngineDrivenContext``: abstract base class with a two-phase prepare/commit
-  interface for CPU-side KV data transfer. Concrete implementations (e.g.
-  ``EngineDrivenContextPickle``) each decide *how* data is serialised and transported.
+  interface for CPU-side KV data transfer. Concrete implementations each decide
+  *how* data is serialised and transported.
 - ``create_engine_driven_context()``: factory that returns the appropriate
   ``EngineDrivenContext`` subclass.
 - ``compute_kv_layout``, ``gather_paged_kv_to_cpu``, ``scatter_cpu_to_paged_kv``:
@@ -121,7 +121,7 @@ class EngineDrivenContext(ABC):
         """Prepare SHM buffers for a store operation.
 
         Returns:
-            None: pickle mode — no pre-allocated buffers. Caller gathers all
+            None: inline mode — no pre-allocated buffers. Caller gathers all
                 chunks to CPU itself and sends the serialized data via
                 commit_store.
             ([], []): SHM mode but all chunks already cached. Caller should
@@ -140,19 +140,28 @@ class EngineDrivenContext(ABC):
     def commit_store(
         self, key: IPCCacheServerKey, instance_id: int, chunks: list[torch.Tensor]
     ) -> bool:
-        """Commit store. Pickle: serialize and send. Shm: notify server."""
+        """Commit store. Inline: serialize and send. Shm: notify server."""
         ...
 
     @abstractmethod
     def prepare_retrieve(
-        self, key: IPCCacheServerKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int, expected_count: int
     ) -> list[torch.Tensor] | None:
-        """Prepare retrieve. Returns chunks or shm views, or None on miss."""
+        """Prepare retrieve for exactly ``expected_count`` chunks.
+
+        Args:
+            key: Cache key to retrieve.
+            instance_id: Worker instance identifier.
+            expected_count: Required number of LMCache chunks.
+
+        Returns:
+            Chunks or SHM views on a hit, or ``None`` on a miss.
+        """
         ...
 
     @abstractmethod
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
-        """Commit retrieve. Pickle: no-op. Shm: release read locks."""
+        """Commit retrieve. Inline: no-op. Shm: release read locks."""
         ...
 
     @abstractmethod
@@ -167,33 +176,25 @@ def create_engine_driven_context(
     mq_timeout: float,
     shm_name: str,
     pool_size: int,
-    *,
-    use_pickle: bool = False,
 ) -> EngineDrivenContext:
     """Factory that returns the appropriate :class:`EngineDrivenContext` implementation.
 
     Returns SHM-based implementation when shared-memory pool information is
-    available; otherwise falls back to the pickle-based implementation.
+    available; otherwise falls back to the safe inline implementation.
     If SHM initialization fails for any reason (e.g. segment not found,
-    permission error), gracefully falls back to pickle transport.
+    permission error), gracefully falls back to inline transport.
 
     Args:
         metadata: Layout metadata for the non-GPU context.
         req_client: Transport-neutral client used for server requests.
         mq_timeout: Timeout in seconds for blocking MQ requests.
-        shm_name: Shared-memory segment name. Empty values force pickle mode.
+        shm_name: Shared-memory segment name. Empty values force inline mode.
         pool_size: Shared-memory pool size in bytes. Non-positive values force
-            pickle mode.
-        use_pickle: Explicitly use pickle transport even when SHM info is
-            available.
-
+            inline mode.
     Returns:
         A concrete :class:`EngineDrivenContext` instance.
     """
-    if not shm_name or pool_size <= 0:
-        use_pickle = True
-
-    if not use_pickle:
+    if shm_name and pool_size > 0:
         # Local
         from .shm import EngineDrivenContextShm
 
@@ -209,16 +210,16 @@ def create_engine_driven_context(
         except Exception:
             logger.warning(
                 "Failed to initialize SHM context (shm_name=%s), "
-                "falling back to pickle transport",
+                "falling back to inline tensor transport",
                 shm_name,
                 exc_info=True,
             )
 
     # Local
-    from .pickle import EngineDrivenContextPickle
+    from .inline import EngineDrivenContextInline
 
-    logger.info("Creating EngineDrivenContextPickle (pickle transport)")
-    return EngineDrivenContextPickle(metadata, req_client, mq_timeout)
+    logger.info("Creating EngineDrivenContextInline")
+    return EngineDrivenContextInline(metadata, req_client, mq_timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -229,12 +230,14 @@ def create_engine_driven_context(
 def compute_kv_layout(
     kv_caches: dict[str, torch.Tensor],
     layout_hints: LayoutHints | None = None,
+    engine_type: EngineType = EngineType.VLLM,
 ) -> tuple[int, int, int, str, "lmcache_native.EngineKVFormat", int]:
     """Compute KV layout metadata from KV tensors.
 
     Args:
         kv_caches: Per-layer KV tensor mapping.
         layout_hints: Optional engine layout hints.
+        engine_type: Serving engine that produced the KV tensors.
 
     Returns:
         Tuple of ``(block_size, num_layers, hidden_dim_size, dtype_str,``
@@ -262,7 +265,7 @@ def compute_kv_layout(
         raise ValueError("kv_caches is empty. Cannot compute KV layout.")
 
     engine_kv_format, normalized = normalize_kv_and_discover_format(
-        tensors, EngineType.VLLM, layout_hints=layout_hints
+        tensors, engine_type, layout_hints=layout_hints
     )
     block_size = get_block_size(normalized, engine_kv_format)
     num_layers = get_num_layers(normalized, engine_kv_format)
@@ -289,6 +292,7 @@ def gather_paged_kv_to_cpu(
     engine_kv_format: "lmcache_native.EngineKVFormat" | None = None,
     out: list[torch.Tensor] | None = None,
     chunk_indices: list[int] | None = None,
+    engine_type: EngineType = EngineType.VLLM,
 ) -> list[torch.Tensor]:
     """Gather paged KV blocks into CPU chunk tensors.
 
@@ -310,6 +314,7 @@ def gather_paged_kv_to_cpu(
             ``out``, only those chunks are gathered and written into
             ``out[i]`` in order.  When ``None``, all chunks are gathered
             (backward-compatible behaviour).
+        engine_type: Serving engine that produced the KV tensors.
 
     Returns:
         List of CPU tensors, one per chunk. For split-K/V formats each chunk
@@ -340,7 +345,7 @@ def gather_paged_kv_to_cpu(
 
     tensors = list(kv_caches.values())
     fmt, normalized = normalize_kv_and_discover_format(
-        tensors, EngineType.VLLM, layout_hints=layout_hints
+        tensors, engine_type, layout_hints=layout_hints
     )
     # KV tensors, not process-wide accelerator availability, select the ops.
     device = get_device(normalized)
@@ -547,6 +552,7 @@ def scatter_cpu_to_paged_kv(
     skip_first_n_tokens: int = 0,
     layout_hints: LayoutHints | None = None,
     engine_kv_format: "lmcache_native.EngineKVFormat" | None = None,
+    engine_type: EngineType = EngineType.VLLM,
 ) -> None:
     """Scatter CPU chunk tensors back into paged KV tensors.
 
@@ -567,6 +573,7 @@ def scatter_cpu_to_paged_kv(
             GPU transfer path).
         layout_hints: Optional engine layout hints.
         engine_kv_format: Optional pre-detected KV format.
+        engine_type: Serving engine that produced the KV tensors.
 
     Raises:
         ValueError: If ``block_ids`` is shorter than
@@ -597,7 +604,7 @@ def scatter_cpu_to_paged_kv(
 
     tensors = list(kv_caches.values())
     fmt, normalized = normalize_kv_and_discover_format(
-        tensors, EngineType.VLLM, layout_hints=layout_hints
+        tensors, engine_type, layout_hints=layout_hints
     )
     device = get_device(normalized)
     device_ops = resolve_device_ops(device.type)

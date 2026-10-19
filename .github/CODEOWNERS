@@ -79,7 +79,7 @@
 /lmcache/tools/                        @yoo-kumaneko
 
 # Tests
-/tests/                                @hickeyma @sammshen @ApostaC @deng451e
+/tests/                                @hickeyma @sammshen @ApostaC @deng451e @VincyZhang
 
 # CLI
 /lmcache/cli/                          @KuntaiDu @deng451e @royyhuang @ApostaC @sammshen @zhengfeihe @ruizhang0101
@@ -98,11 +98,11 @@
 /examples/                             @sammshen @deng451e
 
 # CI / Infrastructure
-/.github/                              @hickeyma @sammshen @ApostaC @deng451e
-/.buildkite/                           @sammshen @ApostaC @deng451e @hickeyma
+/.github/                              @hickeyma @sammshen @ApostaC @deng451e @VincyZhang
+/.buildkite/                           @sammshen @ApostaC @deng451e @hickeyma @VincyZhang
 
 # Operator
-/operator/                             @royyhuang @DongDongJu @ruizhang0101
+/operator/                             @royyhuang @DongDongJu @ruizhang0101 @VincyZhang
 
 # Rust
 /rust/                                 @DongDongJu @zhengfeihe
