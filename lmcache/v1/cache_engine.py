@@ -1108,12 +1108,7 @@ class LMCacheEngine:
 
                 assert task is not None
 
-                if layer_id == 0:
-                    # NOTE(Yuwei): For sglang integration we need to provide retrieved
-                    # tokens number in the first layer loading since there is no lookup
-                    yield torch.sum(ret_mask)
-                else:
-                    yield None
+                yield None
 
                 mem_objs_layer = task.result()
                 mem_obj_consumer.send(mem_objs_layer)
