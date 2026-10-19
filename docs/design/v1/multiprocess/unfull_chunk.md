@@ -183,8 +183,9 @@ separately from the chunk prefetch result:
   looked up there); LMCache-driven transfer mode only (the CUDA default).
 - A prompt shorter than one chunk has no full chunk to look up, so its
   unfull chunk is never probed.
-- A failed unfull-chunk retrieve leaves its read locks (and a temporary
-  object) to the read-lock TTL; the failed-retrieve release resolves full
+- A failed unfull-chunk retrieve, or a lookup abandoned for an APC-shrink
+  re-lookup (`apc_covered_lookup.md`), leaves the unfull chunk's read locks
+  (and a temporary object) to the read-lock TTL: those releases resolve full
   chunks only.
 - The copy path is chosen per object group: when the ring's opaque layout is
   not eligible for the direct-copy path, the object group holding it (the

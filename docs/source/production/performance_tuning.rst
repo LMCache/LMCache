@@ -80,7 +80,6 @@ Working Example
         vllm serve Qwen/Qwen3-0.6B \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}' \
-        --disable-log-requests \
         --no-enable-prefix-caching
 
 3. Send a request to populate the cache:

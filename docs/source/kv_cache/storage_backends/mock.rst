@@ -36,7 +36,6 @@ Deploy a serving engine with the mock remote backend:
 
     LMCACHE_CONFIG_FILE=mock.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct \
         --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}' \
-        --disable-log-requests \
         --no-enable-prefix-caching
 
 Check the retrieval (storing is async so the throughput there is meaningless) logs on the second query to confirm that the throughput is slightly lower than 2 GB/s (the CPU <-> GPU allocation/transfer also has overhead).

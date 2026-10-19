@@ -94,6 +94,7 @@ _KV_EVENT_RESYNCS = Counter(
 )
 # Maximum records in each pushed batch.
 _KV_EVENT_BATCH_SIZE = 1024
+_KV_EVENT_RECONNECT_DELAY = 1.0
 
 
 class ExtraConfigDefault(enum.Enum):
@@ -922,7 +923,8 @@ class LMCacheMPSchedulerAdapter:
         request_configs: dict[str, Any] | None = None,
         reserve_last_token: bool = False,
         include_unfull_chunk: bool = False,
-    ) -> None:
+        start: int = 0,
+    ) -> bool:
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
 
@@ -944,9 +946,15 @@ class LMCacheMPSchedulerAdapter:
                 chunk ending at the lookup range's unaligned end, so
                 ``check_lookup_result`` can return a count that is not a
                 multiple of the chunk size.
+            start: Chunk-aligned start token index of the lookup; tokens
+                below it are covered by the engine's prefix cache, so the
+                server touches but does not lock or prefetch them. A start
+                at the aligned end is valid: the server submits no prefetch
+                and reports the covered prefix as the hit.
 
         Returns:
-            None
+            Whether a LOOKUP actually went out. Key per-lookup state off
+            this so it cannot drift from what the server received.
 
         Notes:
             This function will have a side-effect: submitting a look up request to
@@ -958,11 +966,11 @@ class LMCacheMPSchedulerAdapter:
         self._ensure_heartbeat_started()
 
         if not self.is_healthy:
-            return
+            return False
 
         if request_id in self._pending_lookups:
             # Skip if there is already a lookup request
-            return
+            return False
 
         lookup_tokens = max(0, len(token_ids) - int(reserve_last_token))
         aligned_end = (
@@ -975,7 +983,7 @@ class LMCacheMPSchedulerAdapter:
 
         key = self._create_key(
             token_ids,
-            start=0,
+            start=start,
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
@@ -996,6 +1004,7 @@ class LMCacheMPSchedulerAdapter:
         )
         self._pending_lookups.add(request_id)
         self._lookup_params[request_id] = (token_ids, cache_salt, request_configs)
+        return True
 
     def _free_inconsistent_lookup_locks(
         self,
@@ -1235,6 +1244,7 @@ class LMCacheMPSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         include_unfull_chunk: bool = False,
+        extra_ranges: tuple[tuple[int, int], ...] = (),
     ) -> None:
         """Release read locks acquired during lookup without a full retrieve.
 
@@ -1259,11 +1269,14 @@ class LMCacheMPSchedulerAdapter:
                 the IPC key.
             include_unfull_chunk: Also release the unfull chunk the lookup
                 locked; ``end`` must then be the lookup's unaligned end.
+            extra_ranges: Lock ranges left by this request's earlier,
+                abandoned lookups, as ``(start, end)`` token pairs ending at
+                that lookup's hit boundary. Released in the same RPC.
         """
         if not self.is_healthy:
             return
 
-        # Free [start, end) on every server.
+        # Free [start, end) and any extra ranges on every server.
         base_key = self._create_key(
             token_ids,
             start=start,
@@ -1274,7 +1287,9 @@ class LMCacheMPSchedulerAdapter:
             include_unfull_chunk=include_unfull_chunk,
         ).no_worker_id_version()
         for url in self._server_urls:
-            self.req_clients[url].free_lookup_locks(base_key, self.tp_size)
+            self.req_clients[url].free_lookup_locks(
+                base_key, self.tp_size, extra_ranges
+            )
 
     def end_session(self, request_id: str) -> None:
         """
@@ -2657,6 +2672,8 @@ class LMCacheMPWorkerAdapter:
                     stream.close()
                 with self._kv_event_lock:
                     self._kv_event_stream = None
+            if self._kv_event_stop.wait(_KV_EVENT_RECONNECT_DELAY):
+                return
 
     def _disable_kv_event_stream(self, reason: str) -> None:
         """Withdraw placements and resume completed-store reporting after failure."""

@@ -333,7 +333,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         )
         # Build the entry and strategy outside the lock, then insert the pair
         # atomically so a concurrent reap can never strand one without the
-        # other. REGISTER is SYNC-serialized, so it is the sole inserter.
+        # other. REGISTER is SERIALIZED, so it is the sole inserter.
         entry = EngineDrivenContextEntry(
             metadata=metadata,
             model_name=payload.model_name,

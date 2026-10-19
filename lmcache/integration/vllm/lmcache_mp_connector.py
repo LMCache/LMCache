@@ -1369,12 +1369,29 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.num_stored_tokens = 0
             tracker.num_vllm_hit_tokens = 0
             tracker.num_lmcache_hit_tokens = 0
+            tracker.apc_covered_tokens = 0
             tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
             return 0, False
 
+        # APC-covered lookup start (0 = none; stays 0 after a shrink):
+        # the vLLM hit floored to every group's paged-chunk boundary and the
+        # LMCache chunk size. It never exceeds the aligned lookup end since
+        # vLLM caps the APC hit at num_prompt_tokens - 1; an all-covered
+        # lookup is served by the server's empty prefetch job.
+        lookup_start = 0
+        if not tracker.need_full_lookup:
+            tokens_per_chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
+            lookup_start = (
+                num_computed_tokens
+                // self._hit_alignment_tokens
+                * self._hit_alignment_tokens
+                // tokens_per_chunk
+                * tokens_per_chunk
+            )
+
         if tracker.lookup_started_at is None:
             tracker.lookup_started_at = time.monotonic()
-        self.scheduler_adapter.maybe_submit_lookup_request(
+        submitted = self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
@@ -1385,7 +1402,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             },
             reserve_last_token=self._reserve_last_token_for_lookup,
             include_unfull_chunk=self._unfull_chunk,
+            start=lookup_start,
         )
+        # Freeze only on a real submit: a no-op poll would re-freeze a
+        # boundary the in-flight lookup never used.
+        if submitted:
+            tracker.apc_covered_tokens = lookup_start
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
         if ret is None:
@@ -1405,6 +1427,42 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             // self._hit_alignment_tokens
             * self._hit_alignment_tokens
         )
+
+        # APC shrank below the frozen boundary: stop skipping (sticky),
+        # remember the abandoned lookup's locked range for the next FREE,
+        # and re-look-up the full prefix in the same scheduler step.
+        if (
+            tracker.apc_covered_tokens > 0
+            and tracker.num_vllm_hit_tokens < tracker.apc_covered_tokens
+        ):
+            logger.info(
+                "APC hit for request %s shrank below the covered boundary "
+                "(%d < %d); re-looking-up the full prefix from token 0.",
+                request.request_id,
+                tracker.num_vllm_hit_tokens,
+                tracker.apc_covered_tokens,
+            )
+            if ret > tracker.apc_covered_tokens:
+                tracker.pending_free_ranges.append((tracker.apc_covered_tokens, ret))
+            self.scheduler_adapter.cleanup_lookup_result(request.request_id)
+            tracker.need_full_lookup = True
+            tracker.lookup_started_at = None
+            tracker.apc_covered_tokens = 0
+            tracker.num_stored_tokens = 0
+            tracker.num_lmcache_hit_tokens = 0
+            if self.scheduler_adapter.maybe_submit_lookup_request(
+                request.request_id,
+                token_ids=tracker.get_token_ids(),
+                cache_salt=tracker.cache_salt,
+                request_configs={
+                    **(tracker.request_configs or {}),
+                    "lmcache.hint.engine_computed_tokens": num_computed_tokens,
+                },
+                reserve_last_token=self._reserve_last_token_for_lookup,
+                include_unfull_chunk=self._unfull_chunk,
+            ):
+                tracker.lookup_started_at = time.monotonic()
+            return None, True
 
         if ret == 0:
             return 0, False
@@ -1538,7 +1596,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)
 
             # Free locks on chunks that vLLM already computed and won't
-            # retrieve from LMCache.
+            # retrieve from LMCache, plus any ranges left locked by this
+            # request's abandoned lookups (APC shrink re-lookups).
+            free_end = 0
             if tracker.num_lmcache_hit_tokens > 0:
                 if not condition:
                     # No retrieve needed — free ALL locked chunks
@@ -1552,24 +1612,25 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     # be freed by vLLM's retrieve.
                     free_end = tracker.num_vllm_hit_tokens
 
-                if free_end > 0:
-                    self.scheduler_adapter.free_lookup_locks(
-                        token_ids=tracker.get_token_ids(),
-                        start=0,
-                        end=free_end,
-                        request_id=request.request_id,
-                        cache_salt=tracker.cache_salt,
-                        request_configs=tracker.request_configs,
-                        # Freeing the whole hit also frees its unfull chunk.
-                        include_unfull_chunk=not condition
-                        and free_end % self.scheduler_adapter.lmcache_tokens_per_chunk
-                        != 0,
-                    )
-                    logger.debug(
-                        "Free locks of tokens %d-%d since it is cached by vLLM.",
-                        0,
-                        free_end,
-                    )
+            if free_end > 0 or tracker.pending_free_ranges:
+                self.scheduler_adapter.free_lookup_locks(
+                    token_ids=tracker.get_token_ids(),
+                    start=0,
+                    end=free_end,
+                    request_id=request.request_id,
+                    cache_salt=tracker.cache_salt,
+                    request_configs=tracker.request_configs,
+                    # Freeing the whole hit also frees its unfull chunk.
+                    include_unfull_chunk=not condition
+                    and free_end % self.scheduler_adapter.lmcache_tokens_per_chunk != 0,
+                    extra_ranges=tuple(tracker.pending_free_ranges),
+                )
+                tracker.pending_free_ranges = []
+                logger.debug(
+                    "Free locks of tokens %d-%d since it is cached by vLLM.",
+                    0,
+                    free_end,
+                )
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
