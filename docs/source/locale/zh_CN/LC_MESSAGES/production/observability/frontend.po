@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"POT-Creation-Date: 2026-09-28 09:40+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -29,7 +29,9 @@ msgid ""
 "(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
 "for better feature support and performance. For the MP mode equivalent of"
 " this page, see :doc:`/mp/frontend_dashboard`."
-msgstr "本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/frontend_dashboard`。"
+msgstr ""
+"本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` "
+"以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/frontend_dashboard`。"
 
 #: ../../source/production/observability/frontend.rst:11
 msgid ""
@@ -166,23 +168,31 @@ msgid ""
 " to your ``lmcache.yaml``:"
 msgstr "要通过 LMCache 插件框架启动前端，请将以下内容添加到您的 ``lmcache.yaml`` 中："
 
-#: ../../source/production/observability/frontend.rst:124
+#: ../../source/production/observability/frontend.rst:127
 msgid "Proxying Requests"
 msgstr "代理请求"
 
-#: ../../source/production/observability/frontend.rst:126
+#: ../../source/production/observability/frontend.rst:129
 msgid "Proxy requests using the format:"
 msgstr "使用以下格式代理请求："
 
-#: ../../source/production/observability/frontend.rst:132
+#: ../../source/production/observability/frontend.rst:135
 msgid "Examples:"
 msgstr "示例："
 
-#: ../../source/production/observability/frontend.rst:145
+#: ../../source/production/observability/frontend.rst:148
+msgid ""
+"The ``POST /run_script`` example above requires the target node to opt in"
+" with ``run_script_api_enabled: true`` (see the sample config above). "
+"Without it the endpoint returns ``404`` — it executes caller-supplied "
+"code in-process and is therefore disabled by default."
+msgstr ""
+
+#: ../../source/production/observability/frontend.rst:155
 msgid "Contributing"
 msgstr "贡献"
 
-#: ../../source/production/observability/frontend.rst:147
+#: ../../source/production/observability/frontend.rst:157
 msgid ""
 "LMCache Frontend is an open-source project and we welcome contributions "
 "from the community! Whether you want to fix bugs, add new features, "
@@ -190,41 +200,41 @@ msgid ""
 "appreciated."
 msgstr "LMCache 前端是一个开源项目，我们欢迎社区的贡献！无论您想修复错误、添加新功能、改善文档还是分享想法，我们都非常感谢您的贡献。"
 
-#: ../../source/production/observability/frontend.rst:151
+#: ../../source/production/observability/frontend.rst:161
 msgid "Ways to contribute:"
 msgstr "贡献方式："
 
-#: ../../source/production/observability/frontend.rst:153
+#: ../../source/production/observability/frontend.rst:163
 msgid ""
 "**Report Issues**: Found a bug or have a feature request? Open an issue "
 "on GitHub."
 msgstr "**报告问题**\\ ：发现了一个错误或有功能请求？在 GitHub 上提交一个问题。"
 
-#: ../../source/production/observability/frontend.rst:155
+#: ../../source/production/observability/frontend.rst:165
 msgid ""
 "**Submit Pull Requests**: Fork the repository, make your changes, and "
 "submit a PR."
 msgstr "**提交拉取请求**\\ ：分叉仓库，进行更改，并提交 PR。"
 
-#: ../../source/production/observability/frontend.rst:157
+#: ../../source/production/observability/frontend.rst:167
 msgid "**Improve Documentation**: Help us make the docs clearer and more helpful."
 msgstr "**改善文档**\\ ：帮助我们使文档更清晰、更有帮助。"
 
-#: ../../source/production/observability/frontend.rst:158
+#: ../../source/production/observability/frontend.rst:168
 msgid ""
 "**Share Feedback**: Let us know how you're using LMCache Frontend and "
 "what could be improved."
 msgstr "**分享反馈**\\ ：让我们知道您如何使用 LMCache 前端以及可以改进的地方。"
 
-#: ../../source/production/observability/frontend.rst:161
+#: ../../source/production/observability/frontend.rst:171
 msgid "Join us in making LMCache Frontend better for everyone!"
 msgstr "加入我们，让 LMCache Frontend 变得更好！"
 
-#: ../../source/production/observability/frontend.rst:165
+#: ../../source/production/observability/frontend.rst:175
 msgid "More Information"
 msgstr "更多信息"
 
-#: ../../source/production/observability/frontend.rst:167
+#: ../../source/production/observability/frontend.rst:177
 msgid ""
 "For more details, visit the `LMCache Frontend GitHub repository "
 "<https://github.com/LMCache/lmcache_frontend>`_."

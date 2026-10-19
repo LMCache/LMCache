@@ -1,0 +1,342 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-19 09:28+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/multi_l1.rst:2
+msgid "Multiple L1 Managers"
+msgstr "多个 L1 管理器"
+
+#: ../../source/mp/multi_l1.rst:4
+msgid ""
+"The MP server can serve KV objects from independently configured DRAM, "
+"Device-DAX, and GDS L1 managers. Each manager has its own capacity, "
+"eviction controller, and store controller. L2 adapters use a fixed L1 "
+"affinity tag."
+msgstr ""
+"MP 服务器可以从独立配置的 DRAM、Device-DAX 和 GDS L1 管理器中提供 KV "
+"对象。每个管理器都有自己的容量、逐出控制器和存储控制器。L2 适配器使用固定的 L1 亲和性标签。"
+
+#: ../../source/mp/multi_l1.rst:9
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/mp/multi_l1.rst:11
+msgid ""
+"Repeat ``--l1-manager`` in write-placement order. Each JSON object "
+"requires ``type``, a unique non-empty ``tag``, and ``size_gb`` (GiB). The"
+" types are ``DRAM``, ``DEVDAX``, and ``GDS``. The ``_default`` tag is "
+"reserved for DRAM in this interface and is the default affinity target "
+"for L2 adapters."
+msgstr ""
+"重复 ``--l1-manager`` 以写入放置顺序。每个 JSON 对象需要 ``type``、一个唯一的非空 ``tag`` 和 "
+"``size_gb``（GiB）。类型包括 ``DRAM``、``DEVDAX`` 和 ``GDS``。``_default`` "
+"标签在此接口中保留给 DRAM，并且是 L2 适配器的默认亲和目标。"
+
+#: ../../source/mp/multi_l1.rst:16
+msgid ""
+"For example, use a dedicated Device-DAX device and a GDS-capable "
+"directory:"
+msgstr "例如，使用专用的 Device-DAX 设备和支持 GDS 的目录："
+
+#: ../../source/mp/multi_l1.rst:26
+msgid ""
+"A Device-DAX L1 in this interface has no implicit DRAM pool. Its size "
+"applies to the mapped device. Use dedicated, physically disjoint regions:"
+" different Device-DAX paths can alias the same CXL memory. Independent "
+"managers must not write those aliases concurrently. GDS uses an ephemeral"
+" slab that is cleared at initialization; it does not restore cached "
+"objects after a server restart."
+msgstr ""
+"在此接口中，Device-DAX L1 没有隐式的 DRAM 池。其大小适用于映射的设备。使用专用的、物理上不相交的区域：不同的 Device-"
+"DAX 路径可以别名相同的 CXL 内存。独立的管理器不得同时写入这些别名。GDS "
+"使用一个在初始化时清除的短暂内存块；它不会在服务器重启后恢复缓存对象。"
+
+#: ../../source/mp/multi_l1.rst:33
+msgid "Use these combinations of ``--l1-manager`` arguments for the six profiles:"
+msgstr "使用这些 ``--l1-manager`` 参数组合来配置六个配置文件："
+
+#: ../../source/mp/multi_l1.rst:39
+msgid "Profile"
+msgstr "配置文件"
+
+#: ../../source/mp/multi_l1.rst:40
+msgid "Managers in placement order"
+msgstr "按放置顺序的管理器"
+
+#: ../../source/mp/multi_l1.rst:41
+msgid "DRAM only"
+msgstr "仅支持 DRAM"
+
+#: ../../source/mp/multi_l1.rst:42 ../../source/mp/multi_l1.rst:65
+msgid "``DRAM``"
+msgstr "``DRAM``"
+
+#: ../../source/mp/multi_l1.rst:43
+msgid "GDS only"
+msgstr "仅限 GDS"
+
+#: ../../source/mp/multi_l1.rst:44 ../../source/mp/multi_l1.rst:72
+msgid "``GDS``"
+msgstr "``GDS``"
+
+#: ../../source/mp/multi_l1.rst:45
+msgid "Device-DAX only"
+msgstr "仅限设备-DAX"
+
+#: ../../source/mp/multi_l1.rst:46 ../../source/mp/multi_l1.rst:70
+msgid "``DEVDAX``"
+msgstr "``DEVDAX``"
+
+#: ../../source/mp/multi_l1.rst:47
+msgid "DRAM + GDS"
+msgstr "DRAM + GDS"
+
+#: ../../source/mp/multi_l1.rst:48
+msgid "``DRAM``, ``GDS``"
+msgstr "``DRAM``, ``GDS``"
+
+#: ../../source/mp/multi_l1.rst:49
+msgid "DRAM + Device-DAX"
+msgstr "DRAM + 设备-DAX"
+
+#: ../../source/mp/multi_l1.rst:50
+msgid "``DRAM``, ``DEVDAX``"
+msgstr "``DRAM``, ``DEVDAX``"
+
+#: ../../source/mp/multi_l1.rst:51
+msgid "DRAM + Device-DAX + GDS"
+msgstr "DRAM + Device-DAX + GDS"
+
+#: ../../source/mp/multi_l1.rst:52
+msgid "``DRAM``, ``DEVDAX``, ``GDS``"
+msgstr "``DRAM``, ``DEVDAX``, ``GDS``"
+
+#: ../../source/mp/multi_l1.rst:54
+msgid ""
+"Common optional JSON fields are ``align_bytes`` (4096), "
+"``read_ttl_seconds`` (300), ``write_ttl_seconds`` (600), and "
+"``eviction``. Alignment must be a positive power of two; GDS requires at "
+"least 4096 bytes. TTLs must be positive integers. Unknown fields are "
+"rejected."
+msgstr ""
+"常见的可选 JSON 字段包括 ``align_bytes`` (4096)、``read_ttl_seconds`` "
+"(300)、``write_ttl_seconds`` (600) 和 ``eviction``。对齐必须是正的二次幂；GDS 至少需要 4096"
+" 字节。TTL 必须是正整数。未知字段将被拒绝。"
+
+#: ../../source/mp/multi_l1.rst:63
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/mp/multi_l1.rst:64
+msgid "Backend fields"
+msgstr "后端字段"
+
+#: ../../source/mp/multi_l1.rst:66
+msgid ""
+"``use_lazy`` (true), ``init_size_gb`` (20, capped at capacity), "
+"``shm_name`` (empty), ``use_hugepages`` (false), ``mlock`` (false, see "
+":doc:`configuration`). Shared memory and hugepages require eager "
+"allocation. Shared-memory names must be unique."
+msgstr "``use_lazy`` (true), ``init_size_gb`` (20, 受容量限制), ``shm_name`` (空), ``use_hugepages`` (false), ``mlock`` (false, 见 :doc:`configuration`)。共享内存和大页需要提前分配。共享内存名称必须是唯一的。"
+
+#: ../../source/mp/multi_l1.rst:71
+msgid "Required ``path``; the allocator checks mapping size and device alignment."
+msgstr "必需的 ``path``；分配器检查映射大小和设备对齐。"
+
+#: ../../source/mp/multi_l1.rst:73
+msgid ""
+"Required ``path``; ``backend`` (``auto``), ``direct_io`` (true). See "
+":doc:`configuration` for backend requirements and location semantics."
+msgstr ""
+"必需的 ``path``；``backend`` (``auto``)，``direct_io`` (true)。有关后端要求和位置语义，请参见 "
+":doc:`configuration`。"
+
+#: ../../source/mp/multi_l1.rst:76
+#, python-brace-format
+msgid ""
+"The global eviction flags supply defaults. Override them per manager "
+"with, for example, "
+"``\"eviction\":{\"eviction_policy\":\"LRU\",\"trigger_watermark\":0.9, "
+"\"eviction_ratio\":0.1}``. Without global defaults each manager must "
+"specify an eviction policy. ``noop`` is useful for controlled overflow "
+"tests; an LRU manager may free space before a later write needs to "
+"overflow."
+msgstr ""
+"全局逐出标志提供默认值。可以通过每个管理器覆盖它们，例如，``\"eviction\":{\"eviction_policy\":\"LRU\",\"trigger_watermark\":0.9,"
+" \"eviction_ratio\":0.1}``。如果没有全局默认值，每个管理器必须指定一个逐出策略。``noop`` "
+"对于受控溢出测试非常有用；LRU 管理器可能会在后续写入需要溢出之前释放空间。"
+
+#: ../../source/mp/multi_l1.rst:82
+msgid ""
+"Legacy single-L1 flags, including ``--l1-size-gb``, remain supported. Do "
+"not combine ``--l1-manager`` with legacy capacity or backend-selection "
+"flags. Python callers can use ``DRAML1ManagerConfig``, "
+"``DevDaxL1ManagerConfig``, and ``GDSL1ManagerConfig``; their "
+"``from_dict`` methods implement the JSON schema."
+msgstr ""
+"遗留的单层 L1 标志，包括 ``--l1-size-gb``，仍然受到支持。请勿将 ``--l1-manager`` "
+"与遗留的容量或后端选择标志结合使用。Python 调用者可以使用 "
+"``DRAML1ManagerConfig``、``DevDaxL1ManagerConfig`` 和 "
+"``GDSL1ManagerConfig``；它们的 ``from_dict`` 方法实现了 JSON 架构。"
+
+#: ../../source/mp/multi_l1.rst:88
+msgid "Placement, affinity, and reads"
+msgstr "放置、亲和性和读取"
+
+#: ../../source/mp/multi_l1.rst:90
+msgid ""
+"Writes try managers in argument order. Only ``OUT_OF_MEMORY`` results "
+"move to the next manager; conflicts and exceptions do not. Allocation "
+"remains atomic within each batch, so a batch can fail even when combined "
+"free space across managers would suffice. This does not add cross-L1 "
+"deduplication or migration."
+msgstr ""
+"写入尝试按照参数顺序管理。只有 ``OUT_OF_MEMORY`` "
+"结果会移动到下一个管理器；冲突和异常不会。分配在每个批次内保持原子性，因此即使跨管理器的可用空间足够，批次仍然可能失败。这不会增加跨 L1 "
+"的去重或迁移。"
+
+#: ../../source/mp/multi_l1.rst:95
+msgid ""
+"An L2 adapter's ``affinity_tag`` selects the host-backed L1 used for both"
+" stores and reloads. It defaults to ``_default`` and must name a "
+"configured manager. An adapter sees completed stores from that manager "
+"only. Set the tag explicitly for a Device-DAX-only configuration. GDS "
+"cannot be an affinity target for the existing host-buffer L2 adapters. "
+"Affinity is fixed; runtime adapter additions are validated against the "
+"same tags."
+msgstr ""
+"L2 适配器的 ``affinity_tag`` 选择用于存储和重新加载的主机支持的 L1。默认值为 "
+"``_default``，必须命名一个已配置的管理器。适配器仅能看到来自该管理器的已完成存储。对于仅支持 Device-DAX "
+"的配置，需显式设置标签。GDS 不能作为现有主机缓冲 L2 适配器的亲和力目标。亲和力是固定的；运行时适配器的添加会根据相同的标签进行验证。"
+
+#: ../../source/mp/multi_l1.rst:102
+msgid ""
+"Lookups visit L1 managers synchronously. Prefetch selects one owner per "
+"key and keeps that selection in the request's result. GPU completion "
+"releases locks on those exact owners, including when another request "
+"finds a different copy of the same key. Every manager has independent "
+"read and write locks."
+msgstr ""
+"查找同步访问 L1 管理器。预取为每个键选择一个所有者，并将该选择保留在请求的结果中。GPU "
+"完成时会释放对这些确切所有者的锁，包括当另一个请求找到同一键的不同副本时。每个管理器都有独立的读锁和写锁。"
+
+#: ../../source/mp/multi_l1.rst:108
+msgid "Status and Prometheus"
+msgstr "状态和 Prometheus"
+
+#: ../../source/mp/multi_l1.rst:110
+msgid "``GET /status`` includes these fields under ``storage_manager``:"
+msgstr "``GET /status`` 包含这些字段在 ``storage_manager`` 下："
+
+#: ../../source/mp/multi_l1.rst:112
+msgid ""
+"``l1_managers``: status keyed by L1 tag, including object/lock counts, "
+"staging bytes, used/allocated/configured memory, and capacity by medium."
+msgstr "``l1_managers``：按 L1 标签键入的状态，包括对象/锁计数、暂存字节、已使用/分配/配置的内存以及按介质划分的容量。"
+
+#: ../../source/mp/multi_l1.rst:114
+msgid ""
+"``store_controllers`` and ``l1_eviction_controllers``: controller health "
+"and progress keyed by tag."
+msgstr "``store_controllers`` 和 ``l1_eviction_controllers``：按标签键控的控制器健康状况和进度。"
+
+#: ../../source/mp/multi_l1.rst:116
+msgid ""
+"``l1_usage``: aggregate ``[used_bytes, allocated_bytes]``. For lazy DRAM,"
+" allocated bytes can be below configured capacity."
+msgstr ""
+"``l1_usage``: 聚合 ``[used_bytes, allocated_bytes]``。对于惰性 "
+"DRAM，分配的字节数可能低于配置的容量。"
+
+#: ../../source/mp/multi_l1.rst:118
+msgid ""
+"``l1_capacity_bytes_by_backend``: configured/live capacity summed by "
+"``dram``, ``devdax``, and ``gds``. Draining Device-DAX arenas are "
+"excluded."
+msgstr ""
+"``l1_capacity_bytes_by_backend``: 按 ``dram``、``devdax`` 和 ``gds`` "
+"汇总的配置/实时容量。排除了排空的 Device-DAX 区域。"
+
+#: ../../source/mp/multi_l1.rst:121
+msgid ""
+"The legacy singular status fields remain available when there is one "
+"manager. ``GET /config`` includes every L1 configuration and each "
+"adapter's affinity."
+msgstr "当只有一个管理器时，遗留的单一状态字段仍然可用。``GET /config`` 包含每个 L1 配置和每个适配器的亲和性。"
+
+#: ../../source/mp/multi_l1.rst:124
+msgid ""
+"Prometheus exports ``lmcache_mp_l1_memory_usage_bytes``, "
+"``lmcache_mp_l1_usage_ratio``, and ``lmcache_mp_l1_staging_bytes`` with "
+"``l1_tag`` and ``backend`` labels. L1 read, write, and eviction counters "
+"carry ``l1_tag`` alongside existing cache-salt labels. Optional lifecycle"
+" histograms also use ``l1_tag`` and track each manager's copy "
+"independently. Sum across ``l1_tag`` for server totals; do not sum usage "
+"ratios. A legacy manager that combines DRAM and Device-DAX reports "
+"``backend=\"dram+devdax\"`` for its combined usage."
+msgstr ""
+"Prometheus 导出 "
+"``lmcache_mp_l1_memory_usage_bytes``、``lmcache_mp_l1_usage_ratio`` 和 "
+"``lmcache_mp_l1_staging_bytes``，并带有 ``l1_tag`` 和 ``backend`` 标签。L1 "
+"的读、写和逐出计数器携带 ``l1_tag`` 以及现有的缓存盐标签。可选的生命周期直方图也使用 "
+"``l1_tag``，并独立跟踪每个管理器的副本。对 ``l1_tag`` 进行求和以获得服务器总数；不要对使用比例进行求和。一个将 DRAM 和"
+" Device-DAX 结合的传统管理器报告 ``backend=\"dram+devdax\"`` 以表示其组合使用情况。"
+
+#: ../../source/mp/multi_l1.rst:133
+msgid "Limits and serving validation"
+msgstr "限制和服务验证"
+
+#: ../../source/mp/multi_l1.rst:135
+msgid ""
+"Only **one GDS slab per process** is supported. The native GDS libraries "
+"register CUDA streams process-wide; adding a second slab currently "
+"conflicts with that registration. This limit permits every profile listed"
+" above. A successful cuFile compatibility-mode transfer does not "
+"establish native GPUDirect DMA support; check the deployment's driver and"
+" filesystem."
+msgstr ""
+"仅支持 **每个进程一个 GDS 块**。本地 GDS 库在整个进程中注册 CUDA "
+"流；当前添加第二个块会与该注册发生冲突。此限制允许上述列出的每个配置文件。成功的 cuFile 兼容模式传输并不建立本地 GPUDirect "
+"DMA 支持；请检查部署的驱动程序和文件系统。"
+
+#: ../../source/mp/multi_l1.rst:141
+msgid ""
+"L1 topology is fixed at startup. The legacy single-region descriptor, "
+"shared-memory transfer channel, P2P registration, and Device-DAX hotplug "
+"API require a single compatible L1. Multi-L1 GPU serving uses the "
+"existing LMCache-driven IPC transfer path. Hybrid models additionally "
+"require their engine's supported recurrent-state connector and matching "
+"block/chunk geometry; see :doc:`hybrid_models`."
+msgstr ""
+"L1 拓扑在启动时固定。传统的单区域描述符、共享内存传输通道、P2P 注册和设备 DAX 热插拔 API 需要一个兼容的单一 L1。多 L1 "
+"GPU 服务使用现有的基于 LMCache 的 IPC 传输路径。混合模型还需要其引擎支持的递归状态连接器和匹配的块/块几何形状；请参见 "
+":doc:`hybrid_models`。"
+
+#: ../../source/mp/multi_l1.rst:148
+msgid ""
+"Storage profiles alone do not qualify an engine/model/TP combination. "
+"Validate external-cache hits after clearing engine-local prefix state, "
+"token outputs, per-tag writes and reads, and zero remaining locks. "
+"Exercise every configured backend under pressure, and restart the engine "
+"and server for a second run."
+msgstr ""
+"存储配置文件本身并不能使引擎/模型/TP "
+"组合合格。在清除引擎本地前缀状态、令牌输出、每个标签的写入和读取以及零剩余锁后，验证外部缓存命中。在压力下对每个配置的后端进行测试，并重启引擎和服务器以进行第二次运行。"
+

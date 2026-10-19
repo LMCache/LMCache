@@ -1,0 +1,398 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-19 09:28+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:2
+msgid "Server Module Plugins"
+msgstr "服务器模块插件"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:4
+msgid ""
+"The multiprocess ``lmcache server`` is composed from transport-neutral "
+"server modules. Built-in modules handle lookup, management, transfer, "
+"P2P, KV events, and blend. A server module plugin lets an installed "
+"Python package add extra modules at startup without modifying LMCache "
+"source."
+msgstr "多进程 ``lmcache server`` 由与传输无关的服务器模块组成。内置模块处理查找、管理、传输、P2P、KV 事件和混合。服务器模块插件允许已安装的 Python 包在启动时添加额外的模块，而无需修改 LMCache 源代码。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:9
+msgid ""
+"This mechanism is explicit opt-in. Installing a package is not enough to "
+"change server behavior; the operator must pass ``--server-module``."
+msgstr "此机制是显式选择加入的。仅仅安装一个包不足以改变服务器行为；操作员必须传递 ``--server-module``。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:13
+msgid "When to use it"
+msgstr "何时使用它"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:15
+msgid ""
+"Use a server module plugin when implementation should live in another "
+"package. Examples include vendor-specific implementations, experimental "
+"handlers, or site-local observability/control modules that reuse "
+"LMCache's shared ``MPCacheServerContext``."
+msgstr ""
+"当实现应该位于另一个包中时，请使用服务器模块插件。示例包括特定于供应商的实现、实验性处理程序或重用 LMCache 共享的 "
+"``MPCacheServerContext`` 的站点本地可观察性/控制模块。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:20
+msgid ""
+"For new extension protocols, prefer a transport-specific service when the"
+" extension owns a real client protocol. A plugin can register its own "
+"generated gRPC service or its own ZMQ service during LMCache server "
+"startup, while the same module also provides status, cleanup, and shared "
+"``MPCacheServerContext`` access."
+msgstr "对于新的扩展协议，当扩展拥有真实的客户端协议时，优先选择特定于传输的服务。插件可以在 LMCache 服务器启动期间注册其生成的 gRPC 服务或其自己的 ZMQ 服务，同时同一模块还提供状态、清理和共享的 ``MPCacheServerContext`` 访问。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:26
+msgid ""
+"For small control-plane calls that do not need a first-class service, "
+"plugins may use the stable ``SERVER_MODULE_CALL`` envelope. The core wire"
+" contract stays fixed across transports:"
+msgstr "对于不需要一流服务的小型控制平面调用，插件可以使用稳定的 ``SERVER_MODULE_CALL`` 信封。核心通信协议在不同传输中保持不变："
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:30
+msgid "``method`` is a namespaced string such as ``\"my_package.echo\"``."
+msgstr "``method`` 是一个命名空间字符串，例如 ``\"my_package.echo\"``。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:31
+msgid "``payload`` is plugin-owned request bytes."
+msgstr "``payload`` 是插件拥有的请求字节。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:32
+msgid ""
+"the response contains ``success``, plugin-owned response ``payload`` "
+"bytes, and a human-readable ``error`` string."
+msgstr "响应包含 ``success``、插件拥有的响应 ``payload`` 字节和可读的 ``error`` 字符串。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:35
+msgid ""
+"This gives out-of-tree packages a lightweight fallback namespace without "
+"appending a new ``RequestType`` enum value or generated gRPC method for "
+"every plugin feature. If a feature needs a high-throughput or strongly "
+"typed API, register a package-owned gRPC/ZMQ service. If every LMCache "
+"client should know about the API, add that request type, payload, "
+"response, and gRPC schema to LMCache core instead."
+msgstr ""
+"这为树外包提供了一个轻量级的回退命名空间，无需为每个插件功能附加新的 ``RequestType`` 枚举值或生成的 gRPC "
+"方法。如果某个功能需要高吞吐量或强类型的 API，请注册一个包拥有的 gRPC/ZMQ 服务。如果每个 LMCache 客户端都应该了解该 "
+"API，请将该请求类型、有效负载、响应和 gRPC 架构添加到 LMCache 核心中。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:43
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:45
+msgid "Pass one JSON object per ``--server-module`` flag:"
+msgstr "每个 ``--server-module`` 标志传递一个 JSON 对象："
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:57
+msgid ""
+"``config`` defaults to an empty object. The flag can be repeated, and a "
+"single flag may contain a JSON list of module specs."
+msgstr "``config`` 默认为一个空对象。该标志可以重复使用，单个标志可以包含一个模块规范的 JSON 列表。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:60
+msgid "Server module spec fields"
+msgstr "服务器模块规范字段"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:64
+msgid "Field"
+msgstr "字段"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:65
+msgid "Required"
+msgstr "必需的"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:66
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:67
+msgid "``module_path``"
+msgstr "``module_path``"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:68
+msgid "yes"
+msgstr "是"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:69
+msgid ""
+"Dotted Python import path defining one or more concrete "
+"``DiscoverableModule`` subclasses."
+msgstr "定义一个或多个具体的 ``DiscoverableModule`` 子类的点分 Python 导入路径。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:71
+msgid "``config``"
+msgstr "``config``"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:72
+msgid "no"
+msgstr "否"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:73
+msgid ""
+"Plugin-specific JSON object available through "
+"``ModuleBuildContext.config_for()``."
+msgstr "通过 ``ModuleBuildContext.config_for()`` 提供的特定于插件的 JSON 对象。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:77
+msgid "Opt-in modules shipped with LMCache"
+msgstr "与 LMCache 一起提供的可选模块"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:79
+msgid ""
+"Some modules ship inside the LMCache package but are not built by "
+"default. They live under ``lmcache.v1.multiprocess.plugin_modules``, "
+"outside the built-in discovery root ``lmcache.v1.multiprocess.modules``, "
+"so the server never composes them on its own. Load one exactly like an "
+"out-of-tree module, by naming its Python module:"
+msgstr "某些模块包含在 LMCache 包中，但默认情况下并不会构建。它们位于 ``lmcache.v1.multiprocess.plugin_modules`` 下，位于内置发现根 ``lmcache.v1.multiprocess.modules`` 之外，因此服务器不会自行组合它们。加载一个模块的方式与加载树外模块完全相同，通过命名其 Python 模块："
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:91
+msgid "Currently shipped:"
+msgstr "当前已发布："
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:97
+msgid "Module path"
+msgstr "模块路径"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:98
+msgid "Purpose"
+msgstr "目的"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:99
+msgid "``lmcache.v1.multiprocess.plugin_modules.qstore``"
+msgstr "``lmcache.v1.multiprocess.plugin_modules.qstore``"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:100
+msgid ""
+"``QStoreModule``: stores per-layer query tensors captured by the vLLM "
+"connector (``\"lmcache.mp.transfer_intermediate_tensors\": true``). "
+"Requires the LMCache-driven transfer path; see :doc:`/mp/sdk`."
+msgstr "``QStoreModule``：存储由 vLLM 连接器捕获的逐层查询张量（``\"lmcache.mp.transfer_intermediate_tensors\": true``）。需要 LMCache 驱动的传输路径；请参见 :doc:`/mp/sdk`。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:105
+msgid "Module contract"
+msgstr "模块契约"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:107
+msgid ""
+"External modules use the same discovery, dependency, construction, and "
+"runtime contract as built-ins. LMCache imports ``module_path``, finds its"
+" concrete ``DiscoverableModule`` subclasses, merges them into the built-"
+"in dependency graph, and calls ``create(build_ctx)``. There is no "
+"external-only base class or factory contract: follow the existing "
+"``DiscoverableModule`` implementations under "
+"``lmcache.v1.multiprocess.modules``. Plugin-specific configuration is "
+"available from ``build_ctx.config_for(module_class)``."
+msgstr "外部模块使用与内置模块相同的发现、依赖、构造和运行时契约。LMCache 导入 ``module_path``，找到其具体的 ``DiscoverableModule`` 子类，将它们合并到内置依赖图中，并调用 ``create(build_ctx)``。没有仅限外部的基类或工厂契约：请遵循 ``lmcache.v1.multiprocess.modules`` 下现有的 ``DiscoverableModule`` 实现。特定于插件的配置可以通过 ``build_ctx.config_for(module_class)`` 获取。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:115
+msgid ""
+"Dependencies are class references, just as for built-ins. An external "
+"module may depend on a built-in class or on another explicitly loaded "
+"external class. Every dependency must be included in the "
+"discovered/configured class set. At startup, LMCache logs every "
+"constructed module and its declared dependencies as "
+"``name(dependencies=[...])``. Handlers are registered in construction "
+"order, so a dependent module can override its dependency's handler. "
+"Modules close in reverse construction order; ``ManagementModule`` stops "
+"its reaper before liveness targets release their state."
+msgstr "依赖项是类引用，和内置项一样。外部模块可以依赖于内置类或另一个显式加载的外部类。每个依赖项必须包含在发现/配置的类集中。在启动时，LMCache 记录每个构建的模块及其声明的依赖项，格式为 ``name(dependencies=[...])``。处理程序按构建顺序注册，因此依赖模块可以覆盖其依赖项的处理程序。模块以反向构建顺序关闭；``ManagementModule`` 在活跃目标释放其状态之前停止其收割者。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:124
+msgid ""
+"Plugin modules can also expose extension protocol methods with "
+"``@server_module_handler``:"
+msgstr "插件模块还可以使用 ``@server_module_handler`` 暴露扩展协议方法："
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:150
+msgid ""
+"If two modules register the same ``SERVER_MODULE_CALL`` method name, "
+"startup fails."
+msgstr "如果两个模块注册了相同的 ``SERVER_MODULE_CALL`` 方法名称，则启动失败。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:154
+msgid "Transport-specific services"
+msgstr "传输特定服务"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:156
+msgid ""
+"When an extension owns its protocol, expose the registrar matching the "
+"configured transport as a method on the module. LMCache calls it before "
+"the request server starts."
+msgstr "当扩展拥有其协议时，将与配置的传输匹配的注册器作为模块上的一个方法暴露。LMCache 在请求服务器启动之前调用它。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:160
+msgid ""
+"For gRPC, register generated services against the concrete "
+"``grpc.Server``:"
+msgstr "对于 gRPC，将生成的服务注册到具体的 ``grpc.Server``："
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:176
+msgid ""
+"For ZMQ, register or start a package-owned ZMQ service against the "
+"concrete ``MessageQueueServer``:"
+msgstr "对于 ZMQ，注册或启动一个包拥有的 ZMQ 服务到具体的 ``MessageQueueServer``："
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:191
+msgid ""
+"If a ZMQ registrar starts a sidecar socket, the module's ``close()`` "
+"method must stop that sidecar. Do not use ``register_zmq_services`` to "
+"add ``HandlerType.BLOCKING`` handlers to the core ``MessageQueueServer`` "
+"unless the registrar also assigns an executor with "
+"``add_normal_thread_pool`` or ``add_affinity_thread_pool`` before "
+"startup."
+msgstr "如果 ZMQ 注册器启动了一个侧车套接字，则模块的 ``close()`` 方法必须停止该侧车。除非注册器在启动之前还使用 ``add_normal_thread_pool`` 或 ``add_affinity_thread_pool`` 分配了一个执行器，否则不要使用 ``register_zmq_services`` 将 ``HandlerType.BLOCKING`` 处理程序添加到核心的 ``MessageQueueServer``。"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:198
+msgid "Envelope client calls"
+msgstr "信封客户端调用"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:200
+msgid "Both ZMQ and gRPC clients expose ``server_module_call``:"
+msgstr "两个 ZMQ 和 gRPC 客户端都暴露了 ``server_module_call``："
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:220
+msgid "Liveness and cleanup"
+msgstr "存活性和清理"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:222
+msgid ""
+"If a plugin owns per-worker state that should be pinged and reaped by "
+"``ManagementModule``, implement the ``InstanceLivenessTarget`` method "
+"set:"
+msgstr ""
+"如果插件拥有每个工作进程的状态，并且该状态应该由 ``ManagementModule`` 进行 ping 和清理，请实现 "
+"``InstanceLivenessTarget`` 方法集："
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:225
+msgid "``touch_instance(instance_id)``"
+msgstr "``touch_instance(instance_id)``"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:226
+msgid "``reap_stale_instances(reap_timeout_s, registration_grace_s)``"
+msgstr "``reap_stale_instances(reap_timeout_s, registration_grace_s)``"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:227
+msgid "``tracked_instance_count()``"
+msgstr "``tracked_instance_count()``"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:228
+msgid "``drop_instance_state(instance_id)``"
+msgstr "``drop_instance_state(instance_id)``"
+
+#: ../../source/developer_guide/extending_lmcache/server_modules.rst:230
+msgid ""
+"LMCache detects that method set when loading plugin modules and includes "
+"the module in the management reaper targets."
+msgstr "LMCache 在加载插件模块时检测到设置方法，并将该模块包含在管理收割者目标中。"
+
+#~ msgid "Dotted Python import path containing the module factory."
+#~ msgstr "包含模块工厂的点分 Python 导入路径。"
+
+#~ msgid "``factory_name``"
+#~ msgstr "``factory_name``"
+
+#~ msgid ""
+#~ "Callable name inside ``module_path``. Defaults"
+#~ " to ``build_server_modules``."
+#~ msgstr "``module_path`` 中的可调用名称。默认为 ``build_server_modules``。"
+
+#~ msgid "Plugin-specific JSON object passed to the factory."
+#~ msgstr "传递给工厂的插件特定 JSON 对象。"
+
+#~ msgid "Factory contract"
+#~ msgstr "工厂契约"
+
+#~ msgid ""
+#~ "The factory receives one "
+#~ "``ExtServerModuleBuildContext`` and returns "
+#~ "``ExtServerModuleComponents``. For backwards "
+#~ "compatibility, returning one module, a "
+#~ "sequence of modules, or ``None`` is "
+#~ "also accepted:"
+#~ msgstr ""
+#~ "工厂接收一个 ``ExtServerModuleBuildContext`` 并返回 "
+#~ "``ExtServerModuleComponents``。为了向后兼容，返回一个模块、一系列模块或 ``None`` "
+#~ "也是可以接受的："
+
+#~ msgid "A service-only package can return no modules:"
+#~ msgstr "一个仅服务的包可以不返回模块："
+
+#~ msgid "``ExtServerModuleBuildContext`` contains:"
+#~ msgstr "``ExtServerModuleBuildContext`` 包含："
+
+#~ msgid "``server_context``: the shared ``MPCacheServerContext``."
+#~ msgstr "``server_context``: 共享的 ``MPCacheServerContext``。"
+
+#~ msgid "``mp_config``: parsed ``MPServerConfig``."
+#~ msgstr "``mp_config``: 解析后的 ``MPServerConfig``。"
+
+#~ msgid "``coordinator_config``: parsed coordinator configuration."
+#~ msgstr "``coordinator_config``: 解析的协调器配置。"
+
+#~ msgid ""
+#~ "``modules``: built-in modules, plus "
+#~ "modules returned by earlier plugin "
+#~ "factories in command-line order."
+#~ msgstr "``modules``: 内置模块，以及按命令行顺序返回的早期插件工厂的模块。"
+
+#~ msgid "``config``: the JSON object from this plugin's server-module spec."
+#~ msgstr "``config``: 此插件的服务器模块规范中的 JSON 对象。"
+
+#~ msgid "A returned module must expose the regular server module contract:"
+#~ msgstr "返回的模块必须暴露常规服务器模块契约："
+
+#~ msgid ""
+#~ "Request handlers are ordinary transport-"
+#~ "neutral handlers decorated with "
+#~ "``@request_handler``:"
+#~ msgstr "请求处理程序是普通的与传输无关的处理程序，使用 ``@request_handler`` 装饰："
+
+#~ msgid ""
+#~ "Plugin modules are appended after "
+#~ "built-in modules. If two modules "
+#~ "register the same existing request type,"
+#~ " the later module wins for transport"
+#~ " handler registration. If two plugin "
+#~ "modules register the same "
+#~ "``SERVER_MODULE_CALL`` method name, startup "
+#~ "fails."
+#~ msgstr ""
+#~ "插件模块会在内置模块之后附加。如果两个模块注册了相同的现有请求类型，则后注册的模块在传输处理程序注册中获胜。如果两个插件模块注册了相同的"
+#~ " ``SERVER_MODULE_CALL`` 方法名称，则启动失败。"
+
+#~ msgid ""
+#~ "For compatibility with simple module-"
+#~ "shaped plugins, LMCache also calls "
+#~ "``register_grpc_services(server)`` and "
+#~ "``register_zmq_services(server)`` methods when a "
+#~ "returned module exposes them. New "
+#~ "packages should prefer the explicit "
+#~ "``ExtServerModuleComponents`` fields so modules "
+#~ "and transport services stay separate."
+#~ msgstr ""
+#~ "为了与简单的模块形状插件兼容，LMCache 还会在返回的模块公开时调用 "
+#~ "``register_grpc_services(server)`` 和 "
+#~ "``register_zmq_services(server)`` 方法。新包应优先使用显式的 "
+#~ "``ExtServerModuleComponents`` 字段，以便模块和传输服务保持分离。"
+
