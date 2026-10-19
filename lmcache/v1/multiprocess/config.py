@@ -52,6 +52,10 @@ class MPServerConfig:
     grpc_server_workers: int = 32
     """Worker threads for gRPC request dispatch. Only used by gRPC transport."""
 
+    grpc_server_mode: Literal["sync", "aio"] = "sync"
+    """gRPC server implementation. ``aio`` receives requests on one event loop
+    and hands only the handlers to worker threads. Only used by gRPC transport."""
+
     hash_algorithm: str = "blake3"
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
 
@@ -429,6 +433,14 @@ def add_mp_server_args(
         "--transport grpc. Default is 32.",
     )
     mp_group.add_argument(
+        "--grpc-server-mode",
+        choices=("sync", "aio"),
+        default="sync",
+        help="gRPC server implementation. aio receives requests on one event "
+        "loop and hands only the handlers to worker threads. Only used by "
+        "--transport grpc. Default is sync.",
+    )
+    mp_group.add_argument(
         "--hash-algorithm",
         type=str,
         default="blake3",
@@ -621,6 +633,7 @@ def parse_args_to_mp_server_config(
         max_gpu_workers=max_gpu,
         max_cpu_workers=max_cpu,
         grpc_server_workers=args.grpc_server_workers,
+        grpc_server_mode=args.grpc_server_mode,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
