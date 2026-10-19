@@ -12,8 +12,8 @@ A failed build leaves the night with no images; there is no fallback. A new
 serving image is pinned (:func:`pin`) only after a valid suite, so a broken
 vLLM nightly is retried the next night. State lives in
 ``<host.root>/prt-images/``: ``pinned.json`` and the pinned image saved as a
-tar, because other jobs on the host may ``docker system prune`` and a load
-(a few minutes) is far cheaper than a serving build (about 27 min).
+tar, because other jobs on the host may ``docker system prune``; loading it
+needs neither Docker Hub nor a rebuild, and restores the very image pinned.
 """
 
 # Standard

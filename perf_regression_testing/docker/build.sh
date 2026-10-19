@@ -4,22 +4,21 @@
 #   build.sh lmcache <LMCache dir> <serving> -> prt-lmcache:<lmcache sha9>-v<vllm sha9>
 #   build.sh mooncake <serving>              -> prt-mooncake:<mooncake sha9>-v<vllm sha9>
 #   build.sh aiperf                          -> prt-aiperf:0.13.0
-# serving: the current vLLM nightly unless VLLM_COMMIT (full sha) is set.
+# serving: the newest vLLM nightly image unless VLLM_COMMIT (full sha) is set;
+#   that commit needs a vllm/vllm-openai:nightly-<sha> image (about one a day).
 # lmcache: <LMCache dir> must be a clean checkout at the commit under test.
 # mooncake: the newest nightly.yml wheel (needs `gh` logged in).
 # Prints the tag last.
 set -euo pipefail
 D=$(cd "$(dirname "$0")" && pwd)
 
-# Nightly wheel name carries "+g<sha9>"; the per-commit index needs the full sha.
+# Newest vllm/vllm-openai:nightly-<full sha> tag on Docker Hub.
 resolve_nightly() {
-  local short
-  short=$(curl -fsS https://wheels.vllm.ai/nightly/cu130/vllm/ \
-    | grep -oE 'vllm-[^"<>]*\+g[0-9a-f]+-[^"<>]*x86_64\.whl' | head -1 \
-    | sed -E 's/.*\+g([0-9a-f]+)-.*/\1/')
-  [ -n "$short" ] || { echo "cannot resolve vLLM nightly" >&2; exit 1; }
-  curl -fsS "https://api.github.com/repos/vllm-project/vllm/commits/$short" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])'
+  curl -fsS "https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags?page_size=100&ordering=last_updated&name=nightly-" \
+    | python3 -c 'import json, re, sys
+tags = [t["name"] for t in json.load(sys.stdin)["results"]]
+print(next(t[8:] for t in tags if re.fullmatch("nightly-[0-9a-f]{40}", t)))' \
+    || { echo "cannot resolve vLLM nightly" >&2; exit 1; }
 }
 
 # Newest nightly.yml run with the wheel artifact: "<run id> <commit> <created>".
@@ -50,7 +49,13 @@ case "${1:-}" in
     VLLM_COMMIT=${VLLM_COMMIT:-$(resolve_nightly)}
     [[ $VLLM_COMMIT =~ ^[0-9a-f]{40}$ ]] || { echo "bad VLLM_COMMIT $VLLM_COMMIT" >&2; exit 1; }
     TAG=prt-serving:${VLLM_COMMIT:0:9}
-    docker build --target serving --build-arg "VLLM_COMMIT=$VLLM_COMMIT" -t "$TAG" "$D"
+    BASE=vllm/vllm-openai:nightly-$VLLM_COMMIT
+    pulled=$(docker image inspect "$BASE" >/dev/null 2>&1 || echo yes)
+    docker build --target serving --build-arg "VLLM_COMMIT=$VLLM_COMMIT" \
+      --build-arg "VLLM_IMAGE=$BASE" -t "$TAG" "$D"
+    # Untag a base we pulled: prt-serving holds its layers, and prune() then
+    # frees them with the old serving image instead of leaking one a week.
+    [ -z "$pulled" ] || docker rmi "$BASE" >/dev/null
     ;;
   lmcache)
     USAGE="usage: build.sh lmcache <LMCache dir> <serving image>"
