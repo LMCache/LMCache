@@ -235,9 +235,9 @@ fully succeed.
 divided by `world_size` at the emit site.  It is absolute: when the lookup
 key's `start` skips an engine-covered prefix (see
 [apc_covered_lookup.md](../multiprocess/modules/apc_covered_lookup.md)), it
-includes the skipped chunks, because that is the hit the engine resolves.  The token fields below do not.  `requested_tokens` and
-`hit_tokens` are denormalized token-level counts so subscribers need not
-know `chunk_size`:
+includes the skipped chunks, because that is the hit the engine resolves.
+The token fields below do not.  `requested_tokens` and `hit_tokens` are
+denormalized token-level counts so subscribers need not know `chunk_size`:
 
 - `requested_tokens = len(chunk_hashes) * chunk_size - apc_covered_tokens`
   on the happy path; `0` on the two early-exit paths in `lookup()` (no

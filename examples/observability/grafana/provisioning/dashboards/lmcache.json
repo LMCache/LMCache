@@ -1407,6 +1407,12 @@
         },
         {
           "editorMode": "code",
+          "expr": "rate(lmcache_mp_lookup_apc_covered_tokens_total[$__rate_interval])",
+          "legendFormat": "engine-covered tokens/s [{{service_instance_id}}]",
+          "refId": "D"
+        },
+        {
+          "editorMode": "code",
           "expr": "rate(lmcache_mp_num_chunks_loaded_total[$__rate_interval])",
           "legendFormat": "chunks loaded/s [{{service_instance_id}}]",
           "refId": "C"
