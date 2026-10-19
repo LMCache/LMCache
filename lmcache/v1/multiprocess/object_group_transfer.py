@@ -48,7 +48,8 @@ _HAS_TRANSFER_PHASE_TIMING: bool = hasattr(device_ops, "pop_completed_phase_timi
 # Whether the copy engine can run the direct transfer at all: the compiled
 # extension exports ``execute_direct_copy_transfer`` (built against CUDA >=
 # 12.8 or HIP >= 7.15) and ``cudaMemcpyBatchAsync`` / ``hipMemcpyBatchAsync``
-# is usable on this runtime and driver (on ROCm, only when opted in via
+# is usable on this runtime and driver, with the registered host pool
+# device-addressable (on ROCm, only when opted in via
 # ``LMCACHE_ROCM_ENABLE_BATCH_MEMCPY``). Resolved once -- ``device_ops`` is
 # native-bound during ``import lmcache``, before this module is imported.
 # ``batch_memcpy_supported`` and ``direct_copy_format_supported`` are
