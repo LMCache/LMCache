@@ -13,15 +13,10 @@ tokens requested by a lookup that were served from the L1 or L2 caches
 ``lookup_hit_l1`` / ``lookup_hit_l2`` split ``lookup_hit`` by tier
 (``l1 + l2 == hit`` per event); ``lookups`` counts completed lookups and
 ``lookup_early_exit`` those that short-circuited before a cache probe,
-labeled by ``reason``.  The prefix the engine's own prefix cache already
-held is skipped by the lookup and kept out of both sides of that ratio.
-
-The request-level pair ``lookup_prompt`` / ``lookup_request_hit`` widens the
-view to the whole prompt: what fraction of each request's prompt was served
-by the engine's prefix cache plus LMCache together:
-
-    rate(lmcache_mp_lookup_request_hit_tokens_total[5m])
-    / rate(lmcache_mp_lookup_prompt_tokens_total[5m])
+labeled by ``reason``.  Both sides of the ratio exclude the prefix the
+engine's own prefix cache already held.  ``lookup_prompt`` /
+``lookup_request_hit`` give the same ratio over the whole prompt, counting
+the engine's prefix cache and LMCache together.
 
 All counters carry ``model_name`` and ``cache_salt`` attributes so they can
 be sliced per model and per tenant / isolation domain on the dashboard.
