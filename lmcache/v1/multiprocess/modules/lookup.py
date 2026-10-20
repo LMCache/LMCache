@@ -99,24 +99,19 @@ class _PrefetchJob:
     # prefetch was submitted.
     row_windows: tuple[int, ...]
     request_id: str
-    # Number of tokens submitted for lookup (denominator for the L1+L2
-    # token-level hit-rate metric).  Equals ``len(chunk_hashes) * chunk_size``
-    # minus the engine-covered prefix on the happy path; 0 on the early-exit
-    # paths (see ``early_exit_reason``).  Consumed at ``MP_LOOKUP_PREFETCH_END``
-    # emission time in ``query_prefetch_status``.
+    # Chunk-aligned tokens LMCache was asked to look up, past the engine-covered
+    # prefix (hit-rate denominator); 0 on early exits.
     requested_tokens: int
     num_object_groups: int = 1
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     # First chunk of the looked-up range (``key.start``); chunks below it are
     # engine-covered and skipped, so the status offsets hits back to absolute.
     start_chunk: int = 0
-    # Engine-held chunks below ``key.start``; excluded from the hit-rate
-    # counters, reported as ``apc_covered_tokens``.  Equals ``start_chunk``
-    # except on a declined lookup, which offsets no hits.
+    # Engine-held chunks below ``key.start``, reported as ``apc_covered_tokens``;
+    # equals ``start_chunk`` except on a declined lookup, which offsets no hits.
     engine_covered_chunks: int = 0
-    # Request-level view, reported on every path: the whole prompt (sub-chunk
-    # tail included) and the engine's own prefix-cache hit from the
-    # ``lmcache.hint.engine_computed_tokens`` request config (0 without it).
+    # Request-level view on every path: the whole prompt and the engine's own
+    # prefix-cache hit from the ``engine_computed_tokens`` hint (0 without it).
     prompt_tokens: int = 0
     engine_hit_tokens: int = 0
     # Captured at lookup time so the ``MP_LOOKUP_PREFETCH_END`` event can
@@ -734,10 +729,8 @@ class LookupModule(DiscoverableModule):
         chunk_size = self._ctx.chunk_size
         covered_tokens = job.engine_covered_chunks * chunk_size
         hit_tokens = (l1_chunks + l2_chunks) * chunk_size
-        # Prefix of the prompt served by either cache.  Both ranges start at
-        # token 0 and the lookup starts at or below the engine hit, so the
-        # longer one is the union; summing would double count the sub-chunk
-        # gap between the raw engine hit and the aligned lookup start.
+        # Prefix served by either cache: both ranges start at 0 and overlap in
+        # the sub-chunk gap below the lookup start, so take the longer, not the sum.
         request_hit_tokens = max(job.engine_hit_tokens, covered_tokens + hit_tokens)
         self._ctx.event_bus.publish(
             Event(
