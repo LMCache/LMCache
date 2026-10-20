@@ -10,7 +10,8 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.musa_connectors import (
+from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.v1.gpu_connector.musa_connectors import (
     VLLMPagedMemLayerwiseMUSAConnector,
     VLLMPagedMemMUSAConnectorV2,
 )
@@ -30,7 +31,7 @@ pytestmark = pytest.mark.musa
 
 
 def _skip_if_no_musa() -> None:
-    if not hasattr(torch, "musa") or not torch.musa.is_available():
+    if torch_device_type != "musa" or not torch_dev.is_available():
         pytest.skip("torch.musa is not available")
 
 
@@ -302,7 +303,7 @@ def test_musa_connector_to_gpu_uses_native_when_available(
         return True
 
     monkeypatch.setattr(
-        "lmcache.v1.gpu_connector.musa_connectors.try_native_to_gpu",
+        "lmcache.inprocess.v1.gpu_connector.musa_connectors.try_native_to_gpu",
         _native_to_gpu,
     )
 
@@ -359,7 +360,7 @@ def test_musa_connector_to_gpu_falls_back_when_native_declines(
         head_size=head_size,
     )
     monkeypatch.setattr(
-        "lmcache.v1.gpu_connector.musa_connectors.try_native_to_gpu",
+        "lmcache.inprocess.v1.gpu_connector.musa_connectors.try_native_to_gpu",
         lambda **_kwargs: False,
     )
 
@@ -444,7 +445,7 @@ def test_musa_connector_from_gpu_uses_native_when_available(
         return True
 
     monkeypatch.setattr(
-        "lmcache.v1.gpu_connector.musa_connectors.try_native_from_gpu",
+        "lmcache.inprocess.v1.gpu_connector.musa_connectors.try_native_from_gpu",
         _native_from_gpu,
     )
 

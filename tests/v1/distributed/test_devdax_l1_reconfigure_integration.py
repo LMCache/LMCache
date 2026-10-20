@@ -26,6 +26,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.utils import get_dax_device_geometry
 from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -82,10 +83,10 @@ class _DeviceProvider:
             self._real_index += 1
             fd = os.open(path, os.O_RDWR)
             try:
-                capacity = os.fstat(fd).st_size
+                capacity = get_dax_device_geometry(fd).capacity
             finally:
                 os.close(fd)
-            if capacity and capacity < size_in_bytes:
+            if capacity < size_in_bytes:
                 pytest.skip(
                     f"device {path} capacity {capacity} < required {size_in_bytes}"
                 )

@@ -456,6 +456,43 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertEqual(tuple(wire.shape), (5, 1, 1, 6))
         self.assertEqual(wire.data_ptr(), tensor.data_ptr())
 
+    def test_adapter_accepts_kimi_conv_state_slice_axis_one(self) -> None:
+        try:
+            # Third Party
+            from sglang.srt.mem_cache.unified_cache.components import ComponentType
+
+            # First Party
+            from lmcache.integration.sglang.unified_kv_adapter import (
+                SGLangUnifiedKVAdapter,
+            )
+        except ImportError as exc:
+            self.skipTest(f"SGLang is not installed: {exc}")
+
+        full_tensor = torch.empty(8, 1, 4)
+        conv_tensor = torch.arange(5 * 3 * 7).reshape(5, 3, 7)
+        kv_pool = SimpleNamespace(kv_buffer=[full_tensor])
+        mamba_pool = SimpleNamespace(
+            _unified_buffer=None,
+            _sub_pool_name=None,
+            _iter_transfer_state_entries=lambda: iter([("conv", conv_tensor, 1, 0)]),
+        )
+        adapter = SGLangUnifiedKVAdapter(
+            token_to_kv_pool_allocator=SimpleNamespace(get_kvcache=lambda: kv_pool),
+            req_to_token_pool=SimpleNamespace(mamba_pool=mamba_pool),
+            tree_components=(ComponentType.FULL, ComponentType.MAMBA),
+            mamba_component=SimpleNamespace(mamba_checkpoint_grid=4),
+            page_size=4,
+            sliding_window_size=None,
+        )
+
+        groups = adapter.resolve_registered_groups()
+
+        self.assertEqual([group.name for group in groups], ["full", "mamba"])
+        mamba_tensor = groups[1].kv_tensors[0]
+        self.assertEqual(tuple(mamba_tensor.shape), (5, 1, 21))
+        self.assertEqual(mamba_tensor.data_ptr(), conv_tensor.data_ptr())
+        self.assertTrue(groups[1].recurrent_state)
+
     def test_group_info_specs_preserve_component_address_spaces(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
         connector.page_size = 4

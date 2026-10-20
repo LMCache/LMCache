@@ -1354,7 +1354,9 @@ Runtime L1 Reconfiguration (Device-DAX)
 
 These routes manage the Device-DAX L1 arena pool configured with
 ``--l1-devdax-path``. Devices must already be provisioned, and requests do not
-use ``adapter_index``.
+use ``adapter_index``. Every arena maps ``[offset, offset + size)`` of its
+device; the same device may be added more than once with disjoint ranges, and
+independent servers can share one device the same way.
 
 ``GET /reconfigure/dax/l1/status``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1372,7 +1374,8 @@ use ``adapter_index``.
           "free_bytes": 12884901888,
           "active_allocations": 2048,
           "state": "active",
-          "is_primary": false
+          "is_primary": false,
+          "offset_in_bytes": 0
         }
       ]
     }
@@ -1380,8 +1383,10 @@ use ``adapter_index``.
 ``POST /reconfigure/dax/l1/add``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Request body:** ``device_path`` (string) and ``size`` (integer byte count or a
-string such as ``"16GiB"``).
+**Request body:** ``device_path`` (string), ``size`` (integer byte count or a
+string such as ``"16GiB"``), and optional ``offset`` (non-negative byte count
+or size string, default ``0``): where in the device the mapping starts. A
+range that overlaps one this pool already maps is rejected with ``409``.
 
 **Response** (``200 OK``): ``{"added": <arena>}``.
 
@@ -1391,7 +1396,7 @@ string such as ``"16GiB"``).
 
     curl -s -X POST http://localhost:8080/reconfigure/dax/l1/add \
         -H 'Content-Type: application/json' \
-        -d '{"device_path": "/dev/dax1.2", "size": "16GiB"}'
+        -d '{"device_path": "/dev/dax1.2", "size": "16GiB", "offset": "512GiB"}'
 
 ``POST /reconfigure/dax/l1/remove``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1399,10 +1404,13 @@ string such as ``"16GiB"``).
 Only drain mode is supported. A draining arena accepts no new allocations and
 is unmapped after its live allocations are freed. The primary arena cannot be
 removed.
-Use the exact device path supplied when adding the arena.
+``device_path`` and ``offset`` together identify the arena; pass the exact
+values used when adding it. ``offset`` defaults to ``0``, so omitting it
+addresses the arena at the start of the device.
 
-**Request body:** ``device_path`` (string) and optional ``mode`` (``drain``;
-default ``drain``).
+**Request body:** ``device_path`` (string), optional ``mode`` (``drain``;
+default ``drain``), and optional ``offset`` (byte count or size string,
+default ``0``).
 
 **Response** (``200 OK``):
 
