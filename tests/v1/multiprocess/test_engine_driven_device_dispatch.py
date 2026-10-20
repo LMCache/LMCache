@@ -110,7 +110,10 @@ def test_cpu_and_cuda_kv_can_share_one_process(
         _assert_roundtrip(device, torch.float16, output_kind)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
+@pytest.mark.skipif(
+    lmcache.torch_device_type != "cuda" or not lmcache.torch_dev.is_available(),
+    reason="requires a CUDA device",
+)
 def test_cuda_kv_roundtrips_through_registered_host_memory() -> None:
     """Gather/scatter must work on slot views of a ``pin_memory``-registered
     pool, as used by ``EngineDrivenContextShm``."""
@@ -144,7 +147,7 @@ def test_cuda_kv_roundtrips_through_registered_host_memory() -> None:
         chunks = gather_paged_kv_to_cpu(
             source, [1, 3], 2, layout_hints={"kv_layout": "NHD"}, out=[slot]
         )
-        torch.cuda.synchronize()
+        lmcache.torch_dev.synchronize()
         assert chunks[0] is slot
         assert torch.equal(slot, expected)
 
@@ -152,7 +155,7 @@ def test_cuda_kv_roundtrips_through_registered_host_memory() -> None:
         scatter_cpu_to_paged_kv(
             destination, [2, 4], [slot], 2, layout_hints={"kv_layout": "NHD"}
         )
-        torch.cuda.synchronize()
+        lmcache.torch_dev.synchronize()
         for name, tensor in destination.items():
             assert torch.equal(tensor[:, [2, 4]], source[name][:, [1, 3]])
             assert torch.count_nonzero(tensor[:, [0, 1, 3, 5]]).item() == 0
