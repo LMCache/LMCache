@@ -133,15 +133,12 @@ class _PrefetchJob:
     # First chunk of the looked-up range (``key.start``); chunks below it are
     # engine-covered and skipped, so the status offsets hits back to absolute.
     start_chunk: int = 0
-    # Chunks below ``key.start`` the engine already holds.  Kept out of the
-    # hit-rate counters and reported as ``apc_covered_tokens`` instead; equals
-    # ``start_chunk`` except on a declined lookup, which offsets no hits.
+    # Engine-held chunks below ``key.start``; excluded from the hit-rate
+    # counters, reported as ``apc_covered_tokens``.  Equals ``start_chunk``
+    # except on a declined lookup, which offsets no hits.
     engine_covered_chunks: int = 0
-    # Request-level facts, reported on every path (early exits included) so
-    # the request-level hit rate has the full prompt as its denominator.
-    # ``prompt_tokens`` is the whole prompt, sub-chunk tail included;
-    # ``engine_hit_tokens`` is the engine's own prefix-cache hit (see
-    # ``_engine_hit_tokens``).
+    # Request-level view, reported on every path: the whole prompt (sub-chunk
+    # tail included) and the engine's own prefix-cache hit.
     prompt_tokens: int = 0
     engine_hit_tokens: int = 0
     # Captured at lookup time so the ``MP_LOOKUP_PREFETCH_END`` event can
