@@ -1282,7 +1282,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ValueError: If a kernel group has no block for the unfull chunk.
         """
         manager = cache_context.kv_layer_groups_manager
-        block_ids_gpu = trim_and_stage_unfull_chunk_block_ids(cache_context, block_ids)
+        block_ids_gpu, skip_blocks = trim_and_stage_unfull_chunk_block_ids(
+            cache_context, block_ids
+        )
         null_groups = all_null_chunk_masks(
             block_ids,
             manager.object_groups,
@@ -1311,6 +1313,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             transfer_unfull_chunk(
                 cache_context,
                 block_ids_gpu,
+                skip_blocks,
                 memory_obj,
                 obj_group_id,
                 lmcache_native.TransferDirection.D2H,
@@ -1345,7 +1348,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ValueError: If an object is missing or a kernel group has no block
                 for the unfull chunk.
         """
-        block_ids_gpu = trim_and_stage_unfull_chunk_block_ids(cache_context, block_ids)
+        block_ids_gpu, skip_blocks = trim_and_stage_unfull_chunk_block_ids(
+            cache_context, block_ids
+        )
         found_keys, memory_objs = self._ctx.storage_manager.unsafe_read(
             obj_keys, l1_owners=self._ctx.get_read_owners(key.request_id)
         )
@@ -1357,6 +1362,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             transfer_unfull_chunk(
                 cache_context,
                 block_ids_gpu,
+                skip_blocks,
                 memory_obj,
                 obj_group_id,
                 lmcache_native.TransferDirection.H2D,

@@ -778,28 +778,34 @@ def transfer_kv_per_object_group(
 def trim_and_stage_unfull_chunk_block_ids(
     cache_context: BaseCacheContext,
     block_ids: list[list[int]],
-) -> list[torch.Tensor]:
-    """Trim an unfull chunk's block id lists and stage them into GPU tensors.
+) -> tuple[list[torch.Tensor], list[int]]:
+    """Fit an unfull chunk's block id lists to the chunk layout and stage them.
 
     An unfull chunk covers fewer tokens than a chunk, so each kernel group
     passes only the blocks of its own token range. Each list is cut to its
     last ``min(len, keep)`` blocks, where ``keep`` is the group's per-chunk
     window in blocks (every block for full attention, the last window for a
-    sliding window, one block for recurrent state). Store and retrieve trim
-    alike, so block ``i`` maps to the same object offset on both sides.
+    sliding window, one block for recurrent state). The copy kernel requires
+    exactly ``keep`` blocks per object, so a shorter list is right-aligned:
+    padded at the front with its first block id, and the padding is skipped
+    (``skip_prefix_n_blocks``), never read or written. The real blocks land
+    in the last object slots; store and retrieve fit alike, so block ``i``
+    maps to the same object offset on both sides.
 
     Args:
         cache_context: The cache context containing the KV cache information.
         block_ids: One block id list per kernel group, covering only the
-            unfull chunk. Trimmed in place.
+            unfull chunk. Fitted in place.
 
     Returns:
-        The trimmed block id lists, staged on GPU and indexed by kernel group.
+        The fitted block id lists staged on GPU, and the number of leading
+        padding blocks to skip, both indexed by kernel group.
 
     Raises:
         ValueError: If a kernel group has no block id.
     """
     kv_groups_manager = cache_context.kv_layer_groups_manager
+    skip_blocks: list[int] = []
     for kernel_group_id in range(kv_groups_manager.num_kernel_groups):
         if not block_ids[kernel_group_id]:
             raise ValueError(f"unfull chunk has no block for group {kernel_group_id}")
@@ -808,27 +814,31 @@ def trim_and_stage_unfull_chunk_block_ids(
             kv_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
         )
         keep = cache_context.calculate_num_blocks(tokens_per_window, kernel_group_id)
-        block_ids[kernel_group_id] = block_ids[kernel_group_id][-keep:]
-    return cache_context.stage_block_ids(block_ids)
+        kept = block_ids[kernel_group_id][-keep:]
+        padding = keep - len(kept)
+        block_ids[kernel_group_id] = kept[:1] * padding + kept
+        skip_blocks.append(padding)
+    return cache_context.stage_block_ids(block_ids), skip_blocks
 
 
 def transfer_unfull_chunk(
     cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
+    skip_blocks: list[int],
     memory_obj: MemoryObj,
     object_group_id: int,
     direction: "lmcache_native.TransferDirection",
 ) -> None:
     """Copy one object group's unfull-chunk object to or from the GPU.
 
-    Unlike :func:`transfer_kv_per_object_group`, each kernel group copies
-    exactly the blocks in ``block_ids_gpu`` (one object, so block ``i`` lands
-    at object offset ``i``) rather than a full chunk's worth. Always uses the
-    staging kernel path.
+    Unlike :func:`transfer_kv_per_object_group`, each kernel group copies only
+    the real blocks of the unfull chunk: the leading ``skip_blocks`` padding
+    of each list is skipped. Always uses the staging kernel path.
 
     Args:
         cache_context: The GPU cache context containing the KV cache information.
         block_ids_gpu: Block ids from :func:`trim_and_stage_unfull_chunk_block_ids`.
+        skip_blocks: Leading padding blocks per kernel group, from the same call.
         memory_obj: The unfull chunk's object for this object group.
         object_group_id: Index of the object group being copied.
         direction: H2D (retrieve) or D2H (store).
@@ -850,7 +860,7 @@ def transfer_unfull_chunk(
             cache_context.get_shape_desc(kernel_group_id),
             cache_context.get_slots_per_chunk_in_sw(kernel_group_id),
             cache_context.get_engine_kv_format(kernel_group_id),
-            0,
+            skip_blocks[kernel_group_id],
         )
     if not is_h2d:
         lmcache_memcpy_async_d2h(object_buffer, memory_obj)

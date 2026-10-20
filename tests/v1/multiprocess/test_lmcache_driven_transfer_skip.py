@@ -450,12 +450,12 @@ def _make_unfull_store_module(monkeypatch, obj_keys):
         return {key: MagicMock(get_size=MagicMock(return_value=10)) for key in keys}
 
     module.context.storage_manager.reserve_write.side_effect = reserve_write
-    unfull_transfers: list[tuple[int, list]] = []
+    unfull_transfers: list[tuple[int, list, list]] = []
     monkeypatch.setattr(
         mod,
         "transfer_unfull_chunk",
-        lambda cc, block_ids, memory_obj, group, direction: unfull_transfers.append(
-            (group, list(block_ids))
+        lambda cc, block_ids, skips, memory_obj, group, direction: (
+            unfull_transfers.append((group, list(block_ids), list(skips)))
         ),
     )
     return module, reserved, unfull_transfers
@@ -475,7 +475,9 @@ def test_store_of_only_an_unfull_chunk_reserves_temporary_objects(monkeypatch):
 
     assert ok and mask == [True]
     assert reserved[-2:] == [(["g0u"], True), (["g1u"], True)]
-    assert unfull_transfers == [(0, [[5], [6], [7]]), (1, [[5], [6], [7]])]
+    # Each list is right-aligned to the 2-block window; the padding is skipped.
+    fitted = ([[5, 5], [6, 6], [7, 7]], [1, 1, 1])
+    assert unfull_transfers == [(0, *fitted), (1, *fitted)]
 
 
 def test_store_appends_the_unfull_chunk_after_full_chunks(monkeypatch):
@@ -493,8 +495,8 @@ def test_store_appends_the_unfull_chunk_after_full_chunks(monkeypatch):
 
     assert ok and mask == [True, True]
     assert (["g0c0"], False) in reserved and (["g0u"], False) in reserved
-    assert [group for group, _ in unfull_transfers] == [0, 1]
-    assert unfull_transfers[0][1] == [[5], [6], [7]]
+    assert [group for group, _, _ in unfull_transfers] == [0, 1]
+    assert unfull_transfers[0][1:] == ([[5, 5], [6, 6], [7, 7]], [1, 1, 1])
 
 
 def test_retrieve_of_only_an_unfull_chunk_skips_aux_groups(monkeypatch):
@@ -505,13 +507,15 @@ def test_retrieve_of_only_an_unfull_chunk_skips_aux_groups(monkeypatch):
         group_kinds=("recurrent", "attention", "aux"),
     )
     module.context.resolve_obj_keys.return_value = [["g0u"], ["g1u"], ["g2u"]]
-    monkeypatch.setattr(mod, "trim_and_stage_unfull_chunk_block_ids", lambda cc, b: b)
+    monkeypatch.setattr(
+        mod, "trim_and_stage_unfull_chunk_block_ids", lambda cc, b: (b, [0] * len(b))
+    )
     unfull_transfers: list[int] = []
     monkeypatch.setattr(
         mod,
         "transfer_unfull_chunk",
-        lambda cc, block_ids, memory_obj, group, direction: unfull_transfers.append(
-            group
+        lambda cc, block_ids, skips, memory_obj, group, direction: (
+            unfull_transfers.append(group)
         ),
     )
 
