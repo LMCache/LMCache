@@ -39,7 +39,9 @@ import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
-    pass
+    from lmcache.v1.multiprocess.transfer_context.group_layout import (
+        EngineDrivenGroupLayout,
+    )
 
 logger = init_logger(__name__)
 
@@ -77,13 +79,34 @@ class EngineDrivenContextMetadata:
 
     Attributes:
         layout_desc: Memory layout descriptor used to interpret chunk payloads.
+            For a multi-group registration, the layout of object group 0.
         block_size: Number of tokens per paged block.
         use_mla: Whether the worker KV format is MLA.
+        group_layout: Object groups of a multi-group registration, whose
+            objects travel as flat ``uint8`` buffers; ``None`` for the
+            single-group protocol, whose chunks travel as ``layout_desc``
+            tensors.
     """
 
     layout_desc: MemoryLayoutDesc
     block_size: int
     use_mla: bool
+    group_layout: EngineDrivenGroupLayout | None = None
+
+
+@dataclass(frozen=True)
+class GroupChunk:
+    """One memory object moved by a multi-group engine-driven transfer.
+
+    Attributes:
+        object_group_id: Object group of the object.
+        chunk_index: Chunk position within the request range.
+        buffer: Flat ``uint8`` buffer holding exactly one object.
+    """
+
+    object_group_id: int
+    chunk_index: int
+    buffer: torch.Tensor
 
 
 class EngineDrivenContext(ABC):
@@ -162,6 +185,42 @@ class EngineDrivenContext(ABC):
     @abstractmethod
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
         """Commit retrieve. Inline: no-op. Shm: release read locks."""
+        ...
+
+    @abstractmethod
+    def prepare_group_store(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> list[GroupChunk] | None:
+        """Prepare a multi-group store.
+
+        Returns:
+            None: inline mode. The caller gathers every transferred object
+                and sends them through ``commit_store``, group by group in
+                chunk order.
+            list: SHM mode. One writable SHM buffer per object still missing
+                from the cache (possibly none); the caller fills them and
+                calls ``commit_store`` with an empty chunk list.
+        """
+        ...
+
+    @abstractmethod
+    def prepare_group_retrieve(
+        self, key: IPCCacheServerKey, instance_id: int, object_nbytes: list[int]
+    ) -> list[torch.Tensor] | None:
+        """Prepare a multi-group retrieve of exactly ``len(object_nbytes)`` objects.
+
+        Args:
+            key: Cache key to retrieve.
+            instance_id: Worker instance identifier.
+            object_nbytes: Byte size of each expected object, group by group in
+                chunk order.
+
+        Returns:
+            One flat ``uint8`` buffer per object on a hit, or ``None`` on a miss.
+
+        Raises:
+            ValueError: If the server returns objects of other sizes.
+        """
         ...
 
     @abstractmethod

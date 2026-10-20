@@ -19,6 +19,7 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
+    GroupChunk,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import current_device_spec
@@ -159,17 +160,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
     def prepare_store(
         self, key: IPCCacheServerKey, instance_id: int
     ) -> tuple[list[torch.Tensor], list[int]] | None:
-        future = self.req_client.prepare_store(key, instance_id)
-        # wait() first so a timeout raises exactly one LMCacheTimeoutError
-        # (one event); result() then returns without its own timeout.
-        if not future.wait(timeout=self.mq_timeout):
-            raise LMCacheTimeoutError(
-                f"PREPARE_STORE timed out for instance_id={instance_id} "
-                f"after {self.mq_timeout}s",
-                session_id=key.request_id,
-            )
-        response = future.result()
-        context = response.context if isinstance(response.context, dict) else {}
+        context = self._request_store_slots(key, instance_id)
         slots = context.get("slots")
         if not isinstance(slots, list):
             return None
@@ -226,6 +217,37 @@ class EngineDrivenContextShm(EngineDrivenContext):
         except TimeoutError:
             return False
 
+    def prepare_group_store(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> list[GroupChunk] | None:
+        context = self._request_store_slots(key, instance_id)
+        slots = context.get("slots")
+        if not isinstance(slots, list):
+            return None
+        return [
+            GroupChunk(object_group_id=gid, chunk_index=chunk, buffer=buffer)
+            for gid, chunk, buffer in zip(
+                context["object_group_ids"],
+                context["chunk_indices"],
+                self._build_slot_tensors(slots),
+                strict=True,
+            )
+        ]
+
+    def prepare_group_retrieve(
+        self, key: IPCCacheServerKey, instance_id: int, object_nbytes: list[int]
+    ) -> list[torch.Tensor] | None:
+        buffers = self.prepare_retrieve(key, instance_id, len(object_nbytes))
+        if buffers is None:
+            return None
+        for buffer, nbytes in zip(buffers, object_nbytes, strict=True):
+            if buffer.dtype != torch.uint8 or buffer.numel() != nbytes:
+                raise ValueError(
+                    "SHM retrieve object size mismatch: expected "
+                    f"{nbytes} uint8 bytes, got {buffer.numel()} {buffer.dtype}"
+                )
+        return buffers
+
     def close(self) -> None:
         if self._shm is None:
             return
@@ -235,6 +257,26 @@ class EngineDrivenContextShm(EngineDrivenContext):
         finally:
             self._shm = None
             self._shm_buffer = None
+
+    def _request_store_slots(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> dict[str, Any]:
+        """Send PREPARE_STORE and return the response context.
+
+        Raises:
+            LMCacheTimeoutError: If the server does not answer in time.
+        """
+        future = self.req_client.prepare_store(key, instance_id)
+        # wait() first so a timeout raises exactly one LMCacheTimeoutError
+        # (one event); result() then returns without its own timeout.
+        if not future.wait(timeout=self.mq_timeout):
+            raise LMCacheTimeoutError(
+                f"PREPARE_STORE timed out for instance_id={instance_id} "
+                f"after {self.mq_timeout}s",
+                session_id=key.request_id,
+            )
+        response = future.result()
+        return response.context if isinstance(response.context, dict) else {}
 
     def _pin_shm_buffer(self) -> None:
         """Pin the SHM buffer as page-locked host memory via cudaHostRegister.

@@ -4,6 +4,7 @@
 # Standard
 from _thread import LockType
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 import abc
 
@@ -12,7 +13,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     PrepareRetrieveResponse,
@@ -22,19 +23,63 @@ from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMet
 from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
 from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
     decode_tensors,
+    decode_tensors_by_layout,
     encode_tensors,
 )
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.distributed.storage_manager import StorageManager
+    from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class ObjectGroupKeys:
+    """Object keys of one object group that a request transfers.
+
+    Attributes:
+        object_group_id: Object group the keys belong to.
+        first_chunk: Chunk index of ``keys[0]`` within the request range.
+        keys: Keys of the transferred chunks, in chunk order.
+        layout_desc: Memory layout of one object of the group.
+    """
+
+    object_group_id: int
+    first_chunk: int
+    keys: list[ObjectKey]
+    layout_desc: MemoryLayoutDesc
+
+
+ResolveTransferGroups = Callable[[IPCCacheServerKey], list[ObjectGroupKeys]]
 
 
 def _dtype_to_name(dtype: torch.dtype) -> str:
     """Return a stable torch dtype name without module prefix."""
     return str(dtype).split(".")[-1]
+
+
+def _flat_keys(groups: list[ObjectGroupKeys]) -> list[ObjectKey]:
+    """Return the keys of all groups, group by group."""
+    return [obj_key for group in groups for obj_key in group.keys]
+
+
+def _object_view(
+    memory_obj: "MemoryObj", context: EngineDrivenContextMetadata
+) -> torch.Tensor | None:
+    """Return the tensor that carries ``memory_obj`` over the wire.
+
+    Multi-group objects concatenate regions of different shapes and dtypes,
+    so they travel as flat ``uint8`` buffers; single-group objects travel as
+    their typed chunk tensor.
+    """
+    if context.group_layout is None:
+        return memory_obj.tensor
+    raw = memory_obj.raw_tensor
+    if raw is None:
+        return None
+    return raw[: memory_obj.get_size()].view(torch.uint8)
 
 
 def create_transfer_strategy(
@@ -97,7 +142,7 @@ class TransferStrategy(abc.ABC):
         key: IPCCacheServerKey,
         instance_id: int,
         context: EngineDrivenContextMetadata,
-        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
+        resolve_transfer_groups: ResolveTransferGroups,
     ) -> PrepareStoreResponse:
         """Prepare destination resources for a store request.
 
@@ -105,7 +150,8 @@ class TransferStrategy(abc.ABC):
             key: Cache key identifying the requested token range.
             instance_id: Worker instance identifier.
             context: Non-GPU transfer metadata for the instance.
-            resolve_obj_keys: Callable that resolves object keys from ``key``.
+            resolve_transfer_groups: Callable that resolves the transferred
+                object keys of every object group from ``key``.
 
         Returns:
             Transport-specific store preparation response.
@@ -118,7 +164,7 @@ class TransferStrategy(abc.ABC):
         instance_id: int,
         cpu_data: bytes,
         context: EngineDrivenContextMetadata,
-        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
+        resolve_transfer_groups: ResolveTransferGroups,
     ) -> bool:
         """Finalize a store request.
 
@@ -127,7 +173,8 @@ class TransferStrategy(abc.ABC):
             instance_id: Worker instance identifier.
             cpu_data: Serialized payload from the worker.
             context: Non-GPU transfer metadata for the instance.
-            resolve_obj_keys: Callable that resolves object keys from ``key``.
+            resolve_transfer_groups: Callable that resolves the transferred
+                object keys of every object group from ``key``.
 
         Returns:
             ``True`` when the strategy successfully commits the store request.
@@ -138,14 +185,17 @@ class TransferStrategy(abc.ABC):
         self,
         key: IPCCacheServerKey,
         instance_id: int,
-        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
+        context: EngineDrivenContextMetadata,
+        resolve_transfer_groups: ResolveTransferGroups,
     ) -> PrepareRetrieveResponse:
         """Prepare source resources for a retrieve request.
 
         Args:
             key: Cache key identifying the requested token range.
             instance_id: Worker instance identifier.
-            resolve_obj_keys: Callable that resolves object keys from ``key``.
+            context: Non-GPU transfer metadata for the instance.
+            resolve_transfer_groups: Callable that resolves the transferred
+                object keys of every object group from ``key``.
 
         Returns:
             Transport-specific retrieve preparation response.
@@ -195,7 +245,7 @@ class InlineTransferStrategy(TransferStrategy):
         key: IPCCacheServerKey,
         instance_id: int,
         context: EngineDrivenContextMetadata,
-        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
+        resolve_transfer_groups: ResolveTransferGroups,
     ) -> PrepareStoreResponse:
         """Return empty store context for inline mode.
 
@@ -209,23 +259,22 @@ class InlineTransferStrategy(TransferStrategy):
         instance_id: int,
         cpu_data: bytes,
         context: EngineDrivenContextMetadata,
-        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
+        resolve_transfer_groups: ResolveTransferGroups,
     ) -> bool:
         """Deserialize and write validated inline chunks into reserved objects.
 
         Returns:
             ``True`` when every reserved object is written successfully.
         """
-        obj_keys = resolve_obj_keys(key)
-        chunks = decode_tensors(
-            cpu_data,
-            expected_shape=context.layout_desc.shapes[0],
-            expected_dtype=context.layout_desc.dtypes[0],
-            expected_count=len(obj_keys),
-        )
-        reserved_dict = self._storage_manager.reserve_write(
-            obj_keys, context.layout_desc
-        )
+        groups = resolve_transfer_groups(key)
+        obj_keys = _flat_keys(groups)
+        chunks = self._decode_chunks(cpu_data, groups, context)
+        reserved_dict: dict[ObjectKey, "MemoryObj"] = {}
+        for group in groups:
+            if group.keys:
+                reserved_dict.update(
+                    self._storage_manager.reserve_write(group.keys, group.layout_desc)
+                )
         written_keys: list[ObjectKey] = []
         try:
             for idx, obj_key in enumerate(obj_keys):
@@ -241,8 +290,8 @@ class InlineTransferStrategy(TransferStrategy):
                         len(chunks),
                     )
                     continue
-                memory_obj = reserved_dict[obj_key]
-                if memory_obj.tensor is None:
+                target = _object_view(reserved_dict[obj_key], context)
+                if target is None:
                     logger.error(
                         "Engine-driven inline store reserved an object without "
                         "a tensor (instance_id=%d, chunk_index=%d)",
@@ -251,7 +300,7 @@ class InlineTransferStrategy(TransferStrategy):
                     )
                     continue
                 chunk_cpu = chunks[idx]
-                if chunk_cpu.shape != memory_obj.tensor.shape:
+                if chunk_cpu.shape != target.shape:
                     logger.error(
                         "Engine-driven inline store chunk shape mismatch "
                         "(instance_id=%d, chunk_index=%d, chunk_shape=%s, "
@@ -259,10 +308,10 @@ class InlineTransferStrategy(TransferStrategy):
                         instance_id,
                         idx,
                         tuple(chunk_cpu.shape),
-                        tuple(memory_obj.tensor.shape),
+                        tuple(target.shape),
                     )
                     continue
-                memory_obj.tensor.copy_(chunk_cpu)
+                target.copy_(chunk_cpu)
                 written_keys.append(obj_key)
         finally:
             if written_keys:
@@ -289,10 +338,11 @@ class InlineTransferStrategy(TransferStrategy):
         self,
         key: IPCCacheServerKey,
         instance_id: int,
-        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
+        context: EngineDrivenContextMetadata,
+        resolve_transfer_groups: ResolveTransferGroups,
     ) -> PrepareRetrieveResponse:
         """Read prefetched objects and return a typed inline tensor payload."""
-        obj_keys = resolve_obj_keys(key)
+        obj_keys = _flat_keys(resolve_transfer_groups(key))
         prefetched_keys: list[ObjectKey] = []
         owners = (
             self._read_owner_resolver(key.request_id)
@@ -309,11 +359,12 @@ class InlineTransferStrategy(TransferStrategy):
                 prefetched_keys = obj_keys[: len(maybe_memory_objs)]
                 chunks = []
                 for memory_obj in maybe_memory_objs:
-                    if memory_obj.tensor is None:
+                    source = _object_view(memory_obj, context)
+                    if source is None:
                         return PrepareRetrieveResponse(
                             success=False, data=b"", context={}
                         )
-                    chunks.append(memory_obj.tensor.cpu().clone())
+                    chunks.append(source.cpu().clone())
                 return PrepareRetrieveResponse(
                     success=True, data=encode_tensors(chunks), context={}
                 )
@@ -330,6 +381,30 @@ class InlineTransferStrategy(TransferStrategy):
     ) -> bool:
         """No-op for inline mode; data was already copied during prepare."""
         return True
+
+    @staticmethod
+    def _decode_chunks(
+        cpu_data: bytes,
+        groups: list[ObjectGroupKeys],
+        context: EngineDrivenContextMetadata,
+    ) -> list[torch.Tensor]:
+        """Decode one inline chunk per transferred key, group by group."""
+        if context.group_layout is None:
+            return decode_tensors(
+                cpu_data,
+                expected_shape=context.layout_desc.shapes[0],
+                expected_dtype=context.layout_desc.dtypes[0],
+                expected_count=sum(len(group.keys) for group in groups),
+            )
+        object_groups = context.group_layout.object_groups
+        return decode_tensors_by_layout(
+            cpu_data,
+            [
+                (torch.Size([object_groups[group.object_group_id].nbytes]), torch.uint8)
+                for group in groups
+                for _ in group.keys
+            ],
+        )
 
 
 class ShmTransferStrategy(TransferStrategy):
@@ -375,33 +450,44 @@ class ShmTransferStrategy(TransferStrategy):
         key: IPCCacheServerKey,
         instance_id: int,
         context: EngineDrivenContextMetadata,
-        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
+        resolve_transfer_groups: ResolveTransferGroups,
     ) -> PrepareStoreResponse:
         """Reserve SHM-backed objects and return slot descriptors.
 
         Returns:
             Context with ``slots`` and ``chunk_indices``.
         """
-        obj_keys = resolve_obj_keys(key)
-        reserved = self._storage_manager.reserve_write(obj_keys, context.layout_desc)
+        groups = resolve_transfer_groups(key)
+        reserved: dict[ObjectKey, "MemoryObj"] = {}
         slots: list[dict[str, Any]] = []
         chunk_indices: list[int] = []
+        object_group_ids: list[int] = []
         reserved_keys: list[ObjectKey] = []
         try:
-            for idx, obj_key in enumerate(obj_keys):
-                memory_obj = reserved.get(obj_key)
-                if memory_obj is None or memory_obj.tensor is None:
+            for group in groups:
+                if not group.keys:
                     continue
-                slots.append(
-                    ShmSlotDescriptor(
-                        offset=memory_obj.shm_offset,
-                        length=memory_obj.shm_byte_length,
-                        shape=list(memory_obj.tensor.shape),
-                        dtype=_dtype_to_name(memory_obj.tensor.dtype),
-                    ).to_dict()
+                reserved.update(
+                    self._storage_manager.reserve_write(group.keys, group.layout_desc)
                 )
-                chunk_indices.append(idx)
-                reserved_keys.append(obj_key)
+                for idx, obj_key in enumerate(group.keys):
+                    memory_obj = reserved.get(obj_key)
+                    if memory_obj is None:
+                        continue
+                    view = _object_view(memory_obj, context)
+                    if view is None:
+                        continue
+                    slots.append(
+                        ShmSlotDescriptor(
+                            offset=memory_obj.shm_offset,
+                            length=memory_obj.shm_byte_length,
+                            shape=list(view.shape),
+                            dtype=_dtype_to_name(view.dtype),
+                        ).to_dict()
+                    )
+                    chunk_indices.append(group.first_chunk + idx)
+                    object_group_ids.append(group.object_group_id)
+                    reserved_keys.append(obj_key)
         finally:
             reserved_keys_set = set(reserved_keys)
             unused_keys = [
@@ -409,14 +495,18 @@ class ShmTransferStrategy(TransferStrategy):
             ]
             if unused_keys:
                 self._storage_manager.finish_write(unused_keys)
+        response_context: dict[str, Any] = {
+            "slots": slots,
+            "chunk_indices": chunk_indices,
+        }
+        if context.group_layout is not None:
+            response_context["object_group_ids"] = object_group_ids
         if not reserved_keys:
-            return PrepareStoreResponse(context={"slots": [], "chunk_indices": []})
+            return PrepareStoreResponse(context=response_context)
         transfer_key = self._transfer_key_factory(key, instance_id)
         with self._pending_lock:
             self._pending_writes[transfer_key] = reserved_keys
-        return PrepareStoreResponse(
-            context={"slots": slots, "chunk_indices": chunk_indices}
-        )
+        return PrepareStoreResponse(context=response_context)
 
     def commit_store(
         self,
@@ -424,7 +514,7 @@ class ShmTransferStrategy(TransferStrategy):
         instance_id: int,
         cpu_data: bytes,
         context: EngineDrivenContextMetadata,
-        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
+        resolve_transfer_groups: ResolveTransferGroups,
     ) -> bool:
         """Finalize SHM store write locks or use the safe inline fallback.
 
@@ -437,7 +527,7 @@ class ShmTransferStrategy(TransferStrategy):
                 instance_id=instance_id,
                 cpu_data=cpu_data,
                 context=context,
-                resolve_obj_keys=resolve_obj_keys,
+                resolve_transfer_groups=resolve_transfer_groups,
             )
         transfer_key = self._transfer_key_factory(key, instance_id)
         with self._pending_lock:
@@ -452,10 +542,11 @@ class ShmTransferStrategy(TransferStrategy):
         self,
         key: IPCCacheServerKey,
         instance_id: int,
-        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
+        context: EngineDrivenContextMetadata,
+        resolve_transfer_groups: ResolveTransferGroups,
     ) -> PrepareRetrieveResponse:
         """Read SHM objects and return slot descriptors for worker access."""
-        obj_keys = resolve_obj_keys(key)
+        obj_keys = _flat_keys(resolve_transfer_groups(key))
         shm_prefetched_keys, shm_memory_objs = self._storage_manager.unsafe_read(
             obj_keys
         )
@@ -469,15 +560,16 @@ class ShmTransferStrategy(TransferStrategy):
             return PrepareRetrieveResponse(success=False, data=b"", context={})
         slots: list[dict[str, Any]] = []
         for memory_obj in shm_memory_objs:
-            if memory_obj.tensor is None:
+            view = _object_view(memory_obj, context)
+            if view is None:
                 self._storage_manager.finish_read_prefetched(shm_prefetched_keys)
                 return PrepareRetrieveResponse(success=False, data=b"", context={})
             slots.append(
                 ShmSlotDescriptor(
                     offset=memory_obj.shm_offset,
                     length=memory_obj.shm_byte_length,
-                    shape=list(memory_obj.tensor.shape),
-                    dtype=_dtype_to_name(memory_obj.tensor.dtype),
+                    shape=list(view.shape),
+                    dtype=_dtype_to_name(view.dtype),
                 ).to_dict()
             )
         transfer_key = self._transfer_key_factory(key, instance_id)

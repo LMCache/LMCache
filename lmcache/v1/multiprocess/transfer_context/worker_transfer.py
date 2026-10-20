@@ -17,6 +17,7 @@ from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
 from lmcache.v1.multiprocess.custom_types import (
+    KVTensorSpec,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
@@ -25,10 +26,14 @@ from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
+    GroupChunk,
     compute_kv_layout,
     create_engine_driven_context,
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
+)
+from lmcache.v1.multiprocess.transfer_context.group_layout import (
+    EngineDrivenGroupLayout,
 )
 from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -765,6 +770,10 @@ class EngineDrivenTransferContext(TransferContext):
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None
         self._engine_type = EngineType.VLLM
+        # Set by a multi-group registration only.
+        self._group_layout: EngineDrivenGroupLayout | None = None
+        self._group_layer_names: list[list[str]] = []
+        self._null_block_id = 0
 
     @property
     def engine_driven_context(self) -> EngineDrivenContext:
@@ -793,19 +802,27 @@ class EngineDrivenTransferContext(TransferContext):
         """Register KV caches with the engine-driven context server.
 
         ``engine_type`` selects the KV layout normalization used during
-        registration and subsequent gather/scatter operations.
-        Engine-driven transfer currently supports exactly one physical KV
-        transfer group.
+        registration and subsequent gather/scatter operations. More than one
+        ``engine_group_infos`` entry registers every object group of a hybrid
+        model (see :mod:`~lmcache.v1.multiprocess.transfer_context.group_layout`);
+        otherwise one transfer group covers all KV tensors.
 
         Raises:
-            ValueError: If more than one physical KV transfer group is
-                registered.
+            RuntimeError: If a multi-group registration reaches a server
+                without multi-group support, or the two sides derive different
+                object groups.
         """
         if len(engine_group_infos) > 1:
-            raise ValueError(
-                "engine-driven transfer does not support multiple KV "
-                "transfer groups now"
+            self._register_groups(
+                kv_caches,
+                model_name,
+                world_size,
+                mq_timeout,
+                layout_hints,
+                engine_group_infos,
+                engine_type,
             )
+            return
         # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
         # the tensor-detected slot count, e.g. DeepSeek V4) is only handled
         # on the CUDA path. The non-CUDA path is yet to be implemented.
@@ -926,6 +943,9 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_store()."
             )
 
+        if self._group_layout is not None:
+            return self._submit_group_store(key, kv_caches, block_ids)
+
         device = _get_kv_device(kv_caches)
         synchronize_device(device)
         result = self._engine_driven_context.prepare_store(key, self._instance_id)
@@ -975,6 +995,11 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_retrieve()."
             )
 
+        if self._group_layout is not None:
+            return self._submit_group_retrieve(
+                key, kv_caches, block_ids, event, skip_first_n_tokens
+            )
+
         device = _get_kv_device(kv_caches)
         full_block_ids = _single_group_block_ids(block_ids)
         if len(full_block_ids) % blocks_in_chunk != 0:
@@ -1021,6 +1046,301 @@ class EngineDrivenTransferContext(TransferContext):
 
     def flush_inflight_stores(self) -> None:
         pass
+
+    def _register_groups(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        model_name: str,
+        world_size: int,
+        mq_timeout: float,
+        layout_hints: LayoutHints | None,
+        engine_group_infos: Sequence[EngineGroupInfo],
+        engine_type: EngineType,
+    ) -> None:
+        """Register every object group of a hybrid model.
+
+        The server rebuilds the object groups from the tensor specs; the worker
+        rebuilds them from its tensors with the server's flags, and both must
+        agree on the object group count.
+        """
+        self._layout_hints = layout_hints
+        self._engine_type = engine_type
+        tensors = list(kv_caches.values())
+        dtype_name = str(tensors[0].dtype).removeprefix("torch.")
+        future = self._submit_registration(
+            lambda: self._req_client.register_kv_cache_engine_driven_context(
+                RegisterEngineDrivenContextPayload(
+                    instance_id=self._instance_id,
+                    model_name=model_name,
+                    world_size=world_size,
+                    # The server derives the layout from kv_tensor_specs; the
+                    # scalar fields only feed its status report.
+                    block_size=0,
+                    num_layers=len(tensors),
+                    hidden_dim_size=0,
+                    dtype_str=dtype_name,
+                    use_mla=False,
+                    kv_tensor_specs=[
+                        KVTensorSpec(
+                            shape=tuple(tensor.shape),
+                            stride=tuple(tensor.stride()),
+                            dtype_str=str(tensor.dtype).removeprefix("torch."),
+                        )
+                        for tensor in tensors
+                    ],
+                    engine_group_infos=list(engine_group_infos),
+                    engine_type=engine_type,
+                    layout_hints=cast(LayoutHints, dict(layout_hints or {})),
+                )
+            )
+        )
+        response = future.result(timeout=mq_timeout)
+        if self._is_closed():
+            return
+        if (
+            not isinstance(response, RegisterEngineDrivenContextResponse)
+            or response.num_object_groups == 0
+        ):
+            raise RuntimeError(
+                "The LMCache server does not support multi-group engine-driven "
+                "transfer; upgrade the LMCache server"
+            )
+        group_layout = EngineDrivenGroupLayout(
+            tensors,
+            engine_group_infos,
+            engine_type,
+            layout_hints,
+            response.chunk_size,
+            separate_object_groups=response.separate_object_groups,
+            full_sw_kv=response.full_sw_kv,
+        )
+        if len(group_layout.object_groups) != response.num_object_groups:
+            raise RuntimeError(
+                f"Worker derived {len(group_layout.object_groups)} object groups "
+                f"but the server registered {response.num_object_groups}"
+            )
+        names = list(kv_caches.keys())
+        self._group_layer_names = [
+            [names[i] for i in group.layer_indices]
+            for group in group_layout.kernel_groups
+        ]
+        self._null_block_id = response.null_block_id
+        self._group_layout = group_layout
+        self._engine_driven_context = create_engine_driven_context(
+            EngineDrivenContextMetadata(
+                layout_desc=group_layout.object_groups[0].layout_desc,
+                block_size=0,
+                use_mla=False,
+                group_layout=group_layout,
+            ),
+            self._req_client,
+            mq_timeout,
+            shm_name=response.shm_name,
+            pool_size=response.pool_size,
+        )
+        logger.info(
+            "Worker engine-driven context registered (instance_id=%d, mode=%s, "
+            "object_groups=%d, windows=%s)",
+            self._instance_id,
+            "SHM" if response.shm_name and response.pool_size > 0 else "inline",
+            len(group_layout.object_groups),
+            group_layout.attn_desc.num_chunks_in_sw,
+        )
+
+    def _group_store_chunks(
+        self, block_ids: list[list[int]]
+    ) -> list[tuple[int, int]] | None:
+        """Return the ``(object group, chunk)`` pairs a store transfers.
+
+        Pairs are ordered group by group, then by chunk, which is the order
+        the server expects inline objects in.
+
+        Returns:
+            The pairs, or ``None`` if a transferred chunk only maps to the null
+            block: the server would otherwise persist absent data.
+        """
+        group_layout = cast(EngineDrivenGroupLayout, self._group_layout)
+        num_chunks = group_layout.num_chunks(block_ids)
+        pairs: list[tuple[int, int]] = []
+        for gid, object_group in enumerate(group_layout.object_groups):
+            for chunk in range(object_group.first_chunk(num_chunks), num_chunks):
+                if self._is_null_chunk(gid, chunk, block_ids):
+                    return None
+                pairs.append((gid, chunk))
+        return pairs
+
+    def _is_null_chunk(
+        self, object_group_idx: int, chunk: int, block_ids: list[list[int]]
+    ) -> bool:
+        """Return whether every transferred block of a chunk is the null block."""
+        group_layout = cast(EngineDrivenGroupLayout, self._group_layout)
+        for k in group_layout.object_groups[object_group_idx].kernel_group_indices:
+            group = group_layout.kernel_groups[k]
+            end = (chunk + 1) * group.blocks_per_chunk
+            if any(
+                block != self._null_block_id
+                for block in block_ids[k][end - group.blocks_per_window : end]
+            ):
+                return False
+        return True
+
+    def _group_kv_caches(
+        self, kv_caches: dict[str, torch.Tensor], kernel_group_idx: int
+    ) -> dict[str, torch.Tensor]:
+        """Return the KV tensors of one kernel group."""
+        return {
+            name: kv_caches[name] for name in self._group_layer_names[kernel_group_idx]
+        }
+
+    def _gather_group_chunks(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        block_ids: list[list[int]],
+        chunks: list[GroupChunk],
+    ) -> None:
+        """Enqueue device-to-host copies of every kernel group into ``chunks``.
+
+        The copies may still be in flight on return; the caller synchronizes.
+        """
+        group_layout = cast(EngineDrivenGroupLayout, self._group_layout)
+        regions = [
+            group_layout.region_views(chunk.object_group_id, chunk.buffer)
+            for chunk in chunks
+        ]
+        for gid, object_group in enumerate(group_layout.object_groups):
+            members = [
+                (chunk, region)
+                for chunk, region in zip(chunks, regions, strict=True)
+                if chunk.object_group_id == gid
+            ]
+            if not members:
+                continue
+            for pos, k in enumerate(object_group.kernel_group_indices):
+                group = group_layout.kernel_groups[k]
+                gather_paged_kv_to_cpu(
+                    self._group_kv_caches(kv_caches, k),
+                    group_layout.window_block_ids(k, block_ids[k], 0),
+                    group.blocks_per_window,
+                    layout_hints=self._layout_hints,
+                    engine_kv_format=group.engine_kv_format,
+                    out=[region[pos] for _, region in members],
+                    chunk_indices=[chunk.chunk_index for chunk, _ in members],
+                    engine_type=self._engine_type,
+                )
+
+    def _submit_group_store(
+        self,
+        key: Any,
+        kv_caches: dict[str, torch.Tensor],
+        block_ids: list[list[int]],
+    ) -> MessagingFuture:
+        """Synchronously store every object group of one request."""
+        engine_driven_context = cast(EngineDrivenContext, self._engine_driven_context)
+        group_layout = cast(EngineDrivenGroupLayout, self._group_layout)
+        future: MessagingFuture[bool] = MessagingFuture()
+        pairs = self._group_store_chunks(block_ids)
+        if pairs is None:
+            logger.error(
+                "Skipping engine-driven store of %s: a transferred chunk has "
+                "only null blocks",
+                key.request_id,
+            )
+            future.set_result(False)
+            return future
+
+        device = _get_kv_device(kv_caches)
+        synchronize_device(device)
+        chunks = engine_driven_context.prepare_group_store(key, self._instance_id)
+        if chunks is None:
+            chunks = [
+                GroupChunk(
+                    object_group_id=gid,
+                    chunk_index=chunk,
+                    buffer=torch.empty(
+                        group_layout.object_groups[gid].nbytes, dtype=torch.uint8
+                    ),
+                )
+                for gid, chunk in pairs
+            ]
+        elif not chunks:
+            # Every object is already cached.
+            future.set_result(True)
+            return future
+        self._gather_group_chunks(kv_caches, block_ids, chunks)
+        synchronize_device(device)
+        future.set_result(
+            engine_driven_context.commit_store(
+                key, self._instance_id, [chunk.buffer for chunk in chunks]
+            )
+        )
+        return future
+
+    def _submit_group_retrieve(
+        self,
+        key: Any,
+        kv_caches: dict[str, torch.Tensor],
+        block_ids: list[list[int]],
+        event: IPCEvent | None,
+        skip_first_n_tokens: int,
+    ) -> MessagingFuture:
+        """Retrieve every object group of one request into the paged KV."""
+        engine_driven_context = cast(EngineDrivenContext, self._engine_driven_context)
+        group_layout = cast(EngineDrivenGroupLayout, self._group_layout)
+        num_chunks = group_layout.num_chunks(block_ids)
+        first_chunks = [
+            group.first_chunk(num_chunks) for group in group_layout.object_groups
+        ]
+        buffers = engine_driven_context.prepare_group_retrieve(
+            key,
+            self._instance_id,
+            [
+                group.nbytes
+                for group, first in zip(
+                    group_layout.object_groups, first_chunks, strict=True
+                )
+                for _ in range(first, num_chunks)
+            ],
+        )
+        ok = buffers is not None
+        if buffers is not None:
+            try:
+                if event is not None:
+                    event.wait()
+                offset = 0
+                for gid, (object_group, first) in enumerate(
+                    zip(group_layout.object_groups, first_chunks, strict=True)
+                ):
+                    count = num_chunks - first
+                    regions = [
+                        group_layout.region_views(gid, buffer)
+                        for buffer in buffers[offset : offset + count]
+                    ]
+                    offset += count
+                    for pos, k in enumerate(object_group.kernel_group_indices):
+                        group = group_layout.kernel_groups[k]
+                        scatter_cpu_to_paged_kv(
+                            self._group_kv_caches(kv_caches, k),
+                            group_layout.window_block_ids(k, block_ids[k], first),
+                            [region[pos] for region in regions],
+                            group.blocks_per_window,
+                            skip_first_n_tokens=group_layout.scatter_skip_slots(
+                                k, first, skip_first_n_tokens
+                            ),
+                            layout_hints=self._layout_hints,
+                            engine_kv_format=group.engine_kv_format,
+                            engine_type=self._engine_type,
+                        )
+            except (RuntimeError, ValueError, TypeError, IndexError):
+                logger.exception("Failed to scatter retrieved CPU context chunks")
+                ok = False
+            # SHM path: ensure all device writes are complete before releasing
+            # the SHM slot (server may immediately reuse it after commit_retrieve).
+            synchronize_device(_get_kv_device(kv_caches))
+        engine_driven_context.commit_retrieve(key, self._instance_id)
+
+        future: MessagingFuture[bool] = MessagingFuture()
+        future.set_result(ok)
+        return future
 
 
 def create_transfer_context(

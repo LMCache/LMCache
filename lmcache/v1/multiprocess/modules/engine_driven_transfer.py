@@ -2,6 +2,7 @@
 """Engine-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass
 import threading
 import time
@@ -32,9 +33,13 @@ from lmcache.v1.multiprocess.engine_module import (
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
+from lmcache.v1.multiprocess.transfer_context.group_layout import (
+    EngineDrivenGroupLayout,
+)
 
 # Local
 from .server_transfer import (
+    ObjectGroupKeys,
     TransferStrategy,
     create_transfer_strategy,
 )
@@ -261,10 +266,121 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     ) -> tuple[int, IPCCacheServerKey]:
         return (instance_id, key)
 
-    def _resolve_single_group_obj_keys(self, key: IPCCacheServerKey) -> list[ObjectKey]:
-        """Resolve object keys for the single object group used by
-        non-GPU transfers."""
-        return self._ctx.resolve_obj_keys(key, [0])[0]
+    def _num_chunks(self, key: IPCCacheServerKey) -> int:
+        """Return the number of LMCache chunks ``key`` covers."""
+        return len(self._ctx.resolve_obj_keys(key, [0])[0])
+
+    def _transfer_groups_resolver(
+        self, metadata: EngineDrivenContextMetadata
+    ) -> Callable[[IPCCacheServerKey], list[ObjectGroupKeys]]:
+        """Return the transfer-group resolver of one registration.
+
+        A single-group registration transfers every chunk of object group 0.
+        A multi-group registration transfers, per object group, the trailing
+        ``num_chunks_in_sw`` chunks only (every chunk for full attention), the
+        chunks the worker gathers and scatters.
+        """
+        group_layout = metadata.group_layout
+        if group_layout is None:
+
+            def resolve_single_group(key: IPCCacheServerKey) -> list[ObjectGroupKeys]:
+                return [
+                    ObjectGroupKeys(
+                        object_group_id=0,
+                        first_chunk=0,
+                        keys=self._ctx.resolve_obj_keys(key, [0])[0],
+                        layout_desc=metadata.layout_desc,
+                    )
+                ]
+
+            return resolve_single_group
+
+        object_groups = group_layout.object_groups
+        group_ids = list(range(len(object_groups)))
+
+        def resolve_object_groups(key: IPCCacheServerKey) -> list[ObjectGroupKeys]:
+            keys_per_group = self._ctx.resolve_obj_keys(key, group_ids)
+            num_chunks = len(keys_per_group[0])
+            groups: list[ObjectGroupKeys] = []
+            for gid, (object_group, keys) in enumerate(
+                zip(object_groups, keys_per_group, strict=True)
+            ):
+                first = object_group.first_chunk(num_chunks)
+                groups.append(
+                    ObjectGroupKeys(
+                        object_group_id=gid,
+                        first_chunk=first,
+                        keys=keys[first:],
+                        layout_desc=object_group.layout_desc,
+                    )
+                )
+            return groups
+
+        return resolve_object_groups
+
+    def _registration_response(
+        self, metadata: EngineDrivenContextMetadata
+    ) -> RegisterEngineDrivenContextResponse:
+        """Build the registration response for ``metadata``."""
+        group_layout = metadata.group_layout
+        return RegisterEngineDrivenContextResponse(
+            shm_name=self._shm_pool_info["shm_name"],
+            pool_size=self._shm_pool_info["pool_size"],
+            num_object_groups=(
+                0 if group_layout is None else len(group_layout.object_groups)
+            ),
+            separate_object_groups=self._ctx.separate_object_groups,
+            full_sw_kv=self._ctx.full_sw_kv,
+            null_block_id=self._ctx.null_block_id,
+            chunk_size=self._ctx.chunk_size,
+        )
+
+    def _build_group_layout(
+        self, payload: RegisterEngineDrivenContextPayload
+    ) -> EngineDrivenGroupLayout:
+        """Rebuild the worker's object groups from its KV tensor specs.
+
+        Raises:
+            ValueError: If ``engine_type`` is missing, a spec carries an
+                invalid dtype name, or the specs and group infos do not
+                describe a valid KV layout.
+        """
+        if payload.engine_type is None:
+            raise ValueError("Multi-group registration requires engine_type")
+        tensors = [
+            torch.empty_strided(
+                spec.shape,
+                spec.stride,
+                dtype=self._parse_dtype(spec.dtype_str),
+                device="meta",
+            )
+            for spec in payload.kv_tensor_specs
+        ]
+        return EngineDrivenGroupLayout(
+            tensors,
+            payload.engine_group_infos,
+            payload.engine_type,
+            payload.layout_hints or None,
+            self._ctx.chunk_size,
+            separate_object_groups=self._ctx.separate_object_groups,
+            full_sw_kv=self._ctx.full_sw_kv,
+        )
+
+    @staticmethod
+    def _parse_dtype(dtype_str: str) -> torch.dtype:
+        """Return the torch dtype named ``dtype_str``.
+
+        Raises:
+            ValueError: If ``dtype_str`` is not a valid torch dtype name.
+        """
+        dtype = getattr(torch, dtype_str, None)
+        if dtype is None or not isinstance(dtype, torch.dtype):
+            raise ValueError(
+                f"Invalid dtype_str '{dtype_str}': must be a valid torch dtype "
+                "attribute name (e.g. 'float16' for torch.float16, "
+                "'bfloat16' for torch.bfloat16, 'float32' for torch.float32)."
+            )
+        return dtype
 
     @request_handler()
     def register_kv_cache_engine_driven_context(
@@ -273,14 +389,19 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     ) -> RegisterEngineDrivenContextResponse:
         """Register non-CUDA KV layout metadata for non-GPU context mode.
 
+        A payload with ``kv_tensor_specs`` registers every object group of a
+        hybrid model; otherwise the scalar layout fields describe the single
+        transfer group.
+
         Args:
             payload: Struct containing all registration fields
                 (instance_id, model_name, world_size, block_size,
                 num_layers, hidden_dim_size, dtype_str, use_mla,
-                num_physical_slots).
+                num_physical_slots, and the multi-group fields).
 
         Raises:
-            ValueError: If ``payload.dtype_str`` is not a valid torch dtype name.
+            ValueError: If a dtype name is not a valid torch dtype name, or
+                the multi-group fields do not describe a valid KV layout.
         """
         shm_name = self._shm_pool_info["shm_name"]
         pool_size = self._shm_pool_info["pool_size"]
@@ -294,43 +415,42 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     "Instance %d already registered (non-GPU); refreshing liveness",
                     payload.instance_id,
                 )
-                return RegisterEngineDrivenContextResponse(
-                    shm_name=shm_name, pool_size=pool_size
+                return self._registration_response(existing.metadata)
+
+        if payload.kv_tensor_specs:
+            group_layout = self._build_group_layout(payload)
+            metadata = EngineDrivenContextMetadata(
+                layout_desc=group_layout.object_groups[0].layout_desc,
+                block_size=payload.block_size,
+                use_mla=payload.use_mla,
+                group_layout=group_layout,
+            )
+        else:
+            dtype = self._parse_dtype(payload.dtype_str)
+            num_physical_slots = payload.num_physical_slots
+            if num_physical_slots is None:
+                # Compatibility with clients from before the physical-slot field
+                # was added. Those clients require one slot per logical token.
+                num_physical_slots = self._ctx.chunk_size
+            elif num_physical_slots <= 0:
+                raise ValueError(
+                    f"num_physical_slots must be positive, got {num_physical_slots}"
                 )
 
-        dtype = getattr(torch, payload.dtype_str, None)
-        if dtype is None or not isinstance(dtype, torch.dtype):
-            raise ValueError(
-                f"Invalid dtype_str '{payload.dtype_str}': must be a valid torch dtype "
-                "attribute name (e.g. 'float16' for torch.float16, "
-                "'bfloat16' for torch.bfloat16, 'float32' for torch.float32)."
+            shape = (
+                torch.Size(
+                    [payload.num_layers, num_physical_slots, payload.hidden_dim_size]
+                )
+                if payload.use_mla
+                else torch.Size(
+                    [2, payload.num_layers, num_physical_slots, payload.hidden_dim_size]
+                )
             )
-
-        num_physical_slots = payload.num_physical_slots
-        if num_physical_slots is None:
-            # Compatibility with clients from before the physical-slot field
-            # was added. Those clients require one slot per logical token.
-            num_physical_slots = self._ctx.chunk_size
-        elif num_physical_slots <= 0:
-            raise ValueError(
-                f"num_physical_slots must be positive, got {num_physical_slots}"
+            metadata = EngineDrivenContextMetadata(
+                layout_desc=MemoryLayoutDesc(shapes=[shape], dtypes=[dtype]),
+                block_size=payload.block_size,
+                use_mla=payload.use_mla,
             )
-
-        shape = (
-            torch.Size(
-                [payload.num_layers, num_physical_slots, payload.hidden_dim_size]
-            )
-            if payload.use_mla
-            else torch.Size(
-                [2, payload.num_layers, num_physical_slots, payload.hidden_dim_size]
-            )
-        )
-        layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
-        metadata = EngineDrivenContextMetadata(
-            layout_desc=layout_desc,
-            block_size=payload.block_size,
-            use_mla=payload.use_mla,
-        )
         # Build the entry and strategy outside the lock, then insert the pair
         # atomically so a concurrent reap can never strand one without the
         # other. REGISTER is SERIALIZED, so it is the sole inserter.
@@ -362,12 +482,30 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             payload.world_size,
         )
 
-        self._ctx.layout_desc_registry.register(
-            payload.model_name, payload.world_size, layout_desc
-        )
-        return RegisterEngineDrivenContextResponse(
-            shm_name=shm_name, pool_size=pool_size
-        )
+        if metadata.group_layout is None:
+            self._ctx.layout_desc_registry.register(
+                payload.model_name, payload.world_size, metadata.layout_desc
+            )
+        else:
+            # Lookup, prefetch and lock release read every object group's
+            # layout and window from the registry, as for LMCache-driven.
+            object_groups = metadata.group_layout.object_groups
+            self._ctx.layout_desc_registry.register(
+                payload.model_name,
+                payload.world_size,
+                metadata.layout_desc,
+                metadata.group_layout.attn_desc,
+                group_layout_descs={
+                    gid: group.layout_desc for gid, group in enumerate(object_groups)
+                },
+            )
+            logger.info(
+                "Instance %d registered %d object groups (windows=%s)",
+                payload.instance_id,
+                len(object_groups),
+                metadata.group_layout.attn_desc.num_chunks_in_sw,
+            )
+        return self._registration_response(metadata)
 
     @request_handler(operation="unregister_kv_cache_engine_driven_context")
     def unregister_kv_cache(self, instance_id: int) -> None:
@@ -414,7 +552,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             key=key,
             instance_id=instance_id,
             context=entry.metadata,
-            resolve_obj_keys=self._resolve_single_group_obj_keys,
+            resolve_transfer_groups=self._transfer_groups_resolver(entry.metadata),
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["store_start_time"] = time.perf_counter()
@@ -453,12 +591,10 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             instance_id=instance_id,
             cpu_data=cpu_data,
             context=entry.metadata,
-            resolve_obj_keys=self._resolve_single_group_obj_keys,
+            resolve_transfer_groups=self._transfer_groups_resolver(entry.metadata),
         )
         if st is not None and result:
-            num_tokens = (
-                len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
-            )
+            num_tokens = self._num_chunks(key) * self._ctx.chunk_size
             logger.info(
                 "Stored %d tokens in %.3f seconds",
                 num_tokens,
@@ -489,11 +625,12 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ValueError: If no non-GPU context is registered for the given
                 instance ID.
         """
-        _, strategy = self._resolve_for_transfer(instance_id)
+        entry, strategy = self._resolve_for_transfer(instance_id)
         response = strategy.prepare_retrieve(
             key=key,
             instance_id=instance_id,
-            resolve_obj_keys=self._resolve_single_group_obj_keys,
+            context=entry.metadata,
+            resolve_transfer_groups=self._transfer_groups_resolver(entry.metadata),
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["retrieve_start_time"] = time.perf_counter()
@@ -523,9 +660,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         st = session.extras.pop("retrieve_start_time", None)
         result = strategy.commit_retrieve(key=key, instance_id=instance_id)
         if st is not None:
-            num_tokens = (
-                len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
-            )
+            num_tokens = self._num_chunks(key) * self._ctx.chunk_size
             logger.info(
                 "Retrieved %d tokens in %.3f seconds",
                 num_tokens,

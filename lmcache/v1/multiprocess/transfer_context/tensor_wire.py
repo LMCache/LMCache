@@ -2,6 +2,7 @@
 """Safe wire format for inline engine-driven tensor transfers."""
 
 # Standard
+from collections.abc import Sequence
 from typing import Annotated, Literal, TypeAlias
 import math
 import warnings
@@ -106,24 +107,54 @@ def decode_tensors(
     """
     if not 0 <= expected_count <= _MAX_TENSOR_COUNT:
         raise ValueError("Expected tensor count must be between 0 and 65536")
+    return decode_tensors_by_layout(
+        payload, [(expected_shape, expected_dtype)] * expected_count
+    )
+
+
+def decode_tensors_by_layout(
+    payload: bytes,
+    expected: Sequence[tuple[torch.Size, torch.dtype]],
+) -> list[torch.Tensor]:
+    """Decode an inline tensor envelope whose tensors may differ in layout.
+
+    Args:
+        payload: MessagePack bytes produced by :func:`encode_tensors`.
+        expected: Required ``(shape, dtype)`` of each tensor, in order; its
+            length is the required tensor count.
+
+    Returns:
+        CPU tensors backed directly by the immutable input payload. Callers must
+        treat the returned tensors as read-only.
+
+    Raises:
+        ValueError: If the envelope or any tensor metadata, count, or byte length
+            does not match ``expected``.
+        msgspec.DecodeError: If ``payload`` is not a valid typed envelope.
+    """
+    expected_count = len(expected)
+    if expected_count > _MAX_TENSOR_COUNT:
+        raise ValueError("Expected tensor count must be between 0 and 65536")
     if len(payload) > (
         _MAX_TOTAL_TENSOR_BYTES + _MAX_METADATA_BYTES_PER_TENSOR * expected_count
     ):
         raise ValueError("Inline tensor envelope exceeds the wire-format limit")
-
     envelope = msgspec.msgpack.decode(payload, type=TensorEnvelope)
     if len(envelope.tensors) != expected_count:
         raise ValueError(
             "Inline tensor count mismatch: "
             f"expected {expected_count}, got {len(envelope.tensors)}"
         )
-
-    expected_shape_tuple = tuple(expected_shape)
-    expected_dtype_name = str(expected_dtype).removeprefix("torch.")
-    expected_tensor_bytes = math.prod(expected_shape_tuple) * expected_dtype.itemsize
     total_bytes = 0
     tensors: list[torch.Tensor] = []
-    for frame in envelope.tensors:
+    for frame, (expected_shape, expected_dtype) in zip(
+        envelope.tensors, expected, strict=True
+    ):
+        expected_shape_tuple = tuple(expected_shape)
+        expected_dtype_name = str(expected_dtype).removeprefix("torch.")
+        expected_tensor_bytes = (
+            math.prod(expected_shape_tuple) * expected_dtype.itemsize
+        )
         dtype = DTYPES.get(frame.dtype)
         if dtype is None:
             raise ValueError(f"Unsupported inline tensor dtype: {frame.dtype}")

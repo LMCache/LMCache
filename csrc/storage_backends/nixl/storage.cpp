@@ -249,7 +249,6 @@ std::vector<uint8_t> query_storage(nixlAgent& agent, nixlBackendH* backend,
                                    nixl_mem_t memory_type,
                                    const std::vector<std::string>& identities) {
   nixl_reg_dlist_t descriptors(memory_type);
-  descriptors.reserve(identities.size());
   for (const std::string& identity : identities) {
     descriptors.addDesc(nixlBlobDesc(0, 0, 0, identity));
   }

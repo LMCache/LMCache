@@ -9,9 +9,11 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
+    GroupChunk,
 )
 from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
     decode_tensors,
+    decode_tensors_by_layout,
     encode_tensors,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -99,6 +101,38 @@ class EngineDrivenContextInline(EngineDrivenContext):
         except TimeoutError:
             pass
         return True
+
+    def prepare_group_store(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> list[GroupChunk] | None:
+        """Send PREPARE_STORE RPC and return no pre-allocated buffers."""
+        self.prepare_store(key, instance_id)
+        return None
+
+    def prepare_group_retrieve(
+        self, key: IPCCacheServerKey, instance_id: int, object_nbytes: list[int]
+    ) -> list[torch.Tensor] | None:
+        """Send PREPARE_RETRIEVE and decode one ``uint8`` buffer per object.
+
+        Args:
+            key: Cache key to retrieve.
+            instance_id: Worker instance identifier.
+            object_nbytes: Byte size of each expected object, in order.
+
+        Returns:
+            Object buffers on hit, or None on miss/timeout.
+        """
+        future = self.req_client.prepare_retrieve(key, instance_id)
+        try:
+            response = future.result(timeout=self.mq_timeout)
+        except TimeoutError:
+            return None
+        if not response.success or not response.data:
+            return None
+        return decode_tensors_by_layout(
+            response.data,
+            [(torch.Size([nbytes]), torch.uint8) for nbytes in object_nbytes],
+        )
 
     def close(self) -> None:
         """No-op: the inline path holds no persistent resources."""
