@@ -44,6 +44,10 @@ WORKDIR /workspace
 
 FROM ${SERVING_IMAGE} AS lmcache
 
+# setuptools-scm reads LMCache's version through git, which the vLLM image lacks.
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 ARG MAX_JOBS=32
 ENV MAX_JOBS=${MAX_JOBS} TORCH_CUDA_ARCH_LIST="9.0"
 COPY --from=lmcache_src . /workspace/LMCache
