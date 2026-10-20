@@ -5,7 +5,9 @@ A passage cached on its own matches inside a longer prompt only if it starts
 on a cache-chunk boundary in both places: chunks are content-addressed, so a
 passage that lands off-phase shares no chunk with its cached copy and nothing
 is reused, silently.  :class:`ChunkAligner` pads the shared system block and
-each passage so every block occupies whole chunks.
+each passage so every block occupies whole chunks, and ends each with
+:data:`BLOCK_END` so concatenating blocks does not re-tokenize their
+junctions.
 """
 
 # Standard
@@ -30,6 +32,16 @@ _TEMPLATE_SENTINEL = "██SENTINEL██"
 
 # Re-encode attempts per block; a merged boundary token shifts the estimate.
 _PAD_ATTEMPTS = 8
+
+# Ends every block.  Blocks are tokenized alone but sent concatenated, so a
+# block ending in letters would fuse with the next block's first word into
+# one pre-token ("fillerVienna") and re-tokenize across the junction,
+# shifting every later chunk boundary.  One newline between non-whitespace
+# characters is its own pre-token in byte-level BPE tokenizers (GPT-2 and
+# the cl100k-style ones: Qwen, Llama 3); a whitespace run is not - GPT-2
+# splits "\n\n" differently before a letter than at the end of the text -
+# so blocks are stripped of surrounding whitespace first.
+BLOCK_END = "\n"
 
 
 class ChunkAligner:
@@ -92,7 +104,8 @@ class ChunkAligner:
             system_prompt: The instructions placed before the passages.
 
         Returns:
-            The padded system block.
+            The padded system block, stripped of surrounding whitespace and
+            ending with :data:`BLOCK_END`.
         """
         prefix_tokens = self._chat_prefix_tokens()
         block = self._pad_to_multiple(
@@ -112,7 +125,9 @@ class ChunkAligner:
             passage: Raw passage text.
 
         Returns:
-            The padded passage; identical across calls for the same text.
+            The padded passage, stripped of surrounding whitespace and
+            ending with :data:`BLOCK_END`; identical across calls for the
+            same text.
         """
         block = self._passage_blocks.get(passage)
         if block is None:
@@ -147,20 +162,31 @@ class ChunkAligner:
         return self.token_length(head)
 
     def _pad_to_multiple(self, text: str, offset: int, rng: random.Random) -> str:
-        """Pad *text* so ``offset + len(text)`` is a whole chunk count."""
+        """Pad *text* so ``offset + len(block)`` is a whole chunk count.
+
+        The block is *text* without surrounding whitespace, then filler if
+        needed, then :data:`BLOCK_END`.
+        """
         align = self._align_tokens
-        total = offset + self.token_length(text)
+        text = text.strip()
+        unpadded = text + BLOCK_END
+        total = offset + self.token_length(unpadded)
         target = math.ceil(total / align) * align
         if target == total:
-            return text
+            return unpadded
 
         num_words = target - total
-        padded = text
+        padded = unpadded
         # Correct against a re-encode: a merged boundary token shifts the
         # estimate, and an off-by-one phase error costs a whole chunk.
         for _ in range(_PAD_ATTEMPTS):
-            words = [rng.choice(self._pool.words) for _ in range(max(num_words, 0))]
-            padded = text + "\n" + self._pool.join(words)
+            if num_words < 1:
+                # Filler also costs a second BLOCK_END, so a block one token
+                # short of a boundary cannot reach it; use the next one.
+                target += align
+                num_words += align
+            words = [rng.choice(self._pool.words) for _ in range(num_words)]
+            padded = unpadded + self._pool.join(words) + BLOCK_END
             actual = offset + self.token_length(padded)
             if actual == target:
                 return padded

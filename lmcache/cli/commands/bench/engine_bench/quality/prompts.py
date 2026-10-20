@@ -13,8 +13,10 @@ QA_SYSTEM_PROMPT = (
     "The following are the given passages.\n"
 )
 
+# Starts with a letter: the last passage block ends with ``BLOCK_END``, and
+# leading whitespace here would fuse with it and re-tokenize that block.
 QA_QUESTION_TEMPLATE = (
-    "\n\nAnswer the question using only the passages above. End with exactly "
+    "Answer the question using only the passages above. End with exactly "
     "one concise answer in this form: <final_answer>answer</final_answer>.\n\n"
     "Question: {question}\nAnswer:"
 )
