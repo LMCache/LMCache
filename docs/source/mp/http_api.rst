@@ -83,7 +83,9 @@ Example:
 
 All examples below assume the server is reachable at
 ``http://localhost:8080``. When authentication is enabled, include the key as
-``Authorization: Bearer <api-key>``. The ``/`` and ``/healthcheck`` routes
+``Authorization: Bearer <api-key>`` or ``X-LMCache-API-Key: <api-key>``.
+Both headers use the same accepted keys; if both are present, either valid
+key authenticates the request. The ``/`` and ``/healthcheck`` routes
 remain public for liveness and readiness probes; every other route requires a
 valid key. For example:
 
@@ -91,6 +93,10 @@ valid key. For example:
 
     curl -H "Authorization: Bearer $(cat /run/secrets/lmcache-http-api-key)" \
         http://localhost:8080/status
+
+For proxies that consume ``Authorization``, such as the Kubernetes API-server
+proxy, send the raw LMCache key in ``X-LMCache-API-Key`` instead. Treat this
+header as a secret in proxy and access-log configurations as well.
 
 Use a high-entropy value such as ``openssl rand -hex 32`` and restrict the key
 file so only the LMCache server process can read it. API-key authentication
