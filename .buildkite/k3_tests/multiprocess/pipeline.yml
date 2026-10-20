@@ -94,18 +94,15 @@ steps:
   - group: ":compression: Multiprocess (4-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/
     steps:
-      # L1 + slot-compression KV correctness for DeepSeek-V4-Flash (sparse-MLA
-      # + fp8, TP=4). The model's KV cache groups mix block geometries
-      # (tokens_per_block 256/64/8/4) and pack several logical tokens per
-      # physical slot; the test stores one long request through LMCache's
-      # slot-compression path, resets vLLM's local prefix cache (LMCache
-      # preserved), re-sends the identical request now served from the L1 CPU
-      # pool, and asserts the two greedy outputs are byte-identical. The 160GB
-      # fp8 TP-shard load (plus the weight download on a cold hf-cache node)
-      # needs the long timeout.
+      # L1 KV correctness for DeepSeek-V4-Flash (sparse-MLA + fp8, TP=4).
+      # Each engine-specific launcher exercises its native DSV4 KV layout,
+      # clears only the engine-local prefix cache, then verifies that LMCache
+      # serves byte-identical greedy output from the L1 CPU pool. The 160GB fp8
+      # TP-shard load (plus the weight download on a cold hf-cache node) needs
+      # the long timeout.
       - label: ":compression: {{matrix.inference_engine}} / dsv4_flash_tp / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh dsv4_flash_tp
-        matrix: *vllm-matrix
+        matrix: *common-matrix
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -125,10 +122,10 @@ steps:
                       - { name: dshm, mountPath: /dev/shm }
                 volumes:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
-                  # TP=4 NCCL + vLLM shared memory; the 1Gi used by the
-                  # smaller pods is too tight for four ranks.
+                  # TP=4 NCCL + inference-engine shared memory; the 1Gi used
+                  # by the smaller pods is too tight for four ranks.
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 8Gi } }
-        artifact_paths: ["*.log"]
+        artifact_paths: ["*.log", "ci_results_*/dsv4_flash_tp/**/*"]
 
   - group: ":compression: Multiprocess (2-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/

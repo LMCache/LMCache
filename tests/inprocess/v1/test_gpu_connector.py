@@ -11,7 +11,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.gpu_connector.gpu_connectors import (
+from lmcache.inprocess.v1.gpu_connector.gpu_connectors import (
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemGPUConnectorV3,
@@ -34,8 +34,8 @@ if not (torch_dev.is_available() and torch_device_type == "cuda"):
         allow_module_level=True,
     )
 
-# Local
-from .utils import (
+# First Party
+from tests.v1.utils import (
     check_paged_kv_cache_equal,
     check_paged_kv_cache_equal_with_mla,
     generate_kv_cache_paged_list_tensors,

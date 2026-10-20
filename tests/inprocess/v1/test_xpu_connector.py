@@ -11,13 +11,13 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.gpu_connector.utils import get_dtype
-from lmcache.v1.gpu_connector.xpu_connectors import (
+from lmcache.inprocess.v1.gpu_connector.xpu_connectors import (
     VLLMBufferLayerwiseXPUConnector,
     VLLMPagedMemLayerwiseXPUConnector,
     VLLMPagedMemXPUConnectorV2,
     VLLMPagedMemXPUConnectorV3,
 )
+from lmcache.v1.gpu_connector.utils import get_dtype
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
     PagedTensorMemoryAllocator,
@@ -36,8 +36,8 @@ pytestmark = [
     ),
 ]
 
-# Local
-from .utils import (  # noqa: E402
+# First Party
+from tests.v1.utils import (  # noqa: E402
     check_paged_kv_cache_equal,
     check_paged_kv_cache_equal_with_mla,
     generate_kv_cache_paged_list_tensors,
