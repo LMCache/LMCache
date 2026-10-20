@@ -62,7 +62,11 @@ To enable shared-memory transfer, pass ``--shm-name`` and disable lazy
 L1 allocation with ``--no-l1-use-lazy``. If shared memory is
 unavailable and these flags are not specified, the SDK falls back to
 the typed inline tensor codec.
-To transfer query tensors, add ``--enable transfer_query`` flag.
+To transfer query tensors, load the opt-in ``qstore`` server module with
+``--server-module``. It requires the LMCache-driven transfer path
+(``--supported-transfer-mode lmcache_driven`` or ``auto``) and advertises the
+``transfer_query`` experimental feature, which the connector checks before it
+starts capturing query tensors.
 
 .. code-block:: bash
 
@@ -75,7 +79,7 @@ To transfer query tensors, add ``--enable transfer_query`` flag.
         --supported-transfer-mode auto \
         --shm-name lmcache_kvcache_sdk \
         --no-l1-use-lazy \
-        --enable transfer_query
+        --server-module '{"module_path": "lmcache.v1.multiprocess.plugin_modules.qstore"}'
 
 Then start vLLM with the LMCache MP connector.
 

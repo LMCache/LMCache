@@ -13,7 +13,7 @@ Overview
 
 Redis is an in-memory key-value store and is a supported option for remote KV Cache offloading in LMCache.
 Some other remote backends are :doc:`Mooncake <./mooncake>`, :doc:`Valkey <./valkey>`, and :doc:`InfiniStore <./infinistore>`.
-This guide will mainly focus on single-node Redis but also shows you how to set up Redis Sentinels and an LMCache Server.
+This guide mainly focuses on single-node Redis and also shows how to set up Redis Sentinels.
 
 Two ways to configure LMCache Redis Offloading:
 -----------------------------------------------
@@ -28,8 +28,6 @@ Two ways to configure LMCache Redis Offloading:
     export LMCACHE_REMOTE_URL="redis://your-redis-host:6379"
     # Redis Sentinel hosts (for high availability)
     # export LMCACHE_REMOTE_URL="redis-sentinel://localhost:26379,localhost:26380,localhost:26381"
-    # LMCache Server host
-    # export LMCACHE_REMOTE_URL="lm://localhost:65432"
 
     # How to serialize and deserialize KV cache on remote transmission
     export LMCACHE_REMOTE_SERDE="naive" # "naive" (default) or "cachegen"
@@ -48,8 +46,6 @@ Example ``config.yaml``:
     remote_url: "redis://your-redis-host:6379"
     # Redis Sentinel hosts (for high availability)
     # remote_url: "redis-sentinel://localhost:26379,localhost:26380,localhost:26381"
-    # LMCache Server host
-    # remote_url: "lm://localhost:65432"
 
     # How to serialize and deserialize KV cache on remote transmission
     remote_serde: "naive" # "naive" (default) or "cachegen"
@@ -85,7 +81,6 @@ Examples of ``remote_url``'s:
 
     remote_url: "redis://your-redis-host:6379"
     remote_url: "redis-sentinel://localhost:26379,localhost:26380,localhost:26381"
-    remote_url: "lm://localhost:65432"
     remote_url: "infinistore://127.0.0.1:12345"
     remote_url: "mooncakestore://127.0.0.1:50051"
 
@@ -192,20 +187,6 @@ You should see something like this (without the comments):
     user      61462  0.1  0.0  67244 10944 ?        Sl   04:15   0:00 redis-server *:26381 [sentinel]
 
 
-**Alternative: Starting an LMCache Server:**
-
-The ``lmcache_server`` CLI entrypoint starts a remote LMCache server and comes with
-the ``lmcache`` package.
-
-.. code-block:: bash
-
-    lmcache_server <host> <port> <device>
-
-    lmcache_server localhost 65432
-
-Currently, the only supported device is "cpu" (which is the default, so you don't need to specify it).
-
-
 **Step 2. Start a vLLM server with remote offloading enabled:**
 
 Create a an lmcache configuration file called: ``redis-offload.yaml``
@@ -256,31 +237,6 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
     # LMCACHE_REMOTE_URL="redis-sentinel://localhost:26379,localhost:26380,localhost:26381" \
     # LMCACHE_REMOTE_SERDE="naive"
     LMCACHE_CONFIG_FILE="redis-sentinel-offload.yaml" \
-    vllm serve \
-        meta-llama/Llama-3.1-8B-Instruct \
-        --max-model-len 16384 \
-        --kv-transfer-config \
-        '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
-
-**Alternative: LMCache Server**
-
-Create a an lmcache configuration file called: ``lmcache-server-offload.yaml``
-
-.. code-block:: yaml
-
-    chunk_size: 256
-    remote_url: "lm://localhost:65432"
-    remote_serde: "naive"
-
-If you don't want to use a config file, uncomment the first three environment variables
-and then comment out the ``LMCACHE_CONFIG_FILE`` below:
-
-.. code-block:: bash
-
-    # LMCACHE_CHUNK_SIZE=256 \
-    # LMCACHE_REMOTE_URL="lm://localhost:65432" \
-    # LMCACHE_REMOTE_SERDE="naive"
-    LMCACHE_CONFIG_FILE="lmcache-server-offload.yaml" \
     vllm serve \
         meta-llama/Llama-3.1-8B-Instruct \
         --max-model-len 16384 \
@@ -451,5 +407,3 @@ for the official LMCache way of controlling and routing your KV Caches in your L
 
     # Confirm no Redis processes are still running
     ps aux | grep redis
-
-

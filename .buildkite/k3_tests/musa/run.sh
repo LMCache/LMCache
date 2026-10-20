@@ -273,7 +273,7 @@ PY
     log "Running ${#UNIT_TEST_FILES[@]} MUSA-compatible unit-test files"
     printf '  %s\n' "${UNIT_TEST_FILES[@]}"
     run_pytest "${PYTEST_ARGS[@]}" \
-        -m "not cuda and not xpu and not sglang" \
+        -m "not cuda and not xpu" \
         "${UNIT_TEST_FILES[@]}" \
         2>&1 | tee "${ARTIFACT_DIR}/pytest.log"
     log "MUSA unit tests finished successfully"

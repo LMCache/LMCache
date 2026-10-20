@@ -52,8 +52,7 @@ class DeploymentMode(Enum):
     """
 
     SINGLE_PROCESS = "single_process"
-    """LMCache runs inside the serving engine (vLLM/SGLang/TRT-LLM
-    integrations)."""
+    """LMCache runs inside the serving engine (vLLM/TRT-LLM integrations)."""
 
     MP_SERVER = "mp_server"
     """LMCache runs as a standalone multiprocess cache server."""

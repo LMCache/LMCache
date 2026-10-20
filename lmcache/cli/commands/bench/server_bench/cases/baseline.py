@@ -38,7 +38,7 @@ class _RequestOutcome:
     """Outcome of one cold or warm request."""
 
     lookup: LookupResult
-    checksums: list[str] | None = None
+    checksums: dict[int, list[str]] | None = None
     retrieve: TransferResult | None = None
     store: TransferResult | None = None
 
@@ -191,18 +191,20 @@ class BaselineBenchCase:
             return
 
         log("  [seq %d] CHECKSUM MISMATCH!" % sequence_id)
-        for index, (cold_checksum, warm_checksum) in enumerate(
-            zip(cold_checksums, warm_checksums, strict=False)
-        ):
-            log(
-                "    chunk %d: cold=%s warm=%s %s"
-                % (
-                    index,
-                    cold_checksum[:12],
-                    warm_checksum[:12],
-                    "OK" if cold_checksum == warm_checksum else "FAIL",
+        for rank, reference in cold_checksums.items():
+            for index, (cold_checksum, warm_checksum) in enumerate(
+                zip(reference, warm_checksums[rank], strict=False)
+            ):
+                log(
+                    "    rank %d chunk %d: cold=%s warm=%s %s"
+                    % (
+                        rank,
+                        index,
+                        cold_checksum[:12],
+                        warm_checksum[:12],
+                        "OK" if cold_checksum == warm_checksum else "FAIL",
+                    )
                 )
-            )
 
     @staticmethod
     def _execute_request(
@@ -225,12 +227,13 @@ class BaselineBenchCase:
         hit_tokens = lookup.hit_chunks * request.chunk_size
         miss_tokens = request.num_full_tokens - hit_tokens
 
-        checksums: list[str] | None = None
+        checksums: dict[int, list[str]] | None = None
         if request_kind == "cold" and miss_tokens > 0:
             checksums = client.compute_checksums(
                 request,
                 start_token=hit_tokens,
                 token_count=miss_tokens,
+                operation="store",
             )
         if request_kind == "warm" and hit_tokens > 0:
             client.zero_destination(
@@ -255,6 +258,7 @@ class BaselineBenchCase:
                 request,
                 start_token=0,
                 token_count=hit_tokens,
+                operation="retrieve",
             )
 
         client.end_session(request)
