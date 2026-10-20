@@ -35,7 +35,7 @@ from lmcache.v1.multiprocess.kv_load_policy import (
     create_kv_load_policy,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.token_codec import unpack_token_ids
+from lmcache.v1.multiprocess.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
@@ -374,7 +374,7 @@ class LookupModule(DiscoverableModule):
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
                 engine_covered_chunks=start_chunk,
-                prompt_tokens=len(key.token_ids),
+                prompt_tokens=num_packed_tokens(key.token_bytes),
                 engine_hit_tokens=int(
                     (key.request_configs or {}).get(
                         "lmcache.hint.engine_computed_tokens", 0
@@ -668,7 +668,7 @@ class LookupModule(DiscoverableModule):
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
                 engine_covered_chunks=engine_covered_chunks,
-                prompt_tokens=len(key.token_ids),
+                prompt_tokens=num_packed_tokens(key.token_bytes),
                 engine_hit_tokens=int(
                     (key.request_configs or {}).get(
                         "lmcache.hint.engine_computed_tokens", 0
