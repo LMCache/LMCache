@@ -5,10 +5,16 @@ LMCache services share transport-neutral API-key loading and verification from
 credential from their wire format and passing only the token to
 `APIKeyVerifier.verify_token()`.
 
-The HTTP adapter in `lmcache.security.http` parses Bearer authorization headers
+The HTTP adapter in `lmcache.security.http` accepts `Authorization: Bearer <key>`
+or `X-LMCache-API-Key: <key>` using the same verifier and accepted-key set,
 and rejects protected requests before route handling. A service supplies its
 own environment-variable names and public paths; this keeps deployment policy
 out of the common verifier.
+
+The dedicated header supports proxies that consume `Authorization`, such as
+the Kubernetes API-server proxy. It carries the raw key without a Bearer prefix.
+If both headers are supplied, either valid credential authenticates the request.
+Proxies and access logs must treat both headers as secrets.
 
 Multiple accepted keys support rotation:
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Bearer authentication adapter for ASGI HTTP services."""
+"""API-key authentication adapter for ASGI HTTP services."""
 
 # Standard
 from collections.abc import Collection
@@ -47,6 +47,8 @@ class HTTPBearerAuthenticationMiddleware:
 
     The verifier is read from ``scope["app"].state.http_authentication``.
     Authentication is disabled when it contains no keys.
+    Accepts ``Authorization: Bearer <key>`` or ``X-LMCache-API-Key: <key>``
+    using the same verifier. When both are present, either valid key suffices.
 
     Args:
         app: Downstream ASGI application.
@@ -83,7 +85,9 @@ class HTTPBearerAuthenticationMiddleware:
             return
 
         headers = Headers(scope=scope)
-        if verifier.verify_token(bearer_token(headers.get("authorization"))):
+        if verifier.verify_token(
+            bearer_token(headers.get("authorization"))
+        ) or verifier.verify_token(headers.get("x-lmcache-api-key")):
             await self.app(scope, receive, send)
             return
 
