@@ -112,8 +112,6 @@ def _parse_mp_storage_args(args: list[str]) -> StorageManagerConfig:
 
 
 class _FakeMooncakeL2Config:
-    affinity_tag = L2AdapterConfigBase.affinity_tag
-
     def __init__(self, setup_config: dict[str, str]) -> None:
         self.setup_config = setup_config
 
@@ -237,11 +235,8 @@ def test_devdax_config_validates_offset(tmp_path):
 @pytest.mark.parametrize(
     ("adapter_name", "adapter_config"),
     [
-        ("nixl_store", SimpleNamespace(affinity_tag=L2AdapterConfigBase.affinity_tag)),
-        (
-            "nixl_store_dynamic",
-            SimpleNamespace(affinity_tag=L2AdapterConfigBase.affinity_tag),
-        ),
+        ("nixl_store", SimpleNamespace()),
+        ("nixl_store_dynamic", SimpleNamespace()),
         ("mooncake_store", _FakeMooncakeL2Config({"protocol": "rdma"})),
     ],
 )
