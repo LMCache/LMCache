@@ -4,11 +4,9 @@ Managing objects and memory for L1 cache
 """
 
 # Standard
-from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import count
 import threading
-import weakref
 
 # First Party
 from lmcache.lmcache_native import TTLLock
@@ -22,6 +20,7 @@ from lmcache.v1.distributed.internal_api import (
     L1ObjectMeta,
     L1OperationResult,
 )
+from lmcache.v1.distributed.l1_metrics import register_l1_metrics, unregister_l1_metrics
 from lmcache.v1.distributed.memory_manager import (
     GDSL1MemoryManager,
     L1ManagerProtocol,
@@ -42,7 +41,6 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
-from lmcache.v1.mp_observability.otel_init import register_gauge
 
 logger = init_logger(__name__)
 _l1_manager_ids = count()
@@ -118,27 +116,6 @@ def l1_mgr_synchronized(func):
     return wrapper
 
 
-def _l1_usage_ratio_or_zero(target: "L1Manager | None") -> float:
-    """Return ``target.get_memory_usage()`` as a 0.0-1.0 ratio.
-
-    Returns 0.0 when ``target`` is None or ``total_bytes`` is zero so the
-    observable-gauge callback never raises during scrape.
-    """
-    if target is None:
-        return 0.0
-    used, total = target.get_memory_usage()
-    if total <= 0:
-        return 0.0
-    return used / total
-
-
-def _l1_staging_bytes_or_zero(target: "L1Manager | None") -> int:
-    """Return ``target.get_staging_memory_usage()``, or 0 without a target."""
-    if target is None:
-        return 0
-    return target.get_staging_memory_usage()
-
-
 # Main classes
 
 
@@ -188,13 +165,6 @@ class L1Manager(L1ManagerInterface):
 
     For every operation on list of keys, the operation is atomic
     """
-
-    # OTel registers each gauge once; its callback snapshots all live managers.
-    _gauge_registered: bool = False
-    _gauge_lock = threading.Lock()
-    _gauge_targets: weakref.WeakValueDictionary[int, "L1Manager"] = (
-        weakref.WeakValueDictionary()
-    )
 
     def __init__(self, config: L1ManagerConfig):
         self._config = config
@@ -250,28 +220,7 @@ class L1Manager(L1ManagerInterface):
 
         self._event_bus = get_event_bus()
 
-        with L1Manager._gauge_lock:
-            L1Manager._gauge_targets[self._l1_manager_id] = self
-            if not L1Manager._gauge_registered:
-                L1Manager._gauge_registered = True
-                register_gauge(
-                    "lmcache.l1_manager",
-                    "lmcache_mp.l1_memory_usage_bytes",
-                    "Bytes currently held in L1 cache",
-                    lambda: L1Manager._observations(lambda m: m.get_memory_usage()[0]),
-                )
-                register_gauge(
-                    "lmcache.l1_manager",
-                    "lmcache_mp.l1_usage_ratio",
-                    "L1 used/total ratio (0.0–1.0)",
-                    lambda: L1Manager._observations(_l1_usage_ratio_or_zero),
-                )
-                register_gauge(
-                    "lmcache.l1_manager",
-                    "lmcache_mp.l1_staging_bytes",
-                    "Bytes held by L1 staging objects (write-reserved, not admitted)",
-                    lambda: L1Manager._observations(_l1_staging_bytes_or_zero),
-                )
+        register_l1_metrics(self)
 
     @property
     def l1_manager_id(self) -> int:
@@ -1151,8 +1100,7 @@ class L1Manager(L1ManagerInterface):
             self._staging_bytes = 0
 
         self._memory_manager.close()
-        with L1Manager._gauge_lock:
-            L1Manager._gauge_targets.pop(self._l1_manager_id, None)
+        unregister_l1_metrics(self)
 
     # Status reporting
     @l1_mgr_synchronized
@@ -1391,27 +1339,3 @@ class L1Manager(L1ManagerInterface):
                 "L1 is not Device-DAX backed (--l1-devdax-path not set)",
             )
         return self._memory_manager
-
-    @classmethod
-    def _observations(
-        cls, value: Callable[["L1Manager"], int | float]
-    ) -> list[tuple[int | float, dict[str, object]]]:
-        with cls._gauge_lock:
-            managers = list(cls._gauge_targets.values())
-        return [
-            (
-                value(m),
-                {
-                    "l1_tag": m.config.tag,
-                    "backend": "gds"
-                    if m.config.gds_l1_config
-                    else "dram+devdax"
-                    if m.config.memory_config.devdax_path
-                    and m.config.memory_config.devdax_size_in_bytes
-                    else "devdax"
-                    if m.config.memory_config.devdax_path
-                    else "dram",
-                },
-            )
-            for m in managers
-        ]

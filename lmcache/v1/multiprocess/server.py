@@ -252,6 +252,37 @@ def _build_server_components(
     return ServerBuildComponents(modules=modules)
 
 
+def prepare_shared_l1(
+    mp_config: MPServerConfig, storage_manager_config: StorageManagerConfig
+) -> None:
+    """Reject MP features that cannot use a shared L1.
+
+    Args:
+        mp_config: MP server configuration.
+        storage_manager_config: Storage configuration.
+
+    Raises:
+        ValueError: A shared L1 is configured together with engine-driven or
+            auto transfer, CacheBlend, P2P or a runtime plugin.
+    """
+    if not any(c.shared is not None for c in storage_manager_config.l1_manager_configs):
+        return
+    if mp_config.supported_transfer_mode != "lmcache_driven":
+        raise ValueError(
+            "A shared L1 requires --supported-transfer-mode lmcache_driven, "
+            f"got {mp_config.supported_transfer_mode!r}"
+        )
+    if mp_config.engine_type == "blend":
+        raise ValueError("A shared L1 does not support CacheBlend")
+    if mp_config.p2p_config.enabled:
+        raise ValueError("A shared L1 does not support P2P")
+    if mp_config.runtime_plugin_config.locations:
+        raise ValueError(
+            "A shared L1 does not support runtime plugins: "
+            f"{mp_config.runtime_plugin_config.locations}"
+        )
+
+
 def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
@@ -279,6 +310,8 @@ def run_cache_server(
         If return_engine is True: tuple of (request server, MPCacheServer).
         If return_engine is False: None (blocks until interrupted).
     """
+    prepare_shared_l1(mp_config, storage_manager_config)
+
     # Before any event IPC backend is resolved (KV-cache registration), so
     # the setting is observed by every resolver in this process.
     set_isolated_ipc(mp_config.isolated_ipc)

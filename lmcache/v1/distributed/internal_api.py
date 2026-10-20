@@ -251,7 +251,8 @@ class L1ManagerInterface(Protocol):
     ``L1Manager`` implements it with the allocator, index, locks and
     eviction in this process. An implementation that cannot honour a call
     answers with the documented ``L1Error`` codes instead of raising, so
-    the callers keep one code path.
+    the callers keep one code path. Device-DAX arena hot-plug is the
+    separate ``DevDaxHotPlug`` capability.
     """
 
     @property
@@ -346,32 +347,12 @@ class L1ManagerInterface(Protocol):
         """Describe a registerable L1 buffer, or None when there is none."""
         ...
 
-    def get_devdax_arena_statuses(self) -> list["DevDaxArenaStatus"]:
-        """Return Device-DAX arena statuses for hot-pluggable L1s."""
-        ...
-
-    def get_devdax_arena_status(self, device_path: str) -> "DevDaxArenaStatus":
-        """Return one hot-pluggable Device-DAX arena's status."""
-        ...
-
     def owns_device(self, device_path: str) -> bool:
         """Whether this L1 maps the physical device at ``device_path``."""
         ...
 
     def memory_region_count(self) -> int:
         """Return the number of memory regions backing this L1."""
-        ...
-
-    def add_devdax_device(
-        self, device_path: str, size_in_bytes: int
-    ) -> "DevDaxArenaStatus":
-        """Hot-add a Device-DAX arena."""
-        ...
-
-    def remove_devdax_device(
-        self, device_path: str, mode: "DevDaxRemoveMode" = ...
-    ) -> "DevDaxArenaStatus":
-        """Hot-remove a Device-DAX arena."""
         ...
 
     def report_status(self) -> dict:
@@ -384,4 +365,35 @@ class L1ManagerInterface(Protocol):
 
     def close(self) -> None:
         """Release every resource held by this L1."""
+        ...
+
+
+@runtime_checkable
+class DevDaxHotPlug(Protocol):
+    """The Device-DAX arena hot-plug surface of an L1 that owns its arenas.
+
+    ``L1Manager`` implements it and still refuses the calls with
+    ``L1ReconfigureError`` when it is not Device-DAX backed. A binding whose
+    region another authority allocates does not implement it, and
+    ``StorageManager`` answers the reconfiguration API with 409 for it.
+    """
+
+    def get_devdax_arena_statuses(self) -> list["DevDaxArenaStatus"]:
+        """Return the status of every mapped Device-DAX arena."""
+        ...
+
+    def get_devdax_arena_status(self, device_path: str) -> "DevDaxArenaStatus":
+        """Return the status of the arena mapped at ``device_path``."""
+        ...
+
+    def add_devdax_device(
+        self, device_path: str, size_in_bytes: int
+    ) -> "DevDaxArenaStatus":
+        """Hot-add a Device-DAX arena."""
+        ...
+
+    def remove_devdax_device(
+        self, device_path: str, mode: "DevDaxRemoveMode" = ...
+    ) -> "DevDaxArenaStatus":
+        """Hot-remove a Device-DAX arena."""
         ...

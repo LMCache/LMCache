@@ -66,6 +66,12 @@ class L1ManagerDescriptor:
     """The manager's configuration object."""
 
     @property
+    def is_remote(self) -> bool:
+        """Whether a memory orchestrator owns this L1's objects (a ``shared``
+        section), so every call on the manager is a round trip."""
+        return self.config.shared is not None
+
+    @property
     def backend_types(self) -> frozenset[L1BackendType]:
         """
         The storage media backing this L1 manager.

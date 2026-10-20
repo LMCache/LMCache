@@ -28,6 +28,55 @@ from lmcache.v1.memory_management import (
 import lmcache.v1.memory_management as memory_management
 
 
+def open_devdax_mapping(
+    device_path: str,
+    size: int,
+) -> tuple[int, mmap.mmap, Any, torch.Tensor]:
+    """Open a Device-DAX device read-write and map its first ``size`` bytes.
+
+    Args:
+        device_path: Device (or file) to map with ``MAP_SHARED``.
+        size: Number of bytes to map from offset zero.
+
+    Returns:
+        ``(fd, mmap_obj, mmap_buffer, buffer)``: the open descriptor, the
+        mapping, the ctypes array exported from it and a flat ``torch.uint8``
+        view of the mapping. Drop ``buffer`` and ``mmap_buffer`` before
+        closing ``mmap_obj``, then close ``fd``.
+
+    Raises:
+        RuntimeError: The path reports a capacity smaller than ``size``.
+        OSError: The path cannot be opened or mapped.
+    """
+    fd: int | None = None
+    mmap_obj: mmap.mmap | None = None
+    try:
+        fd = os.open(device_path, os.O_RDWR)
+        capacity = os.fstat(fd).st_size
+        if capacity > 0 and size > capacity:
+            raise RuntimeError(
+                f"l1 devdax size ({size} bytes) exceeds "
+                f"{device_path} capacity ({capacity} bytes)"
+            )
+
+        mmap_obj = mmap.mmap(
+            fd,
+            size,
+            flags=mmap.MAP_SHARED,
+            prot=mmap.PROT_READ | mmap.PROT_WRITE,
+        )
+        array_type = ctypes.c_uint8 * size
+        mmap_buffer = array_type.from_buffer(mmap_obj)
+        buffer = torch.frombuffer(mmap_buffer, dtype=torch.uint8)
+        return fd, mmap_obj, mmap_buffer, buffer
+    except Exception:
+        if mmap_obj is not None:
+            mmap_obj.close()
+        if fd is not None:
+            os.close(fd)
+        raise
+
+
 class DevDaxNotMappedError(ValueError):
     """No Device-DAX arena is registered at the requested path."""
 
@@ -237,39 +286,6 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             return self._arenas[0].allocator.address_manager
         return None
 
-    def _open_devdax_mapping(
-        self,
-        device_path: str,
-        size: int,
-    ) -> tuple[int, mmap.mmap, Any, torch.Tensor]:
-        fd: int | None = None
-        mmap_obj: mmap.mmap | None = None
-        try:
-            fd = os.open(device_path, os.O_RDWR)
-            capacity = os.fstat(fd).st_size
-            if capacity > 0 and size > capacity:
-                raise RuntimeError(
-                    f"l1 devdax size ({size} bytes) exceeds "
-                    f"{device_path} capacity ({capacity} bytes)"
-                )
-
-            mmap_obj = mmap.mmap(
-                fd,
-                size,
-                flags=mmap.MAP_SHARED,
-                prot=mmap.PROT_READ | mmap.PROT_WRITE,
-            )
-            array_type = ctypes.c_uint8 * size
-            mmap_buffer = array_type.from_buffer(mmap_obj)
-            buffer = torch.frombuffer(mmap_buffer, dtype=torch.uint8)
-            return fd, mmap_obj, mmap_buffer, buffer
-        except Exception:
-            if mmap_obj is not None:
-                mmap_obj.close()
-            if fd is not None:
-                os.close(fd)
-            raise
-
     def _map_and_append_arena(
         self,
         device_path: str,
@@ -295,7 +311,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             RuntimeError: If the device capacity is smaller than ``size``.
             OSError: If the device cannot be opened or mapped.
         """
-        fd, mmap_obj, mmap_buffer, buffer = self._open_devdax_mapping(device_path, size)
+        fd, mmap_obj, mmap_buffer, buffer = open_devdax_mapping(device_path, size)
         arena: _DevDaxArena | None = None
         try:
             allocator = TensorMemoryAllocator(buffer, align_bytes=self.align_bytes)

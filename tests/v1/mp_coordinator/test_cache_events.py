@@ -448,6 +448,28 @@ def test_read_finished_is_not_consumed():
     assert EventType.L1_READ_FINISHED not in subscriber.get_subscriptions()
 
 
+def test_shared_l1_placements_stay_out_of_fleet_events():
+    """A shared L1 tags its placements; the region, not one server, owns them."""
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={"keys": [_key(1)], "meta": [_meta(100)], "shared": True},
+        ),
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={"keys": [_key(2)], "meta": [_meta(200)]},
+        ),
+    )
+    subscriber.flush()
+
+    [batches] = sink.published
+    [store] = batches
+    assert [e.size_bytes for e in store.entries] == [200]
+
+
 def test_l2_events_map_with_backend_and_sizes():
     sink = _RecordingSink()
     subscriber = _subscriber(sink)

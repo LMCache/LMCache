@@ -454,6 +454,12 @@ class PrefetchController(StorageControllerInterface):
         self._l1_manager_descriptors: dict[int, L1ManagerDescriptor] = {
             desc.index: desc for desc in l1_manager_descriptors
         }
+        # Lookups ask local L1s first; a remote (shared) L1 pays a round trip
+        # per call, so it goes last and sees only the keys still missing.
+        self._l1_lookup_order = [
+            desc.index
+            for desc in sorted(l1_manager_descriptors, key=lambda d: d.is_remote)
+        ]
 
         self._l2_adapters: dict[int, L2AdapterInterface] = {
             desc.index: adapter
@@ -1076,6 +1082,9 @@ class PrefetchController(StorageControllerInterface):
         """Read-lock every key of the request that is resident in an L1
         manager and record the hits in ``l1_locked_keys``.
 
+        Local L1s see every key; a remote (shared) L1 is asked last and only
+        for the keys no local L1 locked, so a local hit costs no round trip.
+
         Args:
             request: The request whose keys are looked up.
 
@@ -1086,19 +1095,43 @@ class PrefetchController(StorageControllerInterface):
         flattened_keys = request.get_flattened_keys()
         num_rows = len(request.key_groups)
         num_cols = len(request.key_groups[0].keys)
+        locked: set[int] = set()  # positions some L1 already locked for us
         completed = False
         try:
-            for l1_idx, l1_manager in self._l1_managers.items():
-                result = l1_manager.reserve_read(flattened_keys, request.num_kv_readers)
+            for l1_idx in self._l1_lookup_order:
+                if self._l1_manager_descriptors[l1_idx].is_remote:
+                    keys = [k for i, k in enumerate(flattened_keys) if i not in locked]
+                else:
+                    keys = flattened_keys
+                result = (
+                    self._l1_managers[l1_idx].reserve_read(keys, request.num_kv_readers)
+                    if keys
+                    else {}
+                )
                 res_bitmap = Bitmap(len(flattened_keys))
                 for i, key in enumerate(flattened_keys):
-                    error, _obj = result[key]
-                    if error != L1Error.SUCCESS:
-                        continue
-                    res_bitmap.set(i)
+                    if key in result and result[key][0] == L1Error.SUCCESS:
+                        res_bitmap.set(i)
+                        locked.add(i)
                 request.key_states.l1_locked_keys[l1_idx] = (
                     _scatter_bitmaps_full_global(res_bitmap, num_rows, num_cols)
                 )
+                if self._l1_manager_descriptors[l1_idx].is_remote:
+                    for row in request.key_groups:
+                        for key in row.keys:
+                            error, obj = result.get(key, (L1Error.KEY_NOT_EXIST, None))
+                            if (
+                                error == L1Error.SUCCESS
+                                and obj is not None
+                                and (
+                                    obj.get_shapes() != row.layout_desc.shapes
+                                    or obj.get_dtypes() != row.layout_desc.dtypes
+                                )
+                            ):
+                                raise ValueError(
+                                    "Shared L1 layout differs from the reader "
+                                    f"for {key}"
+                                )
             completed = True
         finally:
             if not completed:

@@ -521,3 +521,25 @@ def test_delete_reports_a_key_as_skipped_while_any_copy_is_locked(
     assert store.delete_l1_keys(keys) == (0, 1)
     managers[locked_index].finish_read(keys)
     assert store.delete_l1_keys(keys) == (1, 0)
+
+
+def test_failed_store_aborts_each_owner(storage_factory: StorageFactory) -> None:
+    store, managers, _ = storage_factory((4096, 4096))
+    objects = {}
+    for index in (1, 2):
+        objects.update(store.reserve_write([key(index)], LAYOUT))
+    assert len({obj.get_l1_manager() for obj in objects.values()}) == 2
+    store.abort_write_by_owner(store.prepare_write_completion(objects))
+    assert all(manager.get_memory_usage()[0] == 0 for manager in managers)
+    assert all(manager.get_staging_memory_usage() == 0 for manager in managers)
+    result = store.query_prefetch_status(
+        store.submit_prefetch_task(
+            single_row_spec([key(1), key(2)], LAYOUT), skip_l2=True
+        )
+    )
+    assert result is not None and result.l1_owners == {}
+    assert set(store.reserve_write([key(1)], LAYOUT)) == {key(1)}
+    with pytest.raises(ValueError, match="registered L1 owner"):
+        store.abort_write_by_owner(
+            [(max(m.l1_manager_id for m in managers) + 1, [key(1)])]
+        )

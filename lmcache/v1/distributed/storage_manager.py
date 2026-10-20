@@ -33,6 +33,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError, strerror
 from lmcache.v1.distributed.internal_api import (
+    DevDaxHotPlug,
     L1ManagerInterface,
     L1MemoryDesc,
     L1OperationResult,
@@ -53,6 +54,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.distributed.serde import create_serde_processor
+from lmcache.v1.distributed.shared_l1.manager import SharedL1Manager
 from lmcache.v1.distributed.storage_controllers import (
     L1EvictionController,
     L2AdapterEvictionState,
@@ -132,12 +134,20 @@ class StorageManager:
             else:
                 created: list[L1ManagerInterface] = []
                 for manager_config in config.l1_manager_configs:
-                    path = manager_config.memory_config.devdax_path
+                    path = (
+                        manager_config.shared.path
+                        if manager_config.shared is not None
+                        else manager_config.memory_config.devdax_path
+                    )
                     if path and any(m.owns_device(path) for m in created):
                         raise ValueError(
                             f"Device-DAX path already owned by an L1: {path}"
                         )
-                    manager: L1ManagerInterface = L1Manager(manager_config)
+                    manager: L1ManagerInterface = (
+                        SharedL1Manager(manager_config)
+                        if manager_config.shared is not None
+                        else L1Manager(manager_config)
+                    )
                     cleanup.callback(manager.close)
                     created.append(manager)
                 managers = tuple(created)
@@ -437,6 +447,28 @@ class StorageManager:
         )
 
         # TODO: global key states update
+
+    def abort_write_by_owner(self, completion: L1WriteCompletion) -> None:
+        """Discard captured reservations whose store failed.
+
+        Args:
+            completion: Owner/key groups captured before scheduling the abort.
+
+        Raises:
+            ValueError: A captured owner is no longer registered.
+
+        The caller must wait for device writes into the reserved buffers, so
+        schedule this on the same stream as the copies. An embedded L1 frees
+        the staging buffers now instead of when their write TTL expires; a
+        remote binding tells its authority, which would otherwise keep the
+        keys write-locked and refuse every later writer.
+        """
+        if any(owner not in self._l1_managers_by_id for owner, _ in completion):
+            raise ValueError("write completion requires a registered L1 owner")
+        for owner, keys in completion:
+            self._l1_managers_by_id[owner].finish_write_and_delete(
+                keys, tag=_L1_WRITE_TAG
+            )
 
     @contextmanager
     def read_prefetched_results(
@@ -883,11 +915,11 @@ class StorageManager:
             One status per mapped arena, in pool order.
 
         Raises:
-            L1ReconfigureError: If L1 is not Device-DAX backed.
+            L1ReconfigureError: If the L1 does not own Device-DAX arenas (409)
+                or is not Device-DAX backed.
             ValueError: This legacy operation requires a single L1 manager.
         """
-        self._require_single_l1()
-        return self._l1_manager.get_devdax_arena_statuses()
+        return self._hot_pluggable_l1().get_devdax_arena_statuses()
 
     def add_l1_devdax_device(
         self,
@@ -910,15 +942,16 @@ class StorageManager:
             Status of the newly added arena.
 
         Raises:
-            L1ReconfigureError: If L1 is not Device-DAX backed, a single-region
-                L2 adapter is configured (409), the physical device is already
-                mapped by L2 (409), or the request cannot be applied.
+            L1ReconfigureError: If the L1 does not own Device-DAX arenas or is
+                not Device-DAX backed, a single-region L2 adapter is configured
+                (409), the physical device is already mapped by L2 (409), or
+                the request cannot be applied.
             ValueError: This legacy operation requires a single L1 manager.
         """
-        self._require_single_l1()
+        l1 = self._hot_pluggable_l1()
         with self._lifecycle_lock:
             # Report the L1 backing error before adapter compatibility.
-            self._l1_manager.get_devdax_arena_statuses()
+            l1.get_devdax_arena_statuses()
             incompatible = self._single_region_adapter_names()
             if incompatible:
                 raise L1ReconfigureError(
@@ -936,7 +969,7 @@ class StorageManager:
                     "is already mapped by L2 adapter(s) "
                     f"({', '.join(device_owners)})",
                 )
-            status = self._l1_manager.add_devdax_device(device_path, size_in_bytes)
+            status = l1.add_devdax_device(device_path, size_in_bytes)
         self._publish_capacity_changed()
         return status
 
@@ -959,25 +992,25 @@ class StorageManager:
             Status of the arena after the removal request.
 
         Raises:
-            L1ReconfigureError: If L1 is not Device-DAX backed or the request
-                cannot be applied.
+            L1ReconfigureError: If the L1 does not own Device-DAX arenas or is
+                not Device-DAX backed, or the request cannot be applied.
             RuntimeError: If device synchronization or cleanup fails after the
                 drain transition.
             OSError: If unmapping or closing the device fails after the drain
                 transition.
             ValueError: This legacy operation requires a single L1 manager.
         """
-        self._require_single_l1()
-        target_was_active = self._l1_devdax_arena_is_active(device_path)
+        l1 = self._hot_pluggable_l1()
+        target_was_active = self._l1_devdax_arena_is_active(l1, device_path)
         try:
-            status = self._l1_manager.remove_devdax_device(device_path, mode)
+            status = l1.remove_devdax_device(device_path, mode)
         except Exception:
             # Draining begins before an empty arena is synchronized and
             # unmapped. If that cleanup raises, usable capacity has still
             # changed and the coordinator must not retain the old topology.
             try:
                 if target_was_active and not self._l1_devdax_arena_is_active(
-                    device_path
+                    l1, device_path
                 ):
                     self._publish_capacity_changed()
             except Exception:
@@ -1002,14 +1035,14 @@ class StorageManager:
             if (name := requires_single_l1_memory_region(descriptor.config)) is not None
         ]
 
-    def _l1_devdax_arena_is_active(self, device_path: str) -> bool:
+    def _l1_devdax_arena_is_active(self, l1: DevDaxHotPlug, device_path: str) -> bool:
         """Return whether an ACTIVE Device-DAX arena is mapped at ``device_path``.
 
         The path must match the one used when adding the arena. ``False``
         when L1 is not Device-DAX backed or nothing is registered there.
         """
         try:
-            status = self._l1_manager.get_devdax_arena_status(device_path)
+            status = l1.get_devdax_arena_status(device_path)
         except L1ReconfigureError:
             return False
         return status.state is DevDaxArenaState.ACTIVE
@@ -1434,6 +1467,21 @@ class StorageManager:
             raise ValueError(
                 "This operation requires a single L1; use owner-routed operations"
             )
+
+    def _hot_pluggable_l1(self) -> DevDaxHotPlug:
+        """Return the single L1 as its Device-DAX hot-plug surface.
+
+        Raises:
+            L1ReconfigureError: The L1 does not own Device-DAX arenas (409).
+            ValueError: This legacy operation requires a single L1 manager.
+        """
+        self._require_single_l1()
+        manager = self._l1_manager
+        if not isinstance(manager, DevDaxHotPlug):
+            raise L1ReconfigureError(
+                409, "L1 does not own Device-DAX arenas; hot-plug is unsupported"
+            )
+        return manager
 
     def _snapshot_adapters(
         self,

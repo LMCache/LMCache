@@ -343,6 +343,30 @@ def unfold_grouped(
     """
     ...
 
+def cache_flush_supported() -> bool:
+    """Return whether :func:`cache_flush_range` is implemented here.
+
+    Returns:
+        True on x86-64; False on architectures without an implementation.
+    """
+    ...
+
+def cache_flush_range(ptr: int, size: int) -> None:
+    """Write back and invalidate the CPU cache lines of a range, then fence.
+
+    Uses CLFLUSHOPT (CLFLUSH when the CPU lacks it) on every line that
+    overlaps ``[ptr, ptr + size)``, followed by a store fence. Releases the
+    GIL while flushing.
+
+    Args:
+        ptr: Start address in this process.
+        size: Length in bytes; 0 is a no-op.
+
+    Raises:
+        RuntimeError: The architecture has no implementation.
+    """
+    ...
+
 class ParallelPatternMatcher:
     """
     Pattern matcher for integer vectors.

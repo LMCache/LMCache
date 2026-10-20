@@ -23,6 +23,7 @@ from lmcache.v1.distributed.config import (
     get_configured_capacity_bytes,
 )
 from lmcache.v1.distributed.error import L1ReconfigureError
+from lmcache.v1.distributed.internal_api import DevDaxHotPlug
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.memory_manager.l1_manager_protocol import L1ManagerProtocol
 from lmcache.v1.distributed.storage_manager import StorageManager
@@ -136,9 +137,12 @@ class _StorageManagerStub:
     def _l2_device_owner_names(self, _device_path: str) -> list[str]:
         return []
 
-    def _l1_devdax_arena_is_active(self, device_path: str) -> bool:
+    def _hot_pluggable_l1(self) -> DevDaxHotPlug:
+        return StorageManager._hot_pluggable_l1(cast("StorageManager", self))
+
+    def _l1_devdax_arena_is_active(self, l1: DevDaxHotPlug, device_path: str) -> bool:
         return StorageManager._l1_devdax_arena_is_active(
-            cast("StorageManager", self), device_path
+            cast("StorageManager", self), l1, device_path
         )
 
     def _snapshot_adapters(
@@ -498,6 +502,20 @@ class TestCapacityChangePublishing:
             for event in events
         ] == [8192, 4096]
 
+    def test_l1_without_hot_plug_is_refused_with_409(self) -> None:
+        # _FakeL1Manager reports arenas but cannot add or remove them, so it
+        # is not a DevDaxHotPlug and the API refuses before touching it.
+        stub = _StorageManagerStub({L1BackendType.DRAM: 4096}, [])
+
+        with pytest.raises(L1ReconfigureError) as excinfo:
+            StorageManager.add_l1_devdax_device(
+                cast("StorageManager", stub), "/dev/dax0.1", 4096
+            )
+        assert excinfo.value.status_code == 409
+        with pytest.raises(L1ReconfigureError):
+            StorageManager.get_l1_devdax_arena_statuses(cast("StorageManager", stub))
+        assert stub._event_bus.events == []
+
     def test_remove_transition_is_published_when_total_is_unchanged(self) -> None:
         class _FailingRemoveL1Manager(_FakeL1Manager):
             def __init__(self) -> None:
@@ -516,6 +534,11 @@ class TestCapacityChangePublishing:
                         is_primary=False,
                     )
                 ]
+
+            def add_devdax_device(
+                self, _device_path: str, _size_in_bytes: int
+            ) -> DevDaxArenaStatus:
+                raise NotImplementedError
 
             def remove_devdax_device(self, _device_path: str, _mode: object) -> None:
                 self._target_state = DevDaxArenaState.DRAINING

@@ -80,9 +80,11 @@ eventfd, and every adapter's lookup and load eventfd. Requests advance through
 two phases, `LOOKUP` while any lookup task is outstanding and `PLAN_AND_LOAD`
 afterwards.
 
-1. **Lock pass** (`_lock_l1_keys`). `reserve_read` every key of the request in
-   every L1 manager; the hits become `l1_locked_keys`. Locks are taken
-   regardless of `lock_mode`.
+1. **Lock pass** (`_lock_l1_keys`). `reserve_read` the request's keys in
+   every L1 manager; the hits become `l1_locked_keys`. Local L1s see every
+   key; a shared L1 (`L1ManagerDescriptor.is_remote`) is asked last and only
+   for the keys no local L1 locked, since each of its calls is a round trip.
+   Locks are taken regardless of `lock_mode`.
 2. **Lookup** (`_start_lookup_phase`). Submit one `lookup_and_lock` task per
    non-draining adapter, over the full key list. As each result arrives
    (`_poll_lookup_results`) it becomes that adapter's row in `l2_locked_keys`.
