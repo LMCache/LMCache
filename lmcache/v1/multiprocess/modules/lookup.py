@@ -43,29 +43,6 @@ logger = init_logger(__name__)
 _DEFAULT_LOAD_POLICY = DefaultKVLoadPolicy({})
 
 
-def _engine_hit_tokens(key: IPCCacheServerKey, covered_tokens: int) -> int:
-    """Return the tokens the engine's prefix cache already held for ``key``.
-
-    Reads the ``lmcache.hint.engine_computed_tokens`` hint the engine
-    connector attaches to ``request_configs`` (see
-    ``docs/design/v1/multiprocess/kv_load_policy.md``); it is the engine's
-    exact hit at submit time.  Without the hint the chunk-aligned covered
-    prefix (the key's ``start``) is the only lower bound the server has, so
-    it is reported instead.
-
-    Args:
-        key: The lookup's cache key.
-        covered_tokens: The engine-covered prefix LMCache skipped, in tokens.
-
-    Returns:
-        The engine's prefix-cache hit in tokens.
-    """
-    hint = (key.request_configs or {}).get("lmcache.hint.engine_computed_tokens")
-    if hint is None:
-        return covered_tokens
-    return int(hint)
-
-
 def resolve_prefetched_obj_keys(
     ctx: MPCacheServerContext,
     key: IPCCacheServerKey,
@@ -138,7 +115,8 @@ class _PrefetchJob:
     # except on a declined lookup, which offsets no hits.
     engine_covered_chunks: int = 0
     # Request-level view, reported on every path: the whole prompt (sub-chunk
-    # tail included) and the engine's own prefix-cache hit.
+    # tail included) and the engine's own prefix-cache hit from the
+    # ``lmcache.hint.engine_computed_tokens`` request config (0 without it).
     prompt_tokens: int = 0
     engine_hit_tokens: int = 0
     # Captured at lookup time so the ``MP_LOOKUP_PREFETCH_END`` event can
@@ -401,8 +379,10 @@ class LookupModule(DiscoverableModule):
                 start_chunk=start_chunk,
                 engine_covered_chunks=start_chunk,
                 prompt_tokens=len(key.token_ids),
-                engine_hit_tokens=_engine_hit_tokens(
-                    key, start_chunk * self._ctx.chunk_size
+                engine_hit_tokens=int(
+                    (key.request_configs or {}).get(
+                        "lmcache.hint.engine_computed_tokens", 0
+                    )
                 ),
                 model_name=model_name,
                 cache_salt=key.cache_salt,
@@ -693,8 +673,10 @@ class LookupModule(DiscoverableModule):
                 start_chunk=start_chunk,
                 engine_covered_chunks=engine_covered_chunks,
                 prompt_tokens=len(key.token_ids),
-                engine_hit_tokens=_engine_hit_tokens(
-                    key, engine_covered_chunks * self._ctx.chunk_size
+                engine_hit_tokens=int(
+                    (key.request_configs or {}).get(
+                        "lmcache.hint.engine_computed_tokens", 0
+                    )
                 ),
                 model_name=key.model_name,
                 cache_salt=key.cache_salt,

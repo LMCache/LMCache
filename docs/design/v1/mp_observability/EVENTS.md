@@ -277,8 +277,8 @@ denormalized token-level counts so subscribers need not know `chunk_size`:
   - `engine_hit_tokens`: the engine's own prefix-cache hit, read from the
     `lmcache.hint.engine_computed_tokens` request config (see
     [kv_load_policy.md](../multiprocess/kv_load_policy.md)).  Unlike
-    `apc_covered_tokens` it is not rounded down to a chunk boundary.  When
-    the integration sends no hint it falls back to `apc_covered_tokens`.
+    `apc_covered_tokens` it is not rounded down to a chunk boundary; `0`
+    when the integration sends no hint.
   - `request_hit_tokens = max(engine_hit_tokens, apc_covered_tokens +
     hit_tokens)`: the prefix of the prompt served by either cache.  Both
     ranges start at token 0 and the lookup starts at or below the engine

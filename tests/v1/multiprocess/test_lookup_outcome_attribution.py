@@ -311,9 +311,9 @@ def test_request_level_fields_cover_the_whole_prompt(
     assert meta["requested_tokens"] == 2 * CHUNK_SIZE
 
 
-def test_engine_hit_falls_back_to_covered_prefix_without_hint():
-    """With no connector hint the aligned covered prefix stands in for the
-    engine hit, so the request-level fields stay consistent."""
+def test_engine_hit_is_zero_without_hint():
+    """With no connector hint the engine hit is unknown and reads 0; the
+    request-level hit still covers the skipped prefix plus LMCache's hit."""
     meta = _end_metadata(
         chunk_hashes=[f"c{i}".encode() for i in range(5)],
         l1_rows=["10"],
@@ -321,7 +321,7 @@ def test_engine_hit_falls_back_to_covered_prefix_without_hint():
         prompt_tokens=_PROMPT_TOKENS,
     )
 
-    assert meta["engine_hit_tokens"] == 3 * CHUNK_SIZE
+    assert meta["engine_hit_tokens"] == 0
     assert meta["request_hit_tokens"] == 4 * CHUNK_SIZE
 
 
