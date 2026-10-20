@@ -680,6 +680,11 @@ class LoadStoreOp:
     """Number of tokens to skip writing at the beginning of the retrieve
     range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
 
+    include_unfull_chunk: bool = False
+    """The range ends with an unfull chunk ``[floor(end / chunk_size) *
+    chunk_size, end)`` that is transferred too; its block IDs follow the full
+    chunks' in every group. Otherwise ``end`` is chunk-aligned."""
+
     @property
     def flat_block_ids(self) -> list[int]:
         """Return all block IDs flattened for group-blind error paths.
@@ -795,6 +800,8 @@ class LMCacheMPSchedulerAdapter:
         self._lookup_params: dict[
             str, tuple[list[int], str, dict[str, Any] | None]
         ] = {}
+        # Unaligned end of each lookup that also asks for the unfull chunk.
+        self._unfull_lookup_ends: dict[str, int] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -915,6 +922,7 @@ class LMCacheMPSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         reserve_last_token: bool = False,
+        include_unfull_chunk: bool = False,
         start: int = 0,
     ) -> bool:
         """
@@ -934,6 +942,10 @@ class LMCacheMPSchedulerAdapter:
                 the IPC key.
             reserve_last_token: Whether to exclude the final token before
                 aligning the lookup range.
+            include_unfull_chunk: Whether the hit may also cover the unfull
+                chunk ending at the lookup range's unaligned end, so
+                ``check_lookup_result`` can return a count that is not a
+                multiple of the chunk size.
             start: Chunk-aligned start token index of the lookup; tokens
                 below it are covered by the engine's prefix cache, so the
                 server touches but does not lock or prefetch them. A start
@@ -964,14 +976,19 @@ class LMCacheMPSchedulerAdapter:
         aligned_end = (
             lookup_tokens // self.lmcache_tokens_per_chunk
         ) * self.lmcache_tokens_per_chunk
+        end = aligned_end
+        if include_unfull_chunk and lookup_tokens != aligned_end:
+            end = lookup_tokens
+            self._unfull_lookup_ends[request_id] = lookup_tokens
 
         key = self._create_key(
             token_ids,
             start=start,
-            end=aligned_end,
+            end=end,
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
+            include_unfull_chunk=end != aligned_end,
         ).no_worker_id_version()
 
         futures: dict[str, MessagingFuture[None]] = {
@@ -1011,12 +1028,11 @@ class LMCacheMPSchedulerAdapter:
             request_id, (None, None, None)
         )
         if token_ids_l is not None:
+            lookup_end = self._unfull_lookup_ends.get(request_id, len(token_ids_l))
             for url, hit_chunks in per_server.items():
                 if hit_chunks <= min_chunks:
                     continue
-                tail_end = min(
-                    hit_chunks * self.lmcache_tokens_per_chunk, len(token_ids_l)
-                )
+                tail_end = min(hit_chunks * self.lmcache_tokens_per_chunk, lookup_end)
                 tail_key = self._create_key(
                     token_ids=token_ids_l,
                     start=min_chunks * self.lmcache_tokens_per_chunk,
@@ -1024,6 +1040,7 @@ class LMCacheMPSchedulerAdapter:
                     request_id=request_id,
                     cache_salt=cs or "",
                     request_configs=request_configs,
+                    include_unfull_chunk=request_id in self._unfull_lookup_ends,
                 ).no_worker_id_version()
                 self.req_clients[url].free_lookup_locks(tail_key, self.tp_size)
 
@@ -1138,7 +1155,14 @@ class LMCacheMPSchedulerAdapter:
             )
             self._free_inconsistent_lookup_locks(request_id, per_server, min_chunks)
 
-        token_count = min_chunks * self.lmcache_tokens_per_chunk
+        # One count past the full chunks is the unfull chunk, which ends at
+        # the lookup's unaligned end.
+        token_count = min(
+            min_chunks * self.lmcache_tokens_per_chunk,
+            self._unfull_lookup_ends.get(
+                request_id, min_chunks * self.lmcache_tokens_per_chunk
+            ),
+        )
 
         self._finished_lookup_results[request_id] = token_count
         return token_count
@@ -1162,6 +1186,7 @@ class LMCacheMPSchedulerAdapter:
         self._finished_lookup_results.pop(request_id, None)
         self._per_server_hits.pop(request_id, None)
         self._lookup_params.pop(request_id, None)
+        self._unfull_lookup_ends.pop(request_id, None)
 
     def reset_cache(self) -> bool:
         """Ask every backing LMCache server to best-effort clear idle cache.
@@ -1218,6 +1243,7 @@ class LMCacheMPSchedulerAdapter:
         request_id: str,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
+        include_unfull_chunk: bool = False,
         extra_ranges: tuple[tuple[int, int], ...] = (),
     ) -> None:
         """Release read locks acquired during lookup without a full retrieve.
@@ -1241,6 +1267,8 @@ class LMCacheMPSchedulerAdapter:
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+            include_unfull_chunk: Also release the unfull chunk the lookup
+                locked; ``end`` must then be the lookup's unaligned end.
             extra_ranges: Lock ranges left by this request's earlier,
                 abandoned lookups, as ``(start, end)`` token pairs ending at
                 that lookup's hit boundary. Released in the same RPC.
@@ -1256,6 +1284,7 @@ class LMCacheMPSchedulerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
+            include_unfull_chunk=include_unfull_chunk,
         ).no_worker_id_version()
         for url in self._server_urls:
             self.req_clients[url].free_lookup_locks(
@@ -1331,6 +1360,7 @@ class LMCacheMPSchedulerAdapter:
         request_id: str,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
+        include_unfull_chunk: bool = False,
     ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key.
 
@@ -1342,6 +1372,9 @@ class LMCacheMPSchedulerAdapter:
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+            include_unfull_chunk: Whether an unaligned ``end`` also addresses
+                the unfull chunk before it (see
+                ``IPCCacheServerKey.include_unfull_chunk``).
 
         Returns:
             IPCCacheServerKey: The constructed key.
@@ -1359,6 +1392,7 @@ class LMCacheMPSchedulerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
+            include_unfull_chunk=include_unfull_chunk,
         )
 
     def update_pending_store_count(self, req_id: str, count: int) -> bool:
@@ -1931,6 +1965,7 @@ class LMCacheMPWorkerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
+            include_unfull_chunk=op.include_unfull_chunk,
         )
         if self.transfer_ctx is None:
             raise RuntimeError(
@@ -2000,6 +2035,7 @@ class LMCacheMPWorkerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
+            include_unfull_chunk=op.include_unfull_chunk,
         )
         if self.transfer_ctx is None:
             raise RuntimeError(
@@ -2749,6 +2785,7 @@ class LMCacheMPWorkerAdapter:
         request_id: str,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
+        include_unfull_chunk: bool = False,
     ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key.
 
@@ -2760,6 +2797,9 @@ class LMCacheMPWorkerAdapter:
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+            include_unfull_chunk: Whether an unaligned ``end`` also addresses
+                the unfull chunk before it (see
+                ``IPCCacheServerKey.include_unfull_chunk``).
 
         Returns:
             IPCCacheServerKey: The constructed key.
@@ -2775,4 +2815,5 @@ class LMCacheMPWorkerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
+            include_unfull_chunk=include_unfull_chunk,
         )

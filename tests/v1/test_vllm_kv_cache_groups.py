@@ -503,6 +503,65 @@ def test_conversion_excludes_scratch_group_layers():
     assert get_engine_group_indices(spec, 3) == [0, EXCLUDED_ENGINE_GROUP, 2]
 
 
+@dataclass
+class HiSparseHotSpec:
+    """Scratch spec that is not a per-request ring; never registered."""
+
+    block_size: int
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
+def test_per_request_state_spec_matches_rings_only():
+    # First Party
+    from lmcache.integration.vllm.kv_cache_groups import is_per_request_state_spec
+
+    assert is_per_request_state_spec(CircularBufferSpec(block_size=8))
+    assert is_per_request_state_spec(
+        UniformTypeKVCacheSpecs(
+            block_size=8, kv_cache_specs={"a": CircularBufferSpec(block_size=8)}
+        )
+    )
+    assert not is_per_request_state_spec(HiSparseHotSpec(block_size=8))
+    assert not is_per_request_state_spec(FullAttentionSpec(block_size=8))
+
+
+def test_conversion_registers_ring_as_per_request_state_when_enabled():
+    """With per-request state enabled, a ring forms its own per-request info
+    while other scratch groups stay excluded."""
+    # First Party
+    from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
+
+    kv_caches = _same_shape_caches(["layer.0", "layer.3"])
+    kv_caches["layer.1"] = torch.zeros(3, 1, 8, 1024, dtype=torch.float32)
+    kv_caches["layer.2"] = torch.zeros(3, 1, 8, 1024, dtype=torch.float32)
+    config = MockKVCacheConfig(
+        kv_cache_groups=[
+            MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+            MockKVCacheGroup(["layer.1"], CircularBufferSpec(block_size=8)),
+            MockKVCacheGroup(["layer.2"], HiSparseHotSpec(block_size=8)),
+            MockKVCacheGroup(["layer.3"], FullAttentionSpec(block_size=16)),
+        ]
+    )
+
+    spec = create_engine_group_infos_from_vllm(
+        config, kv_caches, include_per_request_state=True
+    )
+
+    by_group = {g.engine_group_id: g for g in spec}
+    assert sorted(by_group) == [0, 1, 3]
+    assert by_group[1].per_request_state
+    assert by_group[1].layer_indices == (2,)
+    assert not by_group[0].per_request_state
+    assert get_engine_group_indices(spec, 4) == [0, 3, 1, EXCLUDED_ENGINE_GROUP]
+
+    default = create_engine_group_infos_from_vllm(config, kv_caches)
+    assert all(not g.per_request_state for g in default)
+    assert sorted(g.engine_group_id for g in default) == [0, 3]
+
+
 def test_conversion_skips_format_discovery_for_scratch_layers():
     """A scratch ring whose layout format discovery would reject must not block
     registration: its layers skip discovery and stay excluded."""

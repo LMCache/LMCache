@@ -16,7 +16,7 @@ corresponding ``lmcache.integration.<engine>`` package, not here.
 """
 
 # Standard
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import cast
 
 # Third Party
@@ -63,6 +63,14 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     """Pages hold recurrent state snapshots (Mamba/GDN) rather than attention
     KV; the one-block window reflects restore semantics and blend full-window
     forcing must not widen it. Defaulted field: wire-compatible."""
+
+    per_request_state: bool = False
+    """Pages hold per-request state that is not addressed by token position:
+    the request owns one block for its whole lifetime (e.g. vLLM's
+    ``CircularBufferSpec`` ring holding the raw keys of the compression group
+    that is still open). Every chunk of a transfer request carries that one
+    block, so the server sizes the group as one block per LMCache chunk and
+    ignores ``tokens_per_block``. Defaulted field: wire-compatible."""
 
 
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
@@ -182,6 +190,10 @@ def slice_block_ids_per_group(
     group_tokens_per_block: Sequence[int],
     start_token_idx: int,
     end_token_idx: int,
+    *,
+    tokens_per_chunk: int = 0,
+    per_request_state_groups: Collection[int] = (),
+    include_unfull_chunk: bool = False,
 ) -> list[list[int]]:
     """Slice each engine group's block IDs for a token range.
 
@@ -192,6 +204,10 @@ def slice_block_ids_per_group(
     tokens, a tokens_per_block-64 group gets 4 IDs while a
     tokens_per_block-256 group gets 1.
 
+    A per-request state group (one block per request, see
+    ``EngineGroupInfo.per_request_state``) gets its block once per chunk of
+    the range, the unfull chunk included.
+
     Args:
         allocated_block_ids: Block IDs keyed by engine group id; a missing group
             yields an empty list.
@@ -200,6 +216,12 @@ def slice_block_ids_per_group(
             ``0`` marks a scratch group, which slices to an empty list.
         start_token_idx: Range start token index, inclusive.
         end_token_idx: Range end token index, exclusive.
+        tokens_per_chunk: The LMCache chunk size; required with
+            ``per_request_state_groups``.
+        per_request_state_groups: Engine group ids holding per-request state.
+        include_unfull_chunk: The range ends with an unfull chunk, so
+            ``end_token_idx`` need not align: each group covers it with the
+            block holding its last token.
 
     Returns:
         One block-ID list per engine group, in engine-group order.
@@ -209,23 +231,28 @@ def slice_block_ids_per_group(
     """
     sliced: list[list[int]] = []
     for engine_group_idx, tokens_per_block in enumerate(group_tokens_per_block):
+        group_block_ids = allocated_block_ids.get(engine_group_idx, [])
+        if engine_group_idx in per_request_state_groups:
+            num_chunks = -(-(end_token_idx - start_token_idx) // tokens_per_chunk)
+            sliced.append(list(group_block_ids[:1]) * num_chunks)
+            continue
         if tokens_per_block == 0:
             sliced.append([])
             continue
         if start_token_idx % tokens_per_block != 0 or (
-            end_token_idx % tokens_per_block != 0
+            end_token_idx % tokens_per_block != 0 and not include_unfull_chunk
         ):
             raise ValueError(
                 f"token range [{start_token_idx}, {end_token_idx}) does not "
                 f"align to group {engine_group_idx} tokens_per_block "
                 f"{tokens_per_block}"
             )
-        group_block_ids = allocated_block_ids.get(engine_group_idx, [])
         sliced.append(
             list(
                 group_block_ids[
-                    start_token_idx // tokens_per_block : end_token_idx
-                    // tokens_per_block
+                    start_token_idx // tokens_per_block : -(
+                        -end_token_idx // tokens_per_block
+                    )
                 ]
             )
         )

@@ -433,12 +433,15 @@ class KVLayerGroupsManager:
 
             # tokens_per_block comes from the engine's KV cache spec; when
             # absent, fall back to the physical slot count so the group is
-            # treated as non-compressed (compress_ratio == 1).
-            tokens_per_block = (
-                info.tokens_per_block
-                if info is not None and info.tokens_per_block > 0
-                else bs
-            )
+            # treated as non-compressed (compress_ratio == 1). A per-request
+            # state group copies its single block into every chunk, so one
+            # block covers a whole chunk.
+            if info is not None and info.per_request_state:
+                tokens_per_block = lmcache_tokens_per_chunk
+            elif info is not None and info.tokens_per_block > 0:
+                tokens_per_block = info.tokens_per_block
+            else:
+                tokens_per_block = bs
             sw_size_tokens = info.sw_size_tokens if info is not None else -1
 
             self._validate_block_chunk_size_config(

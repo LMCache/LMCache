@@ -290,6 +290,7 @@ class StorageManager:
         self,
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
+        is_temporary: bool = False,
     ) -> dict[ObjectKey, MemoryObj]:
         """
         Reserve the object for writing into the storage manager.
@@ -298,6 +299,9 @@ class StorageManager:
             keys (list[ObjectKey]): List of object keys to reserve for writing.
             layout_desc (MemoryLayoutDesc): Description of the memory layout
                 for the objects to be reserved.
+            is_temporary: Store the objects as temporary: L1 deletes each one
+                when its last read lock is released, and never offloads it
+                to L2.
         Returns:
             dict[ObjectKey, MemoryObj]: A dictionary mapping object keys to their
                 reserved memory objects. Note that not all requested keys could be
@@ -319,7 +323,7 @@ class StorageManager:
                 break
             results = manager.reserve_write(
                 keys=pending,
-                is_temporary=[False] * len(pending),
+                is_temporary=[is_temporary] * len(pending),
                 layout_desc=layout_desc,
                 tag=_L1_WRITE_TAG,
             )
