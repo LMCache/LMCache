@@ -25,8 +25,8 @@ from lmcache.cli.commands.bench.quality_bench.core.run_files import (
 # Local
 from .fakes import FakeSender, SteppingCounters, answering
 from .stages import (
-    APC_URL,
-    BLEND_URL,
+    CANDIDATE_URL,
+    CONTROL_URL,
     METRICS_URL,
     REF_URL,
     RIGHT,
@@ -62,10 +62,10 @@ class TestRunConfigFromArgs:
             parse_run(
                 "--reference-url",
                 REF_URL,
-                "--blend-url",
-                BLEND_URL,
-                "--apc-url",
-                APC_URL,
+                "--candidate-url",
+                CANDIDATE_URL,
+                "--control-url",
+                CONTROL_URL,
                 "--model",
                 "m",
                 "--dataset",
@@ -82,8 +82,8 @@ class TestRunConfigFromArgs:
         )
         assert [a.role for a in config.arms] == [
             ArmRole.REFERENCE,
-            ArmRole.PREFIX_CACHE,
-            ArmRole.BLEND,
+            ArmRole.CONTROL,
+            ArmRole.CANDIDATE,
         ]
         assert config.scenario is ReuseScenario.REORDERED
         assert config.num_samples == 5
@@ -99,8 +99,8 @@ class TestRunConfigFromArgs:
         with pytest.raises(ValueError, match="--reference-url"):
             run_stage.run_config_from_args(
                 parse_run(
-                    "--blend-url",
-                    BLEND_URL,
+                    "--candidate-url",
+                    CANDIDATE_URL,
                     "--model",
                     "m",
                     "--dataset",
@@ -110,8 +110,8 @@ class TestRunConfigFromArgs:
                 )  # fmt: skip
             )
 
-    def test_metrics_need_the_blend_arm(self) -> None:
-        with pytest.raises(ValueError, match="--blend-url"):
+    def test_metrics_need_the_candidate_arm(self) -> None:
+        with pytest.raises(ValueError, match="--candidate-url"):
             run_stage.run_config_from_args(
                 parse_run(
                     "--reference-url",
@@ -120,7 +120,7 @@ class TestRunConfigFromArgs:
                     "m",
                     "--dataset",
                     "d",
-                    "--blend-metrics-url",
+                    "--capture-blend-metrics",
                     METRICS_URL,
                 )  # fmt: skip
             )
@@ -154,52 +154,53 @@ class TestRunFiles:
         self, dataset, engines, tmp_path
     ) -> None:
         """Arms served one at a time share one results directory."""
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
         run(dataset, out, "--reference-url", REF_URL)
         plan_before = _read(os.path.join(out, PLAN_FILE))
 
-        run(dataset, out, "--blend-url", BLEND_URL)
+        run(dataset, out, "--candidate-url", CANDIDATE_URL)
 
-        assert "arm_blend.json" in _files(out)
+        assert "arm_candidate.json" in _files(out)
         assert "arm_reference_1.json" in _files(out)
         assert _read(os.path.join(out, PLAN_FILE)) == plan_before
 
     def test_other_settings_are_refused_before_any_request(
         self, dataset, engines, tmp_path, capsys
     ) -> None:
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
         run(dataset, out, "--reference-url", REF_URL)
 
         error = expect_setup_error(
-            capsys, lambda: run(dataset, out, "--blend-url", BLEND_URL, "--seed", "7")
+            capsys,
+            lambda: run(dataset, out, "--candidate-url", CANDIDATE_URL, "--seed", "7"),
         )
         assert "seed: 42 -> 7" in error
-        assert engines[BLEND_URL].sent == []
+        assert engines[CANDIDATE_URL].sent == []
 
     def test_drifted_prompts_are_refused(
         self, dataset, engines, tmp_path, monkeypatch, capsys
     ) -> None:
         """Same flags, different prompts: e.g. the tokenizer changed."""
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
         run(dataset, out, "--reference-url", REF_URL)
         monkeypatch.setattr(alignment, "_FILLER_VOCAB_SIZE", 150)
 
         error = expect_setup_error(
-            capsys, lambda: run(dataset, out, "--blend-url", BLEND_URL)
+            capsys, lambda: run(dataset, out, "--candidate-url", CANDIDATE_URL)
         )
         assert "prompts differ" in error
-        assert engines[BLEND_URL].sent == []
+        assert engines[CANDIDATE_URL].sent == []
 
     def test_rerunning_an_arm_replaces_its_passes(
         self, dataset, engines, tmp_path
     ) -> None:
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
         run(dataset, out, "--reference-url", REF_URL, "--reference-repeats", "3")
-        run(dataset, out, "--blend-url", BLEND_URL)
+        run(dataset, out, "--candidate-url", CANDIDATE_URL)
         analyze(out)
         assert SUMMARY_FILE in _files(out)
 
@@ -209,8 +210,8 @@ class TestRunFiles:
         assert "arm_reference_2.json" in files
         assert "arm_reference_3.json" not in files
         assert "answers_reference_3.jsonl" not in files
-        # The blend pass stays; the summary described the old passes.
-        assert "arm_blend.json" in files
+        # The candidate pass stays; the summary described the old passes.
+        assert "arm_candidate.json" in files
         assert SUMMARY_FILE not in files
 
     def test_without_output_dir_a_new_directory_is_created(
@@ -238,7 +239,7 @@ class TestRunFiles:
         self, dataset, engines, tmp_path, monkeypatch
     ) -> None:
         """Each pass is saved as soon as it finishes."""
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
 
         class FailAfterPreflight(SteppingCounters):
             reads = 0
@@ -256,26 +257,26 @@ class TestRunFiles:
         out = str(tmp_path / "out")
 
         with pytest.raises(RuntimeError, match="blend-server metrics"):
-            run_both(dataset, out, "--blend-metrics-url", METRICS_URL)
+            run_both(dataset, out, "--capture-blend-metrics", METRICS_URL)
 
         files = _files(out)
         assert {"arm_reference_1.json", "arm_reference_2.json"} <= files
-        assert "arm_blend.json" not in files
+        assert "arm_candidate.json" not in files
 
 
 class TestRunOutcome:
     def test_only_caching_arms_store_first(self, dataset, engines, tmp_path) -> None:
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
-        engines[APC_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
+        engines[CONTROL_URL] = FakeSender(answering(RIGHT))
 
-        run_both(dataset, str(tmp_path / "out"), "--apc-url", APC_URL)
+        run_both(dataset, str(tmp_path / "out"), "--control-url", CONTROL_URL)
 
         def stores(sender: FakeSender) -> int:
             return sum(rid.startswith("store") for rid, _, _ in sender.sent)
 
         assert stores(engines[REF_URL]) == 0
-        assert stores(engines[BLEND_URL]) > 0
-        assert stores(engines[APC_URL]) == stores(engines[BLEND_URL])
+        assert stores(engines[CANDIDATE_URL]) > 0
+        assert stores(engines[CONTROL_URL]) == stores(engines[CANDIDATE_URL])
         # Two reference passes over three questions.
         assert len(engines[REF_URL].sent) == 6
 
@@ -285,21 +286,21 @@ class TestRunOutcome:
         """CI flags the broken job; analyze still reports the INVALID."""
         # Three questions over five distinct passages.
         down = frozenset([f"q{i}" for i in range(3)] + [f"store{i}" for i in range(5)])
-        engines[BLEND_URL] = FakeSender(answering(RIGHT), failing=down)
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT), failing=down)
         out = str(tmp_path / "out")
 
         with pytest.raises(SystemExit) as exc:
-            run(dataset, out, "--blend-url", BLEND_URL)
+            run(dataset, out, "--candidate-url", CANDIDATE_URL)
 
         assert exc.value.code == 1
-        assert "arm_blend.json" in _files(out)
+        assert "arm_candidate.json" in _files(out)
 
     def test_unreachable_metrics_fail_before_the_arms_run(
         self, dataset, engines, tmp_path, monkeypatch
     ) -> None:
-        """Without the preflight read, a bad URL surfaces only when the blend
+        """Without the preflight read, a bad URL surfaces only when the candidate
         pass starts, after every other pass has run."""
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
 
         class DownCounters(SteppingCounters):
             def read(self) -> BlendCounters:
@@ -312,9 +313,14 @@ class TestRunOutcome:
         )
 
         with pytest.raises(RuntimeError, match="blend-server metrics"):
-            run_both(dataset, str(tmp_path / "out"), "--blend-metrics-url", METRICS_URL)
+            run_both(
+                dataset,
+                str(tmp_path / "out"),
+                "--capture-blend-metrics",
+                METRICS_URL,
+            )
         assert engines[REF_URL].sent == []
-        assert engines[BLEND_URL].sent == []
+        assert engines[CANDIDATE_URL].sent == []
 
     def test_missing_tokenizer_is_reported(
         self, dataset, engines, tmp_path, monkeypatch

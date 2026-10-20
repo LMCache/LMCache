@@ -113,7 +113,7 @@ class TestEvidenceAndManifest:
 
 
 class TestMeasuredEarlier:
-    """Passages an earlier measured question also held, which the blend arm
+    """Passages an earlier measured question also held, which the candidate arm
     might reuse from that question's cached prompt."""
 
     @pytest.mark.parametrize("scenario", list(ReuseScenario))

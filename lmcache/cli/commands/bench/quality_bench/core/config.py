@@ -15,15 +15,17 @@ class ArmRole(enum.Enum):
     """
 
     REFERENCE = "reference"
-    """Full recompute: plain vLLM with prefix caching off. These are the
-    answers every other arm is judged against."""
+    """The stack every other arm is judged against, e.g. full recompute
+    (plain vLLM with prefix caching off)."""
 
-    PREFIX_CACHE = "apc"
-    """vLLM automatic prefix caching, no CacheBlend. Computes the same KV as
-    recompute -- its gap to the reference is a noise floor."""
+    CONTROL = "control"
+    """Optional: a second stack expected to answer like the reference, e.g.
+    vLLM automatic prefix caching (same KV as recompute). Its gap to the
+    reference is a noise floor; it does not set the verdict."""
 
-    BLEND = "blend"
-    """vLLM + CacheBlend (and prefix caching). The arm under test."""
+    CANDIDATE = "candidate"
+    """The stack under test, e.g. vLLM + CacheBlend, another engine, or
+    another model."""
 
 
 class ReuseScenario(enum.Enum):
@@ -117,7 +119,8 @@ class QualityRunConfig:
         num_samples: Questions to measure, taken in dataset order -- ``0``
             measures every usable question in the file.
         chunk_size: LMCache chunk size the passages are aligned to. Must
-            match the blend server's ``--chunk-size``.
+            match a caching candidate's chunk size (e.g. the CacheBlend
+            server's ``--chunk-size``).
         reference_repeats: Reference passes, when a reference arm is run.
             Two or more give the per-question flip rate between identical
             runs, i.e. a noise floor.
@@ -126,9 +129,10 @@ class QualityRunConfig:
         template_kwargs: Chat-template variables sent as
             ``chat_template_kwargs`` (e.g. ``reasoning_effort``).
         task: The dataset's task type.
-        blend_metrics_url: The blend server's Prometheus ``/metrics`` URL.
-            Empty means engagement is not checked and the verdict says so.
-            Only valid with a blend arm.
+        blend_metrics_url: For a CacheBlend candidate, the blend server's
+            Prometheus ``/metrics`` URL (``--capture-blend-metrics``), read
+            during the candidate pass. Empty means blend engagement is not
+            checked and the verdict says so. Only valid with a candidate arm.
         output_dir: Results directory, used as given. Empty means a new
             timestamped directory under ``quality_results``.
         seed: Seed for passage padding and the re-ordering permutations.
@@ -155,7 +159,7 @@ class QualityRunConfig:
             raise ValueError("dataset must be non-empty")
         if not self.arms:
             raise ValueError(
-                "pass at least one of --reference-url, --blend-url, --apc-url"
+                "pass at least one of --reference-url, --candidate-url, --control-url"
             )
         roles = [arm.role for arm in self.arms]
         for role in ArmRole:
@@ -163,8 +167,8 @@ class QualityRunConfig:
                 raise ValueError(f"at most one {role.value} arm is allowed")
         if any(not arm.url for arm in self.arms):
             raise ValueError("every arm needs a non-empty url")
-        if self.blend_metrics_url and ArmRole.BLEND not in roles:
-            raise ValueError("--blend-metrics-url needs --blend-url")
+        if self.blend_metrics_url and ArmRole.CANDIDATE not in roles:
+            raise ValueError("--capture-blend-metrics needs --candidate-url")
         if self.num_samples < 0:
             raise ValueError(f"num_samples must be >= 0, got {self.num_samples}")
         if self.chunk_size < 1:
@@ -232,12 +236,14 @@ class QualityAnalyzeConfig:
         judge: The LLM judge. Required when ``verdict_metric`` is
             ``JUDGE``, otherwise unused.
         tolerance: Largest acceptable mean score difference between the
-            blend arm and the reference, in either direction, in score units
-            (``0.05`` = 5 points). A gain counts too -- reusing KV should
-            not improve answers, so a large one points at the setup.
-        min_blend_share: Smallest share of looked-up prompt tokens the blend
-            server must serve by blending, overall and in every window of
-            questions, for a verdict to be valid.
+            candidate arm and the reference, in either direction, in score
+            units (``0.05`` = 5 points). A gain counts too -- a change meant
+            to preserve answers should not improve them, so a large one
+            points at the setup.
+        min_blend_share: When blend metrics were captured, the smallest
+            share of looked-up prompt tokens the blend server must serve by
+            blending, overall and in every window of questions, for a
+            verdict to be valid. Unused otherwise.
     """
 
     results_dir: str

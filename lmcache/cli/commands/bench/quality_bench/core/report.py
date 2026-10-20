@@ -107,7 +107,7 @@ def write_results(
     """
     plan = plan_record.plan
     runs = [arm.run for arm in arms]
-    blend = next(arm for arm in arms if arm.run.role is ArmRole.BLEND)
+    candidate = next(arm for arm in arms if arm.run.role is ArmRole.CANDIDATE)
     write_jsonl(os.path.join(config.results_dir, ROWS_FILE), rows)
 
     summary = {
@@ -121,7 +121,7 @@ def write_results(
             ),
             "tolerance": config.tolerance,
             "min_blend_share": config.min_blend_share,
-            "blend_metrics_url": blend.blend_metrics_url,
+            "blend_metrics_url": candidate.blend_metrics_url,
         },
         "arms": {arm.run.label: arm.metadata() for arm in arms},
         "num_questions": len(plan.samples),
@@ -138,7 +138,7 @@ def write_results(
         "invalid_reasons": verdict.invalid_reasons,
         "samples_needed": verdict.samples_needed,
         "reference_flip_rate": verdict.reference_flip_rate,
-        "blend": _comparison_record(verdict.blend),
+        "candidate": _comparison_record(verdict.candidate),
         "others": [_comparison_record(c) for c in verdict.others],
         "engagement": asdict(verdict.engagement),
         "arm_counts": {run.label: arm_counts(run) for run in runs},
@@ -167,7 +167,7 @@ def format_summary(
         Multi-line text.
     """
     comparisons: dict[str, ArmComparison] = {
-        c.label: c for c in [verdict.blend, *verdict.others]
+        c.label: c for c in [verdict.candidate, *verdict.others]
     }
     lines = [
         f"bench quality: {len(plan.samples)} questions, "
@@ -179,7 +179,7 @@ def format_summary(
         comparison = comparisons.get(run.label)
         if comparison is None:
             # The first reference run, which every delta is measured from.
-            reference_mean = verdict.blend.mean_score - verdict.blend.delta
+            reference_mean = verdict.candidate.mean_score - verdict.candidate.delta
             score_text, delta_text, error_text = f"{reference_mean:.3f}", "", ""
         else:
             score_text = f"{comparison.mean_score:.3f}"
@@ -206,7 +206,7 @@ def format_summary(
                 f"prefix gaps, not counted as blending)"
             )
     else:
-        lines.append("blend share: not measured (no --blend-metrics-url)")
+        lines.append("blend share: not captured (no --capture-blend-metrics)")
     coverage = plan.evidence_coverage()
     lines.append(
         "evidence passages identified: "
@@ -215,9 +215,9 @@ def format_summary(
     earlier_share = plan.measured_earlier_share()
     if earlier_share:
         lines.append(
-            f"passages also in an earlier question: {earlier_share:.1%} (the "
-            f"blend arm may reuse them from that question's prompt. See "
-            f"measured_earlier_in in the manifest)"
+            f"passages also in an earlier question: {earlier_share:.1%} (a "
+            f"caching candidate may reuse them from that question's prompt. "
+            f"See measured_earlier_in in the manifest)"
         )
     if verdict.unscored:
         lines.append(

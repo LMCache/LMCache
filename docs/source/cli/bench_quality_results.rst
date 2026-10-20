@@ -69,7 +69,7 @@ Conventions used by every file
 
 **Labels.** Each arm pass has a label, used as the file-name suffix and as
 the key in per-arm objects: ``reference_1``, ``reference_2``, … for the
-reference passes (``--reference-repeats``), ``apc`` and ``blend``.
+reference passes (``--reference-repeats``), ``control`` and ``candidate``.
 
 **Request ids.** Store requests are ``store0``, ``store1``, …; measured
 questions are ``q0``, ``q1``, …, in plan order.
@@ -134,14 +134,14 @@ a sentinel:
      - ``""``: no complete answer -- the request failed, or the
        ``<final_answer>`` tags were missing or cut off.
    * - ``counters`` (arm, answers), ``blend_share`` (rows)
-     - ``null``: engagement was not measured (any arm but a blend arm run
-       with ``--blend-metrics-url``).
+     - ``null``: blend metrics were not captured (any arm but a candidate
+       run with ``--capture-blend-metrics``).
    * - ``engine_version`` (arm, summary)
      - ``null``: the engine did not report a version.
    * - ``scores`` values (rows)
      - ``null``: the judge gave no rating for that arm's answer.
    * - ``loss_tag`` (rows)
-     - ``null``: the blend or ``reference_1`` score is ``null``.
+     - ``null``: the candidate or ``reference_1`` score is ``null``.
    * - ``reference_flipped`` (rows)
      - ``null``: only one reference pass, or one of its scores is ``null``.
    * - ``reference_flip_rate`` (summary)
@@ -237,7 +237,7 @@ or dataset and so that later runs can check they build the same prompts.
      - int
      - ``--seed``.
 
-The arm URLs, ``--reference-repeats`` and ``--blend-metrics-url`` are not
+The arm URLs, ``--reference-repeats`` and ``--capture-blend-metrics`` are not
 settings: runs of different arms into one directory may differ in them.
 
 ``plan``:
@@ -355,7 +355,7 @@ it (``plan.json`` holds the same records); it is there to read and grep.
    * - ``measured_earlier_in``
      - array
      - ``q<N>`` ids of earlier questions whose prompts also hold this
-       passage. The blend arm caches measured prompts too, so the passage
+       passage. A caching candidate caches measured prompts too, so the passage
        may be reused from the last of these rather than from
        ``store_request_id``. ``[]`` when none.
 
@@ -394,19 +394,20 @@ answers, so its presence marks the pass complete.
      - Must equal ``plan.json``'s, or ``analyze`` refuses the arm (exit 2).
    * - ``role``
      - string
-     - ``"reference"``, ``"apc"`` or ``"blend"``.
+     - ``"reference"``, ``"control"`` or ``"candidate"``.
    * - ``run_index``
      - int
      - 0-based repeat; above 0 only for reference passes.
    * - ``label``
      - string
-     - ``reference_<run_index + 1>``, ``apc`` or ``blend``.
+     - ``reference_<run_index + 1>``, ``control`` or ``candidate``.
    * - ``url``
      - string
      - The engine URL, as given to ``run``.
    * - ``blend_metrics_url``
      - string
-     - ``--blend-metrics-url`` for a measured blend arm; ``""`` otherwise.
+     - ``--capture-blend-metrics`` for a candidate run with it; ``""``
+       otherwise.
    * - ``engine_version``
      - string or null
      - The engine's reported version.
@@ -456,8 +457,8 @@ answers, so its presence marks the pass complete.
 
 .. code-block:: json
 
-   {"schema_version": 1, "plan_fingerprint": "d7428c9bc57348c7", "role": "blend",
-    "run_index": 0, "label": "blend", "url": "http://gpu1:8000",
+   {"schema_version": 1, "plan_fingerprint": "d7428c9bc57348c7", "role": "candidate",
+    "run_index": 0, "label": "candidate", "url": "http://gpu1:8000",
     "blend_metrics_url": "http://gpu1:9090/metrics", "engine_version": "0.11.0",
     "lmcache_version": "0.4.0-1a2b3c4",
     "started_at": "2026-10-19T10:52:40-05:00", "finished_at": "2026-10-19T11:03:17-05:00",
@@ -526,7 +527,7 @@ rows.jsonl
 
 The per-question comparison, one row per question in plan order -- including
 questions some arm could not be scored on. Start here to see which questions
-the blend arm lost and why.
+the candidate lost and why.
 
 .. list-table::
    :header-rows: 1
@@ -557,8 +558,8 @@ the blend arm lost and why.
      - ``{label: string}``, each pass's extracted answer.
    * - ``loss_tag``
      - string or null
-     - How the blend answer compares with ``reference_1``'s: ``"none"``
-       (same score), ``"blend_higher"``, or, for a loss, ``"empty"`` (no
+     - How the candidate's answer compares with ``reference_1``'s: ``"none"``
+       (same score), ``"candidate_higher"``, or, for a loss, ``"empty"`` (no
        complete answer), ``"abstention"`` (said the passages lack the
        answer), ``"wrong_value"`` (answered with another string from the
        prompt) or ``"wording"`` (anything else).
@@ -577,9 +578,9 @@ the blend arm lost and why.
 .. code-block:: json
 
    {"qid": "s2", "gold": ["Bern"],
-    "scores": {"reference_1": 1.0, "reference_2": 1.0, "blend": 0.0},
-    "match": {"reference_1": 1.0, "reference_2": 1.0, "blend": 0.0},
-    "answers": {"reference_1": "Bern", "reference_2": "Bern", "blend": "Geneva"},
+    "scores": {"reference_1": 1.0, "reference_2": 1.0, "candidate": 0.0},
+    "match": {"reference_1": 1.0, "reference_2": 1.0, "candidate": 0.0},
+    "answers": {"reference_1": "Bern", "reference_2": "Bern", "candidate": "Geneva"},
     "loss_tag": "wording", "reference_flipped": false, "blend_share": 0.75,
     "evidence": [{"passage_id": "b887df1256ff", "origin": "alone",
                   "stored_position": 0, "measured_position": 0}]}
@@ -608,7 +609,7 @@ The verdict and everything needed to interpret it.
      - ``plan.json``'s settings plus ``verdict_metric`` (``"match"``,
        ``"f1"`` or ``"judge"``), ``judge_model`` (judge metric only),
        ``reference_repeats`` (reference passes analyzed), ``tolerance``,
-       ``min_blend_share`` and ``blend_metrics_url`` (from the blend arm).
+       ``min_blend_share`` and ``blend_metrics_url`` (from the candidate arm).
    * - ``arms``
      - object
      - ``{label: {url, engine_version, lmcache_version, started_at,
@@ -649,17 +650,17 @@ The verdict and everything needed to interpret it.
      - number
      - Share of questions whose score differs between ``reference_1`` and
        ``reference_2``: the noise floor.
-   * - ``blend``
+   * - ``candidate``
      - object
-     - The blend pass against ``reference_1`` (below).
+     - The candidate pass against ``reference_1`` (below).
    * - ``others``
      - array
-     - Every other pass (``reference_2``, …, ``apc``) against
+     - Every other pass (``reference_2``, …, ``control``) against
        ``reference_1``, same fields. ``reference_1`` itself never appears:
-       it is the baseline; its mean is ``blend.mean_score - blend.delta``.
+       it is the baseline; its mean is ``candidate.mean_score - candidate.delta``.
    * - ``engagement``
      - object
-     - Whether the blend server actually blended (below).
+     - Whether a CacheBlend candidate actually blended (below).
    * - ``arm_counts``
      - object
      - ``{label: {answered, empty, abstained}}``: complete answers, missing
@@ -670,9 +671,9 @@ The verdict and everything needed to interpret it.
    * - ``loss_tags``
      - object
      - Counts of ``rows.jsonl``'s ``loss_tag`` values, ``none`` and
-       ``blend_higher`` included; only tags that occur.
+       ``candidate_higher`` included; only tags that occur.
 
-``blend`` and ``others[]``:
+``candidate`` and ``others[]``:
 
 .. list-table::
    :header-rows: 1
@@ -708,7 +709,7 @@ The verdict and everything needed to interpret it.
      - Description
    * - ``measured``
      - bool
-     - Whether the blend arm was run with ``--blend-metrics-url``.
+     - Whether the candidate was run with ``--capture-blend-metrics``.
    * - ``blend_share``
      - number
      - Share of looked-up tokens served by blending, over the pass.
@@ -733,7 +734,7 @@ The verdict and everything needed to interpret it.
                   "verdict_metric": "judge", "judge_model": "openai/gpt-oss-120b",
                   "reference_repeats": 2, "tolerance": 0.05, "min_blend_share": 0.3,
                   "blend_metrics_url": "http://gpu1:9090/metrics"},
-     "arms": {"blend": {"url": "http://gpu1:8000", "engine_version": "0.11.0",
+     "arms": {"candidate": {"url": "http://gpu1:8000", "engine_version": "0.11.0",
                         "lmcache_version": "0.4.0-1a2b3c4",
                         "started_at": "2026-10-19T10:52:40-05:00",
                         "finished_at": "2026-10-19T11:03:17-05:00"}, "...": "..."},
@@ -743,16 +744,16 @@ The verdict and everything needed to interpret it.
      "measured_earlier_share": 0.02, "num_store_requests": 1964,
      "verdict": "FAIL", "invalid_reasons": [], "samples_needed": 0,
      "reference_flip_rate": 0.03,
-     "blend": {"label": "blend", "mean_score": 0.768, "delta": -0.137,
+     "candidate": {"label": "candidate", "mean_score": 0.768, "delta": -0.137,
                "standard_error": 0.032},
      "others": [{"label": "reference_2", "mean_score": 0.9, "delta": -0.005,
                  "standard_error": 0.0095}],
      "engagement": {"measured": true, "blend_share": 0.912, "min_window_share": 0.874,
                     "stale_chunks": 0.0, "segmented_prefix_hit_tokens": 0.0,
                     "fingerprints_registered": 4180.0, "engaged": true},
-     "arm_counts": {"blend": {"answered": 200, "empty": 0, "abstained": 9}, "...": "..."},
-     "store_failures": {"reference_1": 0, "reference_2": 0, "blend": 0},
-     "loss_tags": {"none": 168, "blend_higher": 4, "abstention": 9, "wording": 19}
+     "arm_counts": {"candidate": {"answered": 200, "empty": 0, "abstained": 9}, "...": "..."},
+     "store_failures": {"reference_1": 0, "reference_2": 0, "candidate": 0},
+     "loss_tags": {"none": 168, "candidate_higher": 4, "abstention": 9, "wording": 19}
    }
 
 
@@ -797,19 +798,19 @@ line from a killed run, is skipped and re-judged.
 Working with the results
 ------------------------
 
-The questions the blend arm lost, with both answers:
+The questions the candidate lost, with both answers:
 
 .. code-block:: bash
 
-   jq -c 'select(.loss_tag != null and .loss_tag != "none" and .loss_tag != "blend_higher")
-          | {qid, gold, loss_tag, reference: .answers.reference_1, blend: .answers.blend}' \
+   jq -c 'select(.loss_tag != null and .loss_tag != "none" and .loss_tag != "candidate_higher")
+          | {qid, gold, loss_tag, reference: .answers.reference_1, candidate: .answers.candidate}' \
       out/rows.jsonl
 
 ``reference_1``'s mean score, which ``summary.json`` leaves implicit:
 
 .. code-block:: bash
 
-   jq '.blend.mean_score - .blend.delta' out/summary.json
+   jq '.candidate.mean_score - .candidate.delta' out/summary.json
 
 Whether a verdict can be trusted before reading its numbers:
 

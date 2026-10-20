@@ -55,12 +55,12 @@ JUDGE_CACHE_FILE = "judge_cache.jsonl"
 RUN_DIR_FORMAT = "%Y%m%d-%H%M%S"
 
 # Analyze's input order: what decide() and format_summary() assume.
-_ROLE_ORDER = (ArmRole.REFERENCE, ArmRole.PREFIX_CACHE, ArmRole.BLEND)
+_ROLE_ORDER = (ArmRole.REFERENCE, ArmRole.CONTROL, ArmRole.CANDIDATE)
 
 # Roles a verdict needs, with the run flag that produces each.
 _REQUIRED_ROLES = (
     (ArmRole.REFERENCE, "--reference-url"),
-    (ArmRole.BLEND, "--blend-url"),
+    (ArmRole.CANDIDATE, "--candidate-url"),
 )
 
 
@@ -396,12 +396,13 @@ def load_arms(results_dir: str, plan_record: PlanRecord) -> list[ArmRecord]:
         plan_record: The directory's plan, from :func:`load_plan`.
 
     Returns:
-        Reference passes by repeat, then the apc pass, then the blend pass.
+        Reference passes by repeat, then the control pass, then the candidate
+        pass.
 
     Raises:
         ResultsDirError: If a pass is from another plan or schema version, is
             malformed, does not answer the plan's questions in order, or the
-            passes lack a blend arm, a reference arm or a reference repeat.
+            passes lack a candidate arm, a reference arm or a reference repeat.
     """
     records = [
         _load_arm(path, plan_record)

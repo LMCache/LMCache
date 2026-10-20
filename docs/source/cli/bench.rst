@@ -1742,10 +1742,12 @@ Exit codes
 quality
 -------
 
-The ``lmcache bench quality`` commands check whether CacheBlend changes the
-model's answers. They send the same QA prompts to a full-recompute reference
-engine and to a CacheBlend engine, score both against gold answers, and
-print one verdict -- ``PASS``, ``FAIL``, ``UNDERPOWERED`` or ``INVALID`` --
+The ``lmcache bench quality`` commands check whether a serving change --
+CacheBlend, another engine, or a different model -- changes the model's
+answers compared with a reference. They send the same QA prompts to a
+*reference* engine (for example full recompute) and to a *candidate* engine
+(for example CacheBlend), score both against gold answers, and print one
+verdict -- ``PASS``, ``FAIL``, ``UNDERPOWERED`` or ``INVALID`` --
 that CI can gate on. The work is split in two stages that share a *results
 directory*:
 
@@ -1763,8 +1765,8 @@ metric or tolerance without rerunning an arm.
 :ref:`rag-qa-quality <bench-rag-qa-quality>` scores one stack per run.
 ``bench quality`` adds what a comparison needs: byte-identical prompts for
 every arm (checked across runs), a record of how each passage got into the
-cache, a noise floor from repeated reference runs, a check that blending
-actually happened, and a statistical verdict.
+cache, a noise floor from repeated reference runs, for CacheBlend a check
+that blending actually happened, and a statistical verdict.
 
 The commands do not launch engines. Start each one yourself, from an empty
 cache (see the note under :ref:`Quality quick start <bench-quality-quick-start>`).
@@ -1785,20 +1787,23 @@ Pass any of them to ``run``:
      - Engine
    * - ``reference``
      - ``--reference-url``
-     - vLLM with prefix caching **off**. Runs ``--reference-repeats`` times
-       (default 2); how often it disagrees with itself is the *flip rate*,
-       the noise floor.
-   * - ``apc``
-     - ``--apc-url`` (optional)
-     - vLLM with prefix caching on and no LMCache. It reuses KV only at its
-       original position, so it should match the reference; a gap points at
-       the harness or the engine rather than CacheBlend.
-   * - ``blend``
-     - ``--blend-url``
-     - vLLM with the CacheBlend connector and blend server.
+     - The stack every other arm is judged against, for example vLLM with
+       prefix caching **off** (full recompute). Runs ``--reference-repeats``
+       times (default 2); how often it disagrees with itself is the *flip
+       rate*, the noise floor.
+   * - ``candidate``
+     - ``--candidate-url``
+     - The stack under test: for example vLLM with the CacheBlend connector
+       and blend server, another engine, or another model.
+   * - ``control``
+     - ``--control-url`` (optional)
+     - A second stack expected to answer like the reference, for example
+       vLLM with prefix caching on and no LMCache (it reuses KV only at its
+       original position). A gap points at the harness or the engine rather
+       than the candidate. Reported only; it does not set the verdict.
 
-``analyze`` needs a reference and a blend arm in the directory; the apc arm
-is reported when present. Within a ``run``, arms run one after another, and
+``analyze`` needs a reference and a candidate arm in the directory; the
+control arm is reported when present. Within a ``run``, arms run one after another, and
 questions run one at a time.
 
 **Reuse scenarios.** Caching arms first receive *store requests*
@@ -1819,12 +1824,14 @@ prompts:
        seeded new order -- reuse at a different position *and* next to
        different neighbors.
 
-Prompts are chunk-aligned the same way as ``rag-qa-quality``, so set
-``--chunk-size`` to the blend server's chunk size.
+Prompts are chunk-aligned the same way as ``rag-qa-quality``, so for a
+caching candidate set ``--chunk-size`` to its chunk size (for CacheBlend, the
+blend server's).
 
-**Engagement.** A blend arm that silently fell back to recompute would score
-like the reference and pass. With ``--blend-metrics-url`` on the blend arm's
-``run``, the blend server's ``lmcache_blend_lookup_*`` counters are read
+**Blend metrics (CacheBlend candidates).** A CacheBlend candidate that
+silently fell back to recompute would score like the reference and pass.
+With ``--capture-blend-metrics URL`` on the candidate's ``run``, the blend
+server's ``lmcache_blend_lookup_*`` counters are read
 around every question (once before any arm runs, so an unreachable endpoint
 fails fast; a failed read is retried before it stops the run). The *blend
 share* is the share of looked-up tokens served by blending at a new
@@ -1838,7 +1845,7 @@ blending, so those tokens lower the blend share; the summary reports them as
 *segmented-prefix tokens*, and an ``INVALID`` reason names them, so a low
 share caused by L2 trouble is not mistaken for blending being off.
 
-**Verdict.** Δ is the mean blend score minus the mean score of the first
+**Verdict.** Δ is the mean candidate score minus the mean score of the first
 reference run, and SE is the standard error of the per-question differences.
 
 .. list-table::
@@ -1848,10 +1855,10 @@ reference run, and SE is the standard error of the per-question differences.
    * - Verdict
      - Condition
    * - ``INVALID``
-     - The runs cannot be compared: engagement was measured and is below
-       ``--min-blend-share``, an arm run had no successful request (for
-       example an unreachable engine), a store request failed, or more than
-       5% of questions are unscored. The summary lists the reasons.
+     - The runs cannot be compared: blend metrics were captured and the
+       blend share is below ``--min-blend-share``, an arm run had no
+       successful request (for example an unreachable engine), a store
+       request failed, or more than 5% of questions are unscored. The summary lists the reasons.
    * - ``PASS``
      - \|Δ\| ≤ ``--tolerance`` (default 0.05, i.e. 5 points).
    * - ``FAIL``
@@ -1860,11 +1867,12 @@ reference run, and SE is the standard error of the per-question differences.
      - Otherwise: the difference may be noise. The summary says roughly how
        many questions would settle it.
 
-The check is two-sided: a blend arm that scores well *above* the reference
-also fails. Reusing KV should not improve answers, so a large gain points at
-the setup (for example a misconfigured reference) as much as a loss does.
+The check is two-sided: a candidate that scores well *above* the reference
+also fails. A change meant to preserve answers should not improve them, so a
+large gain points at the setup (for example a misconfigured reference) as
+much as a loss does.
 
-Each question the blend arm loses is tagged ``abstention`` (the model said the
+Each question the candidate loses is tagged ``abstention`` (the model said the
 passages lack the answer), ``empty`` (no parsed answer), ``wrong_value`` (it
 answered with another string from the prompt) or ``wording``.
 
@@ -1940,16 +1948,16 @@ not install (``analyze`` does not need it):
 
    pip install transformers
 
-**Everything up at once.** With a reference engine on port 8000, a CacheBlend
-engine on port 8001 (blend server metrics on port 9090), and a judge on
-another host:
+**Everything up at once.** With a full-recompute reference engine on port
+8000, a CacheBlend candidate engine on port 8001 (blend server metrics on
+port 9090), and a judge on another host:
 
 .. code-block:: bash
 
    lmcache bench quality run \
        --reference-url http://localhost:8000 \
-       --blend-url http://localhost:8001 \
-       --blend-metrics-url http://localhost:9090/metrics \
+       --candidate-url http://localhost:8001 \
+       --capture-blend-metrics http://localhost:9090/metrics \
        --model Qwen/Qwen3-8B \
        --dataset hotpotqa --limit 200 \
        --scenario independent --chunk-size 256
@@ -1959,6 +1967,7 @@ another host:
        --judge-url http://judge-host:8000 --judge-model openai/gpt-oss-120b
 
 Drop the ``--judge-*`` flags for a judge-free analysis scored with ``match``.
+For a candidate that is not CacheBlend, drop ``--capture-blend-metrics``.
 
 **One engine at a time** (for example one GPU server, or one CI job per
 arm). Give every ``run`` the same workload flags and ``--output-dir``:
@@ -1969,9 +1978,9 @@ arm). Give every ``run`` the same workload flags and ``--output-dir``:
 
    # Job 1: reference engine up
    lmcache bench quality run --reference-url http://gpu0:8000 $WORKLOAD --output-dir out
-   # Job 2: reference engine down, blend engine and blend server up
-   lmcache bench quality run --blend-url http://gpu0:8000 \
-       --blend-metrics-url http://gpu0:9090/metrics $WORKLOAD --output-dir out
+   # Job 2: reference engine down, candidate engine (and blend server) up
+   lmcache bench quality run --candidate-url http://gpu0:8000 \
+       --capture-blend-metrics http://gpu0:9090/metrics $WORKLOAD --output-dir out
    # Job 3: engines down, judge up (or no judge)
    lmcache bench quality analyze out --judge-url http://gpu0:8000
 
@@ -1982,15 +1991,15 @@ instead of mixed in. Rerunning an arm replaces that arm's earlier passes.
 
 **Reusing a saved reference.** When the reference stack has not changed, copy
 its files from an earlier results directory into a fresh one and run only
-the blend arm:
+the candidate arm:
 
 .. code-block:: bash
 
    mkdir new && cp saved/plan.json saved/manifest.jsonl saved/*reference* new/
-   lmcache bench quality run --blend-url http://gpu0:8000 $WORKLOAD --output-dir new
+   lmcache bench quality run --candidate-url http://gpu0:8000 $WORKLOAD --output-dir new
    lmcache bench quality analyze new
 
-The blend ``run`` refuses the directory if its plan differs from the saved
+The candidate ``run`` refuses the directory if its plan differs from the saved
 one. Each arm records its engine version, lmcache version and timestamps,
 which ``analyze`` prints and stores in ``summary.json`` -- check them to see
 how old a reused reference is. A reused arm keeps the answers as its own
@@ -1998,9 +2007,10 @@ lmcache version extracted them.
 
 .. note::
 
-   Start each caching arm from an empty cache: restart the engine and the
-   blend server before its ``run``. Otherwise the arm reuses KV from an
-   earlier run, and what is measured is no longer the chosen scenario.
+   Start each caching arm from an empty cache: restart the engine (and, for
+   CacheBlend, the blend server) before its ``run``. Otherwise the arm
+   reuses KV from an earlier run, and what is measured is no longer the
+   chosen scenario.
    Running one arm per engine lifetime, as above, satisfies this.
 
 **Datasets** are the same as for :ref:`rag-qa-quality <bench-rag-qa-quality>`:
@@ -2030,19 +2040,22 @@ same workload flags (``--model`` through ``--seed``).
      - Description
    * - ``--reference-url``
      - *(unset)*
-     - Engine serving full recompute (vLLM, prefix caching off).
-   * - ``--blend-url``
+     - Engine serving the reference, for example full recompute (vLLM,
+       prefix caching off).
+   * - ``--candidate-url``
      - *(unset)*
-     - Engine serving CacheBlend.
-   * - ``--apc-url``
+     - Engine serving the candidate under test, for example vLLM with
+       CacheBlend.
+   * - ``--control-url``
      - *(unset)*
-     - Engine serving vLLM prefix caching only. Reported alongside; does
-       not set the verdict.
-   * - ``--blend-metrics-url``
+     - Engine serving an optional control, for example vLLM prefix caching
+       only. Reported alongside; does not set the verdict.
+   * - ``--capture-blend-metrics``
      - *(unset)*
-     - The blend server's Prometheus ``/metrics`` URL; needs
-       ``--blend-url``. Without it, engagement is not checked and cannot
-       make the verdict ``INVALID``.
+     - For a CacheBlend candidate: the blend server's Prometheus
+       ``/metrics`` URL, read during the candidate pass; needs
+       ``--candidate-url``. Without it, blend engagement is not checked and
+       cannot make the verdict ``INVALID``.
    * - ``--reference-repeats``
      - 2
      - Reference passes; needs ``--reference-url``. Two or more report the
@@ -2065,7 +2078,8 @@ same workload flags (``--model`` through ``--seed``).
      - ``independent`` or ``reordered`` (see above).
    * - ``--chunk-size``
      - 256
-     - LMCache chunk size. Must match the blend server's.
+     - LMCache chunk size. For a caching candidate, match its chunk size
+       (for CacheBlend, the blend server's).
    * - ``--max-output-tokens``
      - 2048
      - Token budget per answer, reasoning included.
@@ -2100,11 +2114,12 @@ Quality analyze options
      - ``judge``, ``match`` or ``f1``.
    * - ``--tolerance``
      - 0.05
-     - Acceptable blend-vs-reference score difference, in either direction,
+     - Acceptable candidate-vs-reference score difference, in either direction,
        in score units.
    * - ``--min-blend-share``
      - 0.3
-     - Minimum blend share, overall and per 10-question window.
+     - When blend metrics were captured (``run --capture-blend-metrics``):
+       minimum blend share, overall and per 10-question window.
    * - ``--judge-url``
      - *(unset)*
      - OpenAI-compatible endpoint serving the judge model.
@@ -2138,7 +2153,7 @@ the verdict:
    arm              score    delta    2*SE  empty  abstain
    reference_1      0.905                       0        1
    reference_2      0.900   -0.005   0.019      0        1
-   blend            0.768   -0.137   0.064      0        9
+   candidate        0.768   -0.137   0.064      0        9
    reference flip rate: 0.030
    blend share: 0.912 (min window 0.874), stale chunks: 0, fingerprints registered: 4180
    evidence passages identified: dataset 100, answer_string 0, none 0
@@ -2163,8 +2178,8 @@ described in :doc:`bench_quality_results`.
      - first ``run``
      - The reuse manifest: for every passage of every question, where it was
        stored, where it was measured, whether it holds the evidence, and
-       which earlier questions also held it (``measured_earlier_in``). The
-       blend arm caches measured prompts too, so a recurring passage may be
+       which earlier questions also held it (``measured_earlier_in``). A
+       caching candidate caches measured prompts too, so a recurring passage may be
        reused from an earlier question's prompt rather than from its store
        request; ``summary.json`` reports the share as
        ``measured_earlier_share``, and the terminal summary prints it when it
@@ -2172,12 +2187,12 @@ described in :doc:`bench_quality_results`.
    * - ``arm_<label>.json``
      - ``run``
      - One per pass: URL, engine and lmcache versions, start and finish
-       times, run-level blend counters, store failures, and the plan
+       times, run-level blend counters (when captured), store failures, and the plan
        fingerprint. Written last: answers without it are ignored.
    * - ``answers_<label>.jsonl``
      - ``run``
      - Raw responses per pass: parsed answer, TTFT, output tokens and blend
-       counter deltas.
+       counter deltas (when captured).
    * - ``rows.jsonl``
      - ``analyze``
      - One row per question: gold answers, each arm's answer and score, loss
@@ -2228,7 +2243,7 @@ Quality exit codes
        runs: a required flag is missing, a value is not one of a flag's
        choices, or a number does not parse; or the results directory does
        not fit -- ``run``'s plan differs from the directory's ``plan.json``,
-       or ``analyze`` finds no ``plan.json``, lacks the reference or blend
+       or ``analyze`` finds no ``plan.json``, lacks the reference or candidate
        arm (all missing arms are named), or finds an arm from another plan
        or schema version. Nothing is written, so CI can tell a broken
        pipeline from a quality verdict.

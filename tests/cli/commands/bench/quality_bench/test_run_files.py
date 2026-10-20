@@ -43,7 +43,7 @@ def plan(aligner) -> QualityPlan:
 
 
 def _run(plan: QualityPlan, role: ArmRole, run_index: int = 0) -> ArmRun:
-    measured = role is ArmRole.BLEND
+    measured = role is ArmRole.CANDIDATE
     counters = BlendCounters(requested_tokens=64.0, non_prefix_hit_tokens=32.0)
     answers = [
         ArmAnswer(
@@ -157,9 +157,9 @@ class TestArms:
     def test_round_trip_in_verdict_order(self, plan, tmp_path) -> None:
         out = str(tmp_path)
         written = [
-            _run(plan, ArmRole.BLEND),
+            _run(plan, ArmRole.CANDIDATE),
             _run(plan, ArmRole.REFERENCE, 1),
-            _run(plan, ArmRole.PREFIX_CACHE),
+            _run(plan, ArmRole.CONTROL),
             _run(plan, ArmRole.REFERENCE, 0),
         ]
         for run in written:
@@ -170,8 +170,8 @@ class TestArms:
         assert [a.run.label for a in arms] == [
             "reference_1",
             "reference_2",
-            "apc",
-            "blend",
+            "control",
+            "candidate",
         ]
         assert arms[-1].run == written[0]
         assert arms[0].url == "http://x"
@@ -180,13 +180,13 @@ class TestArms:
     def test_missing_reference_repeat_is_refused(self, plan, tmp_path) -> None:
         out = str(tmp_path)
         _save(out, plan, _run(plan, ArmRole.REFERENCE, 1))
-        _save(out, plan, _run(plan, ArmRole.BLEND))
+        _save(out, plan, _run(plan, ArmRole.CANDIDATE))
         with pytest.raises(ValueError, match="consecutive"):
             load_arms(out, load_plan(out))
 
     def test_remove_role_leaves_other_roles(self, plan, tmp_path) -> None:
         out = str(tmp_path)
-        for run in (_run(plan, ArmRole.REFERENCE), _run(plan, ArmRole.BLEND)):
+        for run in (_run(plan, ArmRole.REFERENCE), _run(plan, ArmRole.CANDIDATE)):
             _save(out, plan, run)
         (tmp_path / SUMMARY_FILE).write_text("{}")
 
@@ -197,4 +197,4 @@ class TestArms:
             "answers_reference_1.jsonl",
             SUMMARY_FILE,
         }
-        assert os.path.exists(tmp_path / "arm_blend.json")
+        assert os.path.exists(tmp_path / "arm_candidate.json")

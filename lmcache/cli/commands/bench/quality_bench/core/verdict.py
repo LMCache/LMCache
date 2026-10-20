@@ -4,8 +4,9 @@
 The verdict acts as a gatekeeper for quality checking. That is, a gap passes
 on tolerance, fails only when it also clears its own error bar, and is
 otherwise UNDERPOWERED with the sample count that would settle it. Additionally,
-a run where blending did not engage is INVALID. The reference is run twice
-so its flip rate is reported as the noise floor.
+a run that is unfit to compare (e.g. an unreachable arm, or a CacheBlend
+candidate whose captured blend metrics show it did not blend) is INVALID. The
+reference is run twice so its flip rate is reported as the noise floor.
 """
 
 # Standard
@@ -40,12 +41,12 @@ ENGAGEMENT_WINDOW = 10
 # so more than this means the judge is malfunctioning. Unscored questions
 # are dropped from every arm alike, which costs only power while the gaps are
 # random. Past this share, they are likely to track the answers (e.g. long
-# blend answers failing to parse), which would bias the comparison.
+# candidate answers failing to parse), which would bias the comparison.
 MAX_UNSCORED_SHARE = 0.05
 
 
 class Verdict(enum.Enum):
-    """Outcome of comparing the blend arm with the reference."""
+    """Outcome of comparing the candidate arm with the reference."""
 
     PASS = "PASS"
     FAIL = "FAIL"
@@ -54,16 +55,16 @@ class Verdict(enum.Enum):
 
 
 class LossTag(enum.Enum):
-    """How the blend arm's answer differs from the reference's."""
+    """How the candidate arm's answer differs from the reference's."""
 
     NONE = "none"
     """Same score."""
 
-    BLEND_HIGHER = "blend_higher"
-    """The blend arm scored higher."""
+    CANDIDATE_HIGHER = "candidate_higher"
+    """The candidate arm scored higher."""
 
     ABSTENTION = "abstention"
-    """The blend arm declined to answer ("the passages do not contain X")."""
+    """The candidate arm declined to answer ("the passages do not contain X")."""
 
     EMPTY = "empty"
     """No complete answer: failed request, or reasoning ran out of tokens."""
@@ -131,14 +132,14 @@ class QualityVerdict:
         metric: The score compared.
         tolerance: Acceptable score difference, either direction, in score
             units.
-        blend: The blend arm against the reference.
-        others: Every other arm run (later reference runs, apc) against the
+        candidate: The candidate arm against the reference.
+        others: Every other arm run (later reference runs, control) against the
             first reference run.
         reference_flip_rate: Share of questions whose score changed between
             the first two reference runs. ``-1.0`` with one reference run.
         samples_needed: For UNDERPOWERED, questions needed for the observed
             gap to clear two standard errors. Otherwise, ``0``.
-        engagement: The blend arm's engagement check.
+        engagement: The candidate arm's engagement check.
         unscored: Questions left out of every comparison because some run
             had no score for them.
         invalid_reasons: Why the verdict is INVALID. Otherwise, empty.
@@ -147,7 +148,7 @@ class QualityVerdict:
     verdict: Verdict
     metric: VerdictMetric
     tolerance: float
-    blend: ArmComparison
+    candidate: ArmComparison
     others: list[ArmComparison]
     reference_flip_rate: float
     samples_needed: int
@@ -214,7 +215,7 @@ def loss_tag(
     """Classify how *candidate* differs from the reference on one question.
 
     Args:
-        candidate: The blend arm's outcome.
+        candidate: The candidate arm's outcome.
         candidate_score: Its score.
         reference_score: The first reference run's score.
         sample_plan: The question's plan, for locating the answer in the
@@ -224,7 +225,7 @@ def loss_tag(
         The tag.
     """
     if candidate_score > reference_score:
-        return LossTag.BLEND_HIGHER
+        return LossTag.CANDIDATE_HIGHER
     if candidate_score == reference_score:
         return LossTag.NONE
     if not candidate.parsed:
@@ -259,17 +260,20 @@ def run_problems(run: ArmRun) -> list[str]:
     return problems
 
 
-def check_engagement(blend: ArmRun, min_blend_share: float) -> EngagementCheck:
-    """Decide whether the blend arm blended enough for its scores to count.
+def check_engagement(candidate: ArmRun, min_blend_share: float) -> EngagementCheck:
+    """Decide whether a CacheBlend candidate blended enough for its scores to count.
+
+    Uses the blend metrics captured during the candidate pass; a candidate
+    run without them is reported as unmeasured, never invalidated.
 
     Args:
-        blend: The blend arm's run.
+        candidate: The candidate arm's run.
         min_blend_share: Required share, run-wide and per window.
 
     Returns:
         The check.
     """
-    if not blend.engagement_measured:
+    if not candidate.engagement_measured:
         return EngagementCheck(
             measured=False,
             blend_share=0.0,
@@ -279,13 +283,13 @@ def check_engagement(blend: ArmRun, min_blend_share: float) -> EngagementCheck:
             fingerprints_registered=0.0,
             engaged=True,
         )
-    share = blend.counters.blend_share
+    share = candidate.counters.blend_share
     windows: list[float] = []
     for start in range(
-        0, len(blend.answers) - ENGAGEMENT_WINDOW + 1, ENGAGEMENT_WINDOW
+        0, len(candidate.answers) - ENGAGEMENT_WINDOW + 1, ENGAGEMENT_WINDOW
     ):
         total = BlendCounters()
-        for answer in blend.answers[start : start + ENGAGEMENT_WINDOW]:
+        for answer in candidate.answers[start : start + ENGAGEMENT_WINDOW]:
             total = total + answer.counters
         windows.append(total.blend_share)
     min_window = min(windows) if windows else share
@@ -293,9 +297,9 @@ def check_engagement(blend: ArmRun, min_blend_share: float) -> EngagementCheck:
         measured=True,
         blend_share=share,
         min_window_share=min_window,
-        stale_chunks=blend.counters.stale_chunks,
-        segmented_prefix_hit_tokens=blend.counters.segmented_prefix_hit_tokens,
-        fingerprints_registered=blend.counters.fingerprints_registered,
+        stale_chunks=candidate.counters.stale_chunks,
+        segmented_prefix_hit_tokens=candidate.counters.segmented_prefix_hit_tokens,
+        fingerprints_registered=candidate.counters.fingerprints_registered,
         engaged=share >= min_blend_share and min_window >= min_blend_share,
     )
 
@@ -313,10 +317,10 @@ def decide(
     Args:
         plan: The plan every run measured.
         runs: Every arm run. Must include at least one reference run and
-            exactly one blend run, each answering every plan sample in plan
+            exactly one candidate run, each answering every plan sample in plan
             order.
         metric: Score to compare.
-        tolerance: Acceptable blend score difference, either direction, in
+        tolerance: Acceptable candidate score difference, either direction, in
             score units.
         min_blend_share: Engagement minimum for a valid verdict.
         scores: Precomputed scores per run label (required for ``JUDGE``).
@@ -324,22 +328,23 @@ def decide(
             score for are left out of every comparison.
 
     Returns:
-        The verdict. It is INVALID, whatever the scores, when the blend arm
-        was measured not to blend enough, when an arm run had no successful
+        The verdict. It is INVALID, whatever the scores, when the candidate arm
+        was measured (by captured blend metrics) not to blend enough, when an
+        arm run had no successful
         request (an unreachable engine scores like a wrong one), when a
         store request failed (the arm did not measure the chosen scenario),
         or when more than :data:`MAX_UNSCORED_SHARE` of the questions are
         unscored.
 
     Raises:
-        ValueError: If *runs* lacks a reference or blend run, a run's
+        ValueError: If *runs* lacks a reference or candidate run, a run's
             answers do not line up with the plan, *scores* lacks a run, or
             no question is scored by every run.
     """
     references = [r for r in runs if r.role is ArmRole.REFERENCE]
-    blends = [r for r in runs if r.role is ArmRole.BLEND]
-    if not references or len(blends) != 1:
-        raise ValueError("runs need at least one reference run and one blend run")
+    candidates = [r for r in runs if r.role is ArmRole.CANDIDATE]
+    if not references or len(candidates) != 1:
+        raise ValueError("runs need at least one reference run and one candidate run")
     for run in runs:
         if [a.sample_id for a in run.answers] != [
             s.sample.sample_id for s in plan.samples
@@ -350,12 +355,14 @@ def decide(
     complete = _complete_scores(table, runs)
     unscored = len(plan.samples) - len(complete[runs[0].label])
     reference_scores = complete[references[0].label]
-    blend = blends[0]
-    blend_comparison = _compare(blend.label, complete[blend.label], reference_scores)
+    candidate = candidates[0]
+    candidate_comparison = _compare(
+        candidate.label, complete[candidate.label], reference_scores
+    )
     others = [
         _compare(run.label, complete[run.label], reference_scores)
         for run in runs
-        if run is not references[0] and run is not blend
+        if run is not references[0] and run is not candidate
     ]
 
     flip_rate = -1.0
@@ -364,14 +371,14 @@ def decide(
         flips = sum(1 for a, b in zip(reference_scores, second, strict=True) if a != b)
         flip_rate = flips / len(reference_scores)
 
-    engagement = check_engagement(blend, min_blend_share)
+    engagement = check_engagement(candidate, min_blend_share)
     invalid_reasons = _invalid_reasons(
         runs, engagement, min_blend_share, unscored, len(plan.samples)
     )
     # Two-sided: reusing KV should not improve answers, so a large gain flags
     # the setup like a large loss does.
-    gap = abs(blend_comparison.delta)
-    significant = gap > 2 * blend_comparison.standard_error
+    gap = abs(candidate_comparison.delta)
+    significant = gap > 2 * candidate_comparison.standard_error
     samples_needed = 0
     if invalid_reasons:
         verdict = Verdict.INVALID
@@ -382,7 +389,8 @@ def decide(
     else:
         verdict = Verdict.UNDERPOWERED
         differences = [
-            b - r for b, r in zip(complete[blend.label], reference_scores, strict=True)
+            b - r
+            for b, r in zip(complete[candidate.label], reference_scores, strict=True)
         ]
         spread = statistics.stdev(differences) if len(differences) > 1 else 0.0
         samples_needed = math.ceil((2 * spread / gap) ** 2) if spread > 0 else 0
@@ -391,7 +399,7 @@ def decide(
         verdict=verdict,
         metric=metric,
         tolerance=tolerance,
-        blend=blend_comparison,
+        candidate=candidate_comparison,
         others=others,
         reference_flip_rate=flip_rate,
         samples_needed=samples_needed,
@@ -411,7 +419,7 @@ def build_rows(
 
     The rows are the hand-off to whoever investigates a loss. That is,
     each names the lost question, every arm's answer and score, how the
-    blend answer failed, and which passages held the answer and how they
+    candidate answer failed, and which passages held the answer and how they
     were cached.
 
     Args:
@@ -426,20 +434,20 @@ def build_rows(
         Rows with keys ``qid``, ``gold``, ``scores`` (label -> score, or
         ``None`` where unscored), ``match`` (label -> 0/1, only for
         ``JUDGE``),
-        ``answers`` (label -> extracted answer), ``loss_tag`` (blend versus
+        ``answers`` (label -> extracted answer), ``loss_tag`` (candidate versus
         the first reference run), ``reference_flipped`` (bool, or ``None``
         with one reference run), ``blend_share`` (this question's share, or
         ``None`` when unmeasured) and ``evidence`` (the manifest's evidence
         passages with their origin and positions).
 
     Raises:
-        ValueError: If *runs* lacks a reference or blend run.
+        ValueError: If *runs* lacks a reference or candidate run.
     """
     references = [r for r in runs if r.role is ArmRole.REFERENCE]
-    blends = [r for r in runs if r.role is ArmRole.BLEND]
-    if not references or len(blends) != 1:
-        raise ValueError("runs need at least one reference run and one blend run")
-    blend = blends[0]
+    candidates = [r for r in runs if r.role is ArmRole.CANDIDATE]
+    if not references or len(candidates) != 1:
+        raise ValueError("runs need at least one reference run and one candidate run")
+    candidate = candidates[0]
     table = scores if scores is not None else lexical_scores(plan, runs, metric)
     matches = (
         lexical_scores(plan, runs, VerdictMetric.MATCH)
@@ -452,16 +460,16 @@ def build_rows(
         golds = sample_plan.sample.answers
         row_scores = {run.label: table[run.label][index] for run in runs}
         reference_score = row_scores[references[0].label]
-        blend_score = row_scores[blend.label]
+        candidate_score = row_scores[candidate.label]
         flipped: bool | None = None
         if len(references) > 1 and reference_score is not None:
             second = row_scores[references[1].label]
             flipped = None if second is None else second != reference_score
-        blend_answer = blend.answers[index]
+        candidate_answer = candidate.answers[index]
         tag: str | None = None
-        if reference_score is not None and blend_score is not None:
+        if reference_score is not None and candidate_score is not None:
             tag = loss_tag(
-                blend_answer, blend_score, reference_score, sample_plan
+                candidate_answer, candidate_score, reference_score, sample_plan
             ).value
         row: dict[str, object] = {
             "qid": sample_plan.sample.sample_id,
@@ -477,8 +485,8 @@ def build_rows(
                 "loss_tag": tag,
                 "reference_flipped": flipped,
                 "blend_share": (
-                    blend_answer.counters.blend_share
-                    if blend.engagement_measured
+                    candidate_answer.counters.blend_share
+                    if candidate.engagement_measured
                     else None
                 ),
                 "evidence": [

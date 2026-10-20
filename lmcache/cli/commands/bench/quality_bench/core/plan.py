@@ -86,11 +86,11 @@ class PassageProvenance:
         is_evidence: Whether it holds the answer (see
             :class:`EvidenceSource`).
         measured_earlier_in: Request ids of earlier measured questions whose
-            prompts also hold this passage, in measured order. The blend
-            arm caches measured prompts too, and by default the blend
-            server's fingerprint index keeps the newest copy of identical
-            content, so the passage's KV may come from the last of these
-            (itself blended) rather than from ``store_request_id``. Empty
+            prompts also hold this passage, in measured order. A caching
+            candidate caches measured prompts too; for CacheBlend, the blend
+            server's fingerprint index by default keeps the newest copy of
+            identical content, so the passage's KV may come from the last of
+            these (itself blended) rather than from ``store_request_id``. Empty
             means ``store_request_id`` is the only cached copy. See the
             design doc, "Reuse from earlier measured questions".
     """
@@ -217,7 +217,7 @@ class QualityPlan:
         """Share of measured passages that an earlier question also held.
 
         A dataset property, known before any request: it bounds how much of
-        the blend arm's reuse may come from earlier measured prompts instead
+        a caching candidate's reuse may come from earlier measured prompts instead
         of the store requests (see ``PassageProvenance.measured_earlier_in``).
 
         Returns:

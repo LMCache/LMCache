@@ -244,12 +244,12 @@ class TestScoreRuns:
         plan = build_plan(samples(), aligner, ReuseScenario.INDEPENDENT, CHUNK, 1)
         golds = [s.sample.answers[0] for s in plan.samples]
         reference = self._run(plan, golds, ArmRole.REFERENCE)
-        blend = self._run(plan, [golds[0], "wrong", ""], ArmRole.BLEND)
+        candidate = self._run(plan, [golds[0], "wrong", ""], ArmRole.CANDIDATE)
         client = FakeJudgeClient()
-        table = asyncio.run(_judge(client).score_runs(plan, [reference, blend]))
+        table = asyncio.run(_judge(client).score_runs(plan, [reference, candidate]))
         assert table[reference.label] == [1.0, 1.0, 1.0]
-        assert table[blend.label] == [1.0, 0.0, 0.0]
-        # Reference answers 0 and the blend's identical answer 0 share one
+        assert table[candidate.label] == [1.0, 0.0, 0.0]
+        # Reference answers 0 and the candidate's identical answer 0 share one
         # judgment; the unparsed answer is never sent.
         assert len(client.prompts) == 2 * 4
 

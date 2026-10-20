@@ -72,15 +72,16 @@ def add_analyze_arguments(parser: argparse.ArgumentParser) -> None:
         "--tolerance",
         type=float,
         default=0.05,
-        help="Acceptable blend-vs-reference score difference, in either "
+        help="Acceptable candidate-vs-reference score difference, in either "
         "direction, in score units (0.05 = 5 points).",
     )
     verdict.add_argument(
         "--min-blend-share",
         type=float,
         default=0.3,
-        help="Minimum share of looked-up tokens served by blending, overall "
-        "and per window of questions, for a valid verdict.",
+        help="When blend metrics were captured (run --capture-blend-metrics): "
+        "minimum share of looked-up tokens served by blending, overall and per "
+        "window of questions, for a valid verdict.",
     )
     judge = parser.add_argument_group("judge")
     judge.add_argument(
@@ -225,8 +226,8 @@ def run_quality_analyze(args: argparse.Namespace) -> None:
 
     Raises:
         SystemExit: With status 1 on a FAIL or INVALID verdict, or 2 if the
-            results directory lacks the plan, the reference arm or the blend
-            arm, or holds passes from another plan (a setup problem, not a
+            results directory lacks the plan, the reference arm or the
+            candidate arm, or holds passes from another plan (a setup problem, not a
             quality result).
         ValueError: If an argument is invalid.
         RuntimeError: If the judge fails, before or during scoring.

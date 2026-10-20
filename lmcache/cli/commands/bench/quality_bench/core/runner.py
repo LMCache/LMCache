@@ -98,7 +98,7 @@ class ArmRun:
 
     @property
     def label(self) -> str:
-        """File-name-safe label, e.g. ``reference_1`` or ``blend``."""
+        """File-name-safe label, e.g. ``reference_1`` or ``candidate``."""
         if self.role is ArmRole.REFERENCE:
             return f"{self.role.value}_{self.run_index + 1}"
         return self.role.value
@@ -125,7 +125,7 @@ class ArmRunner:
                 registers a completion callback on it.
             max_output_tokens: Token budget per measured answer.
             counter_source: Engagement counters for this arm. Pass an
-                unmeasured source for arms without a blend server.
+                unmeasured source unless blend metrics are captured.
         """
         self._sender = request_sender
         self._max_output_tokens = max_output_tokens

@@ -107,13 +107,13 @@ def plan(aligner):
     return build_plan(_samples(), aligner, ReuseScenario.INDEPENDENT, CHUNK, 1)
 
 
-def _decide(plan, blend_answers, measured=True, tolerance=0.05, references=2):
+def _decide(plan, candidate_answers, measured=True, tolerance=0.05, references=2):
     samples = [s.sample for s in plan.samples]
     runs = [
         _run(ArmRole.REFERENCE, _correct(samples), run_index=k)
         for k in range(references)
     ]
-    runs.append(_run(ArmRole.BLEND, blend_answers, measured=measured))
+    runs.append(_run(ArmRole.CANDIDATE, candidate_answers, measured=measured))
     return decide(plan, runs, VerdictMetric.MATCH, tolerance, 0.3), runs
 
 
@@ -122,13 +122,13 @@ class TestDecide:
         samples = [s.sample for s in plan.samples]
         verdict, _ = _decide(plan, _correct(samples))
         assert verdict.verdict is Verdict.PASS
-        assert verdict.blend.delta == 0.0
+        assert verdict.candidate.delta == 0.0
         assert verdict.reference_flip_rate == 0.0
 
     def test_small_loss_within_tolerance_passes(self, plan) -> None:
         samples = [s.sample for s in plan.samples]
         verdict, _ = _decide(plan, _with_losses(samples, 1))
-        assert verdict.blend.delta == pytest.approx(-1 / _N)
+        assert verdict.candidate.delta == pytest.approx(-1 / _N)
         assert verdict.verdict is Verdict.PASS
 
     def test_large_significant_loss_fails(self, plan) -> None:
@@ -137,15 +137,15 @@ class TestDecide:
         assert verdict.verdict is Verdict.FAIL
 
     def test_large_significant_gain_fails(self, plan) -> None:
-        """The check is two-sided: blend far above the reference fails too."""
+        """The check is two-sided: the candidate far above the reference fails too."""
         samples = [s.sample for s in plan.samples]
         runs = [
             _run(ArmRole.REFERENCE, _with_losses(samples, 20), run_index=k)
             for k in range(2)
         ]
-        runs.append(_run(ArmRole.BLEND, _correct(samples), measured=True))
+        runs.append(_run(ArmRole.CANDIDATE, _correct(samples), measured=True))
         verdict = decide(plan, runs, VerdictMetric.MATCH, 0.05, 0.3)
-        assert verdict.blend.delta == pytest.approx(20 / _N)
+        assert verdict.candidate.delta == pytest.approx(20 / _N)
         assert verdict.verdict is Verdict.FAIL
 
     def test_loss_over_tolerance_but_noisy_is_underpowered(self, aligner) -> None:
@@ -155,7 +155,7 @@ class TestDecide:
         assert verdict.verdict is Verdict.UNDERPOWERED
         assert verdict.samples_needed > len(samples)
 
-    def test_unengaged_blend_is_invalid(self, plan) -> None:
+    def test_unengaged_candidate_is_invalid(self, plan) -> None:
         samples = [s.sample for s in plan.samples]
         idle = [_answer(s, s.answers[0], share=0.0) for s in samples]
         verdict, _ = _decide(plan, idle)
@@ -169,7 +169,7 @@ class TestDecide:
         verdict, _ = _decide(plan, _correct(samples))
         assert verdict.invalid_reasons == []
 
-    @pytest.mark.parametrize("role", [ArmRole.REFERENCE, ArmRole.BLEND])
+    @pytest.mark.parametrize("role", [ArmRole.REFERENCE, ArmRole.CANDIDATE])
     def test_arm_with_no_successful_request_is_invalid(self, plan, role) -> None:
         """An unreachable arm scores 0 everywhere."""
         samples = [s.sample for s in plan.samples]
@@ -180,13 +180,13 @@ class TestDecide:
                 down if role is ArmRole.REFERENCE else _correct(samples),
             ),
             _run(
-                ArmRole.BLEND,
-                down if role is ArmRole.BLEND else _correct(samples),
+                ArmRole.CANDIDATE,
+                down if role is ArmRole.CANDIDATE else _correct(samples),
             ),
         ]
         verdict = decide(plan, runs, VerdictMetric.MATCH, 0.05, 0.3)
         assert verdict.verdict is Verdict.INVALID
-        label = "reference_1" if role is ArmRole.REFERENCE else "blend"
+        label = "reference_1" if role is ArmRole.REFERENCE else "candidate"
         assert verdict.invalid_reasons == [f"{label}: no request succeeded"]
 
     def test_every_arm_down_is_invalid_not_pass(self, plan) -> None:
@@ -194,18 +194,18 @@ class TestDecide:
         samples = [s.sample for s in plan.samples]
         runs = [
             _run(ArmRole.REFERENCE, [_failed(s) for s in samples]),
-            _run(ArmRole.BLEND, [_failed(s) for s in samples]),
+            _run(ArmRole.CANDIDATE, [_failed(s) for s in samples]),
         ]
         verdict = decide(plan, runs, VerdictMetric.MATCH, 0.05, 0.3)
-        assert verdict.blend.delta == 0.0
+        assert verdict.candidate.delta == 0.0
         assert verdict.verdict is Verdict.INVALID
         assert len(verdict.invalid_reasons) == 2
 
     def test_some_failed_requests_do_not_invalidate(self, plan) -> None:
         samples = [s.sample for s in plan.samples]
-        blend = _correct(samples)
-        blend[0] = _failed(samples[0])
-        verdict, _ = _decide(plan, blend)
+        candidate = _correct(samples)
+        candidate[0] = _failed(samples[0])
+        verdict, _ = _decide(plan, candidate)
         assert verdict.verdict is Verdict.PASS
         assert verdict.invalid_reasons == []
 
@@ -214,16 +214,16 @@ class TestDecide:
         samples = [s.sample for s in plan.samples]
         runs = [
             _run(ArmRole.REFERENCE, _correct(samples)),
-            _run(ArmRole.BLEND, _correct(samples), store_failures=3),
+            _run(ArmRole.CANDIDATE, _correct(samples), store_failures=3),
         ]
         verdict = decide(plan, runs, VerdictMetric.MATCH, 0.05, 0.3)
         assert verdict.verdict is Verdict.INVALID
-        assert verdict.invalid_reasons == ["blend: 3 store requests failed"]
+        assert verdict.invalid_reasons == ["candidate: 3 store requests failed"]
 
     def test_run_problems_judge_one_run_on_its_own(self, plan) -> None:
         """What `bench quality run` reports before any other arm exists."""
         samples = [s.sample for s in plan.samples]
-        assert run_problems(_run(ArmRole.BLEND, _correct(samples))) == []
+        assert run_problems(_run(ArmRole.CANDIDATE, _correct(samples))) == []
         down = _run(ArmRole.REFERENCE, [_failed(s) for s in samples], store_failures=2)
         assert run_problems(down) == [
             "reference_1: no request succeeded",
@@ -260,7 +260,7 @@ class TestEngagement:
         answers = _correct(samples)
         for i in range(_N - ENGAGEMENT_WINDOW, _N):
             answers[i] = _answer(samples[i], samples[i].answers[0], share=0.0)
-        check = check_engagement(_run(ArmRole.BLEND, answers, measured=True), 0.3)
+        check = check_engagement(_run(ArmRole.CANDIDATE, answers, measured=True), 0.3)
         assert check.blend_share == pytest.approx(0.6)
         assert check.min_window_share == 0.0
         assert not check.engaged
@@ -270,7 +270,7 @@ class TestEngagement:
         gapped = BlendCounters(requested_tokens=100, segmented_prefix_hit_tokens=40)
         answers = [_answer(s, s.answers[0]) for s in samples]
         run = ArmRun(
-            role=ArmRole.BLEND,
+            role=ArmRole.CANDIDATE,
             run_index=0,
             answers=answers,
             counters=gapped,
@@ -289,7 +289,7 @@ class TestEngagement:
         runs = [
             _run(ArmRole.REFERENCE, _correct(samples)),
             ArmRun(
-                role=ArmRole.BLEND,
+                role=ArmRole.CANDIDATE,
                 run_index=0,
                 answers=answers,
                 counters=gapped,
@@ -312,12 +312,12 @@ class TestEngagement:
 class TestBuildRows:
     def test_rows_tag_losses(self, plan) -> None:
         samples = [s.sample for s in plan.samples]
-        blend = _correct(samples)
-        blend[0] = _answer(samples[0], "not provided", 0.8)
-        blend[1] = _answer(samples[1], "", 0.8)
-        blend[2] = _answer(samples[2], "beta2", 0.8)
-        blend[3] = _answer(samples[3], "gamma", 0.8)
-        _, runs = _decide(plan, blend)
+        candidate = _correct(samples)
+        candidate[0] = _answer(samples[0], "not provided", 0.8)
+        candidate[1] = _answer(samples[1], "", 0.8)
+        candidate[2] = _answer(samples[2], "beta2", 0.8)
+        candidate[3] = _answer(samples[3], "gamma", 0.8)
+        _, runs = _decide(plan, candidate)
         rows = build_rows(plan, runs, VerdictMetric.MATCH)
         assert [r["loss_tag"] for r in rows[:5]] == [
             LossTag.ABSTENTION.value,
@@ -327,14 +327,14 @@ class TestBuildRows:
             LossTag.NONE.value,
         ]
 
-    def test_blend_higher_is_its_own_tag(self, plan) -> None:
+    def test_candidate_higher_is_its_own_tag(self, plan) -> None:
         samples = [s.sample for s in plan.samples]
         references = [
             _run(ArmRole.REFERENCE, _with_losses(samples, 1), run_index=0),
         ]
-        runs = [*references, _run(ArmRole.BLEND, _correct(samples), measured=True)]
+        runs = [*references, _run(ArmRole.CANDIDATE, _correct(samples), measured=True)]
         rows = build_rows(plan, runs, VerdictMetric.MATCH)
-        assert rows[0]["loss_tag"] == LossTag.BLEND_HIGHER.value
+        assert rows[0]["loss_tag"] == LossTag.CANDIDATE_HIGHER.value
 
     def test_row_schema(self, plan) -> None:
         samples = [s.sample for s in plan.samples]
@@ -343,7 +343,7 @@ class TestBuildRows:
         assert row["qid"] == "s0"
         scores, evidence = row["scores"], row["evidence"]
         assert isinstance(scores, dict) and isinstance(evidence, list)
-        assert set(scores) == {"reference_1", "reference_2", "blend"}
+        assert set(scores) == {"reference_1", "reference_2", "candidate"}
         assert row["reference_flipped"] is False
         assert row["blend_share"] == pytest.approx(0.8)
         assert evidence[0]["origin"] == "alone"
@@ -356,7 +356,7 @@ class TestPrecomputedScores:
         samples = [s.sample for s in plan.samples]
         return [
             _run(ArmRole.REFERENCE, _correct(samples)),
-            _run(ArmRole.BLEND, _correct(samples), measured=True),
+            _run(ArmRole.CANDIDATE, _correct(samples), measured=True),
         ]
 
     def test_judge_scores_drive_the_verdict(self, plan) -> None:
@@ -367,15 +367,15 @@ class TestPrecomputedScores:
         }
         verdict = decide(plan, runs, VerdictMetric.JUDGE, 0.05, 0.3, scores=scores)
         assert verdict.verdict is Verdict.FAIL
-        assert verdict.blend.delta == pytest.approx(-0.5)
+        assert verdict.candidate.delta == pytest.approx(-0.5)
 
     def test_unscored_questions_are_left_out(self, plan) -> None:
         runs = self._runs(plan)
         reference: list[float | None] = [1.0] * _N
-        blend: list[float | None] = [1.0] * _N
-        blend[0] = None
-        blend[1] = None
-        scores: ScoreTable = {runs[0].label: list(reference), runs[1].label: blend}
+        candidate: list[float | None] = [1.0] * _N
+        candidate[0] = None
+        candidate[1] = None
+        scores: ScoreTable = {runs[0].label: list(reference), runs[1].label: candidate}
         verdict = decide(plan, runs, VerdictMetric.JUDGE, 0.05, 0.3, scores=scores)
         assert verdict.unscored == 2
         # 2 of 40 is exactly MAX_UNSCORED_SHARE: still a valid verdict.
@@ -384,9 +384,9 @@ class TestPrecomputedScores:
 
     def test_too_many_unscored_questions_are_invalid(self, plan) -> None:
         runs = self._runs(plan)
-        blend: list[float | None] = [1.0] * _N
-        blend[:3] = [None, None, None]
-        scores: ScoreTable = {runs[0].label: [1.0] * _N, runs[1].label: blend}
+        candidate: list[float | None] = [1.0] * _N
+        candidate[:3] = [None, None, None]
+        scores: ScoreTable = {runs[0].label: [1.0] * _N, runs[1].label: candidate}
         verdict = decide(plan, runs, VerdictMetric.JUDGE, 0.05, 0.3, scores=scores)
         assert 3 > MAX_UNSCORED_SHARE * _N
         assert verdict.verdict is Verdict.INVALID

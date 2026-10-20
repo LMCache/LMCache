@@ -36,7 +36,7 @@ _SAMPLE_LINE = re.compile(r"^([A-Za-z_:][\w:]*)(?:\{[^}]*\})?\s+(\S+)")
 
 _FETCH_TIMEOUT_S = 10.0
 
-# Counters are read around every blend question, and a failed read aborts
+# Counters are read around every candidate question, and a failed read aborts
 # the run (losing every pass already made), so a transient scrape failure
 # is retried before it counts. Public so that tests can skip the wait.
 FETCH_ATTEMPTS = 3

@@ -380,7 +380,7 @@ class AnswerAccuracyJudge:
         them, the smallest digit 0-4 anywhere in the reply, so a reply that
         carries the judge's reasoning (a thinking model served without a
         reasoning parser, e.g. vLLM without ``--reasoning-parser``) reads as
-        0 almost every time. That zeroes every arm, so the blend gap vanishes
+        0 almost every time. That zeroes every arm, so the candidate's gap vanishes
         and the verdict is a silent PASS. An obviously right and an obviously
         wrong answer are judged on both prompts, through the same retries and
         parser as real answers. Nothing is cached, so every runs fresh checks

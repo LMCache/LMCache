@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """``lmcache bench quality`` command group.
 
-Measures whether CacheBlend changes the model's answers, in two stages:
+Measures whether a serving change -- e.g. CacheBlend, another engine or
+another model -- changes the model's answers compared with a reference, in
+two stages:
 
-* ``run`` sends byte-identical prompts to one or more arms (a full
-  recompute reference, optionally vLLM prefix caching, and CacheBlend) and
+* ``run`` sends byte-identical prompts to one or more arms (a reference such
+  as full recompute, a candidate under test, and optionally a control) and
   saves their answers to a results directory.
 * ``analyze`` scores the saved answers and reports per-question rows and a
   verdict.
@@ -20,10 +22,13 @@ from lmcache.cli.commands.base import CompositeCommand
 
 
 class QualityBenchCommand(CompositeCommand):
-    """Measure CacheBlend answer quality against full recompute."""
+    """Compare a candidate serving stack's answers with a reference."""
 
     def name(self) -> str:
         return "quality"
 
     def help(self) -> str:
-        return "Measure CacheBlend answer quality against full recompute."
+        return (
+            "Compare a candidate serving stack's answers with a reference "
+            "(e.g. CacheBlend vs full recompute)."
+        )

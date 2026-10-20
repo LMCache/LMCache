@@ -19,8 +19,8 @@ from lmcache.cli.commands.bench.quality_bench.core import analyze_stage, run_sta
 from lmcache.cli.commands.bench.quality_bench.core.run_files import SUMMARY_FILE
 
 REF_URL = "http://ref"
-BLEND_URL = "http://blend"
-APC_URL = "http://apc"
+CANDIDATE_URL = "http://candidate"
+CONTROL_URL = "http://control"
 METRICS_URL = "http://blend-server/metrics"
 
 # What the fake engines answer: right or wrong for each dataset question.
@@ -59,8 +59,16 @@ def run(dataset: str, out: str, *arm_flags: str) -> None:
 
 
 def run_both(dataset: str, out: str, *extra: str) -> None:
-    """Run the reference and blend arms into *out* in one invocation."""
-    run(dataset, out, "--reference-url", REF_URL, "--blend-url", BLEND_URL, *extra)
+    """Run the reference and candidate arms into *out* in one invocation."""
+    run(
+        dataset,
+        out,
+        "--reference-url",
+        REF_URL,
+        "--candidate-url",
+        CANDIDATE_URL,
+        *extra,
+    )
 
 
 def analyze(out: str, *flags: str) -> None:

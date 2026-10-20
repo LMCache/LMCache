@@ -4,9 +4,11 @@
 
 ## Overview
 
-`lmcache bench quality` answers one question: **does CacheBlend change the
-answers?** It sends the same QA prompts to a full-recompute reference engine
-and to a CacheBlend engine, scores both against gold answers, and prints one
+`lmcache bench quality` answers one question: **does a serving change
+change the answers?** The change can be CacheBlend, another serving
+optimization, another engine, or another model. It sends the same QA prompts
+to a *reference* engine (e.g. full recompute) and to a *candidate* engine
+(e.g. CacheBlend), scores both against gold answers, and prints one
 verdict — `PASS`, `FAIL`, `UNDERPOWERED`, or `INVALID` — that CI can gate on.
 The work is split into two stages that share a results directory (Section 6):
 `run` sends prompts to one or more arms and saves their answers; `analyze`
@@ -15,16 +17,18 @@ scores the saved answers and reaches the verdict.
 `bench engine --workload rag-qa-quality` already scores one stack's answers.
 `bench quality` adds what a comparison needs on top of that: a plan shared by
 every arm, an explicit description of how the passages got into the cache
-(the *reuse manifest*), a noise floor from repeated reference runs, a check
-that blending actually happened, and a statistical verdict.
+(the *reuse manifest*), a noise floor from repeated reference runs, for a
+CacheBlend candidate a check that blending actually happened, and a
+statistical verdict.
 
 ```bash
 WORKLOAD="--model Qwen/Qwen3-8B --dataset hotpotqa --limit 200 \
           --scenario independent --chunk-size 256"
-# One engine at a time, into one results directory
+# One engine at a time, into one results directory; the candidate here is
+# CacheBlend, so its blend server's metrics are captured
 lmcache bench quality run --reference-url http://gpu0:8000 $WORKLOAD --output-dir out
-lmcache bench quality run --blend-url http://gpu0:8000 \
-    --blend-metrics-url http://gpu0:9090/metrics $WORKLOAD --output-dir out
+lmcache bench quality run --candidate-url http://gpu0:8000 \
+    --capture-blend-metrics http://gpu0:9090/metrics $WORKLOAD --output-dir out
 # No engine needed: score and decide
 lmcache bench quality analyze out \
     --judge-url http://judge-host:8000 --judge-model openai/gpt-oss-120b
@@ -53,23 +57,26 @@ Any file in a supported QA schema loads with `--dataset <path>`.
 
 | Role | Flag | Engine | Stores passages first? |
 |---|---|---|---|
-| `reference` | `--reference-url` | vLLM, prefix caching **off** | No |
-| `apc` | `--apc-url` (optional) | vLLM, prefix caching on, no LMCache | Yes |
-| `blend` | `--blend-url` | vLLM + CBKVConnector + blend server | Yes |
+| `reference` | `--reference-url` | the stack every arm is judged against, e.g. vLLM with prefix caching **off** | No |
+| `candidate` | `--candidate-url` | the stack under test, e.g. vLLM + CBKVConnector + blend server | Yes |
+| `control` | `--control-url` (optional) | a stack expected to match the reference, e.g. vLLM with prefix caching on and no LMCache | Yes |
 
 Each `run` takes any subset of these flags (at least one); `analyze` needs a
-reference and a blend arm in the results directory.
+reference and a candidate arm in the results directory.
 
 The reference runs `--reference-repeats` times (default 2). Its disagreement
 with itself is the **flip rate**, the noise floor below which no arm can be
-told apart. The optional `apc` arm should match the reference exactly, since
-prefix caching reuses KV only at its original positions. A gap there points
-at the harness or the engine, not at CacheBlend.
+told apart. The optional `control` arm should match the reference; with
+vLLM prefix caching as the control it should match exactly, since prefix
+caching reuses KV only at its original positions. A gap there points at the
+harness or the engine, not at the candidate. It is reported, and does not set
+the verdict.
 
 Within a `run`, arms run one after another (all reference passes, then
-`apc`, then `blend`) and questions run sequentially, so per-question counter
-deltas belong to that question. **Each caching arm must start from an empty
-cache**: restart its engine and the blend server before its `run`. Running one
+`control`, then `candidate`) and questions run sequentially, so per-question
+counter deltas belong to that question. **Each caching arm must start from an
+empty cache**: restart its engine (and, for CacheBlend, the blend server)
+before its `run`. Running one
 arm per engine lifetime, as the staged flow does, satisfies this; the command
 does not restart engines itself.
 
@@ -109,10 +116,10 @@ which (`dataset`, `answer_string`, `none`), so loss can later be split by
 
 ### Reuse from earlier measured questions
 
-The store request is not always where the blend arm's KV for a passage comes
-from. The blend arm caches every measured prompt too, and the blend server
-registers each stored chunk in a fingerprint index keyed by the chunk's
-**content** (`BlendTokenRangeMatcher` in
+For a CacheBlend candidate, the store request is not always where its KV for
+a passage comes from. The candidate caches every measured prompt too, and the
+blend server registers each stored chunk in a fingerprint index keyed by
+the chunk's **content** (`BlendTokenRangeMatcher` in
 `lmcache/v1/multiprocess/modules/blend/matcher.py`). Chunk alignment makes a
 passage hash the same in every prompt, so when a passage recurs in a later
 question, which copy is reused depends on the server's registration policy:
@@ -146,12 +153,12 @@ production runs newest-wins, that is also how production reuses recurring
 documents, and requiring dedup mode would measure a configuration nobody
 serves.
 
-## 3. Engagement
+## 3. Engagement (CacheBlend candidates)
 
-A blend arm that silently fell back to recompute would score like the
-reference and `PASS`. When `--blend-metrics-url` is given, the runner reads
-the blend server's Prometheus counters before and after each measured
-question:
+A CacheBlend candidate that silently fell back to recompute would score like
+the reference and `PASS`. When `--capture-blend-metrics` is given (it needs
+`--candidate-url`), the runner reads the blend server's Prometheus counters
+before and after each of the candidate's measured questions:
 
 | Counter | Meaning |
 |---|---|
@@ -186,10 +193,11 @@ question.
 
 A failed counter read aborts the `run`, so the reads are guarded twice. The
 endpoint is read once before any arm runs: otherwise a bad
-`--blend-metrics-url` would surface only when the blend pass starts, after
-every other pass in the same `run`. Each read also retries a failed fetch (3
-attempts, 1 s apart), so one flaky scrape does not abort an hours-long run.
-Passes that finished before an abort are already saved (Section 6).
+`--capture-blend-metrics` would surface only when the candidate pass starts,
+after every other pass in the same `run`. Each read also retries a failed
+fetch (3 attempts, 1 s apart), so one flaky scrape does not abort an
+hours-long run. Passes that finished before an abort are already saved
+(Section 6).
 
 ## 4. Shared modules
 
@@ -260,7 +268,7 @@ are copied directly from ragas 0.4.3 (`ragas/metrics/_nv_metrics.py`, Apache-2.0
   of the comparison and counted as `unscored_questions`. Dropping it from
   every arm alike costs only power while the gaps are random. Above 5%
   (`MAX_UNSCORED_SHARE`) the judge is malfunctioning, and the gaps are likely
-  to track the answers (e.g. long blend answers failing to parse), so the
+  to track the answers (e.g. long candidate answers failing to parse), so the
   verdict is `INVALID`.
 - **Fingerprint.** The judge model and the metric go into the run
   fingerprint, so results from different judges are never compared.
@@ -300,19 +308,19 @@ understates the size of a loss, and misses many correct answers whose gold
 is a sentence rather than a name or figure. Token F1 is weaker still: it can
 pass a clear regression outright. Quote magnitudes from the judge.
 
-**Verdict.** Δ = mean(blend) − mean(reference), where the reference is the
+**Verdict.** Δ = mean(candidate) − mean(reference), where the reference is the
 first reference run. SE is the standard error of the paired per-question
 differences.
 
 | Verdict | Condition |
 |---|---|
-| `INVALID` | engagement measured and below `--min-blend-share` (overall or any window) / an arm run with no successful request / a failed store request / more than 5% of questions unscored. `invalid_reasons` lists which |
+| `INVALID` | blend metrics captured and blend share below `--min-blend-share` (overall or any window) / an arm run with no successful request / a failed store request / more than 5% of questions unscored. `invalid_reasons` lists which |
 | `PASS` | \|Δ\| ≤ `--tolerance` (default 0.05) |
 | `FAIL` | \|Δ\| > tolerance **and** \|Δ\| > 2·SE |
 | `UNDERPOWERED` | otherwise. Reports `samples_needed` = ⌈(2·sd/\|Δ\|)²⌉ |
 
-The comparison is two-sided. Reusing KV should not improve answers, so a
-blend arm far above the reference points at the setup (e.g. a reference
+The comparison is two-sided. A change meant to preserve answers (such as
+reusing KV) should not improve them, so a candidate far above the reference points at the setup (e.g. a reference
 that is not really recomputing) as much as a loss does, and fails the same
 way.
 
@@ -322,28 +330,28 @@ unreachable, every score is `0`, Δ is `0`, and the run would otherwise
 `PASS`. A failed store request means the arm did not cache what the
 scenario says, so its answers do not measure that scenario.
 
-Later reference runs and the `apc` arm, if present, are compared with the
+Later reference runs and the `control` arm, if present, are compared with the
 first reference the same way and reported alongside. They do not set the
 verdict. The flip rate is the share of questions whose score differs between
 the first two reference runs.
 
-**Loss tags.** Each question where blend scores below the reference is tagged
+**Loss tags.** Each question where the candidate scores below the reference is tagged
 `abstention` (the model said the passages lack the answer), `empty` (no
 parsed answer), `wrong_value` (it answered with a string that appears in the
 prompt, i.e. read the wrong passage), or `wording` (anything else).
-`blend_higher` and `none` cover the other rows.
+`candidate_higher` and `none` cover the other rows.
 
 ## 6. Stages and the results directory
 
 **Why two stages.** A single invocation needed every arm's engine, the blend
-server's metrics and the judge reachable for the whole run. On a GPU pool
-that is several GPU servers at once, although the arms only ever run one
-after another. `run` and `analyze` are separate commands that communicate
-only through files, so each engine (and the judge) can be up alone, each in
-its own CI job, and saved answers can be re-analyzed with another metric or
-tolerance. A long-lived process that paused between arms would save the
-engines' GPUs too, but not the judge's, and would allow neither re-analysis
-nor reuse of a saved reference.
+server's metrics (for a CacheBlend candidate) and the judge reachable for the
+whole run. On a GPU pool that is several GPU servers at once, although the
+arms only ever run one after another. `run` and `analyze` are separate
+commands that communicate only through files, so each engine (and the judge)
+can be up alone, each in its own CI job, and saved answers can be re-analyzed
+with another metric or tolerance. A long-lived process that paused between
+arms would save the engines' GPUs too, but not the judge's, and would allow
+neither re-analysis nor reuse of a saved reference.
 
 **The directory** (`--output-dir`, used as given; omitted, `run` creates
 `quality_results/<YYYYmmdd-HHMMSS>/`, with `-2`, `-3`, … on a same-second
@@ -358,7 +366,7 @@ are conditional -- is the user docs page
 |---|---|---|
 | `plan.json` | first `run` | `schema_version`, `plan_fingerprint`, `prompts_digest`, the lmcache version, the workload settings, and the whole plan: store requests and, per question, its manifest entry plus question, gold answers, passages and measured messages |
 | `manifest.jsonl` | first `run` | reuse manifest (Section 2) |
-| `arm_<label>.json` | `run` | per pass: role, repeat, URL, metrics URL, engine version (best-effort `GET /version`), lmcache version, start and finish times, run-level blend counters, store failures, `plan_fingerprint` |
+| `arm_<label>.json` | `run` | per pass: role, repeat, URL, metrics URL, engine version (best-effort `GET /version`), lmcache version, start and finish times, run-level blend counters (when captured), store failures, `plan_fingerprint` |
 | `answers_<label>.jsonl` | `run` | per question: response, parsed answer, TTFT, output tokens, counter delta |
 | `rows.jsonl` | `analyze` | per question: gold, score per arm, answers, loss tag, reference flipped, blend share, evidence; with the judge, also each arm's `match` score as a cross-check |
 | `summary.json` | `analyze` | verdict and `invalid_reasons`, metric, tolerance, Δ, SE, flip rate, engagement, per-arm counts, each arm's provenance, evidence sources (`dataset` / `answer_string` / `none`), `measured_earlier_share`, judge model and unscored questions, `plan_fingerprint`, `run_fingerprint` |
@@ -379,11 +387,11 @@ are conditional -- is the user docs page
   role's earlier files (and the now-stale `rows.jsonl` and `summary.json`),
   so reference repeats never mix engine lifetimes and fewer repeats never
   leave a stale one behind.
-- **Schema versions.** Every file records `schema_version`; another version
-  is refused rather than misread.
+- **Schema versions.** `plan.json` and every arm file record
+  `schema_version`; another version is refused rather than misread.
 
 Every refusal above, and an `analyze` without `plan.json` or without the
-reference or blend arm, raises `ResultsDirError`. Both commands report it
+reference or candidate arm, raises `ResultsDirError`. Both commands report it
 without a traceback and exit `2`, like an invalid invocation, rather than
 `1`: it is a setup problem, not a quality result, and CI can tell the two
 apart by exit code alone. A missing-arms message names every missing arm
@@ -391,8 +399,8 @@ and one `run` command that supplies them all.
 
 **Reusing a reference.** Copy `plan.json`, `manifest.jsonl` and the
 `*reference*` files (optionally `judge_cache.jsonl`) into a fresh directory,
-run only the blend arm into it, and analyze. The plan check refuses the blend
-`run` if anything that shapes the prompts changed. Whether the *reference
+run only the candidate arm into it, and analyze. The plan check refuses the
+candidate `run` if anything that shapes the prompts changed. Whether the *reference
 stack* is unchanged (engine image, model revision) is the caller's to decide;
 the recorded engine and lmcache versions and timestamps make it visible. A
 reused arm keeps the answers as its own lmcache version extracted them.

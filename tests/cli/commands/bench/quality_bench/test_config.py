@@ -16,7 +16,7 @@ from lmcache.cli.commands.bench.quality_bench.core.config import (
 
 _ARMS = [
     ArmEndpoint(ArmRole.REFERENCE, "http://ref"),
-    ArmEndpoint(ArmRole.BLEND, "http://blend"),
+    ArmEndpoint(ArmRole.CANDIDATE, "http://candidate"),
 ]
 
 
@@ -35,8 +35,8 @@ def _analyze_config(**overrides) -> QualityAnalyzeConfig:
 class TestQualityRunConfig:
     def test_minimal_config_is_valid(self) -> None:
         config = _run_config()
-        assert config.arm(ArmRole.BLEND).url == "http://blend"
-        assert not config.has_arm(ArmRole.PREFIX_CACHE)
+        assert config.arm(ArmRole.CANDIDATE).url == "http://candidate"
+        assert not config.has_arm(ArmRole.CONTROL)
 
     @pytest.mark.parametrize("role", list(ArmRole))
     def test_a_single_arm_is_enough(self, role: ArmRole) -> None:
@@ -56,10 +56,10 @@ class TestQualityRunConfig:
 
     def test_empty_url_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="url"):
-            _run_config(arms=[_ARMS[0], ArmEndpoint(ArmRole.BLEND, "")])
+            _run_config(arms=[_ARMS[0], ArmEndpoint(ArmRole.CANDIDATE, "")])
 
-    def test_metrics_url_needs_a_blend_arm(self) -> None:
-        with pytest.raises(ValueError, match="--blend-url"):
+    def test_metrics_url_needs_a_candidate_arm(self) -> None:
+        with pytest.raises(ValueError, match="--candidate-url"):
             _run_config(arms=[_ARMS[0]], blend_metrics_url="http://m/metrics")
 
     @pytest.mark.parametrize(
@@ -79,7 +79,7 @@ class TestQualityRunConfig:
 
     def test_missing_arm_raises_key_error(self) -> None:
         with pytest.raises(KeyError):
-            _run_config().arm(ArmRole.PREFIX_CACHE)
+            _run_config().arm(ArmRole.CONTROL)
 
     def test_plan_settings_change_with_the_prompt_settings(self) -> None:
         assert _run_config().plan_settings() != (
@@ -88,9 +88,9 @@ class TestQualityRunConfig:
 
     def test_plan_settings_ignore_the_arms(self) -> None:
         """Runs of different arms into one directory must share a plan."""
-        only_blend = [ArmEndpoint(ArmRole.BLEND, "http://elsewhere")]
+        only_candidate = [ArmEndpoint(ArmRole.CANDIDATE, "http://elsewhere")]
         assert _run_config().plan_settings() == (
-            _run_config(arms=only_blend).plan_settings()
+            _run_config(arms=only_candidate).plan_settings()
         )
 
 

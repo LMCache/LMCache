@@ -81,25 +81,31 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     arms.add_argument(
         "--reference-url",
         default="",
-        help="Engine serving full recompute (vLLM, prefix caching off).",
+        help="Engine serving the reference every other arm is judged against, "
+        "e.g. full recompute (vLLM, prefix caching off).",
     )
     arms.add_argument(
-        "--blend-url",
+        "--candidate-url",
         default="",
-        help="Engine serving CacheBlend (vLLM + CBKVConnector).",
+        help="Engine serving the candidate under test, e.g. CacheBlend (vLLM "
+        "+ CBKVConnector), another engine, or another model.",
     )
     arms.add_argument(
-        "--apc-url",
+        "--control-url",
         default="",
-        help="Engine serving vLLM prefix caching only. Its gap to the "
-        "reference is reported as a noise floor.",
+        help="Optional engine expected to answer like the reference, e.g. "
+        "vLLM prefix caching only. Its gap to the reference is reported as "
+        "a noise floor.",
     )
     arms.add_argument(
-        "--blend-metrics-url",
+        "--capture-blend-metrics",
+        dest="blend_metrics_url",
         default="",
-        help="The blend server's Prometheus /metrics URL (needs --blend-url). "
-        "Without it, engagement is not checked and cannot make the verdict "
-        "INVALID.",
+        metavar="URL",
+        help="For a CacheBlend candidate: the blend server's Prometheus "
+        "/metrics URL, read during the candidate pass (needs --candidate-url). "
+        "Without it, blend engagement is not checked and cannot make the "
+        "verdict INVALID.",
     )
     arms.add_argument(
         "--reference-repeats",
@@ -145,7 +151,8 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--chunk-size",
         type=int,
         default=256,
-        help="LMCache chunk size. Must match the blend server's --chunk-size.",
+        help="LMCache chunk size. For a caching candidate, match its chunk size "
+        "(e.g. the CacheBlend server's --chunk-size).",
     )
     workload.add_argument(
         "--max-output-tokens",
@@ -194,8 +201,8 @@ def run_config_from_args(args: argparse.Namespace) -> QualityRunConfig:
         ArmEndpoint(role, url)
         for role, url in (
             (ArmRole.REFERENCE, args.reference_url),
-            (ArmRole.PREFIX_CACHE, args.apc_url),
-            (ArmRole.BLEND, args.blend_url),
+            (ArmRole.CONTROL, args.control_url),
+            (ArmRole.CANDIDATE, args.candidate_url),
         )
         if url
     ]
@@ -258,17 +265,19 @@ async def run_arms(
 ) -> list[ArmRun]:
     """Run every configured arm over *plan*, one pass at a time.
 
-    Order: every reference pass, then apc, then blend, skipping arms that
-    are not configured. The caching arms store the plan's passages first --
-    the reference does not. Each arm must start from an empty cache: restart
-    its engine (and the blend server) before the run.
+    Order: every reference pass, then control, then candidate, skipping arms
+    that are not configured. The control and candidate store the plan's
+    passages first -- the reference does not. Each caching arm must start
+    from an empty cache: restart its engine (and any cache server) before
+    the run.
 
     Args:
         config: The run's config.
         plan: The prompts to send.
         senders: One request sender per configured arm role. All are closed
             when the last pass finishes.
-        blend_counters: Engagement counters for the blend arm.
+        blend_counters: Blend-server counters, read during the candidate
+            pass (unmeasured unless --capture-blend-metrics was given).
         on_run: Called with each pass as soon as it finishes, so a failure
             in a later pass does not lose it.
 
@@ -282,10 +291,10 @@ async def run_arms(
             (ArmRole.REFERENCE, k, StorePhase.SKIP_STORE, unmeasured)
             for k in range(config.reference_repeats)
         ]
-    if config.has_arm(ArmRole.PREFIX_CACHE):
-        schedule.append((ArmRole.PREFIX_CACHE, 0, StorePhase.STORE_FIRST, unmeasured))
-    if config.has_arm(ArmRole.BLEND):
-        schedule.append((ArmRole.BLEND, 0, StorePhase.STORE_FIRST, blend_counters))
+    if config.has_arm(ArmRole.CONTROL):
+        schedule.append((ArmRole.CONTROL, 0, StorePhase.STORE_FIRST, unmeasured))
+    if config.has_arm(ArmRole.CANDIDATE):
+        schedule.append((ArmRole.CANDIDATE, 0, StorePhase.STORE_FIRST, blend_counters))
 
     runs: list[ArmRun] = []
     runners: dict[ArmRole, ArmRunner] = {}
@@ -374,8 +383,8 @@ def run_quality_run(args: argparse.Namespace) -> None:
         if config.blend_metrics_url
         else UnmeasuredBlendCounters()
     )
-    # The counters are first needed when the blend pass starts, after every
-    # other pass. Read them now so a bad --blend-metrics-url fails before
+    # The counters are first needed when the candidate pass starts, after
+    # every other pass. Read them now so a bad --capture-blend-metrics fails before
     # any arm time is spent.
     blend_counters.read()
 
@@ -404,7 +413,7 @@ def run_quality_run(args: argparse.Namespace) -> None:
             fingerprint,
             url=config.arm(run.role).url,
             blend_metrics_url=(
-                config.blend_metrics_url if run.role is ArmRole.BLEND else ""
+                config.blend_metrics_url if run.role is ArmRole.CANDIDATE else ""
             ),
             engine_version=versions[run.role],
             started_at=pass_started,

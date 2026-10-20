@@ -23,8 +23,8 @@ from lmcache.cli.commands.bench.quality_bench.core.run_files import (
 # Local
 from .fakes import FakeJudgeClient, FakeSender, SteppingCounters, answering, rate_exact
 from .stages import (
-    APC_URL,
-    BLEND_URL,
+    CANDIDATE_URL,
+    CONTROL_URL,
     METRICS_URL,
     REF_URL,
     RIGHT,
@@ -37,7 +37,7 @@ from .stages import (
     summary,
 )
 
-# Blend answers one of three questions wrongly.
+# The candidate answers one of three questions wrongly.
 ONE_WRONG = {**RIGHT, "Swiss?": "Vienna"}
 
 
@@ -46,8 +46,8 @@ def _sent(engines: dict[str, FakeSender]) -> int:
 
 
 class TestVerdict:
-    def test_matching_blend_passes(self, dataset, engines, tmp_path) -> None:
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+    def test_matching_candidate_passes(self, dataset, engines, tmp_path) -> None:
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
         run_both(dataset, out)
 
@@ -56,7 +56,7 @@ class TestVerdict:
         result = summary(out)
         assert result["verdict"] == "PASS"
         assert os.path.isfile(os.path.join(out, ROWS_FILE))
-        assert result["arms"]["blend"]["url"] == BLEND_URL
+        assert result["arms"]["candidate"]["url"] == CANDIDATE_URL
         assert result["arms"]["reference_1"]["engine_version"] == "fake-1.0"
         assert result["settings"]["reference_repeats"] == 2
 
@@ -64,21 +64,26 @@ class TestVerdict:
         self, dataset, engines, tmp_path
     ) -> None:
         """The serialized CI flow: one engine per job, then analyze."""
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
-        engines[APC_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
+        engines[CONTROL_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
         run(dataset, out, "--reference-url", REF_URL)
-        run(dataset, out, "--apc-url", APC_URL)
-        run(dataset, out, "--blend-url", BLEND_URL)
+        run(dataset, out, "--control-url", CONTROL_URL)
+        run(dataset, out, "--candidate-url", CANDIDATE_URL)
 
         analyze(out)
 
         result = summary(out)
         assert result["verdict"] == "PASS"
-        assert set(result["arms"]) == {"reference_1", "reference_2", "apc", "blend"}
+        assert set(result["arms"]) == {
+            "reference_1",
+            "reference_2",
+            "control",
+            "candidate",
+        }
 
     def test_quality_loss_exits_non_zero(self, dataset, engines, tmp_path) -> None:
-        engines[BLEND_URL] = FakeSender(answering(WRONG))
+        engines[CANDIDATE_URL] = FakeSender(answering(WRONG))
         out = str(tmp_path / "out")
         run_both(dataset, out)
 
@@ -88,10 +93,10 @@ class TestVerdict:
         assert exc.value.code == 1
         assert summary(out)["verdict"] == "FAIL"
 
-    def test_unengaged_blend_is_invalid(
+    def test_unengaged_candidate_is_invalid(
         self, dataset, engines, tmp_path, monkeypatch
     ) -> None:
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         no_blending = BlendCounters(requested_tokens=100.0, prefix_hit_tokens=100.0)
         monkeypatch.setattr(
             run_stage,
@@ -99,7 +104,7 @@ class TestVerdict:
             lambda url: SteppingCounters(no_blending),
         )
         out = str(tmp_path / "out")
-        run_both(dataset, out, "--blend-metrics-url", METRICS_URL)
+        run_both(dataset, out, "--capture-blend-metrics", METRICS_URL)
 
         with pytest.raises(SystemExit) as exc:
             analyze(out)
@@ -113,7 +118,7 @@ class TestVerdict:
         """Every request failing on both arms scores 0 = 0, which is no PASS."""
         down = frozenset([f"q{i}" for i in range(3)] + [f"store{i}" for i in range(5)])
         engines[REF_URL] = FakeSender(answering(RIGHT), failing=down)
-        engines[BLEND_URL] = FakeSender(answering(RIGHT), failing=down)
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT), failing=down)
         out = str(tmp_path / "out")
         with pytest.raises(SystemExit):
             run_both(dataset, out)
@@ -123,13 +128,13 @@ class TestVerdict:
 
         result = summary(out)
         assert result["verdict"] == "INVALID"
-        assert "blend: no request succeeded" in result["invalid_reasons"]
+        assert "candidate: no request succeeded" in result["invalid_reasons"]
         assert "reference_1: no request succeeded" in result["invalid_reasons"]
 
     def test_segmented_prefix_tokens_are_reported(
         self, dataset, engines, tmp_path, monkeypatch, capsys
     ) -> None:
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         step = BlendCounters(
             requested_tokens=100.0,
             non_prefix_hit_tokens=60.0,
@@ -139,7 +144,7 @@ class TestVerdict:
             run_stage, "PrometheusBlendCounters", lambda url: SteppingCounters(step)
         )
         out = str(tmp_path / "out")
-        run_both(dataset, out, "--blend-metrics-url", METRICS_URL)
+        run_both(dataset, out, "--capture-blend-metrics", METRICS_URL)
 
         analyze(out)
 
@@ -150,7 +155,7 @@ class TestVerdict:
 
     def test_results_are_strict_json(self, dataset, engines, tmp_path) -> None:
         """One question leaves the standard error undefined: null, not Infinity."""
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
         run_both(dataset, out, "--limit", "1")
 
@@ -161,13 +166,13 @@ class TestVerdict:
 
         with open(os.path.join(out, SUMMARY_FILE)) as f:
             result = json.loads(f.read(), parse_constant=refuse)
-        assert result["blend"]["standard_error"] is None
+        assert result["candidate"]["standard_error"] is None
         with open(os.path.join(out, ROWS_FILE)) as f:
             for line in f:
                 json.loads(line, parse_constant=refuse)
 
     def test_summary_reports_the_plan(self, dataset, engines, tmp_path, capsys) -> None:
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
         run_both(dataset, out)
 
@@ -184,7 +189,7 @@ class TestSavedRuns:
     def test_analyze_needs_no_dataset_or_tokenizer(
         self, dataset, engines, tmp_path, monkeypatch
     ) -> None:
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
         run_both(dataset, out)
         os.remove(dataset)
@@ -201,7 +206,7 @@ class TestSavedRuns:
     def test_reanalyzing_with_another_tolerance_sends_nothing(
         self, dataset, engines, tmp_path
     ) -> None:
-        engines[BLEND_URL] = FakeSender(answering(ONE_WRONG))
+        engines[CANDIDATE_URL] = FakeSender(answering(ONE_WRONG))
         out = str(tmp_path / "out")
         run_both(dataset, out)
         sent = _sent(engines)
@@ -217,15 +222,15 @@ class TestSavedRuns:
 
     @pytest.mark.parametrize(
         ("flag", "missing"),
-        [("--reference-url", "blend"), ("--blend-url", "reference")],
+        [("--reference-url", "candidate"), ("--candidate-url", "reference")],
     )
     def test_a_missing_arm_names_the_run_to_do(
         self, dataset, engines, tmp_path, capsys, flag: str, missing: str
     ) -> None:
         """A setup problem, not a verdict: exit 2, no summary written."""
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
-        run(dataset, out, flag, REF_URL if flag == "--reference-url" else BLEND_URL)
+        run(dataset, out, flag, REF_URL if flag == "--reference-url" else CANDIDATE_URL)
 
         error = expect_setup_error(capsys, lambda: analyze(out))
 
@@ -235,14 +240,14 @@ class TestSavedRuns:
     def test_every_missing_arm_is_named_at_once(
         self, dataset, engines, tmp_path, capsys
     ) -> None:
-        engines[APC_URL] = FakeSender(answering(RIGHT))
+        engines[CONTROL_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
-        run(dataset, out, "--apc-url", APC_URL)
+        run(dataset, out, "--control-url", CONTROL_URL)
 
         error = expect_setup_error(capsys, lambda: analyze(out))
 
-        assert "has no reference and blend arms" in error
-        assert "--reference-url … --blend-url …" in error
+        assert "has no reference and candidate arms" in error
+        assert "--reference-url … --candidate-url …" in error
 
     def test_missing_plan_names_the_run_to_do(self, tmp_path, capsys) -> None:
         error = expect_setup_error(capsys, lambda: analyze(str(tmp_path / "empty")))
@@ -251,11 +256,11 @@ class TestSavedRuns:
     def test_an_arm_from_another_plan_is_refused(
         self, dataset, engines, tmp_path, capsys
     ) -> None:
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         here, there = str(tmp_path / "here"), str(tmp_path / "there")
         run_both(dataset, here)
-        run(dataset, there, "--blend-url", BLEND_URL, "--seed", "7")
-        for name in ("arm_blend.json", "answers_blend.jsonl"):
+        run(dataset, there, "--candidate-url", CANDIDATE_URL, "--seed", "7")
+        for name in ("arm_candidate.json", "answers_candidate.jsonl"):
             shutil.copy(os.path.join(there, name), os.path.join(here, name))
 
         assert "another plan" in expect_setup_error(capsys, lambda: analyze(here))
@@ -263,7 +268,7 @@ class TestSavedRuns:
     def test_another_schema_version_is_refused(
         self, dataset, engines, tmp_path, capsys
     ) -> None:
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
         run_both(dataset, out)
         path = os.path.join(out, PLAN_FILE)
@@ -277,21 +282,21 @@ class TestSavedRuns:
 
     def test_an_unfinished_pass_is_ignored(self, dataset, engines, tmp_path) -> None:
         """Answers without their arm file are from a pass that never ended."""
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
         run_both(dataset, out)
         shutil.copy(
-            os.path.join(out, "answers_blend.jsonl"),
-            os.path.join(out, "answers_apc.jsonl"),
+            os.path.join(out, "answers_candidate.jsonl"),
+            os.path.join(out, "answers_control.jsonl"),
         )
 
         analyze(out)
 
-        assert "apc" not in summary(out)["arms"]
+        assert "control" not in summary(out)["arms"]
 
     def test_a_saved_reference_can_be_reused(self, dataset, engines, tmp_path) -> None:
-        """CI copies a saved reference in and runs only the blend arm."""
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        """CI copies a saved reference in and runs only the candidate arm."""
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         saved, fresh = str(tmp_path / "saved"), str(tmp_path / "fresh")
         run(dataset, saved, "--reference-url", REF_URL)
         os.makedirs(fresh)
@@ -299,7 +304,7 @@ class TestSavedRuns:
             shutil.copy(os.path.join(saved, name), os.path.join(fresh, name))
         reference_requests = len(engines[REF_URL].sent)
 
-        run(dataset, fresh, "--blend-url", BLEND_URL)
+        run(dataset, fresh, "--candidate-url", CANDIDATE_URL)
         analyze(fresh)
 
         assert summary(fresh)["verdict"] == "PASS"
@@ -327,7 +332,7 @@ class TestJudge:
     def test_judged_analysis_fails_on_wrong_answers(
         self, dataset, engines, judge_client, tmp_path
     ) -> None:
-        engines[BLEND_URL] = FakeSender(answering(WRONG))
+        engines[CANDIDATE_URL] = FakeSender(answering(WRONG))
         out = str(tmp_path / "out")
         run_both(dataset, out)
 
@@ -346,7 +351,7 @@ class TestJudge:
     def test_reanalysis_reuses_the_judge_cache(
         self, dataset, engines, judge_client, tmp_path
     ) -> None:
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
         run_both(dataset, out)
         analyze(out, "--judge-url", "http://judge")
@@ -360,7 +365,7 @@ class TestJudge:
     def test_unreachable_judge_fails_before_scoring(
         self, dataset, engines, tmp_path, monkeypatch
     ) -> None:
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
         run_both(dataset, out)
         monkeypatch.setattr(
@@ -375,7 +380,7 @@ class TestJudge:
         self, dataset, engines, tmp_path, monkeypatch
     ) -> None:
         """A thinking judge without a reasoning parser would zero every arm."""
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
         run_both(dataset, out)
         thinking = FakeJudgeClient(lambda _p: "<think>0 doubts.</think> 4")
@@ -387,7 +392,7 @@ class TestJudge:
     def test_judge_failing_mid_scoring_keeps_its_progress(
         self, dataset, engines, tmp_path, monkeypatch
     ) -> None:
-        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
         run_both(dataset, out)
 

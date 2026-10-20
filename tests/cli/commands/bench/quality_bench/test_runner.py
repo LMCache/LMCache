@@ -43,7 +43,7 @@ class LaggingCounters(BlendCounterSource):
         asyncio.get_running_loop().call_later(delay_s, self.add_now, delta)
 
 
-def _run(aligner, sender, store_phase, counters=None, role=ArmRole.BLEND):
+def _run(aligner, sender, store_phase, counters=None, role=ArmRole.CANDIDATE):
     plan = build_plan(samples(), aligner, ReuseScenario.INDEPENDENT, CHUNK, 1)
     runner = ArmRunner(sender, 64, counters or UnmeasuredBlendCounters())
     return plan, asyncio.run(runner.run(plan, role, 0, store_phase))
