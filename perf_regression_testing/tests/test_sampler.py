@@ -59,3 +59,29 @@ def test_an_unreachable_url_is_recorded_not_raised(tmp_path: Path) -> None:
     s.stop()
     rec = json.loads(out.read_text().splitlines()[0])
     assert "err" in rec
+
+
+def test_cgroup_memory_is_sampled(tmp_path: Path) -> None:
+    srv, url = _serve(ENGINE)
+    (tmp_path / "memory.stat").write_text("anon 100\nfile 200\nfile_mapped 7\n")
+    out = tmp_path / "samples.jsonl"
+    s = Sampler(out, url, interval_s=0.05, cgroup=tmp_path)
+    s.start()
+    time.sleep(0.1)
+    s.stop()
+    srv.shutdown()
+    rec = json.loads(out.read_text().splitlines()[0])
+    assert (rec["mem_anon"], rec["mem_file"]) == (100, 200)
+    assert "file_mapped" not in str(rec)
+
+
+def test_a_gone_cgroup_is_recorded_not_raised(tmp_path: Path) -> None:
+    srv, url = _serve(ENGINE)
+    out = tmp_path / "samples.jsonl"
+    s = Sampler(out, url, interval_s=0.05, cgroup=tmp_path / "gone")
+    s.start()
+    time.sleep(0.1)
+    s.stop()
+    srv.shutdown()
+    rec = json.loads(out.read_text().splitlines()[0])
+    assert "mem_err" in rec and "mem_anon" not in rec

@@ -2,7 +2,9 @@
 """Background sampler: server counters, one JSON line per tick.
 
 Each line holds ``t`` (unix seconds), every :data:`METRICS` sample summed over
-labels and URLs, and ``vllm:prompt_tokens_by_source/<source>``.
+labels and URLs, and ``vllm:prompt_tokens_by_source/<source>``. With a cgroup,
+also ``mem_anon`` and ``mem_file`` (bytes): the container's own memory and the
+page cache charged to it.
 """
 
 # Standard
@@ -50,6 +52,19 @@ def _scrape(url: str, rec: dict[str, Any]) -> None:
         rec[key] = rec.get(key, 0.0) + float(value)
 
 
+def _memory(cgroup: Path, rec: dict[str, Any]) -> None:
+    """Add ``mem_anon`` and ``mem_file`` from ``cgroup``'s ``memory.stat``.
+
+    Args:
+        cgroup: A cgroup v2 dir.
+        rec: The tick's record, updated in place.
+    """
+    for line in (cgroup / "memory.stat").read_text().splitlines():
+        key, value = line.split()
+        if key in ("anon", "file"):
+            rec[f"mem_{key}"] = int(value)
+
+
 class Sampler:
     """Samples metrics URLs into a JSONL file."""
 
@@ -58,6 +73,7 @@ class Sampler:
         out: Path,
         url: str,
         interval_s: float = 5.0,
+        cgroup: Path | None = None,
     ) -> None:
         """Prepare a sampler; call :meth:`start` to begin.
 
@@ -65,10 +81,12 @@ class Sampler:
             out: JSONL file to append to.
             url: Prometheus endpoint to scrape.
             interval_s: Seconds between ticks.
+            cgroup: cgroup v2 dir whose memory to sample, or None.
         """
         self.out = out
         self.url = url
         self.interval_s = interval_s
+        self.cgroup = cgroup
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
@@ -96,6 +114,11 @@ class Sampler:
                     ValueError,
                 ) as e:
                     rec["err"] = str(e)
+                if self.cgroup is not None:
+                    try:
+                        _memory(self.cgroup, rec)
+                    except OSError as e:
+                        rec["mem_err"] = str(e)
                 f.write(json.dumps(rec) + "\n")
                 f.flush()
                 self._stop.wait(max(0.0, self.interval_s - (time.time() - t)))

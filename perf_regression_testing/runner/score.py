@@ -136,6 +136,7 @@ def score(run_dir: Path, window_s: float) -> dict[str, Any]:
         return _at(samples, we, key) - _at(samples, ws, key)
 
     src = {k: delta(f"vllm:prompt_tokens_by_source/{k}") for k in _SOURCES}
+    mem = [s for s in samples if ws <= s["t"] <= we and "mem_anon" in s]
     total = sum(src.values())
     return {
         "window_start": ws,
@@ -150,4 +151,11 @@ def score(run_dir: Path, window_s: float) -> dict[str, Any]:
         # Served by the cache layer (L1 and L2), the same meter everywhere.
         "external_token_share": src["external_kv_transfer"] / total if total else None,
         "preemptions": delta("vllm:num_preemptions_total"),
+        # Peak over the window of the vLLM container's own memory and of the
+        # page cache charged to it (a [deployments] vllm_memory_gb caps both).
+        "vllm_mem_peak_gb": {
+            k: max(s[f"mem_{k}"] for s in mem) / 2**30 for k in ("anon", "file")
+        }
+        if mem
+        else None,
     }

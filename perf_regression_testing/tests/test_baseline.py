@@ -145,3 +145,10 @@ def test_config_hash_tracks_run_settings_not_timeouts() -> None:
     assert baseline.config_hash(spec) == h
     spec.vllm_args["max-num-seqs"] = "1"
     assert baseline.config_hash(spec) != h
+
+
+def test_a_memory_cap_is_part_of_the_config() -> None:
+    spec = config.resolve(config.load(), "agentic", "vllm_lmcache")
+    h = baseline.config_hash(spec)
+    spec.vllm_memory_gb = 896
+    assert baseline.config_hash(spec) != h

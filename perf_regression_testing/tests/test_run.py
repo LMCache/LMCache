@@ -134,3 +134,16 @@ def test_heartbeat_counts_a_fixed_duration_phase_across_midnight(
     assert run.aiperf_phase(log, now) == (
         "profiling started | target: 960.0s duration (6 of 16 min)"
     )
+
+
+@pytest.mark.parametrize(
+    ("deployment", "limit"), [("vllm_simple_l2", ["832g"]), ("vllm_lmcache", [])]
+)
+def test_only_a_deployment_with_a_memory_cap_gets_one(
+    tmp_path: Path, deployment: str, limit: list[str]
+) -> None:
+    spec = resolve(load(), "agentic", deployment)
+    cmd = run.build_commands(spec, [0, 1, 2, 3], "t", tmp_path, "img", "aiperf")["vllm"]
+    assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--memory"] == limit
+    # Swap counts toward the cap, so the page cache cannot spill past it.
+    assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--memory-swap"] == limit

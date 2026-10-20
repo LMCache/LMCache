@@ -24,7 +24,8 @@ Workload `agentic`: a Claude Code session replay
 (`semianalysisai/cc-traces-weka-062126-256k`, pinned revision), 230
 concurrent sessions, closed loop. Model Step-3.7-Flash-FP8 on 4 x H200
 (TP4 + EP, FP8 KV, MTP). Every deployment runs the same stock vLLM image and
-the same budget, 800 GiB DRAM + 1500 GiB disk (`vllm_simple`: the DRAM only);
+the same budget, 800 GiB DRAM + 1500 GiB disk (`vllm_simple`: the DRAM only;
+`vllm_simple_l2`: the disk, with the DRAM as page cache under a memory cap);
 only the cache layer differs:
 
 | deployment | suite | cache layer |
@@ -32,6 +33,7 @@ only the cache layer differs:
 | `vllm_lmcache` | nightly, gates | LMCache MP server, L1 + `fs_native` L2 |
 | `vllm_native` | weekly | vLLM `OffloadingConnector`, CPU + fs tier |
 | `vllm_simple` | weekly | vLLM `SimpleCPUOffloadConnector`, CPU only (one tier by design) |
+| `vllm_simple_l2` | weekly | the same connector's disk backend, page cache as the DRAM tier (container memory capped) |
 | `vllm_mooncake` | weekly | Mooncake store, 4 clients, CPU pool + SSD offload |
 
 Tested metrics: decode p10/p50 (tok/s per request) and TTFT p50/p95.

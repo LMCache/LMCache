@@ -117,7 +117,10 @@ def config_hash(spec: RunSpec) -> str:
     d["services"] = [
         {k: v for k, v in svc.items() if v is not None} for svc in d["services"]
     ]
-    blob = json.dumps({k: d[k] for k in _CONFIG_FIELDS}, sort_keys=True, default=str)
+    fields = {k: d[k] for k in _CONFIG_FIELDS}
+    if spec.vllm_memory_gb is not None:
+        fields["vllm_memory_gb"] = spec.vllm_memory_gb
+    blob = json.dumps(fields, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:12]
 
 

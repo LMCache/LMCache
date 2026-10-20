@@ -199,6 +199,7 @@ class RunSpec:
     vllm_args: dict[str, Any]
     services: list[Service]
     vllm_scratch: list[dict[str, Any]]
+    vllm_memory_gb: int | None
     devices: list[str]
     cap_add: list[str]
     files: dict[str, dict[str, Any]]
@@ -272,6 +273,7 @@ def resolve(cfg: dict[str, Any], workload: str, deployment: str) -> RunSpec:
         },
         services=services,
         vllm_scratch=d.get("vllm_scratch", []),
+        vllm_memory_gb=d.get("vllm_memory_gb"),
         devices=d.get("devices", []),
         cap_add=d.get("cap_add", []),
         files=d.get("files", {}),

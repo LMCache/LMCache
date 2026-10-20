@@ -32,6 +32,7 @@ def run_args(
     cap_add: list[str],
     seccomp: str | None = None,
     cap_drop: tuple[str, ...] = (),
+    memory_gb: int | None = None,
 ) -> list[str]:
     """Build the ``docker run`` options shared by every runner container.
 
@@ -48,6 +49,8 @@ def run_args(
         seccomp: ``--security-opt seccomp=`` value, or None for docker's
             default profile.
         cap_drop: Linux capabilities to drop (``--cap-drop``).
+        memory_gb: Memory limit in GiB, swap included, or None for none. The
+            cgroup charges the page cache of the container's files to it.
 
     Returns:
         ``docker run`` arguments up to and including the image.
@@ -78,6 +81,8 @@ def run_args(
         args += ["--cap-drop", c]
     if seccomp is not None:
         args += ["--security-opt", f"seccomp={seccomp}"]
+    if memory_gb is not None:
+        args += ["--memory", f"{memory_gb}g", "--memory-swap", f"{memory_gb}g"]
     for m in mounts:
         args += ["-v", f"{m['path']}:{m['path']}" + (":ro" if m.get("ro") else "")]
     for k, v in env.items():
@@ -114,6 +119,29 @@ def status(name: str) -> str | None:
         text=True,
     )
     return r.stdout.strip() if r.returncode == 0 else None
+
+
+def cgroup_dir(name: str) -> Path:
+    """Return the cgroup v2 dir of running container ``name``.
+
+    Args:
+        name: Container name.
+
+    Returns:
+        ``/sys/fs/cgroup/<path>`` of the container's init process.
+
+    Raises:
+        subprocess.CalledProcessError: the container is not running.
+    """
+    pid = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.Pid}}", name],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    # cgroup v2 has the single line "0::<path>".
+    path = Path(f"/proc/{pid}/cgroup").read_text().strip().split("::", 1)[1]
+    return Path("/sys/fs/cgroup" + path)
 
 
 def root_free_gb() -> float:

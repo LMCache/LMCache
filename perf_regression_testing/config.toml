@@ -175,6 +175,18 @@ image_target = "serving"
 [deployments.vllm_simple.vllm_args]
 kv-transfer-config = '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":858993459200}}'
 
+[deployments.vllm_simple_l2]
+# SimpleCPUOffloadConnector's disk backend, 1500 GiB (375 GiB per TP rank),
+# read through the page cache. That cache is the DRAM tier: vllm_memory_gb
+# caps the container's memory, page cache included, at 800 GiB plus the
+# headroom vLLM itself needs (summary vllm_mem_peak_gb.anon measures it).
+image_target = "serving"
+vllm_scratch = [{ path = "<root>/l2", min_free_gb = 1500 }]
+vllm_memory_gb = 832
+
+[deployments.vllm_simple_l2.vllm_args]
+kv-transfer-config = '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"kv_offload_backend":"disk","disk_path":"<root>/l2/simple","disk_capacity_bytes":402653184000,"use_page_cache":true}}'
+
 [deployments.vllm_mooncake]
 # Tuned through Mooncake's own config only. Standalone-store layout:
 # mooncake_client owns the CPU pool and SSD tier. Budget 800 GiB pool, 1500
@@ -273,7 +285,7 @@ gate = true
 
 [suites.weekly]
 workloads = ["agentic"]
-deployments = ["vllm_native", "vllm_simple", "vllm_mooncake"]
+deployments = ["vllm_native", "vllm_simple", "vllm_simple_l2", "vllm_mooncake"]
 gate = false
 
 # Cross-night check (runner/baseline.py): each metric's series is tested for a

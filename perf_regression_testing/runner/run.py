@@ -329,6 +329,7 @@ def build_commands(
                 if any("cap_gb" in d for d in spec.vllm_scratch)
                 else ()
             ),
+            memory_gb=spec.vllm_memory_gb,
         )
         + [
             "vllm",
@@ -444,7 +445,12 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
             summary["invalid"].append(reason)
             return finish(EXIT_NOT_UP)
         sampler = Sampler(
-            out / "samples.jsonl", f"http://127.0.0.1:{spec.vllm_port}/metrics"
+            out / "samples.jsonl",
+            f"http://127.0.0.1:{spec.vllm_port}/metrics",
+            # Only a capped run needs it, and only cgroup v2 has one dir to read.
+            cgroup=docker.cgroup_dir(f"prt-{run_id}-vllm")
+            if spec.vllm_memory_gb is not None
+            else None,
         )
         sampler.start()
         logger.info("AIPerf running (log: %s)", out / "aiperf.log")
