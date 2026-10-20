@@ -76,7 +76,7 @@ def patch_pin_allocator():
 
     def fake_pin_close(self):
         if not self._unregistered:
-            torch.xpu.synchronize()
+            torch_dev.synchronize()
             self._unregistered = True
 
     with (
