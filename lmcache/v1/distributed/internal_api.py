@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import enum
 
 # First Party
-from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    L1BackendType,
+    MemoryLayoutDesc,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.memory_management import MemoryObj
 
@@ -344,6 +349,10 @@ class L1ManagerInterface(Protocol):
 
     def get_l1_memory_desc(self) -> L1MemoryDesc | None:
         """Describe a registerable L1 buffer, or None when there is none."""
+        ...
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this L1's primary pool."""
         ...
 
     def get_devdax_arena_statuses(self) -> list["DevDaxArenaStatus"]:

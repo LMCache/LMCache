@@ -55,6 +55,7 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     L1ManagerDescriptor,
     L2AdapterDescriptor,
     MapState,
+    resolve_l1_affinity,
 )
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -463,9 +464,9 @@ class PrefetchController(StorageControllerInterface):
             desc.index: desc for desc in adapter_descriptors
         }
         self._policy = policy
-        by_tag = {d.config.tag: d.index for d in l1_manager_descriptors}
         self._l2_affinity = {
-            d.index: by_tag[d.config.affinity_tag] for d in adapter_descriptors
+            d.index: resolve_l1_affinity(d.config, self._l1_managers)
+            for d in adapter_descriptors
         }
 
         # TODO: remove max_in_flight and make it dynamic
@@ -769,14 +770,13 @@ class PrefetchController(StorageControllerInterface):
                 equal ``adapter_id``).
 
         Raises:
+            ValueError: If no L1 manager has the memory tags the adapter
+                wants.
             RuntimeError: If the background loop did not apply the op in
                 time (e.g. the loop is not running).
         """
-        by_tag = {d.config.tag: d.index for d in self._l1_manager_descriptors.values()}
-        if descriptor.config.affinity_tag not in by_tag:
-            raise ValueError(
-                f"Unknown L1 affinity_tag: {descriptor.config.affinity_tag}"
-            )
+        # Raise on the caller's thread rather than in the loop thread.
+        resolve_l1_affinity(descriptor.config, self._l1_managers)
         op = AddAdapterOp(
             adapter_id=adapter_id,
             adapter=adapter,
@@ -925,10 +925,8 @@ class PrefetchController(StorageControllerInterface):
             self._pending_adapter_ops = []
         for op in ops:
             if isinstance(op, AddAdapterOp):
-                self._l2_affinity[op.adapter_id] = next(
-                    d.index
-                    for d in self._l1_manager_descriptors.values()
-                    if d.config.tag == op.descriptor.config.affinity_tag
+                self._l2_affinity[op.adapter_id] = resolve_l1_affinity(
+                    op.descriptor.config, self._l1_managers
                 )
                 self._l2_adapters[op.adapter_id] = op.adapter
                 self._adapter_descriptors[op.adapter_id] = op.descriptor

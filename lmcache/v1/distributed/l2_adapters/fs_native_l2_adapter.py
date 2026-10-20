@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import MemoryResidency, MemorySegment, MemoryTags
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
 )
@@ -175,8 +176,11 @@ def _create_fs_native_l2_adapter(
         config.use_odirect,
         config.read_ahead_size,
     )
+    residency = MemoryResidency.REMOTE if config.shared else MemoryResidency.LOCAL
+    memory_tags = MemoryTags(MemorySegment.STORAGE, residency)
     return NativeConnectorL2Adapter(
         native_client,
+        memory_tags,
         max_capacity_gb=config.max_capacity_gb,
         type_name="FSNativeL2Adapter",
         pad_buffers_to_alignment=config.use_odirect,

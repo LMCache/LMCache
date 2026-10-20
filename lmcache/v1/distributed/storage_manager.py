@@ -69,6 +69,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 from lmcache.v1.distributed.storage_controllers.utils import (
     L1ManagerDescriptor,
     L2AdapterDescriptor,
+    resolve_l1_affinity,
 )
 from lmcache.v1.distributed.storage_controllers.write_policy import OrderedWritePolicy
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
@@ -245,7 +246,7 @@ class StorageManager:
                 descriptors = [
                     d
                     for d in self._adapter_descriptors.values()
-                    if d.config.affinity_tag == c.tag
+                    if resolve_l1_affinity(d.config, self._l1_by_tag) == c.tag
                 ]
                 controller = StoreController(
                     manager,
@@ -1146,20 +1147,18 @@ class StorageManager:
             The stable id assigned to the new adapter.
 
         Raises:
-            ValueError: If the adapter registers a single L1 memory region
-                while L1 spans more than one (hybrid DRAM + Device-DAX, or
-                more than one Device-DAX arena), or a DAX device is already
-                mapped by L1 or another L2 adapter.
+            ValueError: If no L1 has the memory tags the adapter wants, the
+                adapter registers a single L1 memory region while L1 spans
+                more than one (hybrid DRAM + Device-DAX, or more than one
+                Device-DAX arena), or a DAX device is already mapped by L1 or
+                another L2 adapter.
         """
         with self._lifecycle_lock:
             # Mirror of the check in add_l1_devdax_device: a single-region
             # adapter may only be added while L1 is exactly one memory region.
             adapter_name = requires_single_l1_memory_region(config)
-            if config.affinity_tag not in self._l1_by_tag:
-                raise ValueError(f"Unknown L1 affinity_tag: {config.affinity_tag}")
-            if self._l1_by_tag[config.affinity_tag].config.gds_l1_config is not None:
-                raise ValueError("L2 affinity requires a host-backed DRAM or DEVDAX L1")
-            region_count = self._l1_by_tag[config.affinity_tag].memory_region_count()
+            manager = self._l1_by_tag[resolve_l1_affinity(config, self._l1_by_tag)]
+            region_count = manager.memory_region_count()
             if adapter_name is not None and region_count > 1:
                 raise ValueError(
                     f"{adapter_name} registers a single L1 memory region, but "
@@ -1183,7 +1182,7 @@ class StorageManager:
             with self._adapters_lock:
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
-            owner = self._l1_by_tag[config.affinity_tag].l1_manager_id
+            owner = manager.l1_manager_id
             self._store_controllers[owner].add_adapter(adapter_id, adapter, descriptor)
             self._prefetch_controller.add_adapter(adapter_id, adapter, descriptor)
             if self._should_enable_l2_eviction(adapter, config.eviction_config):
@@ -1222,7 +1221,9 @@ class StorageManager:
                 raise ValueError(f"No L2 adapter with id {adapter_id}")
 
             deadline = time.monotonic() + timeout
-            affinity = self._adapter_descriptors[adapter_id].config.affinity_tag
+            affinity = resolve_l1_affinity(
+                self._adapter_descriptors[adapter_id].config, self._l1_by_tag
+            )
             owner = self._l1_by_tag[affinity].l1_manager_id
             store_done = self._store_controllers[owner].request_remove_adapter(
                 adapter_id
@@ -1483,10 +1484,11 @@ class StorageManager:
             A ``(adapter_id, adapter, descriptor)`` tuple. ``adapter_id`` is
             the freshly allocated stable id, ``adapter`` is the new adapter
             instance, and ``descriptor`` is its descriptor carrying that id.
+
+        Raises:
+            ValueError: If no L1 has the memory tags the adapter wants.
         """
-        if config.affinity_tag not in self._l1_by_tag:
-            raise ValueError(f"Unknown L1 affinity_tag: {config.affinity_tag}")
-        manager = self._l1_by_tag[config.affinity_tag]
+        manager = self._l1_by_tag[resolve_l1_affinity(config, self._l1_by_tag)]
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
         adapter: L2AdapterInterface = create_l2_adapter(
@@ -1502,6 +1504,12 @@ class StorageManager:
         # Stamp the registered type name so the adapter's cache events on
         # the observability bus carry their backend identity.
         adapter.set_backend_identity(descriptor.type_name, shared=config.shared)
+        logger.info(
+            "L2 adapter %d (%s) uses L1 %s",
+            adapter_id,
+            descriptor.type_name,
+            manager.config.tag,
+        )
         return adapter_id, adapter, descriptor
 
     def _should_enable_l2_eviction(

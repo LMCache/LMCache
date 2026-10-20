@@ -13,7 +13,14 @@ import weakref
 # First Party
 from lmcache.lmcache_native import TTLLock
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    L1BackendType,
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError
 from lmcache.v1.distributed.internal_api import (
@@ -1038,6 +1045,26 @@ class L1Manager(L1ManagerInterface):
     def get_l1_memory_desc(self):
         """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
         return self._memory_manager.get_l1_memory_desc()
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this L1's primary pool.
+
+        Returns:
+            ``GDS`` for a GDS slab, ``CXL`` for a pure Device-DAX tier, and
+            ``DRAM`` otherwise, all ``LOCAL``.
+
+        Note:
+            A hybrid DRAM + Device-DAX tier reports ``DRAM``, its primary
+            pool. Tags are fixed at construction.
+        """
+        memory_config = self._config.memory_config
+        if self._config.gds_l1_config is not None:
+            segment = MemorySegment.GDS
+        elif memory_config.devdax_path and not memory_config.devdax_size_in_bytes:
+            segment = MemorySegment.CXL
+        else:
+            segment = MemorySegment.DRAM
+        return MemoryTags(segment=segment, residency=MemoryResidency.LOCAL)
 
     def get_devdax_arena_statuses(self) -> list[DevDaxArenaStatus]:
         """Return runtime status for every Device-DAX arena.
