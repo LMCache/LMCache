@@ -189,23 +189,6 @@ class TokenHasher:
             prefix_hash = self.none_hash
         return self.hash_func((prefix_hash, tuple(tokens), None))
 
-    def hash_unfull_chunk(self, tokens: list[int], prefix_hash: Any = None) -> Any:
-        """Hash an unfull trailing chunk (fewer than ``chunk_size`` tokens).
-
-        The prefix is first chained through an empty-token step, which keeps
-        unfull-chunk hashes apart from full-chunk hashes under every hash
-        algorithm, so an unfull object never shares a key with a full chunk.
-
-        Args:
-            tokens: The unfull chunk's tokens, following the last full chunk.
-            prefix_hash: Rolling hash of the full chunks before it (defaults
-                to none_hash).
-
-        Returns:
-            int or bytes, like :meth:`hash_tokens`.
-        """
-        return self.hash_tokens(tokens, self.hash_tokens([], prefix_hash))
-
     def compute_chunk_hashes(
         self,
         token_ids: list[int],

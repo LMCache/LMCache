@@ -123,8 +123,9 @@ class Session:
         """Return the hash of the unfull chunk ending at ``end``.
 
         The unfull chunk covers ``[floor(end / chunk_size) * chunk_size,
-        end)`` and chains from the rolling hash of the full chunks before it
-        (see :meth:`TokenHasher.hash_unfull_chunk`).
+        end)`` and is hashed like a full chunk, chaining from the rolling
+        hash of the full chunks before it. It has fewer than chunk_size
+        tokens, so its hash differs from every full chunk's.
 
         Args:
             end: End token index; must not be a multiple of chunk_size.
@@ -155,7 +156,7 @@ class Session:
                 if num_full_chunks > 0
                 else self.hasher.none_hash
             )
-            return self.hasher.hash_unfull_chunk(
+            return self.hasher.hash_tokens(
                 self.token_ids[num_full_chunks * chunk_size : end], prefix
             )
 

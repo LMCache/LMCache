@@ -41,16 +41,15 @@ MODEL = "model"
 LAYOUT = MemoryLayoutDesc(shapes=[torch.Size([CHUNK_SIZE, 1, 8])], dtypes=[torch.uint8])
 
 
-def test_unfull_chunk_hash_is_separate_from_full_chunk_hashes():
+def test_unfull_chunk_key_differs_from_the_full_chunk_it_starts():
     hasher = TokenHasher(chunk_size=4)
-    tokens = [1, 2, 3, 4, 5, 6, 7]
-    prefix = hasher.hash_tokens(tokens[:4])
+    session = SessionManager(hasher, cleanup_interval=None).get_or_create("req")
+    session.set_tokens(list(range(8)))
 
-    unfull = hasher.hash_unfull_chunk(tokens[4:7], prefix)
+    full_chunk = session.get_hashes(4, 8)[0]
 
-    assert unfull != hasher.hash_tokens(tokens[4:7], prefix)
-    assert unfull != hasher.hash_unfull_chunk(tokens[4:6], prefix)
-    assert unfull == hasher.hash_unfull_chunk(tokens[4:7], prefix)
+    assert session.get_unfull_chunk_hash(7) != full_chunk
+    assert session.get_unfull_chunk_hash(7) != session.get_unfull_chunk_hash(6)
 
 
 def test_session_unfull_chunk_hash_chains_from_full_chunks():
@@ -59,11 +58,11 @@ def test_session_unfull_chunk_hash_chains_from_full_chunks():
     tokens = list(range(10))
     session.set_tokens(tokens)
 
-    expected = hasher.hash_unfull_chunk(
+    expected = hasher.hash_tokens(
         tokens[8:10], hasher.hash_tokens(tokens[4:8], hasher.hash_tokens(tokens[:4]))
     )
     assert session.get_unfull_chunk_hash(10) == expected
-    assert session.get_unfull_chunk_hash(3) == hasher.hash_unfull_chunk(tokens[:3])
+    assert session.get_unfull_chunk_hash(3) == hasher.hash_tokens(tokens[:3])
     with pytest.raises(ValueError, match="multiple"):
         session.get_unfull_chunk_hash(8)
     with pytest.raises(ValueError, match="exceeds"):
@@ -214,7 +213,7 @@ def _unfull_keys(hasher: TokenHasher, tokens: list[int], end: int) -> list[Objec
     for start in range(0, full, CHUNK_SIZE):
         prefix = hasher.hash_tokens(tokens[start : start + CHUNK_SIZE], prefix)
     unfull_hash = TokenHasher.hash_to_bytes(
-        hasher.hash_unfull_chunk(tokens[full:end], prefix)
+        hasher.hash_tokens(tokens[full:end], prefix)
     )
     return ipc_key_to_object_keys(
         _key(tokens, full, end, "writer", True), [unfull_hash], [0]

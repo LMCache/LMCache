@@ -70,13 +70,17 @@ paid only when the feature is on.
 ## Unfull chunk key
 
 ```text
-unfull_hash = H(tokens[kC:P], prefix = H((), prefix = chunk_hash[k-1]))
+unfull_hash = H(tokens[kC:P], prefix = chunk_hash[k-1])
 ```
 
-The extra empty-token hashing step separates the unfull-chunk key space from
-full-chunk keys for every hash algorithm, so a temporary unfull object never
+The unfull chunk is hashed like the next full chunk, from the rolling hash
+of the full chunks before it. It has fewer than `C` tokens, and every hash
+algorithm LMCache supports encodes the token count (blake3 hashes the packed
+tokens, `sha256_cbor` and the builtin tuple hash include the tuple length),
+so its key differs from every full chunk's: a temporary unfull object never
 collides with a persistent full chunk (`reserve_write` would otherwise return
-`KEY_NOT_WRITABLE`). The key covers the exact length `P`.
+`KEY_NOT_WRITABLE`). A new hash algorithm must keep that property. The key
+covers the exact length `P`.
 
 An `IPCCacheServerKey` addresses the unfull chunk only when
 `include_unfull_chunk` is set and `end` is not chunk-aligned; it is then the
