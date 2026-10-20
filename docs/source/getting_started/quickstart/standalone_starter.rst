@@ -38,12 +38,12 @@ CPU-Only Mode
 
    python -m lmcache.v1.standalone \
        --config examples/cache_with_configs/example.yaml \
-       --model_name my_model \
-       --worker_id 0 \
-       --world_size 1
+       --model-name my_model \
+       --worker-id 0 \
+       --world-size 1
 
 Remote P2P Mode
-~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~
 TO be added
 
 Configuration Section
@@ -52,16 +52,20 @@ Configuration Section
 The standalone starter supports multiple configuration sources with the following priority order:
 
 1. **Command-line arguments** (highest priority)
-2. **Configuration file** (specified by ``--config`` or ``LMCACHE_CONFIG_FILE``)
-3. **Environment variables** (e.g., ``LMCACHE_CHUNK_SIZE=512``)
+2. **Environment variables** (e.g., ``LMCACHE_CHUNK_SIZE=512``)
+3. **Configuration file** (specified by ``--config`` or ``LMCACHE_CONFIG_FILE``)
 4. **Default values** (lowest priority)
+
+Use hyphenated options for starter parameters such as ``--model-name`` and
+``--kv-shape``. Engine configuration overrides use ``--key=value`` with the
+configuration field name, for example ``--chunk_size=512``.
 
 Parameter Details
 ~~~~~~~~~~~~~~~~~
 
 **KV Cache Shape Specification**
 
-The ``--kvcache_shape_spec`` parameter supports multi-layer group configurations:
+The ``--kvcache-shape-spec`` parameter supports multi-layer group configurations:
 
 - Format: ``(shape_string):dtype:layer_count;[...]``
 - shape_string: comma-separated shape (e.g., '2,2,256,4,16')
@@ -77,13 +81,8 @@ The ``--kvcache_shape_spec`` parameter supports multi-layer group configurations
 
 **MLA (Multi-Level Attention)**
 
-- ``--use_mla``: Enable MLA for improved attention performance
+- ``--use-mla``: Enable MLA for improved attention performance
 - Requires compatible model and configuration
-
-**Cache Formats**
-
-- ``--fmt=vllm``: vLLM-compatible format (default)
-- Supports other formats for different inference engines
 
 Command-Line Parameters
 -----------------------
@@ -94,15 +93,14 @@ Basic Parameters
 .. code-block:: bash
 
    --config CONFIG_FILE             # Path to configuration file
-   --model_name MODEL_NAME          # Model name for cache identification
-   --worker_id WORKER_ID            # Worker ID (default: 0)
-   --world_size WORLD_SIZE          # Total workers (default: 1)
-   --kv_dtype {float16,float32,bfloat16,uint8}  # KV cache data type
-   --kv_shape KV_SHAPE              # KV cache shape (default: "2,2,256,4,16")
-   --kvcache_shape_spec SPEC       # Multi-group KV shape specification
+   --model-name MODEL_NAME          # Model name for cache identification
+   --worker-id WORKER_ID            # Worker ID (default: 0)
+   --world-size WORLD_SIZE          # Total workers (default: 1)
+   --kv-dtype {float16,float32,bfloat16,uint8}  # KV cache data type
+   --kv-shape KV_SHAPE              # KV cache shape (default: "2,2,256,4,16")
+   --kvcache-shape-spec SPEC       # Multi-group KV shape specification
    --device {cpu,cuda,xpu}          # Device to run on (default: cpu)
-   --fmt FORMAT                     # Cache format (default: vllm)
-   --use_mla                        # Enable MLA (Multi-Level Attention)
+   --use-mla                        # Enable MLA (Multi-Level Attention)
 
 
 Usage Examples
@@ -117,7 +115,7 @@ Custom Configuration
        --config examples/cache_with_configs/example.yaml \
        --chunk_size=512 \
        --max_local_cpu_size=4.0 \
-       --model_name=custom_model
+       --model-name=custom_model
 
 Multi-Layer Group Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -126,9 +124,9 @@ Multi-Layer Group Configuration
 
    python -m lmcache.v1.standalone \
        --config examples/cache_with_configs/example.yaml \
-       --kvcache_shape_spec="(2,2,256,4,16):float16:2" \
-       --kv_shape="2,2,256,4,16" \
-       --model_name=multi_group_model \
+       --kvcache-shape-spec="(2,2,256,4,16):float16:2" \
+       --kv-shape="2,2,256,4,16" \
+       --model-name=multi_group_model \
        --device=cpu
 
 GPU device
@@ -138,12 +136,12 @@ GPU device
 
    python -m lmcache.v1.standalone \
        --config examples/cache_with_configs/example.yaml \
-       --kvcache_shape_spec="(2,2,256,4,16):float16:2" \
-       --kv_shape="2,2,256,4,16" \
-       --kv_dtype=float16 \
+       --kvcache-shape-spec="(2,2,256,4,16):float16:2" \
+       --kv-shape="2,2,256,4,16" \
+       --kv-dtype=float16 \
        --device=cuda \
-       --use_mla \
-       --model_name=gpu_model
+       --use-mla \
+       --model-name=gpu_model
 
 MLA Configuration
 ~~~~~~~~~~~~~~~~~
@@ -152,11 +150,10 @@ MLA Configuration
 
    python -m lmcache.v1.standalone \
        --config examples/cache_with_configs/example.yaml \
-       --kv_shape="16,2,512,16,64" \
-       --kv_dtype=bfloat16 \
-       --use_mla \
-       --fmt=vllm \
-       --model_name=mla_model
+       --kv-shape="16,2,512,16,64" \
+       --kv-dtype=bfloat16 \
+       --use-mla \
+       --model-name=mla_model
 
 Internal API Server
 -------------------
@@ -169,7 +166,7 @@ The standalone starter includes an internal API server for monitoring and manage
        --config examples/cache_with_configs/example.yaml \
        --chunk_size=512 \
        --max_local_cpu_size=4.0 \
-       --model_name=custom_model \
+       --model-name=custom_model \
        --internal_api_server_enabled=True
 
 
@@ -192,7 +189,7 @@ Common Issues
 **Solution**: Verify device support: use ``--device=cpu`` if GPU not available
 
 **Issue**: "MLA configuration error"
-**Solution**: Ensure compatible model and check ``--use_mla`` parameter
+**Solution**: Ensure compatible model and check ``--use-mla`` parameter
 
 Debug Mode
 ~~~~~~~~~~
@@ -213,7 +210,7 @@ For detailed layer group information:
 
    export LMCACHE_LOG_LEVEL=DEBUG
    python -m lmcache.v1.standalone \
-       --kvcache_shape_spec="(2,2,256,4,16):float16:2;(3,2,256,4,4):float32:3" \
+       --kvcache-shape-spec="(2,2,256,4,16):float16:2;(3,2,256,4,4):float32:3" \
        --device=cpu
 
 Performance Tuning
@@ -236,10 +233,10 @@ Layer Group Optimization
 .. code-block:: bash
 
    # Optimize for mixed precision models
-   --kvcache_shape_spec="(2,2,256,4,16):float16:2;(3,2,256,4,4):bfloat16:3"
+   --kvcache-shape-spec="(2,2,256,4,16):float16:2;(3,2,256,4,4):bfloat16:3"
 
    # Optimize for different layer configurations
-   --kvcache_shape_spec="(2,2,512,8,32):float16:4;(4,2,256,16,16):float32:2"
+   --kvcache-shape-spec="(2,2,512,8,32):float16:4;(4,2,256,16,16):float32:2"
 
 GPU Acceleration
 ~~~~~~~~~~~~~~~~~
@@ -247,10 +244,10 @@ GPU Acceleration
 .. code-block:: bash
 
    # GPU-optimized configuration
-   --device=cuda --kv_dtype=float16 --use_mla
+   --device=cuda --kv-dtype=float16 --use-mla
 
    # Large model on GPU
-   --device=cuda --kv_shape="64,2,512,64,128" --max_local_cpu_size=16.0
+   --device=cuda --kv-shape="64,2,512,64,128" --max_local_cpu_size=16.0
 
 MLA Performance
 ~~~~~~~~~~~~~~~
@@ -258,10 +255,10 @@ MLA Performance
 .. code-block:: bash
 
    # Enable MLA for attention optimization
-   --use_mla --kv_dtype=bfloat16 --device=cuda
+   --use-mla --kv-dtype=bfloat16 --device=cuda
 
    # MLA with custom shape
-   --use_mla --kv_shape="32,2,1024,32,64" --fmt=vllm
+   --use-mla --kv-shape="32,2,1024,32,64"
 
 
 Best Practices
