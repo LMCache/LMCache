@@ -95,6 +95,10 @@ and connector import tests. For these focused checks, use
 `python -m pytest --confcutdir=tests/v1 tests/v1/gpu_connector/` so the root
 `tests/conftest.py` GPU allocator fixtures are not loaded. This validates CPU
 imports and shared layout/GDS behavior, not accelerator kernel roundtrips.
+When combining these tests with `tests/inprocess/`, use `--noconftest` for
+self-contained CPU checks spanning both trees; normal accelerator CI must
+retain the root fixtures. Mirrored test directories with identical module
+names need package `__init__.py` files to avoid pytest import mismatches.
 
 ### Testing Practices
 
