@@ -839,7 +839,7 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.save_decode_cache``
      - ``false``
      - Cache generated tokens in addition to prompt tokens.
-   * - ``lmcache.mp.unfull_chunk``
+   * - ``lmcache.mp.save_unfull_chunk``
      - ``false``
      - Also cache the trailing partial chunk of a prompt whose request ends
        there (``max_tokens == 1``, e.g. a disaggregated prefill), so a later

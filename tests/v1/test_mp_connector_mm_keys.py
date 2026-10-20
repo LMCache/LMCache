@@ -196,7 +196,7 @@ def test_eager_prefetch_forwards_request_configs():
         role=KVConnectorRole.SCHEDULER,
         _eager_prefetch=True,
         _reserve_last_token_for_lookup=False,
-        _unfull_chunk=False,
+        _save_unfull_chunk=False,
         scheduler_adapter=scheduler_adapter,
         _get_or_create_request_tracker=MagicMock(return_value=tracker),
     )
@@ -233,7 +233,7 @@ def test_lookup_hint_carries_vllm_prefix_hit() -> None:
     connector.request_trackers = {}
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = False
-    connector._unfull_chunk = False
+    connector._save_unfull_chunk = False
     connector.lazy_offload = False
     connector._hit_alignment_tokens = 64
 
@@ -253,7 +253,7 @@ def test_recurrent_lookup_reserves_final_prompt_token() -> None:
     connector.request_trackers = {}
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = True
-    connector._unfull_chunk = False
+    connector._save_unfull_chunk = False
     connector._hit_alignment_tokens = 64
     connector._connector_stats = MagicMock()
     connector.lazy_offload = False
