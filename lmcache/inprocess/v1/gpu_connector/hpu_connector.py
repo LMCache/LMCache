@@ -21,9 +21,9 @@ import habana_frameworks.torch as htorch
 import torch
 
 # First Party
+from lmcache.inprocess.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector import GPUConnectorInterface
 from lmcache.v1.gpu_connector.utils import (
     get_block_size,
     get_dtype,

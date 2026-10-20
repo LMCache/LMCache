@@ -73,7 +73,7 @@ def test_create_runtime_connector_dispatches_musa(
 ) -> None:
     """The shared benchmark selects its MUSA connector on MUSA hosts."""
     # First Party
-    from lmcache.v1.gpu_connector.musa_connectors import (
+    from lmcache.inprocess.v1.gpu_connector.musa_connectors import (
         VLLMPagedMemMUSAConnectorV2,
     )
 

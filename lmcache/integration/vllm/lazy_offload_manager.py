@@ -192,7 +192,8 @@ class LazyOffloadManager:
         Args:
             configs: Connector extra config, read by the policy at bind time.
             group_tokens_per_block: Token capacity per KV-cache group, used
-                to estimate the next step's block pressure.
+                to estimate the next step's block pressure. Scratch groups
+                report ``0`` and add no pressure.
             completion_tracker: Adapter view aggregating per-worker receipts.
         """
         self._configs = dict(configs or {})
@@ -455,9 +456,12 @@ class LazyOffloadManager:
         drain = self._require_policy().drain(
             DrainSignals(
                 new_blocks_allocated=_new_blocks(scheduler_output),
+                # A scratch group (span 0) holds one block per request for
+                # the request's lifetime, so scheduled tokens never grow it.
                 est_next_step_blocks=sum(
                     -(-scheduler_output.total_num_scheduled_tokens // tokens_per_block)
                     for tokens_per_block in self._group_tokens_per_block
+                    if tokens_per_block > 0
                 ),
                 finished_request_ids=self._requests.finished_request_ids(),
                 blocked_request_ids=self._requests.in_flight_request_ids(),

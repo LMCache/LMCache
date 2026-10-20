@@ -7,12 +7,12 @@ import os
 import torch
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.gpu_connectors import (
+from lmcache.inprocess.v1.gpu_connector.gpu_connectors import (
     GPUConnectorInterface,
     VLLMPagedMemGPUConnectorV2,
 )
+from lmcache.logging import init_logger
+from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import (
     DiscoverableKVCache,
     LayoutHints,

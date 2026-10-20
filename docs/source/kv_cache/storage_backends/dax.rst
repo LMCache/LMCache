@@ -41,8 +41,9 @@ Configuration
 Multiprocess Mode
 -----------------
 
-In LMCache multiprocess mode, Device-DAX is configured as a built-in L2
-adapter named ``dax``.  The MP adapter uses the normal L2 adapter
+In LMCache multiprocess mode a Device-DAX device can also back the **L1**
+tier directly; see :ref:`mp-devdax-l1`. The rest of this section covers the
+built-in L2 adapter named ``dax``.  The MP adapter uses the normal L2 adapter
 ``submit -> event fd -> query`` contract; no vLLM connector protocol changes
 are required.
 

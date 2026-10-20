@@ -66,7 +66,7 @@ V3's transfer path is wrong for TRT-LLM:
 implementation. It also exposes a bespoke
 `register_kv_caches(kv_cache_tensor)` method called by the worker once
 at init — separate from `to_gpu`/`from_gpu`. The factory in
-`lmcache/v1/gpu_connector/__init__.py` constructs it from
+`lmcache/inprocess/v1/gpu_connector/__init__.py` constructs it from
 `LMCacheMetadata` plus the device, and the adapter wires the pool
 tensor in afterwards.
 
