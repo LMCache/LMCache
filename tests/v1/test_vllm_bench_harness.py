@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 import json
 import os
 import shutil
@@ -11,12 +11,12 @@ import tempfile
 import pytest
 
 
-def get_bash_executable() -> Optional[str]:
+def get_bash_executable() -> str | None:
     """
     Find an available bash executable on the current system.
 
     Returns:
-        Optional[str]: Path to bash executable, or None if not found.
+        Path to bash executable, or None if not found.
     """
     if os.name == "nt":
         for git_bash in [
@@ -41,7 +41,7 @@ def get_bench_script_path() -> str:
     Locate the vllm-bench.sh workload script relative to the repo root.
 
     Returns:
-        str: Absolute path to vllm-bench.sh.
+        Absolute path to vllm-bench.sh.
     """
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     script_path = os.path.join(
@@ -59,10 +59,10 @@ def get_bench_script_path() -> str:
 
 def run_stubbed_benchmark(
     tmp_path: str,
-    extra_env: Optional[Dict[str, str]] = None,
+    extra_env: dict[str, str] | None = None,
     mock_baseline_tp: float = 100.0,
     mock_lmcache_tp: float = 98.0,
-) -> Tuple[subprocess.CompletedProcess, List[str], Dict[str, Any]]:
+) -> tuple[subprocess.CompletedProcess[str], list[str], dict[str, Any]]:
     """
     Execute vllm-bench.sh in a stubbed CPU environment.
 
@@ -76,15 +76,17 @@ def run_stubbed_benchmark(
         Tuple containing:
             - CompletedProcess object from script execution
             - List of raw invocation arguments captured by mock vllm
-            - Parsed comparison manifest dictionary (empty if unparseable)
+            - Parsed comparison manifest dictionary (empty if unparsable)
     """
     bash = get_bash_executable()
-    if not bash:
+    if bash is None:
         pytest.skip("Bash executable is required to test vllm-bench.sh harness")
+        raise RuntimeError("Bash executable not found")
 
     script_path = get_bench_script_path()
     if not os.path.exists(script_path):
         pytest.fail(f"Benchmark script not found: {script_path}")
+        raise FileNotFoundError(f"Benchmark script not found: {script_path}")
 
     bin_dir = os.path.join(tmp_path, "bin")
     results_dir = os.path.join(tmp_path, "results")
@@ -172,12 +174,12 @@ exit 0
         timeout=60,
     )
 
-    invocations: List[str] = []
+    invocations: list[str] = []
     if os.path.exists(mock_log):
         with open(mock_log, "r", encoding="utf-8") as f:
             invocations = [line.strip() for line in f if line.strip()]
 
-    manifest: Dict[str, Any] = {}
+    manifest: dict[str, Any] = {}
     manifest_path = os.path.join(results_dir, "vllm_bench", "manifest.json")
     if os.path.exists(manifest_path):
         with open(manifest_path, "r", encoding="utf-8") as f:
@@ -253,7 +255,7 @@ def test_vllm_bench_pass_summary_retains_numbers() -> None:
         assert manifest.get("verdict") == "PASS"
         assert manifest.get("baseline_throughput") == 100.0
         assert manifest.get("lmcache_throughput") == 98.0
-        assert manifest.get("slowdown_percent") == pytest.approx(2.0, 0.01)
+        assert manifest.get("slowdown_percent") == pytest.approx(2.0, rel=0.01)
         assert manifest.get("max_slowdown_percent") == 5.0
         assert manifest.get("num_prompts") == 50
         assert manifest.get("random_input_len") == 10000
@@ -282,7 +284,7 @@ def test_vllm_bench_fail_summary_retains_numbers() -> None:
         assert manifest.get("verdict") == "FAIL"
         assert manifest.get("baseline_throughput") == 100.0
         assert manifest.get("lmcache_throughput") == 90.0
-        assert manifest.get("slowdown_percent") == pytest.approx(10.0, 0.01)
+        assert manifest.get("slowdown_percent") == pytest.approx(10.0, rel=0.01)
         assert manifest.get("max_slowdown_percent") == 5.0
         assert "=== Benchmark Comparison Manifest ===" in proc.stdout
 
