@@ -22,7 +22,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 uv venv --quiet "$tmp/maturin"
 uv pip install --quiet --python "$tmp/maturin/bin/python" maturin
 
-PATH="$CARGO_HOME/bin:$PATH" "$tmp/maturin/bin/maturin" build --release \
+PATH="$CARGO_HOME/bin:$PATH" "$tmp/maturin/bin/maturin" build --release --locked \
     --manifest-path rust/raw_block/Cargo.toml \
     --interpreter "$(command -v python3)" \
     --out "$out"

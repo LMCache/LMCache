@@ -58,7 +58,7 @@ jobs:
                 target: ${{ matrix.target }}
                 manylinux: "2_28"
                 args: >-
-                    --release --out dist
+                    --release --locked --out dist
                     --manifest-path rust/raw_block/Cargo.toml
                     --interpreter python3.10 python3.11 python3.12 python3.13
 

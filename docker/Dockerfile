@@ -140,9 +140,13 @@ RUN . /opt/venv/bin/activate && \
         vllm[runai,tensorizer,flashinfer] \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
-    uv pip install "lmcache${VER:+==${VER}}" "lmcache-rust-raw-block-io${VER:+==${VER}}" \
+    uv pip install "lmcache${VER:+==${VER}}" \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match --verbose && \
+    # The Rust module is published at lmcache's version; pin it to the lmcache
+    # actually installed, so the two match even when LMCACHE_VERSION is unset.
+    LMCACHE_INSTALLED=$(python3 -c 'import importlib.metadata as m; print(m.version("lmcache"))') && \
+    uv pip install "lmcache-rust-raw-block-io==${LMCACHE_INSTALLED}" && \
     python3 -c 'import lmcache_rust_raw_block_io' && \
   
     uv pip install --reinstall-package nixl nixl

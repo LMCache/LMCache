@@ -12,7 +12,7 @@
 set -euo pipefail
 
 version=${1:?usage: stamp_raw_block_version.sh <version>}
-cargo_toml="$(dirname "$0")/../../rust/raw_block/Cargo.toml"
+crate_dir="$(dirname "$0")/../../rust/raw_block"
 
 if [[ "$version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)((a|b|rc)([0-9]+))?$ ]]; then
     semver=${BASH_REMATCH[1]}
@@ -26,6 +26,10 @@ else
     exit 1
 fi
 
-# The first `version = ` line is the [package] version.
-sed -i "0,/^version = \".*\"/s//version = \"${semver}\"/" "$cargo_toml"
-grep -m1 '^version = ' "$cargo_toml"
+# The first `version = ` line is the [package] version. Cargo.lock records
+# the crate's own version too; update it so `--locked` builds still pass.
+sed -i "0,/^version = \".*\"/s//version = \"${semver}\"/" "$crate_dir/Cargo.toml"
+sed -i "/^name = \"lmcache_rust_raw_block_io\"$/{n;s/^version = \".*\"/version = \"${semver}\"/}" \
+    "$crate_dir/Cargo.lock"
+grep -m1 '^version = ' "$crate_dir/Cargo.toml"
+grep -A1 '^name = "lmcache_rust_raw_block_io"$' "$crate_dir/Cargo.lock" | tail -1
