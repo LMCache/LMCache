@@ -72,9 +72,16 @@ needed:
 - :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that
   binding off the registered spec and returns the wrapper's ``wrap``
   classmethod so callers can invoke ``factory(tensor)`` uniformly.
-- ``RawCudaIPCWrapper`` intentionally stays off the spec so it
-  coexists with ``CudaIPCWrapper`` without collision — callers
-  (TRT-LLM adapter) instantiate it directly.
+- ``CudaDeviceSpec.ipc_wrapper_cls`` consults the process-global
+  isolated-IPC switch (`lmcache.v1.platform.isolated_ipc.is_isolated_ipc`)
+  via `_select_ipc_wrapper_cls()`: on → ``RawCudaIPCWrapper`` (raw
+  `cudaIpcGetMemHandle`, no shared `/dev/shm`), off → ``CudaIPCWrapper``
+  (PyTorch storage IPC). The class is resolved per call rather than
+  cached, so registration after process init sees the final switch
+  value. The TRT-LLM adapter continues to instantiate
+  ``RawCudaIPCWrapper`` directly (its `cudaMalloc`-backed pool cannot
+  go through `_share_cuda_()` at all), independent of the switch. See
+  [`../../platform/cuda/ipc_wrapper.md`](../../platform/cuda/ipc_wrapper.md).
 - Adding a new accelerator backend only requires shipping a sub-package
   under ``platform/<device>/`` with a ``DeviceSpec`` subclass whose
   ``ipc_wrapper_cls`` returns the wrapper — zero changes to the
