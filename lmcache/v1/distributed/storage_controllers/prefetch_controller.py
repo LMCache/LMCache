@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import enum
 import itertools
+import math
 import select
 import threading
 
@@ -30,6 +31,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     FetchingPolicy,
     GroupedObjectKeys,
+    MemoryLayoutDesc,
     ObjectKey,
     PrefetchLockMode,
     PrefetchResult,
@@ -40,7 +42,7 @@ from lmcache.v1.distributed.bitmap_ops.fold import (
     fold_unfold_grouped,
 )
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ManagerInterface
+from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1OperationResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
@@ -217,6 +219,62 @@ def _scatter_bitmaps_full_global(
     return ret
 
 
+def _reserve_leading_keys(
+    l1_manager: L1ManagerInterface,
+    keys: list[ObjectKey],
+    retain: dict[ObjectKey, bool],
+    layout_desc: MemoryLayoutDesc,
+    tag: str,
+) -> dict[ObjectKey, L1OperationResult]:
+    """Reserve ``keys``, falling back to the longest leading run that fits.
+
+    ``reserve_write`` allocates a batch all at once, so a request larger
+    than the free L1 space would otherwise reserve nothing and miss
+    entirely. On out-of-memory, retry with as many leading keys as the
+    free space should hold, halving while fragmentation still rejects it.
+
+    Args:
+        l1_manager: The manager to reserve in.
+        keys: One row's keys, in chunk order.
+        retain: Whether each key stays resident after the reader is done.
+        layout_desc: The memory layout of every key in ``keys``.
+        tag: The writer tag for the reservations.
+
+    Returns:
+        The reserve result of every key in ``keys``. Keys past the reserved
+        leading run keep their ``OUT_OF_MEMORY`` result.
+    """
+    results = l1_manager.reserve_write(
+        keys=keys,
+        is_temporary=[not retain[key] for key in keys],
+        layout_desc=layout_desc,
+        tag=tag,
+    )
+    oom_keys = [key for key in keys if results[key][0] == L1Error.OUT_OF_MEMORY]
+    if not oom_keys:
+        return results
+
+    used, total = l1_manager.get_memory_usage()
+    obj_bytes = sum(
+        math.prod(shape) * dtype.itemsize
+        for shape, dtype in zip(layout_desc.shapes, layout_desc.dtypes, strict=True)
+    )
+    count = min(len(oom_keys) - 1, (total - used) // obj_bytes)
+    while count > 0:
+        subset = oom_keys[:count]
+        retry = l1_manager.reserve_write(
+            keys=subset,
+            is_temporary=[not retain[key] for key in subset],
+            layout_desc=layout_desc,
+            tag=tag,
+        )
+        if all(retry[key][0] != L1Error.OUT_OF_MEMORY for key in subset):
+            results.update(retry)
+            break
+        count //= 2
+    return results
+
+
 def _reserve_l1_cells(
     l1_manager: L1ManagerInterface,
     key_groups: list[GroupedObjectKeys],
@@ -252,11 +310,8 @@ def _reserve_l1_cells(
         if not cols:
             continue
         keys = row.gather(group.keys)
-        results = l1_manager.reserve_write(
-            keys=keys,
-            is_temporary=[not retain[key] for key in keys],
-            layout_desc=group.layout_desc,
-            tag=tag,
+        results = _reserve_leading_keys(
+            l1_manager, keys, retain, group.layout_desc, tag
         )
         for col, key in zip(cols, keys, strict=True):
             error, mem_obj = results[key]
