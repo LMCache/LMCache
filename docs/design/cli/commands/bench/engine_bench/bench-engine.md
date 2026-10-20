@@ -595,6 +595,13 @@ then start on a chunk boundary in both the prefill and the composite, so
 their chunks hold document content alone and match. Without this they land
 off-phase and nothing matches, silently.
 
+Blocks are sized by encoding each one alone, so every block is stripped of
+surrounding whitespace and ends with one newline (`BLOCK_END`), and the
+question template opens with a letter. Without that separator a block's last
+filler word fuses with the next document's first word (`wordvienna`) into one
+pre-token, the junction re-tokenizes, and every later document lands
+off-phase.
+
 The padding lives in `quality/alignment.py` (`ChunkAligner`) and the prompt
 text in `quality/prompts.py`, outside the workload, so other answer-quality
 benchmarks can build byte-identical prompts.
