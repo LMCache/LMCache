@@ -87,6 +87,8 @@ Reports go to `$PRT_ROOT/prt-suites/<suite>_<UTC time>/`, the history to
 setting `PRT_SUITE=nightly` or `weekly`; reports go to
 `$PRT_ROOT/prt-suites/buildkite-<build number>-<suite>/` and are attached to
 the build.
+A manual build with `PRT_DEPLOYMENTS=vllm_simple` (comma-separated) in its
+env runs only those of the suite's deployments (`--deployments`).
 With `PRT_RESULTS_REPO` set, each suite also appends its runs to that repo's
 `data/runs.jsonl` (`publish.py`), which a static GitHub Pages site renders.
 Publishing is best effort and never changes the suite's exit code.

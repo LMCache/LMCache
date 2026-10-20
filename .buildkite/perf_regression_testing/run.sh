@@ -26,7 +26,9 @@ if [[ -z "${PYTHON:-}" ]]; then
   exit 64
 fi
 out=$PRT_ROOT/prt-suites/buildkite-${BUILDKITE_BUILD_NUMBER:-local}-$PRT_SUITE-$(date -u +%Y%m%d-%H%M%S)
-"$PYTHON" -m perf_regression_testing.suite --suite "$PRT_SUITE" --out "$out"
+# PRT_DEPLOYMENTS (optional, comma-separated) runs only those of the suite.
+"$PYTHON" -m perf_regression_testing.suite --suite "$PRT_SUITE" --out "$out" \
+  ${PRT_DEPLOYMENTS:+--deployments "$PRT_DEPLOYMENTS"}
 rc=$?
 # The host is not reachable from Buildkite: keep every log as an artifact.
 if [[ -d "$out" ]]; then

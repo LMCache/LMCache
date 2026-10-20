@@ -4,6 +4,7 @@
 Usage (repo root, Python >= 3.11, docker on the host, env as in config.toml)::
 
     python -m perf_regression_testing.suite --suite nightly [--out <dir>]
+        [--deployments vllm_simple,...]
 
 Flow::
 
@@ -144,18 +145,22 @@ def report_md(rep: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def suite(name: str, out: Path) -> int:
+def suite(name: str, out: Path, deployments: list[str] | None = None) -> int:
     """Run suite ``name`` into ``out``; see the module docstring.
 
     Args:
         name: Key under ``[suites]``.
         out: Output dir; must not exist.
+        deployments: Run only these of the suite's deployments, in this
+            order; None runs all of them. The caller checks they belong to
+            the suite.
 
     Returns:
         Exit code.
     """
     cfg = load()
     plan = cfg["suites"][name]
+    deps = deployments or plan["deployments"]
     out.mkdir(parents=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     rep: dict[str, Any] = {"suite": name, "date": stamp, "runs": []}
@@ -171,7 +176,7 @@ def suite(name: str, out: Path) -> int:
         return code
 
     try:
-        check_host(cfg, plan["deployments"])
+        check_host(cfg, deps)
     except HostSetupError as e:
         rep["images"] = {"usable": False, "error": str(e)}
         return finish(EXIT_SUITE_INVALID)
@@ -183,7 +188,7 @@ def suite(name: str, out: Path) -> int:
         }
         return finish(EXIT_SUITE_INVALID)
 
-    targets = {cfg["deployments"][d]["image_target"] for d in plan["deployments"]}
+    targets = {cfg["deployments"][d]["image_target"] for d in deps}
     root = Path(cfg["host"]["root"])
     rep["images"] = im = images.tonight(
         root, PKG_DIR.parent, out / "images", need_lmcache="lmcache" in targets
@@ -217,7 +222,7 @@ def suite(name: str, out: Path) -> int:
     codes = []
     regressed = False
     for w in plan["workloads"]:
-        for d in plan["deployments"]:
+        for d in deps:
             spec = resolve(cfg, w, d)
             run_dir = out / f"{stamp}-{w}-{d}"
             if spec.image_target == "mooncake" and mooncake_error:
@@ -296,6 +301,10 @@ def main() -> None:
         type=Path,
         help="must not exist; default <host.root>/prt-suites/<suite>_<UTC time>",
     )
+    ap.add_argument(
+        "--deployments",
+        help="comma-separated subset of the suite's deployments; default all",
+    )
     ap.add_argument("--lock-wait-s", type=float, default=3600)
     a = ap.parse_args()
     logging.basicConfig(
@@ -316,6 +325,12 @@ def main() -> None:
         if a.suite not in cfg["suites"]:
             # Exits 2, a soft fail like any other unusable suite.
             ap.error(f"--suite {a.suite!r}: choose from {', '.join(cfg['suites'])}")
+        known = cfg["suites"][a.suite]["deployments"]
+        deployments = a.deployments.split(",") if a.deployments else None
+        if deployments is not None and not set(deployments) <= set(known):
+            ap.error(
+                f"--deployments {a.deployments!r}: {a.suite} runs {', '.join(known)}"
+            )
         root = Path(cfg["host"]["root"])
         held = lock(root / "prt-suite.lock", a.lock_wait_s)
         if held is None:
@@ -324,7 +339,7 @@ def main() -> None:
         out = a.out or root / "prt-suites" / time.strftime(
             f"{a.suite}_%Y%m%d-%H%M%S", time.gmtime()
         )
-        code = suite(a.suite, out)
+        code = suite(a.suite, out, deployments)
         print(f"report: {out}/report.json (exit {code})")
     except Exception:
         # A crash would exit 1, which means "regressed".

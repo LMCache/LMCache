@@ -91,3 +91,51 @@ def test_an_unknown_suite_is_a_usage_error_naming_the_suites(
     assert e.value.code == suite.EXIT_SUITE_INVALID
     err = capsys.readouterr().err
     assert "'daily'" in err and "nightly" in err and "weekly" in err
+
+
+def test_deployments_runs_only_the_named_pairs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = Path(suite.load()["model"]["path"])
+    model.mkdir(parents=True)
+    (model / "config.json").write_text("{}")
+    monkeypatch.setattr(suite.docker, "root_free_gb", lambda: 1e9)
+    monkeypatch.setattr(suite.docker, "image_label", lambda image, key: "x")
+    builds: list[str] = []
+
+    def tonight(root: Path, src: Path, out: Path, need_lmcache: bool) -> dict:
+        im = {"usable": True, "vllm_source": "nightly", "time": 0.0}
+        return im | {"serving": "prt-serving:x", "vllm_commit": "v"}
+
+    def build(args: list[str], log: Path) -> str:
+        builds.append(args[0])
+        return f"prt-{args[0]}"
+
+    ran: list[str] = []
+
+    def run(spec: object, out: Path, image: str, aiperf: str) -> int:
+        ran.append(out.name.rsplit("-", 1)[-1])
+        out.mkdir(parents=True)
+        summary = {"invalid": [], "vllm_commit": "v", "lmcache_commit": None}
+        (out / "summary.json").write_text(json.dumps(summary))
+        return suite.EXIT_VALID
+
+    monkeypatch.setattr(suite.images, "tonight", tonight)
+    monkeypatch.setattr(suite.images, "build", build)
+    monkeypatch.setattr(suite.images, "prune", lambda keep: [])
+    monkeypatch.setattr(suite, "run", run)
+    assert suite.suite("weekly", tmp_path / "s", ["vllm_simple"]) == suite.EXIT_VALID
+    assert ran == ["vllm_simple"]
+    assert "mooncake" not in builds
+
+
+def test_a_deployment_outside_the_suite_is_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = ["suite", "--suite", "weekly", "--deployments", "vllm_simple,vllm_lmcache"]
+    monkeypatch.setattr("sys.argv", argv)
+    with pytest.raises(SystemExit) as e:
+        suite.main()
+    assert e.value.code == suite.EXIT_SUITE_INVALID
+    err = capsys.readouterr().err
+    assert "vllm_lmcache" in err and "vllm_native" in err
