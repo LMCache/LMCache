@@ -66,6 +66,7 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
 from lmcache.v1.multiprocess.config import add_mp_server_args
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.storage_backend.dax.core import DaxCore
+import lmcache.utils as lmcache_utils
 import lmcache.v1.memory_management as memory_management
 
 
@@ -1818,5 +1819,89 @@ def test_hybrid_manager_get_backend_type_reports_per_object_medium(tmp_path):
         manager.free(objs)
         del objs
         gc.collect()
+    finally:
+        manager.close()
+
+
+_FAKE_DEVDAX_RDEV = os.makedev(252, 7)
+
+
+def _fake_devdax_node(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    backing: str,
+    *,
+    size: int | None,
+    align: int = 4096,
+) -> None:
+    """Present ``backing`` as a Device-DAX node whose sysfs size/align are given.
+
+    ``size=None`` omits the sysfs ``size`` attribute, as for a non-DAX node.
+    """
+    node = (
+        tmp_path
+        / "sysfs"
+        / f"{os.major(_FAKE_DEVDAX_RDEV)}:{os.minor(_FAKE_DEVDAX_RDEV)}"
+    )
+    node.mkdir(parents=True)
+    if size is not None:
+        (node / "size").write_text(f"{size}\n")
+    (node / "align").write_text(f"{align}\n")
+    monkeypatch.setattr(lmcache_utils, "DAX_SYSFS_CHAR_ROOT", str(tmp_path / "sysfs"))
+
+    real_fstat = os.fstat
+    info = os.stat(backing)
+    identity = (info.st_dev, info.st_ino)
+
+    def fake_fstat(fd: int) -> Any:
+        result = real_fstat(fd)
+        if (result.st_dev, result.st_ino) == identity:
+            return SimpleNamespace(st_mode=stat.S_IFCHR, st_rdev=_FAKE_DEVDAX_RDEV)
+        return result
+
+    monkeypatch.setattr(os, "fstat", fake_fstat)
+
+
+def test_add_device_validates_range_against_sysfs_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Device-DAX range is checked against sysfs before it is mapped.
+
+    ``fstat`` reports size 0 for the node and the kernel accepts an out-of-range
+    mmap, so the pre-check is what stands between a bad offset and a SIGBUS.
+    """
+    primary = _make_mmap_file(tmp_path, size=4096)
+    extra = _make_mmap_file(tmp_path, size=4 * 4096, name="dax0.0")
+    manager = _pure_devdax_manager(primary)
+    _fake_devdax_node(monkeypatch, tmp_path, extra, size=4 * 4096)
+    try:
+        fds_before = len(os.listdir("/proc/self/fd"))
+        with pytest.raises(L1ReconfigureError, match="exceeds") as at_end:
+            manager.add_device(extra, 4096, offset_in_bytes=4 * 4096)
+        assert at_end.value.status_code == 409
+        with pytest.raises(L1ReconfigureError, match="device alignment"):
+            manager.add_device(extra, 4096 + 512, offset_in_bytes=0)
+        assert len(os.listdir("/proc/self/fd")) == fds_before
+        assert len(manager.get_arena_statuses()) == 1
+
+        added = manager.add_device(extra, 2 * 4096, offset_in_bytes=2 * 4096)
+        assert added.state == DevDaxArenaState.ACTIVE
+        assert len(manager.get_arena_statuses()) == 2
+    finally:
+        manager.close()
+
+
+def test_add_device_fails_closed_without_sysfs_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A character device whose size sysfs cannot report is never mapped."""
+    primary = _make_mmap_file(tmp_path, size=4096)
+    extra = _make_mmap_file(tmp_path, size=4 * 4096, name="not-dax")
+    manager = _pure_devdax_manager(primary)
+    _fake_devdax_node(monkeypatch, tmp_path, extra, size=None)
+    try:
+        with pytest.raises(L1ReconfigureError, match="cannot read Device-DAX size"):
+            manager.add_device(extra, 4096)
+        assert len(manager.get_arena_statuses()) == 1
     finally:
         manager.close()

@@ -13,7 +13,12 @@ import threading
 import torch
 
 # First Party
-from lmcache.utils import _lmcache_nvtx_annotate, get_device_identity, get_size_bytes
+from lmcache.utils import (
+    _lmcache_nvtx_annotate,
+    check_dax_range,
+    get_device_identity,
+    get_size_bytes,
+)
 from lmcache.v1.memory_allocators.buffer_allocator import BufferAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
@@ -271,15 +276,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         mmap_obj: mmap.mmap | None = None
         try:
             fd = os.open(device_path, os.O_RDWR)
-            capacity = os.fstat(fd).st_size
-            if capacity > 0 and offset + size > capacity:
-                raise RuntimeError(
-                    f"l1 devdax range [{offset}, {offset + size}) exceeds "
-                    f"{device_path} capacity ({capacity} bytes)"
-                )
-
-            # Character devices report st_size == 0, so the kernel enforces
-            # the device bounds and alignment for them at mmap time.
+            check_dax_range(device_path, fd, offset, size)
             mmap_obj = mmap.mmap(
                 fd,
                 size,
@@ -322,7 +319,8 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             The newly mapped arena.
 
         Raises:
-            RuntimeError: If ``offset + size`` exceeds the device capacity.
+            RuntimeError: If the range exceeds the device capacity or breaks
+                its alignment, or the capacity cannot be determined.
             OSError: If the device cannot be opened or mapped.
         """
         fd, mmap_obj, mmap_buffer, buffer = self._open_devdax_mapping(
@@ -805,8 +803,8 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         Raises:
             ValueError: If an argument is invalid or the range overlaps a
                 mapped one.
-            RuntimeError: If the allocator is closed or the range exceeds the
-                device capacity.
+            RuntimeError: If the allocator is closed, the range exceeds the
+                device capacity or alignment, or the capacity is unknown.
             OSError: If the device cannot be opened or mapped.
         """
         if not device_path:

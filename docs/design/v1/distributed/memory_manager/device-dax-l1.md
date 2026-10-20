@@ -71,11 +71,15 @@ Each arena maps `[offset, offset + size)` of its device (`mmap(..., offset=)`),
 with `offset` defaulting to 0. The offset exists so that several LMCache
 servers can share one CXL device by mapping disjoint ranges, and so that one
 pool can hold several ranges of the same device. The allocator validates that
-the offset is a non-negative multiple of `mmap.ALLOCATIONGRANULARITY` and, when
-`fstat` reports a size, that `offset + size` fits; character devices report
-size 0, so the kernel enforces device bounds and alignment (usually 2 MiB) at
-`mmap` time. Nothing coordinates offsets between servers: the operator owns the
-partitioning, as with any shared device.
+the offset is a non-negative multiple of `mmap.ALLOCATIONGRANULARITY`, then
+`lmcache.utils.check_dax_range` checks `[offset, offset + size)` against the
+device geometry: `st_size` for a regular file, or the sysfs `size` and `align`
+attributes of the character device (looked up under `/sys/dev/char` by
+`major:minor`). This check is mandatory: `fstat` reports size 0 for a
+character device, and the kernel accepts an out-of-range Device-DAX `mmap`
+and raises SIGBUS on first access. A node whose size sysfs cannot report is
+rejected rather than mapped. Nothing coordinates offsets between servers: the
+operator owns the partitioning, as with any shared device.
 
 Allocation order:
 
@@ -131,9 +135,9 @@ Add:
    allocator, and that `[offset, offset + size)` does not overlap a range
    already mapped from the same physical device (compared by `st_rdev` /
    inode, so aliases count). Disjoint ranges of one device are allowed.
-2. Open the device read-write, check capacity when `fstat.st_size` is positive,
-   and map it with `mmap(MAP_SHARED, RW)`. Build a `TensorMemoryAllocator` and
-   best-effort pin it.
+2. Open the device read-write, check the range against the device size and
+   alignment (`check_dax_range`), and map it with `mmap(MAP_SHARED, RW)`.
+   Build a `TensorMemoryAllocator` and best-effort pin it.
 3. Append the arena as `active` and non-primary. It is immediately available as
    overflow. Existing allocations are untouched.
 4. The `StorageManager` entry point publishes the current whole capacity
@@ -224,9 +228,10 @@ to 0, and a pair that matches nothing is a 404.
 
 The manager translates request conflicts into `L1ReconfigureError` (409, or
 404 for an unregistered path). Devices must already be provisioned with the
-requested capacity and mapping alignment; L1 does not validate DAX sysfs
-metadata or provision namespaces. The separate L2 ownership check still rejects
-adding a device already mapped by a DAX L2 adapter, including its aliases.
+requested capacity and mapping alignment; L1 verifies both from sysfs before
+mapping but does not provision namespaces. The separate L2 ownership check
+still rejects adding a device already mapped by a DAX L2 adapter, including its
+aliases.
 
 ## Thread Safety
 

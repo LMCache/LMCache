@@ -394,8 +394,8 @@ single-L1 interface. For placing L1 on CXL-attached memory see
      - Offset into ``--l1-devdax-path``, in GiB, where the L1 mapping starts.
        Lets several LMCache servers share one CXL device by mapping disjoint
        ranges, for example offset 0 and 512 with ``--l1-size-gb 512`` each.
-       The mapping must fit in the device, land on a page boundary, and follow
-       the device alignment (usually 2 MiB) the kernel enforces.
+       The range must fit within the device, and offset and size must be
+       multiples of the device alignment (usually 2 MiB).
        ``--l1-manager`` key: ``offset_gb``.
    * - ``--l1-mlock``
      - ``False``
@@ -419,8 +419,8 @@ in the legacy form, ``offset_gb`` in the tagged form. LMCache does not
 coordinate offsets between servers; overlapping ranges, or two nodes that
 alias the same physical CXL range, write over each other. The device must
 be in ``devdax`` mode (CXL memory is often onlined as ``system-ram``), the
-range must fit its capacity, and offset and size should be multiples of the
-device alignment (usually 2 MiB):
+range must fit within the device, and offset and size must be multiples of
+the device alignment (usually 2 MiB); a range that does not is rejected:
 
 .. code-block:: bash
 
