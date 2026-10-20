@@ -2,8 +2,8 @@
 
 PRT runs LMCache end to end every night on a real serving setup and fails
 when a metric has shifted to a worse level than its own history. A weekly
-suite runs vLLM native offloading and Mooncake on the same setup as a
-reference; those runs never fail the build.
+suite runs vLLM's two offloading connectors and Mooncake on the same setup
+as a reference; those runs never fail the build.
 
 ```
 suite.py --suite nightly|weekly            (one suite at a time: a lock file)
@@ -24,12 +24,14 @@ Workload `agentic`: a Claude Code session replay
 (`semianalysisai/cc-traces-weka-062126-256k`, pinned revision), 230
 concurrent sessions, closed loop. Model Step-3.7-Flash-FP8 on 4 x H200
 (TP4 + EP, FP8 KV, MTP). Every deployment runs the same stock vLLM image and
-the same budget, 800 GiB DRAM + 1500 GiB disk; only the cache layer differs:
+the same budget, 800 GiB DRAM + 1500 GiB disk (`vllm_simple`: the DRAM only);
+only the cache layer differs:
 
 | deployment | suite | cache layer |
 |---|---|---|
 | `vllm_lmcache` | nightly, gates | LMCache MP server, L1 + `fs_native` L2 |
 | `vllm_native` | weekly | vLLM `OffloadingConnector`, CPU + fs tier |
+| `vllm_simple` | weekly | vLLM `SimpleCPUOffloadConnector`, CPU only (one tier by design) |
 | `vllm_mooncake` | weekly | Mooncake store, 4 clients, CPU pool + SSD offload |
 
 Tested metrics: decode p10/p50 (tok/s per request) and TTFT p50/p95.

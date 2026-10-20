@@ -167,6 +167,14 @@ vllm_scratch = [{ path = "<root>/l2", min_free_gb = 1500, cap_gb = 1500 }]
 # Per-rank fs dirs are <root_dir>_r<rank>, so root_dir sits inside the scratch.
 kv-transfer-config = '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","block_size":1024,"cpu_bytes_to_use":858993459200,"eviction_policy":"lru","secondary_tiers":[{"type":"fs","root_dir":"<root>/l2/fs"}]}}'
 
+[deployments.vllm_simple]
+# vLLM SimpleCPUOffloadConnector. Its offload pool is one tier, CPU or disk,
+# never both: this runs CPU, 800 GiB total over the TP ranks, and no disk.
+image_target = "serving"
+
+[deployments.vllm_simple.vllm_args]
+kv-transfer-config = '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":858993459200}}'
+
 [deployments.vllm_mooncake]
 # Tuned through Mooncake's own config only. Standalone-store layout:
 # mooncake_client owns the CPU pool and SSD tier. Budget 800 GiB pool, 1500
@@ -265,7 +273,7 @@ gate = true
 
 [suites.weekly]
 workloads = ["agentic"]
-deployments = ["vllm_native", "vllm_mooncake"]
+deployments = ["vllm_native", "vllm_simple", "vllm_mooncake"]
 gate = false
 
 # Cross-night check (runner/baseline.py): each metric's series is tested for a
