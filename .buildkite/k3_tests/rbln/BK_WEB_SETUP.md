@@ -15,11 +15,6 @@ no RBLN Portal credentials are needed. The image runs as uid 2000, which
 cannot write `/opt/venv`, so the step sets `runAsUser: 0`. Harbor has no
 `latest` tag; bump the pinned tag in `pipeline.yml` deliberately.
 
-The step ends with a vLLM-RBLN + LMCache e2e (`vllm_e2e.py`), which serves
-a Hugging Face model (default in `run.sh`) from the image's vllm-rbln. The
-pod therefore needs to reach the Hugging Face Hub to download the model; set
-`RBLN_E2E_MODEL` to use another one.
-
 > Builds whose only changes are docs/`*.md`/`LICENSE`/`.github/**` auto-pass
 > via the [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes).
 > Add the `force-ci` label to a PR to bypass.
