@@ -44,9 +44,13 @@ WORKDIR /workspace
 
 FROM ${SERVING_IMAGE} AS lmcache
 
-# setuptools-scm reads LMCache's version through git, which the vLLM image lacks.
-RUN apt-get update -y \
+# The vLLM image lacks what building LMCache needs: git for setuptools-scm's
+# version, and the cuSPARSE and cuSOLVER headers that ATen/cuda/CUDAContext.h
+# includes.
+RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') \
+    && apt-get update -y \
     && apt-get install -y --no-install-recommends git \
+        libcusparse-dev-${CUDA_VERSION_DASH} libcusolver-dev-${CUDA_VERSION_DASH} \
     && rm -rf /var/lib/apt/lists/*
 ARG MAX_JOBS=32
 ENV MAX_JOBS=${MAX_JOBS} TORCH_CUDA_ARCH_LIST="9.0"
