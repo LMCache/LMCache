@@ -35,6 +35,7 @@ from lmcache.v1.multiprocess.kv_load_policy import (
     create_kv_load_policy,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.session import PrefetchTierSplit
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
@@ -119,6 +120,10 @@ class _PrefetchJob:
     # Names the ``lookup()`` branch that returned before submitting a prefetch
     # task; empty on the normal path.
     early_exit_reason: str = ""
+    # ``(object_group_id, kv_rank)`` of each submitted key row, in row order;
+    # empty when no prefetch was submitted.  Keys the finished result's per-row
+    # L1/L2 cells on the session for serve-side attribution.
+    row_ids: tuple[tuple[int, int], ...] = ()
 
 
 class LookupModule(DiscoverableModule):
@@ -365,6 +370,10 @@ class LookupModule(DiscoverableModule):
                 start_chunk=start_chunk,
                 model_name=model_name,
                 cache_salt=key.cache_salt,
+                row_ids=tuple(
+                    (row.object_group_id, row.keys[0].kv_rank)
+                    for row in spec.key_groups
+                ),
             )
         )
 
@@ -696,6 +705,28 @@ class LookupModule(DiscoverableModule):
             tuple(range(job.attn_desc.num_object_groups)),
             result.l1_owners,
         )
+        # Keep the per-row L1/L2 split so retrieve() can attribute the keys
+        # it delivers to the tier that served them (``MP_RETRIEVE_END``).
+        # The rows cover only the looked-up sub-range, so the split carries
+        # ``start_chunk``.  A shape mismatch leaves no record: the retrieve
+        # then reports its keys as unattributed instead of guessing.
+        if job.row_ids and len(job.row_ids) == len(result.l1_hit_cells) == len(
+            result.l2_hit_cells
+        ):
+            session.record_prefetch_tier_split(
+                PrefetchTierSplit(
+                    start_chunk=job.start_chunk,
+                    rows={
+                        row_id: (l1_row, l2_row)
+                        for row_id, l1_row, l2_row in zip(
+                            job.row_ids,
+                            result.l1_hit_cells,
+                            result.l2_hit_cells,
+                            strict=True,
+                        )
+                    },
+                )
+            )
 
         # L1 is credited with the prefix its own cells serve under the same
         # window rule; L2 with however far it extended that prefix.

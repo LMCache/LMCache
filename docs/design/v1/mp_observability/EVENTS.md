@@ -198,7 +198,7 @@ to correlate START/END pairs.
 | `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes`, `num_tokens`, `transfer_key` | `str`, `int`, `int`, `str`, `int`, `int`, `str` |
 | `MP_TRANSFER_PHASE_SAMPLES` | `samples`, `ended_transfer_key` | `list[tuple[int, int, int, float, int, str, float, float]]` — `(phase, direction, device_index, elapsed_ms, nbytes, session_id, start_time_s, end_time_s)` per finished executor section, plus the `transfer_key` (`str`) of the transfer whose END published this event -- its authoritative completion signal, present even when `samples` is empty; `phase` is a `TransferPhase` value (0 = kernel, 1 = staging), `direction` a `TransferDirection` value, the `session_id` slot carries the `transfer_key` of the store/retrieve operation (see `next_transfer_key`), `start_time_s`/`end_time_s` its bounds on the EventRecorder wall clock (empty / `0.0` only if the call's anchor event could not be recorded) |
 | `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name`, `transfer_key` | `str`, `int`, `str`, `str` |
-| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens`, `transfer_key` | `str`, `int`, `int`, `str`, `str`, `int`, `int`, `str` |
+| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens`, `transfer_key`, `l1_delivered_keys`, `l2_delivered_keys`, `unattributed_delivered_keys`, `l1_delivered_keys_by_group`, `l2_delivered_keys_by_group`, `unattributed_delivered_keys_by_group` | `str`, `int`, `int`, `str`, `str`, `int`, `int`, `str`, `int`, `int`, `int`, `list[int]`, `list[int]`, `list[int]` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
 | `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `l1_hit_tokens`, `l2_hit_tokens`, `l1_hit_keys`, `l2_hit_keys`, `early_exit_reason`, `model_name`, `cache_salt` | `int`, `int`, `int`, `int`, `int`, `int`, `int`, `str`, `str`, `str` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes`, `token_ids` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]`, `tuple[int, ...]` (the IPC key's prompt token ids, shared by reference) |
@@ -228,6 +228,50 @@ Denormalized token count (`num_chunks * chunk_size`) so subscribers need
 not know `chunk_size`.  Fail-closed, matching `total_bytes`: `0` when the
 store committed nothing (`stored_count == 0`) or the retrieve did not
 fully succeed.
+
+### Delivered-key attribution on `MP_RETRIEVE_END`
+
+`retrieved_count` is the number of object keys the retrieve read from L1
+and transferred into the engine: one key per `(object group, chunk)` for
+the worker's kv rank, only the in-window suffix of a sliding-window group,
+and none for aux groups.  The six attribution fields split that same count
+by the tier that served each key, using the per-row `l1_hit_cells` /
+`l2_hit_cells` the request's lookup recorded on its session
+(`Session.record_prefetch_tier_split`):
+
+- `l1_delivered_keys`: keys L1 already held when the lookup ran.
+- `l2_delivered_keys`: keys the lookup's prefetch loaded from L2 for this
+  request.
+- `unattributed_delivered_keys`: keys with no record to consult — the
+  session holds no lookup record (early-exit lookup, lookup served by
+  another process, record already cleared) or the key lies outside the
+  lookup's rows (a sub-range retrieve whose sliding window ends before the
+  hit does, or one that reaches below the looked-up range).  Never guessed.
+- `*_delivered_keys_by_group`: the same three counts per object group as a
+  comma-separated string indexed by object group id (`"3,0,0,0,0,1"`; `0`
+  for groups the retrieve skipped).  A string rather than a list because
+  `EventBus.publish_on_stream` keeps only `int` and `str` metadata values.
+
+The lookup's rows cover only `[start_chunk, end)`: chunks below
+`start_chunk` are engine-covered (the engine's own prefix cache holds them),
+so they are neither looked up nor retrieved, and the recorded split carries
+`start_chunk` so the retrieve can index the rows by absolute chunk.
+`l1_hit_keys` / `l2_hit_keys` count over the same rows, so the covered
+prefix drops out of both sides of the comparison below.
+
+**Invariant: `l1_delivered_keys + l2_delivered_keys +
+unattributed_delivered_keys == retrieved_count` on every path**, including
+a retrieve that fails part-way (only the groups transferred before the
+failure count on either side).  Units are keys, not tokens or chunks: on a
+hybrid model one chunk column holds one key per object group, and the
+full-attention key of a column can come from L1 while its sliding-window
+key comes from L2, so a token cannot be assigned to one tier.  The
+lookup-side `l1_hit_keys` / `l2_hit_keys` on `MP_LOOKUP_PREFETCH_END`
+count the same keys over all kv ranks at lookup time; summed over the
+workers of one request, the delivered counts equal them when every worker
+retrieves the whole looked-up hit, and fall short by what was locked but
+never retrieved (an aborted request, a sub-range retrieve, an engine hit
+that grew between the lookup and block allocation).
 
 ### `MP_LOOKUP_PREFETCH_END` metadata
 

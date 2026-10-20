@@ -528,13 +528,61 @@ distinct from any scheduler-scoped id used elsewhere.
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.num_chunks_loaded` | `lmcache_mp_num_chunks_loaded_total` | Counter (attrs: `worker_id`, `model_name`, `cache_salt`) | `MP_RETRIEVE_END` | `+retrieved_count` per event |
+| `lmcache_mp.retrieve_delivered_l1_keys` | `lmcache_mp_retrieve_delivered_l1_keys_total` | Counter (attrs: `worker_id`, `model_name`, `cache_salt`, `object_group_id`) | `MP_RETRIEVE_END` | `+l1_delivered_keys_by_group[g]` per object group `g` |
+| `lmcache_mp.retrieve_delivered_l2_keys` | `lmcache_mp_retrieve_delivered_l2_keys_total` | Counter (same attrs) | `MP_RETRIEVE_END` | `+l2_delivered_keys_by_group[g]` per object group `g` |
+| `lmcache_mp.retrieve_delivered_unattributed_keys` | `lmcache_mp_retrieve_delivered_unattributed_keys_total` | Counter (same attrs) | `MP_RETRIEVE_END` | `+unattributed_delivered_keys_by_group[g]` per object group `g` |
 
-**What it answers:** How many LMCache chunks is each vLLM worker loading
-from LMCache into its engine?  Compare across workers to spot uneven
-demand or underserved ranks.  Slice by `model_name` to see per-model
-load volume in multi-model deployments, or by `cache_salt` for per-tenant
-attribution (note: `cache_salt` can be high-cardinality — drop it at
-scrape time with `metric_relabel_configs` if storage cost matters).
+**What `num_chunks_loaded` answers:** How many LMCache chunks is each vLLM
+worker loading from LMCache into its engine?  Compare across workers to
+spot uneven demand or underserved ranks.  Slice by `model_name` to see
+per-model load volume in multi-model deployments, or by `cache_salt` for
+per-tenant attribution (note: `cache_salt` can be high-cardinality — drop
+it at scrape time with `metric_relabel_configs` if storage cost matters).
+`retrieved_count` counts object keys — one per object group and chunk for
+the worker's kv rank, only the in-window keys of a sliding-window group —
+so on a hybrid model it exceeds the number of chunks by the sliding-window
+groups' in-window keys.
+
+**What the `retrieve_delivered_*` counters answer:** Of the keys each
+worker actually delivered, how many were served from L1-resident data and
+how many from data the request's own prefetch loaded from L2?  (See the
+`MP_RETRIEVE_END` section of [EVENTS.md](EVENTS.md) for the attribution
+rule.)  The three split `retrieved_count` exactly, so for every
+`(worker_id, model_name, cache_salt)`:
+
+```
+sum by (worker_id, model_name, cache_salt) (
+    rate(lmcache_mp_retrieve_delivered_l1_keys_total[5m])
+  + rate(lmcache_mp_retrieve_delivered_l2_keys_total[5m])
+  + rate(lmcache_mp_retrieve_delivered_unattributed_keys_total[5m])
+) == rate(lmcache_mp_num_chunks_loaded_total[5m])
+```
+
+Share of delivered keys served from L1, per object group:
+
+```
+sum by (object_group_id) (rate(lmcache_mp_retrieve_delivered_l1_keys_total[5m]))
+/ sum by (object_group_id) (
+    rate(lmcache_mp_retrieve_delivered_l1_keys_total[5m])
+  + rate(lmcache_mp_retrieve_delivered_l2_keys_total[5m]))
+```
+
+Keys loaded from L2 into L1 that no retrieve delivered (aborted or
+truncated requests, hits trimmed at prefetch finish, an engine hit that grew
+after the lookup), summed over every
+worker so that all kv ranks are covered (divide the delivered sum by
+`num_kv_readers` on MLA deployments, where every reader delivers the same
+keys):
+
+```
+increase(lmcache_mp_l2_prefetch_load_completed_chunks_total[1h])
+- sum(increase(lmcache_mp_retrieve_delivered_l2_keys_total[1h]))
+```
+
+`unattributed` stays at zero in a healthy deployment; a non-zero rate means
+retrieves ran without a lookup record for their request (see EVENTS.md).
+`object_group_id` is a small integer label with one value per object group
+of the model (a non-hybrid model has only `0`).
 
 ---
 

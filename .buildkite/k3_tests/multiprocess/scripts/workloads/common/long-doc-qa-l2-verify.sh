@@ -214,6 +214,20 @@ prefetch_lookups = get_counter('lmcache_mp_l2_prefetch_lookup_requests_total')
 l2_hit_keys = get_counter('lmcache_mp_lookup_hit_l2_keys_total')
 prefetch_loaded = get_counter('lmcache_mp_l2_prefetch_load_completed_chunks_total')
 
+def sum_counter(name):
+    # Sum every series of a labeled counter (one per worker / object group).
+    total = 0.0
+    for line in metrics_text.splitlines():
+        if line.startswith(name + ' ') or line.startswith(name + '{'):
+            total += float(line.rsplit(' ', 1)[-1])
+    return total
+
+# Serve-side attribution metrics (one series per worker and object group)
+chunks_loaded = sum_counter('lmcache_mp_num_chunks_loaded_total')
+delivered_l1 = sum_counter('lmcache_mp_retrieve_delivered_l1_keys_total')
+delivered_l2 = sum_counter('lmcache_mp_retrieve_delivered_l2_keys_total')
+delivered_unattributed = sum_counter('lmcache_mp_retrieve_delivered_unattributed_keys_total')
+
 print('=' * 60)
 print('Data Flow Metrics')
 print('=' * 60)
@@ -223,6 +237,10 @@ print(f'  L2 store keys succeeded:     {store_succeeded:.0f}')
 print(f'  L2 prefetch lookups:         {prefetch_lookups:.0f}')
 print(f'  L2 lookup hit keys:          {l2_hit_keys:.0f}')
 print(f'  L2 prefetch keys loaded:     {prefetch_loaded:.0f}')
+print(f'  Keys loaded into engine:     {chunks_loaded:.0f}')
+print(f'  Delivered keys from L1:      {delivered_l1:.0f}')
+print(f'  Delivered keys from L2:      {delivered_l2:.0f}')
+print(f'  Delivered keys unattributed: {delivered_unattributed:.0f}')
 print()
 
 failed = False
@@ -258,6 +276,18 @@ check(l2_hit_keys > 0,
 check(prefetch_loaded > 0,
       f'L2 prefetch: {prefetch_loaded:.0f} keys loaded',
       'No keys loaded from L2')
+
+# 4. Serve-side attribution: every key delivered to the engine is attributed
+#    to the tier that served it, and the query round delivers L2-loaded keys
+delivered_total = delivered_l1 + delivered_l2 + delivered_unattributed
+check(delivered_total == chunks_loaded,
+      f'Delivered keys: {delivered_l1:.0f} from L1 + {delivered_l2:.0f} from L2 + '
+      f'{delivered_unattributed:.0f} unattributed == {chunks_loaded:.0f} loaded',
+      f'Delivered-key attribution ({delivered_total:.0f}) != keys loaded into '
+      f'the engine ({chunks_loaded:.0f})')
+check(delivered_l2 > 0,
+      f'Delivered keys: {delivered_l2:.0f} served from L2 loads',
+      'No delivered keys attributed to L2 (expected > 0 from query round)')
 
 print()
 if failed:
@@ -345,6 +375,7 @@ checks = [
     ("counter", "lmcache_mp_lookup_requested_tokens_total", "model_name"),
     ("counter", "lmcache_mp_lookup_hit_tokens_total", "model_name"),
     ("counter", "lmcache_mp_num_chunks_loaded_total", "worker_id"),
+    ("counter", "lmcache_mp_retrieve_delivered_l2_keys_total", "object_group_id"),
     # ── Histograms.  The OTel→Prometheus bridge appends the OTel
     # ``unit`` to the series name, so a histogram declared with
     # ``unit="GB/s"`` actually reports as

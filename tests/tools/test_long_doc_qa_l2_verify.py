@@ -54,6 +54,7 @@ lmcache_mp_l2_load_completed_requests_total{l2_name="mock"} 95
 lmcache_mp_lookup_requested_tokens_total{model_name="Qwen/Qwen3-14B"} 600000
 lmcache_mp_lookup_hit_tokens_total{model_name="Qwen/Qwen3-14B"} 300000
 lmcache_mp_num_chunks_loaded_total{worker_id="0"} 2340
+lmcache_mp_retrieve_delivered_l2_keys_total{worker_id="0",object_group_id="0"} 2340
 lmcache_mp_l0_l1_store_throughput_GB_per_second_count 60
 lmcache_mp_l0_l1_load_throughput_GB_per_second_count 60
 lmcache_mp_l2_store_throughput_GB_per_second_count{l2_name="mock"} 60
