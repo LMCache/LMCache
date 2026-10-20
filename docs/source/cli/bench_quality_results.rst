@@ -660,7 +660,7 @@ The verdict and everything needed to interpret it.
        it is the baseline; its mean is ``candidate.mean_score - candidate.delta``.
    * - ``engagement``
      - object
-     - Whether a CacheBlend candidate actually blended (below).
+     - Whether a blend-server candidate actually blended (below).
    * - ``arm_counts``
      - object
      - ``{label: {answered, empty, abstained}}``: complete answers, missing

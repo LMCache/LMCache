@@ -87,7 +87,7 @@ class PassageProvenance:
             :class:`EvidenceSource`).
         measured_earlier_in: Request ids of earlier measured questions whose
             prompts also hold this passage, in measured order. A caching
-            candidate caches measured prompts too; for CacheBlend, the blend
+            candidate caches measured prompts too; the LMCache blend
             server's fingerprint index by default keeps the newest copy of
             identical content, so the passage's KV may come from the last of
             these (itself blended) rather than from ``store_request_id``. Empty

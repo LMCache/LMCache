@@ -15,17 +15,18 @@ class ArmRole(enum.Enum):
     """
 
     REFERENCE = "reference"
-    """The stack every other arm is judged against, e.g. full recompute
-    (plain vLLM with prefix caching off)."""
+    """The stack every other arm is judged against, e.g. the original model
+    on plain vLLM with prefix caching off."""
 
     CONTROL = "control"
     """Optional: a second stack expected to answer like the reference, e.g.
-    vLLM automatic prefix caching (same KV as recompute). Its gap to the
-    reference is a noise floor; it does not set the verdict."""
+    the reference with vLLM automatic prefix caching on (same KV as
+    recompute). Its gap to the reference is a noise floor; it does not set
+    the verdict."""
 
     CANDIDATE = "candidate"
-    """The stack under test, e.g. vLLM + CacheBlend, another engine, or
-    another model."""
+    """The stack under test, e.g. a quantized, compressed or post-trained
+    model, a KV cache optimization, or another engine."""
 
 
 class ReuseScenario(enum.Enum):
@@ -119,8 +120,8 @@ class QualityRunConfig:
         num_samples: Questions to measure, taken in dataset order -- ``0``
             measures every usable question in the file.
         chunk_size: LMCache chunk size the passages are aligned to. Must
-            match a caching candidate's chunk size (e.g. the CacheBlend
-            server's ``--chunk-size``).
+            match a caching candidate's chunk size (e.g. the LMCache
+            blend server's ``--chunk-size``).
         reference_repeats: Reference passes, when a reference arm is run.
             Two or more give the per-question flip rate between identical
             runs, i.e. a noise floor.
@@ -129,8 +130,8 @@ class QualityRunConfig:
         template_kwargs: Chat-template variables sent as
             ``chat_template_kwargs`` (e.g. ``reasoning_effort``).
         task: The dataset's task type.
-        blend_metrics_url: For a CacheBlend candidate, the blend server's
-            Prometheus ``/metrics`` URL (``--capture-blend-metrics``), read
+        blend_metrics_url: For a candidate served through the LMCache blend
+            server, its Prometheus ``/metrics`` URL (``--capture-blend-metrics``), read
             during the candidate pass. Empty means blend engagement is not
             checked and the verdict says so. Only valid with a candidate arm.
         output_dir: Results directory, used as given. Empty means a new

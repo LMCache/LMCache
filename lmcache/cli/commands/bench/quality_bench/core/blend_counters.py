@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Blend-server engagement counters for ``lmcache bench quality``.
 
-Utility of a CacheBlend quality result is dependent on the blend firing correctly.
+A blending candidate's result is only meaningful if blending actually fired.
 These counters, read from the blend server's Prometheus ``/metrics``, show how
 much of each prompt was actually served by blending.
 """

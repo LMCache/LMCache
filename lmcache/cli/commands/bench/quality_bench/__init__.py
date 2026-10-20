@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """``lmcache bench quality`` command group.
 
-Measures whether a serving change -- e.g. CacheBlend, another engine or
-another model -- changes the model's answers compared with a reference, in
-two stages:
+Measures whether a serving engine change -- e.g. quantization, KV cache
+compression, post-training, or another engine or model -- changes the
+answers compared with a reference, in two stages:
 
-* ``run`` sends byte-identical prompts to one or more arms (a reference such
-  as full recompute, a candidate under test, and optionally a control) and
+* ``run`` sends byte-identical prompts to one or more arms (a reference, a
+  candidate under test, and optionally a control) and
   saves their answers to a results directory.
 * ``analyze`` scores the saved answers and reports per-question rows and a
   verdict.
@@ -30,5 +30,5 @@ class QualityBenchCommand(CompositeCommand):
     def help(self) -> str:
         return (
             "Compare a candidate serving stack's answers with a reference "
-            "(e.g. CacheBlend vs full recompute)."
+            "(e.g. a quantized model vs the original)."
         )

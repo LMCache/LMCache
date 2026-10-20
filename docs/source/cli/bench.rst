@@ -1742,14 +1742,14 @@ Exit codes
 quality
 -------
 
-The ``lmcache bench quality`` commands check whether a serving change --
-CacheBlend, another engine, or a different model -- changes the model's
-answers compared with a reference. They send the same QA prompts to a
-*reference* engine (for example full recompute) and to a *candidate* engine
-(for example CacheBlend), score both against gold answers, and print one
-verdict -- ``PASS``, ``FAIL``, ``UNDERPOWERED`` or ``INVALID`` --
-that CI can gate on. The work is split in two stages that share a *results
-directory*:
+The ``lmcache bench quality`` commands check whether a serving engine
+change -- quantization, KV cache compression, post-training, or another
+engine or model -- changes the answers compared with a reference. They send
+the same QA prompts to a *reference* engine (for example the original model)
+and to a *candidate* engine (for example a quantized version of it), score
+both against gold answers, and print one verdict -- ``PASS``, ``FAIL``,
+``UNDERPOWERED`` or ``INVALID`` -- that CI can gate on. The work is split
+in two stages that share a *results directory*:
 
 .. code-block:: bash
 
@@ -1765,8 +1765,8 @@ metric or tolerance without rerunning an arm.
 :ref:`rag-qa-quality <bench-rag-qa-quality>` scores one stack per run.
 ``bench quality`` adds what a comparison needs: byte-identical prompts for
 every arm (checked across runs), a record of how each passage got into the
-cache, a noise floor from repeated reference runs, for CacheBlend a check
-that blending actually happened, and a statistical verdict.
+cache, a noise floor from repeated reference runs, optionally a check that
+KV blending actually happened, and a statistical verdict.
 
 The commands do not launch engines. Start each one yourself, from an empty
 cache (see the note under :ref:`Quality quick start <bench-quality-quick-start>`).
@@ -1775,8 +1775,9 @@ cache (see the note under :ref:`Quality quick start <bench-quality-quick-start>`
 What bench quality does
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-**Arms.** Each arm is an OpenAI-compatible engine serving the same model.
-Pass any of them to ``run``:
+**Arms.** Each arm is an OpenAI-compatible engine that accepts requests for
+the ``--model`` name; to compare two models, serve the candidate under that
+name (with vLLM, ``--served-model-name``). Pass any of the arms to ``run``:
 
 .. list-table::
    :header-rows: 1
@@ -1787,24 +1788,24 @@ Pass any of them to ``run``:
      - Engine
    * - ``reference``
      - ``--reference-url``
-     - The stack every other arm is judged against, for example vLLM with
-       prefix caching **off** (full recompute). Runs ``--reference-repeats``
-       times (default 2); how often it disagrees with itself is the *flip
-       rate*, the noise floor.
+     - The stack every other arm is judged against, for example the
+       original model on vLLM with prefix caching **off**. Runs
+       ``--reference-repeats`` times (default 2); how often it disagrees
+       with itself is the *flip rate*, the noise floor.
    * - ``candidate``
      - ``--candidate-url``
-     - The stack under test: for example vLLM with the CacheBlend connector
-       and blend server, another engine, or another model.
+     - The stack under test: for example a quantized, compressed or
+       post-trained model, a KV cache optimization, or another engine.
    * - ``control``
      - ``--control-url`` (optional)
      - A second stack expected to answer like the reference, for example
-       vLLM with prefix caching on and no LMCache (it reuses KV only at its
+       the reference with prefix caching on (it reuses KV only at its
        original position). A gap points at the harness or the engine rather
        than the candidate. Reported only; it does not set the verdict.
 
 ``analyze`` needs a reference and a candidate arm in the directory; the
-control arm is reported when present. Within a ``run``, arms run one after another, and
-questions run one at a time.
+control arm is reported when present. Within a ``run``, arms run one after
+another, and questions run one at a time.
 
 **Reuse scenarios.** Caching arms first receive *store requests*
 (``max_tokens=1``) that put the passages in the cache, then the measured
@@ -1825,16 +1826,15 @@ prompts:
        different neighbors.
 
 Prompts are chunk-aligned the same way as ``rag-qa-quality``, so for a
-caching candidate set ``--chunk-size`` to its chunk size (for CacheBlend, the
-blend server's).
+caching candidate set ``--chunk-size`` to its chunk size.
 
-**Blend metrics (CacheBlend candidates).** A CacheBlend candidate that
-silently fell back to recompute would score like the reference and pass.
-With ``--capture-blend-metrics URL`` on the candidate's ``run``, the blend
-server's ``lmcache_blend_lookup_*`` counters are read
-around every question (once before any arm runs, so an unreachable endpoint
-fails fast; a failed read is retried before it stops the run). The *blend
-share* is the share of looked-up tokens served by blending at a new
+**Blend metrics.** For a candidate served through the LMCache blend server,
+which reuses cached KV at new positions, a silent fallback to recompute would
+score like the reference and pass. With ``--capture-blend-metrics URL`` on the
+candidate's ``run``, the blend server's ``lmcache_blend_lookup_*`` counters
+are read around every question (once before any arm runs, so an unreachable
+endpoint fails fast; a failed read is retried before it stops the run). The
+*blend share* is the share of looked-up tokens served by blending at a new
 position. The verdict is ``INVALID`` if the share is below
 ``--min-blend-share``, over the whole run or in any window of 10 consecutive
 questions (which catches a run that stopped blending partway).
@@ -1948,39 +1948,45 @@ not install (``analyze`` does not need it):
 
    pip install transformers
 
-**Everything up at once.** With a full-recompute reference engine on port
-8000, a CacheBlend candidate engine on port 8001 (blend server metrics on
-port 9090), and a judge on another host:
+**Everything up at once.** This compares an FP8-quantized model with the
+original. Serve the original on port 8000 as the reference and the quantized
+model on port 8001 as the candidate, under the original's name so both arms
+accept the same requests, with a judge on another host:
+
+.. code-block:: bash
+
+   vllm serve Qwen/Qwen3-8B --port 8000 --no-enable-prefix-caching
+   vllm serve Qwen/Qwen3-8B-FP8 --port 8001 --no-enable-prefix-caching \
+       --served-model-name Qwen/Qwen3-8B
 
 .. code-block:: bash
 
    lmcache bench quality run \
        --reference-url http://localhost:8000 \
        --candidate-url http://localhost:8001 \
-       --capture-blend-metrics http://localhost:9090/metrics \
        --model Qwen/Qwen3-8B \
-       --dataset hotpotqa --limit 200 \
-       --scenario independent --chunk-size 256
+       --dataset hotpotqa --limit 200
    # prints: results directory: quality_results/20261019-103005
 
    lmcache bench quality analyze quality_results/20261019-103005 \
        --judge-url http://judge-host:8000 --judge-model openai/gpt-oss-120b
 
 Drop the ``--judge-*`` flags for a judge-free analysis scored with ``match``.
-For a candidate that is not CacheBlend, drop ``--capture-blend-metrics``.
+For a candidate served through the LMCache blend server, add
+``--capture-blend-metrics`` with its metrics URL and set ``--chunk-size`` to
+its chunk size (see Blend metrics above).
 
 **One engine at a time** (for example one GPU server, or one CI job per
 arm). Give every ``run`` the same workload flags and ``--output-dir``:
 
 .. code-block:: bash
 
-   WORKLOAD="--model Qwen/Qwen3-8B --dataset hotpotqa --limit 200 --chunk-size 256"
+   WORKLOAD="--model Qwen/Qwen3-8B --dataset hotpotqa --limit 200"
 
    # Job 1: reference engine up
    lmcache bench quality run --reference-url http://gpu0:8000 $WORKLOAD --output-dir out
-   # Job 2: reference engine down, candidate engine (and blend server) up
-   lmcache bench quality run --candidate-url http://gpu0:8000 \
-       --capture-blend-metrics http://gpu0:9090/metrics $WORKLOAD --output-dir out
+   # Job 2: reference engine down, candidate engine up
+   lmcache bench quality run --candidate-url http://gpu0:8000 $WORKLOAD --output-dir out
    # Job 3: engines down, judge up (or no judge)
    lmcache bench quality analyze out --judge-url http://gpu0:8000
 
@@ -2007,10 +2013,10 @@ lmcache version extracted them.
 
 .. note::
 
-   Start each caching arm from an empty cache: restart the engine (and, for
-   CacheBlend, the blend server) before its ``run``. Otherwise the arm
-   reuses KV from an earlier run, and what is measured is no longer the
-   chosen scenario.
+   Start each caching arm from an empty cache: restart the engine (and any
+   cache server behind it) before its ``run``. Otherwise the arm reuses KV
+   from an earlier run, and what is measured is no longer the chosen
+   scenario.
    Running one arm per engine lifetime, as above, satisfies this.
 
 **Datasets** are the same as for :ref:`rag-qa-quality <bench-rag-qa-quality>`:
@@ -2040,20 +2046,20 @@ same workload flags (``--model`` through ``--seed``).
      - Description
    * - ``--reference-url``
      - *(unset)*
-     - Engine serving the reference, for example full recompute (vLLM,
+     - Engine serving the reference, for example the original model (vLLM,
        prefix caching off).
    * - ``--candidate-url``
      - *(unset)*
-     - Engine serving the candidate under test, for example vLLM with
-       CacheBlend.
+     - Engine serving the candidate under test, for example a quantized
+       model.
    * - ``--control-url``
      - *(unset)*
-     - Engine serving an optional control, for example vLLM prefix caching
-       only. Reported alongside; does not set the verdict.
+     - Engine serving an optional control, for example the reference with
+       prefix caching on. Reported alongside; does not set the verdict.
    * - ``--capture-blend-metrics``
      - *(unset)*
-     - For a CacheBlend candidate: the blend server's Prometheus
-       ``/metrics`` URL, read during the candidate pass; needs
+     - For a candidate served through the LMCache blend server: its
+       Prometheus ``/metrics`` URL, read during the candidate pass; needs
        ``--candidate-url``. Without it, blend engagement is not checked and
        cannot make the verdict ``INVALID``.
    * - ``--reference-repeats``
@@ -2062,7 +2068,8 @@ same workload flags (``--model`` through ``--seed``).
        flip rate.
    * - ``--model``
      - *required*
-     - Served model name. Its tokenizer is used to align passages to chunks.
+     - Served model name, sent to every arm; its tokenizer is used to align
+       passages to chunks. Serve a different candidate model under this name.
    * - ``--task``
      - ``qa``
      - Task type of the dataset. Only ``qa`` is supported.
@@ -2078,8 +2085,7 @@ same workload flags (``--model`` through ``--seed``).
      - ``independent`` or ``reordered`` (see above).
    * - ``--chunk-size``
      - 256
-     - LMCache chunk size. For a caching candidate, match its chunk size
-       (for CacheBlend, the blend server's).
+     - LMCache chunk size. For a caching candidate, match its chunk size.
    * - ``--max-output-tokens``
      - 2048
      - Token budget per answer, reasoning included.

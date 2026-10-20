@@ -4,31 +4,30 @@
 
 ## Overview
 
-`lmcache bench quality` answers one question: **does a serving change
-change the answers?** The change can be CacheBlend, another serving
-optimization, another engine, or another model. It sends the same QA prompts
-to a *reference* engine (e.g. full recompute) and to a *candidate* engine
-(e.g. CacheBlend), scores both against gold answers, and prints one
-verdict — `PASS`, `FAIL`, `UNDERPOWERED`, or `INVALID` — that CI can gate on.
-The work is split into two stages that share a results directory (Section 6):
-`run` sends prompts to one or more arms and saves their answers; `analyze`
-scores the saved answers and reaches the verdict.
+`lmcache bench quality` answers one question: **does a serving engine change
+the answers?** The candidate can differ from the reference by quantization, KV
+cache compression, post-training, or another engine or model. It sends the
+same QA prompts to a *reference* engine (e.g. the original model) and to a
+*candidate* engine (e.g. a quantized version of it), scores both against gold
+answers, and prints one verdict — `PASS`, `FAIL`, `UNDERPOWERED`, or `INVALID`
+— that CI can gate on. The work is split into two stages that share a results
+directory (Section 6): `run` sends prompts to one or more arms and saves their
+answers; `analyze` scores the saved answers and reaches the verdict.
 
 `bench engine --workload rag-qa-quality` already scores one stack's answers.
 `bench quality` adds what a comparison needs on top of that: a plan shared by
 every arm, an explicit description of how the passages got into the cache
-(the *reuse manifest*), a noise floor from repeated reference runs, for a
-CacheBlend candidate a check that blending actually happened, and a
+(the *reuse manifest*), a noise floor from repeated reference runs,
+optionally a check that KV blending actually happened (Section 3), and a
 statistical verdict.
 
 ```bash
-WORKLOAD="--model Qwen/Qwen3-8B --dataset hotpotqa --limit 200 \
-          --scenario independent --chunk-size 256"
-# One engine at a time, into one results directory; the candidate here is
-# CacheBlend, so its blend server's metrics are captured
+WORKLOAD="--model Qwen/Qwen3-8B --dataset hotpotqa --limit 200"
+# One engine at a time, into one results directory. Reference: the original
+# model. Candidate: its FP8 version, served under the same name
+# (vllm serve Qwen/Qwen3-8B-FP8 --served-model-name Qwen/Qwen3-8B).
 lmcache bench quality run --reference-url http://gpu0:8000 $WORKLOAD --output-dir out
-lmcache bench quality run --candidate-url http://gpu0:8000 \
-    --capture-blend-metrics http://gpu0:9090/metrics $WORKLOAD --output-dir out
+lmcache bench quality run --candidate-url http://gpu0:8000 $WORKLOAD --output-dir out
 # No engine needed: score and decide
 lmcache bench quality analyze out \
     --judge-url http://judge-host:8000 --judge-model openai/gpt-oss-120b
@@ -57,12 +56,15 @@ Any file in a supported QA schema loads with `--dataset <path>`.
 
 | Role | Flag | Engine | Stores passages first? |
 |---|---|---|---|
-| `reference` | `--reference-url` | the stack every arm is judged against, e.g. vLLM with prefix caching **off** | No |
-| `candidate` | `--candidate-url` | the stack under test, e.g. vLLM + CBKVConnector + blend server | Yes |
-| `control` | `--control-url` (optional) | a stack expected to match the reference, e.g. vLLM with prefix caching on and no LMCache | Yes |
+| `reference` | `--reference-url` | the stack every arm is judged against, e.g. the original model on vLLM with prefix caching **off** | No |
+| `candidate` | `--candidate-url` | the stack under test, e.g. a quantized, compressed or post-trained model, a KV cache optimization, or another engine | Yes |
+| `control` | `--control-url` (optional) | a stack expected to match the reference, e.g. the reference with prefix caching on | Yes |
 
 Each `run` takes any subset of these flags (at least one); `analyze` needs a
-reference and a candidate arm in the results directory.
+reference and a candidate arm in the results directory. Every arm is sent
+the `--model` name, so a candidate model is served under that name (vLLM:
+`--served-model-name`); the plan, and so the prompts, are built with that
+model's tokenizer.
 
 The reference runs `--reference-repeats` times (default 2). Its disagreement
 with itself is the **flip rate**, the noise floor below which no arm can be
@@ -75,10 +77,9 @@ the verdict.
 Within a `run`, arms run one after another (all reference passes, then
 `control`, then `candidate`) and questions run sequentially, so per-question
 counter deltas belong to that question. **Each caching arm must start from an
-empty cache**: restart its engine (and, for CacheBlend, the blend server)
-before its `run`. Running one
-arm per engine lifetime, as the staged flow does, satisfies this; the command
-does not restart engines itself.
+empty cache**: restart its engine (and any cache server behind it) before
+its `run`. Running one arm per engine lifetime, as the staged flow does,
+satisfies this; the command does not restart engines itself.
 
 ## 2. Plan and reuse scenarios
 
@@ -116,12 +117,12 @@ which (`dataset`, `answer_string`, `none`), so loss can later be split by
 
 ### Reuse from earlier measured questions
 
-For a CacheBlend candidate, the store request is not always where its KV for
-a passage comes from. The candidate caches every measured prompt too, and the
-blend server registers each stored chunk in a fingerprint index keyed by
-the chunk's **content** (`BlendTokenRangeMatcher` in
-`lmcache/v1/multiprocess/modules/blend/matcher.py`). Chunk alignment makes a
-passage hash the same in every prompt, so when a passage recurs in a later
+For a candidate served through the LMCache blend server, the store request is
+not always where its KV for a passage comes from. The candidate caches every
+measured prompt too, and the blend server registers each stored chunk in a
+fingerprint index keyed by the chunk's **content** (`BlendTokenRangeMatcher`
+in `lmcache/v1/multiprocess/modules/blend/matcher.py`). Chunk alignment makes
+a passage hash the same in every prompt, so when a passage recurs in a later
 question, which copy is reused depends on the server's registration policy:
 
 | Blend server | Policy | Copy reused by a later question |
@@ -153,10 +154,11 @@ production runs newest-wins, that is also how production reuses recurring
 documents, and requiring dedup mode would measure a configuration nobody
 serves.
 
-## 3. Engagement (CacheBlend candidates)
+## 3. Engagement (blend-server candidates)
 
-A CacheBlend candidate that silently fell back to recompute would score like
-the reference and `PASS`. When `--capture-blend-metrics` is given (it needs
+A candidate served through the LMCache blend server reuses cached KV at new
+positions; one that silently fell back to recompute would score like the
+reference and `PASS`. When `--capture-blend-metrics` is given (it needs
 `--candidate-url`), the runner reads the blend server's Prometheus counters
 before and after each of the candidate's measured questions:
 
@@ -344,8 +346,8 @@ prompt, i.e. read the wrong passage), or `wording` (anything else).
 ## 6. Stages and the results directory
 
 **Why two stages.** A single invocation needed every arm's engine, the blend
-server's metrics (for a CacheBlend candidate) and the judge reachable for the
-whole run. On a GPU pool that is several GPU servers at once, although the
+server's metrics (for a blend-server candidate) and the judge reachable for
+the whole run. On a GPU pool that is several GPU servers at once, although the
 arms only ever run one after another. `run` and `analyze` are separate
 commands that communicate only through files, so each engine (and the judge)
 can be up alone, each in its own CI job, and saved answers can be re-analyzed

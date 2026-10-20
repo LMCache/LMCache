@@ -82,30 +82,30 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--reference-url",
         default="",
         help="Engine serving the reference every other arm is judged against, "
-        "e.g. full recompute (vLLM, prefix caching off).",
+        "e.g. the original model (vLLM, prefix caching off).",
     )
     arms.add_argument(
         "--candidate-url",
         default="",
-        help="Engine serving the candidate under test, e.g. CacheBlend (vLLM "
-        "+ CBKVConnector), another engine, or another model.",
+        help="Engine serving the candidate under test, e.g. a quantized, "
+        "compressed or post-trained model, or another engine.",
     )
     arms.add_argument(
         "--control-url",
         default="",
         help="Optional engine expected to answer like the reference, e.g. "
-        "vLLM prefix caching only. Its gap to the reference is reported as "
-        "a noise floor.",
+        "the reference with prefix caching on. Its gap to the reference is "
+        "reported as a noise floor.",
     )
     arms.add_argument(
         "--capture-blend-metrics",
         dest="blend_metrics_url",
         default="",
         metavar="URL",
-        help="For a CacheBlend candidate: the blend server's Prometheus "
-        "/metrics URL, read during the candidate pass (needs --candidate-url). "
-        "Without it, blend engagement is not checked and cannot make the "
-        "verdict INVALID.",
+        help="For a candidate served through the LMCache blend server: its "
+        "Prometheus /metrics URL, read during the candidate pass (needs "
+        "--candidate-url). Without it, blend engagement is not checked and "
+        "cannot make the verdict INVALID.",
     )
     arms.add_argument(
         "--reference-repeats",
@@ -120,7 +120,9 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     workload.add_argument(
         "--model",
         required=True,
-        help="Served model name. Its tokenizer aligns passages to chunks.",
+        help="Served model name, sent to every arm; its tokenizer aligns "
+        "passages to chunks. To compare two models, serve the candidate under "
+        "this name (vLLM: --served-model-name).",
     )
     workload.add_argument(
         "--task",
@@ -152,7 +154,7 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=256,
         help="LMCache chunk size. For a caching candidate, match its chunk size "
-        "(e.g. the CacheBlend server's --chunk-size).",
+        "(e.g. the LMCache blend server's --chunk-size).",
     )
     workload.add_argument(
         "--max-output-tokens",

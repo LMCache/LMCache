@@ -4,8 +4,8 @@
 The verdict acts as a gatekeeper for quality checking. That is, a gap passes
 on tolerance, fails only when it also clears its own error bar, and is
 otherwise UNDERPOWERED with the sample count that would settle it. Additionally,
-a run that is unfit to compare (e.g. an unreachable arm, or a CacheBlend
-candidate whose captured blend metrics show it did not blend) is INVALID. The
+a run that is unfit to compare (e.g. an unreachable arm, or a candidate
+whose captured blend metrics show it did not blend) is INVALID. The
 reference is run twice so its flip rate is reported as the noise floor.
 """
 
@@ -261,7 +261,7 @@ def run_problems(run: ArmRun) -> list[str]:
 
 
 def check_engagement(candidate: ArmRun, min_blend_share: float) -> EngagementCheck:
-    """Decide whether a CacheBlend candidate blended enough for its scores to count.
+    """Decide whether a candidate blended enough for its scores to count.
 
     Uses the blend metrics captured during the candidate pass; a candidate
     run without them is reported as unmeasured, never invalidated.
