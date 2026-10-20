@@ -54,10 +54,7 @@ class _AioServicer:
             async def subscribe(
                 request: Any, context: grpc.aio.ServicerContext
             ) -> AsyncIterator[Any]:
-                try:
-                    stream = await server.dispatch(handler, request, context)
-                except ValueError as exc:
-                    await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+                stream = await server.dispatch(handler, request, context)
                 async for response in server.forward(stream, handler, context):
                     yield response
 
@@ -163,6 +160,12 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
                 )
         except NotImplementedError as exc:
             await context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
+            raise RuntimeError("gRPC context abort unexpectedly returned") from exc
+        except ConnectionError as exc:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+            raise RuntimeError("gRPC context abort unexpectedly returned") from exc
+        except (TypeError, ValueError) as exc:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
             raise RuntimeError("gRPC context abort unexpectedly returned") from exc
         if isinstance(result, MessagingStream):
             return result

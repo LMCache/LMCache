@@ -13,6 +13,7 @@ from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
     KVCache,
+    KVEventProfile,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
@@ -44,6 +45,7 @@ def register_kv_cache_handler(
     engine_type: EngineType,
     layout_hints: LayoutHints,
     engine_group_infos: list[EngineGroupInfo],
+    event_profile: KVEventProfile | None = None,
 ) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.

@@ -28,14 +28,17 @@ from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess import native_completion
+from lmcache.v1.multiprocess.custom_types import KVEventProfile
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as transfer
 
 
+@pytest.mark.parametrize("native_events", [False, True])
 @pytest.mark.parametrize("owner_count", [1, 2])
 @pytest.mark.parametrize("failure", ["none", "copy", "owner"])
 def test_store_owner_callback_round_trip(
     monkeypatch: pytest.MonkeyPatch,
     owner_count: int,
+    native_events: bool,
     failure: Literal["none", "copy", "owner"],
 ) -> None:
     """Real reservations survive serialization and finish only after dispatch.
@@ -118,6 +121,7 @@ def test_store_owner_callback_round_trip(
         null_block_id=0,
         storage_manager=storage,
         event_bus=MagicMock(),
+        kv_event_module=MagicMock(),
         resolve_obj_keys=lambda key, gids: [[k] for k in keys],
     )
     module = transfer.LMCacheDrivenTransferModule(cast(Any, ctx))
@@ -138,7 +142,16 @@ def test_store_owner_callback_round_trip(
     monkeypatch.setattr(module, "get_and_touch_context_entry", lambda _: entry)
     try:
         _, succeeded = module.store(
-            cast(Any, SimpleNamespace(request_id="req", worker_id=1)),
+            cast(
+                Any,
+                SimpleNamespace(
+                    request_id="req",
+                    worker_id=1,
+                    event_profile=KVEventProfile("native:v1", 1)
+                    if native_events
+                    else None,
+                ),
+            ),
             1,
             [[1], [2]],
             b"producer",
@@ -161,21 +174,39 @@ def test_store_owner_callback_round_trip(
         release_kind, release_encoded = queued[0]
         assert release_kind == "release_imported_event"
         assert msgspec.msgpack.decode(release_encoded, type=tuple[int, int]) == (1, 7)
-        if failure != "none":
+        if failure != "none" and not native_events:
             assert len(queued) == 1
             assert order == ["callback", "copy", "copy", "record"]
             assert all(obj.is_valid() for obj in copied)
         else:
             assert order == ["callback", "copy", "copy", "record", "callback"]
             kind, encoded = queued[1]
-            assert kind == "finish_write_by_owner"
-            payload = msgspec.msgpack.decode(encoded, type=L1WriteCompletion)
-            assert payload == [
-                (manager.l1_manager_id, keys if owner_count == 1 else [keys[index]])
-                for index, manager in enumerate(managers)
-            ]
+            if native_events:
+                assert kind == "finish_native_event_store"
+                payload, request, transfer_key = msgspec.msgpack.decode(
+                    encoded, type=tuple[L1WriteCompletion, str, str]
+                )
+                assert request == "req"
+            else:
+                assert kind == "finish_write_by_owner"
+                payload = msgspec.msgpack.decode(encoded, type=L1WriteCompletion)
+            expected_payload = (
+                [
+                    (manager.l1_manager_id, keys if owner_count == 1 else [keys[index]])
+                    for index, manager in enumerate(managers)
+                ]
+                if failure == "none"
+                else []
+            )
+            assert payload == expected_payload
         module.close()
         cache_context.release_imported_event.assert_called_once_with(7)
+        if native_events:
+            cleanup = ctx.event_bus.publish.call_args.args[0]
+            assert cleanup.event_type == EventType.MP_TOKENS
+            assert cleanup.session_id == "req"
+            assert cleanup.metadata["native_store_finished"] == transfer_key
+            assert cleanup.metadata["chunk_hashes"] == []
         for index, manager in enumerate(managers):
             found = manager.reserve_read(keys)
             expected = (

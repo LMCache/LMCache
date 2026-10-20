@@ -129,7 +129,8 @@ def _coalesce_store_metadata(
 
     Returns:
         A single STORE metadata spanning the whole range, carrying the
-        concatenated block ids of every cache group.
+        concatenated block ids of every cache group and native event bindings
+        in chunk order.
 
     Raises:
         ValueError: If the input is empty, non-contiguous, or changes cache
@@ -162,6 +163,9 @@ def _coalesce_store_metadata(
         block_ids=merged_block_ids,
         start=first.op.start,
         end=last.op.end,
+        event_bindings=tuple(
+            binding for meta in request_metas for binding in meta.op.event_bindings
+        ),
     )
     return LMCacheMPRequestMetadata(
         request_id=first.request_id,

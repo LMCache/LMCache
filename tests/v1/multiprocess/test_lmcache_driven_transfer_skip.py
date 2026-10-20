@@ -230,7 +230,7 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
 ) -> None:
     module, context, _reads, transfers = _make_checkpoint_module(monkeypatch)
     _handle, ok = module.store(
-        SimpleNamespace(request_id="req", worker_id=1),
+        SimpleNamespace(request_id="req", worker_id=1, event_profile=None),
         1,
         [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
         b"producer",

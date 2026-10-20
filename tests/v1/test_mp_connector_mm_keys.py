@@ -227,6 +227,7 @@ def test_lookup_hint_carries_vllm_prefix_hit() -> None:
     scheduler_adapter.lmcache_tokens_per_chunk = 64
     scheduler_adapter.check_lookup_result.return_value = None
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._enable_kv_events = False
     connector.request_trackers = {}
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = False
@@ -246,6 +247,7 @@ def test_recurrent_lookup_reserves_final_prompt_token() -> None:
     scheduler_adapter.lmcache_tokens_per_chunk = 64
     scheduler_adapter.check_lookup_result.return_value = 64
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._enable_kv_events = False
     connector.request_trackers = {}
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = True
@@ -353,9 +355,9 @@ def test_store_metadata_decode_chunk_boundary(
     total_tokens = prompt_length + output_length
     tracker.num_scheduled_tokens = total_tokens - tracker.num_lmcache_hit_tokens
     tracker.allocated_block_ids = {0: list(range((total_tokens + 15) // 16))}
-    kwargs = {"save_decode_cache": True} if save_decode_cache else {}
-
-    metadata = LMCacheMPRequestMetadata.GetStoreMetadata(tracker, 256, [16], **kwargs)
+    metadata = LMCacheMPRequestMetadata.GetStoreMetadata(
+        tracker, 256, [16], save_decode_cache=save_decode_cache
+    )
 
     if save_decode_cache and total_tokens // 256 > prompt_length // 256:
         assert metadata is not None

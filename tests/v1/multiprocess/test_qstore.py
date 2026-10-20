@@ -18,7 +18,7 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
-from lmcache.v1.multiprocess.custom_types import TRANSFER_QUERY
+from lmcache.v1.multiprocess.custom_types import KV_EVENT_CAPABILITY, TRANSFER_QUERY
 from lmcache.v1.multiprocess.engine_module import discover_modules
 from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleSpec,
@@ -263,6 +263,7 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
 
 
 def _build(**config: Any) -> list:
+    config.setdefault("kv_event_log_size", 0)
     return server_mod._build_modules(
         MagicMock(name="ctx"),
         MPServerConfig(worker_reap_timeout_seconds=0, **config),
@@ -345,7 +346,7 @@ def test_server_wires_event_module_liveness(
     events = next(module for module in modules if isinstance(module, KVEventModule))
     management = next(m for m in modules if isinstance(m, ManagementModule))
     assert events.enabled is enabled
-    assert management.get_experimental() == []
+    assert management.get_experimental() == ([KV_EVENT_CAPABILITY] if enabled else [])
     touch = MagicMock()
     monkeypatch.setattr(events, "touch_instance", touch)
     management.ping(123)

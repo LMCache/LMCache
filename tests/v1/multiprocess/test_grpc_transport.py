@@ -28,6 +28,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CBUnifiedLookupResult,
     IPCCacheServerKey,
     KVEventBatch,
+    KVEventProfile,
     KVEventRecord,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
@@ -714,7 +715,13 @@ def test_stalled_stream_subscriber_stops_server_reads(grpc_server_mode: str) -> 
     class Module:
         @request_handler()
         def subscribe_kv_events(
-            self, instance_id: int, model_name: str, cursor: int, max_events: int
+            self,
+            instance_id: int,
+            model_name: str,
+            cursor: int,
+            max_events: int,
+            world_size: int,
+            profile: KVEventProfile,
         ) -> MessagingStream[KVEventBatch]:
             def read(closed: threading.Event) -> KVEventBatch:
                 nonlocal reads
@@ -722,7 +729,16 @@ def test_stalled_stream_subscriber_stops_server_reads(grpc_server_mode: str) -> 
                     raise StopIteration
                 reads += 1
                 record = KVEventRecord(
-                    reads, "store", "cpu", model_name, [b"h"], None, [1] * 4096
+                    reads,
+                    "stored",
+                    "CPU",
+                    model_name,
+                    (b"h",),
+                    None,
+                    (1,) * 4096,
+                    profile.block_size,
+                    profile.profile_id,
+                    world_size,
                 )
                 return KVEventBatch(True, 1, reads, False, [record])
 
@@ -740,7 +756,9 @@ def test_stalled_stream_subscriber_stops_server_reads(grpc_server_mode: str) -> 
     server.start()
     client = GrpcMultiprocessClient(f"grpc://127.0.0.1:{server.bound_port}")  # type: ignore[abstract]
     try:
-        stream = client.subscribe_kv_events(1, "model", 0, 16)
+        stream = client.subscribe_kv_events(
+            1, "model", 0, 16, 1, KVEventProfile("test", 4096)
+        )
         next(stream)
         # Reads stop once the flow-control window is full.
         deadline = time.monotonic() + 10

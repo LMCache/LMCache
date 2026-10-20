@@ -48,9 +48,12 @@ from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPConnectorMetadata,
+    LMCacheMPRequestMetadata,
+    LMCacheMPRequestTracker,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.utils import CacheStoreEvent  # noqa: E402
+from lmcache.v1.multiprocess.custom_types import KV_EVENT_CAPABILITY, KVEventProfile
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -98,17 +101,48 @@ def test_kv_event_aggregation_preserves_worker_transitions(
     assert aggregate.get_all_events() == []
 
 
+def _event_cache_config() -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=4,
+                    num_kv_heads=1,
+                    head_size=8,
+                    dtype=torch.float32,
+                ),
+            )
+        ],
+    )
+
+
 def _config(transfer_config: KVTransferConfig) -> VllmConfig:
     return cast(
         VllmConfig,
         SimpleNamespace(
             model_config=SimpleNamespace(model="test-model", use_mla=False),
             parallel_config=SimpleNamespace(
-                world_size=1, rank=0, tensor_parallel_size=1, pipeline_parallel_size=1
+                world_size=1,
+                rank=0,
+                tensor_parallel_size=1,
+                pipeline_parallel_size=1,
+                data_parallel_size=1,
+                decode_context_parallel_size=1,
             ),
-            cache_config=SimpleNamespace(block_size=4, enable_prefix_caching=True),
+            cache_config=SimpleNamespace(
+                block_size=4,
+                enable_prefix_caching=True,
+                prefix_caching_hash_algo="sha256",
+                prefix_match_unit=None,
+            ),
+            speculative_config=None,
+            lora_config=None,
             scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
             kv_transfer_config=transfer_config,
+            kv_events_config=None,
         ),
     )
 
@@ -124,6 +158,11 @@ def _request(request_id: str = "request") -> Request:
             status=RequestStatus.WAITING,
             num_computed_tokens=0,
             kv_transfer_params=None,
+            lora_request=None,
+            mm_features=[],
+            prompt_embeds=None,
+            prompt_token_ids=list(range(12)),
+            block_hashes=[],
         ),
     )
 
@@ -185,7 +224,9 @@ def mock_io(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(connector_mod, "vllm_layout_hints", lambda config: {})
     monkeypatch.setattr(adapter_mod.RequestClientFactory, "create", MagicMock())
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 4)
-    monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
+    monkeypatch.setattr(
+        adapter_mod, "get_experimental", lambda *a, **kw: {KV_EVENT_CAPABILITY}
+    )
     monkeypatch.setattr(adapter_mod, "HeartbeatThread", MagicMock())
     monkeypatch.setattr(adapter_mod, "set_ipc_policy", MagicMock())
     monkeypatch.setattr(
@@ -682,8 +723,8 @@ def test_kv_events_survive_multi_connector(
         )
     )
     cast(Any, config).kv_events_config = SimpleNamespace(enable_kv_cache_events=True)
-    scheduler = MultiConnector(config, KVConnectorRole.SCHEDULER, None)
-    worker = MultiConnector(config, KVConnectorRole.WORKER, None)
+    scheduler = MultiConnector(config, KVConnectorRole.SCHEDULER, _event_cache_config())
+    worker = MultiConnector(config, KVConnectorRole.WORKER, _event_cache_config())
     scheduler.bind_gpu_block_pool(mock_io.pool)
     try:
         kv_events_queue.extend([[_kv_event(11)], [_kv_event(12)]])
@@ -715,8 +756,10 @@ def test_kv_events_standalone_use_hook_only(
         KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
     )
     cast(Any, config).kv_events_config = SimpleNamespace(enable_kv_cache_events=True)
-    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
-    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    scheduler = LMCacheMPConnector(
+        config, KVConnectorRole.SCHEDULER, _event_cache_config()
+    )
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER, _event_cache_config())
     try:
         kv_events_queue.extend([[_kv_event(11)], [_kv_event(12)]])
         for expected in ([11], [12]):
@@ -733,6 +776,27 @@ def test_kv_events_standalone_use_hook_only(
         scheduler.shutdown()
 
 
+def test_cpu_replay_declares_cache_kind_without_prior_gpu_events(
+    mock_io: SimpleNamespace, kv_events_queue: list[list[CacheStoreEvent]]
+) -> None:
+    """A fresh router can index CPU replay before any GPU event arrives."""
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    cast(Any, config).kv_events_config = SimpleNamespace(enable_kv_cache_events=True)
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER, _event_cache_config())
+    try:
+        kv_events_queue.append([_kv_event(11)])
+        replay = worker.get_kv_connector_kv_cache_events()
+        assert replay is not None
+        (event,) = replay.get_all_events()
+        assert isinstance(event, BlockStored)
+        assert event.medium == "CPU" and event.group_idx == 0
+        assert event.kv_cache_spec_kind == "full_attention"
+    finally:
+        worker.shutdown()
+
+
 def test_kv_events_worker_reports_merge_across_ranks(
     mock_io: SimpleNamespace, kv_events_queue: list[list[CacheStoreEvent]]
 ) -> None:
@@ -746,8 +810,10 @@ def test_kv_events_worker_reports_merge_across_ranks(
         KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
     )
     cast(Any, config).kv_events_config = SimpleNamespace(enable_kv_cache_events=True)
-    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
-    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    scheduler = LMCacheMPConnector(
+        config, KVConnectorRole.SCHEDULER, _event_cache_config()
+    )
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER, _event_cache_config())
     try:
         kv_events_queue.extend([[_kv_event(11), _kv_event(12)], [_kv_event(11)]])
         rank0 = worker.build_connector_worker_meta()
@@ -764,4 +830,117 @@ def test_kv_events_worker_reports_merge_across_ranks(
         assert _stored_hashes(scheduler) == []
     finally:
         worker.shutdown()
+        scheduler.shutdown()
+
+
+@pytest.mark.parametrize("chunk_size", [4, 8])
+@pytest.mark.parametrize("integer_hashes", [False, True])
+def test_store_bindings_match_native_gpu_block_pool_events(
+    monkeypatch: pytest.MonkeyPatch, chunk_size: int, integer_hashes: bool
+) -> None:
+    """Scheduler STORE metadata matches independently emitted native GPU events."""
+    # Third Party
+    from vllm.sampling_params import SamplingParams
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+
+    monkeypatch.setenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", str(int(integer_hashes)))
+    init_none_hash(sha256)
+    request = Request(
+        request_id="native-identity",
+        prompt_token_ids=list(range(2 * chunk_size + 3)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(4, sha256),
+    )
+    pool = BlockPool(
+        16, enable_caching=True, hash_block_size=4, enable_kv_cache_events=True
+    )
+    blocks = pool.get_new_blocks(2 * chunk_size // 4)
+    pool.cache_full_blocks(request, blocks, 0, len(blocks), 4, 0)
+    gpu = pool.take_events()[0]
+    tracker = LMCacheMPRequestTracker(request)
+    tracker.native_block_hashes = request.block_hashes
+    tracker.append_block_ids(([block.block_id for block in blocks],))
+    tracker.increase_num_scheduled_tokens(len(request.all_token_ids))
+    metadata = LMCacheMPRequestMetadata.GetStoreMetadata(
+        tracker,
+        chunk_size,
+        [4],
+        event_profile=KVEventProfile("vllm-test-native", 4),
+        hash_block_size=4,
+    )
+    assert metadata is not None
+    bindings = metadata.op.event_bindings
+    assert len(bindings) == 2
+    assert [h for binding in bindings for h in binding.block_hashes] == gpu.block_hashes
+    assert [t for binding in bindings for t in binding.token_ids] == gpu.token_ids
+    assert bindings[0].parent_block_hash == gpu.parent_block_hash
+    assert bindings[1].parent_block_hash == gpu.block_hashes[chunk_size // 4 - 1]
+    assert all(binding.block_size == gpu.block_size for binding in bindings)
+    assert metadata.op.end == 2 * chunk_size  # Incomplete terminal chunk omitted.
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_native_event_startup_uses_stock_connector_hooks(
+    mock_io: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    """Native CPU events require no companion vLLM admission hook."""
+    monkeypatch.delattr(KVConnectorBase_V1, "validate_kv_event_request", raising=False)
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    cast(Any, config).kv_events_config = SimpleNamespace(enable_kv_cache_events=enabled)
+    connector = LMCacheMPConnector(
+        config, KVConnectorRole.SCHEDULER, _event_cache_config()
+    )
+    connector.shutdown()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    "field",
+    [None, "cache_salt", "lora_request", "mm_features", "prompt_embeds", "session_id"],
+)
+def test_request_namespaces_preserve_caching_and_scope_native_bindings(
+    mock_io: SimpleNamespace,
+    enabled: bool,
+    field: str | None,
+) -> None:
+    """Requests outside the event profile retain ordinary lookup and STORE."""
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    cast(Any, config).kv_events_config = SimpleNamespace(enable_kv_cache_events=enabled)
+    request = _request()
+    request.block_hashes.extend([b"a" * 32, b"b" * 32, b"c" * 32])
+    if field is not None:
+        setattr(
+            request,
+            field,
+            [
+                SimpleNamespace(
+                    identifier="a" * 64, mm_position=SimpleNamespace(offset=0, length=4)
+                )
+            ]
+            if field == "mm_features"
+            else "unsupported",
+        )
+    scheduler = LMCacheMPConnector(
+        config, KVConnectorRole.SCHEDULER, _event_cache_config()
+    )
+    try:
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+        scheduler.update_state_after_alloc(
+            request, MagicMock(get_block_ids=lambda: ([1, 2, 3],)), 0
+        )
+        for new in (True, False):
+            metadata = scheduler.build_connector_meta(_schedule(num_tokens=4, new=new))
+            assert len(metadata.requests) == 1
+            assert bool(metadata.requests[0].op.event_bindings) == (
+                enabled and field is None
+            )
+            assert metadata.requests[0].cache_salt == request.cache_salt
+    finally:
         scheduler.shutdown()

@@ -16,6 +16,7 @@ from lmcache.v1.multiprocess.custom_types import (
     DeviceIPCWrapper,
     IPCCacheServerKey,
     KVEventBatch,
+    KVEventProfile,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
@@ -55,6 +56,7 @@ class RequestClient(Protocol):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
+        event_profile: KVEventProfile | None = None,
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
@@ -244,7 +246,13 @@ class RequestClient(Protocol):
 
     @rpc_method
     def subscribe_kv_events(
-        self, instance_id: int, model_name: str, cursor: int, max_events: int
+        self,
+        instance_id: int,
+        model_name: str,
+        cursor: int,
+        max_events: int,
+        world_size: int,
+        profile: KVEventProfile,
     ) -> MessagingStream[KVEventBatch]: ...
 
     @rpc_method

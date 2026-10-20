@@ -91,7 +91,9 @@ class EventType(Enum):
     # chunk_hashes (list[bytes]), token_chunks (list[list[int]]),
     # token_offsets (list[int]: position of each chunk's first token) and
     # parent_hashes (list[bytes | None]: the preceding chunk's hash, None
-    # for a sequence's first chunk).
+    # for a sequence's first chunk). Native event binding/cleanup markers
+    # additionally carry native_identities or native_store_finished (the
+    # process-unique transfer key); those markers keep the legacy arrays empty.
     MP_TOKENS = "mp.tokens"
 
     # MP Server lifecycle sentinels (CPU-synchronous)

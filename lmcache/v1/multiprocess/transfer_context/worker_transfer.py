@@ -17,6 +17,7 @@ from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
 from lmcache.v1.multiprocess.custom_types import (
+    KVEventProfile,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
@@ -262,6 +263,7 @@ class TransferContext(ABC):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
+        event_profile: KVEventProfile | None = None,
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -277,6 +279,8 @@ class TransferContext(ABC):
                 contexts use it to normalize engine-specific KV layouts.
                 Adapters should pass their own :class:`EngineType`; the
                 default is :attr:`EngineType.VLLM` for backwards compatibility.
+            event_profile: Optional native CPU-event contract validated on every
+                worker registration; supported only by LMCache-driven transfer.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -504,6 +508,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
+        event_profile: KVEventProfile | None = None,
     ) -> None:
         """Register the worker KV cache with the LMCache server.
 
@@ -516,6 +521,8 @@ class LMCacheDrivenTransferContext(TransferContext):
             layout_hints: Optional KV-layout metadata.
             engine_group_infos: Optional engine KV-group metadata.
             engine_type: Serving engine that produced the caches.
+            event_profile: Optional native CPU-event contract to validate before
+                this worker becomes ready.
 
         Raises:
             RuntimeError: If event IPC is unsupported for the KV-cache device.
@@ -534,6 +541,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                 engine_type,
                 layout_hints or {},
                 list(engine_group_infos),
+                event_profile,
             )
         )
         future.result(timeout=mq_timeout)
@@ -789,18 +797,22 @@ class EngineDrivenTransferContext(TransferContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
+        event_profile: KVEventProfile | None = None,
     ) -> None:
         """Register KV caches with the engine-driven context server.
 
         ``engine_type`` selects the KV layout normalization used during
         registration and subsequent gather/scatter operations.
         Engine-driven transfer currently supports exactly one physical KV
-        transfer group.
+        transfer group. ``event_profile`` must be None: native events require
+        the LMCache-driven committed-residency path.
 
         Raises:
-            ValueError: If more than one physical KV transfer group is
-                registered.
+            ValueError: If native events are requested or more than one physical
+                KV transfer group is registered.
         """
+        if event_profile is not None:
+            raise ValueError("native KV events require LMCache-driven transfer")
         if len(engine_group_infos) > 1:
             raise ValueError(
                 "engine-driven transfer does not support multiple KV "

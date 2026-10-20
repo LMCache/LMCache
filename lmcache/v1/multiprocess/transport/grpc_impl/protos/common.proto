@@ -18,6 +18,8 @@ message IpcCacheServerKey {
   string cache_salt = 8;
   optional bytes encoded_request_configs = 9;
   int64 num_kv_readers = 10;
+  optional KVEventProfile event_profile = 11;
+  repeated EventBinding event_bindings = 12;
 }
 
 // Store / Retrieve and CacheBlend retrieve share this reply shape.
@@ -44,4 +46,18 @@ message EngineGroupInfo {
   int64 sw_size_tokens = 4;
   int64 extra_object_group_tag = 5;
   bool recurrent_state = 6;
+}
+
+// Engine-native content identity semantics, immutable per registered context.
+message KVEventProfile {
+  string profile_id = 1;
+  int64 block_size = 2;
+}
+
+message EventBinding {
+  string profile_id = 1;
+  repeated bytes encoded_block_hashes = 2;
+  optional bytes encoded_parent_block_hash = 3;
+  repeated int64 token_ids = 4;
+  int64 block_size = 5;
 }

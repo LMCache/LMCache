@@ -54,11 +54,7 @@ class _GeneratedServicer:
             def subscribe(
                 request: Any, context: grpc.ServicerContext, send: Callable
             ) -> None:
-                try:
-                    stream = self._dispatch(handler, request, context)
-                except ValueError as exc:
-                    context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
-                    return
+                stream = self._dispatch(handler, request, context)
                 if not context.add_callback(stream.close):
                     stream.close()
                     return
@@ -134,6 +130,12 @@ class _GeneratedServicer:
             return registered.response_encoder(result)
         except NotImplementedError as exc:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
+            raise RuntimeError("gRPC context abort unexpectedly returned") from exc
+        except ConnectionError as exc:
+            context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+            raise RuntimeError("gRPC context abort unexpectedly returned") from exc
+        except (TypeError, ValueError) as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
             raise RuntimeError("gRPC context abort unexpectedly returned") from exc
 
 
