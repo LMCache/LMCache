@@ -778,17 +778,21 @@ inline void append_split(std::vector<void*>& dsts, std::vector<void*>& srcs,
 }
 
 #if LMC_HAS_2D_BATCH_MEMCPY
-// Bytes between the device bases of consecutive layers at the same
-// (kv plane, block), when that distance is identical for every layer of the
-// group and one block of every layer fits inside one block stride; 0
-// otherwise. These are vLLM's block-outermost layouts (e.g. DeepSeek-V4),
-// which pack all layers of a block side by side, so one 2-D copy can move one
-// block of every layer (width = block bytes, height = layers). Each layer
-// then starts inside the previous layer's first block stride, so all layers
-// lie in one allocation, as the rows of a 2-D copy must; separately allocated
-// layers are at least a whole layer apart and never qualify. Both pitches
-// stay far below cudaDevAttrMaxPitch: the device pitch is under one block
-// stride and the host pitch is one layer's share of an object.
+// This function calculates the engine-side pitch of a 2-D copy that moves one
+// block of every layer of a kernel group at once (width = block bytes,
+// height = layers): the byte distance in the engine KV cache from a block of
+// layer l to the same block (and kv plane) of layer l + 1.
+// Returns:
+// - that distance, if it is the same for every pair of consecutive layers and
+//   one block of every layer fits inside one block stride. This is the
+//   block-outermost layout (e.g. vLLM's BLNHC for DeepSeek-V4), where each
+//   block packs one padded page per layer side by side, so the distance is
+//   the padded page size;
+// - 0 otherwise (e.g. layer-outermost layouts, whose layers are a whole
+//   layer apart); the caller then copies each layer with its own 1-D entry.
+// A non-zero pitch puts each layer's base inside the previous layer's first
+// block, so all layers lie in one allocation, as the rows of a 2-D copy must,
+// and the pitch stays far below cudaDevAttrMaxPitch.
 size_t uniform_layer_pitch(const BlockAddressing& addr,
                            const DirectCopyGroupSpec& spec) {
   const PageBufferShapeDesc& sd = spec.shape_desc;
@@ -841,6 +845,11 @@ void append_2d_split(std::vector<cudaMemcpy3DBatchOp>& ops, uintptr_t host,
     op.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
     ops.push_back(op);
   };
+  // Consecutive rows inside one pin chunk accumulate into a pending 2-D op:
+  // `run_start` is the first row of the pending op, `run_rows` is how many
+  // rows it has (0 = nothing pending), and `run_chunk` is the index of the
+  // cudaHostRegister chunk (virtual offset / host_buffer_alignment) that all
+  // of its rows lie in. flush() emits the pending op.
   size_t run_start = 0;
   size_t run_rows = 0;
   size_t run_chunk = 0;
@@ -852,10 +861,11 @@ void append_2d_split(std::vector<cudaMemcpy3DBatchOp>& ops, uintptr_t host,
     }
   };
   for (size_t r = 0; r < height; ++r) {
+    // Pin chunks holding the first and the last byte of row r.
     const size_t v = host_virtual_offset + r * host_pitch;
-    const size_t first = v / host_buffer_alignment;
-    const size_t last = (v + width - 1) / host_buffer_alignment;
-    if (first != last) {
+    const size_t first_chunk = v / host_buffer_alignment;
+    const size_t last_chunk = (v + width - 1) / host_buffer_alignment;
+    if (first_chunk != last_chunk) {
       flush();
       size_t off = 0;
       while (off < width) {
@@ -868,13 +878,13 @@ void append_2d_split(std::vector<cudaMemcpy3DBatchOp>& ops, uintptr_t host,
       }
       continue;
     }
-    if (run_rows > 0 && first == run_chunk) {
+    if (run_rows > 0 && first_chunk == run_chunk) {
       ++run_rows;
     } else {
       flush();
       run_start = r;
       run_rows = 1;
-      run_chunk = first;
+      run_chunk = first_chunk;
     }
   }
   flush();
@@ -969,9 +979,12 @@ size_t execute_direct_copy_transfer(
   // --- Per-group addressing, resolved once ---
   std::vector<BlockAddressing> addressing(group_specs.size());
   std::vector<int> blocks_per_chunk(group_specs.size());
-  std::vector<size_t> layer_bytes(group_specs.size());
-  // Non-zero: move one block of every layer with a single 2-D copy.
-  std::vector<size_t> layer_pitch(group_specs.size());
+  // Bytes of one (kv plane, layer) region of a chunk in the LMCache object.
+  std::vector<size_t> lmcache_layer_bytes(group_specs.size());
+  // Bytes from a block of one layer to the same block of the next layer in
+  // the engine KV cache; non-zero means one 2-D copy moves the block of every
+  // layer (see uniform_layer_pitch).
+  std::vector<size_t> engine_layer_pitch(group_specs.size());
   for (size_t g = 0; g < group_specs.size(); ++g) {
     const DirectCopyGroupSpec& spec = group_specs[g];
     const PageBufferShapeDesc& sd = spec.shape_desc;
@@ -983,8 +996,8 @@ size_t execute_direct_copy_transfer(
                 "slots_per_chunk (", spec.slots_per_chunk,
                 ") must be a positive multiple of block size (", sd.bs, ")");
     blocks_per_chunk[g] = spec.slots_per_chunk / sd.bs;
-    layer_bytes[g] = static_cast<size_t>(spec.slots_per_chunk) * sd.nh * sd.hs *
-                     sd.element_size;
+    lmcache_layer_bytes[g] = static_cast<size_t>(spec.slots_per_chunk) * sd.nh *
+                             sd.hs * sd.element_size;
     const size_t ptrs_needed =
         addressing[g].base == BlockAddressing::Base::kSingleTensor ? 1
         : addressing[g].base == BlockAddressing::Base::kPerPlaneLayer
@@ -994,7 +1007,7 @@ size_t execute_direct_copy_transfer(
                 " has ", spec.paged_layer_ptrs.size(),
                 " paged layer pointers, needs ", ptrs_needed);
   #if LMC_HAS_2D_BATCH_MEMCPY
-    layer_pitch[g] = uniform_layer_pitch(addressing[g], spec);
+    engine_layer_pitch[g] = uniform_layer_pitch(addressing[g], spec);
   #endif
   }
 
@@ -1054,14 +1067,14 @@ size_t execute_direct_copy_transfer(
       // every entry below because (kv, layer, block) only ever move forward.
       const size_t region_end =
           spec.byte_offset_in_object +
-          static_cast<size_t>(sd.kv_size) * sd.nl * layer_bytes[g];
+          static_cast<size_t>(sd.kv_size) * sd.nl * lmcache_layer_bytes[g];
       TORCH_CHECK(region_end <= obj.nbytes, "group ", g,
                   " region ends at byte ", region_end, " past the object size ",
                   obj.nbytes);
 
       // With a uniform layer pitch, one 2-D copy starting at layer 0 covers
       // every layer of a block, so the layer loop runs once.
-      const int layers_per_copy = layer_pitch[g] > 0 ? sd.nl : 1;
+      const int layers_per_copy = engine_layer_pitch[g] > 0 ? sd.nl : 1;
       for (int kv = 0; kv < sd.kv_size; ++kv) {
         for (int layer = 0; layer < sd.nl; layer += layers_per_copy) {
           const uintptr_t dev_base = select_base(addr, spec, kv, layer) +
@@ -1069,7 +1082,8 @@ size_t execute_direct_copy_transfer(
                                      layer * addr.layer_stride;
           const uintptr_t host_base =
               obj.host_ptr + spec.byte_offset_in_object +
-              (static_cast<size_t>(kv) * sd.nl + layer) * layer_bytes[g];
+              (static_cast<size_t>(kv) * sd.nl + layer) *
+                  lmcache_layer_bytes[g];
           for (int b = skip; b < bpc; ++b) {
             const int64_t block_id = spec.block_ids[block_base + b];
             TORCH_CHECK(block_id >= 0 && block_id < sd.nb, "block id ",
@@ -1081,7 +1095,7 @@ size_t execute_direct_copy_transfer(
   #if LMC_HAS_2D_BATCH_MEMCPY
             if (layers_per_copy > 1) {
               append_2d_split(ops, host, dev, addr.block_bytes, sd.nl,
-                              layer_bytes[g], layer_pitch[g],
+                              lmcache_layer_bytes[g], engine_layer_pitch[g],
                               obj.host_offset + (host - obj.host_ptr),
                               host_buffer_alignment, is_h2d);
               continue;
