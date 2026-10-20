@@ -35,6 +35,8 @@ from lmcache.v1.multiprocess.object_group_transfer import (
 )
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.platform import torch_ops
+import lmcache.lmcache_native as lmcache_native
 
 CHUNK_SIZE = 16
 MODEL = "model"
@@ -100,6 +102,50 @@ def test_split_unfull_chunk_block_ids():
 
     block_ids = [[1, 2]]
     assert split_unfull_chunk_block_ids(block_ids, [1], 2, False) == (block_ids, [])
+
+
+def test_right_aligned_unfull_blocks_round_trip_through_the_copy_op():
+    """A 2-block unfull list padded to the 4-block window and skipped moves
+    exactly its real blocks: the copy op needs a full window per object."""
+    num_layers, num_blocks, block_size, num_heads, head_size = 2, 8, 4, 2, 8
+    window_blocks = 4
+    shape_desc = torch_ops.PageBufferShapeDesc()
+    shape_desc.nl = num_layers
+    shape_desc.nb = num_blocks
+    shape_desc.bs = block_size
+    shape_desc.nh = num_heads
+    shape_desc.hs = head_size
+    shape_desc.element_size = 4
+    shape_desc.kv_size = 2
+    paged_shape = (2, num_blocks, block_size, num_heads, head_size)
+    prefill = [torch.randn(paged_shape) for _ in range(num_layers)]
+    decode = [torch.zeros(paged_shape) for _ in range(num_layers)]
+    chunk = torch.zeros(
+        2, num_layers, window_blocks * block_size, num_heads * head_size
+    )
+
+    def copy(layers, block_ids, direction):
+        padding = window_blocks - len(block_ids)
+        torch_ops.multi_layer_block_kv_transfer(
+            layers,
+            [chunk],
+            torch.tensor(block_ids[:1] * padding + block_ids),
+            torch.device("cpu"),
+            direction,
+            shape_desc,
+            window_blocks * block_size,
+            lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            padding,
+        )
+
+    copy(prefill, [6, 2], lmcache_native.TransferDirection.D2H)
+    copy(decode, [1, 5], lmcache_native.TransferDirection.H2D)
+
+    for layer in range(num_layers):
+        assert torch.equal(decode[layer][:, 1], prefill[layer][:, 6])
+        assert torch.equal(decode[layer][:, 5], prefill[layer][:, 2])
+        untouched = [0, 2, 3, 4, 6, 7]
+        assert not decode[layer][:, untouched].any()
 
 
 @pytest.fixture

@@ -112,13 +112,26 @@ all-or-nothing commit, same read-lock release on retrieve).
 The unfull chunk is a single object per object group. Its per-group block
 list is trimmed to the last `min(n, keep)` blocks, where `keep` is the
 group's per-chunk window in blocks (all blocks for full attention, the last
-window for sliding window, one block for Mamba state and for the ring). Store
-and load trim the same way, so block `i` maps to object offset `i` on both
-sides. The transfer kernel copies exactly the blocks it is given
-(`num_blocks_per_object = total_blocks / num_objects`), so a short list
-needs no kernel change; the unfull object always takes the staging-kernel
-path (`transfer_unfull_chunk`), never the direct-copy path. An object group
-whose unfull blocks are all null (no real state) stores nothing.
+window for sliding window, one block for Mamba state and for the ring).
+
+The copy kernel requires exactly `keep` blocks per object
+(`num_blocks_per_object * block_size == slots_per_chunk`), so a shorter list
+is right-aligned instead of changing the kernel: it is padded at the front
+with placeholder ids and the padding is skipped with the kernel's existing
+`skip_prefix_n_blocks`, so it is never read or written:
+
+```text
+full attention, keep = 16, 3 real blocks:
+  block ids : [b0 b0 b0 ... b0 | b0 b1 b2]     (13 placeholders + 3 real)
+  skip      : 13
+  object    : slots 0..12 untouched, slots 13..15 <- b0 b1 b2
+```
+
+Store and load fit the list the same way, so the real block at position `i`
+lands in the same object slot on both sides. The unfull object always takes
+the staging-kernel path (`transfer_unfull_chunk`), never the direct-copy
+path, whose per-chunk planning assumes full chunks. An object group whose
+unfull blocks are all null (no real state) stores nothing.
 
 Sliding-window groups need the window ending at `P`, which can start in
 chunk `k-1`. The chunk lookup already retains the last window of the hit
