@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
 import math
@@ -256,6 +256,16 @@ class _LookupAck:
 
     submitted_at: float
     """``time.monotonic()`` timestamp taken when the LOOKUPs were sent."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    """Guards ``status`` and ``closed`` against the ack callbacks."""
+
+    status: dict[str, tuple[MessagingFuture[Any], float]] | None = None
+    """QUERY_PREFETCH_STATUS futures sent once every server acked, or None
+    while nobody has sent them yet."""
+
+    closed: bool = False
+    """Set when the request is cleaned up or ended; no status is sent after."""
 
 
 def get_lmcache_chunk_size(
@@ -980,14 +990,56 @@ class LMCacheMPSchedulerAdapter:
         }
 
         # Do not wait for the acknowledgement here: that is a full server
-        # round trip on the scheduler thread. check_lookup_result resolves
-        # the futures lazily, one non-blocking poll per call.
-        self._unacked_lookups[request_id] = _LookupAck(
-            futures=futures, submitted_at=time.monotonic()
-        )
+        # round trip on the scheduler thread. check_lookup_result polls the
+        # futures without blocking.
+        ack = _LookupAck(futures=dict(futures), submitted_at=time.monotonic())
+        self._unacked_lookups[request_id] = ack
         self._pending_lookups.add(request_id)
         self._lookup_params[request_id] = (token_ids, cache_salt, request_configs)
+        # Send the status query as soon as the last ack lands, so its reply
+        # is usually there by the next scheduler step instead of two steps on.
+        if self._nonblocking_lookup_status:
+            for fut in futures.values():
+                fut.add_done_callback(
+                    lambda _f: self._send_status_once_acked(request_id, ack, futures)
+                )
         return True
+
+    @staticmethod
+    def _close_ack(ack: _LookupAck) -> dict[str, tuple[MessagingFuture[Any], float]]:
+        """Stop the ack callbacks from sending and return what they sent."""
+        with ack.lock:
+            ack.closed = True
+            return ack.status or {}
+
+    def _send_status_once_acked(
+        self,
+        request_id: str,
+        ack: _LookupAck,
+        futures: dict[str, MessagingFuture[None]],
+    ) -> None:
+        """Send QUERY_PREFETCH_STATUS once every server acked the LOOKUP.
+
+        Runs in a transport receive thread when an ack lands. Failed acks are
+        left for ``check_lookup_result`` to surface.
+
+        Args:
+            request_id: The lookup request.
+            ack: Its acknowledgement state.
+            futures: Every LOOKUP future of the request, keyed by server URL.
+        """
+        if not all(f.query() and f.exception_ is None for f in futures.values()):
+            return
+        with ack.lock:
+            if ack.closed or ack.status is not None:
+                return
+            ack.status = {
+                url: (
+                    self.req_clients[url].query_prefetch_status(request_id),
+                    time.monotonic(),
+                )
+                for url in self._server_urls
+            }
 
     def _free_inconsistent_lookup_locks(
         self,
@@ -1035,7 +1087,8 @@ class LMCacheMPSchedulerAdapter:
         First polls, without blocking, whether every server has acknowledged
         the LOOKUP sent by ``maybe_submit_lookup_request``; while any ack is
         outstanding this returns None. Once all servers have acked, polls one
-        outstanding QUERY_PREFETCH_STATUS future per unresolved server without
+        outstanding QUERY_PREFETCH_STATUS future per unresolved server, which
+        in non-blocking mode was usually sent when the last ack arrived, without
         waiting by default. Setting ``lmcache.mp.nonblocking_lookup_status`` to
         False instead waits for each reply in the current callback. Returns the
         matched token count when the prefetch is complete, or None if still
@@ -1081,11 +1134,12 @@ class LMCacheMPSchedulerAdapter:
                 if time.monotonic() - ack.submitted_at >= self._mq_timeout:
                     for url in ack.futures:
                         self._mark_lookup_timed_out(url)
-                    del self._unacked_lookups[request_id]
+                    self._close_ack(self._unacked_lookups.pop(request_id))
                     return 0
                 # Acknowledgement still in flight; poll again next step.
                 return None
-            del self._unacked_lookups[request_id]
+            early = self._close_ack(self._unacked_lookups.pop(request_id))
+            self._lookup_status.setdefault(request_id, {}).update(early)
 
         # Persistent accumulator for this request. A server present in
         # the dict has already handed over its final hit count and must
@@ -1157,7 +1211,9 @@ class LMCacheMPSchedulerAdapter:
             request_id: The ID of the finished request.
         """
         self._pending_lookups.discard(request_id)
-        self._unacked_lookups.pop(request_id, None)
+        ack = self._unacked_lookups.pop(request_id, None)
+        if ack is not None:
+            self._close_ack(ack)
         self._lookup_status.pop(request_id, None)
         self._finished_lookup_results.pop(request_id, None)
         self._per_server_hits.pop(request_id, None)
@@ -1276,8 +1332,10 @@ class LMCacheMPSchedulerAdapter:
         if not self.is_healthy:
             return
 
+        status = self._lookup_status.pop(request_id, {})
         ack = self._unacked_lookups.pop(request_id, None)
         if ack is not None:
+            status.update(self._close_ack(ack))
             remaining = max(
                 0.0, self._mq_timeout - (time.monotonic() - ack.submitted_at)
             )
@@ -1290,9 +1348,7 @@ class LMCacheMPSchedulerAdapter:
 
         # Status polling used to complete inside check_lookup_result(). Keep
         # its ordering before END_SESSION when a request finishes early.
-        for url, (future, submitted_at) in self._lookup_status.pop(
-            request_id, {}
-        ).items():
+        for url, (future, submitted_at) in status.items():
             remaining = max(0.0, self._mq_timeout - (time.monotonic() - submitted_at))
             if not future.wait(timeout=remaining):
                 self._mark_lookup_timed_out(url)
