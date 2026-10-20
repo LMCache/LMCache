@@ -152,7 +152,7 @@ class ValkeyWorkerPool:
             auto-discovers the full topology from any reachable seed.
         num_workers: Number of worker threads (and clients); must be > 0.
         username: Optional auth username.
-        password: Optional auth password.
+        password: Auth password. Required when ``username`` is set.
         request_timeout: Per-request timeout in seconds.
         connection_timeout: Initial connection timeout in seconds.
         tls_enable: Whether to use TLS.
@@ -168,6 +168,8 @@ class ValkeyWorkerPool:
         ValueError: If ``addresses`` is empty or ``num_workers <= 0``.
         RuntimeError: If ``valkey-glide`` is not installed (raised during
             warmup).
+        ConfigurationError: If ``username`` is set without ``password``
+            (raised by glide at client creation during warmup).
     """
 
     def __init__(
@@ -268,7 +270,13 @@ class ValkeyWorkerPool:
 
         credentials = None
         if self._username or self._password:
-            credentials = glide_sync.ServerCredentials(self._username, self._password)
+            # glide's positional order is (password, username); pass by keyword.
+            # An empty password becomes None so glide rejects a username-only
+            # config at client creation instead of connecting without AUTH.
+            credentials = glide_sync.ServerCredentials(
+                password=self._password or None,
+                username=self._username,
+            )
 
         addresses = [
             glide_sync.NodeAddress(host, port) for host, port in self._addresses
