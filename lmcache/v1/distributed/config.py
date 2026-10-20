@@ -658,8 +658,9 @@ class StorageManagerConfig:
     prefetch_policy: str = "default"
     """ The L2 prefetch policy name. """
 
-    prefetch_max_in_flight: int = 8
-    """ Maximum number of concurrent prefetch requests. """
+    prefetch_inflight_watermark: float = 0.5
+    """ Fraction of each L1's capacity that in-flight L2 prefetches may stage
+    before new prefetch requests wait, in (0, 1]. """
 
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
@@ -682,6 +683,11 @@ class StorageManagerConfig:
         for c in self.l1_manager_configs:
             if c.eviction is None:
                 c.eviction = self.eviction_config
+        if not 0 < self.prefetch_inflight_watermark <= 1:
+            raise ValueError(
+                "prefetch_inflight_watermark must be in (0, 1], got "
+                f"{self.prefetch_inflight_watermark}"
+            )
         normalize_storage_manager_config(self)
         validate_storage_manager_config(self)
 
@@ -991,10 +997,20 @@ def add_storage_manager_args(
         "Default is 'default' (pick the first adapter by index).",
     )
     policy_group.add_argument(
+        "--l2-prefetch-inflight-watermark",
+        type=float,
+        default=0.5,
+        help="Fraction of L1 capacity, in (0, 1], that in-flight L2 prefetch "
+        "requests may stage before new prefetch requests wait. Default is 0.5.",
+    )
+    # Deprecated: released deployers (operator) still render this flag into
+    # server args, and rejecting it crashes the pod on startup.
+    policy_group.add_argument(
         "--l2-prefetch-max-in-flight",
         type=int,
-        default=8,
-        help="Maximum number of concurrent prefetch requests. Default is 8.",
+        default=None,
+        help="Deprecated and ignored; prefetch admission follows "
+        "--l2-prefetch-inflight-watermark.",
     )
     policy_group.add_argument(
         "--periodic-notifier-interval-ms",
@@ -1038,6 +1054,12 @@ def parse_args_to_config(
     Returns:
         StorageManagerConfig: The configuration object.
     """
+    if args.l2_prefetch_max_in_flight is not None:
+        logger.warning(
+            "--l2-prefetch-max-in-flight is deprecated and ignored; prefetch "
+            "admission follows --l2-prefetch-inflight-watermark (%s)",
+            args.l2_prefetch_inflight_watermark,
+        )
     defaults = (
         EvictionConfig(
             args.eviction_policy,
@@ -1094,7 +1116,7 @@ def parse_args_to_config(
             l2_adapter_config=parse_args_to_l2_adapters_config(args),
             store_policy=args.l2_store_policy,
             prefetch_policy=args.l2_prefetch_policy,
-            prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+            prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
             periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
         )
     if args.l1_size_gb is None or defaults is None:
@@ -1174,7 +1196,7 @@ def parse_args_to_config(
         l2_adapter_config=l2_adapter_config,
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
-        prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+        prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
     return config
