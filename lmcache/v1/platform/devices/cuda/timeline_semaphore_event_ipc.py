@@ -53,6 +53,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.platform.devices.cuda.utils import (
     _CHECK_CUDA,
+    _bind_primary_context,
     _cuda,
     _raw_stream_handle,
     _resolve_device_index,
@@ -202,6 +203,7 @@ def _enqueue_wait(event: TimelineSemaphoreEvent, stream: object | None) -> None:
         return
     raw: cudaStream_t = _raw_stream_handle(stream, event.device_index)
     with torch.cuda.device(event.device_index):
+        _bind_primary_context(event.device_index)
         result: tuple[object, ...] = _cuda.driver.cuStreamWaitValue64(
             _cuda.driver.CUstream(raw),
             _cuda.driver.CUdeviceptr(event.base_ptr + event.slot_offset),
@@ -257,6 +259,7 @@ class TimelineSemaphoreEventIPCBackend:
                 buffer.buffer_ops_stream, device_index
             )
             with torch.cuda.device(device_index):
+                _bind_primary_context(device_index)
                 _CHECK_CUDA(
                     _cuda.driver.cuStreamWriteValue64(
                         _cuda.driver.CUstream(stream_hdl),
@@ -333,6 +336,7 @@ class TimelineSemaphoreEventIPCBackend:
             event.slot_offset = slot_offset
             event.seq = seq
             with torch.cuda.device(event.device_index):
+                _bind_primary_context(event.device_index)
                 _CHECK_CUDA(
                     _cuda.driver.cuStreamWriteValue64(
                         _cuda.driver.CUstream(stream_hdl),
