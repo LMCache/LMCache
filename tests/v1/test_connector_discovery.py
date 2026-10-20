@@ -5,6 +5,9 @@ import asyncio
 import importlib
 import pkgutil
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.v1.storage_backend.connector import ConnectorAdapter, ConnectorManager
 
@@ -74,9 +77,20 @@ def test_discover_adapters(monkeypatch):
 
     loop = asyncio.new_event_loop()
     try:
-        manager = ConnectorManager("lm://localhost:1234", loop, None)
+        manager = ConnectorManager("good://localhost:1234", loop, None)
     finally:
         loop.close()
 
     assert len(manager.adapters) == 1
     assert isinstance(manager.adapters[0], GoodAdapter)
+
+
+def test_legacy_lm_scheme_is_rejected():
+    """The removed TCP connector must not accept legacy ``lm://`` URLs."""
+    loop = asyncio.new_event_loop()
+    try:
+        manager = ConnectorManager("lm://localhost:1234", loop, None)
+        with pytest.raises(ValueError, match="No adapter found"):
+            manager.create_connector()
+    finally:
+        loop.close()

@@ -68,6 +68,9 @@ Commonly used flags include:
      - Base number of request worker threads.
    * - ``--grpc-server-workers N``
      - gRPC dispatch threads (used only with ``--transport grpc``).
+   * - ``--grpc-server-mode {sync,aio}``
+     - gRPC server implementation (used only with ``--transport grpc``).
+       Default is ``sync``.
    * - ``--coordinator-url URL``
      - Register with an MP coordinator at this base URL (e.g.
        ``http://coordinator:9300``). Opt-in; enables fleet registration. See
@@ -113,7 +116,7 @@ Commonly used flags include:
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation for P2P reads (default ``nixl``).
    * - ``--server-module JSON``
-     - Load an out-of-tree multiprocess server module factory. Repeatable.
+     - Import out-of-tree ``DiscoverableModule`` classes. Repeatable.
        See :doc:`/developer_guide/extending_lmcache/server_modules`.
    * - ``--trace-level {storage,events}``
      - Enable trace recording: ``storage`` records StorageManager calls for

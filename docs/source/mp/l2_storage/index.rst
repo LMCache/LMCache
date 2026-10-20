@@ -143,7 +143,8 @@ When L1 is used purely as a write buffer (all data lives in L2), use
 ``--l2-store-policy skip_l1`` together with ``--eviction-policy noop``.
 This combination deletes keys from L1 as soon as they are stored to L2
 and disables the LRU eviction tracker entirely, reducing memory and CPU
-overhead.
+overhead. A key that a request is still reading when its L2 store finishes
+is deleted shortly after that read ends.
 
 .. code-block:: bash
 

@@ -687,16 +687,21 @@ class StorageManager:
             handle.prefetch_request_id, timeout
         )
 
-    def touch_l1_keys(self, keys: list[ObjectKey]):
-        """
-        Touch the keys in L1 storage, marking the keys
-        as accessed(retrieved or stored).
+    def touch_cached_keys(self, keys: list[ObjectKey]) -> None:
+        """Refresh eviction recency in L1 *and* L2, without I/O.
+
+        A real load refreshes both tiers, so an L1-only touch would leave
+        the keys cold to L2.
 
         Args:
             keys (list[ObjectKey]): List of object keys to touch.
         """
         for manager in self._l1_managers_by_id.values():
             manager.touch_keys(keys)
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            adapter.submit_touch(keys)
 
     def delete_l1_keys(
         self, keys: list[ObjectKey], force: bool = False

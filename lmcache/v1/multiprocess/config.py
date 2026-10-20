@@ -52,6 +52,10 @@ class MPServerConfig:
     grpc_server_workers: int = 32
     """Worker threads for gRPC request dispatch. Only used by gRPC transport."""
 
+    grpc_server_mode: Literal["sync", "aio"] = "sync"
+    """gRPC server implementation. ``aio`` receives requests on one event loop
+    and hands only the handlers to worker threads. Only used by gRPC transport."""
+
     hash_algorithm: str = "blake3"
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
 
@@ -145,10 +149,6 @@ class MPServerConfig:
     sent a PING (model warmup, or death before its first request). Must be
     >= worker_reap_timeout_seconds."""
 
-    enable: list[str] = field(default_factory=list)
-    """List of experimental transfer modules to enable. Options: transfer_query
-    (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
-
     kv_event_log_size: int = 32768
     """CPU store/eviction records retained for KV-event subscribers; 0 disables it."""
 
@@ -158,7 +158,7 @@ class MPServerConfig:
     different sentinel, for example ``-1``."""
 
     server_modules: list[ExtServerModuleSpec] = field(default_factory=list)
-    """Out-of-tree server-module factories to load after built-in modules."""
+    """Out-of-tree ``DiscoverableModule`` classes to import explicitly."""
 
     def __post_init__(self) -> None:
         """Validate the chunk size and worker-reaping timeouts.
@@ -433,6 +433,14 @@ def add_mp_server_args(
         "--transport grpc. Default is 32.",
     )
     mp_group.add_argument(
+        "--grpc-server-mode",
+        choices=("sync", "aio"),
+        default="sync",
+        help="gRPC server implementation. aio receives requests on one event "
+        "loop and hands only the handlers to worker threads. Only used by "
+        "--transport grpc. Default is sync.",
+    )
+    mp_group.add_argument(
         "--hash-algorithm",
         type=str,
         default="blake3",
@@ -573,15 +581,6 @@ def add_mp_server_args(
         "orders a prompt so it starts with an exact copy of a cached prompt.",
     )
     mp_group.add_argument(
-        "--enable",
-        type=str,
-        nargs="*",
-        default=[],
-        help="List of experimental transfer modules to enable. "
-        "Options: transfer_query (see lmcache.v1.multiprocess.modules."
-        "experimental.__init___.py).",
-    )
-    mp_group.add_argument(
         "--kv-event-log-size",
         type=int,
         default=MPServerConfig.kv_event_log_size,
@@ -592,11 +591,14 @@ def add_mp_server_args(
         "--server-module",
         action="append",
         default=[],
-        help="JSON object describing an out-of-tree server-module factory. "
-        "Repeat to load multiple modules. Example: "
+        help="JSON object describing a server module to load. "
+        "Repeat to load multiple Python modules. Example: "
         '\'{"module_path":"my_pkg.server_module",'
-        '"factory_name":"build_server_modules",'
-        '"config":{"name":"demo"}}\'.',
+        '"config":{"name":"demo"}}\'. '
+        "Opt-in modules shipped with LMCache live under "
+        "lmcache.v1.multiprocess.plugin_modules, e.g. "
+        '\'{"module_path":"lmcache.v1.multiprocess.plugin_modules.qstore"}\' '
+        "for query-tensor transfer.",
     )
     return parser
 
@@ -631,6 +633,7 @@ def parse_args_to_mp_server_config(
         max_gpu_workers=max_gpu,
         max_cpu_workers=max_cpu,
         grpc_server_workers=args.grpc_server_workers,
+        grpc_server_mode=args.grpc_server_mode,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
@@ -651,7 +654,6 @@ def parse_args_to_mp_server_config(
         session_ttl_seconds=args.session_ttl_seconds,
         kv_load_policy=args.kv_load_policy,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
-        enable=args.enable or [],
         kv_event_log_size=args.kv_event_log_size,
         server_modules=parse_server_module_specs(args.server_module or []),
     )

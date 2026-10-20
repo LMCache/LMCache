@@ -5,6 +5,10 @@ The paged Q ring buffer (QRingBuffer) is a temporary buffer for query tensors,
 made to be paged in GPU such that it's compatible with the existing LMCache
 paged KV store/retrieve machinery. This implementation is copied and modified
 from the LMCache-driven KV transfer module.
+
+This module is an opt-in plugin: it is not auto-discovered and is built only
+when the server is started with
+``--server-module '{"module_path": "lmcache.v1.multiprocess.plugin_modules.qstore"}'``.
 """
 
 # Standard
@@ -22,12 +26,22 @@ from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, KVCache
+from lmcache.v1.multiprocess.custom_types import (
+    TRANSFER_QUERY,
+    IPCCacheServerKey,
+    KVCache,
+)
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    InstanceLivenessTarget,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
+    LMCacheDrivenTransferModule,
     get_layout_desc,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
@@ -43,7 +57,7 @@ import lmcache.lmcache_native as lmcache_native
 logger = init_logger(__name__)
 
 
-class QStoreModule(InstanceLivenessTarget):
+class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
     """Handles paged Q ring registration and store operations.
 
     Owns Q context registrations and provides handlers for register,
@@ -52,6 +66,39 @@ class QStoreModule(InstanceLivenessTarget):
     Args:
         ctx: The shared engine context.
     """
+
+    module_name = "qstore"
+    # Requires the LMCache-driven transfer path to exist.
+    module_dependencies = (LMCacheDrivenTransferModule,)
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        """Build whenever this module is loaded through ``--server-module``.
+
+        Requires the LMCache-driven transfer path and advertises the
+        ``transfer_query`` experimental feature to clients.
+
+        Args:
+            build_ctx: Shared build context; the LMCache-driven transfer
+                module must already be built.
+
+        Returns:
+            The constructed module.
+
+        Raises:
+            ValueError: If the LMCache-driven transfer module is not built
+                (``supported_transfer_mode`` is neither ``lmcache_driven`` nor
+                ``auto``).
+        """
+        try:
+            build_ctx.require(LMCacheDrivenTransferModule)
+        except ValueError:
+            raise ValueError(
+                f"Server module '{cls.module_name}' ({TRANSFER_QUERY}) requires "
+                "supported_transfer_mode='lmcache_driven' or 'auto'."
+            ) from None
+        build_ctx.add_experimental(TRANSFER_QUERY)
+        return cls(build_ctx.engine_context)
 
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
@@ -249,7 +296,7 @@ class QStoreModule(InstanceLivenessTarget):
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
         # time so a stale entry is not reaped right after recovery.
-        # REGISTER_Q_CACHE is SYNC-serialized on the MQ main loop, so it is
+        # REGISTER_Q_CACHE is SERIALIZED on the MQ main loop, so it is
         # the sole inserter.
         with self._lock:
             existing = self._q_contexts.get(instance_id)
