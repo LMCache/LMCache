@@ -55,7 +55,10 @@ case "${1:-}" in
       --build-arg "VLLM_IMAGE=$BASE" -t "$TAG" "$D"
     # Untag a base we pulled: prt-serving holds its layers, and prune() then
     # frees them with the old serving image instead of leaking one a week.
-    [ -z "$pulled" ] || docker rmi "$BASE" >/dev/null
+    # The classic image store never tags what BuildKit pulls, so check first.
+    if [ -n "$pulled" ] && docker image inspect "$BASE" >/dev/null 2>&1; then
+      docker rmi "$BASE" >/dev/null
+    fi
     ;;
   lmcache)
     USAGE="usage: build.sh lmcache <LMCache dir> <serving image>"
