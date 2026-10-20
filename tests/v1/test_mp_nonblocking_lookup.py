@@ -68,7 +68,7 @@ class Client:
     """Old-peer RPC surface only; no L0 capabilities or GPU API are supplied."""
 
     def __init__(self) -> None:
-        self.ack = CheckedFuture()
+        self.ack: MessagingFuture[Any] = CheckedFuture()
         self.status = CheckedFuture()
         self.replies: deque[MessagingFuture[Any]] = deque([self.status])
         self.lookups: list[Any] = []
@@ -314,6 +314,49 @@ def test_ack_ordering_and_one_status_in_flight_per_server(
     assert all(client.queries == ["r"] for client in clients)
 
 
+def test_status_is_sent_when_the_last_ack_lands(make_adapter: AdapterFactory) -> None:
+    adapter, clients = make_adapter(2)
+    adapter.maybe_submit_lookup_request("r", list(range(256)))
+    clients[0].ack.set_result(None)
+    assert not any(client.queries for client in clients)
+    clients[1].ack.set_result(None)
+    assert all(client.queries == ["r"] for client in clients)
+    for client in clients:
+        client.status.set_result(2)
+    assert adapter.check_lookup_result("r") == 128
+
+
+def test_end_session_waits_for_a_status_query_sent_on_ack(
+    make_adapter: AdapterFactory,
+) -> None:
+    adapter, (client,) = make_adapter()
+    ends_when_waited: list[list[str]] = []
+
+    class StatusFuture(MessagingFuture[Any]):
+        def wait(self, timeout: float | None = None) -> bool:
+            ends_when_waited.append(list(client.ends))
+            return True
+
+    # end_session may block on the ack, which CheckedFuture forbids.
+    client.ack = MessagingFuture()
+    client.replies = deque([StatusFuture()])
+    adapter.maybe_submit_lookup_request("r", list(range(256)))
+    client.ack.set_result(None)
+    assert client.queries == ["r"]
+
+    adapter.end_session("r")
+    assert ends_when_waited == [[]]
+    assert client.ends == ["r"]
+
+
+def test_no_status_query_after_cleanup(make_adapter: AdapterFactory) -> None:
+    adapter, (client,) = make_adapter()
+    adapter.maybe_submit_lookup_request("r", list(range(256)))
+    adapter.cleanup_lookup_result("r")
+    client.ack.set_result(None)
+    assert not client.queries
+
+
 @pytest.mark.parametrize("chunks", [0, 2])
 def test_none_is_unresolved_and_terminal_zero_is_cached(
     make_adapter: AdapterFactory, chunks: int
@@ -401,8 +444,8 @@ def test_cleanup_discards_old_status_before_request_id_reuse(
     adapter.cleanup_lookup_result("r")
     adapter.cleanup_lookup_result("r")
     assert adapter.check_lookup_result("r") == 0
-    adapter.maybe_submit_lookup_request("r", list(range(256)))
     client.replies.append(ready(0))
+    adapter.maybe_submit_lookup_request("r", list(range(256)))
     client.status.set_result(4)
     assert resolved(adapter) == 0
     assert len(client.lookups) == 2 and client.queries == ["r", "r"]

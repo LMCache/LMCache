@@ -128,6 +128,7 @@ def test_submit_sends_key_start_and_reports_whether_it_sent():
     adapter._pending_lookups = set()
     adapter._unacked_lookups = {}
     adapter._lookup_params = {}
+    adapter._nonblocking_lookup_status = True
     adapter._server_urls = ["u"]
     adapter.req_clients = {"u": MagicMock()}
     adapter._create_key = MagicMock()

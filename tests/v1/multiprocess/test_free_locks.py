@@ -503,6 +503,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     adapter._pending_lookups = set()
     adapter._unacked_lookups = {}
     adapter._lookup_params = {}
+    adapter._nonblocking_lookup_status = True
 
     token_ids = list(range(512))
 
