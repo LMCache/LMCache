@@ -263,7 +263,7 @@ consumer code must never do any of the following — it queries via the
   `get_shape_desc(group_idx)` to it, assembles per-group GPU pointer
   tensors via `get_group_data_ptrs`. No parallel `shape_descs_` /
   `hidden_dim_sizes_` state.
-- **`lmcache/v1/gpu_connector/gpu_connectors.py::VLLMPagedMemGPUConnectorV3._initialize_kv_cache_pointers`**
+- **`lmcache/inprocess/v1/gpu_connector/gpu_connectors.py::VLLMPagedMemGPUConnectorV3._initialize_kv_cache_pointers`**
   — for the in-process vLLM path, calls
   `normalize_kv_and_discover_format` (which permutes for HND support
   and detects the format in one step) and constructs

@@ -18,9 +18,9 @@ import uuid
 import torch
 
 # First Party
+from lmcache.inprocess.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -540,7 +540,9 @@ def create_gpu_connector(hidden_dim, num_layers):
 
 def create_xpu_connector(hidden_dim, num_layers):
     # First Party
-    from lmcache.v1.gpu_connector.xpu_connectors import VLLMPagedMemXPUConnectorV2
+    from lmcache.inprocess.v1.gpu_connector.xpu_connectors import (
+        VLLMPagedMemXPUConnectorV2,
+    )
 
     return VLLMPagedMemXPUConnectorV2(hidden_dim, num_layers)
 
@@ -555,7 +557,7 @@ def create_musa_connector(
     interface consistent across accelerators.
     """
     # First Party
-    from lmcache.v1.gpu_connector.musa_connectors import (
+    from lmcache.inprocess.v1.gpu_connector.musa_connectors import (
         VLLMPagedMemMUSAConnectorV2,
     )
 

@@ -5,7 +5,7 @@
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector import GPUConnectorInterface
+from lmcache.inprocess.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 
 
 class MockGPUConnector(GPUConnectorInterface):
