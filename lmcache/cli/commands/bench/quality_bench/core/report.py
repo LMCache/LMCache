@@ -6,6 +6,7 @@ from collections import Counter
 from dataclasses import asdict
 import hashlib
 import json
+import math
 import os
 
 # First Party
@@ -22,6 +23,8 @@ from lmcache.cli.commands.bench.quality_bench.core.run_files import (
     SUMMARY_FILE,
     ArmRecord,
     PlanRecord,
+    write_json,
+    write_jsonl,
 )
 from lmcache.cli.commands.bench.quality_bench.core.runner import ArmRun
 from lmcache.cli.commands.bench.quality_bench.core.verdict import (
@@ -89,6 +92,9 @@ def write_results(
       verdict (with any reasons it is INVALID), engagement, per-arm scores
       and failure counts.
 
+    Both are written atomically and as strict JSON (an undefined standard
+    error is ``null``), so any JSON parser reads them.
+
     Args:
         config: The analysis's config.
         plan_record: The results directory's plan.
@@ -102,7 +108,7 @@ def write_results(
     plan = plan_record.plan
     runs = [arm.run for arm in arms]
     blend = next(arm for arm in arms if arm.run.role is ArmRole.BLEND)
-    _write_jsonl(os.path.join(config.results_dir, ROWS_FILE), rows)
+    write_jsonl(os.path.join(config.results_dir, ROWS_FILE), rows)
 
     summary = {
         "run_fingerprint": run_fingerprint(plan_record, config),
@@ -132,8 +138,8 @@ def write_results(
         "invalid_reasons": verdict.invalid_reasons,
         "samples_needed": verdict.samples_needed,
         "reference_flip_rate": verdict.reference_flip_rate,
-        "blend": asdict(verdict.blend),
-        "others": [asdict(c) for c in verdict.others],
+        "blend": _comparison_record(verdict.blend),
+        "others": [_comparison_record(c) for c in verdict.others],
         "engagement": asdict(verdict.engagement),
         "arm_counts": {run.label: arm_counts(run) for run in runs},
         "store_failures": {run.label: run.store_failures for run in runs},
@@ -142,9 +148,7 @@ def write_results(
         ),
     }
     summary_path = os.path.join(config.results_dir, SUMMARY_FILE)
-    with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
-        f.write("\n")
+    write_json(summary_path, summary)
     logger.info("Wrote quality results to %s", config.results_dir)
     return summary_path
 
@@ -234,8 +238,13 @@ def format_summary(
     return "\n".join(lines)
 
 
-def _write_jsonl(path: str, records: list[dict[str, object]]) -> None:
-    """Write *records* to *path*, one JSON object per line."""
-    with open(path, "w", encoding="utf-8") as f:
-        for record in records:
-            f.write(json.dumps(record) + "\n")
+def _comparison_record(comparison: ArmComparison) -> dict[str, object]:
+    """Return *comparison* for ``summary.json``, as strict JSON.
+
+    ``standard_error`` is infinite with fewer than two scored questions;
+    JSON has no infinity, so it is written as ``null``.
+    """
+    record = asdict(comparison)
+    if not math.isfinite(comparison.standard_error):
+        record["standard_error"] = None
+    return record

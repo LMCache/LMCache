@@ -148,6 +148,24 @@ class TestVerdict:
         assert engagement["blend_share"] == pytest.approx(0.6)
         assert "segmented-prefix tokens:" in capsys.readouterr().out
 
+    def test_results_are_strict_json(self, dataset, engines, tmp_path) -> None:
+        """One question leaves the standard error undefined: null, not Infinity."""
+        engines[BLEND_URL] = FakeSender(answering(RIGHT))
+        out = str(tmp_path / "out")
+        run_both(dataset, out, "--limit", "1")
+
+        analyze(out)
+
+        def refuse(constant: str) -> float:
+            raise ValueError(f"non-standard JSON constant {constant}")
+
+        with open(os.path.join(out, SUMMARY_FILE)) as f:
+            result = json.loads(f.read(), parse_constant=refuse)
+        assert result["blend"]["standard_error"] is None
+        with open(os.path.join(out, ROWS_FILE)) as f:
+            for line in f:
+                json.loads(line, parse_constant=refuse)
+
     def test_summary_reports_the_plan(self, dataset, engines, tmp_path, capsys) -> None:
         engines[BLEND_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")

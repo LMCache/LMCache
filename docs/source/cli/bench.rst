@@ -2144,7 +2144,8 @@ the verdict:
    evidence passages identified: dataset 100, answer_string 0, none 0
    verdict: FAIL
 
-The results directory holds:
+The results directory holds the files below; every field of every file is
+described in :doc:`bench_quality_results`.
 
 .. list-table::
    :header-rows: 1
@@ -2168,12 +2169,12 @@ The results directory holds:
        request; ``summary.json`` reports the share as
        ``measured_earlier_share``, and the terminal summary prints it when it
        is not zero.
-   * - ``arm_<arm>.json``
+   * - ``arm_<label>.json``
      - ``run``
      - One per pass: URL, engine and lmcache versions, start and finish
        times, run-level blend counters, store failures, and the plan
        fingerprint. Written last: answers without it are ignored.
-   * - ``answers_<arm>.jsonl``
+   * - ``answers_<label>.jsonl``
      - ``run``
      - Raw responses per pass: parsed answer, TTFT, output tokens and blend
        counter deltas.
@@ -2196,6 +2197,11 @@ Two summaries are comparable **only when their** ``run_fingerprint``
 **values match**. It covers the model, dataset, task, ``--limit``, scenario,
 chunk size, output budget, template kwargs, seed, verdict metric, judge
 model, and every measured prompt.
+
+.. toctree::
+   :hidden:
+
+   bench_quality_results
 
 
 Quality exit codes

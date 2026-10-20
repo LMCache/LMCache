@@ -347,7 +347,12 @@ nor reuse of a saved reference.
 
 **The directory** (`--output-dir`, used as given; omitted, `run` creates
 `quality_results/<YYYYmmdd-HHMMSS>/`, with `-2`, `-3`, … on a same-second
-collision). Every JSON write is atomic (temporary file, then `os.replace`).
+collision). Every JSON write except the append-only judge cache is atomic
+(temporary file, then `os.replace`) and strict JSON (`allow_nan=False`; an
+undefined standard error is written as `null`), so any JSON parser reads the
+results. The field-by-field reference -- types, units, sentinels, which keys
+are conditional -- is the user docs page
+`docs/source/cli/bench_quality_results.rst`; the table below is the overview.
 
 | File | Written by | Contents |
 |---|---|---|

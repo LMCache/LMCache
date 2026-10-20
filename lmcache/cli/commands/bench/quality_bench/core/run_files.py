@@ -226,7 +226,7 @@ def ensure_plan(
     path = os.path.join(results_dir, PLAN_FILE)
     if not os.path.exists(path):
         os.makedirs(results_dir, exist_ok=True)
-        _write_json(
+        write_json(
             path,
             {
                 "schema_version": SCHEMA_VERSION,
@@ -238,7 +238,7 @@ def ensure_plan(
                 "plan": plan.to_record(),
             },
         )
-        _write_jsonl(
+        write_jsonl(
             os.path.join(results_dir, MANIFEST_FILE),
             [s.manifest_entry(plan.scenario, plan.chunk_size) for s in plan.samples],
         )
@@ -322,11 +322,11 @@ def write_arm(
         started_at: When the pass started.
         finished_at: When the pass finished.
     """
-    _write_jsonl(
+    write_jsonl(
         _in(results_dir, f"answers_{run.label}.jsonl"),
         [_answer_record(a, run.engagement_measured) for a in run.answers],
     )
-    _write_json(
+    write_json(
         _in(results_dir, f"arm_{run.label}.json"),
         {
             "schema_version": SCHEMA_VERSION,
@@ -438,6 +438,47 @@ def load_arms(results_dir: str, plan_record: PlanRecord) -> list[ArmRecord]:
     return records
 
 
+def write_json(path: str, record: Mapping[str, object]) -> None:
+    """Write one JSON object to *path* atomically.
+
+    The object goes to ``<path>.tmp`` first and replaces *path* in one
+    step, so a reader never sees half a file; a ``.tmp`` left by a killed
+    process is never read. Non-finite numbers are refused, so every file is
+    strict JSON that any parser accepts.
+
+    Args:
+        path: Destination file.
+        record: The object to write.
+
+    Raises:
+        ValueError: If *record* holds ``inf`` or ``nan``.
+    """
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2, allow_nan=False)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def write_jsonl(path: str, records: list[dict[str, object]]) -> None:
+    """Write one JSON object per line to *path* atomically.
+
+    Same guarantees as :func:`write_json`.
+
+    Args:
+        path: Destination file.
+        records: The objects to write, one per line.
+
+    Raises:
+        ValueError: If a record holds ``inf`` or ``nan``.
+    """
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, allow_nan=False) + "\n")
+    os.replace(tmp, path)
+
+
 def _now() -> str:
     """Return the current local time, ISO 8601, to the second."""
     return datetime.now().astimezone().isoformat(timespec="seconds")
@@ -545,21 +586,3 @@ def _read_jsonl(path: str) -> list[dict[str, Any]]:
     """Read one JSON object per non-blank line."""
     with open(path, encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
-
-
-def _write_json(path: str, record: Mapping[str, object]) -> None:
-    """Write *record* atomically, so a reader never sees half a file."""
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(record, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
-
-
-def _write_jsonl(path: str, records: list[dict[str, object]]) -> None:
-    """Write *records* atomically, one JSON object per line."""
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        for record in records:
-            f.write(json.dumps(record) + "\n")
-    os.replace(tmp, path)
