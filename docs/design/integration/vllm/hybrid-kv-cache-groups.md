@@ -166,7 +166,7 @@ and the ring holds nothing the next step reads. Resuming mid-group (for
 example a prefill-to-decode handoff at an arbitrary prompt length) does need
 the ring's content, and this path does not provide it.
 
-With `lmcache.mp.unfull_chunk` on, rings are registered instead: each forms
+With `lmcache.mp.save_unfull_chunk` on, rings are registered instead: each forms
 an `EngineGroupInfo(per_request_state=True)` (`is_per_request_state_spec`;
 other scratch specs stay excluded), the server sizes it as one block per
 chunk, and every store and retrieve carries the request's ring block once per

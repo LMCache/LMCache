@@ -22,7 +22,7 @@ disaggregation, or the next round of a chat) resumes at `P` instead of `kC`.
 It is the shared groundwork for PD handoff and multi-round reuse; neither
 policy lives here.
 
-Enabled per connector with `lmcache.mp.unfull_chunk: true`
+Enabled per connector with `lmcache.mp.save_unfull_chunk: true`
 (`kv_connector_extra_config`). Off by default: nothing changes for existing
 deployments.
 

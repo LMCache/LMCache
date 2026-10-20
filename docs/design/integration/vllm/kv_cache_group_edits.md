@@ -35,7 +35,7 @@ the config + tensors already resolve.
 
 Rules 1-3 apply only to Mamba-hybrid models (the registry is only consulted
 when `kv_cache_config.has_mamba_layers`). Rule 4 applies to any model, and
-only when per-request rings are registered (`lmcache.mp.unfull_chunk`).
+only when per-request rings are registered (`lmcache.mp.save_unfull_chunk`).
 
 ### 1. Mamba state pages
 
