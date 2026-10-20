@@ -361,7 +361,7 @@ class KVLayerGroupsManager:
                 object group.
         """
         # Import here to break a circular import via
-        # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
+        # lmcache.inprocess.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
         # First Party
         from lmcache.v1.gpu_connector.utils import (
             get_num_blocks,
