@@ -25,7 +25,10 @@ it:
   tiers matter: a real load refreshes recency in both, so touching only L1
   would leave the keys cold to L2 and get them evicted.
 - **does not** lock or prefetch it. The prefetch covers `[c0, end)` only;
-  hit counts shift back to absolute at status time.
+  hit counts shift back to absolute at status time. The hit-rate metrics
+  do not shift: they cover `[c0, end)` only, and the covered prefix is
+  reported separately as `apc_covered_tokens` on the event, so it never
+  reads as an L1 hit.
 
 So the prefix is no longer *promoted* into L1 on every lookup — that
 promotion was the waste. Cache contents are unchanged; only placement is.
