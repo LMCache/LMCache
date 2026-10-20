@@ -299,24 +299,13 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
    * - ``lmcache_mp.lookup_hit_l2_keys``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Hit keys loaded from L2 into L1.
-   * - ``lmcache_mp.lookup_apc_covered``
-     - Counter (attrs: ``model_name``, ``cache_salt``)
-     - Tokens the engine's prefix cache already held when the lookup ran.
-       LMCache skips them, so they are excluded from ``lookup_requested``
-       and ``lookup_hit``.
    * - ``lmcache_mp.lookup_prompt``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Whole prompt length of each looked-up request, sub-chunk tail
        included (denominator of the request-level hit rate).
-   * - ``lmcache_mp.lookup_engine_hit``
-     - Counter (attrs: ``model_name``, ``cache_salt``)
-     - Tokens the engine's own prefix cache held for the request, from the
-       connector's ``lmcache.hint.engine_computed_tokens`` hint (the aligned
-       covered prefix when no hint was sent).
    * - ``lmcache_mp.lookup_request_hit``
      - Counter (attrs: ``model_name``, ``cache_salt``)
-     - Prefix of the prompt served by the engine or LMCache: the longer of
-       ``lookup_engine_hit`` and ``lookup_apc_covered + lookup_hit``
+     - Prefix of the prompt served by the engine's prefix cache or LMCache
        (numerator of the request-level hit rate).
    * - ``lmcache_mp.lookups``
      - Counter (attrs: ``model_name``, ``cache_salt``)
@@ -330,9 +319,9 @@ All lookup counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``),
 so they always advance together per completed lookup. Early-exit lookups
 contribute ``0`` tokens to the lookup-level token counters, ``0`` keys to
 both key counters, and ``+1`` to ``lookups`` / ``lookup_early_exit``; they
-still advance the request-level counters (``lookup_prompt``,
-``lookup_engine_hit``, ``lookup_request_hit``), which describe the request
-rather than the lookup. Abandoned lookups contribute to none of them.
+still advance the request-level counters (``lookup_prompt`` and
+``lookup_request_hit``), which describe the request rather than the
+lookup. Abandoned lookups contribute to none of them.
 
 The ``model_name`` and ``cache_salt`` attributes are captured at lookup
 time from ``IPCCacheServerKey`` so dashboards can compute per-model or
@@ -340,29 +329,31 @@ per-tenant hit rate. ``cache_salt`` can be high-cardinality (one entry
 per tenant or isolation domain); drop it at scrape time with
 ``metric_relabel_configs`` if storage cost matters.
 
-**PromQL for hit rate:**
+**PromQL for hit rate** (both ratios use the whole prompt as denominator):
 
 .. code-block:: promql
 
-    # Aggregate (all models, all salts):
+    # LMCache token hit rate, share of prompt tokens (all models, all salts):
     rate(lmcache_mp_lookup_hit_tokens_total[5m])
-    / rate(lmcache_mp_lookup_requested_tokens_total[5m])
+    / rate(lmcache_mp_lookup_prompt_tokens_total[5m])
+
+    # Request-level: share of prompt tokens served by the engine's prefix
+    # cache or LMCache:
+    rate(lmcache_mp_lookup_request_hit_tokens_total[5m])
+    / rate(lmcache_mp_lookup_prompt_tokens_total[5m])
 
     # Per-model:
     sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
-    / sum(rate(lmcache_mp_lookup_requested_tokens_total[5m])) by (model_name)
+    / sum(rate(lmcache_mp_lookup_prompt_tokens_total[5m])) by (model_name)
+
+    # LMCache hit rate on only the range it was asked to look up (past the
+    # prefix the engine already held):
+    rate(lmcache_mp_lookup_hit_tokens_total[5m])
+    / rate(lmcache_mp_lookup_requested_tokens_total[5m])
 
     # Share of hit tokens L1 could serve on its own:
     rate(lmcache_mp_lookup_hit_l1_tokens_total[5m])
     / rate(lmcache_mp_lookup_hit_tokens_total[5m])
-
-    # Request-level: share of prompt tokens served by the engine's own
-    # prefix cache, and by the engine or LMCache together:
-    rate(lmcache_mp_lookup_engine_hit_tokens_total[5m])
-    / rate(lmcache_mp_lookup_prompt_tokens_total[5m])
-
-    rate(lmcache_mp_lookup_request_hit_tokens_total[5m])
-    / rate(lmcache_mp_lookup_prompt_tokens_total[5m])
 
     # Fraction of lookups that early-exited, by reason:
     sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)

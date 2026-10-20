@@ -396,8 +396,11 @@ class TestAttributionCounters:
         assert delta["lmcache_mp.lookups"] == 1
         assert delta.get("lmcache_mp.lookup_early_exit", 0) == 0
 
-    def test_apc_covered_has_its_own_counter(self, bus, subscriber, snapshot):
-        """The engine-covered prefix lands only in lookup_apc_covered."""
+    def test_apc_covered_prefix_stays_out_of_the_hit_counters(
+        self, bus, subscriber, snapshot
+    ):
+        """The engine-covered prefix moves neither lookup_requested nor
+        lookup_hit, and gets no counter of its own."""
         bus.start()
         bus.publish(
             Event(
@@ -418,7 +421,7 @@ class TestAttributionCounters:
         bus.stop()
 
         delta = snapshot()
-        assert delta["lmcache_mp.lookup_apc_covered"] == 1024
+        assert delta.get("lmcache_mp.lookup_apc_covered", 0) == 0
         assert delta["lmcache_mp.lookup_requested"] == 512
         assert delta["lmcache_mp.lookup_hit"] == 512
         assert delta["lmcache_mp.lookup_hit_l1"] == 256
@@ -426,8 +429,8 @@ class TestAttributionCounters:
     def test_request_level_fields_have_their_own_counters(
         self, bus, subscriber, snapshot
     ):
-        """prompt / engine_hit / request_hit land on the request-level
-        counters and leave the lookup-level ones alone."""
+        """prompt / request_hit land on the request-level counters and leave
+        the lookup-level ones alone; engine_hit is not exported."""
         bus.start()
         bus.publish(
             Event(
@@ -452,7 +455,7 @@ class TestAttributionCounters:
 
         delta = snapshot()
         assert delta["lmcache_mp.lookup_prompt"] == 1380
-        assert delta["lmcache_mp.lookup_engine_hit"] == 818
+        assert delta.get("lmcache_mp.lookup_engine_hit", 0) == 0
         assert delta["lmcache_mp.lookup_request_hit"] == 1024
         assert delta["lmcache_mp.lookup_requested"] == 512
         assert delta["lmcache_mp.lookup_hit"] == 256

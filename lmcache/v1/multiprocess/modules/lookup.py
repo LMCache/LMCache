@@ -136,7 +136,7 @@ class _PrefetchJob:
     # Chunks below ``key.start`` the engine already holds.  Kept out of the
     # hit-rate counters and reported as ``apc_covered_tokens`` instead; equals
     # ``start_chunk`` except on a declined lookup, which offsets no hits.
-    covered_chunks: int = 0
+    engine_covered_chunks: int = 0
     # Request-level facts, reported on every path (early exits included) so
     # the request-level hit rate has the full prompt as its denominator.
     # ``prompt_tokens`` is the whole prompt, sub-chunk tail included;
@@ -344,7 +344,7 @@ class LookupModule(DiscoverableModule):
                 requested_tokens=looked_up_tokens,
                 num_object_groups=attn_desc.num_object_groups,
                 attn_desc=attn_desc,
-                covered_chunks=start_chunk,
+                engine_covered_chunks=start_chunk,
                 early_exit_reason="load_policy_recompute",
             )
             return
@@ -375,7 +375,7 @@ class LookupModule(DiscoverableModule):
                 num_object_groups=attn_desc.num_object_groups,
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
-                covered_chunks=start_chunk,
+                engine_covered_chunks=start_chunk,
             )
             return
 
@@ -402,7 +402,7 @@ class LookupModule(DiscoverableModule):
                 num_object_groups=attn_desc.num_object_groups,
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
-                covered_chunks=start_chunk,
+                engine_covered_chunks=start_chunk,
                 prompt_tokens=len(key.token_ids),
                 engine_hit_tokens=_engine_hit_tokens(
                     key, start_chunk * self._ctx.chunk_size
@@ -662,7 +662,7 @@ class LookupModule(DiscoverableModule):
         num_object_groups: int = 1,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         start_chunk: int = 0,
-        covered_chunks: int = 0,
+        engine_covered_chunks: int = 0,
         early_exit_reason: str = "",
     ) -> None:
         """Register a job that resolves immediately without a prefetch.
@@ -674,7 +674,7 @@ class LookupModule(DiscoverableModule):
             attn_desc: The request's attention window descriptor.
             start_chunk: First chunk of the looked-up range; reported as the
                 hit when everything below it is engine-covered.
-            covered_chunks: Engine-covered chunks below ``key.start``,
+            engine_covered_chunks: Engine-covered chunks below ``key.start``,
                 reported as ``apc_covered_tokens``.
             early_exit_reason: The ``lookup()`` branch that returned before
                 submitting a prefetch; empty when the lookup simply had
@@ -694,10 +694,10 @@ class LookupModule(DiscoverableModule):
                 num_object_groups=num_object_groups,
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
-                covered_chunks=covered_chunks,
+                engine_covered_chunks=engine_covered_chunks,
                 prompt_tokens=len(key.token_ids),
                 engine_hit_tokens=_engine_hit_tokens(
-                    key, covered_chunks * self._ctx.chunk_size
+                    key, engine_covered_chunks * self._ctx.chunk_size
                 ),
                 model_name=key.model_name,
                 cache_salt=key.cache_salt,
@@ -753,7 +753,7 @@ class LookupModule(DiscoverableModule):
         )
 
         chunk_size = self._ctx.chunk_size
-        covered_tokens = job.covered_chunks * chunk_size
+        covered_tokens = job.engine_covered_chunks * chunk_size
         hit_tokens = (l1_chunks + l2_chunks) * chunk_size
         # Prefix of the prompt served by either cache.  Both ranges start at
         # token 0 and the lookup starts at or below the engine hit, so the
