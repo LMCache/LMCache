@@ -1262,15 +1262,40 @@ class EvictionRacingL1Manager:
 
 
 class TestReservationFailures:
-    @pytest.mark.parametrize(
-        ("fetching_policy", "expected_rows"),
-        [("full", [[], []]), ("prefix", [[], []])],
-    )
-    def test_out_of_memory_row_is_dropped(self, fetching_policy, expected_rows):
-        """An L1 with room for one row's buffers but not two leaks nothing.
-        Under "prefix" the unreserved row empties the servable prefix; under
-        "full" a chunk counts only when every row loads, so the whole-column
-        trim releases the reserved row too."""
+    def test_request_larger_than_free_l1_loads_leading_chunks(self):
+        """A request that does not fit in L1 still loads the chunks that do,
+        instead of missing entirely."""
+        layout = make_layout()
+        object_bytes = 100 * 2 * 512 * 2
+        l1_manager = L1Manager(
+            make_l1_config(size_in_bytes=object_bytes * 4 + 65536, use_lazy=False)
+        )
+        adapter = make_adapter()
+        keys = [make_object_key(i) for i in range(6)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+        try:
+            req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+            result = wait_for_result(ctrl, req_id, timeout=10.0)
+
+            assert row_bits(result) == [0, 1, 2, 3]
+            assert_read_locked(l1_manager, keys[:4])
+            assert_absent(l1_manager, keys[4:])
+            assert l1_manager.get_staging_memory_usage() == 0
+            assert_l2_unlocked(adapter)
+            l1_manager.finish_read(keys[:4])
+        finally:
+            ctrl.stop()
+            adapter.close()
+            l1_manager.close()
+
+    @pytest.mark.parametrize("fetching_policy", ["full", "prefix"])
+    def test_out_of_memory_row_keeps_what_fits(self, fetching_policy):
+        """An L1 with room for one row's buffers plus one more chunk leaks
+        nothing. The second row reserves the chunk that fits, so column 0
+        is complete in both rows and is served under either policy."""
+        expected_rows = [[0], [0]]
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
         l1_manager = L1Manager(
@@ -1309,9 +1334,9 @@ class TestReservationFailures:
 
     def test_out_of_memory_trims_to_whole_columns(self):
         """Under ``"full"`` the shortfall keeps only columns
-        complete in every row. Batched reservation is all-or-nothing per
-        row, so a row that cannot fully reserve empties the whole-column
-        set; the released chunks stay loadable (found, no locks held)."""
+        complete in every row. The second row only fits column 0, so the
+        reserved columns 1 and 2 of the first row are released and stay
+        loadable (found, no locks held)."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
         l1_manager = L1Manager(
@@ -1332,7 +1357,7 @@ class TestReservationFailures:
             )
             result = wait_for_result(ctrl, req_id, timeout=10.0)
 
-            assert [row_bits(result, 0), row_bits(result, 1)] == [[], []]
+            assert [row_bits(result, 0), row_bits(result, 1)] == [[0], [0]]
             # Capacity-dropped columns are still reported found -- absent
             # would mean evicted.
             assert result is not None and result.found_cells is not None
@@ -1340,9 +1365,12 @@ class TestReservationFailures:
                 [0, 1, 2],
                 [0, 1, 2],
             ]
-            assert_absent(l1_manager, all_keys)
+            held = [rows[0].keys[0], rows[1].keys[0]]
+            assert_read_locked(l1_manager, held)
+            assert_absent(l1_manager, [k for k in all_keys if k not in held])
             assert l1_manager.get_staging_memory_usage() == 0
             assert_l2_unlocked(adapter)
+            l1_manager.finish_read(held)
         finally:
             ctrl.stop()
             adapter.close()
