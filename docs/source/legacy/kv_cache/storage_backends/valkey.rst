@@ -45,7 +45,7 @@ The following ``extra_config`` keys are supported:
      - Enable TLS. Required for ElastiCache Serverless.
    * - ``valkey_username``
      - ``""``
-     - Authentication username.
+     - Authentication username. Requires ``valkey_password``. Leave empty to use the default user with password-only auth.
    * - ``valkey_password``
      - ``""``
      - Authentication password.
