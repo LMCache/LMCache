@@ -19,6 +19,15 @@ Terms used throughout this package:
   one store the worker accepts per request. A batch is *in flight* from its
   submission until every worker has reported it, and the request's later
   operations stay buffered for as long as that lasts.
+- **Held**: a buffered operation whose GPU blocks the manager pinned while
+  the request's batch was in flight, so they cannot be recycled behind a
+  slow store. A held operation cannot lose its data; it is submitted once
+  the batch settles, and the batch takes over the pin.
+- **Protected**: a buffered operation an imminent admission would recycle.
+  The manager moves its blocks to the free-queue tail instead of pinning
+  them, so the admission still has every free block to allocate from, and
+  the next drain emits it. Only when the allocation would reach the tail
+  too are they held instead.
 - **Session**: the LMCache-side state a request owns while it is storing.
   ``LazyOffloadManager`` ends it once the request has finished and has
   nothing buffered and nothing in flight.
@@ -69,24 +78,36 @@ class DrainSignals:
     """One scheduler step's inputs to a drain decision.
 
     Attributes:
-        new_blocks_allocated: GPU blocks vLLM handed out during this step,
-            counted gross. Drives the policy's estimate of how fast the free
-            queue is being consumed.
-        est_next_step_blocks: Blocks the next step is expected to allocate,
-            derived from the tokens this step scheduled. Used so a burst
-            after an idle period is not underestimated.
+        next_step_blocks: Upper bound on the blocks the requests now running
+            can allocate before the next drain. Admissions and resumed
+            loads are not in it: the manager protects buffered blocks from
+            those right before they allocate.
+        resuming_blocks: Upper bound on the blocks that requests whose load
+            finished, but that no step has scheduled yet, allocate once
+            scheduled. The protection when their load finished assumed the
+            next step; until a step schedules them, the head moves on and
+            the danger depth counts them too.
         finished_request_ids: Requests whose generation has ended. Their
             buffered operations are still storable; the id is reported so a
             policy may treat them differently from running requests.
         blocked_request_ids: Requests that already have a store batch in
             flight. The worker tracks one store future per request id, so
-            these must stay buffered until their receipt arrives.
+            these must stay buffered until their receipt arrives; a policy
+            may ask the manager to hold their blocks meanwhile.
+        preempted_request_ids: Requests this step preempted. Their blocks
+            are freed, and once rescheduled they restart from token zero,
+            which discards whatever is still buffered for them.
+        running_blocks_allocated: Blocks this step allocated to requests
+            that were already running, which the previous drain's
+            ``next_step_blocks`` bounds. Read only to check that bound.
     """
 
-    new_blocks_allocated: int
-    est_next_step_blocks: int
+    next_step_blocks: int
+    resuming_blocks: int
     finished_request_ids: set[str]
     blocked_request_ids: set[str]
+    preempted_request_ids: set[str]
+    running_blocks_allocated: int
 
 
 @dataclass
@@ -100,10 +121,38 @@ class LazyOffloadDrain:
             operations. This is a buffer fact only: the manager combines it
             with the request's phase and in-flight batch before tearing a
             session down.
+        holds: Operations of blocked requests whose blocks the manager must
+            pin now, one entry per request. Each entry extends the request's
+            held operations, which always form a prefix of its buffer. They
+            stay buffered and are emitted by a later drain.
+        to_tail: Operations at risk that ``max_drain_per_step`` left
+            buffered, whose blocks the manager must move to the free-queue
+            tail now. They are due, and a later drain emits them.
     """
 
     items: list[PendingStoreItem] = field(default_factory=list)
     emptied_request_ids: list[str] = field(default_factory=list)
+    holds: list[PendingStoreItem] = field(default_factory=list)
+    to_tail: list[PendingStoreItem] = field(default_factory=list)
+
+
+@dataclass
+class AdmissionProtection:
+    """What the manager must do before an admission allocates.
+
+    Attributes:
+        to_tail: Operations to move to the free-queue tail, one entry per
+            request, in prefix order. They stay allocatable, so the
+            admission is not refused for them, and the next drain emits
+            them unless their request is blocked, which holds them.
+        holds: Operations to pin, because the allocation would reach the
+            tail too. Like ``LazyOffloadDrain.holds``, each entry extends
+            the request's held prefix; pinning may make vLLM defer the
+            admission, which is cheaper than losing the store.
+    """
+
+    to_tail: list[PendingStoreItem] = field(default_factory=list)
+    holds: list[PendingStoreItem] = field(default_factory=list)
 
 
 class OffloadPolicy(ABC):
@@ -151,6 +200,21 @@ class OffloadPolicy(ABC):
         Returns:
             The stores to submit and the requests left with nothing buffered.
         """
+
+    def protect(self, num_blocks: int) -> AdmissionProtection:
+        """Protect what an imminent allocation of ``num_blocks`` would recycle.
+
+        Called right before vLLM allocates blocks for a request it admits,
+        which evicts from the free-queue head before the step's drain runs.
+        A policy that never lets buffered blocks be recycled returns nothing.
+
+        Args:
+            num_blocks: Upper bound on the blocks the allocation consumes.
+
+        Returns:
+            The operations to move to the tail and the ones to pin.
+        """
+        return AdmissionProtection()
 
     @abstractmethod
     def has_pending_request(self, request_id: str) -> bool:

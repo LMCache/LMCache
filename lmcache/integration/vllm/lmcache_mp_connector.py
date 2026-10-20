@@ -368,6 +368,98 @@ def get_resolved_attention_block_sizes(
     return {vllm_config.cache_config.block_size}
 
 
+def _hash_block_size(vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig") -> int:
+    """Return the token granularity vLLM hashes and splits prefill at.
+
+    Mirrors ``resolve_kv_cache_block_sizes`` for align-mode Mamba hybrids:
+    ``prefix_match_unit`` if set, else the GCD of the groups' block sizes.
+    Unscaled by DCP, the GCD can only come out finer, which keeps every
+    bound built on it a bound.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        The granularity, in tokens.
+    """
+    prefix_match_unit = getattr(vllm_config.cache_config, "prefix_match_unit", None)
+    if prefix_match_unit:
+        return prefix_match_unit
+    return math.gcd(
+        *(group.kv_cache_spec.block_size for group in kv_cache_config.kv_cache_groups)
+    )
+
+
+def get_mamba_step_extra_blocks(
+    vllm_config: VllmConfig,
+    kv_cache_config: "KVCacheConfig | None",
+) -> dict[int, int]:
+    """Return the align-mode Mamba groups and their extra blocks per step.
+
+    ``MambaManager.allocate_new_blocks`` caps a running request's step at
+    one state block, plus a prefill checkpoint block when the spec has
+    them and a copy-on-write block after a partial hit, which needs a hash
+    granularity finer than the block.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        Group index -> blocks beyond the state block; empty unless the
+        model has Mamba groups in ``align`` cache mode.
+    """
+    if kv_cache_config is None or (
+        getattr(vllm_config.cache_config, "mamba_cache_mode", "none") != "align"
+    ):
+        return {}
+    hash_block_size = _hash_block_size(vllm_config, kv_cache_config)
+    extra: dict[int, int] = {}
+    for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
+        spec = group.kv_cache_spec
+        if not any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__):
+            continue
+        extra[group_idx] = int(
+            getattr(spec, "num_prefill_checkpoint_blocks", 0) > 0
+        ) + int(hash_block_size < spec.block_size)
+    return extra
+
+
+def get_prefill_alignment(
+    vllm_config: VllmConfig,
+    kv_cache_config: "KVCacheConfig | None",
+) -> int:
+    """Return what a prefill chunk short of the prompt's end ends on.
+
+    ``Scheduler._mamba_block_aligned_split`` ends such a chunk on a block
+    boundary, or earlier at a stop on the hash grid, unless a block is
+    wider than the prefill chunk limit.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        The alignment in tokens, or 0 when chunks may end anywhere.
+    """
+    if kv_cache_config is None or not get_mamba_step_extra_blocks(
+        vllm_config, kv_cache_config
+    ):
+        return 0
+    scheduler_config = vllm_config.scheduler_config
+    max_prefill_tokens = (
+        getattr(scheduler_config, "max_num_scheduled_tokens", None)
+        or scheduler_config.max_num_batched_tokens
+    )
+    threshold = scheduler_config.long_prefill_token_threshold
+    if threshold > 0:
+        max_prefill_tokens = min(max_prefill_tokens, threshold)
+    if vllm_config.cache_config.block_size > max_prefill_tokens:
+        return 0
+    return _hash_block_size(vllm_config, kv_cache_config)
+
+
 def validate_mamba_step_alignment(
     vllm_config: VllmConfig,
     kv_cache_config: "KVCacheConfig | None" = None,
@@ -774,6 +866,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # Whether vLLM called get_kv_connector_kv_cache_events this step; it
             # never does for a MultiConnector child (see build_connector_worker_meta).
             self._kv_events_hook_called = False
+            # The bound metadata whose stores wait_for_save already submitted.
+            self._saved_metadata: KVConnectorMetadata | None = None
             if self.transfer_intermediate_tensors:
                 # First Party
                 from lmcache.integration.vllm.experimental import (
@@ -828,6 +922,25 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     vllm_config.kv_transfer_config.kv_connector_extra_config,
                     self._group_tokens_per_block,
                     self.scheduler_adapter,
+                    # The scheduler's per-step token budget. Older vLLM has
+                    # no max_num_scheduled_tokens and budgets the batch size.
+                    max_step_tokens=(
+                        getattr(
+                            vllm_config.scheduler_config,
+                            "max_num_scheduled_tokens",
+                            None,
+                        )
+                        or vllm_config.scheduler_config.max_num_batched_tokens
+                    ),
+                    num_lookahead_tokens=(
+                        (spec_config.num_speculative_tokens or 0) if spec_config else 0
+                    ),
+                    mamba_groups=get_mamba_step_extra_blocks(
+                        vllm_config, kv_cache_config
+                    ),
+                    prefill_alignment=get_prefill_alignment(
+                        vllm_config, kv_cache_config
+                    ),
                 )
 
     @property
@@ -992,9 +1105,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         from save_kv_layer is complete before finishing the forward.
 
         This prevents overwrites of paged KV buffer before saving done.
+
+        Submits the bound metadata's stores once: ``get_finished`` calls it
+        too on steps that schedule no tokens, for vLLM releases whose
+        no-forward path skips it.
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
+        if metadata is self._saved_metadata:
+            return
+        self._saved_metadata = metadata
 
         request_ids = []
         ops = []
@@ -1064,6 +1184,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
+        metadata = self._connector_metadata
+        if (
+            isinstance(metadata, LMCacheMPConnectorMetadata)
+            and metadata.schedules_no_tokens
+        ):
+            # vLLM 0.18 to 0.30 skip wait_for_save on steps that schedule no
+            # tokens, which still carry lazy-offload stores. Other steps may
+            # defer it past the draft model's forward, so they are left alone.
+            self.wait_for_save()
         if self.lazy_offload:
             val = self.worker_adapter.get_finished_with_lazy_offload()
         else:
@@ -1283,162 +1412,20 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             connectivity issues or eviction), those tokens must not be taken
             into account.
         """
-        tracker = self._get_or_create_request_tracker(request)
-
-        # A failed asynchronous load is bypassed until vLLM admits the request
-        # for local computation via update_state_after_alloc().  The scheduler
-        # may poll this method repeatedly before that admission; do not submit
-        # another lookup or re-enter WAITING_FOR_REMOTE_KVS in the meantime.
-        if tracker.state == LMCacheMPRequestState.BYPASS_LMCACHE:
-            return 0, False
-
-        # A completed async load normally leaves num_computed_tokens > 0, so
-        # the scheduler does not call this method again.  If vLLM reset the
-        # request to zero after the worker reported invalid blocks, however,
-        # the existing tracker is still READY and describes the failed load.
-        # Reusing it would report another external hit without transitioning
-        # back through WAITING_FOR_LOAD, leaving the request stuck forever in
-        # WAITING_FOR_REMOTE_KVS.  Fail closed for this request instead: drop
-        # the stale local lookup/tracker state and let vLLM recompute locally.
-        # The server has already released each failed worker's reader share.
-        if (
-            tracker.state == LMCacheMPRequestState.READY
-            and request.num_computed_tokens == 0
-            and tracker.num_lmcache_hit_tokens > 0
-        ):
-            logger.warning(
-                "Bypassing LMCache for request %s after a failed async KV load; "
-                "the prompt will be recomputed locally.",
-                request.request_id,
-            )
-            self.scheduler_adapter.cleanup_lookup_result(request.request_id)
-            tracker.allocated_block_ids.clear()
-            tracker.num_stored_tokens = 0
-            tracker.num_vllm_hit_tokens = 0
-            tracker.num_lmcache_hit_tokens = 0
-            tracker.apc_covered_tokens = 0
-            tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
-            return 0, False
-
-        # APC-covered lookup start (0 = none; stays 0 after a shrink):
-        # the vLLM hit floored to every group's paged-chunk boundary and the
-        # LMCache chunk size. It never exceeds the aligned lookup end since
-        # vLLM caps the APC hit at num_prompt_tokens - 1; an all-covered
-        # lookup is served by the server's empty prefetch job.
-        lookup_start = 0
-        if not tracker.need_full_lookup:
-            tokens_per_chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
-            lookup_start = (
-                num_computed_tokens
-                // self._hit_alignment_tokens
-                * self._hit_alignment_tokens
-                // tokens_per_chunk
-                * tokens_per_chunk
-            )
-
-        if tracker.lookup_started_at is None:
-            tracker.lookup_started_at = time.monotonic()
-        submitted = self.scheduler_adapter.maybe_submit_lookup_request(
-            request.request_id,
-            token_ids=tracker.get_token_ids(),
-            cache_salt=tracker.cache_salt,
-            # vLLM's prefix-cache hit, for the server's KV load policy.
-            request_configs={
-                **(tracker.request_configs or {}),
-                "lmcache.hint.engine_computed_tokens": num_computed_tokens,
-            },
-            reserve_last_token=self._reserve_last_token_for_lookup,
-            start=lookup_start,
+        num_external_tokens, load_async = self._match_external_tokens(
+            request, num_computed_tokens
         )
-        # Freeze only on a real submit: a no-op poll would re-freeze a
-        # boundary the in-flight lookup never used.
-        if submitted:
-            tracker.apc_covered_tokens = lookup_start
-
-        ret = self.scheduler_adapter.check_lookup_result(request.request_id)
-        if ret is None:
-            return None, True
-        assert tracker.lookup_started_at is not None
-        self._connector_stats.record_lookup(
-            time.monotonic() - tracker.lookup_started_at
-        )
-        tracker.lookup_started_at = None
-
-        # Save the vLLM hit count even when LMCache misses. It is rounded
-        # down to a boundary aligned for every engine group (a full-prompt
-        # APC hit reports num_prompt_tokens - 1), so the retrieve-skip
-        # range stays paged-chunk-aligned in all groups.
-        tracker.num_vllm_hit_tokens = (
-            num_computed_tokens
-            // self._hit_alignment_tokens
-            * self._hit_alignment_tokens
-        )
-
-        # APC shrank below the frozen boundary: stop skipping (sticky),
-        # remember the abandoned lookup's locked range for the next FREE,
-        # and re-look-up the full prefix in the same scheduler step.
-        if (
-            tracker.apc_covered_tokens > 0
-            and tracker.num_vllm_hit_tokens < tracker.apc_covered_tokens
-        ):
-            logger.info(
-                "APC hit for request %s shrank below the covered boundary "
-                "(%d < %d); re-looking-up the full prefix from token 0.",
+        if self.lazy_offload and num_external_tokens is not None:
+            # vLLM allocates this request's blocks right after this call, from
+            # the free-queue head, before the step's drain can store there.
+            self._lazy_offload_manager.on_admission(
                 request.request_id,
-                tracker.num_vllm_hit_tokens,
-                tracker.apc_covered_tokens,
-            )
-            if ret > tracker.apc_covered_tokens:
-                tracker.pending_free_ranges.append((tracker.apc_covered_tokens, ret))
-            self.scheduler_adapter.cleanup_lookup_result(request.request_id)
-            tracker.need_full_lookup = True
-            tracker.lookup_started_at = None
-            tracker.apc_covered_tokens = 0
-            tracker.num_stored_tokens = 0
-            tracker.num_lmcache_hit_tokens = 0
-            if self.scheduler_adapter.maybe_submit_lookup_request(
-                request.request_id,
-                token_ids=tracker.get_token_ids(),
-                cache_salt=tracker.cache_salt,
-                request_configs={
-                    **(tracker.request_configs or {}),
-                    "lmcache.hint.engine_computed_tokens": num_computed_tokens,
-                },
-                reserve_last_token=self._reserve_last_token_for_lookup,
-            ):
-                tracker.lookup_started_at = time.monotonic()
-            return None, True
-
-        if ret == 0:
-            return 0, False
-
-        assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
-
-        tracker.num_stored_tokens = ret
-        tracker.num_lmcache_hit_tokens = ret
-
-        need_to_load = max(0, ret - num_computed_tokens)
-
-        if request.status == RequestStatus.PREEMPTED:
-            logger.info(
-                "<resume-load> req=%s apc=%d lmcache=%d load=%d",
-                request.request_id,
+                len(request.all_token_ids),
                 num_computed_tokens,
-                ret,
-                need_to_load,
+                num_external_tokens,
+                load_async,
             )
-
-        # In full-prompt-hit case, we need to recompute the last token.
-        # Without this, num_computed_tokens would equal request.num_tokens,
-        # causing num_new_tokens to be 0 and triggering the
-        # `assert num_new_tokens > 0` in the scheduler.
-        if ret == len(request.all_token_ids):
-            need_to_load = max(0, need_to_load - 1)
-
-        logger.debug(
-            "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
-        )
-        return need_to_load, need_to_load > 0
+        return num_external_tokens, load_async
 
     def on_new_request(self, request: "Request") -> None:
         """Submit an LMCache lookup when a request enters the waiting queue.
@@ -1570,6 +1557,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = LMCacheMPConnectorMetadata()
         metadata.need_flush_before_forward = _has_preemption_reqs(scheduler_output)
+        metadata.schedules_no_tokens = not scheduler_output.total_num_scheduled_tokens
 
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
@@ -1608,6 +1596,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         if not self.lazy_offload:
             return
+        # vLLM resumes these requests next step without asking for a hit.
+        self._lazy_offload_manager.on_loads_finished(
+            set(connector_output.finished_recving or ())
+        )
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, LMCacheMPWorkerMetadata):
             return
@@ -1702,8 +1694,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         Returns:
             True when scheduler-side lazy offload has submitted stores waiting
             for worker completion. Queued stores are intentionally excluded:
-            they require a model-token step for submission and cannot progress
-            during a connector-only step. Non-lazy mode uses vLLM's normal
+            they may stay buffered until block pressure or their deadline
+            releases them, and their hash snapshot, not a delayed free, keeps
+            them from storing stale blocks. Non-lazy mode uses vLLM's normal
             delayed-free path and does not need this keepalive.
         """
         if self.role != KVConnectorRole.SCHEDULER or not self.lazy_offload:
@@ -1965,3 +1958,175 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "[KVConnector] Cleaned up request_tracker for request %s",
                 request_id,
             )
+
+    def _match_external_tokens(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+    ) -> tuple[int | None, bool]:
+        """Look the request up in LMCache; see ``get_num_new_matched_tokens``.
+
+        Args:
+            request: The request object.
+            num_computed_tokens: The number of locally computed tokens.
+
+        Returns:
+            The external hit beyond ``num_computed_tokens`` (None while the
+            lookup is pending) and whether it is loaded asynchronously.
+        """
+        tracker = self._get_or_create_request_tracker(request)
+
+        # A failed asynchronous load is bypassed until vLLM admits the request
+        # for local computation via update_state_after_alloc().  The scheduler
+        # may poll this method repeatedly before that admission; do not submit
+        # another lookup or re-enter WAITING_FOR_REMOTE_KVS in the meantime.
+        if tracker.state == LMCacheMPRequestState.BYPASS_LMCACHE:
+            return 0, False
+
+        # A completed async load normally leaves num_computed_tokens > 0, so
+        # the scheduler does not call this method again.  If vLLM reset the
+        # request to zero after the worker reported invalid blocks, however,
+        # the existing tracker is still READY and describes the failed load.
+        # Reusing it would report another external hit without transitioning
+        # back through WAITING_FOR_LOAD, leaving the request stuck forever in
+        # WAITING_FOR_REMOTE_KVS.  Fail closed for this request instead: drop
+        # the stale local lookup/tracker state and let vLLM recompute locally.
+        # The server has already released each failed worker's reader share.
+        if (
+            tracker.state == LMCacheMPRequestState.READY
+            and request.num_computed_tokens == 0
+            and tracker.num_lmcache_hit_tokens > 0
+        ):
+            logger.warning(
+                "Bypassing LMCache for request %s after a failed async KV load; "
+                "the prompt will be recomputed locally.",
+                request.request_id,
+            )
+            self.scheduler_adapter.cleanup_lookup_result(request.request_id)
+            tracker.allocated_block_ids.clear()
+            tracker.num_stored_tokens = 0
+            tracker.num_vllm_hit_tokens = 0
+            tracker.num_lmcache_hit_tokens = 0
+            tracker.apc_covered_tokens = 0
+            tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
+            return 0, False
+
+        # APC-covered lookup start (0 = none; stays 0 after a shrink):
+        # the vLLM hit floored to every group's paged-chunk boundary and the
+        # LMCache chunk size. It never exceeds the aligned lookup end since
+        # vLLM caps the APC hit at num_prompt_tokens - 1; an all-covered
+        # lookup is served by the server's empty prefetch job.
+        lookup_start = 0
+        if not tracker.need_full_lookup:
+            tokens_per_chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
+            lookup_start = (
+                num_computed_tokens
+                // self._hit_alignment_tokens
+                * self._hit_alignment_tokens
+                // tokens_per_chunk
+                * tokens_per_chunk
+            )
+
+        if tracker.lookup_started_at is None:
+            tracker.lookup_started_at = time.monotonic()
+        submitted = self.scheduler_adapter.maybe_submit_lookup_request(
+            request.request_id,
+            token_ids=tracker.get_token_ids(),
+            cache_salt=tracker.cache_salt,
+            # vLLM's prefix-cache hit, for the server's KV load policy.
+            request_configs={
+                **(tracker.request_configs or {}),
+                "lmcache.hint.engine_computed_tokens": num_computed_tokens,
+            },
+            reserve_last_token=self._reserve_last_token_for_lookup,
+            start=lookup_start,
+        )
+        # Freeze only on a real submit: a no-op poll would re-freeze a
+        # boundary the in-flight lookup never used.
+        if submitted:
+            tracker.apc_covered_tokens = lookup_start
+
+        ret = self.scheduler_adapter.check_lookup_result(request.request_id)
+        if ret is None:
+            return None, True
+        assert tracker.lookup_started_at is not None
+        self._connector_stats.record_lookup(
+            time.monotonic() - tracker.lookup_started_at
+        )
+        tracker.lookup_started_at = None
+
+        # Save the vLLM hit count even when LMCache misses. It is rounded
+        # down to a boundary aligned for every engine group (a full-prompt
+        # APC hit reports num_prompt_tokens - 1), so the retrieve-skip
+        # range stays paged-chunk-aligned in all groups.
+        tracker.num_vllm_hit_tokens = (
+            num_computed_tokens
+            // self._hit_alignment_tokens
+            * self._hit_alignment_tokens
+        )
+
+        # APC shrank below the frozen boundary: stop skipping (sticky),
+        # remember the abandoned lookup's locked range for the next FREE,
+        # and re-look-up the full prefix in the same scheduler step.
+        if (
+            tracker.apc_covered_tokens > 0
+            and tracker.num_vllm_hit_tokens < tracker.apc_covered_tokens
+        ):
+            logger.info(
+                "APC hit for request %s shrank below the covered boundary "
+                "(%d < %d); re-looking-up the full prefix from token 0.",
+                request.request_id,
+                tracker.num_vllm_hit_tokens,
+                tracker.apc_covered_tokens,
+            )
+            if ret > tracker.apc_covered_tokens:
+                tracker.pending_free_ranges.append((tracker.apc_covered_tokens, ret))
+            self.scheduler_adapter.cleanup_lookup_result(request.request_id)
+            tracker.need_full_lookup = True
+            tracker.lookup_started_at = None
+            tracker.apc_covered_tokens = 0
+            tracker.num_stored_tokens = 0
+            tracker.num_lmcache_hit_tokens = 0
+            if self.scheduler_adapter.maybe_submit_lookup_request(
+                request.request_id,
+                token_ids=tracker.get_token_ids(),
+                cache_salt=tracker.cache_salt,
+                request_configs={
+                    **(tracker.request_configs or {}),
+                    "lmcache.hint.engine_computed_tokens": num_computed_tokens,
+                },
+                reserve_last_token=self._reserve_last_token_for_lookup,
+            ):
+                tracker.lookup_started_at = time.monotonic()
+            return None, True
+
+        if ret == 0:
+            return 0, False
+
+        assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
+
+        tracker.num_stored_tokens = ret
+        tracker.num_lmcache_hit_tokens = ret
+
+        need_to_load = max(0, ret - num_computed_tokens)
+
+        if request.status == RequestStatus.PREEMPTED:
+            logger.info(
+                "<resume-load> req=%s apc=%d lmcache=%d load=%d",
+                request.request_id,
+                num_computed_tokens,
+                ret,
+                need_to_load,
+            )
+
+        # In full-prompt-hit case, we need to recompute the last token.
+        # Without this, num_computed_tokens would equal request.num_tokens,
+        # causing num_new_tokens to be 0 and triggering the
+        # `assert num_new_tokens > 0` in the scheduler.
+        if ret == len(request.all_token_ids):
+            need_to_load = max(0, need_to_load - 1)
+
+        logger.debug(
+            "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
+        )
+        return need_to_load, need_to_load > 0

@@ -48,6 +48,7 @@ from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPConnectorMetadata,
+    LMCacheMPRequestMetadata,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.utils import CacheStoreEvent  # noqa: E402
@@ -107,7 +108,9 @@ def _config(transfer_config: KVTransferConfig) -> VllmConfig:
                 world_size=1, rank=0, tensor_parallel_size=1, pipeline_parallel_size=1
             ),
             cache_config=SimpleNamespace(block_size=4, enable_prefix_caching=True),
-            scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
+            scheduler_config=SimpleNamespace(
+                disable_hybrid_kv_cache_manager=True, max_num_batched_tokens=16
+            ),
             kv_transfer_config=transfer_config,
         ),
     )
@@ -131,15 +134,20 @@ def _request(request_id: str = "request") -> Request:
 def _schedule(
     request_id: str = "request",
     num_tokens: int = 0,
-    block_ids: tuple[list[int], ...] = (),
+    block_ids: tuple[list[int], ...] = ([],),
     *,
     new: bool = False,
 ) -> SchedulerOutput:
+    # vLLM hands one block-id list per KV-cache group; this config has one.
     return cast(
         SchedulerOutput,
         SimpleNamespace(
             scheduled_new_reqs=(
-                [SimpleNamespace(req_id=request_id, block_ids=block_ids)]
+                [
+                    SimpleNamespace(
+                        req_id=request_id, block_ids=block_ids, num_computed_tokens=0
+                    )
+                ]
                 if new and num_tokens
                 else []
             ),
@@ -147,9 +155,12 @@ def _schedule(
                 req_ids=[request_id] if not new and num_tokens else [],
                 new_block_ids=[block_ids] if not new and num_tokens else [],
                 resumed_req_ids=set(),
+                num_computed_tokens=[0] if not new and num_tokens else [],
             ),
             num_scheduled_tokens={request_id: num_tokens} if num_tokens else {},
             total_num_scheduled_tokens=num_tokens,
+            finished_req_ids=set(),
+            preempted_req_ids=None,
         ),
     )
 
@@ -177,7 +188,13 @@ def mock_io(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         submit.return_value.query.return_value = True
         submit.return_value.result.return_value = True
     telemetry = MagicMock()
-    pool = MagicMock(blocks=[SimpleNamespace(block_hash=bytes([i])) for i in range(8)])
+    pool = MagicMock(
+        blocks=[
+            # Owned by the running request, as a store's blocks are.
+            SimpleNamespace(block_hash=bytes([i]), is_null=False, ref_cnt=1)
+            for i in range(8)
+        ]
+    )
     monkeypatch.setattr(
         connector_mod, "LMCacheMPSchedulerAdapter", lambda **kw: scheduler
     )
@@ -383,6 +400,48 @@ def test_chunked_prefill_stores_and_completion(
     else:
         mock_io.telemetry.on_request_store_finished.assert_not_called()
     assert not any(worker.get_finished({"request"}))
+
+
+@pytest.mark.parametrize("kv_role", ["kv_both"])
+@pytest.mark.parametrize("lazy_offload", [True])
+@pytest.mark.parametrize("schedules_tokens", [False, True])
+def test_store_of_a_step_without_forward_is_submitted_once(
+    connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
+    schedules_tokens: bool,
+) -> None:
+    """A lazy drain on a step that schedules nothing still reaches LMCache.
+
+    vLLM 0.18 to 0.30 skip ``wait_for_save`` on such steps but still poll
+    ``get_finished``, which then submits the step's stores. With a forward,
+    ``wait_for_save`` may come after ``get_finished`` (it waits for the draft
+    model), so polling must not submit early; either way, one submission.
+    """
+    scheduler, worker = connectors
+    request = _request()
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    scheduler.update_state_after_alloc(
+        request, MagicMock(get_block_ids=lambda: ([1],)), 0
+    )
+    metadata = scheduler.build_connector_meta(
+        _schedule(num_tokens=4, block_ids=([1],), new=True)
+        if schedules_tokens
+        else _schedule()
+    )
+    metadata.add_request_metadata(
+        LMCacheMPRequestMetadata(
+            request_id="request",
+            direction="STORE",
+            op=LoadStoreOp(token_ids=list(range(4)), block_ids=[[1]], start=0, end=4),
+        )
+    )
+    worker.bind_connector_metadata(metadata)
+    with pytest.MonkeyPatch.context() as patcher:
+        submit = MagicMock()
+        patcher.setattr(worker.worker_adapter, "batched_submit_store_requests", submit)
+        worker.get_finished(set())
+        assert submit.call_count == int(not schedules_tokens)
+        worker.wait_for_save()
+        assert submit.call_count == 1
 
 
 @pytest.mark.parametrize("retrieve_success", [False, True])
