@@ -17,10 +17,11 @@ its endpoints with it; either way this file names no controller.
 """
 
 # Standard
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 import asyncio
+import time
 
 # Third Party
 from fastapi import FastAPI
@@ -28,9 +29,19 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.background_loops import (
+    BackgroundLoops,
+    EventLoopMonitor,
+)
+from lmcache.v1.mp_coordinator.config import (
+    KafkaCacheEventSourceConfig,
+    MPCoordinatorConfig,
+)
 from lmcache.v1.mp_coordinator.controllers import build_controllers
-from lmcache.v1.mp_coordinator.controllers.base import ControllerRuntime
+from lmcache.v1.mp_coordinator.controllers.base import (
+    ControllerRuntime,
+    ControllerStatus,
+)
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
 from lmcache.v1.mp_coordinator.http_routes import HttpRoutes
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
@@ -38,7 +49,13 @@ from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
     CacheEventConsumer,
 )
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
+from lmcache.v1.mp_coordinator.ingest.event_source import CacheEventSource
 from lmcache.v1.mp_coordinator.ingest.http_event_source import HttpCacheEventSource
+from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
+    KafkaCacheEventSource,
+)
+from lmcache.v1.mp_coordinator.ingest.stream_position import StreamPosition
+from lmcache.v1.mp_coordinator.observability import register_coordinator_metrics
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
     load_checkpoint,
     save_checkpoint,
@@ -56,28 +73,11 @@ from lmcache.v1.mp_coordinator.persistence.store import (
 )
 from lmcache.v1.mp_coordinator.views import build_views
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.views.server_config import ServerConfigRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
 logger = init_logger(__name__)
-
-
-def evict_stale(registry: InstanceRegistry, instance_timeout: float) -> list[str]:
-    """Deregister every instance whose heartbeat is older than the timeout.
-
-    Args:
-        registry: The shared instance registry.
-        instance_timeout: Max seconds since the last heartbeat before eviction.
-
-    Returns:
-        The ids of instances evicted in this sweep.
-    """
-    evicted = []
-    for instance_id in registry.stale(instance_timeout):
-        if registry.deregister(instance_id) is not None:
-            logger.warning("Instance %s timed out; evicted", instance_id)
-            evicted.append(instance_id)
-    return evicted
 
 
 def create_app(config: MPCoordinatorConfig) -> FastAPI:
@@ -93,6 +93,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     """
     views = build_views(config)
     registry = views.get(InstanceRegistry)
+    server_configs = views.get(ServerConfigRegistry)
     controllers = build_controllers(config, views)
     # Resolves pin requests' token_ids to object keys; must match the fleet's
     # chunk size and hash algorithm (see MPCoordinatorConfig).
@@ -111,15 +112,32 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # to read across the consumers consistently.
     quiesce = QuiesceLock()
     event_gate = EventGate(event_broadcaster, quiesce)
-    event_source = HttpCacheEventSource(event_gate)
+    # Exactly one source feeds the gate, chosen by the config: the HTTP push
+    # source behind ``POST /events`` or the Kafka pull source, never both, so
+    # every emitter's stream has one ordered path in (which is what the
+    # gate's per-emitter seq cursor assumes).
+    event_source: CacheEventSource
+    stream_position: StreamPosition | None = None
+    if isinstance(config.event_source_config, KafkaCacheEventSourceConfig):
+        stream_position = StreamPosition()
+        event_source = KafkaCacheEventSource(
+            event_gate, config.event_source_config, stream_position
+        )
+    else:
+        event_source = HttpCacheEventSource(event_gate)
 
     # The gate is named because it is durable but is neither a view nor
-    # a controller; everything else advertises its own state.
+    # a controller; everything else advertises its own state. The stream
+    # position rides beside them for the same reason a partial checkpoint
+    # must never look complete: captured under the same quiesce, restored
+    # before the source seeks to it.
     checkpoint_components: list[DurableComponent] = [
         event_gate,
         *views.durable_components()[PersistenceType.CHECKPOINT],
         *controllers.durable_components()[PersistenceType.CHECKPOINT],
     ]
+    if stream_position is not None:
+        checkpoint_components.append(stream_position)
     checkpoint_store = _artifact_store(config.checkpoint_path)
     metadata_persister = MetadataPersister(_artifact_store(config.metadata_path))
     for component in controllers.durable_components()[PersistenceType.METADATA]:
@@ -127,6 +145,15 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # Before the checkpoint, so a restored key arrives already pinned.
     metadata_persister.load()
     load_checkpoint(checkpoint_store, checkpoint_components)
+    background_loops = BackgroundLoops()
+    event_loop_monitor = EventLoopMonitor()
+    # Whether each controller's run() was entered; the lifespan marks it.
+    controller_status = ControllerStatus(type(c).__name__ for c in controllers.all())
+    restored_instances = set(event_gate.stats().streams)
+    restored_deadline = time.monotonic() + config.instance_timeout
+    if config.metrics_enabled:
+        # Every component with metrics registered itself as it was built.
+        register_coordinator_metrics()
 
     ctx = CoordinatorContext(
         views=views,
@@ -137,34 +164,37 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         metadata_persister=metadata_persister,
     )
 
-    async def _checkpoint_loop() -> None:
-        """Checkpoint on a timer until cancelled.
+    async def _write_checkpoint() -> None:
+        """One pass of the checkpoint loop.
 
         Only derived state runs on a timer: it changes continuously, so a
         cadence is the only sensible cost. Operator intent is written when
         it changes instead (see ``MetadataPersister``).
         """
-        while True:
-            await asyncio.sleep(config.checkpoint_interval)
-            await asyncio.to_thread(
-                save_checkpoint,
-                checkpoint_store,
-                quiesce,
-                checkpoint_components,
-            )
+        await asyncio.to_thread(
+            save_checkpoint,
+            checkpoint_store,
+            quiesce,
+            checkpoint_components,
+        )
 
-    async def _health_loop() -> None:
-        """Evict stale instances on a timer until cancelled.
+    async def _evict_stale_instances() -> None:
+        """One pass of the health loop.
 
         A timed-out instance takes its L1 contents with it, so its
         reported L1 state is fenced across every consumer. Its L2
         contents stay: they live on storage the fleet shares and leave
-        only via ``DELETE`` events.
+        only via ``DELETE`` events. Its capacity declaration goes too,
+        as on ``DELETE /instances``; a server that was only slow
+        redeclares when it re-registers.
         """
-        while True:
-            await asyncio.sleep(config.health_check_interval)
-            for instance_id in evict_stale(registry, config.instance_timeout):
-                event_gate.drop_instance(instance_id)
+        departed = _evict_stale(registry, config.instance_timeout)
+        if restored_instances and time.monotonic() >= restored_deadline:
+            departed += _unreturned_instances(registry, restored_instances)
+            restored_instances.clear()
+        for instance_id in departed:
+            event_gate.drop_instance(instance_id)
+            server_configs.forget(instance_id)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -201,7 +231,9 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
             # with it: the endpoints belonging to no controller keep
             # working, and whatever the failed one does simply is not
             # happening -- the log is the only notice of that.
-            runtime = ControllerRuntime(http_client=outbound_client)
+            runtime = ControllerRuntime(
+                http_client=outbound_client, background_loops=background_loops
+            )
             for controller in controllers.all():
                 try:
                     await stack.enter_async_context(controller.run(runtime))
@@ -209,15 +241,25 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
                     logger.exception(
                         "Controller %s failed to start", type(controller).__name__
                     )
+                    continue
+                controller_status.mark_up(type(controller).__name__)
             await event_source.start()
             stack.push_async_callback(event_source.stop)
             # Nested, so they stop before the stack unwinds. Awaited too:
             # ``save_checkpoint`` runs in a thread a cancel cannot reach.
-            timers = []
+            timers = [asyncio.create_task(event_loop_monitor.run())]
             if config.checkpoint_path and config.checkpoint_interval > 0:
-                timers.append(asyncio.create_task(_checkpoint_loop()))
+                timers.append(
+                    background_loops.start(
+                        "checkpoint", config.checkpoint_interval, _write_checkpoint
+                    )
+                )
             if config.health_check_interval > 0:
-                timers.append(asyncio.create_task(_health_loop()))
+                timers.append(
+                    background_loops.start(
+                        "health", config.health_check_interval, _evict_stale_instances
+                    )
+                )
             logger.info(
                 "MP coordinator listening on http://%s:%d", config.host, config.port
             )
@@ -255,3 +297,43 @@ def _artifact_store(path: str) -> ArtifactStore:
         path: Configured location, empty when the operator wants none.
     """
     return LocalArtifactStore(Path(path)) if path else NullArtifactStore()
+
+
+def _evict_stale(registry: InstanceRegistry, instance_timeout: float) -> list[str]:
+    """Deregister every instance whose heartbeat is older than the timeout.
+
+    Args:
+        registry: The shared instance registry.
+        instance_timeout: Max seconds since the last heartbeat before eviction.
+
+    Returns:
+        The ids of instances evicted in this sweep.
+    """
+    evicted = []
+    for instance_id in registry.stale(instance_timeout):
+        if registry.deregister(instance_id) is not None:
+            logger.warning("Instance %s timed out; evicted", instance_id)
+            evicted.append(instance_id)
+    return evicted
+
+
+def _unreturned_instances(
+    registry: InstanceRegistry, restored: Iterable[str]
+) -> list[str]:
+    """Return the restored instances that never registered again.
+
+    Args:
+        registry: The shared instance registry.
+        restored: Instances that came back from the checkpoint.
+
+    Returns:
+        The ids still missing from the registry.
+    """
+    missing = []
+    for instance_id in restored:
+        if not registry.contains(instance_id):
+            logger.warning(
+                "Instance %s did not re-register after restore; evicted", instance_id
+            )
+            missing.append(instance_id)
+    return missing

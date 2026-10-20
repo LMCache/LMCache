@@ -4,21 +4,22 @@ A coordinator-level capability that lets a CacheBlend lookup on one
 mp-server find and reuse chunk KV cached anywhere in the fleet, fetched
 from a shared, content-addressed L2 or directly from a peer's L1 over the
 P2P transfer channel (RDMA). It is **opt-in** (a coordinator URL plus
-cache-event reporting) and **additive** (the local matcher still runs).
+cache-event reporting) and, once on, **replaces** the local matcher: the
+fleet index is the server's only source of non-prefix matches.
 
 Code: `lmcache/v1/mp_coordinator/blend_index.py`,
 `lmcache/v1/mp_coordinator/blend_client.py`,
-`lmcache/v1/multiprocess/modules/blend.py`.
+`lmcache/v1/multiprocess/modules/blend/lookup.py`.
 Index internals: [blend_index.md](blend_index.md).
 
 ## Why
 
 CacheBlend lookup on its own is **local to one mp-server**: the matcher
-(`BlendTokenRangeMatcher`, `modules/blend.py`) indexes only chunks that
-server stored, so a request routed to a different replica recomputes KV a
-peer already holds. As replicas scale, cache sharding works against
-reuse. The coordinator federates content fleet-wide so any server can
-discover and reuse what any other cached.
+(`BlendTokenRangeMatcher`, `modules/blend/matcher.py`) indexes only
+chunks that server stored, so a request routed to a different replica
+recomputes KV a peer already holds. As replicas scale, cache sharding
+works against reuse. The coordinator federates content fleet-wide so
+any server can discover and reuse what any other cached.
 
 ## Where the fleet index comes from
 
@@ -37,16 +38,15 @@ STORE (blend server, worker-0)
         ── POST /events ──▶ key directory: token bindings
                                         └─▶ blend index: fingerprints
 
-LOOKUP (blend server, cb_unified_lookup)
-  local matcher (always) ─┐
-  request tokens          │
+LOOKUP (blend server, cb_unified_lookup; local matcher skipped)
+  request tokens
     ── POST /directory/blend-lookup ──▶ blend index: roll + filter +
-       (tokens + this server's       │    resolve + verify token-exact
-        model/salt/world_size)       │    + scope to the caller's namespace
-    ◀── matches: [(chunk_hash, old_st, cur_st)] ──┘
-  → union of both sources
-  → non-prefix set (drop prefix-covered, leftmost-greedy overlap dedup)
+       (tokens + this server's            resolve + verify token-exact
+        model/salt/world_size)            + scope to the caller's namespace
+    ◀── matches: [(chunk_hash, old_st, cur_st)]
+  → non-prefix set (drop prefix-covered)
   → one sparse prefetch (shared L2 and/or peer L1 via P2P)
+  → leftmost-greedy overlap dedup over the fetched matches
   → retrieve + re-RoPE
 ```
 
@@ -84,30 +84,39 @@ acceptable for trusted fleet infra, revisit if not.
 
 ## Lookup flow in `cb_unified_lookup`
 
-Local and fleet matching are **additive**. The local matcher always runs;
-a coordinator only adds candidates.
+With a coordinator configured, the fleet index is the **only** match
+source: the local matcher is not queried. Without one, the local matcher
+is the only source. The two are never combined.
 
-1. First call: run the local matcher **and** submit the coordinator query
-   (request tokens). A per-lookup wall-clock deadline is armed
-   (`match_budget_s`, from the mp server's `--coordinator-blend-timeout`).
+1. First call: submit the prefix leg and the coordinator query (request
+   tokens); the local matcher is skipped. A per-lookup wall-clock
+   deadline is armed (`match_budget_s`, from the mp server's
+   `--coordinator-blend-timeout`).
 2. After the prefix resolves, poll the coordinator **before** the sparse
-   prefetch: defer while pending, give up at the deadline (then that
-   lookup is local-only). The deadline — not just the per-request HTTP
+   prefetch: defer while pending, give up at the deadline. A lookup that
+   times out has **no** non-prefix matches — it is prefix-only, and the
+   rest recomputes. The deadline — not just the per-request HTTP
    timeout — bounds the total wait, since queue time counts.
-3. Union both sources, keep matches outside the prefix coverage, and
-   apply **leftmost-greedy overlap dedup**: neither source is
-   overlap-free with respect to the other, and two matches over the same
-   request range can't both scatter. Chunks both sources report collapse
-   here.
-4. Submit **one** sparse prefetch over that set, classify, retrieve.
+3. Keep the coordinator's matches outside the prefix coverage and submit
+   **one** sparse prefetch over them.
+4. Apply **leftmost-greedy overlap dedup** over the matches that were
+   actually fetched (two matches over the same request range can't both
+   scatter, and deduping after the fetch picks a winner that can be
+   loaded), then classify and retrieve.
 
-**Why additive rather than fleet-only.** The fleet index is not a
-guaranteed superset of the local table: it is fed by best-effort cache
-events, so a dropped flush or a token binding evicted from the emitter's
-bounded cache leaves a chunk *this server holds* unmatchable fleet-wide.
-Running both makes recall the union, which is never worse than either
-alone, and costs only the local matcher's CPU (a vectorized probe) on the
-path that was already paying for a round-trip.
+**Why fleet-only rather than additive.** With event reporting on, this
+server's own stores reach the fleet index through the same event stream,
+so the fleet index already holds what the local matcher would find; a
+local pass would mostly add duplicate candidates. Blend reorder is off
+with a coordinator for a related reason: a reorder plan can only see this
+server's prompts.
+
+The cost is that the fleet index is best-effort. A dropped event flush, or
+a token binding evicted from the emitter's bounded cache, leaves a chunk
+unmatchable fleet-wide — **including on the server that holds it** — until
+its next store re-indexes it. Stores still register fingerprints in the
+local matcher, but with a coordinator it is never queried, so it does not
+cover that gap.
 
 ### Fetch sources: shared L2 and peer L1
 
@@ -122,9 +131,10 @@ only in a storer's L1 are matchable fleet-wide.
 
 Fleet matches become `CBMatchResult` (each `hash` is the chunk content
 hash — the coordinator's `chunk_hash`), so they ride the **identical**
-sparse prefetch + classify + retrieve + re-RoPE path as local matches and
-surface in `CBUnifiedLookupResult.non_prefix_segments`. There is no
-separate `global_segments` field and no protocol change.
+sparse prefetch + classify + retrieve + re-RoPE path as the local
+matcher's results do on a server without a coordinator, and surface in
+`CBUnifiedLookupResult.non_prefix_segments`. There is no separate
+`global_segments` field and no protocol change.
 
 ## Gating
 
@@ -137,20 +147,21 @@ Fleet matching requires **both**:
 With a URL but no event reporting the coordinator has no cache state to
 match against, so every query would return empty. `server.py` treats
 that as not-configured and logs a warning at startup rather than paying a
-round-trip per lookup for nothing. Since matching is additive, blend
-still works locally in that case — the fleet leg is simply absent.
+round-trip per lookup for nothing. The blend client is not created, so
+the server runs as if no coordinator were configured: the local matcher
+serves non-prefix matches.
 
 ## Failure modes
 
 | event | effect | handling |
 | --- | --- | --- |
-| coordinator down | no fleet leg | HTTP times out → empty → local matches only |
-| event reporting off | no fleet leg | detected at startup, warned, client not created |
-| cache-event batch dropped | a chunk unindexed fleet-wide | local matcher still finds it; re-indexed on its next store |
-| emitter token-binding evicted | chunk unindexed fleet-wide | same |
+| coordinator down | no non-prefix matches | HTTP fails or the deadline passes → empty → prefix-only lookup, the rest recomputes |
+| event reporting off | no fleet leg | detected at startup, warned, client not created → local matcher used |
+| cache-event batch dropped | a chunk unindexed fleet-wide, even on the server holding it | recompute; re-indexed on its next store |
+| emitter token-binding evicted | same | same |
 | fingerprint collision | candidate skipped | token verification rejects it |
 | chunk evicted from peer L1, no L2 copy | wasted prefetch | miss → recompute |
-| content held only by another model/tenant/world size | no fleet match | scoped out coordinator-side; local matches still apply |
+| content held only by another model/tenant/world size | no fleet match | scoped out coordinator-side |
 | chunk stored by only some ranks of the caller's world size | wasted prefetch | claims are per namespace, not per rank → ObjectKey misses → recompute |
 
 ## Future evolution
@@ -194,7 +205,9 @@ no new wire cost.
 
 ## Scope
 
-Additive: no change to local prefix/blend lookup, retrieve/re-RoPE/
-scatter, or the coordinator backbone. Composes via the documented
+No change to the prefix leg, retrieve/re-RoPE/scatter, or the
+coordinator backbone. With a coordinator, only the non-prefix match
+source changes (local matcher → fleet index), and blend reorder is
+disabled. Composes via the documented
 extension seam — the `/directory` router plus the opt-in blend client —
 with no edits to membership or the health loop.

@@ -35,9 +35,9 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _send_lookup,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.multiprocess.transport.zmq_impl.wire import decode_operation
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
@@ -120,7 +120,7 @@ class TestCaseDelegation:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Standard
-        from unittest.mock import MagicMock, call
+        from unittest.mock import ANY, MagicMock, call
 
         # First Party
         from lmcache.cli.commands.bench.server_bench import command as sv_cmd
@@ -168,8 +168,11 @@ class TestCaseDelegation:
         case_factory.assert_called_once_with(
             sequence_count=2,
             sequence_id_offset=5,
+            sequence_id_stride=1,
             interval_seconds=0.0,
+            stop=ANY,
         )
+        client_factory.assert_called_once_with(ANY, ANY, client_index=0)
         client.start.assert_called_once_with()
         bench_case.run.assert_called_once()
         assert bench_case.run.call_args.args[0] is client
@@ -184,6 +187,88 @@ class TestCaseDelegation:
             ]
         )
         metrics.emit.assert_called_once_with()
+
+    def test_deals_sequences_across_concurrent_clients(
+        self,
+        cmd: BenchCommand,
+        parser: argparse.ArgumentParser,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Standard
+        from unittest.mock import ANY, MagicMock, call
+
+        # First Party
+        from lmcache.cli.commands.bench.server_bench import command as sv_cmd
+        from lmcache.cli.commands.bench.server_bench.cases.base import (
+            BenchResult,
+        )
+
+        clients = [MagicMock(), MagicMock()]
+        client_factory = MagicMock(side_effect=clients)
+        cases = [MagicMock(), MagicMock()]
+        for index, bench_case in enumerate(cases):
+            bench_case.name = "baseline"
+            bench_case.run.return_value = BenchResult(
+                case_name="baseline",
+                completed_runs=3 - index,
+                checks={"checksum_match": [True] * (3 - index)},
+            )
+        case_factory = MagicMock(side_effect=cases)
+        metrics = MagicMock()
+        result_section = MagicMock()
+        metrics.add_section.side_effect = [MagicMock(), result_section]
+        monkeypatch.setattr(sv_cmd, "ServerBenchClient", client_factory)
+        monkeypatch.setattr(sv_cmd, "BaselineBenchCase", case_factory)
+        monkeypatch.setattr(cmd, "create_metrics", MagicMock(return_value=metrics))
+        args = parser.parse_args(
+            [
+                "bench",
+                "server",
+                "--mode",
+                "cpu",
+                "--start",
+                "10",
+                "--end",
+                "15",
+                "--interval",
+                "0",
+                "--concurrency",
+                "2",
+                "--quiet",
+            ]
+        )
+
+        sv_cmd.run_server_bench(cmd, args)
+
+        assert case_factory.call_args_list == [
+            call(
+                sequence_count=3,
+                sequence_id_offset=10,
+                sequence_id_stride=2,
+                interval_seconds=0.0,
+                stop=ANY,
+            ),
+            call(
+                sequence_count=2,
+                sequence_id_offset=11,
+                sequence_id_stride=2,
+                interval_seconds=0.0,
+                stop=ANY,
+            ),
+        ]
+        assert client_factory.call_args_list == [
+            call(ANY, ANY, client_index=0),
+            call(ANY, ANY, client_index=1),
+        ]
+        for client, bench_case in zip(clients, cases, strict=True):
+            client.start.assert_called_once_with()
+            assert bench_case.run.call_args.args[0] is client
+            client.close.assert_called_once_with()
+        result_section.add.assert_any_call("total_requests", "Total requests", 5)
+        result_section.add.assert_any_call("checksum_ok", "Checksum OK", 5)
+        assert "requests_per_s" in [
+            add_call.args[0] for add_call in result_section.add.call_args_list
+        ]
 
     def test_closes_client_when_case_fails(
         self,
@@ -474,14 +559,8 @@ class TestQueryChecksum:
 
 @pytest.fixture
 def router_endpoint() -> str:
-    """Allocate an ephemeral inproc/tcp endpoint for the ROUTER."""
-    # Use tcp with port=0 so the OS assigns a free port.
-    ctx = zmq.Context.instance()
-    probe = ctx.socket(zmq.ROUTER)
-    probe.bind("tcp://127.0.0.1:0")
-    endpoint = probe.getsockopt_string(zmq.LAST_ENDPOINT)
-    probe.close(linger=0)
-    return endpoint
+    """Request an ephemeral TCP port when the ROUTER binds."""
+    return "tcp://127.0.0.1:0"
 
 
 # ------------------------------------------------------------------ #
@@ -615,6 +694,7 @@ class _LookupRouter:
         self._ctx = zmq.Context.instance()
         self._router = self._ctx.socket(zmq.ROUTER)
         self._router.bind(endpoint)
+        self.endpoint = self._router.getsockopt_string(zmq.LAST_ENDPOINT)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -632,11 +712,11 @@ class _LookupRouter:
                 continue
             frames = self._router.recv_multipart()
             identity, uid_f, type_f, *payload = frames
-            req_type = msgspec.msgpack.decode(type_f, type=RequestType)
-            if req_type == RequestType.LOOKUP:
+            operation = decode_operation(type_f)
+            if operation == "lookup":
                 # Void reply: no payload frame.
                 self._router.send_multipart([identity, uid_f, type_f])
-            elif req_type == RequestType.QUERY_PREFETCH_STATUS:
+            elif operation == "query_prefetch_status":
                 req_id = msgspec.msgpack.decode(payload[0], type=str)
                 self.last_query_request_id = req_id
                 if self._in_progress_left > 0:
@@ -660,7 +740,7 @@ class TestLookupProtocol:
         router = _LookupRouter(router_endpoint)
         router.start()
         try:
-            client = self._make_client(router_endpoint)
+            client = self._make_client(router.endpoint)
             key = _make_key((1, 9906, 9906), request_id="req-void")
             assert _send_lookup(client, key) is True
             client.close()
@@ -679,7 +759,7 @@ class TestLookupProtocol:
         )
         router.start()
         try:
-            client = self._make_client(router_endpoint)
+            client = self._make_client(router.endpoint)
             hit = _poll_prefetch_status(
                 client,
                 "req-42",
@@ -916,6 +996,7 @@ class TestClientMultiWorker:
         is_mla: bool,
         tp_size: int,
         transfer_mode: str = "lmcache_driven",
+        client_index: int = 0,
     ) -> tuple[
         list[tuple[str, tuple[Any, ...]]],
         list[tuple[str, tuple[Any, ...]]],
@@ -1070,6 +1151,7 @@ class TestClientMultiWorker:
                 block_size=16,
             ),
             MagicMock(),
+            client_index=client_index,
         )
         bench_client.start()
         gc.collect()
@@ -1194,6 +1276,18 @@ class TestClientMultiWorker:
         assert retrieve_result is not None
         assert retrieve_result.attempted_worker_ranks == (0, 1)
         assert retrieve_result.succeeded
+
+    def test_second_client_registers_past_first_clients_instance_ids(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _request_calls, transfer_calls, _result = self._run(
+            monkeypatch, is_mla=False, tp_size=2, client_index=1
+        )
+        instance_ids = sorted(
+            call[1][0] for call in transfer_calls if call[0] == "register"
+        )
+        assert instance_ids == [1002, 1003]
 
     @pytest.mark.parametrize("is_mla", [True, False])
     @pytest.mark.parametrize("tp", [1, 2, 4])

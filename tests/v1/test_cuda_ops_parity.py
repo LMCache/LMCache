@@ -47,7 +47,7 @@ def _public_callables(module):
         and callable(obj)
         and not inspect.isclass(obj)  # classes tested by descriptor/enum tests
         and not hasattr(obj, "__members__")  # exclude pybind11 enums
-        and getattr(obj, "__module__", None) == getattr(module, "__name__", None)
+        and getattr(obj, "__module__", "").startswith(module.__name__)
     }
 
 
@@ -217,6 +217,9 @@ _EXCLUDED_FUNCS: set[str] = {
     "execute_object_group_transfer",
     "execute_cb_retrieve_plan_flat",
     "pop_completed_phase_timings",
+    "execute_direct_copy_transfer",
+    "batch_memcpy_supported",
+    "direct_copy_format_supported",
 }
 
 # CUDA-only plan descriptors intentionally remain native-only. Descriptor
@@ -226,6 +229,8 @@ _EXCLUDED_DESCS: set[str] = {
     "LaunchVar",
     "BatchStep",
     "CBGroupSpec",
+    "DirectCopyGroupSpec",
+    "DirectCopyObject",
 }
 
 _fallback_callables = _public_callables(fallback)

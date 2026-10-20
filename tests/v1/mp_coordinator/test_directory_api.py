@@ -125,6 +125,22 @@ def test_delete_event_removes_placement():
         assert result[0]["placements"] == []
 
 
+def test_a_batch_without_dropped_events_reads_as_zero():
+    """Emitters that predate the field omit it."""
+    batch = _batch()
+    assert "dropped_events" not in batch
+    with _client() as client:
+        assert _post_events(client, [batch])["applied"] == 1
+
+
+def test_a_negative_dropped_events_is_rejected():
+    with _client() as client:
+        resp = client.post(
+            "/events", json={"batches": [{**_batch(), "dropped_events": -1}]}
+        )
+    assert resp.status_code == 422
+
+
 def test_duplicate_and_stale_batches_are_counted():
     with _client() as client:
         _post_events(client, [_batch(incarnation=2, seq=1)])
@@ -504,3 +520,30 @@ def test_stats_reports_blend_index_counts():
         assert data["num_chunks"] == 1
         assert data["num_claims"] == 1
         assert data["num_namespaces"] == 1
+
+
+# -- Separate object groups --------------------------------------------------
+
+
+def test_a_token_lookup_reports_every_object_group_it_is_stored_in():
+    """Under --separate-object-groups a chunk is stored once per group. A
+    lookup that resolved group 0 alone answered "cached" while reporting a
+    fraction of what was held; it now reports every group, each with its
+    own placement."""
+    config = MPCoordinatorConfig(
+        health_check_interval=0.0, eviction_check_interval=0.0, chunk_size=4
+    )
+    body = {"model_name": MODEL, "world_size": 1, "token_ids": [1, 2, 3, 4]}
+    with TestClient(create_app(config)) as client:
+        [group_zero] = client.post("/directory/lookup", json=body).json()["results"]
+        stored = [{**group_zero["key"], "object_group_id": g} for g in (0, 1, 2)]
+        _post_events(
+            client,
+            [_batch(entries=[{"key": key, "size_bytes": 64} for key in stored])],
+        )
+
+        results = client.post("/directory/lookup", json=body).json()
+
+    assert results["chunks"] == 1
+    assert sorted(r["key"]["object_group_id"] for r in results["results"]) == [0, 1, 2]
+    assert all(r["placements"] for r in results["results"])
