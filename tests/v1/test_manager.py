@@ -338,7 +338,7 @@ class TestLMCacheManagerHelpers:
         config = LMCacheEngineConfig.from_defaults()
         config.enable_pd = False
         # First Party
-        from lmcache.v1.gpu_connector.utils import need_gpu_interm_buffer
+        from lmcache.inprocess.v1.gpu_connector.utils import need_gpu_interm_buffer
 
         assert need_gpu_interm_buffer(config) is True
 

@@ -31,6 +31,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev
+from lmcache.inprocess.v1.gpu_connector import CreateGPUConnector
 from lmcache.integration.tensorrt_llm.utils import (
     ENGINE_NAME,
     create_trtllm_metadata,
@@ -39,7 +40,6 @@ from lmcache.integration.tensorrt_llm.utils import (
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
-from lmcache.v1.gpu_connector import CreateGPUConnector
 
 logger = init_logger(__name__)
 
