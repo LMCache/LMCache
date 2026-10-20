@@ -2,7 +2,11 @@
 """Regression coverage for the direct torch device pre-commit check."""
 
 # Standard
+from itertools import product
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock
+import subprocess
 import sys
 
 # Third Party
@@ -872,3 +876,538 @@ def test_nested_class_delete_falls_back_to_module_not_outer_class() -> None:
         "        torch.cuda\n"
     )
     assert direct_device_lines(source, {"cuda"}) == {7}
+
+
+@pytest.mark.parametrize(
+    "setup, expression",
+    [
+        ("modules = [] + [torch]", "modules[0].cuda"),
+        ("modules = [None] + [torch]", "modules[1].cuda"),
+        ("modules = [torch] * 2", "modules[1].cuda"),
+        ("modules = 2 * [torch]", "modules[-1].cuda"),
+        ("modules = [torch] * count", "modules[0].cuda"),
+        ("modules = []\nmodules += [torch]", "modules[0].cuda"),
+        ("modules = [torch]\nmodules *= 2", "modules[1].cuda"),
+        ("modules = [None]\nmodules[0] = torch", "modules[0].cuda"),
+        ("modules = [None]\nmodules[index] = torch", "modules[0].cuda"),
+        ("modules = []\nmodules.append(torch)", "modules[0].cuda"),
+        ("modules = []\nmodules.extend([None, torch])", "modules[1].cuda"),
+        ("modules = []\nmodules.extend(iter([torch]))", "modules[0].cuda"),
+        ("modules = [None]\nalias = modules\nalias[0] = torch", "modules[0].cuda"),
+        ("modules = []\nalias = modules\nalias.append(torch)", "modules[0].cuda"),
+        ("modules = []\nalias = modules\nalias += [torch]", "modules[0].cuda"),
+        ("modules = [[None]]\nmodules[0][0] = torch", "modules[0][0].cuda"),
+        ("inner = []\nmodules = [inner]\ninner.append(torch)", "modules[0][0].cuda"),
+        ("modules = [None]\nmodules[:] = [torch]", "modules[0].cuda"),
+        ("modules = [None]\nif condition:\n    modules[0] = torch", "modules[0].cuda"),
+        ("modules = []\nfor _ in items:\n    modules.append(torch)", "modules[0].cuda"),
+        ('modules = {"backend": torch}', 'modules["backend"].cuda'),
+        (
+            'modules = {"backend": None}\nmodules["backend"] = torch',
+            'modules["backend"].cuda',
+        ),
+        (
+            'modules = {}\nalias = modules\nalias["backend"] = torch',
+            'modules["backend"].cuda',
+        ),
+        (
+            'modules = {"backend": None}\nmodules[key] = torch',
+            'modules["backend"].cuda',
+        ),
+        (
+            'modules = {"backend": [None]}\nmodules["backend"][0] = torch',
+            'modules["backend"][0].cuda',
+        ),
+        (
+            'inner = {}\nmodules = [inner]\ninner["backend"] = torch',
+            'modules[0]["backend"].cuda',
+        ),
+        ("modules = {key: torch}", 'modules["backend"].cuda'),
+        ("modules = {key: torch for key in names}", 'modules["backend"].cuda'),
+        ('modules = {"backend": torch}\ncopy = {**modules}', 'copy["backend"].cuda'),
+        (
+            "modules = {}\nfor _ in items:\n    modules[key] = torch",
+            'modules["backend"].cuda',
+        ),
+    ],
+)
+def test_rejects_container_operations(setup: str, expression: str) -> None:
+    source = f"import torch\n{setup}\n{expression}\n"
+    assert direct_device_lines(source, {"cuda"}) == {len(source.splitlines())}
+
+
+@pytest.mark.parametrize(
+    "target, iterable, access",
+    [
+        ("i, t", "enumerate([torch])", "t.cuda"),
+        ("i, t", "enumerate([torch], start=3)", "t.cuda"),
+        ("t, other", "zip([torch], [None])", "t.cuda"),
+        ("other, t", "zip([None], [torch], strict=True)", "t.cuda"),
+        ("i, pair", "enumerate(zip([torch], [None]))", "pair[0].cuda"),
+        ("t", "iter([torch])", "t.cuda"),
+        ("t", "reversed([None, torch])", "t.cuda"),
+        ("i, t", "enumerate(reversed([torch]))", "t.cuda"),
+        ("t", '{"backend": torch}.values()', "t.cuda"),
+        ("key, t", '{"backend": torch}.items()', "t.cuda"),
+        ("t", "{torch: None}", "t.cuda"),
+        ("t", "{torch: None}.keys()", "t.cuda"),
+    ],
+)
+@pytest.mark.parametrize("comprehension", [False, True])
+def test_rejects_wrapped_iteration(
+    target: str, iterable: str, access: str, comprehension: bool
+) -> None:
+    if comprehension:
+        source = f"import torch\n[{access} for {target} in {iterable}]\n"
+    else:
+        source = f"import torch\nfor {target} in {iterable}:\n    {access}\n"
+    assert direct_device_lines(source, {"cuda"}) == {len(source.splitlines())}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "modules = [None] + [torch]\nmodules[0].cuda",
+        "modules = [torch] * 0\nfor t in modules:\n    t.cuda",
+        "modules = [None, torch] * 2\nmodules[2].cuda",
+        "modules = [torch]\nmodules[0] = None\nmodules[0].cuda",
+        "modules = [torch]\nmodules[:] = [None]\nmodules[0].cuda",
+        "modules = [torch]\nalias = modules\nalias[0] = None\nmodules[0].cuda",
+        "a = [None]\nb = [None]\na[0] = torch\nb[0].cuda",
+        "a = [None]\nb = a[:]\na[0] = torch\nb[0].cuda",
+        "a = [None]\nb = a + []\na[0] = torch\nb[0].cuda",
+        "a = [None]\nb = a\nb = [torch]\na[0].cuda",
+        'modules = {"a": None, "b": torch}\nmodules["a"].cuda',
+        'modules = {"a": torch, "a": None}\nmodules["a"].cuda',
+        'modules = {"a": torch}\nmodules["a"] = None\nmodules["a"].cuda',
+        "enumerate = custom\nfor i, t in enumerate([torch]):\n    t.cuda",
+        "zip = custom\nfor t, other in zip([torch], [None]):\n    t.cuda",
+        "iter = custom\nfor t in iter([torch]):\n    t.cuda",
+        "reversed = custom\nfor t in reversed([torch]):\n    t.cuda",
+        "def run(enumerate):\n    for i, t in enumerate([torch]):\n        t.cuda",
+        "for t in {torch: None}.values():\n    t.cuda",
+        'for key in {"backend": torch}:\n    key.cuda',
+    ],
+)
+def test_container_operations_and_wrappers_do_not_misidentify_torch(
+    source: str,
+) -> None:
+    assert direct_device_lines(f"import torch\n{source}\n", {"cuda"}) == set()
+
+
+@pytest.mark.parametrize(
+    "source, lines",
+    [
+        (
+            "import torch\n"
+            "t = None\n"
+            "def run():\n"
+            "    t.cuda.synchronize()\n"
+            "t = torch\n"
+            "run()\n",
+            {4},
+        ),
+        (
+            "def run():\n    t.cuda.synchronize()\nimport torch as t\nrun()\n",
+            {2},
+        ),
+        (
+            "import torch\n"
+            "t = None\n"
+            "run = lambda: t.cuda.synchronize()\n"
+            "t = torch\n"
+            "run()\n",
+            {3},
+        ),
+        (
+            "import torch\n"
+            "def outer():\n"
+            "    t = None\n"
+            "    def inner():\n"
+            "        t.cuda.synchronize()\n"
+            "    t = torch\n"
+            "    inner()\n",
+            {5},
+        ),
+        (
+            "import torch\n"
+            "t = None\n"
+            "def run():\n"
+            "    t.cuda.synchronize()\n"
+            "alias = run\n"
+            "t = torch\n"
+            "alias()\n",
+            {4},
+        ),
+        (
+            "import torch\n"
+            "t = None\n"
+            "def run():\n"
+            "    t.cuda.synchronize()\n"
+            "callbacks = [run]\n"
+            "t = torch\n"
+            "callbacks[0]()\n",
+            {4},
+        ),
+        (
+            "import torch\n"
+            "def outer():\n"
+            "    t = None\n"
+            "    def inner():\n"
+            "        t.cuda.synchronize()\n"
+            "    t = torch\n"
+            "    return inner\n"
+            "outer()()\n",
+            {5},
+        ),
+        (
+            "import torch\n"
+            "def outer():\n"
+            "    t = None\n"
+            "    run = lambda: t.cuda.synchronize()\n"
+            "    t = torch\n"
+            "    return run\n"
+            "f = outer()\n"
+            "f()\n",
+            {4},
+        ),
+        (
+            "import torch\n"
+            "t = None\n"
+            "def run():\n"
+            "    t.cuda.synchronize()\n"
+            "if condition:\n"
+            "    t = torch\n"
+            "run()\n",
+            {4},
+        ),
+        (
+            "import torch\n"
+            "modules = [None]\n"
+            "def run():\n"
+            "    modules[0].cuda.synchronize()\n"
+            "modules[0] = torch\n"
+            "run()\n",
+            {4},
+        ),
+    ],
+)
+def test_rejects_delayed_closure_binding(source: str, lines: set[int]) -> None:
+    assert direct_device_lines(source, {"cuda"}) == lines
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "t = None\ndef run():\n    t.cuda\n"
+        "def caller():\n    t = torch\n    run()\ncaller()",
+        "t = None\ndef run(t=t):\n    t.cuda\nt = torch\nrun()",
+        "t = None\nrun = lambda t=t: t.cuda\nt = torch\nrun()",
+        "t = None\ndef run():\n    t.cuda\nrun()\nt = torch",
+        "t = None\ndef run():\n    t.cuda\nt = torch\nrun = other\nrun()",
+        "t = None\ndef run(t):\n    t.cuda\nt = torch\nrun(None)",
+        "t = None\ndef run():\n    if condition:\n        run()\n    t.cuda\nrun()",
+    ],
+)
+def test_closure_analysis_preserves_lexical_bindings_and_terminates(
+    source: str,
+) -> None:
+    assert direct_device_lines(f"import torch\n{source}\n", {"cuda"}) == set()
+
+
+@pytest.mark.parametrize(
+    "setup, expression",
+    [
+        (
+            "modules = []\ndef fill():\n    modules.append(torch)\nfill()",
+            "modules[0].cuda",
+        ),
+        (
+            "t = None\ndef fill():\n    global t\n    t = torch\n"
+            "def run():\n    t.cuda\nfill()",
+            "run()",
+        ),
+        (
+            "def fill(items):\n    items.append(torch)\n"
+            "def run():\n    modules = []\n    fill(modules)\n    modules[0].cuda",
+            "run()",
+        ),
+        (
+            "modules = [None]\ndef run(t=modules):\n    t[0].cuda\nmodules[0] = torch",
+            "run()",
+        ),
+        (
+            "modules = {}\nfor _ in items:\n    modules['nested'] = modules\n"
+            "    modules['torch'] = torch",
+            "modules['nested']['torch'].cuda",
+        ),
+    ],
+)
+def test_container_mutations_and_closures_compose(setup: str, expression: str) -> None:
+    source = f"import torch\n{setup}\n{expression}\n"
+    assert direct_device_lines(source, {"cuda"})
+
+
+def test_uncalled_function_does_not_mutate_outer_container() -> None:
+    source = (
+        "import torch\n"
+        "modules = []\n"
+        "def fill():\n"
+        "    modules.append(torch)\n"
+        "for t in modules:\n"
+        "    t.cuda\n"
+    )
+    assert direct_device_lines(source, {"cuda"}) == set()
+
+
+def test_late_closure_call_uses_lexical_global_not_caller_shadow() -> None:
+    source = (
+        "import torch\n"
+        "t = None\n"
+        "def run():\n"
+        "    t.cuda\n"
+        "def caller():\n"
+        "    t = None\n"
+        "    run()\n"
+        "t = torch\n"
+        "caller()\n"
+    )
+    assert direct_device_lines(source, {"cuda"}) == {4}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "modules = [] + [torch]\nmodules[0].cuda.synchronize()",
+        "modules = [torch] * 2\nmodules[1].cuda.synchronize()",
+        "modules = [None]\nalias = modules\nalias[0] = torch\n"
+        "modules[0].cuda.synchronize()",
+        "modules = []\nmodules.append(torch)\nmodules[0].cuda.synchronize()",
+        "modules = []\nmodules.extend([torch])\nmodules[0].cuda.synchronize()",
+        "for _, t in enumerate([torch]):\n    t.cuda.synchronize()",
+        "for t, _ in zip([torch], [None]):\n    t.cuda.synchronize()",
+        "for t in iter([torch]):\n    t.cuda.synchronize()",
+        "for t in reversed([torch]):\n    t.cuda.synchronize()",
+        'modules = {"backend": torch}\nmodules["backend"].cuda.synchronize()',
+        'modules = {}\nalias = modules\nalias["backend"] = torch\n'
+        'modules["backend"].cuda.synchronize()',
+        "t = None\ndef run():\n    t.cuda.synchronize()\nt = torch\nrun()",
+        "def outer():\n    t = None\n    def run():\n"
+        "        t.cuda.synchronize()\n    t = torch\n    return run\nouter()()",
+    ],
+)
+def test_extended_cases_execute_device_call_and_fail_cli(
+    body: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = f"import torch\n{body}\n"
+    synchronize = Mock()
+
+    class TorchModule(ModuleType):
+        cuda: SimpleNamespace
+
+    fake_torch = TorchModule("torch")
+    fake_torch.cuda = SimpleNamespace(synchronize=synchronize)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    exec(compile(source, "<device-check-repro>", "exec"), {})
+    synchronize.assert_called_once_with()
+
+    lines = direct_device_lines(source, {"cuda"})
+    assert lines == {
+        index
+        for index, line in enumerate(source.splitlines(), 1)
+        if ".synchronize()" in line
+    }
+    path = tmp_path / "device_check_repro.py"
+    path.write_text(source, encoding="utf-8")
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(root / "tools/check_direct_torch_device.py"), str(path)],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "BANNED: Direct torch device API usage" in result.stdout
+    for line in lines:
+        assert f"{path}:{line}:" in result.stdout
+
+
+def _differential_programs() -> list[str]:
+    programs = []
+    containers = [
+        ("[other]", "a[0]", "b[0]"),
+        ("{'x': other}", "a['x']", "b['x']"),
+        ("[[other]]", "a[0][0]", "b[0][0]"),
+    ]
+    for (initial, read, write), assignment, before, after in product(
+        containers,
+        ["b = a", "b = a if flag else c", "b = c if flag else a"],
+        ["other", "torch"],
+        ["other", "torch"],
+    ):
+        programs.append(
+            f"import torch\na = {initial.replace('other', before)}\n"
+            f"c = {initial}\n{assignment}\n{write} = {after}\n"
+            f"{read}.cuda.synchronize()\n"
+        )
+    programs.extend(
+        [
+            "import torch\ndef clear():\n    global torch\n    torch = other\n"
+            "def keep():\n    pass\nf = clear if flag else keep\nf()\n"
+            "torch.cuda.synchronize()\n",
+            "import torch\ndef run(t):\n    t.cuda.synchronize()\n"
+            "run(**{'t': torch})\n",
+            "import torch\ndef run(t):\n    t.cuda.synchronize()\nrun(*[torch])\n",
+            "import torch\nx = [other]\ndef update():\n    x[0] = torch\n"
+            "    return x\nupdate()[0].cuda.synchronize()\n",
+            "import torch\nx = [other for _ in range(1)]\nx.append(torch)\n"
+            "x[1].cuda.synchronize()\n",
+            "import torch\nx = [other for _ in range(1)]\nx[0] = torch\n"
+            "x[0].cuda.synchronize()\n",
+            "import torch\ndef make():\n    return [other]\na = make()\nb = make()\n"
+            "b[0] = torch\na[0].cuda.synchronize()\n",
+            "import torch\ndef make():\n    return [torch]\na = make()\nb = make()\n"
+            "b[0] = other\na[0].cuda.synchronize()\n",
+            "import torch\nx = [other]\nit = iter(x)\nx[0] = torch\n"
+            "for t in it:\n    t.cuda.synchronize()\n",
+            "import torch\nt = other\nit = (t for _ in range(1))\nt = torch\n"
+            "for value in it:\n    value.cuda.synchronize()\n",
+            "import torch\ndef make():\n    t = other\n"
+            "    def run():\n        t.cuda.synchronize()\n"
+            "    if flag:\n        t = torch\n    return run\nmake()()\n",
+            "import torch\ndef make(t):\n    def run():\n        t.cuda.synchronize()\n"
+            "    return run\nf = make(torch)\ng = make(other)\nf()\n",
+            "import torch\ndef make(t):\n    return lambda: t.cuda.synchronize()\n"
+            "f = make(torch) if flag else make(other)\nf()\n",
+        ]
+    )
+    return programs
+
+
+@pytest.mark.parametrize("source", _differential_programs())
+def test_runtime_differential_over_all_branch_choices(
+    source: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TorchModule(ModuleType):
+        cuda: SimpleNamespace
+
+    observed: set[int] = set()
+
+    def synchronize() -> None:
+        observed.add(sys._getframe(1).f_lineno)
+
+    fake = TorchModule("torch")
+    fake.cuda = SimpleNamespace(synchronize=synchronize)
+    other = SimpleNamespace(cuda=SimpleNamespace(synchronize=lambda: None))
+    monkeypatch.setitem(sys.modules, "torch", fake)
+    for flag in (False, True):
+        exec(
+            compile(source, "<differential-repro>", "exec"),
+            {"other": other, "flag": flag},
+        )
+    assert direct_device_lines(source, {"cuda"}) == observed
+
+
+@pytest.mark.parametrize(
+    "creation, target, access",
+    [
+        ("iter(x)", "t", "t"),
+        ("reversed(x)", "t", "t"),
+        ("enumerate(x)", "i, t", "t"),
+        ("zip(x, [None])", "t, other", "t"),
+        ("(t for t in x)", "t", "t"),
+        ("enumerate(iter(x))", "i, t", "t"),
+    ],
+)
+def test_iterators_observe_mutation_before_consumption(
+    creation: str,
+    target: str,
+    access: str,
+) -> None:
+    source = (
+        f"import torch\nx = [None]\nit = {creation}\nx[0] = torch\n"
+        f"for {target} in it:\n    {access}.cuda\n"
+    )
+    assert direct_device_lines(source, {"cuda"}) == {6}
+
+
+def test_generator_captures_outer_iterable_before_rebinding() -> None:
+    source = (
+        "import torch\nx = [None]\nit = (t for t in x)\nx = [torch]\n"
+        "for t in it:\n    t.cuda\n"
+    )
+    assert direct_device_lines(source, {"cuda"}) == set()
+
+
+def test_returned_generator_retains_lexical_cells() -> None:
+    source = (
+        "import torch\n"
+        "def make():\n"
+        "    t = None\n"
+        "    it = (t for _ in range(1))\n"
+        "    t = torch\n"
+        "    return it\n"
+        "for t in make():\n"
+        "    t.cuda\n"
+    )
+    assert direct_device_lines(source, {"cuda"}) == {8}
+
+
+def test_keyword_capture_receives_expanded_arguments() -> None:
+    source = (
+        "import torch\ndef run(**kwargs):\n    kwargs['t'].cuda\nrun(**{'t': torch})\n"
+    )
+    assert direct_device_lines(source, {"cuda"}) == {3}
+
+
+def test_repeated_calls_recheck_changed_global_bindings() -> None:
+    source = (
+        "import torch\n"
+        "t = None\n"
+        "def run():\n"
+        "    t.cuda\n"
+        "for value in [None, torch]:\n"
+        "    t = value\n"
+        "    run()\n"
+    )
+    assert direct_device_lines(source, {"cuda"}) == {4}
+
+
+def test_repeated_effectful_calls_are_not_cached_as_readonly() -> None:
+    source = (
+        "import torch\n"
+        "modules = []\n"
+        "def add():\n"
+        "    modules.append(torch)\n"
+        "for _ in range(2):\n"
+        "    add()\n"
+        "modules[1].cuda\n"
+    )
+    assert direct_device_lines(source, {"cuda"}) == {7}
+
+
+def test_branching_call_graph_finishes_within_timeout() -> None:
+    source = "import torch\ndef f0(t):\n    t.cuda\n"
+    for depth in range(1, 19):
+        source += f"def f{depth}(t):\n    f{depth - 1}(t)\n    f{depth - 1}(t)\n"
+    source += "f18(torch)\n"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            "from tools.check_direct_torch_device import direct_device_lines\n"
+            "assert direct_device_lines(sys.stdin.read(), {'cuda'}) == {3}\n",
+        ],
+        input=source,
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    assert result.returncode == 0, result.stderr

@@ -10,12 +10,14 @@ Comprehensions have isolated targets; assignment expressions bind outside them.
 Function defaults and scope declarations participate in name resolution.
 Loops join back-edge bindings to a fixed point, widening container shapes to
 conservative element summaries. Terminated paths do not execute later statements.
-This is a syntax-based check, not interprocedural analysis: arbitrary function
-returns and container mutations are not inferred.
+Known list/dict writes preserve aliases, and built-in iterator wrappers preserve
+elements. Same-file functions are revisited at call sites using lexical bindings
+and captured defaults, with recursion bounded by active function definitions.
+Third-party call results, cross-module data flow and reflection are not inferred.
 """
 
 # Standard
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 import ast
@@ -28,14 +30,69 @@ else:
 
 
 @dataclass(frozen=True)
+class _Origin:
+    node: ast.AST
+    context: tuple[ast.AST | None, ...]
+
+
+@dataclass(frozen=True)
 class _Sequence:
-    items: tuple["frozenset[str | _Sequence]", ...]
+    items: tuple["_Binding", ...]
     repeated: bool = False
+    recursive: bool = False
+    origin: _Origin | None = None
+
+
+@dataclass(frozen=True)
+class _Key:
+    value: str | int | float | bytes | bool | None
+
+
+@dataclass(frozen=True)
+class _Mapping:
+    entries: tuple[tuple[_Key | None, "_Binding"], ...]
+    keys: "_Binding" = frozenset()
+    origin: _Origin | None = None
     recursive: bool = False
 
 
-_Binding = frozenset[str | _Sequence]
+@dataclass(frozen=True)
+class _Function:
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+    context: tuple[ast.AST | None, ...]
+
+
+@dataclass(frozen=True)
+class _Iterator:
+    kind: str
+    sources: tuple["_Binding", ...]
+
+
+@dataclass(frozen=True)
+class _Generator:
+    node: ast.GeneratorExp
+    context: tuple[ast.AST | None, ...]
+
+
+_Binding = frozenset[str | _Sequence | _Mapping | _Function | _Iterator | _Generator]
 _Scopes = list[dict[str, _Binding]]
+_ReadOnlyCall = tuple[
+    _Function,
+    ast.Call | None,
+    int,
+    frozenset[ast.AST],
+    tuple[frozenset[tuple[str, _Binding]], ...],
+]
+
+
+@dataclass
+class _FunctionState:
+    frames: _Scopes
+    bindings: dict[str, _Binding]
+    declarations: dict[int, dict[str, str]]
+    class_scopes: set[int]
+    comprehension_scopes: set[int]
+    first_iter: _Binding = frozenset()
 
 
 def _scope_declarations(body: Iterable[ast.AST]) -> dict[str, str]:
@@ -119,6 +176,17 @@ class _DeviceVisitor(ast.NodeVisitor):
         self.declarations: dict[int, dict[str, str]] = {}
         self.reachable = True
         self.exits: list[tuple[str, _Scopes]] = []
+        self.scope_nodes: list[ast.AST | None] = [None]
+        self.functions: dict[_Function, _FunctionState] = {}
+        self.generators: dict[_Generator, _FunctionState] = {}
+        self.active_functions: set[ast.AST] = set()
+        self.return_values: _Binding = frozenset()
+        self.mutated_origins: set[_Origin] = set()
+        self.function_revision = 0
+        self.readonly_calls: set[_ReadOnlyCall] = set()
+
+    def _origin(self, node: ast.AST) -> _Origin:
+        return _Origin(node, tuple(self.scope_nodes))
 
     def _binding_scope(self, name: str, start: int | None = None) -> int:
         if start is None:
@@ -215,9 +283,57 @@ class _DeviceVisitor(ast.NodeVisitor):
                         items.append(self._items(value))
                 else:
                     items.append(self._value(element))
-            return frozenset({_Sequence(tuple(items), repeated)})
+            return frozenset(
+                {
+                    _Sequence(
+                        tuple(items),
+                        repeated,
+                        origin=self._origin(node)
+                        if isinstance(node, ast.List)
+                        else None,
+                    )
+                }
+            )
+        if isinstance(node, ast.Dict):
+            entries: dict[_Key | None, _Binding] = {}
+            keys: _Binding = frozenset()
+            for key_node, value_node in zip(node.keys, node.values, strict=True):
+                value = self._value(value_node)
+                if key_node is None:
+                    for mapping in value:
+                        if isinstance(mapping, _Mapping):
+                            for key, item in mapping.entries:
+                                entries[key] = (
+                                    item
+                                    if key is not None
+                                    else entries.get(key, frozenset()) | item
+                                )
+                            keys |= mapping.keys
+                else:
+                    key = self._key(key_node)
+                    entries[key] = (
+                        value
+                        if key is not None
+                        else entries.get(key, frozenset()) | value
+                    )
+                    keys |= self._value(key_node)
+            return frozenset(
+                {_Mapping(tuple(entries.items()), keys, self._origin(node))}
+            )
+        if isinstance(node, ast.BinOp):
+            return self._binary_value(node.op, node.left, node.right, node)
         if isinstance(node, ast.Subscript):
-            return self._select(self._value(node.value), node.slice)
+            value = self._select(self._value(node.value), node.slice)
+            if isinstance(node.slice, ast.Slice):
+                value = frozenset(
+                    _Sequence(
+                        item.items, item.repeated, item.recursive, self._origin(node)
+                    )
+                    if isinstance(item, _Sequence)
+                    else item
+                    for item in value
+                )
+            return value
         if isinstance(node, ast.NamedExpr):
             return self._value(node.value)
         if isinstance(node, ast.IfExp):
@@ -232,6 +348,57 @@ class _DeviceVisitor(ast.NodeVisitor):
             return frozenset({"device"})
         return frozenset()
 
+    def _key(self, node: ast.expr) -> _Key | None:
+        if isinstance(node, ast.Constant) and isinstance(
+            node.value, (str, int, float, bytes, bool, type(None))
+        ):
+            return _Key(node.value)
+        number = self._integer_index(node)
+        return _Key(number) if number is not None else None
+
+    def _binary_value(
+        self,
+        operator: ast.operator,
+        left: ast.expr,
+        right: ast.expr,
+        site: ast.AST,
+    ) -> _Binding:
+        origin = self._origin(site)
+        lhs, rhs = self._value(left), self._value(right)
+        results: set[_Sequence] = set()
+        if isinstance(operator, ast.Add):
+            for first in lhs:
+                for second in rhs:
+                    if isinstance(first, _Sequence) and isinstance(second, _Sequence):
+                        results.add(
+                            _Sequence(
+                                first.items + second.items,
+                                first.repeated or second.repeated,
+                                first.recursive or second.recursive,
+                                origin,
+                            )
+                        )
+        elif isinstance(operator, ast.Mult):
+            for sequence_value, count_node in ((lhs, right), (rhs, left)):
+                count = self._integer_index(count_node)
+                for sequence in sequence_value:
+                    if not isinstance(sequence, _Sequence):
+                        continue
+                    if count is not None and count <= 0:
+                        results.add(_Sequence((), origin=origin))
+                    elif (
+                        count is not None
+                        and count * len(sequence.items) <= 256
+                        and not sequence.repeated
+                    ):
+                        results.add(_Sequence(sequence.items * count, origin=origin))
+                    else:
+                        # Summarize large/unknown repetition without expanding it.
+                        results.add(
+                            _Sequence(sequence.items, True, sequence.recursive, origin)
+                        )
+        return frozenset(results)
+
     def _items(self, value: _Binding) -> _Binding:
         items: _Binding = frozenset(
             item
@@ -240,31 +407,111 @@ class _DeviceVisitor(ast.NodeVisitor):
             for items in sequence.items
             for item in items
         )
-        return items | frozenset(
-            sequence
-            for sequence in value
-            if isinstance(sequence, _Sequence) and sequence.recursive
+        keys = frozenset(
+            key
+            for mapping in value
+            if isinstance(mapping, _Mapping)
+            for key in mapping.keys
+        )
+        wrapped: _Binding = frozenset()
+        for iterator in value:
+            if isinstance(iterator, _Generator):
+                wrapped |= self._evaluate_generator(iterator, consume=True)
+            elif isinstance(iterator, _Iterator):
+                if iterator.kind == "enumerate":
+                    wrapped |= frozenset(
+                        {
+                            _Sequence(
+                                (
+                                    frozenset(),
+                                    self._items(iterator.sources[0]),
+                                )
+                            )
+                        }
+                    )
+                elif iterator.kind == "zip":
+                    wrapped |= frozenset(
+                        {
+                            _Sequence(
+                                tuple(
+                                    self._items(source) for source in iterator.sources
+                                )
+                            )
+                        }
+                    )
+                elif iterator.kind in ("iter", "reversed"):
+                    wrapped |= self._items(iterator.sources[0])
+                else:
+                    for mapping in iterator.sources[0]:
+                        if not isinstance(mapping, _Mapping):
+                            continue
+                        for _, item in mapping.entries:
+                            if iterator.kind == "keys":
+                                wrapped |= mapping.keys
+                            elif iterator.kind == "values":
+                                wrapped |= item
+                            elif iterator.kind == "items":
+                                wrapped |= frozenset({_Sequence((mapping.keys, item))})
+        return (
+            items
+            | keys
+            | wrapped
+            | frozenset(
+                sequence
+                for sequence in value
+                if isinstance(sequence, _Sequence) and sequence.recursive
+            )
         )
 
     def _widen_loop_binding(self, value: _Binding) -> _Binding:
-        leaves: set[str] = set()
+        leaves: set[str | _Function | _Generator] = set()
 
         def collect(items: _Binding) -> None:
             for item in items:
-                if isinstance(item, str):
+                if isinstance(item, (str, _Function, _Generator)):
                     leaves.add(item)
+                elif isinstance(item, (_Sequence, _Iterator)):
+                    for child in (
+                        item.items if isinstance(item, _Sequence) else item.sources
+                    ):
+                        collect(child)
                 else:
-                    for child in item.items:
+                    collect(item.keys)
+                    for _, child in item.entries:
                         collect(child)
 
-        sequences = frozenset(item for item in value if isinstance(item, _Sequence))
+        sequences = frozenset(
+            item for item in value if isinstance(item, (_Sequence, _Iterator))
+        )
         collect(sequences)
-        scalars = frozenset(item for item in value if isinstance(item, str))
-        if sequences:
-            return scalars | frozenset(
-                {_Sequence((frozenset(leaves),), repeated=True, recursive=True)}
+        result: _Binding = frozenset(
+            item for item in value if isinstance(item, (str, _Function, _Generator))
+        )
+        result |= frozenset(
+            _Sequence(
+                (frozenset(leaves),),
+                repeated=True,
+                recursive=True,
+                origin=sequence.origin if isinstance(sequence, _Sequence) else None,
             )
-        return scalars
+            for sequence in sequences
+        )
+        for mapping in value:
+            if isinstance(mapping, _Mapping):
+                leaves.clear()
+                for _, item in mapping.entries:
+                    collect(item)
+                result |= frozenset(
+                    {
+                        _Mapping(
+                            ((None, frozenset(leaves)),),
+                            mapping.keys,
+                            mapping.origin,
+                            True,
+                        )
+                    }
+                )
+        return result
 
     def _integer_index(self, node: ast.expr | None) -> int | None:
         if isinstance(node, ast.Constant) and isinstance(node.value, int):
@@ -280,6 +527,20 @@ class _DeviceVisitor(ast.NodeVisitor):
         return None
 
     def _select(self, value: _Binding, index: ast.expr | int) -> _Binding:
+        key = _Key(index) if isinstance(index, int) else self._key(index)
+        mapped: _Binding = frozenset(
+            item
+            for mapping in value
+            if isinstance(mapping, _Mapping)
+            for entry_key, items in mapping.entries
+            if key is None or entry_key is None or key == entry_key
+            for item in items
+        )
+        mapped |= frozenset(
+            mapping
+            for mapping in value
+            if isinstance(mapping, _Mapping) and mapping.recursive
+        )
         if isinstance(index, ast.Slice):
             bounds = (index.lower, index.upper, index.step)
             lower, upper, step = (self._integer_index(bound) for bound in bounds)
@@ -301,8 +562,10 @@ class _DeviceVisitor(ast.NodeVisitor):
             return frozenset({_Sequence((self._items(value),), repeated=True)})
         position = index if isinstance(index, int) else self._integer_index(index)
         if position is None:
-            return self._items(value)
-        result: _Binding = frozenset()
+            return mapped | self._items(
+                frozenset(item for item in value if isinstance(item, _Sequence))
+            )
+        result = mapped
         for sequence in value:
             if not isinstance(sequence, _Sequence):
                 continue
@@ -344,6 +607,227 @@ class _DeviceVisitor(ast.NodeVisitor):
                     self._bind_target(element, self._select(value, position))
         elif isinstance(target, ast.Starred):
             self._bind_target(target.value, value)
+        elif isinstance(target, ast.Subscript):
+            self._mutate_containers(
+                self._value(target.value),
+                lambda container: self._set_item(container, target.slice, value),
+            )
+
+    def _set_item(
+        self,
+        container: _Sequence | _Mapping,
+        index: ast.expr,
+        value: _Binding,
+    ) -> _Binding:
+        if isinstance(container, _Mapping):
+            key = self._key(index)
+            entries = dict(container.entries)
+            if key is None:
+                entries[None] = entries.get(None, frozenset()) | value
+            else:
+                entries[key] = value
+            return frozenset(
+                {
+                    _Mapping(
+                        tuple(entries.items()),
+                        container.keys | self._value(index),
+                        container.origin,
+                        container.recursive,
+                    )
+                }
+            )
+        position = self._integer_index(index)
+        if not container.repeated and position is not None:
+            if -len(container.items) <= position < len(container.items):
+                items = list(container.items)
+                items[position] = value
+                return frozenset({_Sequence(tuple(items), origin=container.origin)})
+            return frozenset({container})
+        if isinstance(index, ast.Slice):
+            lower, upper, step = (
+                self._integer_index(bound)
+                for bound in (index.lower, index.upper, index.step)
+            )
+            if (
+                not container.repeated
+                and step in (None, 1)
+                and all(
+                    bound is None or self._integer_index(bound) is not None
+                    for bound in (index.lower, index.upper, index.step)
+                )
+            ):
+                results: set[_Sequence] = set()
+                for replacement in value:
+                    if isinstance(replacement, _Sequence) and not replacement.repeated:
+                        items = list(container.items)
+                        items[lower:upper:step] = replacement.items
+                        results.add(_Sequence(tuple(items), origin=container.origin))
+                if results:
+                    return frozenset(results)
+            value = self._items(value)
+        return frozenset(
+            {
+                _Sequence(
+                    tuple(item | value for item in container.items) or (value,),
+                    container.repeated,
+                    container.recursive,
+                    container.origin,
+                )
+            }
+        )
+
+    def _mutate_containers(
+        self,
+        value: _Binding,
+        transform: Callable[[_Sequence | _Mapping], _Binding],
+    ) -> None:
+        replacements: dict[_Origin, _Binding] = {}
+        origins = {
+            item.origin for item in value if isinstance(item, (_Sequence, _Mapping))
+        }
+        definite = len(origins) == 1 and all(
+            isinstance(item, (_Sequence, _Mapping)) for item in value
+        )
+        for container in value:
+            if (
+                isinstance(container, (_Sequence, _Mapping))
+                and container.origin is not None
+            ):
+                replacements[container.origin] = (
+                    replacements.get(container.origin, frozenset())
+                    | transform(container)
+                    | (frozenset() if definite else frozenset({container}))
+                )
+
+        if replacements:
+            self.mutated_origins.update(replacements)
+            self.scopes = [
+                {
+                    name: self._rewrite_binding(binding, replacements)
+                    for name, binding in scope.items()
+                }
+                for scope in self.scopes
+            ]
+
+    def _rewrite_binding(
+        self,
+        binding: _Binding,
+        replacements: dict[_Origin, _Binding],
+    ) -> _Binding:
+        result: _Binding = frozenset()
+        for item in binding:
+            if isinstance(item, (_Sequence, _Mapping)) and item.origin in replacements:
+                result |= replacements[item.origin]
+            elif isinstance(item, _Sequence):
+                result |= frozenset(
+                    {
+                        _Sequence(
+                            tuple(
+                                self._rewrite_binding(child, replacements)
+                                for child in item.items
+                            ),
+                            item.repeated,
+                            item.recursive,
+                            item.origin,
+                        )
+                    }
+                )
+            elif isinstance(item, _Mapping):
+                result |= frozenset(
+                    {
+                        _Mapping(
+                            tuple(
+                                (key, self._rewrite_binding(child, replacements))
+                                for key, child in item.entries
+                            ),
+                            self._rewrite_binding(item.keys, replacements),
+                            item.origin,
+                            item.recursive,
+                        )
+                    }
+                )
+            elif isinstance(item, _Iterator):
+                result |= frozenset(
+                    {
+                        _Iterator(
+                            item.kind,
+                            tuple(
+                                self._rewrite_binding(source, replacements)
+                                for source in item.sources
+                            ),
+                        )
+                    }
+                )
+            else:
+                result |= frozenset({item})
+        return result
+
+    def _container_versions(self, scopes: _Scopes) -> dict[_Origin, _Binding]:
+        versions: dict[_Origin, _Binding] = {}
+
+        def collect(binding: _Binding) -> None:
+            for item in binding:
+                if isinstance(item, (_Sequence, _Mapping)):
+                    if item.origin is not None:
+                        versions[item.origin] = versions.get(
+                            item.origin, frozenset()
+                        ) | frozenset({item})
+                    children = (
+                        item.items
+                        if isinstance(item, _Sequence)
+                        else tuple(value for _, value in item.entries)
+                    )
+                    for child in children:
+                        collect(child)
+                elif isinstance(item, _Iterator):
+                    for source in item.sources:
+                        collect(source)
+
+        for scope in scopes:
+            for binding in scope.values():
+                collect(binding)
+        return versions
+
+    def _append_items(
+        self,
+        container: _Sequence | _Mapping,
+        value: _Binding,
+        extend: bool,
+    ) -> _Binding:
+        if not isinstance(container, _Sequence):
+            return frozenset({container})
+        if not extend:
+            return frozenset(
+                {
+                    _Sequence(
+                        container.items + (value,),
+                        container.repeated,
+                        container.recursive,
+                        container.origin,
+                    )
+                }
+            )
+        results: set[_Sequence] = set()
+        for sequence in value:
+            if isinstance(sequence, _Sequence) and not sequence.repeated:
+                results.add(
+                    _Sequence(
+                        container.items + sequence.items,
+                        container.repeated,
+                        container.recursive,
+                        container.origin,
+                    )
+                )
+            else:
+                results.add(
+                    _Sequence(
+                        container.items + (self._items(frozenset({sequence})),),
+                        True,
+                        container.recursive,
+                        container.origin,
+                    )
+                )
+        return frozenset(results) if results else frozenset({container})
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -388,6 +872,35 @@ class _DeviceVisitor(ast.NodeVisitor):
         if node.value is not None:
             self._bind_target(node.target, self._value(node.value))
         self.visit(node.annotation)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.visit(node.target)
+        self.visit(node.value)
+        old = self._value(node.target)
+        value = self._binary_value(node.op, node.target, node.value, node)
+        if isinstance(node.op, ast.Add):
+            self._mutate_containers(
+                old,
+                lambda container: self._append_items(
+                    container, self._value(node.value), True
+                ),
+            )
+        elif isinstance(node.op, ast.Mult):
+            self._mutate_containers(
+                old,
+                lambda container: frozenset(
+                    _Sequence(
+                        item.items, item.repeated, item.recursive, container.origin
+                    )
+                    for item in value
+                    if isinstance(item, _Sequence)
+                ),
+            )
+        if isinstance(node.target, ast.Name) and any(
+            isinstance(item, _Sequence) and item.origin is not None for item in old
+        ):
+            return
+        self._bind_target(node.target, value)
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
         self.visit(node.value)
@@ -498,6 +1011,7 @@ class _DeviceVisitor(ast.NodeVisitor):
     def visit_Return(self, node: ast.Return) -> None:
         if node.value is not None:
             self.visit(node.value)
+            self.return_values |= self._value(node.value)
         self._terminate("return")
 
     def visit_Raise(self, node: ast.Raise) -> None:
@@ -664,34 +1178,230 @@ class _DeviceVisitor(ast.NodeVisitor):
             bindings[node.args.kwarg.arg] = frozenset()
         return bindings
 
-    def _visit_function_body(
+    def _define_function(
         self,
         node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda,
-    ) -> None:
-        bindings = self._argument_bindings(node)
+    ) -> _Binding:
+        function = _Function(node, tuple(self.scope_nodes))
+        value: _Binding = frozenset({function})
+        if not isinstance(node, ast.Lambda):
+            self.scopes[self._binding_scope(node.name)][node.name] = value
+        self.functions[function] = _FunctionState(
+            [scope.copy() for scope in self.scopes],
+            self._argument_bindings(node),
+            self.declarations.copy(),
+            self.class_scopes.copy(),
+            self.comprehension_scopes.copy(),
+        )
+        self.function_revision += 1
+        self._visit_function_body(function)
+        return value
+
+    def _visit_function_body(
+        self,
+        function: _Function,
+        call: ast.Call | None = None,
+    ) -> _Binding:
+        node = function.node
+        if node in self.active_functions:
+            return frozenset()
+        state = self.functions[function]
+        versions = self._container_versions(self.scopes)
+        bindings = {
+            name: self._rewrite_binding(value, versions)
+            for name, value in state.bindings.items()
+        }
+        if call is not None:
+            self._bind_call_arguments(node.args, call, bindings)
         entry = self.scopes
+        scope_nodes = self.scope_nodes
+        declarations = self.declarations
+        class_scopes = self.class_scopes
+        comprehension_scopes = self.comprehension_scopes
+        return_values = self.return_values
+        mutated_origins = self.mutated_origins
         reachable, exits = self.reachable, self.exits
-        self.scopes = [scope.copy() for scope in entry] + [bindings]
+        current = dict(zip(scope_nodes, entry, strict=True))
+        self.scopes = [
+            current.get(frame, saved).copy()
+            for frame, saved in zip(function.context, state.frames, strict=True)
+        ] + [bindings]
+        incoming = [scope.copy() for scope in self.scopes]
+        cache_key: _ReadOnlyCall = (
+            function,
+            call,
+            self.function_revision,
+            frozenset(self.active_functions),
+            tuple(frozenset(scope.items()) for scope in incoming),
+        )
+        if cache_key in self.readonly_calls:
+            self.scopes = entry
+            return frozenset()
+        self.scope_nodes = [*function.context, call if call is not None else node]
+        self.declarations = state.declarations.copy()
+        self.class_scopes = state.class_scopes.copy()
+        self.comprehension_scopes = state.comprehension_scopes.copy()
         self.reachable, self.exits = True, []
+        self.return_values = frozenset()
+        self.mutated_origins = set()
+        self.active_functions.add(node)
         index = len(self.scopes) - 1
         body = [node.body] if isinstance(node, ast.Lambda) else node.body
         self.declarations[index] = _scope_declarations(body)
+        for statement in body:
+            for child in ast.walk(statement):
+                if isinstance(child, ast.expr):
+                    self.values.pop(child, None)
         self._visit_block(body)
-        del self.declarations[index]
+        if isinstance(node, ast.Lambda):
+            self.return_values |= self._value(node.body)
+        result = self.return_values
+        paths = ([self.scopes] if self.reachable else []) + [
+            scopes for kind, scopes in self.exits if kind == "return"
+        ]
+        if paths:
+            self._merge_scope_paths(paths)
+            # Escaping closures retain the cells at the enclosing function's exit.
+            closures: list[tuple[_Function | _Generator, _FunctionState]] = list(
+                self.functions.items()
+            )
+            closures.extend(self.generators.items())
+            for closure, closure_state in closures:
+                if self.scope_nodes[-1] in closure.context:
+                    for i, frame in enumerate(closure.context):
+                        if frame in self.scope_nodes:
+                            updated = self.scopes[self.scope_nodes.index(frame)]
+                            if closure_state.frames[i] != updated:
+                                closure_state.frames[i] = updated.copy()
+                                self.function_revision += 1
+        completed = self.scopes
+        versions = self._container_versions(completed)
+        effects = {
+            origin: versions[origin]
+            for origin in self.mutated_origins
+            if origin in versions
+        }
+        if (
+            not result
+            and not effects
+            and completed[:-1] == incoming[:-1]
+            and self.function_revision == cache_key[2]
+        ):
+            self.readonly_calls.add(cache_key)
+        self.active_functions.remove(node)
         self.scopes = entry
+        self.scope_nodes = scope_nodes
+        self.declarations = declarations
+        self.class_scopes = class_scopes
+        self.comprehension_scopes = comprehension_scopes
         self.reachable, self.exits = reachable, exits
+        self.return_values = return_values
+        self.mutated_origins = mutated_origins
+        if call is not None and paths:
+            for index, frame in enumerate(function.context):
+                if frame in self.scope_nodes:
+                    self.scopes[self.scope_nodes.index(frame)] = completed[index].copy()
+            self.mutated_origins.update(effects)
+            self.scopes = [
+                {
+                    name: self._rewrite_binding(value, effects)
+                    for name, value in scope.items()
+                }
+                for scope in self.scopes
+            ]
+        return result
+
+    def _bind_call_arguments(
+        self,
+        args: ast.arguments,
+        call: ast.Call,
+        bindings: dict[str, _Binding],
+    ) -> None:
+        positional = [*args.posonlyargs, *args.args]
+        supplied: list[_Binding] = []
+        uncertain: _Binding = frozenset()
+        uncertain_start: int | None = None
+        for argument in call.args:
+            if isinstance(argument, ast.Starred):
+                sequences = self._value(argument.value)
+                sequence = next(iter(sequences)) if len(sequences) == 1 else None
+                if isinstance(sequence, _Sequence) and not sequence.repeated:
+                    supplied.extend(sequence.items)
+                else:
+                    if uncertain_start is None:
+                        uncertain_start = len(supplied)
+                    uncertain |= self._items(sequences)
+            else:
+                supplied.append(self._value(argument))
+        for arg, value in zip(positional, supplied, strict=False):
+            bindings[arg.arg] = value
+        if uncertain_start is not None:
+            possible = uncertain | frozenset().union(*supplied[uncertain_start:])
+            for arg in positional[uncertain_start:]:
+                bindings[arg.arg] |= possible
+        if args.vararg is not None:
+            extra = tuple(supplied[len(positional) :])
+            bindings[args.vararg.arg] = frozenset(
+                {
+                    _Sequence(
+                        extra + ((uncertain,) if uncertain_start is not None else ()),
+                        repeated=uncertain_start is not None,
+                    )
+                }
+            )
+        named = {arg.arg for arg in (*args.args, *args.kwonlyargs)}
+        extras: dict[_Key | None, _Binding] = {}
+        for keyword in call.keywords:
+            pairs: list[tuple[_Key | None, _Binding]] = (
+                [(_Key(keyword.arg), self._value(keyword.value))]
+                if keyword.arg is not None
+                else [
+                    (key, value)
+                    for mapping in self._value(keyword.value)
+                    if isinstance(mapping, _Mapping)
+                    for key, value in mapping.entries
+                ]
+            )
+            for key, value in pairs:
+                if (
+                    key is not None
+                    and isinstance(key.value, str)
+                    and key.value in named
+                ):
+                    bindings[key.value] = value
+                elif key is None:
+                    for name in named:
+                        bindings[name] |= value
+                    extras[None] = extras.get(None, frozenset()) | value
+                else:
+                    extras[key] = extras.get(key, frozenset()) | value
+        if args.kwarg is not None:
+            bindings[args.kwarg.arg] = frozenset(
+                {
+                    _Mapping(
+                        tuple(extras.items()),
+                        origin=self._origin(call),
+                    )
+                }
+            )
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         self.visit(node.args)
-        self._visit_function_body(node)
+        self.values[node] = self._define_function(node)
 
     def visit_ListComp(
-        self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp
+        self,
+        node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp,
+        first_value: _Binding | None = None,
     ) -> None:
         first = node.generators[0]
-        self.visit(first.iter)
+        if first_value is None:
+            self.visit(first.iter)
+        else:
+            self.values[first.iter] = first_value
         outer = [scope.copy() for scope in self.scopes]
         self.scopes.append({})
+        self.scope_nodes.append(node)
         scope_index = len(self.scopes) - 1
         self.comprehension_scopes.add(scope_index)
         for generator in node.generators:
@@ -707,13 +1417,31 @@ class _DeviceVisitor(ast.NodeVisitor):
         if isinstance(node, ast.DictComp):
             self.visit(node.key)
             self.visit(node.value)
+            self.values[node] = frozenset(
+                {
+                    _Mapping(
+                        ((self._key(node.key), self._value(node.value)),),
+                        self._value(node.key),
+                        self._origin(node),
+                    )
+                }
+            )
         else:
             self.visit(node.elt)
             self.values[node] = frozenset(
-                {_Sequence((self._value(node.elt),), repeated=True)}
+                {
+                    _Sequence(
+                        (self._value(node.elt),),
+                        repeated=True,
+                        origin=self._origin(node)
+                        if isinstance(node, ast.ListComp)
+                        else None,
+                    )
+                }
             )
         self.comprehension_scopes.remove(scope_index)
         self.scopes.pop()
+        self.scope_nodes.pop()
         # Iteration can be empty, and a generator may never be consumed.
         outcomes = self.scopes
         self.scopes = outer
@@ -721,7 +1449,77 @@ class _DeviceVisitor(ast.NodeVisitor):
 
     visit_SetComp = visit_ListComp
     visit_DictComp = visit_ListComp
-    visit_GeneratorExp = visit_ListComp
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self.visit(node.generators[0].iter)
+        generator = _Generator(node, tuple(self.scope_nodes))
+        self.generators[generator] = _FunctionState(
+            [scope.copy() for scope in self.scopes],
+            {},
+            self.declarations.copy(),
+            self.class_scopes.copy(),
+            self.comprehension_scopes.copy(),
+            self._value(node.generators[0].iter),
+        )
+        self.function_revision += 1
+        self.values[node] = frozenset({generator})
+        self._evaluate_generator(generator, consume=False)
+
+    def _evaluate_generator(self, generator: _Generator, consume: bool) -> _Binding:
+        node = generator.node
+        if node in self.active_functions:
+            return frozenset()
+        state = self.generators[generator]
+        entry, scope_nodes = self.scopes, self.scope_nodes
+        declarations = self.declarations
+        class_scopes, comprehension_scopes = (
+            self.class_scopes,
+            self.comprehension_scopes,
+        )
+        reachable, exits = self.reachable, self.exits
+        mutated = self.mutated_origins
+        saved_value = self.values.get(node)
+        current = dict(zip(scope_nodes, entry, strict=True))
+        self.scopes = [
+            current.get(frame, saved).copy()
+            for frame, saved in zip(generator.context, state.frames, strict=True)
+        ]
+        self.scope_nodes = list(generator.context)
+        self.declarations = state.declarations.copy()
+        self.class_scopes = state.class_scopes.copy()
+        self.comprehension_scopes = state.comprehension_scopes.copy()
+        self.reachable, self.exits = True, []
+        self.mutated_origins = set()
+        self.active_functions.add(node)
+        for child in ast.walk(node):
+            if isinstance(child, ast.expr):
+                self.values.pop(child, None)
+        first = self._rewrite_binding(
+            state.first_iter, self._container_versions(self.scopes)
+        )
+        self.visit_ListComp(node, first)
+        result = self._items(self.values[node])
+        completed = self.scopes
+        changed = self.mutated_origins
+        self.active_functions.remove(node)
+        self.scopes, self.scope_nodes = entry, scope_nodes
+        self.declarations = declarations
+        self.class_scopes, self.comprehension_scopes = (
+            class_scopes,
+            comprehension_scopes,
+        )
+        self.reachable, self.exits = reachable, exits
+        self.mutated_origins = mutated
+        if saved_value is None:
+            self.values.pop(node, None)
+        else:
+            self.values[node] = saved_value
+        if consume:
+            for index, frame in enumerate(generator.context):
+                if frame in scope_nodes:
+                    self.scopes[scope_nodes.index(frame)] = completed[index]
+            self.mutated_origins.update(changed)
+        return result
 
     def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         for expression in node.decorator_list:
@@ -731,8 +1529,7 @@ class _DeviceVisitor(ast.NodeVisitor):
             self.visit(node.returns)
         for parameter in getattr(node, "type_params", ()):
             self.visit(parameter)
-        self.scopes[self._binding_scope(node.name)][node.name] = frozenset()
-        self._visit_function_body(node)
+        self._define_function(node)
 
     visit_AsyncFunctionDef = visit_FunctionDef
     visit_AsyncFor = visit_For
@@ -743,6 +1540,7 @@ class _DeviceVisitor(ast.NodeVisitor):
         for parameter in getattr(node, "type_params", ()):
             self.visit(parameter)
         self.scopes.append({})
+        self.scope_nodes.append(node)
         index = len(self.scopes) - 1
         self.class_scopes.add(index)
         self.declarations[index] = _scope_declarations(node.body)
@@ -750,6 +1548,7 @@ class _DeviceVisitor(ast.NodeVisitor):
         self.class_scopes.remove(index)
         del self.declarations[index]
         self.scopes.pop()
+        self.scope_nodes.pop()
         self.scopes[self._binding_scope(node.name)][node.name] = frozenset()
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
@@ -765,9 +1564,54 @@ class _DeviceVisitor(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         self.generic_visit(node)
+        functions = [
+            value for value in self._value(node.func) if isinstance(value, _Function)
+        ]
+        if functions:
+            entry = self.scopes
+            outcomes = []
+            result: _Binding = frozenset()
+            for function in functions:
+                self.scopes = [scope.copy() for scope in entry]
+                result |= self._visit_function_body(function, node)
+                outcomes.append(self.scopes)
+            self.scopes = entry
+            self._merge_scope_paths(outcomes)
+            self.values[node] = result
+        if isinstance(node.func, ast.Attribute):
+            receiver = self._value(node.func.value)
+            if node.func.attr in ("append", "extend") and len(node.args) == 1:
+                extend = node.func.attr == "extend"
+                self._mutate_containers(
+                    receiver,
+                    lambda container: self._append_items(
+                        container, self._value(node.args[0]), extend
+                    ),
+                )
+            elif node.func.attr in ("keys", "values", "items") and not node.args:
+                self.values[node] = frozenset({_Iterator(node.func.attr, (receiver,))})
+        if isinstance(node.func, ast.Name) and self._is_builtin(node.func.id):
+            wrapper = node.func.id
+            if wrapper == "enumerate" and node.args:
+                self.values[node] = frozenset(
+                    {_Iterator(wrapper, (self._value(node.args[0]),))}
+                )
+            elif wrapper == "zip":
+                self.values[node] = frozenset(
+                    {_Iterator(wrapper, tuple(self._value(arg) for arg in node.args))}
+                )
+            elif wrapper == "iter" and len(node.args) == 1:
+                self.values[node] = frozenset(
+                    {_Iterator(wrapper, (self._value(node.args[0]),))}
+                )
+            elif wrapper == "reversed" and len(node.args) == 1:
+                self.values[node] = frozenset(
+                    {_Iterator(wrapper, (self._value(node.args[0]),))}
+                )
         if (
             isinstance(node.func, ast.Name)
             and node.func.id == "getattr"
+            and self._is_builtin("getattr")
             and len(node.args) >= 2
             and "torch" in self._value(node.args[0])
             and isinstance(node.args[1], ast.Constant)
@@ -775,6 +1619,17 @@ class _DeviceVisitor(ast.NodeVisitor):
         ):
             self.lines.add(node.lineno)
             self.values[node] = frozenset({"device"})
+
+    def _is_builtin(self, name: str) -> bool:
+        for index in range(len(self.scopes) - 1, -1, -1):
+            if index in self.class_scopes and index != len(self.scopes) - 1:
+                continue
+            target = self._binding_scope(name, index)
+            if target != index:
+                return name not in self.scopes[target]
+            if name in self.scopes[index]:
+                return False
+        return True
 
 
 def direct_device_lines(source: str, devices: set[str]) -> set[int]:
