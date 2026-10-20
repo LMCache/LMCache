@@ -1925,8 +1925,8 @@ A request the engine looks up again (for example after preemption) emits
 one span per lookup; the analyzer keeps only its earliest span.
 
 Persist the spans with the Collector's ``file`` exporter. Starting from
-``examples/observability/otel-collector.yml``, add the exporter to the
-traces pipeline:
+``examples/observability``, add the exporter to the traces pipeline in
+``otel-collector.yml``:
 
 .. code-block:: yaml
 
@@ -1940,7 +1940,25 @@ traces pipeline:
          receivers: [otlp]
          exporters: [otlp/tempo, file/traces]
 
-The file holds OTLP JSON, one export batch per line. Prompt token ids are
+The collector image has no writable directory of its own and runs as
+user ``10001``, so the exporter cannot create that path until a host
+directory is mounted there. Create one the collector can write to and
+mount it in ``docker-compose.yml``:
+
+.. code-block:: bash
+
+   mkdir -p otel-data && chmod a+w otel-data
+
+.. code-block:: yaml
+
+   services:
+     otel-collector:
+       volumes:
+         - ./otel-collector.yml:/etc/otel-collector.yml:ro
+         - ./otel-data:/var/log/otel
+
+The file then appears as ``otel-data/lmcache-traces.jsonl`` on the host.
+It holds OTLP JSON, one export batch per line. Prompt token ids are
 only exported when ``--enable-token-trace`` is set; treat the file as
 sensitive.
 
