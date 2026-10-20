@@ -116,7 +116,7 @@ def test_deployments_runs_only_the_named_pairs(
     def run(spec: object, out: Path, image: str, aiperf: str) -> int:
         ran.append(out.name.rsplit("-", 1)[-1])
         out.mkdir(parents=True)
-        summary = {"invalid": [], "vllm_commit": "v", "lmcache_commit": None}
+        summary = {"invalid": [], "vllm_commit": "v", "lmcache_commit": "l"}
         (out / "summary.json").write_text(json.dumps(summary))
         return suite.EXIT_VALID
 
