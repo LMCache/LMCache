@@ -285,6 +285,14 @@ def test_sender_nonblocking_fifo_transfers(async_sender):
         assert ev.wait(timeout=timeout), f"req-{i} did not complete"
 
 
+def test_sender_skips_request_without_transfer_spec(async_sender):
+    """A request without transfer_spec is local and is not transferred."""
+    mem_obj = _make_mem_obj()
+    async_sender.batched_submit_put_task([_make_key(0)], [mem_obj], transfer_spec=None)
+    mem_obj.ref_count_up.assert_not_called()
+    assert mem_obj.get_ref_count() == 1
+
+
 def test_sender_flow_control_backpressure(async_sender):
     """allocate() blocks when staging buffer is physically full, unblocks on notify."""
     sentinel = _make_mem_obj(idx=77)

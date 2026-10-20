@@ -28,7 +28,7 @@ Worker adapter (vLLM MP adapter)
           ├─ AsyncEngineDrivenTransferContext (async_engine_driven.py)
           │    (store-only async: all three phases run in background thread pool)
           └─ EngineDrivenContext (transfer_context/base.py)
-             ├─ EngineDrivenContextPickle (transfer_context/pickle.py)
+             ├─ EngineDrivenContextInline (safe inline tensor codec)
              └─ EngineDrivenContextShm    (transfer_context/shm.py)
 
 MPCacheServer (server)
@@ -41,7 +41,7 @@ MPCacheServer (server)
 │    └─ shm_pool_info (pre-computed once)
 └─ EngineDrivenTransferModule (modules/engine_driven_transfer.py)
      └─ TransferStrategy (modules/server_transfer.py)
-          ├─ PickleTransferStrategy
+          ├─ InlineTransferStrategy (safe inline tensor codec)
           └─ ShmTransferStrategy
 ```
 
@@ -101,7 +101,7 @@ State machine overview (worker-side):
 Overall data flow:
 - **lmcache-driven path** (CUDA IPC): worker sends a handle, server pulls/pushes
   data directly via device memory.
-- **engine-driven path** (CPU/SHM/pickle): worker gathers/scatters paged KV and
+- **engine-driven path** (CPU/SHM/inline): worker gathers/scatters paged KV and
   exchanges CPU-side data via a transport-specific `EngineDrivenContext`
   implementation.
 
@@ -133,11 +133,11 @@ and block-id flattening), then submits all three phases to a background
 
 During `register`, worker receives `RegisterEngineDrivenContextResponse(shm_name, pool_size)`
 from server and then calls `create_engine_driven_context(...)` to construct
-`EngineDrivenContextPickle` or `EngineDrivenContextShm`.
+`EngineDrivenContextInline` or `EngineDrivenContextShm`.
 
 Why `prepare → data operation → commit`:
 - `prepare_*`: set up transport state (for SHM this allocates/returns shared buffers;
-  for pickle it is a protocol RPC that does not allocate transfer buffers).
+  for inline transfer it is a protocol RPC that does not allocate buffers).
 - gather/scatter: worker-local data movement between paged KV and contiguous
   CPU chunks, performed between protocol phases.
 - `commit_*`: finalize and notify server to consume or release transfer state.
@@ -173,11 +173,11 @@ mixed-device configurations by raising an error.
   logic to a `TransferStrategy`.
 
 Server transfer strategy implementations:
-- **PickleTransferStrategy**: pure pickle prepare/commit behavior.
-- **ShmTransferStrategy**: SHM slot-based prepare/commit behavior, with pickle
-  fallback when inline bytes are provided.
+- **InlineTransferStrategy**: typed inline tensor prepare/commit behavior.
+- **ShmTransferStrategy**: SHM slot-based prepare/commit behavior, with the safe
+  typed codec as fallback when inline bytes are provided.
 
-This mirrors the worker split (`EngineDrivenContextPickle` / `EngineDrivenContextShm`):
+This mirrors the worker split (`EngineDrivenContextInline` / `EngineDrivenContextShm`):
 both sides keep common request flow while isolating transport-specific logic.
 
 `MPCacheServerContext` is the shared container injected into modules at init.
@@ -193,7 +193,7 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 | Transport | Copies | Data flow |
 |---|---|---|
 | LMCache-driven (CUDA IPC) | 2 | GPU KV → GPU staging buffer → CPU memory object |
-| Pickle | 4 | GPU KV → CPU chunk → serialize → deserialize → CPU memory object |
+| Inline | 4 | GPU KV → CPU chunk → serialize → deserialize → CPU memory object |
 | SHM | 1 | GPU KV → CPU memory object (SHM mapped) |
 
 **Retrieve (server storage → worker):**
@@ -201,23 +201,26 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 | Transport | Copies | Data flow |
 |---|---|---|
 | LMCache-driven (CUDA IPC) | 2 | CPU memory object → GPU staging buffer → GPU KV |
-| Pickle | 4 | CPU memory object → serialize → deserialize → CPU chunk → GPU KV |
+| Inline | 4 | CPU memory object → serialize → deserialize → CPU chunk → GPU KV |
 | SHM | 1 | CPU memory object (SHM mapped) → GPU KV |
 
 | Transport | Pros | Cons | Best fit |
 |---|---|---|---|
 | LMCache-driven (CUDA IPC) | Mature path, good async overlap | CUDA-only | NVIDIA CUDA deployments |
-| Pickle | Works everywhere, no SHM setup | Extra serialization + copy overhead | Universal fallback |
+| Inline | Works everywhere, no SHM setup | Extra serialization + copy overhead | Universal fallback |
 | SHM | Lowest copy count, no serialization | Requires enough `/dev/shm` and synchronization | High-throughput engine-driven setups |
 
 ### 2.5 Current File Layout (Key Components)
 
 - `lmcache/v1/multiprocess/modules/engine_driven_transfer.py`: `EngineDrivenTransferModule`
-- `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `PickleTransferStrategy`, `ShmTransferStrategy`
+- `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `InlineTransferStrategy`, `ShmTransferStrategy`
 - `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `EngineDrivenTransferContext`, `LMCacheDrivenTransferContext`, `create_transfer_context`, `MPTransferMode`
 - `lmcache/v1/multiprocess/transfer_context/async_engine_driven.py`: `AsyncEngineDrivenTransferContext`
 - `lmcache/v1/multiprocess/transfer_context/base.py`: `EngineDrivenContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
-- `lmcache/v1/multiprocess/transfer_context/pickle.py`: `EngineDrivenContextPickle`
+- `lmcache/v1/multiprocess/transfer_context/inline.py`:
+  `EngineDrivenContextInline` using the safe inline tensor codec
+- `lmcache/v1/multiprocess/transfer_context/tensor_wire.py`: versioned tensor
+  metadata and raw-byte encoding with strict layout validation
 - `lmcache/v1/multiprocess/transfer_context/shm.py`: `EngineDrivenContextShm`
 
 ## 3. Protocol & Data Flow
@@ -245,7 +248,7 @@ The engine-driven path uses five request types:
 5. `COMMIT_RETRIEVE`  
    Worker acknowledges retrieval completion so transport state can be finalized.
 
-### 3.2 Data Flow: Pickle Path
+### 3.2 Data Flow: Inline Tensor Path
 
 Store:
 1. Worker `prepare_store` RPC.
@@ -260,14 +263,22 @@ Retrieve:
 4. Worker scatters chunks back to paged KV.
 5. Worker `commit_retrieve` finalizes protocol state.
 
+The inline payload is a versioned MessagePack envelope. Each tensor carries only
+an allowlisted dtype name, shape, and raw contiguous bytes. Both endpoints require
+the registered dtype and shape, an exact request-derived tensor count, exact byte
+lengths, and bounded individual and cumulative sizes. Unknown versions or fields
+and payloads from the previous untyped protocol are rejected without a fallback.
+This wire change is intentionally fail closed, so workers and servers must upgrade
+together.
+
 ```text
-Store (pickle)
+Store (inline tensor)
 Worker: prepare_store --> Server
 Worker: gather paged KV -> CPU chunks
 Worker: commit_store(serialized bytes) --> Server
 Server: deserialize -> storage write
 
-Retrieve (pickle)
+Retrieve (inline tensor)
 Worker: prepare_retrieve --> Server
 Server: read storage -> serialize bytes
 Server: serialized bytes --> Worker

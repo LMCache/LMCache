@@ -40,7 +40,7 @@ class EventIpcHandleResult(_message.Message):
     SUCCESS_FIELD_NUMBER: _ClassVar[int]
     event_ipc_handle: bytes
     success: bool
-    def __init__(self, event_ipc_handle: _Optional[bytes] = ..., success: bool = ...) -> None: ...
+    def __init__(self, event_ipc_handle: _Optional[bytes] = ..., success: _Optional[bool] = ...) -> None: ...
 
 class BlockIdGroup(_message.Message):
     __slots__ = ("block_ids",)
@@ -68,4 +68,4 @@ class EngineGroupInfo(_message.Message):
     sw_size_tokens: int
     extra_object_group_tag: int
     recurrent_state: bool
-    def __init__(self, engine_group_id: _Optional[int] = ..., layer_indices: _Optional[_Iterable[int]] = ..., tokens_per_block: _Optional[int] = ..., sw_size_tokens: _Optional[int] = ..., extra_object_group_tag: _Optional[int] = ..., recurrent_state: bool = ...) -> None: ...
+    def __init__(self, engine_group_id: _Optional[int] = ..., layer_indices: _Optional[_Iterable[int]] = ..., tokens_per_block: _Optional[int] = ..., sw_size_tokens: _Optional[int] = ..., extra_object_group_tag: _Optional[int] = ..., recurrent_state: _Optional[bool] = ...) -> None: ...

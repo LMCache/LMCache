@@ -61,16 +61,6 @@ import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
-#: The layout the RBLN-tuned op sequence below is written for: the native
-#: vLLM-RBLN per-layer HND format the vLLM detector reports for an RBLN
-#: attention KV cache.
-_HND_FORMAT = lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS
-
-#: The MLA layout vLLM-RBLN's MLA attention backend allocates
-#: (``[NB, BS, HS]``). Moved by its own functional op sequence -- see the
-#: module docstring for why the shared torch path cannot be reused here.
-_MLA_FORMAT = lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
-
 
 class RblnDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "rbln"
@@ -101,13 +91,15 @@ class RblnDeviceOps(DeviceOps):
             direction: ``D2H`` to store, ``H2D`` to retrieve.
             shape_desc: Paged-buffer shape descriptor.
             lmcache_chunk_size: Tokens per staging chunk.
-            engine_kv_format: Engine KV layout; must be the HND or MLA format.
+            engine_kv_format: Engine KV layout. Classified by its
+                ``KVFormatSpec`` layout facts: a per-layer two-major HND
+                layout or a per-layer ``[NB, BS, HS]`` MLA layout.
             skip_prefix_n_blocks: Leading blocks neither read nor written.
 
         Raises:
-            ValueError: If the operands are not tensor lists, the format is
-                neither the validated HND nor the MLA layout, a paged tensor
-                does not match its format's native shape, or the direction is
+            ValueError: If the operands are not tensor lists, the format's
+                layout facts match neither supported layout, a paged tensor
+                does not match its layout's shape, or the direction is
                 unknown.
         """
         del device  # taken from the operands
@@ -119,35 +111,48 @@ class RblnDeviceOps(DeviceOps):
                 "form is only produced for compiled backends, and RBLN has "
                 "no compiled block-transfer extension in tree."
             )
-        is_mla = lmcache_native.is_mla(engine_kv_format)
-        if is_mla:
-            # is_mla() admits every MLA layout; only NL_X_NB_BS_HS has an
-            # RBLN op sequence, so reject the others here with a format
-            # error rather than a shape mismatch in validate_mla_layers.
-            if int(engine_kv_format) != int(_MLA_FORMAT):
-                raise ValueError(
-                    "RBLN block transfer supports only the "
-                    f"{_MLA_FORMAT.name} MLA layout; got {engine_kv_format!r}"
-                )
-        elif int(engine_kv_format) != int(_HND_FORMAT):
+        # Imported lazily, not at module scope: importing the specs package
+        # pulls in ``lmcache.v1.gpu_connector``, which reads
+        # ``lmcache.device_ops`` -- still being resolved to this module while
+        # ``lmcache`` initializes on an RBLN host (an ImportError otherwise).
+        # First Party
+        from lmcache.v1.gpu_connector.kv_format.specs.base import describe_shape
+        from lmcache.v1.gpu_connector.kv_format.specs.registry import (
+            get_spec_class,
+        )
+
+        # Dispatch on the format's layout facts rather than its identity, so
+        # any per-layer layout the op sequences below address is accepted.
+        format_spec = get_spec_class(engine_kv_format)
+        is_mla = (
+            format_spec.is_layer_list
+            and format_spec.is_mla
+            and not format_spec.is_pbs_fused
+            and not format_spec.is_kv_second_tuple
+            and not format_spec.requires_blocked_scale_repacking
+        )
+        is_hnd = (
+            format_spec.is_layer_list
+            and format_spec.is_hnd
+            and format_spec.is_two_major
+            and not format_spec.is_fused_packed
+        )
+        if not (is_mla or is_hnd):
             raise ValueError(
-                "RBLN block transfer supports only "
-                f"{_HND_FORMAT.name} and {_MLA_FORMAT.name}; "
-                f"got {engine_kv_format!r}"
+                "RBLN block transfer supports only per-layer [NB, BS, HS] MLA "
+                "and per-layer two-major HND layouts; got "
+                f"{engine_kv_format!r} ({describe_shape(engine_kv_format)})"
             )
 
         # Per-format addressing only; the chunk/block bookkeeping below is
         # shared. HND keeps the singleton axis the RBLN attention backend
         # requires -- drop it here, where the bytes are actually addressed.
-        # MLA has nothing to squeeze; its rank is pinned instead.
-        if is_mla:
-            paged_layers = validate_mla_layers(
-                cast("list[torch.Tensor]", list(paged_buffer_ptrs_tensor))
-            )
-        else:
-            paged_layers = squeeze_singleton_axis(
-                cast("list[torch.Tensor]", list(paged_buffer_ptrs_tensor))
-            )
+        # The squeeze is strict, so an HND layout without that axis fails
+        # here. MLA has nothing to squeeze; its rank is pinned instead.
+        layers = cast("list[torch.Tensor]", list(paged_buffer_ptrs_tensor))
+        paged_layers = (
+            validate_mla_layers(layers) if is_mla else squeeze_singleton_axis(layers)
+        )
         chunks = cast("list[torch.Tensor]", list(lmcache_objects_ptrs))
         flat_blocks = (
             [int(b) for b in block_ids.tolist()]
