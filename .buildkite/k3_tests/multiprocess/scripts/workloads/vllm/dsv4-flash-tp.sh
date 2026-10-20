@@ -53,14 +53,16 @@ set -e
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../../.." && pwd)"
 
-source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
+export INFERENCE_ENGINE="${INFERENCE_ENGINE:-vllm}"
+source "${SCRIPT_DIR}/../helpers.sh"
+source "${SCRIPT_DIR}/../verification/dsv4-flash-tp-verification.sh"
 
 # ── Configuration ───────────────────────────────────────────
 MODEL="${MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
 LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 VLLM_PORT="${VLLM_PORT:-8000}"
+ENGINE_PORT="$VLLM_PORT"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-4}"
 BUILD_ID="${BUILD_ID:-local_$$}"
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
@@ -109,69 +111,6 @@ echo "LMCache port: $LMCACHE_PORT | vLLM port: $VLLM_PORT | TP=$TENSOR_PARALLEL_
 echo "Chunk size: $CHUNK_SIZE | L1 pool: ${L1_SIZE_GB}GB"
 echo "Results dir: $TP_DIR"
 echo ""
-
-# Send one greedy completion request and write the generated text to a file.
-# Uses only the Python stdlib so no extra client dependency is required.
-send_completion() {
-    local out_file="$1"
-    local run_name="$2"
-    echo "=== Sending completion ($run_name) on port $VLLM_PORT ==="
-    python3 - "$VLLM_PORT" "$MODEL" "$PROMPT_FILE" "$MAX_TOKENS" "$out_file" <<'PYEOF'
-import json
-import sys
-import urllib.request
-
-port, model, prompt_file, max_tokens, out_file = sys.argv[1:6]
-prompt = open(prompt_file).read()
-body = json.dumps(
-    {
-        "model": model,
-        "prompt": prompt,
-        "temperature": 0.0,
-        "max_tokens": int(max_tokens),
-        "seed": 0,
-    }
-).encode()
-req = urllib.request.Request(
-    f"http://127.0.0.1:{port}/v1/completions",
-    data=body,
-    headers={"Content-Type": "application/json"},
-)
-with urllib.request.urlopen(req, timeout=600) as resp:
-    data = json.load(resp)
-text = data["choices"][0]["text"]
-with open(out_file, "w") as f:
-    f.write(text)
-print(f"  generated {len(text)} chars")
-PYEOF
-    echo "$run_name completed"
-    echo ""
-}
-
-# Reset vLLM's local prefix cache (APC) while preserving LMCache.
-# reset_external defaults to false -> only vLLM's APC is cleared. Requires
-# VLLM_SERVER_DEV_MODE=1 on the vLLM launch.
-reset_vllm_prefix_cache() {
-    echo "=== Resetting vLLM local prefix cache (LMCache preserved) ==="
-    local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-        "http://127.0.0.1:${VLLM_PORT}/reset_prefix_cache")
-    if [ "$code" != "200" ]; then
-        echo "Failed to reset prefix cache (HTTP $code). Is VLLM_SERVER_DEV_MODE=1?"
-        return 1
-    fi
-    echo "vLLM prefix cache reset."
-    echo ""
-}
-
-# Count completed LMCache retrieves in the server log (proves run 2 was served
-# by LMCache, so the comparison can't pass vacuously by recomputing).
-count_retrieves() {
-    # NB: ``grep -c`` prints 0 *and* exits 1 on no match, so guard the file
-    # existence and use ``|| true`` (not ``|| echo 0``) to avoid emitting "0\n0".
-    [ -f "$LMCACHE_LOG" ] || { echo 0; return; }
-    grep -c "Retrieved" "$LMCACHE_LOG" 2>/dev/null || true
-}
 
 # ── 0a. Probe the ambient vLLM, downgrade only if it is broken ──
 # The 0.28.1rc1 nightlies break DeepSeek-V4-Flash sparse decode on SM120
@@ -283,36 +222,7 @@ sleep 10
 # slot-compressed blocks per group are stored) built by repeating a fixed
 # paragraph, so the input is identical on every run.
 #
-# The prompt deliberately ends MID-SENTENCE: the retrieve run recomputes the
-# few prompt-tail tokens beyond the last full chunk with a different prefill
-# kernel shape than the cold run, which perturbs the logits slightly. An
-# open-ended ending (e.g. "Summarize the text above:") puts the first
-# generated token at a near-tie (measured top-2 logprob gap 0.0000 between
-# ' The' and ' \n'), so that jitter flips the greedy argmax and the byte
-# comparison flakes. Ending inside the 80x-repeated sentence pins every
-# generated token to the memorized continuation (measured min top-2 gap 6.75
-# across 128 tokens), making the comparison robust.
-python3 - "$PROMPT_FILE" <<'PYEOF'
-import sys
-
-prompt_file = sys.argv[1]
-paragraph = (
-    "The poll() system call waits for one of a set of file descriptors to "
-    "become ready to perform I/O. The set of file descriptors to be monitored "
-    "is specified in the fds argument, which is an array of pollfd structures. "
-    "The caller should specify the number of items in the fds array in nfds. "
-    "The timeout argument specifies the number of milliseconds that poll() "
-    "should block waiting for a file descriptor to become ready. The call will "
-    "block until either a file descriptor becomes ready, the call is "
-    "interrupted by a signal handler, or the timeout expires. "
-)
-# ~97 words/paragraph * 80 ~= 7.8k words.
-with open(prompt_file, "w") as f:
-    f.write(paragraph * 80)
-    f.write("The poll() system call waits for one of a set of file")
-PYEOF
-echo "Prompt built ($(wc -w < "$PROMPT_FILE") words)."
-echo ""
+dsv4_build_prompt
 
 # ── 3. Launch vLLM (dev mode for /reset_prefix_cache) ───────
 echo "=== Launching vLLM ($MODEL, TP=$TENSOR_PARALLEL_SIZE, port $VLLM_PORT) ==="
@@ -354,52 +264,5 @@ if ! wait_for_server "$VLLM_PORT" "$VLLM_READY_TIMEOUT" "$VLLM_LOG"; then
 fi
 echo ""
 
-# ── 4. vLLM run: compute from scratch, populating LMCache ───
-send_completion "$OUT_A" "vLLM run"
-
-echo "Waiting ${STORE_DRAIN_SECONDS}s for LMCache stores to drain..."
-sleep "$STORE_DRAIN_SECONDS"
-retrieves_before=$(count_retrieves)
-
-# ── 5. Invalidate vLLM's local prefix cache (keep LMCache) ──
-reset_vllm_prefix_cache
-
-# ── 6. Retrieve run: vLLM APC misses -> LMCache serves the KV ─
-send_completion "$OUT_B" "LMCache retrieve run"
-retrieves_after=$(count_retrieves)
-
-# ── 7. Compare outputs and verify LMCache was actually used ──
-echo "============================================"
-echo "=== Verifying L1 slot-compression correctness ==="
-echo "============================================"
-echo "LMCache retrieves logged: before=${retrieves_before}, after=${retrieves_after}"
-
-failed=0
-
-if cmp -s "$OUT_A" "$OUT_B"; then
-    echo "PASS: vLLM-run and LMCache-retrieve outputs are identical."
-else
-    echo "FAILED: outputs differ between the cold run and the LMCache-served run."
-    echo "--- vLLM run (first 400 chars) ---"
-    head -c 400 "$OUT_A"; echo
-    echo "--- LMCache retrieve run (first 400 chars) ---"
-    head -c 400 "$OUT_B"; echo
-    failed=1
-fi
-
-if [ "$retrieves_after" -le "$retrieves_before" ]; then
-    echo "FAILED: LMCache served no retrieves during the retrieve run "
-    echo "        (before=${retrieves_before}, after=${retrieves_after}); the "
-    echo "        comparison would be vacuous."
-    failed=1
-fi
-
-if [ "$failed" -ne 0 ]; then
-    exit 1
-fi
-
-echo ""
-echo "============================================"
-echo "=== DeepSeek-V4-Flash L1 test passed ==="
-echo "  outputs identical; LMCache served $((retrieves_after - retrieves_before)) retrieves."
-echo "============================================"
+# ── 4. Store, clear vLLM APC, retrieve, and verify ──────────
+dsv4_run_l1_round_trip
