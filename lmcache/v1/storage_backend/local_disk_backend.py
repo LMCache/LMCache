@@ -302,25 +302,9 @@ class LocalDiskBackend(StorageBackendInterface):
         return True
 
     def clear(self) -> int:
-        """Remove every unpinned entry and its file from the disk cache.
-
-        Pinned entries belong to an in-flight retrieval and are kept, as in
-        ``LocalCPUBackend.clear()``. Selection and removal happen under one
-        ``disk_lock`` hold, so an entry cannot be pinned in between.
-
-        Note:
-            Only entries this backend tracks are removed. A put still being
-            written when ``clear()`` runs keeps its reservation and its entry
-            appears once the write completes. A file that is already missing
-            is treated as removed.
-
-        Returns:
-            The number of tokens cleared.
-
-        Raises:
-            OSError: If deleting a file fails for a reason other than the file
-                being missing. Entries cleared before the failure stay
-                cleared; the failing entry is left in place.
+        """
+        removes unpinned entries and their files, and
+        counts the number of tokens removed
         """
         num_cleared_tokens = 0
         with self.disk_lock:
@@ -328,26 +312,17 @@ class LocalDiskBackend(StorageBackendInterface):
                 for key, meta in list(self.dict.items()):
                     if not meta.can_evict:
                         continue
-                    # Unlink before changing any bookkeeping, so an unexpected
-                    # OSError leaves this entry tracked and consistent.
                     try:
                         os.remove(meta.path)
                     except FileNotFoundError:
-                        # Deleted outside LMCache; read_file() handles this
-                        # case the same way.
                         logger.debug(
                             "Disk cache file %s was already removed", meta.path
                         )
                     del self.dict[key]
                     self.usage -= meta.size
-                    # remove() leaves releasing the put-time reservation to its
-                    # callers; the eviction loop in submit_put_task() does too.
                     self.current_cache_size -= meta.size
                     self.cache_policy.update_on_force_evict(key)
                     num_cleared_tokens += meta.shape[meta.fmt.token_dim()]
-                    # Queued under disk_lock, per entry, so the controller hears
-                    # about every removed entry even if a later unlink fails, and
-                    # before any later insert_key() can re-admit the key.
                     if self.batched_msg_sender is not None:
                         self.batched_msg_sender.add_kv_op(
                             op_type=OpType.EVICT,
