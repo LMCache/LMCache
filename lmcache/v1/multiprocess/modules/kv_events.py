@@ -21,15 +21,26 @@ from lmcache.v1.multiprocess.custom_types import (
     KVEventRecord,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    InstanceLivenessTarget,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.futures import MessagingStream
+from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+    EngineDrivenTransferModule,
+)
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    LMCacheDrivenTransferModule,
+)
 from lmcache.v1.multiprocess.request_handler import request_handler
 
 _KIND_LOST = "lost"
 _TOKEN_BINDING_CACHE_SIZE = 65536
 
 
-class KVEventModule(InstanceLivenessTarget):
+class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
     """Own CPU event records, token bindings, and worker subscriptions.
 
     Args:
@@ -42,6 +53,22 @@ class KVEventModule(InstanceLivenessTarget):
     The existing management reaper refreshes and expires subscriptions through
     InstanceLivenessTarget. Subscription expiry does not reap transfer state.
     """
+
+    module_name = "kv_events"
+    # Build after both transfer classes so reverse close order stops event
+    # subscriptions before any enabled transfer module releases its state.
+    module_dependencies = (
+        LMCacheDrivenTransferModule,
+        EngineDrivenTransferModule,
+    )
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        """Build the event channel; a disabled channel still serves subscribers."""
+        return cls(
+            build_ctx.engine_context,
+            kv_event_log_size=build_ctx.mp_config.kv_event_log_size,
+        )
 
     def __init__(
         self,

@@ -86,6 +86,20 @@ Test dependencies: `uv pip install -r requirements/test.txt`
 
 Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
 
+### CPU-only connector import checks
+
+Use Python 3.12 with PyTorch and the common native extensions installed.
+A fresh worktree does not include ignored native build artifacts; build them
+with `NO_GPU_EXT=1 python setup.py build_ext --inplace` before running layout
+and connector import tests. For these focused checks, use
+`python -m pytest --confcutdir=tests/v1 tests/v1/gpu_connector/` so the root
+`tests/conftest.py` GPU allocator fixtures are not loaded. This validates CPU
+imports and shared layout/GDS behavior, not accelerator kernel roundtrips.
+When combining these tests with `tests/inprocess/`, use `--noconftest` for
+self-contained CPU checks spanning both trees; normal accelerator CI must
+retain the root fixtures. Mirrored test directories with identical module
+names need package `__init__.py` files to avoid pytest import mismatches.
+
 ### Testing Practices
 
 - Write tests against the **public interface and docstring contract**, not the implementation. Test as if you don't know the internals — verify that behavior matches what the docstring describes.

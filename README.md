@@ -23,7 +23,7 @@
   [![GitHub contributors](https://img.shields.io/github/contributors/LMCache/LMCache)](https://github.com/LMCache/LMCache/graphs/contributors)
   [![Good first issues](https://img.shields.io/github/issues/LMCache/LMCache/good%20first%20issue?label=good%20first%20issues&color=7057ff)](https://github.com/LMCache/LMCache/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
   [![Slack](https://img.shields.io/badge/Slack-Join%20us-4A154B?logo=slack)](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA)
-  [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/LMCache/LMCache/)
+  [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-1E88E5)](https://deepwiki.com/LMCache/LMCache/)
 
   ⭐ **If LMCache helps you serve LLMs faster and cheaper, [give us a star](https://github.com/LMCache/LMCache) — it helps more teams discover the project.**
 

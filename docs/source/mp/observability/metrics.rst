@@ -299,6 +299,14 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
    * - ``lmcache_mp.lookup_hit_l2_keys``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Hit keys loaded from L2 into L1.
+   * - ``lmcache_mp.lookup_prompt``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Whole prompt length of each looked-up request, sub-chunk tail
+       included (denominator of the request-level hit rate).
+   * - ``lmcache_mp.lookup_request_hit``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Prefix of the prompt served by the engine's prefix cache or LMCache
+       (numerator of the request-level hit rate).
    * - ``lmcache_mp.lookups``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Completed lookups (denominator for ``lookup_early_exit``).
@@ -309,9 +317,11 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
 
 All lookup counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``),
 so they always advance together per completed lookup. Early-exit lookups
-contribute ``0`` tokens to all four token counters, ``0`` keys to both
-key counters, and ``+1`` to
-``lookups`` / ``lookup_early_exit``, and abandoned lookups contribute to neither.
+contribute ``0`` tokens to the lookup-level token counters, ``0`` keys to
+both key counters, and ``+1`` to ``lookups`` / ``lookup_early_exit``; they
+still advance the request-level counters (``lookup_prompt`` and
+``lookup_request_hit``), which describe the request rather than the
+lookup. Abandoned lookups contribute to none of them.
 
 The ``model_name`` and ``cache_salt`` attributes are captured at lookup
 time from ``IPCCacheServerKey`` so dashboards can compute per-model or
@@ -319,17 +329,27 @@ per-tenant hit rate. ``cache_salt`` can be high-cardinality (one entry
 per tenant or isolation domain); drop it at scrape time with
 ``metric_relabel_configs`` if storage cost matters.
 
-**PromQL for hit rate:**
+**PromQL for hit rate** (both ratios use the whole prompt as denominator):
 
 .. code-block:: promql
 
-    # Aggregate (all models, all salts):
+    # LMCache token hit rate, share of prompt tokens (all models, all salts):
     rate(lmcache_mp_lookup_hit_tokens_total[5m])
-    / rate(lmcache_mp_lookup_requested_tokens_total[5m])
+    / rate(lmcache_mp_lookup_prompt_tokens_total[5m])
+
+    # Request-level: share of prompt tokens served by the engine's prefix
+    # cache or LMCache:
+    rate(lmcache_mp_lookup_request_hit_tokens_total[5m])
+    / rate(lmcache_mp_lookup_prompt_tokens_total[5m])
 
     # Per-model:
     sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
-    / sum(rate(lmcache_mp_lookup_requested_tokens_total[5m])) by (model_name)
+    / sum(rate(lmcache_mp_lookup_prompt_tokens_total[5m])) by (model_name)
+
+    # LMCache hit rate on only the range it was asked to look up (past the
+    # prefix the engine already held):
+    rate(lmcache_mp_lookup_hit_tokens_total[5m])
+    / rate(lmcache_mp_lookup_requested_tokens_total[5m])
 
     # Share of hit tokens L1 could serve on its own:
     rate(lmcache_mp_lookup_hit_l1_tokens_total[5m])
@@ -988,3 +1008,36 @@ The freshness metrics say how old the coordinator's view is.
      - ObservableGauge (attr: ``partition``)
      - Records not yet read per partition.  Kafka's own lag tools cannot report
        this, because the coordinator never commits offsets.
+
+The liveness metrics say whether the coordinator's loops and controllers are
+still doing their work.  A failed pass of a background loop is logged and
+counted, and the loop keeps running.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_coordinator.background_loop.last_success_timestamp_seconds``
+     - ObservableGauge (attr: ``loop``)
+     - Wall-clock time each loop (``health``, ``checkpoint``, ``eviction``)
+       last finished a pass without an error.  More than three intervals ago
+       means the loop has stopped making progress.
+   * - ``lmcache_coordinator.background_loop.interval_seconds``
+     - ObservableGauge (attr: ``loop``)
+     - Configured seconds between the loop's passes.
+   * - ``lmcache_coordinator.background_loop.passes``
+     - ObservableCounter (attrs: ``loop``, ``result``)
+     - Loop passes, ``ok`` or ``failed``.
+   * - ``lmcache_coordinator.controller.up``
+     - ObservableGauge (attr: ``controller``)
+     - ``1`` if the controller is running, ``0`` if it failed to start.
+   * - ``lmcache_coordinator.event_loop.blocked_seconds``
+     - ObservableCounter
+     - Total time the coordinator's event loop was blocked.  Its rate is the
+       fraction of time request handlers, heartbeats and loops were stalled.
+   * - ``lmcache_coordinator.registry.server_seconds_since_heartbeat``
+     - ObservableGauge (attr: ``instance_id``)
+     - Seconds since each registered server's last heartbeat.
