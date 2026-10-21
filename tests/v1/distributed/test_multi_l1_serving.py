@@ -36,6 +36,25 @@ def _args(specs: list[dict[str, object]]) -> list[str]:
     ]
 
 
+def test_devdax_manager_accepts_offset_gb(tmp_path: Path) -> None:
+    """``offset_gb`` maps a DEVDAX manager past the start of a shared device."""
+    base = {"type": "DEVDAX", "tag": "dax", "size_gb": 1, "path": str(tmp_path / "d")}
+    config = parse_args(_args([{**base, "offset_gb": 2}]))
+    (manager,) = config.l1_manager_configs
+    assert isinstance(manager, DevDaxL1ManagerConfig)
+    assert manager.memory_config.devdax_offset_in_bytes == 2 << 30
+
+    (default,) = parse_args(_args([base])).l1_manager_configs
+    assert default.memory_config.devdax_offset_in_bytes == 0
+
+    with pytest.raises(ValueError, match="offset_gb"):
+        parse_args(_args([{**base, "offset_gb": -1}]))
+    with pytest.raises(ValueError, match="offset_gb"):
+        parse_args(_args([{**base, "offset_gb": True}]))
+    with pytest.raises(ValueError, match="multiple of"):
+        parse_args(_args([{**base, "offset_gb": 1e-9}]))
+
+
 def test_backend_config_subclasses_and_affinity(tmp_path: Path) -> None:
     specs = [
         {"type": "DRAM", "tag": "_default", "size_gb": 1},

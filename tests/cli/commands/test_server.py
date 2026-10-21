@@ -2,8 +2,13 @@
 """Tests for the ``lmcache server`` CLI command."""
 
 # Standard
+from pathlib import Path
 from unittest.mock import patch
 import argparse
+import importlib.util
+import os
+import subprocess
+import sys
 
 # Third Party
 import pytest
@@ -24,6 +29,40 @@ def parser(cmd):
     sub = p.add_subparsers()
     cmd.register(sub)
     return p
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("lmcache.lmcache_native") is None,
+    reason="Fresh CLI process requires the native extension",
+)
+def test_server_help_with_incompatible_bigtable(tmp_path: Path) -> None:
+    """A broken Bigtable dependency does not prevent full server help output."""
+    bigtable_package = tmp_path / "google" / "cloud" / "bigtable"
+    bigtable_package.mkdir(parents=True)
+    bigtable_package.joinpath("__init__.py").write_text(
+        'raise TypeError("Descriptors cannot be created directly")\n'
+    )
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, "-m", "lmcache.cli.main", "server", "--help"],
+        cwd=repo_root,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join((str(tmp_path), str(repo_root))),
+            "LMCACHE_TRACK_USAGE": "false",
+            "LMCACHE_DISABLE_BANNER": "1",
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "TypeError: Descriptors cannot be created directly" in result.stderr
+    assert "bigtable_l2_adapter" in result.stderr
+    assert "--l2-adapter" in result.stdout
+    assert "--http-port" in result.stdout
+    assert "mock" in result.stdout
 
 
 class TestServerCommandMetadata:

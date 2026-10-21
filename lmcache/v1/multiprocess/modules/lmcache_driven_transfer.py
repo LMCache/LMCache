@@ -28,7 +28,12 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    InstanceLivenessTarget,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
 from lmcache.v1.multiprocess.native_completion import (
@@ -37,7 +42,6 @@ from lmcache.v1.multiprocess.native_completion import (
 )
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
-    transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -161,7 +165,7 @@ class ContextEntry:
     event_backend: EventIPCBackend | None = None
 
 
-class LMCacheDrivenTransferModule(InstanceLivenessTarget):
+class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     """Handles LMCache-driven KV cache transfer operations.
 
     Owns GPU context registrations and provides handlers for
@@ -170,6 +174,16 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
     Args:
         ctx: The shared engine context.
     """
+
+    module_name = "lmcache_driven_transfer"
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        """Build unless the transfer mode excludes the LMCache-driven path."""
+        mode = build_ctx.mp_config.supported_transfer_mode
+        if mode == "engine_driven":
+            return None
+        return cls(build_ctx.engine_context)
 
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
@@ -468,7 +482,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
         # time so a stale entry is not reaped right after recovery. REGISTER
-        # is SYNC-serialized on the MQ main loop, so it is the sole inserter.
+        # is SERIALIZED on the MQ main loop, so it is the sole inserter.
         with self._lock:
             existing = self._cache_contexts.get(instance_id)
             if existing is not None:
@@ -480,14 +494,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 return
 
         # Build the context and layout descriptor outside the lock.
-        cache_context = create_cache_context(
+        cache_context = self._create_cache_context(
             kv_caches,
-            self._ctx.chunk_size,
+            instance_id=instance_id,
+            engine_type=engine_type,
             layout_hints=layout_hints or None,
             engine_group_infos=engine_group_infos,
-            engine_type=engine_type,
-            separate_object_groups=self._ctx.separate_object_groups,
-            full_sw_kv=self._ctx.full_sw_kv,
         )
         kv_groups_manager = cache_context.kv_layer_groups_manager
         num_object_groups = kv_groups_manager.num_object_groups
@@ -778,8 +790,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     ]
 
                     # NOTE: batch_size must stay 1 for store.
-                    transfer_kv_per_object_group(
-                        cache_context,
+                    cache_context.transfer_object_group(
                         block_ids_per_group_gpu,
                         memory_objs,
                         object_group_id=obj_group_id,
@@ -847,6 +858,31 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             event_backend.export_event(event, cache_context.device),
             store_succeeded,
             stored_mask,
+        )
+
+    def _create_cache_context(
+        self,
+        kv_caches: KVCache,
+        *,
+        instance_id: int,
+        engine_type: EngineType,
+        layout_hints: LayoutHints | None,
+        engine_group_infos: Sequence[EngineGroupInfo],
+    ) -> BaseCacheContext:
+        """Build the cache context for a newly registered instance.
+
+        ``instance_id`` is the registering instance. The default ignores it;
+        a subclass can use it to look up per-instance data that its worker
+        sent before registering.
+        """
+        return create_cache_context(
+            kv_caches,
+            self._ctx.chunk_size,
+            layout_hints=layout_hints,
+            engine_group_infos=engine_group_infos,
+            engine_type=engine_type,
+            separate_object_groups=self._ctx.separate_object_groups,
+            full_sw_kv=self._ctx.full_sw_kv,
         )
 
     @request_handler(
@@ -1049,8 +1085,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     total_bytes += sum(mo.get_size() for mo in window_objs)
                     # None-pad the skipped prefix so block-id slicing is unchanged.
                     memory_objs: list[MemoryObj | None] = [None] * skip + window_objs
-                    transfer_kv_per_object_group(
-                        cache_context,
+                    cache_context.transfer_object_group(
                         block_ids_per_group_gpu,
                         memory_objs,
                         object_group_id=obj_group_id,

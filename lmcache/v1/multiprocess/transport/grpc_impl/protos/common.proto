@@ -33,7 +33,7 @@ message BlockIdGroup {
 
 // Device IPC wrappers preserve concrete Python subclass identity.
 message DeviceIpcWrapper {
-  bytes pickled_payload = 1;
+  bytes descriptor_payload = 1;
 }
 
 // EngineGroupInfo mirrors the Python msgspec.Struct field-by-field.
