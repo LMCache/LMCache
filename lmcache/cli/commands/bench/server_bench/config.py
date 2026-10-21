@@ -6,6 +6,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
+from typing import Literal
 import argparse
 
 # First Party
@@ -14,25 +15,7 @@ from lmcache.cli.commands.bench.server_bench.cases.base import BenchCase
 
 @dataclass(frozen=True)
 class BenchConfig:
-    """Immutable client configuration for one server benchmark run.
-
-    CLI-only concerns such as profiling stay with the command layer.
-
-    Attributes:
-        rpc_url: Multiprocess request endpoint of the LMCache server.
-        http_url: HTTP endpoint used by management and checksum APIs.
-        mode: ``"cpu"`` or ``"gpu"`` for mock Worker resources.
-        transfer_mode: ``"auto"``, ``"engine_driven"``, or
-            ``"lmcache_driven"``.
-        tp_size: Number of simulated tensor-parallel Workers.
-        use_mla: Whether the CLI explicitly requested MLA routing.
-        num_tokens: Synthetic payload tokens per request, excluding the
-            sequence token prepended by the benchmark.
-        kvcache_shape_spec: LMCache KV shape specification string.
-        num_blocks: Fallback number of paged KV blocks.
-        block_size: Fallback number of tokens per paged KV block.
-        concurrency: Number of clients sending requests at the same time.
-    """
+    """Immutable client configuration for one server benchmark run."""
 
     rpc_url: str
     http_url: str
@@ -45,6 +28,7 @@ class BenchConfig:
     num_blocks: int
     block_size: int
     concurrency: int = 1
+    block_allocation: Literal["sequential", "random"] = "sequential"
 
     def __post_init__(self) -> None:
         if self.mode not in ("cpu", "gpu"):
@@ -59,6 +43,9 @@ class BenchConfig:
             raise ValueError(f"tp_size must be positive, got {self.tp_size}")
         if self.concurrency < 1:
             raise ValueError(f"concurrency must be positive, got {self.concurrency}")
+
+        if self.block_allocation not in ("sequential", "random"):
+            raise ValueError(f"unsupported block allocation: {self.block_allocation}")
 
     @property
     def is_gpu(self) -> bool:
@@ -140,4 +127,5 @@ def parse_args_to_config(args: argparse.Namespace) -> BenchConfig:
         num_blocks=args.num_blocks,
         block_size=args.block_size,
         concurrency=int(getattr(args, "concurrency", 1)),
+        block_allocation=getattr(args, "block_allocation", "sequential"),
     )
