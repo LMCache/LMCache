@@ -111,9 +111,25 @@ class LookupMixin:
 
     def _match_fingerprints(self, key: IPCCacheServerKey) -> list[CBMatchResult]:
         """Drain pending registrations, then return raw fingerprint matches
-        (any order, possibly overlapping)."""
+        (any order, possibly overlapping) on the model's shift grid."""
         self._drain_fingerprints_sync()
-        return self._token_range_matcher.match_sub_sequence(list(key.token_ids))
+        return self._token_range_matcher.match_sub_sequence(
+            list(key.token_ids), shift_align=self._cb_shift_align(key)
+        )
+
+    def _cb_shift_align(self, key: IPCCacheServerKey) -> int:
+        """Shift grid for ``key``'s model: the largest tokens-per-slot ratio over its
+        registered kernel groups (a pooled state cannot straddle a shift); 1 if none."""
+        align = 1
+        for entry in self._transfer_module.context_entries_snapshot().values():
+            if entry.model_name != key.model_name or entry.world_size != key.world_size:
+                continue
+            for kg in entry.cache_context.kv_layer_groups_manager.kernel_groups:
+                spb = int(getattr(kg, "slots_per_block", 0) or 0)
+                tpb = int(getattr(kg, "tokens_per_block", 0) or 0)
+                if spb > 0 and tpb > spb and tpb % spb == 0:
+                    align = max(align, tpb // spb)
+        return align
 
     @staticmethod
     def _non_overlapping_after_prefix(
@@ -588,7 +604,14 @@ class LookupMixin:
                 ]
             # Prefix-filter only; the overlap dedup runs AFTER the prefetch,
             # so the winner is chosen among chunks that can actually be fetched.
-            job.non_prefix = [c for c in candidates if c.cur_st >= prefix_tokens]
+            # Coordinator matches did not pass through the local matcher, so
+            # the shift grid is enforced here for every source.
+            align = self._cb_shift_align(key)
+            job.non_prefix = [
+                c
+                for c in candidates
+                if c.cur_st >= prefix_tokens and (c.cur_st - c.old_st) % align == 0
+            ]
             if job.non_prefix:
                 resolved = self._resolve_cb_read_layouts(key.model_name, key.world_size)
                 if resolved is not None:

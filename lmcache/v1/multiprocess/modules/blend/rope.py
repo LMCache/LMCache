@@ -25,6 +25,15 @@ _FP8_FLAVOR_TO_AT_SCALAR = {
     "fp8_e5m2": 23,  # at::ScalarType::Float8_e5m2
 }
 
+# at::ScalarType -> item size, for the float view a uint8 row is rotated
+# through (DeepSeek-V4: a bf16 rope tail inside the packed 584-byte record).
+_AT_SCALAR_ITEMSIZE = {5: 2, 6: 4, 15: 2}
+
+
+class RopeWindowDoesNotFit(RuntimeError):
+    """A declared rope window ends past the kernel group's row: a side plane sharing
+    the engine group (indexer K next to the main KV), skipped instead of declining."""
+
 
 @dataclass
 class _CBRopeState:
@@ -39,10 +48,9 @@ class _CBRopeState:
     is_neox_style: bool  # NeoX = contiguous halves; else GPT-J.
     cos_sin_caches: list[torch.Tensor]
     group_to_cache: list[int]  # engine group idx -> cache idx; empty = cache 0
-    # Per-group rotation window ``(offset_elems, width_elems)``; ``None``
-    # skips re-RoPE for the group, empty list = legacy inferred geometry.
-    # Required for MLA: inference would rotate the latent's content dims.
-    group_rot: "list[tuple[int, int] | None]" = field(default_factory=list)
+    # Per-group window (offset, width[, view_at_scalar]); None = skip, [] = legacy.
+    # The 3-tuple rotates a uint8 row through a float view (offset/width in view elems).
+    group_rot: "list[tuple[int, ...] | None]" = field(default_factory=list)
     group_head_size: list[int] = field(default_factory=list)
     # fp8 flavor of the paged KV ("fp8_e4m3"/"fp8_e5m2"); "" = unquantized.
     kv_quant: str = ""
@@ -71,11 +79,8 @@ class _CBRopeState:
         A ``-1`` group is rope-less: ``None`` regardless of ``group_rot``
         (checked first, so the legacy ``(0, head_size)`` cannot claim it).
 
-        Under a declared map, a non-float kernel group returns ``None``: one
-        engine group can hold several kernel groups (e.g. a bf16 latent plus
-        a uint8 fp8 index cache), and the rope kernel cannot rotate quantized
-        rows. Legacy registrations (empty ``group_rot``) get ``(0, head_size)``
-        with no dtype-based skip.
+        Under a declared map a non-float kernel group returns ``None`` unless its
+        window declares a float view; legacy (empty map) gets ``(0, head_size)``.
 
         Returns:
             ``(offset_elems, width_elems)``, or ``None`` when the group's
@@ -92,14 +97,27 @@ class _CBRopeState:
             return None  # rope-less group
         if not self.group_rot:
             return (0, self.head_size)
-        if dtype is not None and not dtype.is_floating_point:
-            return None
         if engine_group_idx >= len(self.group_rot):
             raise RuntimeError(
                 f"CB re-RoPE: engine group {engine_group_idx} has no rope "
                 f"geometry (map covers {len(self.group_rot)} groups)."
             )
-        return self.group_rot[engine_group_idx]
+        entry = self.group_rot[engine_group_idx]
+        if entry is None:
+            return None
+        if dtype is not None and not dtype.is_floating_point and len(entry) < 3:
+            return None
+        return (entry[0], entry[1])
+
+    def view_scalar_for_group(self, engine_group_idx: int) -> "int | None":
+        """The ``at::ScalarType`` a uint8 group's rows are rotated through,
+        or ``None`` when the window declares no view."""
+        if not self.group_rot or not (0 <= engine_group_idx < len(self.group_rot)):
+            return None
+        entry = self.group_rot[engine_group_idx]
+        if entry is None or len(entry) < 3:
+            return None
+        return int(entry[2])
 
     def cache_for_group(self, engine_group_idx: int) -> "torch.Tensor | None":
         """The cos/sin cache for one engine group.
@@ -135,6 +153,7 @@ def _cb_group_rope_geometry(
     head_size: int,
     group_idx: int,
     rot: "tuple[int, int] | None" = None,
+    row_elems: "int | None" = None,
 ) -> "tuple[bool, int, int, int]":
     """Per-group re-RoPE geometry rules, shared by the batched rope path and
     the retrieve-plan builder so they cannot drift.
@@ -143,25 +162,20 @@ def _cb_group_rope_geometry(
     doubled head dim, detected so only the K half is re-RoPE'd in place.
     ``rot`` with offset > 0 means MLA (rope dims trail the row); MLA groups
     must arrive with ``rot`` set, or the latent would pass the head-inference
-    checks below and its content dims get rotated.
+    checks below and its content dims get rotated. ``row_elems``: row width in elements
+    of a declared float view of a uint8 row; the window then only has to fit the row.
 
     Returns:
         ``(fused_packed, per_head, n_heads, rot_offset)`` — per-head width is
-        ``2 * head_size`` for fused-packed layouts; ``rot_offset`` is 0 for
-        every non-MLA layout.
+        ``2 * head_size`` for fused-packed layouts (the row width in view
+        elements for a viewed row); ``rot_offset`` is 0 for every non-MLA
+        layout.
 
     Raises:
-        RuntimeError: On a compressed layout, an unsupported kv_size, a
-            head_size/hidden_dim mismatch, or a declared window that does
-            not fit the row.
+        RopeWindowDoesNotFit: If a declared window ends past the row.
+        RuntimeError: On an unsupported kv_size, a head_size/hidden_dim
+            mismatch, or a float-row window that does not end the row.
     """
-    if group.tokens_per_block != group.slots_per_block:
-        raise RuntimeError(
-            f"CB: group {group_idx} is compressed "
-            f"(tokens_per_block={group.tokens_per_block}, "
-            f"slots_per_block={group.slots_per_block}); "
-            f"compressed layouts unsupported."
-        )
     if rot is not None and rot[0] > 0:
         rot_offset, rot_width = rot
         if kv_size != 1:
@@ -170,13 +184,19 @@ def _cb_group_rope_geometry(
                 f"{rot} but has kv_size={kv_size}; MLA latents are a "
                 "single plane (kv_size 1)."
             )
-        if rot_offset + rot_width != hidden_dim:
+        row = hidden_dim if row_elems is None else row_elems
+        if rot_offset + rot_width > row:
+            raise RopeWindowDoesNotFit(
+                f"CB: group {group_idx} rope window {rot} ends past the row "
+                f"({row} elements)."
+            )
+        if row_elems is None and rot_offset + rot_width != hidden_dim:
             raise RuntimeError(
                 f"CB: group {group_idx} rope window {rot} does not end "
                 f"the row (hidden_dim={hidden_dim}); MLA latents are "
                 "[content | rope]."
             )
-        return False, hidden_dim, 1, rot_offset
+        return False, row, 1, rot_offset
     if kv_size not in (1, 2):
         raise RuntimeError(
             f"CB: group {group_idx} has kv_size={kv_size}; only K/V "

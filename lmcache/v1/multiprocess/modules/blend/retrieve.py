@@ -37,16 +37,28 @@ from lmcache.v1.multiprocess.modules.blend.read_set import (
     _classify_cb_read_groups,
 )
 from lmcache.v1.multiprocess.modules.blend.rope import (
+    RopeWindowDoesNotFit,
+    _AT_SCALAR_ITEMSIZE,
+    _CBRopeState,
     _FP8_FLAVOR_TO_AT_SCALAR,
     _TORCH_TO_AT_SCALAR,
     _cb_group_rope_geometry,
-    _CBRopeState,
 )
+
+
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
+
+
+def _unpack_block_table(table) -> "tuple[np.ndarray, int, int]":
+    """``(block_ids, tokens_per_block[, slots_per_block])`` -> a 3-tuple;
+    legacy 2-tuples (uncompressed groups) take slots == tokens."""
+    block_ids_np, tokens_per_block = table[0], int(table[1])
+    slots_per_block = int(table[2]) if len(table) > 2 else tokens_per_block
+    return block_ids_np, tokens_per_block, slots_per_block
 
 
 #: No-op reasons already reported (bounded set); each is logged only once.
@@ -219,7 +231,13 @@ class RetrieveMixin:
                 int(buf0.shape[2]),
                 int(buf0.shape[3]),
             )
-            group_bs = group.tokens_per_block
+            tokens_per_block = group.tokens_per_block
+            slots_per_block = group.slots_per_block
+            if slots_per_block <= 0 or tokens_per_block % slots_per_block:
+                return None
+            # Compressed groups hold one slot per `pos_stride` tokens; the
+            # scatter addresses slots, the rope kernel steps positions.
+            pos_stride = tokens_per_block // slots_per_block
             spec_common = dict(
                 paged_kv_ptrs=gpu_context.get_kernel_group_kv_pointers(
                     group_idx
@@ -233,8 +251,8 @@ class RetrieveMixin:
                 hidden_elems=hidden_dim,
                 element_size=buf0.element_size(),
                 engine_kv_format=gpu_context.get_engine_kv_format(group_idx),
-                page_buffer_size=group.shape_desc.nb * group_bs,
-                block_size=group_bs,
+                page_buffer_size=group.shape_desc.nb * slots_per_block,
+                block_size=slots_per_block,
                 head_size=rope_state.head_size_for_group(group.engine_group_idx),
                 # Physical per-block stride; padded pools are wider than bs*hs.
                 block_stride_elems=getattr(group.shape_desc, "block_stride_elems", 0)
@@ -242,33 +260,49 @@ class RetrieveMixin:
                 slot_mapping_base=0,
                 slot_mapping_capacity=0,
                 is_neox=rope_state.is_neox_style,
+                pos_stride=pos_stride,
+            )
+            # Skipped group ([], quantized, NoPE, or a side plane the window does not
+            # fit): staging + scatter only; cos_sin_cache == 0 disables native rope.
+            skipped_spec = cb_group_spec(
+                cos_sin_cache=0,
+                rot_dim=0,
+                rope_num_kv_heads=1,
+                rope_head_stride=hidden_dim,
+                key_scalar_type=0,
+                **spec_common,
             )
             rot = rope_state.rot_for_group(group.engine_group_idx, buf0.dtype)
             if rot is None or not rope_state.cos_sin_caches:
-                # Skipped group ([], quantized, or NoPE): staging + scatter
-                # only. cos_sin_cache == 0 disables native rope, so the dtype
-                # gate below must not run for it.
-                group_specs.append(
-                    cb_group_spec(
-                        cos_sin_cache=0,
-                        rot_dim=0,
-                        rope_num_kv_heads=1,
-                        rope_head_stride=hidden_dim,
-                        key_scalar_type=0,
-                        **spec_common,
-                    )
-                )
+                group_specs.append(skipped_spec)
                 continue
-            # uint8 K planes are rope-able only with a declared fp8 flavor;
-            # the kernel then dequant-rotates-requants, scale-free (rotation
-            # commutes with the per-tensor scale).
-            at_scalar = _TORCH_TO_AT_SCALAR.get(buf0.dtype) or (
-                _FP8_FLAVOR_TO_AT_SCALAR.get(rope_state.kv_quant)
+            view_scalar = (
+                rope_state.view_scalar_for_group(group.engine_group_idx)
                 if buf0.dtype == torch.uint8
                 else None
             )
-            if at_scalar is None:
-                return None
+            row_elems: "int | None" = None
+            if view_scalar is not None:
+                # Packed uint8 record rotated through a declared float view (DeepSeek-
+                # V4: bf16 rope tail at byte 448 of 584); offsets in view elements.
+                rope_itemsize = _AT_SCALAR_ITEMSIZE[view_scalar]
+                row_bytes = hidden_dim * buf0.element_size()
+                if row_bytes % rope_itemsize:
+                    group_specs.append(skipped_spec)
+                    continue
+                row_elems = row_bytes // rope_itemsize
+                at_scalar = view_scalar
+            else:
+                # uint8 K planes are otherwise rope-able only with a declared fp8 flavor
+                # (dequant-rotate-requant; rotation commutes with the per-tensor scale).
+                rope_itemsize = buf0.element_size()
+                at_scalar = _TORCH_TO_AT_SCALAR.get(buf0.dtype) or (
+                    _FP8_FLAVOR_TO_AT_SCALAR.get(rope_state.kv_quant)
+                    if buf0.dtype == torch.uint8
+                    else None
+                )
+                if at_scalar is None:
+                    return None
             try:
                 # Shared batched-rope geometry rules; the planner declines
                 # (returns None) instead of raising on unsupported layouts.
@@ -279,7 +313,12 @@ class RetrieveMixin:
                     rope_state.head_size_for_group(group.engine_group_idx),
                     group_idx,
                     rot,
+                    row_elems=row_elems,
                 )
+            except RopeWindowDoesNotFit:
+                # Side plane sharing the engine group (indexer K): copied verbatim.
+                group_specs.append(skipped_spec)
+                continue
             except RuntimeError:
                 return None
             # NoPE took the skipped-group branch above, so non-None here.
@@ -307,7 +346,7 @@ class RetrieveMixin:
                     rope_head_stride=per_head,
                     key_scalar_type=at_scalar,
                     cache_scalar_type=cache_at_scalar,
-                    rope_base_offset=rot_offset * buf0.element_size(),
+                    rope_base_offset=rot_offset * rope_itemsize,
                     **spec_common,
                 )
             )
@@ -328,7 +367,7 @@ class RetrieveMixin:
         self,
         gpu_context: BaseCacheContext,
         rope_state: _CBRopeState,
-        cpu_block_tables: "list[tuple[np.ndarray, int]]",
+        cpu_block_tables: "list[tuple[np.ndarray, int, int]]",
         runs: "list[list[tuple[CBMatchResult, Any]]]",
         max_batch: int,
     ) -> "tuple[list[Any], tuple[Any, Any, Any, Any], list[torch.Tensor]] | None":
@@ -403,20 +442,12 @@ class RetrieveMixin:
         # CPU math + async copies avoid device alloc/sync contention; the
         # copies ride the ambient stream (FIFO before the native exec).
         run_iter = [run for run in runs if run]
-        if len(run_iter) == 1:
-            pos_np = np.arange(
-                run_iter[0][0][0].cur_st, run_iter[0][-1][0].cur_ed, dtype=np.int64
-            )
-        else:
-            pos_np = np.concatenate(
-                [
-                    np.arange(run[0][0].cur_st, run[-1][0].cur_ed, dtype=np.int64)
-                    for run in run_iter
-                ]
-            )
-        n_pos = int(pos_np.shape[0])
+        run_bounds = [
+            (int(run[0][0].cur_st), int(run[-1][0].cur_ed)) for run in run_iter
+        ]
+        n_pos_tok = sum(e - s for s, e in run_bounds)
         pinned, pinned_np, dev_buf = self._cb_slot_buffers(
-            gpu_context, num_groups, n_pos
+            gpu_context, num_groups, n_pos_tok
         )
         # Cross-request barrier: the previous retrieve may still read these
         # per-context buffers, and a HOST write cannot be stream-ordered --
@@ -426,23 +457,44 @@ class RetrieveMixin:
         prev_ev = self._cb_plan_done_events.pop(gpu_context, None)
         if prev_ev is not None:
             prev_ev.synchronize()
-        div_mod: "dict[int, tuple[np.ndarray, np.ndarray]]" = {}
-        for gi, ((block_ids_np, group_bs), spec) in enumerate(
+        # Per group: s = token // ratio (tokens per slot; 1 if uncompressed), then
+        # slot = block_ids[s // slots_per_block] * slots_per_block + s % slots_per_block
+        pos_by_ratio: "dict[int, np.ndarray]" = {}
+        div_mod: "dict[tuple[int, int], tuple[np.ndarray, np.ndarray]]" = {}
+        strides: list[int] = []
+        for gi, (table, spec) in enumerate(
             zip(cpu_block_tables, group_specs, strict=True)
         ):
-            pair = div_mod.get(group_bs)
+            block_ids_np, tokens_per_block, slots_per_block = _unpack_block_table(table)
+            ratio = tokens_per_block // slots_per_block
+            if any(s % ratio or e % ratio for s, e in run_bounds):
+                # A match off the compression grid cannot be placed slot-wise
+                # (the lookup's shift-alignment filter keeps these out).
+                return None
+            pos_np = pos_by_ratio.get(ratio)
+            if pos_np is None:
+                pos_np = np.concatenate(
+                    [
+                        np.arange(s // ratio, e // ratio, dtype=np.int64)
+                        for s, e in run_bounds
+                    ]
+                )
+                pos_by_ratio[ratio] = pos_np
+            n_pos = int(pos_np.shape[0])
+            pair = div_mod.get((ratio, slots_per_block))
             if pair is None:
-                pair = np.divmod(pos_np, group_bs)
-                div_mod[group_bs] = pair
+                pair = np.divmod(pos_np, slots_per_block)
+                div_mod[(ratio, slots_per_block)] = pair
             q, rem = pair
             out = pinned_np[gi, :n_pos]
-            np.multiply(block_ids_np[q], group_bs, out=out)
+            np.multiply(block_ids_np[q], slots_per_block, out=out)
             out += rem
             dev_buf[gi, :n_pos].copy_(pinned[gi, :n_pos], non_blocking=True)
             # Safe to mutate: one handler per context, and the native call
             # copies spec contents at call time.
             spec.slot_mapping_base = int(dev_buf[gi].data_ptr())
             spec.slot_mapping_capacity = n_pos
+            strides.append(ratio)
         # The device staging must outlive the native call.
         keepalive = [dev_buf]
         # Waves of `wave` chunks per run, alternating slot halves.
@@ -464,6 +516,11 @@ class RetrieveMixin:
         n_tok = cur_ed - cur_st
         tok_off = np.zeros(n, dtype=np.int64)
         np.cumsum(n_tok[:-1], out=tok_off[1:])
+        # Scatter counts/offsets are in each group's SLOTS: n_tok // ratio per chunk
+        # (exact: every bound is a multiple of the ratio, checked above).
+        stride_arr = np.asarray(strides, dtype=np.int64)
+        n_slot_g = n_tok[:, None] // stride_arr[None, :]  # [n, G]
+        slot_off_g = tok_off[:, None] // stride_arr[None, :]
 
         # One staging row per (chunk, read object group), chunk-major; row
         # counts feed step_offsets column 0 (staging_end * n_read).
@@ -495,8 +552,8 @@ class RetrieveMixin:
             [
                 np.tile(groups_arr, n),
                 np.repeat(slot_of, num_groups),
-                np.repeat(tok_off, num_groups),
-                np.repeat(n_tok, num_groups),
+                slot_off_g.ravel(),
+                n_slot_g.ravel(),
             ],
             axis=1,
         )
@@ -813,16 +870,17 @@ class RetrieveMixin:
 
         logger.debug("CB retrieving object keys: %s", all_obj_keys)
 
-        # CB supports only uncompressed single-block-id-space layouts, so the
-        # first staged kernel group is representative.
-        tokens_per_block = gpu_context.kv_layer_groups_manager.kernel_groups[
-            staged_kernel[0]
-        ].tokens_per_block
-        if chunk_size % tokens_per_block != 0:
-            raise ValueError(
-                f"chunk_size {chunk_size} must be a multiple of "
-                f"tokens_per_block {tokens_per_block}"
-            )
+        # Every staged kernel group's paged chunk must tile the LMCache chunk
+        # (compressed groups too: tokens_per_block is in tokens, like the chunk).
+        for _ki in staged_kernel:
+            _tpb = gpu_context.kv_layer_groups_manager.kernel_groups[
+                _ki
+            ].tokens_per_block
+            if _tpb <= 0 or chunk_size % _tpb != 0:
+                raise ValueError(
+                    f"chunk_size {chunk_size} must be a multiple of kernel "
+                    f"group {_ki} tokens_per_block {_tpb}"
+                )
 
         # Retrieve-owned stream: never the shared stream (FIFO behind store
         # copies re-creates the device-sync stall).
@@ -853,7 +911,7 @@ class RetrieveMixin:
             # engine_group_idx (kernel groups may share one). CPU tables only.
             kgm = gpu_context.kv_layer_groups_manager
             block_ids_np = [np.asarray(b, dtype=np.int64) for b in gpu_block_ids]
-            cpu_block_tables: "list[tuple[np.ndarray, int]]" = []
+            cpu_block_tables: "list[tuple[np.ndarray, int, int]]" = []
             for group_idx in staged_kernel:
                 eg_idx = kgm.kernel_groups[group_idx].engine_group_idx
                 if eg_idx >= len(gpu_block_ids):
@@ -865,8 +923,10 @@ class RetrieveMixin:
                         f"{len(gpu_block_ids)} block table(s) were "
                         "provided."
                     )
-                group_bs = kgm.kernel_groups[group_idx].tokens_per_block
-                cpu_block_tables.append((block_ids_np[eg_idx], group_bs))
+                kg = kgm.kernel_groups[group_idx]
+                cpu_block_tables.append(
+                    (block_ids_np[eg_idx], kg.tokens_per_block, kg.slots_per_block)
+                )
 
             # CPU-synchronous sentinel holds cb.request open across the GPU
             # work so another worker's no-op CB_REQUEST_END cannot close the
@@ -953,8 +1013,10 @@ class RetrieveMixin:
                     # Bound by the smallest group: under HMA the sliding group
                     # has fewer blocks than the full group, so [0] isn't safe.
                     num_slots = min(
-                        int(block_ids.shape[0]) * group_bs
-                        for block_ids, group_bs in cpu_block_tables
+                        int(ids.shape[0]) * tokens_per_block
+                        for ids, tokens_per_block, _ in map(
+                            _unpack_block_table, cpu_block_tables
+                        )
                     )
                     for r, chunk_objs in zip(
                         cb_match_result, grouped_objs, strict=True

@@ -53,6 +53,9 @@ struct CBGroupSpec {
   // Byte offset from the slot's K-plane base to the first rope-carrying
   // element: 0 unless MLA, where rope dims trail the latent row.
   int64_t rope_base_offset;
+  // Tokens per stored slot (DeepSeek-V4 ratio-2 compression: 2). The rope
+  // kernel rotates slot j of a chunk at position st + j * pos_stride.
+  int pos_stride;
 };
 
 // One K-only re-RoPE launch: rotate tmp slot `slot_idx` of group `group_idx`
