@@ -32,7 +32,7 @@ import vllm.distributed.parallel_state as ps  # noqa: E402
 
 # First Party
 from lmcache.integration.vllm import vllm_service_factory as factory_mod  # noqa: E402
-from lmcache.integration.vllm.vllm_service_factory import (  # noqa: E402
+from lmcache.inprocess.integration.vllm.vllm_service_factory import (  # noqa: E402
     VllmServiceFactory,
 )
 from lmcache.v1.offload_server import zmq_server  # noqa: E402
