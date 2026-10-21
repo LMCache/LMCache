@@ -688,11 +688,14 @@ Source: ``lmcache/v1/distributed/config.py``
        The ``retain`` policy uses the same load plan but keeps
        prefetched keys permanently in L1.
        Choices: ``default``, ``retain``.
+   * - ``--l2-prefetch-inflight-watermark``
+     - ``0.5``
+     - Fraction of L1 capacity, in (0, 1], that in-flight prefetch
+       (L2 load) requests may stage in L1.
    * - ``--l2-prefetch-max-in-flight``
-     - ``8``
-     - Maximum number of concurrent prefetch (L2 load) requests.
-       Limits how many in-flight loads the PrefetchController may
-       issue at once, preventing excessive L1 memory pressure.
+     - (none)
+     - Deprecated and ignored; prefetch admission follows
+       ``--l2-prefetch-inflight-watermark``.  Logs a warning when set.
    * - ``--periodic-notifier-interval-ms``
      - ``5``
      - Interval in milliseconds for the periodic event notifier
@@ -1158,7 +1161,7 @@ Full Example
         --eviction-trigger-watermark 0.9 \
         --eviction-ratio 0.1 \
         --l2-prefetch-policy default \
-        --l2-prefetch-max-in-flight 8 \
+        --l2-prefetch-inflight-watermark 0.5 \
         --periodic-notifier-interval-ms 5 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \
         --prometheus-port 9090 \

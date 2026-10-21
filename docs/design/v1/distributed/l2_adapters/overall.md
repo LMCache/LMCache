@@ -341,14 +341,17 @@ Policies are selected by name via `--l2-prefetch-policy` (default: `"default"`).
 New policies self-register with `register_prefetch_policy(name, cls)` at import
 time and are auto-discovered by `storage_controllers/__init__.py`.
 
-### Max In-Flight Limiting
+### In-Flight Watermark Admission
 
-The controller limits concurrent prefetch requests to `max_in_flight` (default: 8).
-Requests beyond this limit are queued in `_pending_queue` and dequeued as
-in-flight requests complete.
-
-Note: This is a simple count-based limit. A future improvement would use a
-dynamic admission controller based on L1 memory usage of in-flight requests.
+The controller admits a queued prefetch request when, in every L1 manager that
+receives L2 loads, (1) the staging bytes plus the worst-case load bytes of
+requests still in the lookup phase stay below `inflight_watermark` (default:
+0.5, `--l2-prefetch-inflight-watermark`) of the L1 capacity, and (2) the free
+bytes left after those lookup-phase requests can hold the new request's
+worst-case load. Other requests wait in `_pending_queue` and start as in-flight
+loads complete, so many small requests run concurrently while a few large ones
+cannot overrun L1. See
+[Admission](../storage_controllers/prefetch_controller.md#admission).
 
 ## Integration: StorageManager
 
