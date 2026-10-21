@@ -48,7 +48,7 @@ $PY --version
 # Build against the public ROCm torch whose ABI matches the vLLM image.
 $PY -m pip install --no-cache-dir "${TORCH_ROCM_SPEC}" --index-url "${TORCH_ROCM_INDEX}"
 $PY -m pip install --no-cache-dir \
-    ninja "setuptools>=77.0.3,<81.0.0" setuptools_scm wheel pybind11
+    ninja "setuptools>=77.0.3,<81.0.0" setuptools_scm grpcio==1.78.0 grpcio-tools==1.78.0 wheel pybind11
 install_rocm_repair_tools "$PY"
 $PY -c 'import torch; print("BUILD TORCH:", torch.__version__, "hip:", torch.version.hip, "cxx11abi:", torch._C._GLIBCXX_USE_CXX11_ABI)'
 

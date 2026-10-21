@@ -219,6 +219,16 @@ class TestBenchCommandRegistration:
         assert args.ldqa_shuffle_policy == "random"
         assert args.ldqa_num_inflight_requests == 3
         assert args.quiet is False
+        assert args.no_warmup is False
+
+    def test_no_warmup_flag_accepted(self) -> None:
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers()
+        cmd = BenchCommand()
+        cmd.register(subparsers)
+
+        args = parser.parse_args(["bench", "engine", "--no-warmup"])
+        assert args.no_warmup is True
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +418,30 @@ class TestExportConfig:
 
         assert data["ldqa_document_length"] == 5000
         assert data["ldqa_query_per_document"] == 4
+
+    def test_export_config_records_no_warmup(
+        self,
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
+        export_path = str(tmp_path / "exported.json")
+        args = _make_args(
+            no_warmup=True,
+            export_config=export_path,
+            quiet=True,
+        )
+
+        cmd = BenchCommand()
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            run_engine_bench(cmd, args)
+        finally:
+            sys.stdout = old_stdout
+
+        with open(export_path) as f:
+            data = json.load(f)
+
+        assert data["no_warmup"] is True
 
 
 # ---------------------------------------------------------------------------

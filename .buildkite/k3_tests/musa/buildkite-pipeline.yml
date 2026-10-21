@@ -1,0 +1,10 @@
+# Paste this into the musa-mp-test Buildkite pipeline's "Steps" editor.
+# It uploads the MUSA hardware-smoke definition from the repo on the
+# maintainer's MooreThreads queue.
+
+agents:
+  queue: "MooreThreads"
+
+steps:
+  - label: ":pipeline: Upload pipeline"
+    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/musa/pipeline.yml

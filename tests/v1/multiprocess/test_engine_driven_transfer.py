@@ -2,37 +2,42 @@
 # Standard
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
+from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, PropertyMock, patch
 import os
-import pickle
 import sys
 
 # Third Party
+import msgspec
 import pytest
 import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.multiprocess.custom_types import (
+    PrepareRetrieveResponse,
+    PrepareStoreResponse,
+    RegisterEngineDrivenContextResponse,
+)
 from lmcache.v1.multiprocess.posix_shm import (
     shm_create_readwrite,
     shm_munmap,
     shm_open_pool_as_mmap,
     shm_unlink,
 )
-from lmcache.v1.multiprocess.protocol import RequestType
-from lmcache.v1.multiprocess.protocols.engine import (
-    PrepareRetrieveResponse,
-    PrepareStoreResponse,
-    RegisterEngineDrivenContextResponse,
-)
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContextMetadata,
     create_engine_driven_context,
 )
-from lmcache.v1.multiprocess.transfer_context.pickle import EngineDrivenContextPickle
+from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.multiprocess.transfer_context.shm import EngineDrivenContextShm
+from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
+    decode_tensors,
+    encode_tensors,
+)
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -211,11 +216,14 @@ def _make_storage_manager_config(
 
 def _default_register_payload(
     instance_id: int = 1,
+    num_physical_slots: int | None = None,
 ) -> "RegisterEngineDrivenContextPayload":
     """Build a default non-GPU registration payload for server-side tests.
 
     Args:
         instance_id: Worker instance id to register. Defaults to ``1``.
+        num_physical_slots: Physical slots per gathered chunk. ``None`` uses
+            the legacy protocol behavior.
 
     Uses fixed values ``model_name="m"``, ``world_size=1``, ``block_size=4``,
     ``num_layers=2``, ``hidden_dim_size=16``, ``dtype_str="float32"``, and
@@ -233,6 +241,7 @@ def _default_register_payload(
         hidden_dim_size=16,
         dtype_str="float32",
         use_mla=False,
+        num_physical_slots=num_physical_slots,
     )
 
 
@@ -303,7 +312,9 @@ def test_create_transfer_context_uses_default_context_on_cpu() -> None:
         create_transfer_context,
     )
 
-    context = create_transfer_context({"layer_0": torch.randn(2, 2)})
+    context = create_transfer_context(
+        {"layer_0": torch.randn(2, 2)}, instance_id=1, req_client=MagicMock()
+    )
     assert isinstance(context, EngineDrivenTransferContext)
 
 
@@ -364,7 +375,10 @@ def test_extra_config_default_lets_env_var_select_mp_transfer_mode(
     # EngineDrivenTransferContext.
     monkeypatch.setenv(ENV_MP_TRANSFER_MODE, "engine_driven")
     context = create_transfer_context(
-        {"layer_0": torch.randn(2, 2)}, mode=resolved_mode
+        {"layer_0": torch.randn(2, 2)},
+        instance_id=1,
+        req_client=MagicMock(),
+        mode=resolved_mode,
     )
     assert isinstance(context, EngineDrivenTransferContext)
 
@@ -381,10 +395,13 @@ def test_create_transfer_context_force_lmcache_driven_mode() -> None:
     )
 
     # Importing the CPU sub-package self-registers its KV-wrapper factory.
-    import lmcache.v1.platform.cpu  # noqa: F401
+    import lmcache.v1.platform.devices.cpu  # noqa: F401
 
     context = create_transfer_context(
-        {"layer_0": torch.randn(2, 2)}, mode=MPTransferMode.LMCACHE_DRIVEN
+        {"layer_0": torch.randn(2, 2)},
+        instance_id=1,
+        req_client=MagicMock(),
+        mode=MPTransferMode.LMCACHE_DRIVEN,
     )
     assert isinstance(context, LMCacheDrivenTransferContext)
 
@@ -399,9 +416,104 @@ def test_create_transfer_context_force_engine_driven_mode_on_cpu() -> None:
     )
 
     context = create_transfer_context(
-        {"layer_0": torch.randn(2, 2)}, mode="engine_driven"
+        {"layer_0": torch.randn(2, 2)},
+        instance_id=1,
+        req_client=MagicMock(),
+        mode="engine_driven",
     )
     assert isinstance(context, EngineDrivenTransferContext)
+
+
+def test_auto_non_cuda_context_does_not_require_event_ipc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AUTO non-CUDA routing must not resolve an interprocess event backend."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+
+    class MusaDevice:
+        type = "musa"
+
+    monkeypatch.setattr(worker_transfer, "get_device", lambda _tensor: MusaDevice())
+    monkeypatch.setattr(worker_transfer, "_supports_async_primitives", lambda: False)
+
+    def fail_event_backend_resolution(_device: object) -> None:
+        pytest.fail("engine-driven transfer must not resolve an event IPC backend")
+
+    monkeypatch.setattr(
+        worker_transfer,
+        "get_event_ipc_backend",
+        fail_event_backend_resolution,
+    )
+
+    context = worker_transfer.create_transfer_context(
+        {"layer_0": MagicMock()},
+        instance_id=1,
+        req_client=MagicMock(),
+    )
+
+    assert isinstance(context, worker_transfer.EngineDrivenTransferContext)
+
+
+def test_auto_npu_context_routes_to_lmcache_driven(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AUTO on NPU must route to LMCacheDrivenTransferContext.
+
+    AUTO resolves to the device spec's declared default; NpuDeviceSpec
+    declares lmcache-driven, so an unconfigured NPU worker pairs with the
+    default-configured server (``--supported-transfer-mode lmcache_driven``).
+    """
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.platform.devices.npu import NpuDeviceSpec
+
+    class NpuDevice:
+        type = "npu"
+
+    monkeypatch.setattr(worker_transfer, "get_device", lambda _t: NpuDevice())
+    monkeypatch.setattr(worker_transfer, "get_device_spec", lambda _dt: NpuDeviceSpec())
+    # The npu wrapper factory is only discoverable where the npu platform
+    # imports cleanly; stub it so the routing assertion holds on any host.
+    monkeypatch.setattr(
+        worker_transfer,
+        "resolve_kv_wrapper_factory",
+        lambda _dt: (lambda tensor: tensor),
+    )
+
+    context = worker_transfer.create_transfer_context(
+        {"layer_0": MagicMock()},
+        instance_id=1,
+        req_client=MagicMock(),
+    )
+
+    assert isinstance(context, worker_transfer.LMCacheDrivenTransferContext)
+
+
+def test_default_mp_transfer_mode_declarations() -> None:
+    """AUTO routing defaults must stay pinned per device spec.
+
+    The base default derives from ``is_lmcache_driven_available``:
+    cuda and npu (capability ``True``) default to lmcache-driven; the
+    fallback spec and opt-in-only stacks (cpu SHM, musa handles) stay
+    engine-driven.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
+    from lmcache.v1.platform.base.device_spec import DeviceSpec
+    from lmcache.v1.platform.devices.cpu import CpuDeviceSpec
+    from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
+    from lmcache.v1.platform.devices.musa import MusaDeviceSpec
+    from lmcache.v1.platform.devices.npu import NpuDeviceSpec
+
+    assert DeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
+    assert CudaDeviceSpec().is_lmcache_driven_available() is True
+    assert CudaDeviceSpec().default_mp_transfer_mode() is MPTransferMode.LMCACHE_DRIVEN
+    assert NpuDeviceSpec().is_lmcache_driven_available() is True
+    assert NpuDeviceSpec().default_mp_transfer_mode() is MPTransferMode.LMCACHE_DRIVEN
+    # Available but opt-in-only stacks keep the portable data path as AUTO.
+    assert CpuDeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
+    assert MusaDeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
 
 
 def test_create_transfer_context_invalid_mode_raises() -> None:
@@ -410,7 +522,12 @@ def test_create_transfer_context_invalid_mode_raises() -> None:
     from lmcache.v1.multiprocess.transfer_context import create_transfer_context
 
     with pytest.raises(ValueError, match="Invalid MP transfer mode"):
-        create_transfer_context({"layer_0": torch.randn(2, 2)}, mode="bogus")
+        create_transfer_context(
+            {"layer_0": torch.randn(2, 2)},
+            instance_id=1,
+            req_client=MagicMock(),
+            mode="bogus",
+        )
 
 
 def test_create_transfer_context_handle_mode_unsupported_device_raises(
@@ -432,7 +549,12 @@ def test_create_transfer_context_handle_mode_unsupported_device_raises(
         property(lambda self: None),
     )
     with pytest.raises(ValueError, match="not supported for device type"):
-        create_transfer_context({"layer_0": torch.randn(2, 2)}, mode="lmcache_driven")
+        create_transfer_context(
+            {"layer_0": torch.randn(2, 2)},
+            instance_id=1,
+            req_client=MagicMock(),
+            mode="lmcache_driven",
+        )
 
 
 @pytest.mark.musa
@@ -466,17 +588,16 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
     )
     future = MagicMock()
     future.result.return_value = RegisterEngineDrivenContextResponse()
-    ctx = EngineDrivenTransferContext()
+    req_client = MagicMock()
+    req_client.register_kv_cache_engine_driven_context.return_value = future
+    ctx = EngineDrivenTransferContext(1, req_client)
 
     ctx.register(
-        instance_id=1,
         kv_caches=_make_hnd_kv_caches(),
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        mq_client=MagicMock(),
         mq_timeout=1.0,
-        send_request=MagicMock(return_value=future),
     )
 
 
@@ -527,22 +648,20 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
         return [torch.zeros(2, 2, 8, 16)]
 
     monkeypatch.setattr(worker_transfer, "gather_paged_kv_to_cpu", _fake_gather)
-    ctx = EngineDrivenTransferContext()
+    req_client = MagicMock()
+    req_client.register_kv_cache_engine_driven_context.return_value = future
+    ctx = EngineDrivenTransferContext(1, req_client)
     ctx.register(
-        instance_id=1,
         kv_caches=_make_kv_caches(),
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        mq_client=MagicMock(),
         mq_timeout=1.0,
-        send_request=MagicMock(return_value=future),
     )
 
     result = ctx.submit_store(
         "req",
         _default_key(),
-        1,
         _make_kv_caches(),
         [[0, 1]],
         MagicMock(),
@@ -565,7 +684,10 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
     )
 
     class _FakeEngineDrivenContext:
-        def prepare_retrieve(self, *_args: Any, **_kwargs: Any) -> list[torch.Tensor]:
+        def prepare_retrieve(
+            self, _key: Any, _instance_id: int, expected_count: int
+        ) -> list[torch.Tensor]:
+            captured_kwargs["expected_count"] = expected_count
             return [torch.zeros(2, 2, 8, 16)]
 
         def commit_retrieve(self, *_args: Any, **_kwargs: Any) -> bool:
@@ -599,22 +721,20 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
         captured_kwargs.update(kwargs)
 
     monkeypatch.setattr(worker_transfer, "scatter_cpu_to_paged_kv", _fake_scatter)
-    ctx = EngineDrivenTransferContext()
+    req_client = MagicMock()
+    req_client.register_kv_cache_engine_driven_context.return_value = future
+    ctx = EngineDrivenTransferContext(1, req_client)
     ctx.register(
-        instance_id=1,
         kv_caches=_make_kv_caches(),
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        mq_client=MagicMock(),
         mq_timeout=1.0,
-        send_request=MagicMock(return_value=future),
     )
 
     result = ctx.submit_retrieve(
         "req",
         _default_key(),
-        1,
         _make_kv_caches(),
         [[0, 1]],
         MagicMock(),
@@ -623,6 +743,7 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
 
     assert result is True
     assert "prefer_musa_native" not in captured_kwargs
+    assert captured_kwargs["expected_count"] == 1
 
 
 def test_create_transfer_context_env_var_overrides_default(
@@ -641,10 +762,12 @@ def test_create_transfer_context_env_var_overrides_default(
 
     # Importing the CPU sub-package self-registers its KV-wrapper factory,
     # which is required by the lmcache-driven (handle) path.
-    import lmcache.v1.platform.cpu  # noqa: F401
+    import lmcache.v1.platform.devices.cpu  # noqa: F401
 
     monkeypatch.setenv(ENV_MP_TRANSFER_MODE, "lmcache_driven")
-    context = create_transfer_context({"layer_0": torch.randn(2, 2)})
+    context = create_transfer_context(
+        {"layer_0": torch.randn(2, 2)}, instance_id=1, req_client=MagicMock()
+    )
     assert isinstance(context, LMCacheDrivenTransferContext)
 
 
@@ -713,8 +836,7 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
 
         return torch_device_type if torch_device_type != "cpu" else "cuda"
 
-    # Bypass the CPU-host HND safeguard so the layout hint drives detection
-    # regardless of the host running the test.
+    # Keep format discovery independent of the host running the test.
     monkeypatch.setattr(
         "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type",
         _vllm_detector_device_type(),
@@ -760,6 +882,170 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
         else:
             assert torch.allclose(source[name][0], destination[name][4])
             assert torch.allclose(source[name][1], destination[name][5])
+
+
+def test_explicit_cpu_nhd_layout_preserves_physical_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for DeepSeek MLA on post-vllm#51718 CPU layouts.
+
+    vLLM reports LBNHC/NHD and registers a rank-4 per-layer view. Treating it
+    as the legacy CPU HND layout swaps BS and NH, changing block_size from 16
+    to 1 and hidden_dim from 576 to 9216.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context.base import (
+        compute_kv_layout,
+    )
+
+    monkeypatch.setattr(
+        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type",
+        "cpu",
+    )
+    source = _make_fused_nhd_kv_caches(
+        num_layers=2,
+        num_blocks=16,
+        block_size=16,
+        num_heads=1,
+        head_size=288,
+    )
+    layout_hints: LayoutHints = {"kv_layout": "NHD"}
+
+    block_size, num_layers, hidden_dim, _, _, kv_size = compute_kv_layout(
+        source, layout_hints=layout_hints
+    )
+
+    assert (block_size, num_layers, hidden_dim, kv_size) == (16, 2, 576, 1)
+
+
+def test_engine_driven_register_sends_num_physical_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker registration must describe its gathered chunk, not just tokens."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import (
+        RegisterEngineDrivenContextPayload,
+    )
+    from lmcache.v1.multiprocess.transfer_context import (
+        EngineDrivenTransferContext,
+        worker_transfer,
+    )
+
+    monkeypatch.setattr(
+        worker_transfer,
+        "compute_kv_layout",
+        lambda *_args, **_kwargs: (
+            16,
+            2,
+            576,
+            "float32",
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "create_engine_driven_context",
+        lambda *_args, **_kwargs: MagicMock(),
+    )
+    future = MagicMock()
+    future.result.return_value = RegisterEngineDrivenContextResponse()
+    req_client = MagicMock()
+    req_client.register_kv_cache_engine_driven_context.return_value = future
+
+    context = EngineDrivenTransferContext(1, req_client)
+    context.register(
+        kv_caches=_make_fused_nhd_kv_caches(),
+        model_name="m",
+        world_size=1,
+        blocks_in_chunk=8,
+        mq_timeout=1.0,
+        layout_hints={"kv_layout": "NHD"},
+    )
+
+    unregister_future = context.unregister()
+
+    payload = req_client.register_kv_cache_engine_driven_context.call_args.args[0]
+    assert isinstance(payload, RegisterEngineDrivenContextPayload)
+    assert payload.num_physical_slots == 128
+    assert (
+        unregister_future
+        is req_client.unregister_kv_cache_engine_driven_context.return_value
+    )
+    req_client.unregister_kv_cache_engine_driven_context.assert_called_once_with(1)
+
+
+def test_engine_driven_register_rejects_multiple_transfer_groups() -> None:
+    """Engine-driven registration fails before any server RPC for multiple groups."""
+    # First Party
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    from lmcache.v1.multiprocess.transfer_context import EngineDrivenTransferContext
+
+    req_client = MagicMock()
+    context = EngineDrivenTransferContext(1, req_client)
+    groups = [
+        EngineGroupInfo(engine_group_id=0, layer_indices=(0,)),
+        EngineGroupInfo(engine_group_id=1, layer_indices=(1,)),
+    ]
+
+    with pytest.raises(ValueError, match="does not support multiple KV transfer"):
+        context.register(
+            kv_caches=_make_kv_caches(),
+            model_name="m",
+            world_size=1,
+            blocks_in_chunk=2,
+            mq_timeout=1.0,
+            engine_group_infos=groups,
+        )
+
+    req_client.register_kv_cache_engine_driven_context.assert_not_called()
+
+
+def test_engine_driven_context_unregister_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unregister is a no-op before REGISTER but rolls back a timed-out one."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import (
+        EngineDrivenTransferContext,
+        worker_transfer,
+    )
+
+    req_client = MagicMock()
+    context = EngineDrivenTransferContext(7, req_client)
+    assert context.unregister() is None
+    req_client.unregister_kv_cache_engine_driven_context.assert_not_called()
+
+    monkeypatch.setattr(
+        worker_transfer,
+        "compute_kv_layout",
+        lambda *_args, **_kwargs: (
+            16,
+            2,
+            576,
+            "float32",
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
+            1,
+        ),
+    )
+    register_future = MagicMock()
+    register_future.result.side_effect = TimeoutError()
+    req_client.register_kv_cache_engine_driven_context.return_value = register_future
+
+    with pytest.raises(TimeoutError):
+        context.register(
+            _make_fused_nhd_kv_caches(),
+            "m",
+            1,
+            8,
+            1.0,
+        )
+
+    assert (
+        context.unregister()
+        is req_client.unregister_kv_cache_engine_driven_context.return_value
+    )
+    req_client.unregister_kv_cache_engine_driven_context.assert_called_once_with(7)
 
 
 @pytest.mark.parametrize(
@@ -831,6 +1117,62 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
 
     with pytest.raises(ValueError, match="kv_caches is empty"):
         compute_kv_layout({})
+
+
+def test_sglang_unified_gather_scatter_roundtrip() -> None:
+    """Engine-driven copies preserve SGLang's independent K/V components."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context.base import (
+        compute_kv_layout,
+        gather_paged_kv_to_cpu,
+        scatter_cpu_to_paged_kv,
+    )
+
+    shape = (8, 4, 2, 3)
+    numel = 8 * 4 * 2 * 3
+    source = {
+        "k_0": torch.arange(numel, dtype=torch.float32)
+        .reshape(shape)
+        .to(torch_device_type),
+        "v_0": torch.arange(numel, dtype=torch.float32)
+        .add(numel)
+        .reshape(shape)
+        .to(torch_device_type),
+    }
+    layout_hints: LayoutHints = {"kv_list_layout": "unified"}
+    block_size, num_layers, hidden_dim, _, engine_kv_format, kv_size = (
+        compute_kv_layout(
+            source,
+            layout_hints=layout_hints,
+            engine_type=EngineType.SGLANG,
+        )
+    )
+
+    assert (block_size, num_layers, hidden_dim, kv_size) == (4, 2, 6, 1)
+    assert engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS
+
+    gathered = gather_paged_kv_to_cpu(
+        source,
+        [0, 1],
+        blocks_per_chunk=2,
+        layout_hints=layout_hints,
+        engine_kv_format=engine_kv_format,
+        engine_type=EngineType.SGLANG,
+    )
+    destination = {name: torch.zeros_like(tensor) for name, tensor in source.items()}
+    scatter_cpu_to_paged_kv(
+        destination,
+        [4, 5],
+        gathered,
+        blocks_per_chunk=2,
+        layout_hints=layout_hints,
+        engine_kv_format=engine_kv_format,
+        engine_type=EngineType.SGLANG,
+    )
+
+    for name in source:
+        assert torch.equal(source[name][0], destination[name][4])
+        assert torch.equal(source[name][1], destination[name][5])
 
 
 @pytest.mark.parametrize(
@@ -999,6 +1341,12 @@ def stub_lmcache_native() -> Any:
     module.PeriodicEventNotifier = type(  # type: ignore[attr-defined]
         "PeriodicEventNotifier", (), {}
     )
+
+    class TransferDirection(IntEnum):
+        H2D = 0
+        D2H = 1
+
+    module.TransferDirection = TransferDirection  # type: ignore[attr-defined]
     with patch.dict(
         sys.modules,
         {
@@ -1152,6 +1500,21 @@ def test_server_register_and_find_non_cuda_context_layout(
     assert layout.shapes[0] == torch.Size([2, 2, 16, 16])
 
 
+def test_server_register_uses_worker_physical_slots(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Server must not substitute its logical token chunk for physical slots."""
+    module, _, _, ctx = server_module_factory(chunk_size=256)
+    payload = _default_register_payload(instance_id=11, num_physical_slots=128)
+
+    module.register_kv_cache_engine_driven_context(payload)
+
+    layout = ctx.layout_desc_registry.find("m", 1)
+    assert layout is not None
+    assert layout.shapes[0] == torch.Size([2, 2, 128, 16])
+
+
 def test_server_store_and_retrieve_cpu_chunks(
     stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
@@ -1164,7 +1527,7 @@ def test_server_store_and_retrieve_cpu_chunks(
     mock_storage.reserve_write.return_value = {"obj": mock_memory_obj}
 
     @contextmanager
-    def _read_prefetched_results(_keys: Any) -> Any:
+    def _read_prefetched_results(_keys: Any, l1_owners: Any = None) -> Any:
         yield [mock_memory_obj]
 
     mock_storage.read_prefetched_results.side_effect = _read_prefetched_results
@@ -1179,7 +1542,7 @@ def test_server_store_and_retrieve_cpu_chunks(
     )
     payload = torch.ones(2, 2, 8, 16)
     key = _default_key()
-    store_ok = module.commit_store(key, 2, pickle.dumps([payload]))
+    store_ok = module.commit_store(key, 2, encode_tensors([payload]))
     response = module.prepare_retrieve(key, 2)
     success = response.success
     cpu_data = response.data
@@ -1188,9 +1551,35 @@ def test_server_store_and_retrieve_cpu_chunks(
     assert torch.allclose(mock_memory_obj.tensor, payload)
 
     assert success is True
-    recovered_chunks: list[torch.Tensor] = pickle.loads(cpu_data)
+    recovered_chunks = decode_tensors(
+        cpu_data,
+        expected_shape=payload.shape,
+        expected_dtype=payload.dtype,
+        expected_count=1,
+    )
     assert len(recovered_chunks) == 1
     assert torch.allclose(recovered_chunks[0], payload)
+
+
+def test_server_commit_store_rejects_untyped_payload_before_storage_access(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """A network-controlled untyped payload fails before storage is touched."""
+    mock_storage = MagicMock()
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h"]
+    module, _, _, _ = server_module_factory(
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+    )
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=2)
+    )
+    with pytest.raises(msgspec.DecodeError):
+        module.commit_store(_default_key(), 2, b"not-a-typed-tensor-envelope")
+
+    mock_storage.reserve_write.assert_not_called()
 
 
 def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
@@ -1235,7 +1624,7 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
 ) -> None:
     """Ensure SHM prepare_store releases reserved keys that have no writable tensor."""
     # First Party
-    from lmcache.v1.multiprocess.protocols.engine import PrepareStoreResponse
+    from lmcache.v1.multiprocess.custom_types import PrepareStoreResponse
 
     mock_storage = MagicMock()
     memory_obj = MagicMock()
@@ -1474,6 +1863,70 @@ def _create_shm_segment(shm_name: str, size: int) -> int:
     return shm_create_readwrite(shm_name, size)
 
 
+def test_engine_driven_inline_context_uses_typed_tensor_wire_format() -> None:
+    """Worker-side inline store and retrieve use the validated tensor codec."""
+    req_client = MagicMock()
+    req_client.commit_store.return_value = _CompletedFuture(True)
+    chunks = [torch.arange(4, dtype=torch.float32).reshape(2, 2) for _ in range(2)]
+    req_client.prepare_retrieve.return_value = _CompletedFuture(
+        PrepareRetrieveResponse(
+            success=True,
+            data=encode_tensors(chunks),
+            context={},
+        )
+    )
+    context = EngineDrivenContextInline(
+        metadata=EngineDrivenContextMetadata(
+            layout_desc=MemoryLayoutDesc(
+                shapes=[torch.Size([2, 2])],
+                dtypes=[torch.float32],
+            ),
+            block_size=4,
+            use_mla=False,
+        ),
+        req_client=req_client,
+        mq_timeout=1.0,
+    )
+    key = _default_key(tokens=8)
+
+    assert context.commit_store(key, 1, chunks)
+    encoded = req_client.commit_store.call_args.args[2]
+    decoded_store = decode_tensors(
+        encoded,
+        expected_shape=torch.Size([2, 2]),
+        expected_dtype=torch.float32,
+        expected_count=2,
+    )
+    assert all(
+        torch.equal(actual, expected)
+        for actual, expected in zip(decoded_store, chunks, strict=True)
+    )
+    decoded_retrieve = context.prepare_retrieve(key, 1, expected_count=2)
+    assert decoded_retrieve is not None
+    assert all(
+        torch.equal(actual, expected)
+        for actual, expected in zip(decoded_retrieve, chunks, strict=True)
+    )
+
+
+def test_contiguous_wrapper_derives_expected_retrieve_chunk_count() -> None:
+    """SDK retrieval validates frames using LMCache chunk geometry."""
+    # First Party
+    from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
+
+    context = MagicMock()
+    chunks = [torch.zeros(2, 1, 4, 2) for _ in range(2)]
+    context.prepare_retrieve.return_value = chunks
+    wrapper = ContiguousTransferWrapper(context, chunk_size=4)
+    key = _default_key(tokens=8)
+
+    result = wrapper.retrieve(key, instance_id=7)
+
+    assert result is not None
+    assert result.shape == (2, 1, 8, 2)
+    context.prepare_retrieve.assert_called_once_with(key, 7, 2)
+
+
 def test_engine_driven_context_shm_tensor_view_from_buffer() -> None:
     shm_name = f"lmcache_test_view_{os.getpid()}"
     addr = _create_shm_segment(shm_name, 4096)
@@ -1494,7 +1947,7 @@ def test_engine_driven_context_shm_tensor_view_from_buffer() -> None:
                 block_size=1,
                 use_mla=False,
             ),
-            mq_client=MagicMock(),
+            req_client=MagicMock(),
             mq_timeout=1.0,
             shm_name=shm_name,
             pool_size=4096,
@@ -1526,28 +1979,16 @@ def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
         }
     ]
 
-    mq_client = MagicMock()
+    req_client = MagicMock()
 
-    def _submit_request(req_type, payload, response_cls):  # noqa: ARG001
-        if req_type == RequestType.PREPARE_STORE:
-            return _CompletedFuture(
-                PrepareStoreResponse(context={"slots": slots, "chunk_indices": [0]})
-            )
-        if req_type == RequestType.COMMIT_STORE:
-            _, _, commit_cpu_data = payload
-            assert commit_cpu_data == b""
-            return _CompletedFuture(True)
-        if req_type == RequestType.PREPARE_RETRIEVE:
-            return _CompletedFuture(
-                PrepareRetrieveResponse(
-                    success=True, data=b"", context={"slots": slots}
-                )
-            )
-        if req_type == RequestType.COMMIT_RETRIEVE:
-            return _CompletedFuture(True)
-        raise AssertionError(f"Unexpected request type: {req_type}")
-
-    mq_client.submit_request.side_effect = _submit_request
+    req_client.prepare_store.return_value = _CompletedFuture(
+        PrepareStoreResponse(context={"slots": slots, "chunk_indices": [0]})
+    )
+    req_client.commit_store.return_value = _CompletedFuture(True)
+    req_client.prepare_retrieve.return_value = _CompletedFuture(
+        PrepareRetrieveResponse(success=True, data=b"", context={"slots": slots})
+    )
+    req_client.commit_retrieve.return_value = _CompletedFuture(True)
 
     context = EngineDrivenContextShm(
         metadata=EngineDrivenContextMetadata(
@@ -1558,7 +1999,7 @@ def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
             block_size=1,
             use_mla=False,
         ),
-        mq_client=mq_client,
+        req_client=req_client,
         mq_timeout=1.0,
         shm_name=shm_name,
         pool_size=4096,
@@ -1572,8 +2013,11 @@ def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
             torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
         )
         assert context.commit_store(key, 1, store_views)
+        req_client.commit_store.assert_called_once_with(key, 1, b"")
 
-        retrieve_views = context.prepare_retrieve(key=key, instance_id=1)
+        retrieve_views = context.prepare_retrieve(
+            key=key, instance_id=1, expected_count=1
+        )
         assert retrieve_views is not None
         assert torch.equal(
             retrieve_views[0],
@@ -1597,14 +2041,14 @@ def test_engine_driven_context_shm_init_raises_when_segment_missing() -> None:
                 block_size=1,
                 use_mla=False,
             ),
-            mq_client=MagicMock(),
+            req_client=MagicMock(),
             mq_timeout=1.0,
             shm_name="lmcache_missing_shm_segment",
             pool_size=4096,
         )
 
 
-def test_create_engine_driven_context_falls_back_to_pickle_without_shm_info() -> None:
+def test_create_engine_driven_context_uses_inline_without_shm_info() -> None:
     context = create_engine_driven_context(
         metadata=EngineDrivenContextMetadata(
             layout_desc=MemoryLayoutDesc(
@@ -1614,31 +2058,12 @@ def test_create_engine_driven_context_falls_back_to_pickle_without_shm_info() ->
             block_size=1,
             use_mla=False,
         ),
-        mq_client=MagicMock(),
+        req_client=MagicMock(),
         mq_timeout=1.0,
         shm_name="",
         pool_size=0,
     )
-    assert isinstance(context, EngineDrivenContextPickle)
-
-
-def test_create_engine_driven_context_use_pickle_ignores_valid_shm_info() -> None:
-    context = create_engine_driven_context(
-        metadata=EngineDrivenContextMetadata(
-            layout_desc=MemoryLayoutDesc(
-                shapes=[torch.Size([2, 2])],
-                dtypes=[torch.float32],
-            ),
-            block_size=1,
-            use_mla=False,
-        ),
-        mq_client=MagicMock(),
-        mq_timeout=1.0,
-        shm_name="lmcache_valid_shm",
-        pool_size=4096,
-        use_pickle=True,
-    )
-    assert isinstance(context, EngineDrivenContextPickle)
+    assert isinstance(context, EngineDrivenContextInline)
 
 
 def test_engine_driven_context_shm_close_is_idempotent() -> None:
@@ -1654,7 +2079,7 @@ def test_engine_driven_context_shm_close_is_idempotent() -> None:
                 block_size=1,
                 use_mla=False,
             ),
-            mq_client=MagicMock(),
+            req_client=MagicMock(),
             mq_timeout=1.0,
             shm_name=shm_name,
             pool_size=4096,

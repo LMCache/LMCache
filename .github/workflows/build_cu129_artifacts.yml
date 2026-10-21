@@ -2,12 +2,16 @@ name: Build cu129 Artifacts
 
 # Reusable workflow that builds the cu129 CUDA 12.9 wheel via cibuildwheel
 # against the pytorch manylinux cu12.9 base image.
-# Uploaded as the `release-cu129-artifacts` GHA artifact.
+# Uploaded as architecture-specific `release-cu129-artifacts-*` GHA artifacts.
 # The cu12.9 wheel carries no local version suffix and is published to a
-# dedicated v{tag}-cu12 GitHub Release (not PyPI).
+# dedicated v{tag}-cu129 GitHub Release (not PyPI).
 
 on:
-    workflow_call:
+  workflow_call:
+    secrets:
+      dockerhub_token:
+        description: DockerHub token used to avoid image pull rate limits.
+        required: false
 
 env:
     LC_ALL: en_US.UTF-8
@@ -21,8 +25,18 @@ permissions:
 
 jobs:
     build-cu129-artifacts:
-        name: Build cu129 artifacts
-        runs-on: ubuntu-latest
+        name: Build cu129 artifacts (${{ matrix.arch }})
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - arch: amd64
+                      cibw_arch: x86_64
+                      runner: ubuntu-latest
+                    - arch: arm64
+                      cibw_arch: aarch64
+                      runner: ubuntu-24.04-arm
+        runs-on: ${{ matrix.runner }}
         steps:
             - name: "Harden Runner"
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
@@ -35,26 +49,17 @@ jobs:
               with:
                 fetch-depth: 0
 
-            # Keep stable vX.Y.Z and rc/a/b pre-release tags; strip variant tags
-            # (v*-cu129, v*-alpha) that yield invalid PEP 440 versions (see #3123).
-            - name: Remove non-release tags (keep stable + rc/a/b pre-releases)
-              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
-
-            - name: Login to DockerHub
-              # Skip when either the username var or the token secret is
-              # absent. Secrets are not inherited into reusable workflows
-              # without `secrets: inherit`, and fork PRs never get secrets,
-              # so the token can legitimately be empty on some runs.
-              if: vars.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
-              env:
-                DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+            - name: Prepare artifact build
+              id: prepare
+              uses: ./.github/actions/build-artifacts
               with:
-                username: ${{ vars.DOCKERHUB_USERNAME }}
-                password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-            - name: Free disk space
-              uses: ./.github/actions/free-disk-space
+                dockerhub_login: "true"
+                dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+                dockerhub_token: ${{ secrets.dockerhub_token }}
+                free_disk_space: "true"
+                resolve_version: "true"
+                fallback_version: 0.0.0.dev
+                version_environment_variable: CU129_VERSION
 
             - name: Setup Python 3.13
               uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
@@ -70,22 +75,15 @@ jobs:
               run: |
                 rm -rf dist/
 
-            - name: Get base version for cu12.9 wheel
-              run: |
-                if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-                  BASE="${GITHUB_REF_NAME#v}"
-                else
-                  BASE=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//' || echo "0.0.0.dev")
-                fi
-                echo "CU129_VERSION=${BASE}" >> "$GITHUB_ENV"
-
             - name: Build cu12.9 CUDA wheels with cibuildwheel
               env:
+                CIBW_BUILD: cp3*-manylinux_${{ matrix.cibw_arch }}
                 CIBW_MANYLINUX_X86_64_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda12.9
+                CIBW_MANYLINUX_AARCH64_IMAGE: docker.io/pytorch/manylinuxaarch64-builder:cuda12.9
                 CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0" ENABLE_CXX11_ABI=1 LMCACHE_CUDA_MAJOR=12 SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.CU129_VERSION }} PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu129 PIP_CONSTRAINT=/project/cibw-constraints.txt'
                 CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
                   auditwheel repair
-                  --plat manylinux_2_28_x86_64
+                  --plat manylinux_2_28_${{ matrix.cibw_arch }}
                   --exclude libtorch.so
                   --exclude libtorch_cuda.so
                   --exclude libtorch_python.so
@@ -101,5 +99,5 @@ jobs:
             - name: Upload cu12.9 release artifacts to GHA
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
               with:
-                name: release-cu129-artifacts
+                name: release-cu129-artifacts-${{ matrix.arch }}
                 path: dist/

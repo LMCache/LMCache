@@ -9,7 +9,6 @@ Usage::
 # Standard
 from typing import TYPE_CHECKING
 import argparse
-import json
 import sys
 import urllib.error
 import urllib.request
@@ -19,16 +18,18 @@ from prometheus_client.parser import text_string_to_metric_families
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
+from lmcache.cli.http import (
+    DEFAULT_URLS,
+    CLIHTTPError,
+)
+from lmcache.cli.http import fetch_json as _fetch_json
+from lmcache.cli.http import (
+    normalize_url,
+)
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.cli.metrics import Metrics
-
-# Default server URLs per describe target (ZMQ/HTTP semantics differ).
-DEFAULT_URLS: dict[str, str] = {
-    "kvcache": "http://localhost:8080",
-    "engine": "http://localhost:8000",
-}
 
 # -------------------------------------------------------------------
 # Shared helpers
@@ -39,36 +40,16 @@ class DescribeError(Exception):
     """Raised when the describe command cannot fetch or parse status data."""
 
 
-def normalize_url(url: str) -> str:
-    """Ensure *url* has an ``http://`` or ``https://`` scheme."""
-    if not url.startswith(("http://", "https://")):
-        url = f"http://{url}"
-    return url.rstrip("/")
-
-
 def fetch_json(url: str, timeout: int = 10) -> dict:
     """GET *url* and return the parsed JSON body.
 
     Raises:
         DescribeError: On network/HTTP errors.
     """
-    req = urllib.request.Request(url)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
-        if exc.code == 503:
-            body = exc.read().decode()
-            try:
-                detail = json.loads(body).get("error", body)
-            except (json.JSONDecodeError, AttributeError):
-                detail = body
-            raise DescribeError(f"Server unhealthy: {detail}") from exc
-        raise DescribeError(f"HTTP {exc.code} from {url}: {exc.reason}") from exc
-    except urllib.error.URLError as exc:
-        raise DescribeError(f"Cannot connect to {url}: {exc.reason}") from exc
-    except OSError as exc:
-        raise DescribeError(f"Cannot connect to {url}: {exc}") from exc
+        return _fetch_json(url, timeout=timeout)
+    except CLIHTTPError as exc:
+        raise DescribeError(str(exc)) from exc
 
 
 def fetch_health(url: str, timeout: int = 10) -> bool:
