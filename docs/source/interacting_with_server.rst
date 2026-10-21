@@ -11,3 +11,8 @@ command line, over HTTP, or through the web frontend.
    mp/http_api
    mp/frontend_dashboard
    mp/sdk
+
+.. toctree::
+   :maxdepth: 1
+
+   /internal_api_server/internal_api_server

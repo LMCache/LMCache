@@ -134,12 +134,19 @@ def _schedule(
     block_ids: tuple[list[int], ...] = (),
     *,
     new: bool = False,
+    num_computed_tokens: int = 0,
 ) -> SchedulerOutput:
     return cast(
         SchedulerOutput,
         SimpleNamespace(
             scheduled_new_reqs=(
-                [SimpleNamespace(req_id=request_id, block_ids=block_ids)]
+                [
+                    SimpleNamespace(
+                        req_id=request_id,
+                        block_ids=block_ids,
+                        num_computed_tokens=num_computed_tokens,
+                    )
+                ]
                 if new and num_tokens
                 else []
             ),
@@ -147,6 +154,9 @@ def _schedule(
                 req_ids=[request_id] if not new and num_tokens else [],
                 new_block_ids=[block_ids] if not new and num_tokens else [],
                 resumed_req_ids=set(),
+                num_computed_tokens=(
+                    [num_computed_tokens] if not new and num_tokens else []
+                ),
             ),
             num_scheduled_tokens={request_id: num_tokens} if num_tokens else {},
             total_num_scheduled_tokens=num_tokens,

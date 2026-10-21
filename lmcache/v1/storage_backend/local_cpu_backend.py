@@ -951,8 +951,13 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return list(self.hot_cache.keys())
 
     def clear(self) -> int:
-        """
-        counts the number of memory objects removed
+        """Remove every evictable entry from the hot cache.
+
+        Entries that are pinned or still referenced by a reader are kept.
+
+        Returns:
+            The number of tokens removed. Returns 0 when the hot cache is
+            disabled (``local_cpu`` is False).
         """
         if not self.use_hot:
             return 0

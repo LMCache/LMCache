@@ -179,18 +179,13 @@ def test_server_module_flags_are_parsed():
     config = _parse_mp(
         [
             "--server-module",
-            (
-                '{"module_path":"my_pkg.server_module",'
-                '"factory_name":"build_extra_modules",'
-                '"config":{"mode":"test"}}'
-            ),
+            ('{"module_path":"my_pkg.server_module","config":{"mode":"test"}}'),
         ]
     )
 
     assert len(config.server_modules) == 1
     spec = config.server_modules[0]
     assert spec.module_path == "my_pkg.server_module"
-    assert spec.factory_name == "build_extra_modules"
     assert spec.config == {"mode": "test"}
 
 
@@ -396,7 +391,7 @@ def test_deprecated_flags_log_warning():
     # lmcache's ``init_logger`` sets ``propagate = False``, so pytest's
     # ``caplog`` (root-logger based) cannot see the records. Attach a local
     # handler to the named logger instead (established pattern, see
-    # tests/v1/test_v1_adapter_state_desync.py).
+    # tests/inprocess/integration/vllm/test_v1_adapter_state_desync.py).
     records: list[logging.LogRecord] = []
 
     class _ListHandler(logging.Handler):
