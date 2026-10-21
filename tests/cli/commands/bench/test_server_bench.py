@@ -136,7 +136,11 @@ class TestCaseDelegation:
         case_result = BenchResult(
             case_name="baseline",
             completed_runs=2,
-            checks={"checksum_match": [True, False]},
+            checks={
+                "checksum_match": [True, False],
+                "cold.server_checksum_match": [True, False],
+                "warm.server_checksum_match": [True, True],
+            },
         )
         bench_case.run.return_value = case_result
         client_factory = MagicMock(return_value=client)
@@ -186,6 +190,8 @@ class TestCaseDelegation:
                 call("total_requests", "Total requests", 2),
                 call("checksum_ok", "Checksum OK", 1),
                 call("checksum_fail", "Checksum FAIL", 1),
+                call("server_checksum_ok", "Server checksum OK", 3),
+                call("server_checksum_fail", "Server checksum FAIL", 1),
                 call("pass_rate", "Checksum pass rate (%)", 50.0),
             ]
         )
@@ -496,7 +502,7 @@ class _ChecksumHandler(BaseHTTPRequestHandler):
         body = json.dumps(
             {
                 "status": "success",
-                "chunk_checksums": ["a" * 32, "b" * 32],
+                "chunk_checksums": {"layer_0": ["a" * 32, "b" * 32]},
             }
         ).encode()
         self.send_response(200)
@@ -530,29 +536,27 @@ class TestQueryChecksum:
         base = "http://127.0.0.1:%d" % self.port
         result = _query_checksum(
             base,
-            block_offset=0,
-            num_blocks=2,
-            block_size=2,
-            chunk_size=2,
+            block_ids=[3, 1],
+            blocks_per_chunk=1,
+            instance_id=1000,
         )
         assert result is not None
-        assert len(result) == 2
-        assert result[0] == "a" * 32
+        assert result == {"layer_0": ["a" * 32, "b" * 32]}
         # The POST body matches the MP /cache/checksums contract: block-native
-        # ids and a block-level chunk_size (token chunk_size 2 / block_size 2).
+        # ids in logical order and a block-level chunk_size.
         assert len(self.server.received_payloads) == 1
         sent = self.server.received_payloads[0]
-        assert sent["block_ids"] == [0, 1]
+        assert sent["block_ids"] == [3, 1]
         assert sent["chunk_size"] == 1
-        assert sent["layerwise"] is False
+        assert sent["layerwise"] is True
+        assert sent["instance_id"] == 1000
 
     def test_unreachable_returns_none(self):
         result = _query_checksum(
             "http://127.0.0.1:1",
-            block_offset=0,
-            num_blocks=2,
-            block_size=2,
-            chunk_size=2,
+            block_ids=[3, 1],
+            blocks_per_chunk=1,
+            instance_id=1000,
         )
         assert result is None
 

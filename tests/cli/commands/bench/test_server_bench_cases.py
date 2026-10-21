@@ -72,6 +72,7 @@ def _client(cold_checksum: str, warm_checksum: str) -> MagicMock:
         LookupResult(1, 1, 1.5),
     ]
     client.compute_checksums.side_effect = [{0: [cold_checksum]}, {0: [warm_checksum]}]
+    client.verify_server_checksums.return_value = True
     client.retrieve.side_effect = [None, _transfer("retrieve")]
     client.store.side_effect = [_transfer("store"), None]
     return client
@@ -161,7 +162,27 @@ def run_bench(
                     ).fill_(-1)
                 return ready
 
-        checksum_query = MagicMock()
+        def query_checksum(
+            http_base: str,
+            block_ids: list[int],
+            blocks_per_chunk: int,
+            instance_id: int,
+        ) -> dict[str, list[str]] | None:
+            if fault == "http_unavailable":
+                return None
+            expected: dict[str, list[str]] = {}
+            for start in range(0, len(block_ids), blocks_per_chunk):
+                for index, digest in (
+                    allocated[instance_id - 1000]
+                    .tensor_checksums([block_ids[start : start + blocks_per_chunk]])
+                    .items()
+                ):
+                    expected.setdefault(f"layer_{index}", []).append(digest)
+            if fault == "http_corrupt" and instance_id == 1000 + tp_size - 1:
+                expected["layer_0"][-1] = "wrong"
+            return expected
+
+        checksum_query = MagicMock(side_effect=query_checksum)
         monkeypatch.setattr(zmq, "Context", MagicMock())
         monkeypatch.setattr(RequestClientFactory, "create", MagicMock())
         monkeypatch.setattr(helpers, "_get_chunk_size", lambda _client: 2)
@@ -171,7 +192,7 @@ def run_bench(
             helpers, "_poll_prefetch_status", MagicMock(side_effect=[0, 2])
         )
         monkeypatch.setattr(helpers, "_send_end_session", MagicMock())
-        monkeypatch.setattr("urllib.request.urlopen", checksum_query)
+        monkeypatch.setattr(helpers, "_query_checksum", checksum_query)
         monkeypatch.setattr(
             transfer_context, "EngineDrivenTransferContext", MemoryTransferContext
         )
@@ -239,6 +260,7 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
         ),
         call.lookup(cold),
         call.compute_checksums(cold, start_token=0, token_count=2, operation="store"),
+        call.verify_server_checksums(cold, 0, 2, operation="store"),
         call.store(cold, start_token=0, token_count=2),
         call.release_request(cold),
         call.create_request(
@@ -250,6 +272,7 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
         call.compute_checksums(
             warm, start_token=0, token_count=2, operation="retrieve"
         ),
+        call.verify_server_checksums(warm, 0, 2, operation="retrieve"),
         call.release_request(warm),
     ]
     assert result.completed_runs == 1
@@ -263,6 +286,8 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
         "warm_retrieve_succeeded",
         "checksum_available",
         "checksum_match",
+        "cold.server_checksum_match",
+        "warm.server_checksum_match",
     }
     assert all(values == [True] for values in result.checks.values())
     assert result.latencies_ms == {
@@ -422,7 +447,9 @@ def test_run_concurrently_needs_one_client_per_case() -> None:
         )
 
 
-@pytest.mark.parametrize("operation", ["lookup", "store", "release_request"])
+@pytest.mark.parametrize(
+    "operation", ["lookup", "verify_server_checksums", "store", "release_request"]
+)
 def test_baseline_releases_request_on_error(operation: str) -> None:
     client = _client("same", "same")
     method = getattr(client, operation)
@@ -447,7 +474,12 @@ def test_all_receivers_match_their_writer(
 
     assert result.succeeded
     assert result.checks["checksum_match"] == [True]
-    query.assert_not_called()
+    if mode == "lmcache_driven":
+        assert query.call_count == (1 if mla else tp_size) + tp_size
+        assert result.checks["warm.server_checksum_match"] == [True]
+    else:
+        query.assert_not_called()
+        assert "warm.server_checksum_match" not in result.checks
 
 
 @pytest.mark.parametrize("mode", ["auto", "engine_driven", "lmcache_driven"])
@@ -478,3 +510,14 @@ def test_receiver_checksums_do_not_require_http(
     assert result.succeeded
     assert result.checks["checksum_match"] == [True]
     query.assert_not_called()
+
+
+@pytest.mark.parametrize("fault", ["http_corrupt", "http_unavailable"])
+def test_server_checksum_failure_does_not_hide_local_roundtrip(
+    run_bench: Callable[..., tuple[BenchResult, list[str], MagicMock]], fault: str
+) -> None:
+    result, messages, _ = run_bench(mode="lmcache_driven", fault=fault)
+    assert result.checks["checksum_match"] == [True]
+    assert result.checks["warm.server_checksum_match"] == [False]
+    assert not result.succeeded
+    assert any("SERVER CHECKSUM FAIL" in message for message in messages)

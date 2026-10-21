@@ -106,7 +106,7 @@ def test_checksum_follows_logical_block_and_tensor_order(
     selected = [
         buffers.kv_caches[name][:, list(blocks[0])] for name in ("tensor.0", "tensor.1")
     ]
-    selected.append(buffers.kv_caches["tensor.2"][list(blocks[1])])
+    selected.append(buffers.kv_caches["tensor.2"][list(blocks[1])].float())
     expected = hashlib.md5(
         b"".join(
             value.contiguous().view(torch.uint8).numpy().tobytes() for value in selected

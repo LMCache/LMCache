@@ -19,6 +19,8 @@ def _block_bytes(tensor: torch.Tensor, dim: int, block_ids: Sequence[int]) -> by
     """Gather block bytes in logical order."""
     indices = torch.tensor(block_ids, dtype=torch.long, device=tensor.device)
     selected = tensor.index_select(dim, indices)
+    if selected.dtype == torch.bfloat16:
+        selected = selected.float()
     return selected.contiguous().view(torch.uint8).cpu().numpy().tobytes()
 
 
@@ -96,6 +98,17 @@ class KVCacheBuffers:
     def synchronize(self) -> None:
         """Wait for buffer preparation outside transfer timing."""
         synchronize_device(next(iter(self.kv_caches.values())).device)
+
+    def tensor_checksums(
+        self, block_ids_per_group: Sequence[Sequence[int]]
+    ) -> dict[int, str]:
+        """Hash selected blocks per registered tensor using the server's dtype rules."""
+        return {
+            index: hashlib.md5(_block_bytes(tensor, dim, block_ids)).hexdigest()
+            for index, tensor, dim, block_ids in self._iter_group_tensors(
+                block_ids_per_group
+            )
+        }
 
     def release(self) -> None:
         """Drop owned references without synchronizing or unregistering."""
