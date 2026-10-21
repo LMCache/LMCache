@@ -39,8 +39,8 @@
 /lmcache/v1/platform/devices/rocm/     @maobaolong @hlin99 @andyluo7
 
 # Lookup client
-/lmcache/v1/lookup_client/             @maobaolong @YaoJiayi @sammshen
-/lmcache/v1/lookup_client/mooncake_lookup_client.py  @maobaolong
+/lmcache/inprocess/v1/lookup_client/             @maobaolong @YaoJiayi @sammshen
+/lmcache/inprocess/v1/lookup_client/mooncake_lookup_client.py  @maobaolong
 
 # Storage backends
 /lmcache/v1/storage_backend/           @maobaolong @sammshen @chunxiaozheng @DongDongJu @zhengfeihe

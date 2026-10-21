@@ -231,7 +231,7 @@ class TestLMCacheManagerPostInit:
     def test_post_init_with_engine_and_async_server(self):
         """Test post_init calls engine.post_init when async lookup server exists."""
         # First Party
-        from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+        from lmcache.inprocess.v1.lookup_client.lmcache_async_lookup_client import (
             LMCacheAsyncLookupServer,
         )
 

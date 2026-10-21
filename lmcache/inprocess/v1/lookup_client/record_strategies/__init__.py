@@ -4,11 +4,11 @@
 from typing import Dict, Type
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.lookup_client.record_strategies.base import (
+from lmcache.inprocess.v1.lookup_client.record_strategies.base import (
     AsyncRecorder,
     RecordStrategy,
 )
+from lmcache.logging import init_logger
 from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
 logger = init_logger(__name__)

@@ -8,8 +8,8 @@ import json
 import time
 
 # First Party
+from lmcache.inprocess.v1.lookup_client.record_strategies.base import RecordStrategy
 from lmcache.logging import init_logger
-from lmcache.v1.lookup_client.record_strategies.base import RecordStrategy
 
 logger = init_logger(__name__)
 

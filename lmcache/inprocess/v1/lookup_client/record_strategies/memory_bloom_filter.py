@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # First Party
+from lmcache.inprocess.v1.lookup_client.record_strategies.base import RecordStrategy
 from lmcache.logging import init_logger
-from lmcache.v1.lookup_client.record_strategies.base import RecordStrategy
 from lmcache.v1.utils.bloom_filter import BloomFilter
 
 logger = init_logger(__name__)

@@ -21,14 +21,16 @@ from lmcache.v1.health_monitor.constants import (
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.inprocess.v1.lookup_client.abstract_client import LookupClientInterface
+    from lmcache.inprocess.v1.lookup_client.lmcache_async_lookup_client import (
+        LMCacheAsyncLookupServer,
+    )
+    from lmcache.inprocess.v1.lookup_client.lmcache_lookup_client import (
+        LMCacheLookupServer,
+    )
     from lmcache.observability import PrometheusLogger
     from lmcache.v1.cache_engine import LMCacheEngine
     from lmcache.v1.internal_api_server.api_server import InternalAPIServer
-    from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-    from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
-        LMCacheAsyncLookupServer,
-    )
-    from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
     from lmcache.v1.manager import LMCacheManager
     from lmcache.v1.metadata import LMCacheMetadata
     from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
