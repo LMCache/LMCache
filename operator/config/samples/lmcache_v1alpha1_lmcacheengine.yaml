@@ -33,7 +33,7 @@ spec:
   # -- Prometheus monitoring --
   # prometheus:
   #   enabled: true               # default
-  #   port: 9090                  # default
+  #   port: 9090                  # metrics Service port (default)
   #   serviceMonitor:
   #     enabled: false            # default, requires Prometheus Operator
   #     interval: 30s             # default

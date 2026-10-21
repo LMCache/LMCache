@@ -80,10 +80,12 @@ spec:
 
   # -- Monitoring (maps to PrometheusConfig from mp_observability/config.py) --
   # Note: the CRD uses `enabled: true` by default; the CLI equivalent is
-  # the absence of the `--disable-prometheus` flag.
+  # the absence of the `--disable-metrics` flag. The server serves /metrics
+  # on its HTTP port (server.httpPort, default 8080); `port` below is only
+  # the port of the <name>-metrics Service, which targets that HTTP port.
   prometheus:
-    enabled: bool             # default: true  (CLI: omit --disable-prometheus)
-    port: int                 # default: 9090
+    enabled: bool             # default: true  (CLI: omit --disable-metrics)
+    port: int                 # default: 9090 (metrics Service port)
     serviceMonitor:
       enabled: bool           # default: false
       interval: string        # default: "30s"
@@ -285,7 +287,7 @@ spec:
     sizeGB: 60
 ```
 
-This deploys a DaemonSet with 60GB L1 cache, LRU eviction, blake3 hashing, port 5555, auto-computed 65Gi memory request / 98Gi limit, Prometheus on 9090, and a connection ConfigMap for vLLM. The operator auto-injects the `/dev/shm` hostPath mount and `--host 0.0.0.0`, and creates a node-local Service for vLLM discovery.
+This deploys a DaemonSet with 60GB L1 cache, LRU eviction, blake3 hashing, port 5555, auto-computed 65Gi memory request / 98Gi limit, metrics on the server HTTP port (8080) behind the `production-cache-metrics` Service, and a connection ConfigMap for vLLM. The operator auto-injects the `/dev/shm` hostPath mount and `--host 0.0.0.0`, and creates a node-local Service for vLLM discovery.
 
 ### Production Deployment (all GPU nodes)
 
@@ -320,7 +322,6 @@ spec:
 
   prometheus:
     enabled: true
-    port: 9090
     serviceMonitor:
       enabled: true
       labels:
@@ -329,7 +330,7 @@ spec:
   logLevel: INFO
   podAnnotations:
     prometheus.io/scrape: "true"
-    prometheus.io/port: "9090"
+    prometheus.io/port: "8080"
   priorityClassName: system-node-critical
 ```
 
