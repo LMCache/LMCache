@@ -1,32 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``lmcache bench server`` subcommand implementation.
-
-This module re-exports :func:`add_server_arguments` from the lightweight
-arguments module and provides the execution orchestrator :func:`run_server_bench`
-for the end-to-end LMCache MP cache-server sanity test.
-
-The command exercises the full store / retrieve data path:
-
-    For each request:
-      1. LOOKUP   — submit prefix lookup (void reply)
-      2. QUERY_PREFETCH_STATUS — poll by request_id until done
-      3. RETRIEVE — for the hit portion (if any)
-      4. STORE    — for the miss portion
-      5. CHECKSUM — verify retrieved chunks in reader buffers
-
-Usage examples::
-
-    # GPU mode: real CUDA tensors + IPC
-    lmcache bench server --rpc-url tcp://localhost:5555 \\
-        --num-tokens 512 --start 0 --end 3
-
-    # Custom KV cache shape (multi-group spec)
-    lmcache bench server --rpc-url tcp://localhost:5555 \\
-        --kvcache-shape-spec '(2,32,1024,8,128):float16:32'
-
-    # Run forever starting from sequence 0
-    lmcache bench server --rpc-url tcp://localhost:5555
-"""
+"""``lmcache bench server`` subcommand implementation."""
 
 # Future
 from __future__ import annotations
