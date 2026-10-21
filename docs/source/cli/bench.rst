@@ -1065,14 +1065,10 @@ Both transfer modes verify local buffers. ``--url`` remains accepted for
 compatibility but is unused.
 
 
-Client control is single-threaded; each STORE/RETRIEVE runs enabled workers
-concurrently, including synchronous engine-driven transfers. The client starts
-and reuses transfer threads outside measured operations. Transfer latency covers
-dispatch through completion of all workers. A timeout or exception disables
-further client operations until close.
-``--transfer-timeout`` bounds each transfer wait (default: 10 seconds).
-``close()`` waits for transfer threads before synchronously releasing resources;
-a stuck native call can block shutdown.
+STORE/RETRIEVE runs enabled workers concurrently; latency covers dispatch through
+completion of all workers. ``--transfer-timeout`` bounds each call's wait. After a
+timeout or transfer exception, close the client before reuse. Shutdown waits for
+running transfers and may block if a native call hangs.
 
 Quick start
 ~~~~~~~~~~~
