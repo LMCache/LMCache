@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # First Party
-from lmcache.integration.base_service_factory import BaseServiceFactory
+from lmcache.inprocess.integration.base_service_factory import BaseServiceFactory
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.manager import LMCacheManager
 
