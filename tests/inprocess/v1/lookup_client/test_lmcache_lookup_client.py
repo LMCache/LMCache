@@ -7,7 +7,8 @@ In production, LMCacheLookupClient and LMCacheLookupServer run in separate
 processes (scheduler vs worker), and PYTHONHASHSEED must be set consistently
 across all processes to ensure hash consistency for cache lookups.
 
-Run with: PYTHONHASHSEED=0 pytest tests/v1/lookup_client/test_lmcache_lookup_client.py
+Run with: PYTHONHASHSEED=0 pytest
+tests/inprocess/v1/lookup_client/test_lmcache_lookup_client.py
 """
 
 # Standard
@@ -23,13 +24,13 @@ import torch
 
 # First Party
 from lmcache.inprocess.v1.gpu_connector.mock_gpu_connector import MockGPUConnector
-from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
-from lmcache.v1.lookup_client.factory import LookupClientFactory
-from lmcache.v1.lookup_client.lmcache_lookup_client import (
+from lmcache.inprocess.v1.lookup_client.factory import LookupClientFactory
+from lmcache.inprocess.v1.lookup_client.lmcache_lookup_client import (
     LMCacheLookupClient,
     LMCacheLookupServer,
 )
+from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
+from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from tests.v1.utils import (
     create_test_config,
     create_test_metadata,

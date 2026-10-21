@@ -3,18 +3,22 @@
 from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
+from lmcache.inprocess.v1.lookup_client.abstract_client import LookupClientInterface
+from lmcache.inprocess.v1.lookup_client.chunk_statistics_lookup_client import (
+    ChunkStatisticsLookupClient,
+)
+from lmcache.inprocess.v1.lookup_client.hit_limit_lookup_client import (
+    HitLimitLookupClient,
+)
+from lmcache.inprocess.v1.lookup_client.lmcache_lookup_client_bypass import (
+    LMCacheBypassLookupClient,
+)
+from lmcache.inprocess.v1.lookup_client.mooncake_lookup_client import (
+    MooncakeLookupClient,
+)
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-from lmcache.v1.lookup_client.chunk_statistics_lookup_client import (
-    ChunkStatisticsLookupClient,
-)
-from lmcache.v1.lookup_client.hit_limit_lookup_client import HitLimitLookupClient
-from lmcache.v1.lookup_client.lmcache_lookup_client_bypass import (
-    LMCacheBypassLookupClient,
-)
-from lmcache.v1.lookup_client.mooncake_lookup_client import MooncakeLookupClient
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc.zmq_transport import (
     SocketParams,
@@ -25,10 +29,12 @@ from lmcache.v1.rpc_utils import get_zmq_rpc_path_lmcache
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+    from lmcache.inprocess.v1.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
     )
-    from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
+    from lmcache.inprocess.v1.lookup_client.lmcache_lookup_client import (
+        LMCacheLookupServer,
+    )
 
 logger = init_logger(__name__)
 
@@ -68,10 +74,10 @@ class LookupClientFactory:
             )
         else:
             # First Party
-            from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+            from lmcache.inprocess.v1.lookup_client.lmcache_async_lookup_client import (
                 LMCacheAsyncLookupClient,
             )
-            from lmcache.v1.lookup_client.lmcache_lookup_client import (
+            from lmcache.inprocess.v1.lookup_client.lmcache_lookup_client import (
                 LMCacheLookupClient,
             )
 
@@ -128,10 +134,10 @@ class LookupClientFactory:
             or metadata.worker_id in lookup_server_worker_ids
         ):
             # First Party
-            from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+            from lmcache.inprocess.v1.lookup_client.lmcache_async_lookup_client import (
                 LMCacheAsyncLookupServer,
             )
-            from lmcache.v1.lookup_client.lmcache_lookup_client import (
+            from lmcache.inprocess.v1.lookup_client.lmcache_lookup_client import (
                 LMCacheLookupServer,
             )
 

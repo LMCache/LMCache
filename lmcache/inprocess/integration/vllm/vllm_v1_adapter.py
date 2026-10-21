@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
     # First Party
-    from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
+    from lmcache.inprocess.v1.lookup_client.abstract_client import LookupClientInterface
 
 logger = init_logger(__name__)
 
