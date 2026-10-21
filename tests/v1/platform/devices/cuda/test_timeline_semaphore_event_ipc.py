@@ -176,7 +176,7 @@ def _run_in_fresh_thread(fn: Callable[[], None]) -> None:
     def target() -> None:
         try:
             fn()
-        except BaseException as exc:  # noqa: BLE001 - re-raised below
+        except BaseException as exc:  # re-raised below
             errors.append(exc)
 
     thread = threading.Thread(target=target, daemon=True)

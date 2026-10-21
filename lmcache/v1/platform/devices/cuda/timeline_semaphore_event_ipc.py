@@ -259,7 +259,6 @@ class TimelineSemaphoreEventIPCBackend:
                 buffer.buffer_ops_stream, device_index
             )
             with torch.cuda.device(device_index):
-                _bind_primary_context(device_index)
                 _CHECK_CUDA(
                     _cuda.driver.cuStreamWriteValue64(
                         _cuda.driver.CUstream(stream_hdl),
@@ -322,6 +321,9 @@ class TimelineSemaphoreEventIPCBackend:
                 "Imported timeline-semaphore events cannot be recorded; only the "
                 "exporting process records."
             )
+        # Bind before taking the lock so a failure cannot leave a slot
+        # assigned but never written.
+        _bind_primary_context(event.device_index)
         buffer: _TimelineSemaphoreBuffer = self._get_buffer(event.device_index)
         stream_hdl: cudaStream_t = _raw_stream_handle(stream, event.device_index)
         # Lock held through the enqueue: a second thread landing seq N+1's
@@ -336,7 +338,6 @@ class TimelineSemaphoreEventIPCBackend:
             event.slot_offset = slot_offset
             event.seq = seq
             with torch.cuda.device(event.device_index):
-                _bind_primary_context(event.device_index)
                 _CHECK_CUDA(
                     _cuda.driver.cuStreamWriteValue64(
                         _cuda.driver.CUstream(stream_hdl),
