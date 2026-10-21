@@ -28,8 +28,34 @@ def _get_allowed_imports(request: Request) -> List[str]:
     return []
 
 
+def _is_run_script_enabled(request: Request) -> bool:
+    """Extract run_script_api_enabled from either inProcess or mp mode.
+
+    Defaults to False whenever the setting is absent, so a deployment that
+    never opted in never serves this endpoint.
+    """
+    adapter = getattr(request.app.state, "lmcache_adapter", None)
+    if adapter is not None:
+        return bool(getattr(adapter.config, "run_script_api_enabled", False))
+    configs = getattr(request.app.state, "configs", None)
+    if isinstance(configs, dict):
+        mp_cfg = configs.get("mp")
+        return bool(getattr(mp_cfg, "run_script_api_enabled", False))
+    return False
+
+
 @router.post("/run_script")
 async def run_script(request: Request):
+    if not _is_run_script_enabled(request):
+        return PlainTextResponse(
+            "The /run_script API is disabled. It executes caller-supplied "
+            "code in-process, so it is off by default; enable it explicitly "
+            "with run_script_api_enabled (LMCACHE_RUN_SCRIPT_API_ENABLED=true, "
+            "or --run-script-api-enabled on the standalone server) and only "
+            "on a trusted network.",
+            status_code=404,
+        )
+
     form_data = await request.form()
     script_file = form_data.get("script")
 

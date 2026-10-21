@@ -59,6 +59,47 @@ Bitmap fold(const Bitmap& found, size_t num_chunks, size_t num_ranks,
 Bitmap unfold(size_t hit_length, size_t num_chunks, size_t num_ranks,
               const std::vector<int64_t>& group_windows);
 
+/**
+ * @brief Fold per-row presence bitmaps into servable prefix lengths.
+ *
+ * ``rows[i]`` and ``windows[i]`` describe one object: bit ``j`` of ``rows[i]``
+ * is set iff chunk ``j`` of that object is present, and ``windows[i]`` is the
+ * object's cross-chunk sliding-window size in chunks (``<= 0`` means full
+ * attention). A prefix of length ``L`` is servable iff every row can serve it
+ * under its own window, i.e. its last ``min(window, L)`` chunks are present.
+ * No ordering or grouping of the rows is assumed. Every row has the same
+ * size, which is the number of chunks.
+ *
+ * @param rows Presence bitmaps, all of equal size.
+ * @param windows Per-row window sizes, parallel to ``rows``.
+ *
+ * @return A bitmap of size ``num_chunks``; bit ``j`` set iff every row can
+ *     serve a length-``j + 1`` prefix.
+ *
+ * @throws std::invalid_argument If ``rows`` and ``windows`` differ in length
+ *     or the rows differ in size.
+ */
+Bitmap fold_grouped(const std::vector<Bitmap>& rows,
+                    const std::vector<int64_t>& windows);
+
+/**
+ * @brief Expand a model-wide hit length into per-row retain bitmaps.
+ *
+ * Row ``i`` retains the chunks it needs to serve ``hit_length`` under
+ * ``windows[i]``: ``[0, hit_length)`` for full attention (``<= 0``),
+ * ``[hit_length - window, hit_length)`` for a sliding window.
+ *
+ * @param hit_length Model-wide prefix hit length in chunks (clamped to
+ *     ``num_chunks``).
+ * @param num_chunks Number of LMCache chunks in the request.
+ * @param windows Per-row cross-chunk sliding-window sizes in chunks.
+ *
+ * @return ``windows.size()`` retain bitmaps of size ``num_chunks``, parallel
+ *     to ``windows``.
+ */
+std::vector<Bitmap> unfold_grouped(size_t hit_length, size_t num_chunks,
+                                   const std::vector<int64_t>& windows);
+
 }  // namespace lmcache_native
 
 }  // namespace lmcache
