@@ -106,7 +106,6 @@ class TestCommandMetadata:
         ``server_bench`` sub-package, mirroring the engine / l2 layout.
         """
         # First Party
-        from lmcache.cli.commands.bench.server_bench import arguments as sv_args
         from lmcache.cli.commands.bench.server_bench import command as sv_cmd
         from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
 
@@ -114,7 +113,7 @@ class TestCommandMetadata:
         assert sv_helpers.__name__ == (
             "lmcache.cli.commands.bench.server_bench.helpers"
         )
-        assert callable(sv_args.add_server_arguments)
+        assert callable(sv_cmd.add_server_arguments)
         assert callable(sv_cmd.run_server_bench)
 
 
@@ -332,7 +331,7 @@ class TestCommandArguments:
         parser: argparse.ArgumentParser,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """The runtime-independent help stays consistent with the shape parser."""
+        """The help lists the dtypes supported by the shape parser."""
         with pytest.raises(SystemExit) as exc:
             parser.parse_args(["bench", "server", "--help"])
         assert exc.value.code == 0
