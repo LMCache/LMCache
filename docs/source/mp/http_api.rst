@@ -1739,8 +1739,12 @@ piped directly to a terminal.
 .. warning::
 
    The payload contains **every** environment variable, including any
-   secrets injected via the environment. There is no redaction or auth —
-   restrict network access to this endpoint in production.
+   secrets injected via the environment. Only ``LMCACHE_HTTP_API_KEY`` is
+   redacted (replaced with ``<redacted>``); every other environment variable
+   is returned verbatim. Enable HTTP bearer authentication (see
+   `Server Configuration`_) and/or restrict network access to this endpoint
+   in production -- when authentication is enabled, ``/env`` requires a
+   valid key like every non-public route.
 
 **Response** (``200 OK``, ``text/plain``):
 
