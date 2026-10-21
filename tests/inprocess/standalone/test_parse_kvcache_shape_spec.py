@@ -4,7 +4,7 @@
 import pytest
 
 # First Party
-from lmcache.v1.standalone.__main__ import parse_kvcache_shape_spec
+from lmcache.inprocess.standalone.__main__ import parse_kvcache_shape_spec
 
 
 def test_parse_kvcache_shape_spec_rejects_unknown_dtype() -> None:
