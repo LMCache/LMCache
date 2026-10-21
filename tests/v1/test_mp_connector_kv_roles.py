@@ -439,6 +439,7 @@ def test_lookup_retrieve_and_cleanup(
     sending, receiving = worker.get_finished(set())
     assert not sending
     assert receiving == {"request"}
+    scheduler.update_connector_output(KVConnectorOutput(finished_recving=receiving))
     assert worker.get_block_ids_with_load_errors() == (
         set() if retrieve_success else {2}
     )
@@ -456,6 +457,8 @@ def test_lookup_retrieve_and_cleanup(
     assert scheduler.request_trackers == {}
     mock_io.scheduler.cleanup_lookup_result.assert_called_once_with("request")
     mock_io.scheduler.end_session.assert_called_once_with("request")
+    worker.bind_connector_metadata(scheduler.build_connector_meta(_schedule()))
+    worker.start_load_kv(MagicMock())
     sending, receiving = worker.get_finished({"request"})
     assert (sending or set()) == ({"request"} if delay_free else set())
     assert not receiving
@@ -537,6 +540,38 @@ def test_receive_failure_reporting(
         assert worker.get_block_ids_with_load_errors() == set()
     finally:
         worker.shutdown()
+
+
+def test_request_finished_while_loading_is_not_reported_as_sending(
+    connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
+    mock_io: SimpleNamespace,
+) -> None:
+    """vLLM frees a request that finished mid-load on its finished_recving
+    report and asserts on any later finished_sending report for it.
+
+    EngineCore processes aborts after the worker reports and before
+    update_from_output, so the worker sees the load done a step before the
+    request finishes.
+    """
+    scheduler, worker = connectors
+    request = _request()
+    mock_io.scheduler.check_lookup_result.return_value = 8
+    assert scheduler.get_num_new_matched_tokens(request, 4) == (4, True)
+    scheduler.update_state_after_alloc(
+        request, MagicMock(get_block_ids=lambda: ([1, 2],)), 4
+    )
+    worker.bind_connector_metadata(scheduler.build_connector_meta(_schedule()))
+    worker.start_load_kv(MagicMock())
+    sending, receiving = worker.get_finished(set())
+    assert not sending
+    assert receiving == {"request"}
+
+    scheduler.request_finished(request, [1, 2])
+    scheduler.update_connector_output(KVConnectorOutput(finished_recving=receiving))
+
+    worker.bind_connector_metadata(scheduler.build_connector_meta(_schedule()))
+    worker.start_load_kv(MagicMock())
+    assert not any(worker.get_finished({"request"}))
 
 
 @pytest.mark.parametrize("mp_role", ["kv_both", "kv_consumer"])
