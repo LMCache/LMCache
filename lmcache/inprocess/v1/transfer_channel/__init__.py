@@ -3,7 +3,7 @@
 from typing import Optional
 
 # First Party
-from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
+from lmcache.inprocess.v1.transfer_channel.abstract import BaseTransferChannel
 
 
 # TODO(Jiayi): Refactor this function when we support more channels.
@@ -44,7 +44,7 @@ def CreateTransferChannel(
 
     if channel_type == "nixl":
         # First Party
-        from lmcache.v1.transfer_channel.nixl_channel import NixlChannel
+        from lmcache.inprocess.v1.transfer_channel.nixl_channel import NixlChannel
 
         assert "backends" in kwargs, (
             "`backends` must be provided to create nixl transfer channel."
@@ -64,7 +64,7 @@ def CreateTransferChannel(
 
     if channel_type == "mock_memory":
         # First Party
-        from lmcache.v1.transfer_channel.mock_memory_channel import (
+        from lmcache.inprocess.v1.transfer_channel.mock_memory_channel import (
             MockMemoryChannel,
         )
 

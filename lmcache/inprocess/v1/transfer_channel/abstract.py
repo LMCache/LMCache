@@ -8,14 +8,14 @@ import msgspec
 import zmq
 
 # First Party
-from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.transfer_channel.transfer_utils import (
+from lmcache.inprocess.v1.transfer_channel.transfer_utils import (
     InitSideMsgBase,
     InitSideRetMsgBase,
     P2PInitSideMsg,
     P2PInitSideRetMsg,
     SideMsg,
 )
+from lmcache.v1.memory_management import MemoryObj
 
 
 class BaseTransferChannel(metaclass=abc.ABCMeta):
