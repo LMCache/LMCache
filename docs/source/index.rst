@@ -143,6 +143,7 @@ Documentation
    :maxdepth: 4
 
    mp/l2_storage/index
+   kv_cache/storage_backends/index
 
 :raw-html:`<br />`
 
@@ -196,7 +197,7 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 4
 
    legacy/index
 

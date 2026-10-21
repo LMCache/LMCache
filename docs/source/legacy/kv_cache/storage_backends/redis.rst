@@ -3,7 +3,7 @@ Redis
 
 .. warning::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/l2_storage/resp`.
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the related MP documentation and its separate configuration, see :doc:`/mp/l2_storage/resp`.
 
 
 .. _redis-overview:
@@ -93,7 +93,7 @@ Remote Storage Example
 
 - A Machine with at least one GPU. You can adjust the max model length of your vllm instance depending on your GPU memory.
 
-- vllm and lmcache installed (:doc:`Installation Guide <../../getting_started/installation>`)
+- vllm and lmcache installed (:doc:`Installation Guide </getting_started/installation>`)
 
 - Hugging Face access to ``meta-llama/Meta-Llama-3.1-8B-Instruct``
 
