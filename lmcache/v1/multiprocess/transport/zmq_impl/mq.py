@@ -33,6 +33,7 @@ from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
+    ERROR_OPERATION,
     decode_operation,
     encode_operation,
 )
@@ -426,6 +427,12 @@ class MessageQueueClient:
         if request_uid in self.pending_futures:
             future, rpc_spec = self.pending_futures.pop(request_uid)
             operation = decode_operation(b_operation)
+            if operation == ERROR_OPERATION:
+                detail = b_response[0].decode(errors="replace") if b_response else ""
+                future.set_exception(
+                    RuntimeError(f"Server failed {rpc_spec.operation!r}: {detail}")
+                )
+                return
             if operation != rpc_spec.operation:
                 future.set_exception(
                     ValueError(
@@ -736,8 +743,14 @@ class MessageQueueServer(RequestServer):
                 self.output_queue.put(frames_to_send)
                 self._output_efd.notify()
 
-            except Exception:
+            except Exception as exc:
                 logger.exception("Error in blocking handler")
+                # Fail the caller's future instead of leaving it pending.
+                self.output_queue.put(
+                    prefix_frames[:2]
+                    + [encode_operation(ERROR_OPERATION), str(exc).encode()]
+                )
+                self._output_efd.notify()
 
         future.add_done_callback(_notify_response)
 

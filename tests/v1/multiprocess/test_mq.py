@@ -1083,3 +1083,39 @@ def test_client_socket_bounds_connect_attempts():
     assert client.socket.getsockopt(zmq.CONNECT_TIMEOUT) == CONNECT_TIMEOUT_MS
     assert client.socket.getsockopt(zmq.RECONNECT_IVL_MAX) == RECONNECT_IVL_MAX_MS
     client.close()
+
+
+def test_blocking_handler_exception_fails_client_future() -> None:
+    """A raising blocking handler fails the caller's future instead of hanging it."""
+    server_url = "tcp://127.0.0.1:16031"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    calls = {"n": 0}
+
+    def flaky_noop() -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("no CB rope state")
+        return "NOOP_OK"
+
+    add_handler_helper(server, "noop", flaky_noop, HandlerType.BLOCKING)
+    server.add_normal_thread_pool(["noop"], max_workers=1)
+    server.start()
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        failed: MessagingFuture[str] | MessagingStream[str] = client.submit_request(
+            "noop", []
+        )
+        assert isinstance(failed, MessagingFuture)
+        with pytest.raises(RuntimeError, match="no CB rope state"):
+            failed.result(timeout=5)
+
+        healthy: MessagingFuture[str] | MessagingStream[str] = client.submit_request(
+            "noop", []
+        )
+        assert isinstance(healthy, MessagingFuture)
+        assert healthy.result(timeout=5) == "NOOP_OK"
+    finally:
+        client.close()
+        server.close()

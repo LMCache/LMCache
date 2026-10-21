@@ -53,6 +53,10 @@ LEGACY_OPERATION_IDS = MappingProxyType(
 _LEGACY_ID_TO_OPERATION = {value: key for key, value in LEGACY_OPERATION_IDS.items()}
 
 
+# Reply operation for a handler that raised: the client fails the future.
+ERROR_OPERATION = "error"
+
+
 def encode_operation(operation: RpcOperation) -> bytes:
     """Encode an operation as its legacy ID or stable string name."""
     wire_value: int | str = LEGACY_OPERATION_IDS.get(operation, operation)
