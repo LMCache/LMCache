@@ -36,7 +36,7 @@ pytest.importorskip("vllm")
 from vllm.v1.request import RequestStatus  # noqa: E402
 
 # First Party
-from lmcache.integration.vllm.vllm_v1_adapter import (  # noqa: E402
+from lmcache.inprocess.integration.vllm.vllm_v1_adapter import (  # noqa: E402
     LMCacheConnectorV1Impl,
     ReqMeta,
 )
