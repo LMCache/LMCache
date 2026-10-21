@@ -1924,9 +1924,22 @@ class LMCacheConnectorV1Impl:
         # NOTE: Used to stream back the first token
         # for disagg prefill
         if params is not None and "ret_first_tok" in params:
-            return_params = {
-                "first_tok": request._output_token_ids[0],
-            }
+            # ``_output_token_ids`` is empty when a request terminates
+            # (abort/error) before it produces its first output token, e.g.
+            # when the client hangs up while the prefill is still running.
+            # Indexing it unconditionally raises ``IndexError``, which escapes
+            # this connector into EngineCore and takes the engine down for
+            # every connected user. See LMCache#5773.
+            if request._output_token_ids:
+                return_params = {
+                    "first_tok": request._output_token_ids[0],
+                }
+            else:
+                logger.warning(
+                    "Skipping first-token return for request %s: the request "
+                    "finished before producing any output token.",
+                    request.request_id,
+                )
 
         if self.config.get_extra_config_value(
             "enable_cache_usage_details_in_response", False
