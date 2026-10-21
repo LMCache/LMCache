@@ -3,7 +3,7 @@
 # Core engine
 /lmcache/v1/cache_engine.py            @ApostaC @YaoJiayi @sammshen
 /lmcache/v1/cache_controller/          @maobaolong @YaoJiayi @chunxiaozheng
-/lmcache/v1/offload_server/            @maobaolong @YaoJiayi
+/lmcache/inprocess/v1/offload_server/            @maobaolong @YaoJiayi
 
 # Memory management
 /lmcache/v1/memory_management.py       @sammshen @deng451e @chunxiaozheng @DongDongJu @ApostaC
