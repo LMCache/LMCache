@@ -1972,11 +1972,23 @@ sensitive.
 Trace formats
 ~~~~~~~~~~~~~
 
-``--trace-format`` names the producer whose spans the input holds. Each
-format is a contract on the fields the analyzer reads, kept honest by a
-sample file under ``tests/tools/data/trace_formats/`` that the test
-suite replays. A new format adds a reader function, a sample file and an
-entry here.
+``--trace-format`` names the producer whose records the input holds.
+Whatever the producer and its collector pipeline emit, the analyzer needs
+only this from each request, in order of importance:
+
+* **token ids**, as the engine prefilled them with the chat template
+  applied. The replay works on nothing else.
+* **a timestamp**, which fixes the replay order.
+* **a request id**, so repeat lookups of one request (for example after
+  preemption) count once. A format without one counts every record.
+* **a model name**, only for ``--model``; it may be empty.
+
+How those are packaged is the producer's choice: OTLP spans, OTLP logs or
+flat JSON lines all work, as long as the file is one JSON value per
+line. Each format is a small adapter that turns a parsed line into
+records, kept honest by a sample file under
+``tests/tools/data/trace_formats/`` that the test suite replays. A new
+format adds the adapter, its sample file and an entry here.
 
 lmcache
 ^^^^^^^

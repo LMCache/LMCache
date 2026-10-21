@@ -50,19 +50,27 @@ _DEFAULT_CAPACITY_START = 4096
 
 @dataclass(frozen=True)
 class TraceRecord:
-    """One traced request.
+    """One traced request: all the analyzer needs from any trace format.
+
+    A format is whatever a producer and its collector pipeline emit (OTLP
+    spans, OTLP logs, flat JSON lines); its adapter in :data:`TRACE_FORMATS`
+    turns each input line into these records and nothing else about the
+    input matters. In order of importance:
 
     Attributes:
-        timestamp_ns: Request time (the span's ``startTimeUnixNano``).
-        model: Model name the request was served for.
-        input_ids: Prompt token ids.
-        session_id: Request's session id as recorded on the span.
+        input_ids: Prompt token ids as the engine prefilled them, chat
+            template included. The replay works on nothing else.
+        timestamp_ns: Request time in nanoseconds; fixes the replay order.
+        request_id: Collapses repeat lookups of one request (for example
+            after preemption) to its earliest record. A format without a
+            request id can use a per-line value, and then every line counts.
+        model: Model name, only for the ``--model`` filter; may be empty.
     """
 
     timestamp_ns: int
     model: str
     input_ids: list[int]
-    session_id: str
+    request_id: str
 
 
 @dataclass
@@ -196,33 +204,56 @@ def _iter_spans(batch: dict[str, Any]) -> Iterable[dict[str, Any]]:
             yield from scope_spans.get("spans", [])
 
 
-def _lmcache_record(span: dict[str, Any]) -> TraceRecord | None:
-    """Record for the ``lmcache`` trace format, or ``None`` for other spans.
+def _lmcache_records(line: dict[str, Any]) -> Iterable[TraceRecord]:
+    """Records in one line of the ``lmcache`` trace format.
 
-    The format is the MP server's ``mp.request.trace`` span with
-    ``lmcache.model``, ``lmcache.input_ids`` and ``session_id``.
+    A line is an OTLP JSON export batch; the format is the MP server's
+    ``mp.request.trace`` span with ``lmcache.model``, ``lmcache.input_ids``
+    and ``session_id``. Other spans in the batch are skipped.
     ``lmcache.input_ids`` is the OTLP integer array as emitted, or one JSON
     string of the same integers, which is how a collector ``transform``
     may carry it compactly; both decode to the same ids.
     """
-    if span.get("name") != TRACE_SPAN_NAME:
-        return None
-    attrs = {a["key"]: _attribute_value(a["value"]) for a in span.get("attributes", [])}
-    ids = attrs["lmcache.input_ids"]
-    if isinstance(ids, str):
-        ids = json.loads(ids)
-    return TraceRecord(
-        timestamp_ns=int(span["startTimeUnixNano"]),
-        model=attrs["lmcache.model"],
-        input_ids=[int(t) for t in ids],
-        session_id=str(attrs["session_id"]),
-    )
+    for span in _iter_spans(line):
+        if span.get("name") != TRACE_SPAN_NAME:
+            continue
+        attrs = {a["key"]: _attribute_value(a["value"]) for a in span["attributes"]}
+        ids = attrs["lmcache.input_ids"]
+        if isinstance(ids, str):
+            ids = json.loads(ids)
+        yield TraceRecord(
+            timestamp_ns=int(span["startTimeUnixNano"]),
+            model=attrs["lmcache.model"],
+            input_ids=[int(t) for t in ids],
+            request_id=str(attrs["session_id"]),
+        )
 
 
-#: Producer formats ``--trace-format`` accepts, each a span-to-record
-#: function that returns ``None`` for spans the format does not cover.
-TRACE_FORMATS: dict[str, Callable[[dict[str, Any]], TraceRecord | None]] = {
-    "lmcache": _lmcache_record,
+@dataclass(frozen=True)
+class TraceFormat:
+    """A producer format: how to read it and what it expects to find.
+
+    Attributes:
+        read: Yields the :class:`TraceRecord` entries in one parsed input
+            line (none if the line holds no record of this format).
+        expects: What the input must contain, for the error when it does
+            not.
+    """
+
+    read: Callable[[dict[str, Any]], Iterable[TraceRecord]]
+    expects: str
+
+
+#: Producer formats ``--trace-format`` accepts.
+TRACE_FORMATS: dict[str, TraceFormat] = {
+    "lmcache": TraceFormat(
+        read=_lmcache_records,
+        expects=(
+            f"{TRACE_SPAN_NAME} spans with lmcache.input_ids, which the MP "
+            "server emits under --enable-token-trace and the collector's file "
+            "exporter writes"
+        ),
+    ),
 }
 
 
@@ -231,60 +262,60 @@ def load_trace_records(
     trace_format: str = "lmcache",
     model: str | None = None,
 ) -> list[TraceRecord]:
-    """Read request-trace spans from OTLP JSON files.
+    """Read request records from JSON-lines files in a producer format.
 
-    Each line of each file is one OTLP JSON export batch as written by the
-    OpenTelemetry Collector ``file`` exporter. Spans the format does not
-    cover are ignored. A request the engine looked up more than once (for
-    example after preemption) emits one span per lookup; only its earliest
-    span is kept, so every request counts once.
+    Each non-empty line is parsed as JSON and handed to the format's
+    adapter. A request recorded more than once (for example an engine
+    lookup repeated after preemption) keeps only its earliest record, so
+    every request counts once.
 
     Args:
         paths: Files to read, in any order.
-        trace_format: Producer format of the spans, a key of
+        trace_format: Producer format of the input, a key of
             :data:`TRACE_FORMATS`.
         model: When given, keep only requests for this model name.
 
     Returns:
-        One record per session id, sorted by timestamp (ties keep file
+        One record per request id, sorted by timestamp (ties keep file
         order).
 
     Raises:
-        ValueError: If no span matched the format. The message says what
-            the files did hold, so a wrong file, a server started without
-            the token trace, or a collector pipeline that renamed the span
-            can be told apart.
+        ValueError: If no line yielded a record. The message says what the
+            files did hold (for OTLP span batches, the span names), so a
+            wrong file, a server started without the token trace, or a
+            collector pipeline that renamed the span can be told apart.
     """
-    to_record = TRACE_FORMATS[trace_format]
+    fmt = TRACE_FORMATS[trace_format]
     records: list[TraceRecord] = []
-    seen: Counter[str] = Counter()
+    lines = 0
+    span_names: Counter[str] = Counter()
     for path in paths:
         with open(path, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw:
                     continue
-                for span in _iter_spans(json.loads(line)):
-                    seen[span.get("name", "")] += 1
-                    record = to_record(span)
-                    if record is None or (model is not None and record.model != model):
-                        continue
-                    records.append(record)
+                lines += 1
+                line = json.loads(raw)
+                span_names.update(s.get("name", "") for s in _iter_spans(line))
+                records.extend(
+                    r for r in fmt.read(line) if model is None or r.model == model
+                )
     if not records:
         files = ", ".join(str(p) for p in paths)
-        names = ", ".join(f"{n} ({c})" for n, c in seen.most_common(8)) or "none"
+        held = f"{lines} line(s)"
+        if span_names:
+            names = ", ".join(f"{n} ({c})" for n, c in span_names.most_common(8))
+            held += f" with {sum(span_names.values())} OTLP span(s) named {names}"
         raise ValueError(
-            f"No {trace_format!r} trace records in {files}: read "
-            f"{sum(seen.values())} span(s) named {names}. Expected "
-            f"{TRACE_SPAN_NAME} spans with lmcache.input_ids, which the MP "
-            "server emits under --enable-token-trace and the collector's "
-            "file exporter writes; see the trace-analyze docs."
+            f"No {trace_format!r} trace records in {files}: read {held}. "
+            f"Expected {fmt.expects}; see the trace-analyze docs."
         )
     records.sort(key=lambda r: r.timestamp_ns)
-    first_lookup: dict[str, TraceRecord] = {}
+    first: dict[str, TraceRecord] = {}
     for r in records:
-        first_lookup.setdefault(r.session_id, r)
-    return list(first_lookup.values())
+        first.setdefault(r.request_id, r)
+    return list(first.values())
 
 
 # ---------------------------------------------------------------------------
@@ -760,10 +791,9 @@ def run_trace_analyze(args: argparse.Namespace, metrics: Metrics) -> None:
     results = analyze(records, chunk_sizes, capacities)
 
     models = sorted({r.model for r in records})
-    sessions = len({r.session_id for r in records})
     meta = (
         f"{len(records):,} requests, {total_tokens:,} tokens, "
-        f"{sessions:,} sessions, model(s): {', '.join(models)}"
+        f"model(s): {', '.join(models)}"
     )
     Path(args.html).write_text(render_html(results, meta), encoding="utf-8")
 
@@ -771,7 +801,6 @@ def run_trace_analyze(args: argparse.Namespace, metrics: Metrics) -> None:
     trace.add("input", "Input", ", ".join(str(p) for p in args.input))
     trace.add("requests", "Requests", len(records))
     trace.add("total_tokens", "Total tokens", total_tokens)
-    trace.add("sessions", "Sessions", sessions)
     trace.add("models", "Models", ", ".join(models))
     trace.add("html", "HTML report", str(args.html))
 
