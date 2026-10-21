@@ -12,7 +12,7 @@ import torch
 pytest.importorskip("vllm", reason="EC connector adapter imports vLLM at module top")
 
 # First Party
-from lmcache.integration.vllm.vllm_ec_adapter import (  # noqa: E402
+from lmcache.inprocess.integration.vllm.vllm_ec_adapter import (  # noqa: E402
     LMCacheECConnectorImpl,
     LMCacheECConnectorMetadata,
     MMMeta,
@@ -109,7 +109,7 @@ def test_ec_roundtrip_save_then_load():
             # round-trip itself, not vLLM's device discovery.
             encoder_cache2 = {}
             with patch(
-                "lmcache.integration.vllm.vllm_ec_adapter.torch_device_type",
+                "lmcache.inprocess.integration.vllm.vllm_ec_adapter.torch_device_type",
                 new="cpu",
             ):
                 conn.start_load_caches(encoder_cache2)

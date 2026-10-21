@@ -30,7 +30,7 @@ import torch
 pytest.importorskip("vllm")
 
 # First Party
-from lmcache.integration.vllm.vllm_v1_adapter import (
+from lmcache.inprocess.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorMetadata,
     LMCacheConnectorV1Impl,
     SaveSpec,
@@ -117,7 +117,9 @@ def test_wait_for_save_skips_desynced_request_and_keeps_engine_alive() -> None:
             captured_records.append(record)
 
     handler = _ListHandler(level=logging.WARNING)
-    adapter_logger = logging.getLogger("lmcache.integration.vllm.vllm_v1_adapter")
+    adapter_logger = logging.getLogger(
+        "lmcache.inprocess.integration.vllm.vllm_v1_adapter"
+    )
     # ``init_logger`` sets the logger level from ``LMCACHE_LOG_LEVEL`` (default
     # INFO). If a prior import set it above WARNING, ``logger.warning`` would be
     # filtered before reaching our handler. Force WARNING for the duration of

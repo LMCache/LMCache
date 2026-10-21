@@ -24,6 +24,7 @@ import sys
 import torch
 
 # First Party
+from lmcache.inprocess.standalone.manager import StandaloneLMCacheManager
 from lmcache.inprocess.v1.gpu_connector import CreateGPUConnector
 from lmcache.integration.vllm.utils import get_size_bytes, lmcache_get_or_create_config
 from lmcache.logging import init_logger
@@ -33,7 +34,6 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import parse_command_line_extra_params
 from lmcache.v1.kv_layer_groups import DEFAULT_LAYER_NAME_PREFIX
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.standalone.manager import StandaloneLMCacheManager
 
 # Third Party - Platform detection
 try:
