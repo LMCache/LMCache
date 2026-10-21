@@ -144,6 +144,9 @@ disable-observability = true
 eviction-trigger-watermark = 0.95
 eviction-ratio = 0.05
 l2-prefetch-policy = "retain"
+# One GPU and one CPU worker by default: all 4 TP ranks' stores and loads queue
+# on a single thread.
+max-workers = 4
 
 [deployments.vllm_lmcache.services.args.l2-adapter]
 type = "fs_native"
