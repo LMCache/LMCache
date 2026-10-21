@@ -32,7 +32,7 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.event_manager import EventManager, EventType
+from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
@@ -201,6 +201,7 @@ class TestStorageManagerPrefetchCallback:
         storage_manager.prefetch_all_done_callback(
             future, "test_lookup_1", cum_chunk_lengths_total, tier_expected_chunks
         )
+        storage_manager.mark_async_lookup_done("test_lookup_1")
         loop.close()
 
         # Verify: All 5 chunks should be counted, total 1280 tokens
@@ -208,6 +209,12 @@ class TestStorageManagerPrefetchCallback:
         lookup_id, retrieved_length = storage_manager.async_lookup_server.responses[0]
         assert lookup_id == "test_lookup_1"
         assert retrieved_length == 1280
+        assert (
+            storage_manager.event_manager.get_event_status(
+                EventType.LOADING, "test_lookup_1"
+            )
+            == EventStatus.DONE
+        )
 
         # Verify: No memory objects should have ref_count_down called
         for obj in tier0_objs + tier1_objs:
