@@ -19,8 +19,8 @@ This module replays such a trace through a simulated cache for a grid of
   does (prefix coverage first, then non-overlapping segments outside it).
 
 Only matched tokens are reported; what CacheBlend recomputes on top of a
-match is not modelled. Capacity is expressed in tokens because the trace
-carries no KV shape; ``--kv-bytes-per-token`` converts byte capacities.
+match is not modelled. Capacity is a token budget, since the trace carries
+no KV shape.
 """
 
 # Standard
@@ -137,7 +137,7 @@ class ReplayResult:
 
 
 def parse_size(text: str) -> int:
-    """Parse a size such as ``4096``, ``64k``, ``2G`` or ``1GiB``.
+    """Parse a token count such as ``4096``, ``64k`` or ``1M``.
 
     Suffixes ``K``, ``M``, ``G`` and ``T`` are binary multiples; an
     optional trailing ``i``, ``iB`` or ``B`` is ignored.
@@ -508,18 +508,10 @@ tr.sel td { background: var(--tile); font-weight: 600; }
 (function () {
   var data = JSON.parse(document.getElementById("data").textContent);
   var caps = data.capacities_tokens, sizes = data.chunk_sizes;
-  var bpt = data.kv_bytes_per_token;
   var $ = function (id) { return document.getElementById(id); };
   var fmt = function (n) { return n.toLocaleString("en-US"); };
   var pct = function (x) { return (100 * x).toFixed(2) + "%"; };
-  function bytes(n) {
-    var u = ["B", "KiB", "MiB", "GiB", "TiB"], i = 0;
-    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-    return (i ? n.toFixed(1) : n) + " " + u[i];
-  }
-  function capLabel(t) {
-    return bpt ? bytes(t * bpt) + " (" + fmt(t) + " tokens)" : fmt(t) + " tokens";
-  }
+  var capLabel = function (t) { return fmt(t) + " tokens"; };
   var cell = function (cs, cap) { return data.cells[cs + ":" + cap]; };
   function render() {
     var cap = caps[+$("cap").value], cs = sizes[+$("cs").value], c = cell(cs, cap);
@@ -557,42 +549,18 @@ tr.sel td { background: var(--tile); font-weight: 600; }
 """
 
 
-def _fmt_bytes(n: float) -> str:
-    """Human-readable binary size, matching the report's script."""
-    units = ["B", "KiB", "MiB", "GiB", "TiB"]
-    i = 0
-    while n >= 1024 and i < len(units) - 1:
-        n /= 1024
-        i += 1
-    return f"{n:.1f} {units[i]}" if i else f"{int(n)} {units[i]}"
-
-
-def _capacity_label(tokens: int, kv_bytes_per_token: int | None) -> str:
-    """Capacity in bytes with tokens in parentheses when the conversion is
-    known, otherwise in tokens."""
-    if kv_bytes_per_token:
-        return f"{_fmt_bytes(tokens * kv_bytes_per_token)} ({tokens:,} tokens)"
-    return f"{tokens:,} tokens"
-
-
-def render_html(
-    results: Sequence[ReplayResult],
-    meta: str,
-    kv_bytes_per_token: int | None = None,
-) -> str:
+def render_html(results: Sequence[ReplayResult], meta: str) -> str:
     """Render the self-contained HTML report.
 
-    Two sliders (capacity, chunk size) select one precomputed grid cell
-    and show its prefix hit rate, non-prefix hit tokens, request count and
-    token totals, plus a table of every capacity at the selected chunk
-    size. The default cell (smallest chunk size, largest capacity) is
-    rendered into the markup, so the page reads even where scripts do not
-    run.
+    Two sliders (token budget, chunk size) select one precomputed grid
+    cell and show its prefix and non-prefix hit rates, request count and
+    token totals, plus a table of every budget at the selected chunk size.
+    The default cell (smallest chunk size, largest budget) is rendered
+    into the markup, so the page reads even where scripts do not run.
 
     Args:
         results: Grid cells from :func:`analyze`.
         meta: One line describing the trace, shown under the title.
-        kv_bytes_per_token: When given, capacities are also shown in bytes.
 
     Returns:
         The HTML document.
@@ -603,7 +571,6 @@ def render_html(
         "meta": meta,
         "chunk_sizes": chunk_sizes,
         "capacities_tokens": capacities,
-        "kv_bytes_per_token": kv_bytes_per_token,
         "cells": {f"{r.chunk_size}:{r.capacity_tokens}": r.summary() for r in results},
     }
     # A closing script tag inside the JSON would end the data block early.
@@ -616,7 +583,7 @@ def render_html(
     for cap in capacities:
         r = cells[(default_cs, cap)]
         row_cells = [
-            _capacity_label(cap, kv_bytes_per_token),
+            f"{cap:,} tokens",
             f"{r.capacity_chunks:,}",
             f"{r.prefix_hit_rate:.2%}",
             f"{r.prefix_hit_tokens:,}",
@@ -631,7 +598,7 @@ def render_html(
         "__META__": html.escape(meta),
         "__CAP_MAX__": str(len(capacities) - 1),
         "__CS_MAX__": str(len(chunk_sizes) - 1),
-        "__CAP_V__": _capacity_label(default_cap, kv_bytes_per_token),
+        "__CAP_V__": f"{default_cap:,} tokens",
         "__CS_V__": f"{default_cs:,} tokens",
         "__T_PHR__": f"{c.prefix_hit_rate:.2%}",
         "__T_PHT__": f"{c.prefix_hit_tokens:,} of {c.total_tokens:,} tokens",
@@ -694,17 +661,9 @@ def add_trace_analyze_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="SIZE",
         help=(
-            "Cache capacities to simulate, in tokens, or in bytes when "
-            "--kv-bytes-per-token is given; K/M/G/T suffixes are binary. "
+            "Cache token budgets to simulate; K/M suffixes are binary (64k). "
             "Default: half-octave steps from 4096 tokens up to the trace size."
         ),
-    )
-    parser.add_argument(
-        "--kv-bytes-per-token",
-        type=int,
-        default=None,
-        metavar="BYTES",
-        help="KV cache bytes per token; makes --capacity values bytes",
     )
     parser.add_argument(
         "--model",
@@ -740,8 +699,6 @@ def run_trace_analyze(args: argparse.Namespace, metrics: Metrics) -> None:
     total_tokens = sum(len(r.input_ids) for r in records)
     if args.capacity is None:
         capacities = default_capacities(total_tokens)
-    elif args.kv_bytes_per_token:
-        capacities = [max(1, c // args.kv_bytes_per_token) for c in args.capacity]
     else:
         capacities = list(args.capacity)
     capacities = sorted(set(capacities))
@@ -755,10 +712,7 @@ def run_trace_analyze(args: argparse.Namespace, metrics: Metrics) -> None:
         f"{len(records):,} requests, {total_tokens:,} tokens, "
         f"{sessions:,} sessions, model(s): {', '.join(models)}"
     )
-    Path(args.html).write_text(
-        render_html(results, meta, args.kv_bytes_per_token),
-        encoding="utf-8",
-    )
+    Path(args.html).write_text(render_html(results, meta), encoding="utf-8")
 
     trace = metrics.add_section("trace", "Trace")
     trace.add("input", "Input", ", ".join(str(p) for p in args.input))

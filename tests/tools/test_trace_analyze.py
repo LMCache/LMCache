@@ -180,12 +180,11 @@ class TestBlendReplay:
 def test_render_html_embeds_every_cell() -> None:
     records = [_record(1, list(range(1, 9))), _record(2, list(range(1, 9)))]
     results = analyze(records, [4, 8], [8, 16])
-    page = render_html(results, "two requests", kv_bytes_per_token=1024)
+    page = render_html(results, "two requests")
 
     assert page.startswith("<!doctype html>")
     assert '"chunk_sizes": [4, 8]' in page
     assert '"capacities_tokens": [8, 16]' in page
-    assert '"kv_bytes_per_token": 1024' in page
     for r in results:
         assert f'"{r.chunk_size}:{r.capacity_tokens}"' in page
     assert "two requests" in page

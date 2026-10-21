@@ -69,30 +69,6 @@ def test_end_to_end_writes_report_and_summary(
     assert '"4:16"' in page and '"4:8"' in page
 
 
-def test_kv_bytes_per_token_converts_capacity(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    args = _parse(
-        [
-            "-i",
-            str(FIXTURE),
-            "--chunk-size",
-            "4",
-            "--capacity",
-            "16k",
-            "--kv-bytes-per-token",
-            "1024",
-            "--html",
-            str(tmp_path / "r.html"),
-            "--format",
-            "json",
-        ]
-    )
-    args.func(args)
-    out = json.loads(capsys.readouterr().out)["metrics"]
-    assert out["grid"][0]["capacity_tokens"] == 16
-
-
 def test_empty_trace_exits(tmp_path: Path) -> None:
     empty = tmp_path / "empty.jsonl"
     empty.write_text("")

@@ -1981,9 +1981,7 @@ hashes (the trailing partial chunk is never cached):
   kept. Evicted chunks are removed from the matcher. Only matched tokens
   are reported; CacheBlend's recompute is not modelled.
 
-Capacity is in tokens because the trace carries no KV shape. With
-``--kv-bytes-per-token`` the ``--capacity`` values are bytes instead and
-the report shows both units.
+Capacity is a token budget, since the trace carries no KV shape.
 
 
 Quick start
@@ -1994,13 +1992,13 @@ Quick start
    lmcache bench trace-analyze \
      --input /var/log/otel/lmcache-traces.jsonl \
      --chunk-size 256 512 \
-     --capacity 1G 4G 16G --kv-bytes-per-token 131072 \
+     --capacity 64k 256k 1M \
      --html trace_analysis.html
 
-The HTML report is self-contained: two sliders (capacity, chunk size)
-select a precomputed grid cell and show its prefix and non-prefix hit
-rates with their token counts, request count and token totals, plus a
-table of every capacity at the selected chunk size. Each cell is a full
+The HTML report is self-contained: two sliders (token budget, chunk
+size) select a precomputed grid cell and show its prefix and non-prefix
+hit rates with their token counts, request count and token totals, plus
+a table of every budget at the selected chunk size. Each cell is a full
 replay, so the slider steps over the capacities given; pass more for a
 smoother sweep. A plain-text summary with the same
 grid goes to stdout (``--format json`` for machine-readable output).
@@ -2022,13 +2020,10 @@ Options
      - Where to write the HTML report (default ``trace_analysis.html``).
    * - ``--chunk-size TOKENS [TOKENS ...]``
      - Chunk size(s) to simulate (default ``256``).
-   * - ``--capacity SIZE [SIZE ...]``
-     - Cache capacities to simulate, in tokens, or in bytes when
-       ``--kv-bytes-per-token`` is given. ``K``/``M``/``G``/``T``
-       suffixes are binary (``64k``, ``4G``, ``1.5GiB``). Default:
-       half-octave steps from 4096 tokens up to the trace size.
-   * - ``--kv-bytes-per-token BYTES``
-     - KV cache bytes per token; makes ``--capacity`` values bytes.
+   * - ``--capacity TOKENS [TOKENS ...]``
+     - Cache token budgets to simulate. ``K`` and ``M`` suffixes are
+       binary (``64k``, ``1M``). Default: half-octave steps from 4096
+       tokens up to the trace size.
    * - ``--model NAME``
      - Only analyze requests for this model name. Use it when one trace
        mixes models, since the simulated cache is shared.
