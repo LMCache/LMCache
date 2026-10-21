@@ -5,6 +5,9 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 import importlib.util
+import shutil
+import subprocess
+import sys
 
 
 def _load_proto_generator() -> ModuleType:
@@ -26,7 +29,6 @@ def test_generated_import_check_does_not_import_lmcache_root(
 ) -> None:
     generator = _load_proto_generator()
     package = "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen"
-    package_parts = package.split(".")
     package_dir = tmp_path.joinpath(*package.split("."))
     package_dir.mkdir(parents=True)
     root_init = tmp_path / "lmcache/__init__.py"
@@ -42,7 +44,20 @@ def test_generated_import_check_does_not_import_lmcache_root(
     )
 
     monkeypatch.setattr(generator, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(generator, "GENERATED_DIR", package_dir)
-    monkeypatch.setattr(generator, "GENERATED_PACKAGE", ".".join(package_parts))
 
-    assert generator._check_generated_imports((pb2, pb2_grpc))
+    assert generator._check_generated_imports((pb2, pb2_grpc), package)
+
+
+def test_generate_packages_with_shared_p2p_types(tmp_path: Path) -> None:
+    generator = _load_proto_generator()
+    for package in generator.GENERATED_PACKAGES:
+        relative = Path(*package.split("."))
+        (tmp_path / relative).mkdir(parents=True)
+        shutil.copytree(
+            generator.PROJECT_ROOT / relative.parent / "protos",
+            tmp_path / relative.parent / "protos",
+        )
+    # Keep the native compiler out of the pytest process.
+    script = tmp_path.joinpath(*generator.GENERATED_PACKAGE.split("."), "_generate.py")
+    shutil.copyfile(generator.GENERATED_DIR / "_generate.py", script)
+    subprocess.run([sys.executable, str(script)], cwd=tmp_path, check=True, timeout=60)

@@ -80,7 +80,7 @@ multiprocess (MP) mode.
 │ │ TransferContext        │  │ TransferContext              │    │
 │ │                        │  │                              │    │
 │ │ • host-side workers    │  │ • IPC-capable device workers │    │
-│ │ • Pickle / SHM backend │  │ • SHM wrappers (host+device) │    │
+│ │ • Inline / SHM backend │  │ • SHM wrappers (host+device) │    │
 │ │ • gather/scatter copy  │  │ • zero-copy handle transfer  │    │
 │ └────────────────────────┘  └──────────────────────────────┘    │
 │                                                                 │
@@ -98,7 +98,7 @@ multiprocess (MP) mode.
 | **Middle** engine / storage / multiprocess | `from lmcache import torch_dev` | Hardware-agnostic unified code |
 | **Middle** ops call sites | `from lmcache import device_ops` | Direct reference to the resolved `DeviceOps` singleton. |
 | **Middle** IPC-capable / device-specific APIs | `hasattr(torch_dev, 'xxx')` guard | Graceful runtime degradation |
-| **Bottom** Transfer Context | `create_transfer_context(kv_caches, mode)` | Per-device routing. In `AUTO` mode: CUDA→LMCacheDriven, other devices→EngineDriven. Other IPC-capable devices (e.g. MUSA) can opt-in to LMCacheDriven via explicit `mode=lmcache_driven` when their `DeviceSpec` reports `is_handle_transfer_available() == True`. |
+| **Bottom** Transfer Context | `create_transfer_context(kv_caches, mode)` | Per-device routing. In `AUTO` mode, `DeviceSpec.default_mp_transfer_mode()` decides: devices whose spec reports `is_lmcache_driven_available() == True` default to LMCacheDriven (CUDA, NPU); opt-in-only stacks (CPU SHM, MUSA handles) and everything else stay EngineDriven and can opt in via explicit `mode=lmcache_driven`. |
 | **Bottom** Cache Context | `DeviceSpec.create_cache_context()` | Per-device cache context factory dispatched via `DeviceSpec` registry. |
 
 ## DeviceOps Architecture
@@ -156,15 +156,17 @@ multiprocess (MP) mode.
 
 ```
 MPTransferMode.AUTO (default):
-  device_type == "cuda"  -->  LMCacheDrivenTransferContext  (IPC zero-copy)
-  device_type != "cuda"  -->  EngineDrivenTransferContext    (gather/scatter copy)
+  DeviceSpec.default_mp_transfer_mode()  -->  LMCacheDrivenTransferContext (cuda, npu)
+                                          -->  EngineDrivenTransferContext   (all others)
+  Base derives it from is_lmcache_driven_available(); opt-in-only
+  stacks (cpu shm, musa handles) override the default to EngineDriven
 
 MPTransferMode.ENGINE_DRIVEN:
   any device             -->  EngineDrivenTransferContext
 
 MPTransferMode.LMCACHE_DRIVEN:
   any device that reports  --> LMCacheDrivenTransferContext
-  `DeviceSpec.is_handle_transfer_available() == True`
+  `DeviceSpec.is_lmcache_driven_available() == True`
   (otherwise the factory raises and the caller must fall back)
 
 Override: LMCACHE_MP_TRANSFER_MODE env var or the mode argument to create_transfer_context()
@@ -207,7 +209,7 @@ supported accelerators (CUDA, MUSA, XPU, HPU, Neuron) is available. In that case
 
 The stub is intended for L1-adapter-only flows (e.g., end-to-end MP
 server smoke tests on a CPU-only host) and CLI loading without torch. In
-MP mode, CPU workers use `EngineDrivenTransferContext` (Pickle or SHM
+MP mode, CPU workers use `EngineDrivenTransferContext` (inline or SHM
 backend) for KV transfer; there is no GPU-side connector involved.
 
 `normalize_kv_and_discover_format` also hardcodes `kv_layout = "HND"`
