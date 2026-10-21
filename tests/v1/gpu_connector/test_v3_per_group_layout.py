@@ -179,7 +179,9 @@ def test_register_kv_caches_builds_layer_groups_before_post_init():
     storage backends are created, so no memory object gets a stale shape."""
     pytest.importorskip("vllm")
     # First Party
-    from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+    from lmcache.inprocess.integration.vllm.vllm_v1_adapter import (
+        LMCacheConnectorV1Impl,
+    )
 
     order = MagicMock()
     fake_impl = SimpleNamespace(
