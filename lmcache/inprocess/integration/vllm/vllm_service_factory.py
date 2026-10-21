@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from lmcache.v1.manager import LMCacheManager
 
 # First Party
+from lmcache.inprocess.v1.health_monitor.base import HealthMonitor
 from lmcache.inprocess.v1.lookup_client.abstract_client import (
     LookupClientInterface,
 )
@@ -31,7 +32,6 @@ from lmcache.integration.base_service_factory import BaseServiceFactory
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.health_monitor.base import HealthMonitor
 from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
