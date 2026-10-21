@@ -37,7 +37,7 @@ These docs describe LMCache's multiprocess (MP) architecture, the current recomm
 
 - [KV Cache Optimizations](https://docs.lmcache.ai/kv_cache_optimizations/index.html): Index of techniques that go beyond plain storage and retrieval.
 - [CacheBlend](https://docs.lmcache.ai/kv_cache_optimizations/cacheblend.html): Reuse cached KV for non-prefix text by selectively recomputing boundary tokens. Best Paper, EuroSys 2025.
-- [CacheGen](https://docs.lmcache.ai/legacy/kv_cache_optimizations/compression/cachegen.html): KV cache compression and streaming for faster transfer.
+- [CacheGen](https://docs.lmcache.ai/kv_cache_optimizations/compression/cachegen.html): KV cache compression and streaming for faster transfer.
 - [Layerwise](https://docs.lmcache.ai/legacy/kv_cache_optimizations/layerwise.html): Overlap KV loading with computation layer by layer.
 - [Segmented Prefill](https://docs.lmcache.ai/kv_cache_optimizations/segmented_prefill.html): Split long prefills into segments for better cache reuse.
 - [Lazy KV Cache Offload](https://docs.lmcache.ai/mp/lazy_offload.html): Defer GPU-to-LMCache stores and submit finished requests in FIFO batches, trading immediate cache availability for serving throughput. vLLM + LMCacheMPConnector only, disabled by default.
