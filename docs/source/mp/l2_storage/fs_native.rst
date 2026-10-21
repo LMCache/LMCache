@@ -26,6 +26,11 @@ I/O queue depth on a single Python thread.
   for reads that use ``O_DIRECT`` because direct I/O bypasses the page cache.
 - ``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB
   for client-side usage tracking.  Default ``0`` disables tracking.
+- ``persist_enabled`` (bool, default ``true``): Whether data files outlive
+  the server.  With ``false``, leftover ``*.data`` and ``*.tmp`` files under
+  ``base_path`` are deleted when the adapter starts and all data files are
+  deleted when it shuts down, so a restart never serves or keeps growing a
+  previous process's files.  Rejected together with ``shared: true``.
 
 .. important::
 
