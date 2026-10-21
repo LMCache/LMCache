@@ -15,6 +15,11 @@ from vllm.v1.utils import ConstantList
 import torch
 
 # First Party
+from lmcache.integration.vllm.experimental.token_drop import (
+    TokenDropSpec,
+    LMCacheMPTokenDropRequestState,
+    parse_token_drop_spec,
+)
 from lmcache.integration.vllm.utils import (
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
@@ -79,6 +84,7 @@ class LMCacheMPRequestTracker:
 
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
+    token_drop_spec: TokenDropSpec | None = None
     max_offload_tokens: int | None = None
     lookup_started_at: float | None = None
 
@@ -94,10 +100,13 @@ class LMCacheMPRequestTracker:
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
-    def __init__(self, request: "Request"):
+    def __init__(self, request: "Request", *, enable_token_drop: bool = False):
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
         self.request_configs = extract_request_configs_from_request(request)
+        self.token_drop_spec = (
+            parse_token_drop_spec(self.request_configs) if enable_token_drop else None
+        )
         self.max_offload_tokens = (self.request_configs or {}).get(
             "lmcache.max_offload_tokens"
         )
@@ -440,13 +449,19 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
+        self.token_drop_requests: list[LMCacheMPTokenDropRequestState] = []
+        self.token_drop_reset_ids: set[str] = set()
         self.need_flush_before_forward: bool = False
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)
 
     def __len__(self):
-        return len(self.requests)
+        return (
+            len(self.requests)
+            + len(self.token_drop_requests)
+            + len(self.token_drop_reset_ids)
+        )
 
     # For debugging
     def __str__(self):
@@ -490,11 +505,13 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             (e.g. as a ``MultiConnector`` child, which forwards each child's
             worker metadata but not that hook). ``aggregate()`` merges them the
             way vLLM merges ``kv_cache_events`` across workers.
+        resident_kv_updates: Absolute post-compaction lengths per request.
     """
 
     completed_store_requests: dict[str, int]
     failed_store_requests: set[str] = field(default_factory=set)
     kv_events: KVConnectorKVEvents | None = None
+    resident_kv_updates: dict[str, int] = field(default_factory=dict)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -513,6 +530,8 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
+        resident_updates = dict(self.resident_kv_updates)
+        resident_updates.update(other.resident_kv_updates)
         kv_events = self.kv_events
         if kv_events is None:
             kv_events = other.kv_events
@@ -525,4 +544,5 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
                 self.failed_store_requests | other.failed_store_requests
             ),
             kv_events=kv_events,
+            resident_kv_updates=resident_updates,
         )
