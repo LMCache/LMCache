@@ -231,7 +231,7 @@ class TestLMCacheManagerPostInit:
     def test_post_init_with_engine_and_async_server(self):
         """Test post_init calls engine.post_init when async lookup server exists."""
         # First Party
-        from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+        from lmcache.inprocess.v1.lookup_client.lmcache_async_lookup_client import (
             LMCacheAsyncLookupServer,
         )
 
@@ -338,7 +338,7 @@ class TestLMCacheManagerHelpers:
         config = LMCacheEngineConfig.from_defaults()
         config.enable_pd = False
         # First Party
-        from lmcache.v1.gpu_connector.utils import need_gpu_interm_buffer
+        from lmcache.inprocess.v1.gpu_connector.utils import need_gpu_interm_buffer
 
         assert need_gpu_interm_buffer(config) is True
 

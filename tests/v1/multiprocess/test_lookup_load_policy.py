@@ -69,13 +69,15 @@ def _ctx() -> MagicMock:
     return ctx
 
 
-def _key(request_configs: dict[str, Any] | None) -> IPCCacheServerKey:
+def _key(
+    request_configs: dict[str, Any] | None, start_chunks: int = 0
+) -> IPCCacheServerKey:
     return IPCCacheServerKey(
         model_name="m",
         world_size=1,
         worker_id=None,
         token_ids=tuple(range(len(CHUNK_HASHES) * CHUNK_SIZE)),
-        start=0,
+        start=start_chunks * CHUNK_SIZE,
         end=len(CHUNK_HASHES) * CHUNK_SIZE,
         request_id="req-1",
         request_configs=request_configs,
@@ -105,6 +107,44 @@ def test_declined_lookup_reports_miss_without_prefetch() -> None:
     assert metadata["early_exit_reason"] == "load_policy_recompute"
     # Declined tokens still count as requested, so hit rate shows them unserved.
     assert metadata["requested_tokens"] == len(CHUNK_HASHES) * CHUNK_SIZE
+    assert metadata["hit_tokens"] == 0
+
+
+def test_declined_lookup_keeps_engine_covered_prefix_out_of_requested() -> None:
+    """A declined lookup with ``start > 0`` counts only the looked-up range as
+    requested and the skipped prefix as ``apc_covered_tokens``, while the hit
+    the engine sees is still a plain miss."""
+    ctx = _ctx()
+    module = LookupModule(ctx, _RecordingPolicy(answer=False))
+
+    module.lookup(_key(None, start_chunks=1), tp_size=1)
+
+    assert module.query_prefetch_status("req-1") == 0
+    metadata = _end_metadata(ctx)
+    assert metadata["early_exit_reason"] == "load_policy_recompute"
+    assert metadata["requested_tokens"] == (len(CHUNK_HASHES) - 1) * CHUNK_SIZE
+    assert metadata["apc_covered_tokens"] == CHUNK_SIZE
+    assert metadata["hit_tokens"] == 0
+
+
+def test_declined_lookup_reports_request_level_fields_from_hint() -> None:
+    """A declined lookup still reports the whole prompt and the engine's own
+    hit, so the request-level hit rate counts the engine's share even though
+    LMCache served nothing."""
+    ctx = _ctx()
+    module = LookupModule(ctx, _RecordingPolicy(answer=False))
+    engine_hit = CHUNK_SIZE + 40
+
+    module.lookup(
+        _key({"lmcache.hint.engine_computed_tokens": engine_hit}, start_chunks=1),
+        tp_size=1,
+    )
+
+    assert module.query_prefetch_status("req-1") == 0
+    metadata = _end_metadata(ctx)
+    assert metadata["prompt_tokens"] == len(CHUNK_HASHES) * CHUNK_SIZE
+    assert metadata["engine_hit_tokens"] == engine_hit
+    assert metadata["request_hit_tokens"] == engine_hit
     assert metadata["hit_tokens"] == 0
 
 

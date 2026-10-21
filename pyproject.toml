@@ -94,6 +94,8 @@ select = [
     "SLF",
     # pylint: logging call has more arguments than format placeholders
     "PLE1205",
+    # flake8-tidy-imports: banned API imports
+    "TID251",
 ]
 ignore = [
     # star imports
@@ -118,12 +120,10 @@ ignore = [
 # why mixed directories are listed file by file, and "<dir>/**" is used only
 # where every file below the directory still violates the rule.
 # Tracking issue: https://github.com/LMCache/LMCache/issues/5118
-"lmcache/observability.py" = ["G004"]
-"lmcache/sdk/context.py" = ["G004"]
 "lmcache/storage_backend/serde/cachegen_basics.py" = ["G004"]
-"lmcache/utils.py" = ["G004"]
+"lmcache/storage_backend/**" = ["TID251"]
 "lmcache/v1/distributed/l2_adapters/bigtable_l2_adapter.py" = ["G004"]
-"tests/disagg/test_nixl_channel.py" = ["G004"]
+"tests/v1/platform/test_ipc_wire.py" = ["TID251"]
 
 [tool.ruff.lint.isort]
 # same as .isort.cfg
@@ -134,6 +134,9 @@ from-first = true
 # import-heading-thirdparty=Third Party
 # import-heading-firstparty=First Party
 # import-heading-localfolder=Local
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"pickle".msg = "Use a data-only serialization format instead."
 
 [tool.mypy]
 
@@ -172,6 +175,7 @@ follow_imports = "silent"
 [[tool.mypy.overrides]]
 module = [
     "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.*",
+    "lmcache.v1.memory_orchestrator._proto_gen.*",
 ]
 ignore_errors = true
 follow_imports = "skip"

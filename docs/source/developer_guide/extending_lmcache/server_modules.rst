@@ -121,6 +121,29 @@ Handlers are registered in construction order, so a dependent module can
 override its dependency's handler. Modules close in reverse construction order;
 ``ManagementModule`` stops its reaper before liveness targets release their state.
 
+Replacing a built-in module
+---------------------------
+
+A configured external module can replace a built-in module by subclassing it
+and retaining the same ``module_name``. The built-in class is not constructed,
+and dependencies declared with that built-in class resolve to the external
+instance:
+
+.. code-block:: python
+
+   from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+       LMCacheDrivenTransferModule,
+   )
+
+
+   class MyTransferModule(LMCacheDrivenTransferModule):
+       # Inherits module_name = "lmcache_driven_transfer".
+       ...
+
+Only explicitly configured external modules can replace built-ins. Startup
+fails if an external module uses a built-in name without subclassing that
+built-in class, or if multiple configured modules use the same name.
+
 Plugin modules can also expose extension protocol methods with
 ``@server_module_handler``:
 
@@ -147,8 +170,8 @@ Plugin modules can also expose extension protocol methods with
            request = msgspec.msgpack.decode(payload, type=EchoRequest)
            return msgspec.msgpack.encode(EchoResponse(text=request.text))
 
-If two modules register the same ``SERVER_MODULE_CALL`` method name, startup
-fails.
+If two modules register the same server-module method name, of
+either kind, startup fails.
 
 Transport-specific services
 ---------------------------
@@ -215,6 +238,96 @@ Both ZMQ and gRPC clients expose ``server_module_call``:
    if not response.success:
        raise RuntimeError(response.error)
    echo = msgspec.msgpack.decode(response.payload, type=EchoResponse)
+
+Client-affinity calls
+---------------------
+
+Mark a handler with ``requires_client_affinity=True`` to run it on the
+calling client's affinity thread, the thread that also serves that client's
+store and retrieve requests. Clients call it with
+``server_module_affinity_call``:
+
+.. code-block:: python
+
+   class MyServerModule(DiscoverableModule):
+       @server_module_handler("my_package.load", requires_client_affinity=True)
+       def load(self, payload: bytes) -> bytes:
+           ...
+
+
+   response = client.server_module_affinity_call(
+       ServerModuleCallRequest(method="my_package.load", payload=payload)
+   ).result(timeout=5)
+
+The transport queues the call in order with the client's other affinity
+requests: it starts after an earlier store or retrieve from the same client and
+holds back later ones until it returns, so keep it short. A method is served
+by exactly one of ``server_module_call`` and ``server_module_affinity_call``;
+calling it through the other returns an error that names the right RPC.
+
+Example: layer-wise KV retrieval
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A layer-wise retrieval plug-in lets the engine start computing early layers
+while later layers are still being loaded. Once per engine instance, a unary
+call sets up a pool of device events. Each retrieve is then one affinity call,
+so its copies run in order with the client's other store and retrieve
+requests. Progress frames travel on a channel the plug-in owns, such as a
+ZMQ PUB socket it binds itself:
+
+.. code-block:: text
+
+   vLLM worker (layer-wise connector)        LMCache MP server
+   ==================================        ==================================
+
+   Once per engine instance, after register_kv_cache:
+   server_module_call(
+     "layerwise.register_events",
+     instance ID)               ---------->  plug-in creates a pool of device
+                                             IPC events for the instance
+                                <----------  batch size + pool event handles
+   open the pool handles once,
+   subscribe to the plug-in's
+   frame channel
+
+   Per retrieve request:
+   server_module_affinity_call(
+     "layerwise.retrieve",
+     request ID, key,
+     instance ID,
+     GPU block IDs)             ---------->  ExtServerModuleRouter
+                                               -> plug-in handler, on the
+                                                  client's affinity thread,
+                                                  per batch of layers:
+                                                  - enqueue H2D copy + scatter
+                                                    for layers L..L+B-1
+                                                  - record pool event i
+                                                  - publish frame
+                                                    (request ID, L, B, i)
+
+   For each frame:              <---------   plug-in frame channel
+     GPU stream waits on pool event i
+     compute layers L..L+B-1
+     (later batches keep loading)
+
+   Call result:                 <----------  success=True once every copy is
+                                             enqueued (success=False if the
+                                             handler raised)
+   On failure or timeout, recompute
+   the affected blocks.
+
+Core provides plug-in loading, handler registration through
+``server_module_handler``, routing of both envelope RPCs through
+``ExtServerModuleRouter``, and running the affinity call on the client's
+affinity thread on either ``--transport``. The plug-in owns everything
+layer-specific: the frame format and channel, the event pool, and the
+worker-side connector that waits on each event.
+
+Each frame means the copies for that batch are *enqueued*, not finished; the
+worker learns they have landed only through the pool event. Device IPC event
+handles only work within one host, so the worker and the server must run on
+the same node.
+
 
 Liveness and cleanup
 --------------------
