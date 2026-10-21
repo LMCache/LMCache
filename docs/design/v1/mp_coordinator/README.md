@@ -31,6 +31,7 @@ shape.
 | `DELETE /instances/{id}` | mp → coordinator | deregister (idempotent, 204) |
 | `GET /instances` | operator/tools | list the fleet |
 | `GET /healthz` | k8s probe | liveness |
+| `PUT /config/chunk-size` | mp → coordinator | bind token hashing and blend lookup to the fleet's negotiated chunk size |
 | `PUT/GET /quota/config` | operator | fleet-wide quota configuration |
 | `PUT/GET/DELETE /quota/{cache_salt}` | operator | per-tenant byte budgets |
 | `GET /quota` | operator | fleet-wide usage summary |
@@ -40,6 +41,7 @@ shape.
 | `POST /cache/prefetches` | operator/scheduler | submit warm prefetch to a named server |
 | `GET /cache/prefetches/{instance_id}/{request_id}` | operator/scheduler | poll a warm prefetch |
 | `POST/DELETE /cache/pins` | operator | pin / unpin keys against fleet-wide eviction |
+| `GET /cache/pins` | operator/tools | paginated listing of pinned keys with their pin counts, filterable by `cache_salt` / `model_name` |
 | `POST /cache/delete` | operator | delete cached objects on a named server |
 | `GET /instances/usage` | operator/scheduler | fleet memory view: per-server, per-module usage vs declared capacity |
 | `GET /instances/{instance_id}/usage` | operator/scheduler | one server's memory compartments |
@@ -66,6 +68,10 @@ lmcache/v1/mp_coordinator/
     __init__.py
     event_gate.py       # EventGate: incarnation fencing, seq dedup, gap detection
     event_broadcaster.py  # fans admitted events to the registered consumers
+    event_source.py     # source lifecycle/status contract
+    http_event_source.py  # non-durable POST /events push source
+    kafka_event_source.py  # durable Kafka pull source (poll thread -> gate)
+    stream_position.py  # StreamPosition: the checkpoint's own read cursor
   discovery.py          # Registry + package scan, shared by views and controllers
   views/                # read models of the fleet: what is cached, and how much
     __init__.py         # build_views: scans this package
@@ -78,6 +84,7 @@ lmcache/v1/mp_coordinator/
     __init__.py         # build_controllers: scans this package + named ones
     base.py             # Controller: construction + run(); views only
     eviction_controller.py  # the fleet L2 control loop: quota + usage + LRU + pins
+    eviction_http_api.py    # the /quota and /cache/pins endpoints it owns
     prefetch_manager.py # dispatches warm prefetch to a named MP server
   http_routes.py        # HttpRoutes: a controller registering its own endpoints
   http_apis/
@@ -85,8 +92,7 @@ lmcache/v1/mp_coordinator/
     dependencies.py     # shared FastAPI dependencies (registry, key directory, ...)
     instances_api.py    # /instances REST resource
     health_api.py       # /healthz
-    quota_api.py        # /quota/config, /quota/{cache_salt}, /quota
-    cache_api.py        # /cache/prefetches, /cache/pins, /cache/delete
+    cache_api.py        # /cache/prefetches, /cache/delete
     events_api.py       # /events (fleet cache-event ingest)
     directory_api.py    # /directory/lookup, /directory/blend-lookup, /directory/keys, ...
     instances_usage_api.py  # /instances/usage, /instances/{id}/usage
@@ -102,11 +108,23 @@ sequenceDiagram
     participant API as POST /instances
     participant Reg as InstanceRegistry
 
-    C->>API: POST /instances {instance_id, ip, http_port}
+    C->>API: POST /instances {instance_id, ip, http_port, chunk_size?}
     API->>API: validate JSON body
     API->>Reg: register(MPInstance(...))
     API-->>C: 200 {instance_id, re_registered}
 ```
+
+Chunk size is a fleet invariant. Before an MP server reports chunk-size
+negotiation success, it calls `PUT /config/chunk-size`; the coordinator updates
+its `TokenHasher` and optional `BlendIndex` first. Repeating the same binding is
+idempotent, while a different value is rejected. An MP server also includes the
+value on later registrations once finalization has completed, so a restarted
+coordinator restores the same binding.
+
+A finalized MP server can serve another model only when its chunk size is a
+multiple of that model's required alignment. Otherwise, preconfigure a common
+multiple or use a separate MP server. MP servers using different final chunk
+sizes also need separate coordinators.
 
 Heartbeat is `PUT /instances/{id}/heartbeat` → `registry.update_heartbeat`; a
 404 tells the client to re-register. The health loop (in `app.py`, started by
@@ -180,10 +198,24 @@ Every fact the coordinator holds about fleet cache contents arrives
 through this layer, which decides **what** is admitted and **who** sees
 it. It holds no cache state itself. See [ingest.md](ingest.md).
 
+- `event_source.py` — common source lifecycle/status contract.
+- `http_event_source.py` — `HttpCacheEventSource`, the non-durable
+  `POST /events` push adapter.
+- `kafka_event_source.py` — `KafkaCacheEventSource`, the durable pull
+  adapter: a poll thread reads the fleet's Kafka topic and offers each
+  record to the same `EventGate.ingest_batches`. Selected by
+  `--event-transport kafka` in place of the HTTP source; a coordinator
+  runs exactly one.
+- `stream_position.py` — `StreamPosition`, checkpointed beside the state
+  it describes: the cursor a restarted `KafkaCacheEventSource` seeks each
+  partition to. It is the only cursor — the consumer group never commits
+  — so the resume point moves only when a checkpoint is written, and the
+  offset in a checkpoint always describes the state stored beside it. A
+  partition it has never seen falls back to `auto.offset.reset`.
 - `event_gate.py` — the admission point for every source. Owns the
   per-emitter stream cursor: incarnation fencing (a restart voids the
-  emitter's L1 facts), `seq` dedup, gap detection. `ingest()` for a live
-  emitter stream, `reconcile()` for a scan that has no stream position.
+  emitter's L1 facts), `seq` dedup, and gap detection. Scan sources
+  without stream positions are deliberately unsupported.
 - `event_broadcaster.py` — fans admitted batches (and fence
   notifications) to its registered `CacheEventConsumer`s: the key
   directory and the eviction manager. Adding a consumer is a wiring
@@ -203,7 +235,8 @@ Where the coordinator's fleet-level *doing* lives — the counterpart to
   requests (chunked at `MAX_DELETE_BATCH`) to a uniformly random registered
   mp server (all servers share the backing L2, so one dispatch evicts the
   fleet). Also tracks the pins taken via `POST /cache/pins` so pinned keys
-  are excluded from eviction and delete. Reachable as
+  are excluded from eviction and delete; `GET /cache/pins` pages through
+  that table. Reachable as
   `ctx.eviction_controller`, with `.quota` for the `/quota` endpoints.
 - `views/usage_manager.py` — `CacheUsageManager`, byte totals per tier rolled
   up per `cache_salt` (the tenant axis the eviction controller enforces
@@ -261,7 +294,10 @@ path, matches verified token-exact, and eviction exact because it follows
 binding lifecycle. Blend servers query it with `POST
 /directory/blend-lookup` and get `(chunk_hash, old_st, cur_st)` per match,
 which they expand into per-rank object keys with their own model and salt.
-The match window is the fleet chunk size (`CHUNK_SIZE`), probed at
+The query's `model_name`/`cache_salt`/`world_size` scope matches to chunks
+stored in that namespace, so a match always expands into keys that exist.
+The match
+window is the fleet chunk size (`CHUNK_SIZE`), probed at
 `BLEND_PROBE_STRIDE`. See [blend_index.md](blend_index.md).
 
 The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
@@ -289,6 +325,14 @@ The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
   directory, usage view, and LRU are rebuilt only from the cache-event
   stream, so after a coordinator restart they start empty and refill as
   events arrive — quotas under-report until they do.
+
+## Observability
+
+Every answer the coordinator gives is derived from the cache-event stream,
+so its observability is organized around ingest fidelity, freshness, and
+control-loop liveness rather than request rates. Metrics catalog,
+`/status`, cardinality rules, and phasing: see
+[observability.md](observability.md).
 
 ## Running
 

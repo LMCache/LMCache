@@ -9,6 +9,7 @@
 
 #include "../kv_transfer_types.h"
 #include "cachegen_kernels_sycl.h"
+#include "host_register.h"
 #include "mem_kernels_sycl.h"
 
 namespace py = pybind11;
@@ -19,6 +20,19 @@ namespace py = pybind11;
 // already registered" error, so xpu_ops accepts them as plain ints and casts.
 // Same convention as csrc/cuda/pybind.cpp (cuda_ops).
 PYBIND11_MODULE(xpu_ops, m) {
+  m.def(
+      "multi_layer_block_kv_transfer",
+      [](const torch::Tensor& paged_buffer_ptrs_tensor,
+         const std::vector<uintptr_t>& lmcache_objects_ptrs,
+         const torch::Tensor& block_ids, const torch::Device& device,
+         int direction, PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
+         int engine_kv_format, int skip_prefix_n_blocks) {
+        multi_layer_block_kv_transfer(
+            paged_buffer_ptrs_tensor, lmcache_objects_ptrs, block_ids, device,
+            static_cast<TransferDirection>(direction), shape_desc,
+            lmcache_chunk_size, static_cast<EngineKVFormat>(engine_kv_format),
+            skip_prefix_n_blocks);
+      });
   m.def(
       "multi_layer_kv_transfer",
       [](torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
@@ -53,33 +67,6 @@ PYBIND11_MODULE(xpu_ops, m) {
       py::arg("slot_mapping"), py::arg("direction"),
       py::arg("engine_kv_format"), py::arg("token_major") = false,
       py::call_guard<py::gil_scoped_release>());
-  m.def(
-      "single_layer_kv_transfer_sgl",
-      [](torch::Tensor& lmc_key_value_cache, torch::Tensor& sgl_key_cache,
-         torch::Tensor& sgl_value_cache, torch::Tensor& slot_mapping,
-         const int direction, const bool token_major) {
-        return single_layer_kv_transfer_sgl(
-            lmc_key_value_cache, sgl_key_cache, sgl_value_cache, slot_mapping,
-            static_cast<TransferDirection>(direction), token_major);
-      },
-      py::arg("lmc_key_value_cache"), py::arg("sgl_key_cache"),
-      py::arg("sgl_value_cache"), py::arg("slot_mapping"), py::arg("direction"),
-      py::arg("token_major") = false, py::call_guard<py::gil_scoped_release>());
-  m.def(
-      "multi_layer_kv_transfer_unilateral",
-      [](torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
-         const torch::Tensor& slot_mapping,
-         const torch::Device& paged_memory_device, const int page_buffer_size,
-         const int direction, const int engine_kv_format) {
-        return multi_layer_kv_transfer_unilateral(
-            key_value, key_value_ptrs, slot_mapping, paged_memory_device,
-            page_buffer_size, static_cast<TransferDirection>(direction),
-            static_cast<EngineKVFormat>(engine_kv_format));
-      },
-      py::arg("key_value"), py::arg("key_value_ptrs"), py::arg("slot_mapping"),
-      py::arg("paged_memory_device"), py::arg("page_buffer_size"),
-      py::arg("direction"), py::arg("engine_kv_format"),
-      py::call_guard<py::gil_scoped_release>());
   m.def("load_and_reshape_flash", &load_and_reshape_flash);
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def(
@@ -98,6 +85,13 @@ PYBIND11_MODULE(xpu_ops, m) {
   m.def("alloc_pinned_ptr", &alloc_pinned_ptr, py::arg("size"),
         py::arg("flags") = 0);
   m.def("free_pinned_ptr", &free_pinned_ptr, py::arg("ptr"));
+
+  // Register externally allocated host memory (such as a shared mmap region)
+  // with the active XPU context so transfers can use direct DMA.
+  m.def("xpu_host_register", &xpu_host_register, py::arg("ptr"),
+        py::arg("n_bytes"), py::call_guard<py::gil_scoped_release>());
+  m.def("xpu_host_unregister", &xpu_host_unregister, py::arg("ptr"),
+        py::call_guard<py::gil_scoped_release>());
 
   // CacheGen / RoPE kernels (Intel XPU).  Names match the
   // lmcache.v1.platform.torch_ops baseline so the backend selection in

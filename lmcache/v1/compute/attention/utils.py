@@ -47,8 +47,9 @@ def infer_attn_backend_from_vllm(
             from .triton_sparse import LMCTritonSparseBackend
 
             logger.info(
-                "Using LMCTritonSparseBackend for CacheBlend "
-                f"(ROCm={_is_rocm()}, flashinfer={_flashinfer_available()})"
+                "Using LMCTritonSparseBackend for CacheBlend (ROCm=%s, flashinfer=%s)",
+                _is_rocm(),
+                _flashinfer_available(),
             )
             return LMCTritonSparseBackend(vllm_attn)
 
@@ -64,8 +65,9 @@ def infer_attn_backend_from_vllm(
             from .triton_sparse import LMCTritonSparseBackend
 
             logger.info(
-                f"Attention impl {attn_name} is not FlashInferImpl; "
-                "falling back to LMCTritonSparseBackend"
+                "Attention impl %s is not FlashInferImpl; "
+                "falling back to LMCTritonSparseBackend",
+                attn_name,
             )
             return LMCTritonSparseBackend(vllm_attn)
 

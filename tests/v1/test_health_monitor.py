@@ -98,7 +98,7 @@ def monitor(mock_manager):
 @pytest.fixture
 def mock_backend():
     mock = MagicMock()
-    mock.remote_url = "lm://localhost:1234"
+    mock.remote_url = "mock://100"
     mock.loop = asyncio.new_event_loop()
     mock.connection = MagicMock()
     mock.connection.support_ping.return_value = True
@@ -242,14 +242,14 @@ class TestRemoteBackendHealthCheck:
         assert RemoteBackendHealthCheck(mock_backend).should_skip() is False
 
     def test_name_includes_url(self, mock_backend):
-        assert "localhost:1234" in RemoteBackendHealthCheck(mock_backend).name()
+        assert "mock://100" in RemoteBackendHealthCheck(mock_backend).name()
 
     def test_create_with_remote_backend(self):
         # First Party
         from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 
         mock_backend = MagicMock(spec=RemoteBackend)
-        mock_backend.remote_url = "lm://localhost:1234"
+        mock_backend.remote_url = "mock://100"
         mock_backend.connection = MagicMock()
         mock_backend.config = MagicMock()
         mock_backend.config.extra_config = None
@@ -262,7 +262,7 @@ class TestRemoteBackendHealthCheck:
         }
 
         checks = RemoteBackendHealthCheck.create(mock_manager)
-        assert len(checks) == 1 and "localhost:1234" in checks[0].name()
+        assert len(checks) == 1 and "mock://100" in checks[0].name()
 
     def test_create_no_remote_backend(self):
         mock_manager = MagicMock()
@@ -304,13 +304,19 @@ class TestIrrecoverableException:
         thread = monitor.start()
         assert thread is not None
 
-        # Wait for the loop to encounter the exception and exit
-        time.sleep(0.2)
+        # Wait for the exception path to finish: bounded join instead of a
+        # fixed sleep (CI showed ~249ms shutdown vs 200ms assumed here).
+        # stop() runs only after verification, so a broken
+        # exception-driven termination cannot be masked.
+        try:
+            thread.join(timeout=10.0)
 
-        # The thread should have stopped due to the exception
-        assert not thread.is_alive()
-        # System should be marked unhealthy
-        assert monitor.is_healthy() is False
+            # The thread should have stopped due to the exception
+            assert not thread.is_alive()
+            # System should be marked unhealthy
+            assert monitor.is_healthy() is False
+        finally:
+            monitor.stop()
 
     def test_run_loop_stops_immediately_on_irrecoverable(self, monitor):
         """Test that the monitor stops checking after IrrecoverableException."""

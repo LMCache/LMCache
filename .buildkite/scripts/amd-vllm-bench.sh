@@ -26,6 +26,13 @@ esac
 CONTAINER_NAME="lmcache-amd-vllm-bench-${BUILDKITE_BUILD_ID}-${MODE}"
 
 cd "${REPO_ROOT}"
+
+# shellcheck source=.buildkite/k3_tests/common_scripts/helpers.sh
+source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
+merge_pr_base_branch
+# shellcheck source=.buildkite/scripts/amd-disk-guard.sh
+source "${REPO_ROOT}/.buildkite/scripts/amd-disk-guard.sh"
+
 echo "AMD kernel mode: ${MODE}"
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -91,9 +98,9 @@ print_selected_amd_gpu_info
 
 cleanup() {
     "${DOCKER[@]}" rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
-    # The image runs as root so compiled extensions and artifacts in the
-    # mounted checkout must be returned to the Buildkite agent user.
-    sudo chown -R "$(id -u):$(id -g)" "${REPO_ROOT}" 2>/dev/null || true
+    # Returns the root-owned build output in the mounted checkout to the
+    # agent account and frees disk if it is low.
+    amd_job_cleanup
 }
 trap cleanup EXIT
 
@@ -119,6 +126,7 @@ echo "Pulling ${VLLM_ROCM_IMAGE}"
     --env "GPU_FOR_BASELINE=${GPU_FOR_BASELINE}" \
     --env "PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH:-gfx942}" \
     --env "AMD_KERNEL_MODE=${MODE}" \
+    --env "LMCACHE_REQUEST_TRANSPORT=${LMCACHE_REQUEST_TRANSPORT:-zmq}" \
     "${SERIALIZE_ENV[@]}" \
     --env ATTENTION_BACKEND=auto \
     --env BATCH_INVARIANT=0 \

@@ -6,7 +6,6 @@
 #   Wenwen Chen <wenwen.chen@samsung.com>
 
 # Standard
-from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 from typing import Optional
@@ -14,10 +13,6 @@ from unittest.mock import patch
 import asyncio
 import importlib.util
 import os
-import random
-import shlex
-import socket
-import subprocess
 import time
 
 # Third Party
@@ -598,12 +593,6 @@ class MockHf3fsFuse:
         pass
 
 
-@dataclass
-class LMCacheServerProcess:
-    server_url: str
-    server_process: object
-
-
 @pytest.fixture(scope="function", autouse=True)
 def mock_redis():
     with (
@@ -669,71 +658,10 @@ def mock_hf3fs():
     sys.modules.pop("hf3fs_fuse.io", None)
 
 
-@pytest.fixture(scope="module")
-def lmserver_v1_process(request):
-    def ensure_connection(host, port):
-        retries = 10
-        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        successful = False
-        while retries > 0:
-            retries -= 1
-            try:
-                print("Probing connection, remaining retries: ", retries)
-                client_socket.connect((host, port))
-                successful = True
-                break
-            except ConnectionRefusedError:
-                time.sleep(1)
-                print("Connection refused!")
-                continue
-            except Exception as e:
-                print(f"other Exception: {e}")
-                continue
-
-        client_socket.close()
-        return successful
-
-    # Specify remote device
-    device = request.param
-
-    # Start the process
-    max_retries = 5
-    while max_retries > 0:
-        max_retries -= 1
-        port_number = random.randint(10000, 65500)
-        print("Starting the lmcache v1 server process on port")
-        proc = subprocess.Popen(
-            shlex.split(
-                f"python3 -m lmcache.v1.server localhost {port_number} {device}"
-            )
-        )
-
-        # Wait for lmcache process to start
-        time.sleep(5)
-
-        successful = False
-        if proc.poll() is not None:
-            successful = True
-        else:
-            successful = ensure_connection("localhost", port_number)
-
-        if not successful:
-            proc.terminate()
-            proc.wait()
-        else:
-            break
-
-    # Yield control back to the test until it finishes
-    server_url = f"lm://localhost:{port_number}"
-    yield LMCacheServerProcess(server_url, proc)
-
-    # Terminate the process
-    proc.terminate()
-    proc.wait()
-
-    # Destroy remote disk path
-    if device not in ["cpu"]:
-        subprocess.run(shlex.split(f"rm -rf {device}"))
+@pytest.fixture
+def remote_storage_url(tmp_path: Path) -> str:
+    """Return an isolated filesystem-backed remote storage URL."""
+    return f"fs://localhost:0/{tmp_path}"
 
 
 @pytest.fixture(scope="function")
@@ -851,7 +779,6 @@ def bigtable_emulator():
     import os
     import shutil
     import subprocess
-    import time
 
     existing_host = os.environ.get("BIGTABLE_EMULATOR_HOST")
     if existing_host:
