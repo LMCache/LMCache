@@ -129,6 +129,18 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--isolated-ipc",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Use the IPC mechanisms for engine and server containers that "
+            "share no host IPC namespace or /dev/shm (CUDA: timeline-semaphore "
+            "events instead of interprocess event handles). GPU mode only. "
+            "Must match the server's --isolated-ipc setting; on a mismatch "
+            "the server cannot open the client's events. (Default is False)"
+        ),
+    )
+    parser.add_argument(
         "--tp-size",
         type=int,
         default=1,
@@ -409,6 +421,13 @@ def run_server_bench(
     """
     _require_full_install()
     config = parse_args_to_config(args)
+    # The IPC policy is process-wide and read when each client creates its
+    # transfer context, so set it before any client starts. The CUDA spec
+    # caches its event backend on first use, so this runs once per process.
+    # First Party
+    from lmcache.v1.platform.ipc_policy import set_isolated_ipc
+
+    set_isolated_ipc(config.isolated_ipc)
     stop = threading.Event()
     cases = _build_cases(config, args, stop)
 
@@ -492,6 +511,9 @@ def _emit_server_bench_metrics(
     cfg_section.add("num_tokens", "Tokens / request", args.num_tokens)
     cfg_section.add("interval", "Interval (s)", args.interval)
     cfg_section.add("concurrency", "Concurrency", getattr(args, "concurrency", 1))
+    cfg_section.add(
+        "isolated_ipc", "Isolated IPC", bool(getattr(args, "isolated_ipc", False))
+    )
 
     result_section = metrics.add_section("results", "Results")
     result_section.add("total_requests", "Total requests", result.completed_runs)

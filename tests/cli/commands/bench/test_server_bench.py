@@ -75,6 +75,17 @@ def cmd() -> BenchCommand:
 
 
 @pytest.fixture
+def restore_isolated_ipc():
+    """Restore the process-global isolated-IPC switch after the test."""
+    # First Party
+    from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
+
+    previous = is_isolated_ipc()
+    yield
+    set_isolated_ipc(previous)
+
+
+@pytest.fixture
 def parser(cmd: BenchCommand) -> argparse.ArgumentParser:
     """Parser with ``bench server`` subcommand registered."""
     p = argparse.ArgumentParser()
@@ -187,6 +198,50 @@ class TestCaseDelegation:
             ]
         )
         metrics.emit.assert_called_once_with()
+
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_sets_ipc_policy_before_clients_start(
+        self,
+        cmd: BenchCommand,
+        parser: argparse.ArgumentParser,
+        monkeypatch: pytest.MonkeyPatch,
+        restore_isolated_ipc: None,
+        flag: bool,
+    ) -> None:
+        # Standard
+        from unittest.mock import MagicMock
+
+        # First Party
+        from lmcache.cli.commands.bench.server_bench import command as sv_cmd
+        from lmcache.cli.commands.bench.server_bench.cases.base import (
+            BenchResult,
+        )
+        from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
+
+        seen: list[bool] = []
+
+        def make_client(*args: object, **kwargs: object) -> MagicMock:
+            seen.append(is_isolated_ipc())
+            return MagicMock()
+
+        bench_case = MagicMock()
+        bench_case.name = "baseline"
+        bench_case.run.return_value = BenchResult(case_name="baseline")
+        monkeypatch.setattr(sv_cmd, "ServerBenchClient", make_client)
+        monkeypatch.setattr(
+            sv_cmd, "BaselineBenchCase", MagicMock(return_value=bench_case)
+        )
+        monkeypatch.setattr(cmd, "create_metrics", MagicMock())
+        argv = ["bench", "server", "--mode", "gpu", "--end", "1", "--quiet"]
+        if flag:
+            argv.append("--isolated-ipc")
+        args = parser.parse_args(argv)
+
+        set_isolated_ipc(not flag)
+        sv_cmd.run_server_bench(cmd, args)
+
+        assert args.isolated_ipc is flag
+        assert seen == [flag]
 
     def test_deals_sequences_across_concurrent_clients(
         self,
@@ -344,6 +399,7 @@ class TestCommandArguments:
         assert args.interval == 0.5
         assert args.url == "http://localhost:8080"
         assert args.tp_size == 1
+        assert args.isolated_ipc is False
 
     def test_custom_values(
         self,
@@ -379,6 +435,33 @@ class TestCommandArguments:
         assert args.end == 10
         assert args.interval == 1.0
         assert args.url == "http://other:9090"
+
+    def test_isolated_ipc_flag_reaches_config(
+        self,
+        parser: argparse.ArgumentParser,
+    ) -> None:
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.config import (
+            parse_args_to_config,
+        )
+
+        args = parser.parse_args(["bench", "server", "--isolated-ipc"])
+        assert parse_args_to_config(args).isolated_ipc is True
+        args = parser.parse_args(["bench", "server", "--no-isolated-ipc"])
+        assert parse_args_to_config(args).isolated_ipc is False
+
+    def test_isolated_ipc_rejected_in_cpu_mode(
+        self,
+        parser: argparse.ArgumentParser,
+    ) -> None:
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.config import (
+            parse_args_to_config,
+        )
+
+        args = parser.parse_args(["bench", "server", "--mode", "cpu", "--isolated-ipc"])
+        with pytest.raises(ValueError, match="only applies to --mode gpu"):
+            parse_args_to_config(args)
 
     def test_kvcache_shape_spec_default(
         self,
