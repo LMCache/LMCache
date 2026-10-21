@@ -338,31 +338,69 @@ class LMCacheControllerManager:
             return 0
 
     async def handle_batched_push_request(self, socket) -> Optional[MsgBase]:
+        """Receive and dispatch messages on the PULL socket until cancelled.
+
+        Each frame is decoded (JSON or MessagePack) and dispatched on its own:
+        a frame that cannot be decoded is logged and dropped, and an exception
+        raised while handling a message is logged. Neither ends the loop, so
+        one bad frame (for example an HTTP request from a port scanner or a
+        metrics scraper) cannot stop the controller from receiving worker
+        messages.
+
+        Args:
+            socket: The bound ZMQ PULL socket to receive from.
+
+        Returns:
+            Never returns normally; the loop runs until the task is cancelled.
+        """
         while True:
             parts = await socket.recv_multipart()
             part_count = len(parts)
             with SocketMetricsContext(self, SocketType.PULL, part_count):
                 for part in parts:
-                    # Parse message based on format
-                    if part.startswith(b"{"):
-                        # JSON format - typically from external systems
-                        # like Mooncake
-                        msg_dict = json.loads(part)
-                        msg = msgspec.convert(msg_dict, type=Msg)
-                    else:
-                        # MessagePack format - internal LMCache communication
-                        msg = msgspec.msgpack.decode(part, type=Msg)
-                    if isinstance(msg, WorkerMsg):
-                        await self.handle_worker_message(msg)
+                    try:
+                        # Parse message based on format
+                        if part.startswith(b"{"):
+                            # JSON format - typically from external systems
+                            # like Mooncake
+                            msg_dict = json.loads(part)
+                            msg = msgspec.convert(msg_dict, type=Msg)
+                        else:
+                            # MessagePack format - internal LMCache communication
+                            msg = msgspec.msgpack.decode(part, type=Msg)
+                    except (
+                        json.JSONDecodeError,
+                        UnicodeDecodeError,
+                        msgspec.DecodeError,
+                        msgspec.ValidationError,
+                    ) as e:
+                        logger.error(
+                            "Dropping undecodable PULL message (%d bytes, head=%r): %s",
+                            len(part),
+                            part[:16],
+                            e,
+                        )
+                        continue
 
-                    # FIXME(Jiayi): The abstraction of control messages
-                    # might not be necessary.
-                    # elif isinstance(msg, ControlMsg):
-                    #    await self.issue_control_message(msg)
-                    elif isinstance(msg, OrchMsg):
-                        await self.handle_orchestration_message(msg)
-                    else:
-                        logger.error("Unknown message type: %s", type(msg))
+                    try:
+                        if isinstance(msg, WorkerMsg):
+                            await self.handle_worker_message(msg)
+
+                        # FIXME(Jiayi): The abstraction of control messages
+                        # might not be necessary.
+                        # elif isinstance(msg, ControlMsg):
+                        #    await self.issue_control_message(msg)
+                        elif isinstance(msg, OrchMsg):
+                            await self.handle_orchestration_message(msg)
+                        else:
+                            logger.error("Unknown message type: %s", type(msg))
+                    except Exception:
+                        # A failing handler must not end the receive loop:
+                        # later messages (KV admits/evictions, full syncs)
+                        # would silently stop being processed.
+                        logger.exception(
+                            "Error handling PULL message %s", type(msg).__name__
+                        )
 
     async def handle_batched_req_request(self, socket) -> Optional[MsgBase]:
         """Handle requests on ROUTER socket.
