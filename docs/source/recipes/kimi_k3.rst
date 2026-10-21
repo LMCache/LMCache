@@ -48,8 +48,8 @@ Validated models
 
       As a Mamba / linear-attention hybrid, Kimi K3 needs the same three
       settings as the other KDA / GDN hybrids: the ``align`` Mamba cache mode,
-      prefix caching, and a chunk size matched to vLLM's *unified block size*
-      ``N`` (see :ref:`mamba-block-size` for how ``N`` is determined). For
+      prefix caching, and a chunk size negotiated from vLLM's *unified block
+      size* ``N`` (see :ref:`mamba-block-size` for how ``N`` is determined). For
       Kimi K3 at ``--tensor-parallel-size 8`` the unified block size is
       ``N = 768``:
 
@@ -68,9 +68,10 @@ Validated models
       across TP ranks while the MLA cache is not), so after changing
       ``--tensor-parallel-size`` always re-read ``N`` from vLLM's
       ``Setting attention block size to N tokens`` startup log line and
-      re-derive ``--chunk-size`` and ``--max-num-batched-tokens`` from it.
+      re-derive ``--max-num-batched-tokens`` from it.
 
-      Start the LMCache MP server (``--chunk-size`` = ``N`` = 768):
+      Start the LMCache MP server with an explicitly compatible minimum
+      (a lower minimum would negotiate to ``N = 768``):
 
       .. code-block:: bash
 
@@ -118,9 +119,9 @@ Validated models
         Mamba / linear-attention models: it gives the KDA layers their own
         cache objects and is what lets ``--max-num-batched-tokens`` exceed
         ``2N``.
-      - ``--chunk-size`` (server) must be a multiple of the unified block size
-        ``N = 768`` — ``--chunk-size N`` is the simplest choice. LMCache
-        raises at engine startup if it is not.
+      - ``--chunk-size`` (server) is a minimum. The connector negotiates the
+        smallest multiple of ``N`` that is at least that value. See
+        :doc:`/mp/chunk_size_negotiation`.
       - ``--max-num-batched-tokens`` must be **at least** ``N`` (= ``768``); the
         validated value is ``1500``. ``align`` snapshots the KDA state only on a
         block boundary at the end of a scheduler step. Within ``[N, 2N)`` every
@@ -160,7 +161,7 @@ Validated models
       - The ``+rocm7.2`` LMCache wheel loads on ROCm 10 (its native extensions
         link ``libamdhip64.so.7``, which ROCm 10 still ships).
       - With DCP 8 and fp8 KV the MLA group registers 12288 tokens per block;
-        ``--chunk-size 12288`` (with ``--separate-object-groups``) works.
+        ``--chunk-size 12288`` works, and a lower minimum negotiates to 12288.
       - Set ``--l1-init-size-gb`` equal to ``--l1-size-gb`` for a terabyte-scale
         L1. With the default lazy expansion the server keeps pinning host
         memory while vLLM registers its KV caches, and the GPU mappings can

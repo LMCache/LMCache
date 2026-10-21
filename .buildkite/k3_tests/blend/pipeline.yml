@@ -8,8 +8,11 @@
 # — the recurring rebase/version-skew class (RPC key renames, handler-signature
 # drift, KV-layout changes, etc.).
 #
-# Needs one GPU. Set HF_TOKEN (gated model) and GH_TOKEN (private plugin repo)
-# in the Buildkite UI — see BK_WEB_SETUP.md.
+# A second step smoke-tests coordinator global matching (two stacks, two
+# GPUs; see the step's comment).
+#
+# The compat step needs one GPU. Set HF_TOKEN (gated model) and GH_TOKEN
+# (private plugin repo) in the Buildkite UI — see BK_WEB_SETUP.md.
 
 steps:
   - label: ":jigsaw: CacheBlend plugin compat (Llama-8B)"
@@ -39,3 +42,35 @@ steps:
               - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
     artifact_paths:
       - "cb_compat_logs/**/*"
+
+  # Coordinator global match: a coordinator with the fleet blend index and two
+  # blend server + vLLM stacks (gpt-oss-20b, dummy weights — no weight
+  # download) sharing an fs L2. Stack B must blend a body only stack A stored,
+  # found through the coordinator. Harness lives in the plugin repo
+  # (.buildkite/harness/coordinator_match.py) at CB_PLUGIN_REF.
+  - label: ":satellite: CacheBlend coordinator global match (gpt-oss-20b)"
+    command: .buildkite/k3_tests/blend/run.sh coordinator-match
+    timeout_in_minutes: 40
+    # Same rationale as the compat step: one fresh-pod retry absorbs a loaded
+    # host; a real regression fails both attempts.
+    retry:
+      automatic:
+        - exit_status: 1
+          limit: 1
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never  # local image, imported into K3s containerd
+                resources:
+                  limits:
+                    nvidia.com/gpu: "2"
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    artifact_paths:
+      - "cb_coord_logs/**/*"

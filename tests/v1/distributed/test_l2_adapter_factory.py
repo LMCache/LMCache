@@ -5,6 +5,8 @@ PluginL2AdapterConfig.
 """
 
 # Standard
+from unittest.mock import Mock
+import importlib
 import os
 import tempfile
 import types
@@ -18,7 +20,10 @@ from lmcache.v1.distributed.l2_adapters.config import (
     get_type_name_for_config,
 )
 from lmcache.v1.distributed.l2_adapters.factory import (
+    add_pending_module,
     create_l2_adapter_from_registry,
+    ensure_adapter_loaded,
+    get_all_registered_names,
     register_l2_adapter_factory,
 )
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
@@ -613,6 +618,58 @@ class TestLazyLoading:
 
         assert imported == ["good1", "good2"]
         assert len(fmod._PENDING_MODULES) == 0
+
+    def test_listing_preserves_incompatible_adapter_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Selecting an adapter after help enumeration still exposes its error."""
+        add_pending_module("broken_optional_adapter")
+        monkeypatch.setattr(
+            importlib,
+            "import_module",
+            Mock(side_effect=TypeError("Descriptors cannot be created directly")),
+        )
+
+        assert "mock" in get_all_registered_names()
+        ensure_adapter_loaded("mock")
+        with pytest.raises(TypeError, match="Descriptors cannot be created directly"):
+            ensure_adapter_loaded("broken_optional_adapter")
+
+    def test_listing_continues_after_incompatible_adapter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed import does not hide later adapters on repeated enumeration."""
+        add_pending_module("incompatible_adapter")
+        add_pending_module("available_adapter")
+
+        def import_adapter(name: str) -> types.ModuleType:
+            if name == "incompatible_adapter":
+                raise TypeError("incompatible protobuf")
+            register_l2_adapter_factory("available_adapter", Mock())
+            return types.ModuleType(name)
+
+        monkeypatch.setattr(importlib, "import_module", import_adapter)
+
+        names = get_all_registered_names()
+
+        assert "available_adapter" in names
+        assert names == sorted(names)
+        assert get_all_registered_names() == names
+
+    @pytest.mark.parametrize(
+        "error_type", [RuntimeError, KeyboardInterrupt, SystemExit]
+    )
+    def test_listing_propagates_other_failures(
+        self, monkeypatch: pytest.MonkeyPatch, error_type: type[BaseException]
+    ) -> None:
+        """Discovery does not suppress unrelated errors or process termination."""
+        add_pending_module("failing_adapter")
+        monkeypatch.setattr(
+            importlib, "import_module", Mock(side_effect=error_type("import failed"))
+        )
+
+        with pytest.raises(error_type, match="import failed"):
+            get_all_registered_names()
 
     # -- get_all_registered_names --
 
