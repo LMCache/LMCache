@@ -14,7 +14,9 @@ from vllm.v1.core.sched.output import SchedulerOutput
 import torch
 
 # First Party
-from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+from lmcache.inprocess.integration.vllm.vllm_v1_adapter import (
+    LMCacheConnectorV1Impl,
+)
 
 if TYPE_CHECKING:
     # Third Party

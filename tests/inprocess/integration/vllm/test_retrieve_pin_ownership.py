@@ -36,10 +36,8 @@ from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.token_database import ChunkedTokenDatabase
+from tests.v1.utils import create_test_memory_obj
 import lmcache.v1.cache_engine as cache_engine_module
-
-# Local
-from .utils import create_test_memory_obj
 
 pytestmark = pytest.mark.no_shared_allocator
 

@@ -30,6 +30,9 @@ import torch
 # (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
 from lmcache import utils
 from lmcache.banner import print_banner_once
+from lmcache.inprocess.integration.vllm.vllm_service_factory import (
+    VllmServiceFactory,
+)
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
@@ -37,7 +40,6 @@ from lmcache.integration.vllm.utils import (
     extract_request_configs_from_sampling_params,
     lmcache_get_or_create_config,
 )
-from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
