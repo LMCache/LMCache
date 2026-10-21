@@ -32,6 +32,26 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 
 logger = init_logger(__name__)
 
+# Enough reader threads for the default 1536 MiB budget to bind at 6 MiB
+# objects (chunk_size 256), and for small objects to reach an array's
+# ceiling, which takes a few hundred reads in flight.  Idle readers hold no
+# file descriptor.
+DEFAULT_NUM_READ_WORKERS = 256
+
+
+def _validate_non_negative_int(name: str, raw: object) -> int:
+    """Return ``raw`` if it is a non-negative ``int``.
+
+    ``bool`` is rejected although it subclasses ``int``: ``true`` in a
+    config would otherwise mean one.
+
+    Raises:
+        ValueError: If ``raw`` is a bool, not an int, or negative.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise ValueError(f"{name} must be a non-negative integer, got {raw!r}")
+    return raw
+
 
 class FSNativeL2AdapterConfig(L2AdapterConfigBase):
     """
@@ -43,6 +63,14 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
     - num_workers: C++ worker threads for I/O (default 4).
     - relative_tmp_dir: relative sub-dir for temp files.
     - use_odirect: bypass page cache via O_DIRECT.
+    - num_read_workers: threads dedicated to executing reads, and so the
+      maximum reads in flight (default 256).  0 keeps the legacy path,
+      where reads run on the worker threads and the depth against the
+      device therefore equals num_workers.
+    - read_max_bytes_in_flight: bytes the connector may keep outstanding
+      against the device.  0 selects 1536 MiB when num_read_workers is
+      positive; ignored otherwise.
+      See docs/source/mp/l2_storage/fs_native.rst for how to size both.
     - read_ahead_size: trigger filesystem readahead by
       reading this many bytes first (optional).
     - max_capacity_gb: declared L2 capacity in GB, used for usage
@@ -61,13 +89,33 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         use_odirect: bool = False,
         read_ahead_size: Optional[int] = None,
         max_capacity_gb: float = 0,
+        num_read_workers: int = DEFAULT_NUM_READ_WORKERS,
+        read_max_bytes_in_flight: int = 0,
     ):
+        """Build the config; see the class docstring for each field.
+
+        Raises:
+            ValueError: If ``num_read_workers`` or
+                ``read_max_bytes_in_flight`` is not a non-negative integer.
+        """
         self.base_path = base_path
         self.num_workers = num_workers
         self.relative_tmp_dir = relative_tmp_dir
         self.use_odirect = use_odirect
         self.read_ahead_size = read_ahead_size
         self.max_capacity_gb = max_capacity_gb
+        self.num_read_workers = _validate_non_negative_int(
+            "num_read_workers", num_read_workers
+        )
+        self.read_max_bytes_in_flight = _validate_non_negative_int(
+            "read_max_bytes_in_flight", read_max_bytes_in_flight
+        )
+        if num_read_workers == 0 and read_max_bytes_in_flight > 0:
+            logger.warning(
+                "fs_native: read_max_bytes_in_flight=%d is ignored because "
+                "num_read_workers=0 selects the legacy read path.",
+                read_max_bytes_in_flight,
+            )
 
     @classmethod
     def from_dict(cls, d: dict) -> "FSNativeL2AdapterConfig":
@@ -113,6 +161,8 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             use_odirect=use_odirect,
             read_ahead_size=read_ahead_size,
             max_capacity_gb=float(max_capacity_gb),
+            num_read_workers=d.get("num_read_workers", DEFAULT_NUM_READ_WORKERS),
+            read_max_bytes_in_flight=d.get("read_max_bytes_in_flight", 0),
         )
 
     @classmethod
@@ -127,6 +177,12 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "sub-dir for temp files (default empty)\n"
             "- use_odirect (bool): bypass page cache "
             "via O_DIRECT (default false)\n"
+            "- num_read_workers (int): threads dedicated to "
+            "reads, decoupling device queue depth from "
+            "num_workers (default 256, 0 = legacy path)\n"
+            "- read_max_bytes_in_flight (int): bytes kept "
+            "outstanding against the device (default 0 = "
+            "1536 MiB when num_read_workers > 0)\n"
             "- read_ahead_size (int): trigger fs "
             "readahead by reading this many bytes "
             "first (optional)\n"
@@ -167,13 +223,20 @@ def _create_fs_native_l2_adapter(
         config.relative_tmp_dir,
         config.use_odirect,
         config.read_ahead_size or 0,
+        config.num_read_workers,
+        config.read_max_bytes_in_flight,
     )
+    effective_read_budget = native_client.read_budget_bytes()
     logger.info(
-        "Created FS native L2 adapter: %s (workers=%d, odirect=%s, read_ahead=%s)",
+        "Created FS native L2 adapter: %s (workers=%d, odirect=%s, "
+        "read_ahead=%s, num_read_workers=%d, "
+        "read_max_bytes_in_flight=%d)",
         config.base_path,
         config.num_workers,
         config.use_odirect,
         config.read_ahead_size,
+        config.num_read_workers,
+        effective_read_budget,
     )
     return NativeConnectorL2Adapter(
         native_client,
@@ -185,6 +248,8 @@ def _create_fs_native_l2_adapter(
             "use_odirect": config.use_odirect,
             "num_workers": config.num_workers,
             "read_ahead_size": config.read_ahead_size,
+            "num_read_workers": config.num_read_workers,
+            "read_max_bytes_in_flight": effective_read_budget,
             "pad_buffers_to_alignment": config.use_odirect,
         },
     )
