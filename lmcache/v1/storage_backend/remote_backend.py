@@ -81,6 +81,11 @@ class RemoteBackend(StorageBackendInterface):
             and metadata.worker_id != 0
         )
         logger.info("metadata=%s", metadata)
+        # With pcp_shard_store every rank stores its own chunks, so every rank
+        # must put them to the remote backend (under the worker-0 key).
+        self._pcp_shard_store = bool(
+            config.get_extra_config_value("pcp_shard_store", False)
+        )
         logger.info(
             "Connected to remote storage at %s, remote_mla_worker_id_as_0 mode: %s",
             config.remote_url,
@@ -243,7 +248,9 @@ class RemoteBackend(StorageBackendInterface):
 
         # If MLA worker id as 0 mode is enabled, skip put tasks
         if self._mla_worker_id_as0_mode:
-            return create_immediate_empty_future()
+            if not self._pcp_shard_store:
+                return create_immediate_empty_future()
+            key = key.with_new_worker_id(0)
 
         if self.exists_in_put_tasks(key):
             return create_immediate_empty_future()
@@ -299,7 +306,9 @@ class RemoteBackend(StorageBackendInterface):
             return
         if self.connection.support_batched_put():
             if self._mla_worker_id_as0_mode:
-                return
+                if not self._pcp_shard_store:
+                    return
+                keys = [key.with_new_worker_id(0) for key in keys]
 
             # First, increment reference counts for all objects
             for memory_obj in memory_objs:
@@ -565,6 +574,11 @@ class RemoteBackend(StorageBackendInterface):
                 "Connection is None in batched_get_non_blocking, returning empty list"
             )
             return []
+        # read under the worker-0 key, as batched_async_contains and
+        # the blocking get do (MLA: chunks are stored under worker 0). Without it every
+        # rank != 0 asks for keys that do not exist.
+        if self._mla_worker_id_as0_mode:
+            keys = [key.with_new_worker_id(0) for key in keys]
         try:
             # warning, this timeout will not actually stop the
             # scheduler from waiting for the result
