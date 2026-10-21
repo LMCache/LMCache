@@ -161,7 +161,7 @@ class WorkerContext:
 
 
 class ServerBenchClient:
-    """Single-threaded worker and request resource management."""
+    """Manage Workers and data-plane operations for one benchmark run."""
 
     def __init__(
         self,
@@ -231,7 +231,20 @@ class ServerBenchClient:
         *,
         token_ids: Sequence[int],
     ) -> RequestContext | None:
-        """Atomically reserve full-chunk blocks until release_request; preserve KV."""
+        """Create a request with exclusive blocks reserved until release_request.
+
+        Args:
+            sequence_id: Sequence ID used in logs.
+            request_id: Server session ID.
+            request_kind: Request kind used in logs.
+            token_ids: Request tokens, rounded down to full chunks.
+
+        Returns:
+            The request, or ``None`` if it has no full chunk.
+
+        Raises:
+            RuntimeError: If the client is unavailable or free blocks are insufficient.
+        """
         self._require_started()
         token_ids = tuple(token_ids)
         num_full_tokens = (len(token_ids) // self._chunk_size) * self._chunk_size
@@ -342,7 +355,20 @@ class ServerBenchClient:
         start_token: int,
         token_count: int,
     ) -> TransferResult | None:
-        """STORE a token range on write-enabled workers."""
+        """STORE a token range on every write-enabled Worker.
+
+        Args:
+            request: Request to store.
+            start_token: Start offset in the request.
+            token_count: Number of tokens.
+
+        Returns:
+            Worker results, or ``None`` for an empty range.
+
+        Raises:
+            RuntimeError: If the client is not started.
+            ValueError: If a non-empty range is invalid or not chunk-aligned.
+        """
         return self._transfer("store", request, start_token, token_count)
 
     def retrieve(
@@ -351,13 +377,36 @@ class ServerBenchClient:
         start_token: int,
         token_count: int,
     ) -> TransferResult | None:
-        """RETRIEVE a token range on read-enabled workers."""
+        """RETRIEVE a token range on every read-enabled Worker.
+
+        Args:
+            request: Request to retrieve.
+            start_token: Start offset in the request.
+            token_count: Number of tokens.
+
+        Returns:
+            Worker results, or ``None`` for an empty range.
+
+        Raises:
+            RuntimeError: If the client is not started.
+            ValueError: If a non-empty range is invalid or not chunk-aligned.
+        """
         return self._transfer("retrieve", request, start_token, token_count)
 
     def zero_destination(
         self, request: RequestContext, start_token: int, token_count: int
     ) -> None:
-        """Zero bound reader blocks and synchronize before RETRIEVE."""
+        """Clear and synchronize reader destination blocks before RETRIEVE.
+
+        Args:
+            request: Request to clear.
+            start_token: Start offset in the request.
+            token_count: Number of tokens.
+
+        Raises:
+            RuntimeError: If the client is not started.
+            ValueError: If the range is invalid or not chunk-aligned.
+        """
         self._check_request_ready(request)
         self._validate_token_range(request, start_token, token_count)
         for worker in self._workers:
@@ -375,7 +424,28 @@ class ServerBenchClient:
         *,
         operation: Literal["store", "retrieve"],
     ) -> dict[int, list[str]] | None:
-        """Compute per-receiver, per-chunk checksums for a request range."""
+        """Compute per-receiver checksums for a request range.
+
+        Both transfer modes hash local worker buffers.
+        Store checksums provide the reference for a subsequent retrieve:
+        MLA receivers share rank 0's reference, while other TP ranks use
+        their own writer's reference.
+
+        Args:
+            request: Request to hash.
+            start_token: Start offset in the request.
+            token_count: Number of tokens.
+            operation: ``"store"`` hashes writers before STORE;
+                ``"retrieve"`` hashes receivers after RETRIEVE.
+
+        Returns:
+            Receiver rank to per-chunk digests, or ``None`` for an empty
+            range or if any required checksum is unavailable.
+
+        Raises:
+            RuntimeError: If the client is not started.
+            ValueError: If a non-empty range is invalid or not chunk-aligned.
+        """
         self._check_request_ready(request)
         if token_count == 0:
             return None
@@ -428,7 +498,10 @@ class ServerBenchClient:
         return checksums or None
 
     def close(self) -> None:
-        """Release transfer resources before dropping request blocks and KV buffers."""
+        """Close transfer contexts before releasing their worker-owned buffers.
+
+        Cleanup is idempotent, including after partial startup.
+        """
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
             _DEFAULT_RPC_TIMEOUT_S,
