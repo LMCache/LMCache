@@ -46,12 +46,13 @@ class MetricSpec:
     reduce: Callable[[Sequence[int | float]], int | float]
 
 
-def default_metric_specs(chunk_size: int) -> list[MetricSpec]:
+def default_metric_specs(get_chunk_size: Callable[[], int]) -> list[MetricSpec]:
     """Build the parity metrics matching the single-process reporter.
 
     Args:
-        chunk_size: The server chunk size in tokens; converts the chunk
-            counts carried by store/retrieve events to tokens.
+        get_chunk_size: Returns the current server chunk size in tokens;
+            converts the chunk counts carried by store/retrieve events to
+            tokens.
 
     Returns:
         Specs covering every metric field of ``ContinuousContextMessage``.
@@ -60,13 +61,13 @@ def default_metric_specs(chunk_size: int) -> list[MetricSpec]:
         MetricSpec(
             event_type=EventType.MP_RETRIEVE_END,
             field="interval_num_hit_tokens",
-            extract=lambda e: int(e.metadata["retrieved_count"]) * chunk_size,
+            extract=lambda e: int(e.metadata["retrieved_count"]) * get_chunk_size(),
             reduce=sum,
         ),
         MetricSpec(
             event_type=EventType.MP_STORE_END,
             field="interval_num_stored_tokens",
-            extract=lambda e: int(e.metadata["stored_count"]) * chunk_size,
+            extract=lambda e: int(e.metadata["stored_count"]) * get_chunk_size(),
             reduce=sum,
         ),
         MetricSpec(

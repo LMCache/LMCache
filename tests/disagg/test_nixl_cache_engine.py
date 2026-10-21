@@ -11,11 +11,11 @@ import torch
 
 # First Party
 from lmcache import torch_device_type
+from lmcache.inprocess.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
 from lmcache.logging import init_logger
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
 from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)

@@ -2,7 +2,11 @@
 """Unit tests for lmcache.utils module."""
 
 # Standard
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
+import os
+import stat
 
 # Third Party
 import pytest
@@ -11,18 +15,22 @@ import torch
 # First Party
 from lmcache.utils import (
     CacheEngineKey,
+    DaxDeviceGeometry,
     LayerCacheEngineKey,
     _append_range_or_elements,
     cdiv,
+    check_dax_range,
     compress_slot_mapping,
     convert_tokens_to_list,
     decompress_slot_mapping,
+    get_dax_device_geometry,
     get_version,
     parse_cache_key,
     parse_mixed_slot_mapping,
     round_down,
     round_up,
 )
+import lmcache.utils as lmcache_utils
 
 
 # ============================================================
@@ -700,3 +708,111 @@ class TestCacheKeyParsing:
         assert isinstance(parsed, LayerCacheEngineKey)
         assert parsed == original
         assert parsed.layer_id == 3
+
+
+# ============================================================
+# DAX device geometry
+# ============================================================
+_FAKE_RDEV = os.makedev(252, 7)
+
+
+def _fake_devdax_node(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    backing: Path,
+    *,
+    size: int | None,
+    align: int = 2 * 1024 * 1024,
+) -> None:
+    """Make ``backing`` look like a Device-DAX node with the given sysfs attrs.
+
+    ``fstat`` on the file reports a character device, and the sysfs node for
+    its ``major:minor`` lives under ``tmp_path``. ``size=None`` leaves the node
+    without a ``size`` attribute, as sysfs does for non-DAX character devices.
+    """
+    node = tmp_path / "sysfs" / f"{os.major(_FAKE_RDEV)}:{os.minor(_FAKE_RDEV)}"
+    node.mkdir(parents=True)
+    if size is not None:
+        (node / "size").write_text(f"{size}\n")
+    (node / "align").write_text(f"{align}\n")
+    monkeypatch.setattr(lmcache_utils, "DAX_SYSFS_CHAR_ROOT", str(tmp_path / "sysfs"))
+
+    real_fstat = os.fstat
+    identity = (backing.stat().st_dev, backing.stat().st_ino)
+
+    def fake_fstat(fd: int) -> object:
+        info = real_fstat(fd)
+        if (info.st_dev, info.st_ino) == identity:
+            return SimpleNamespace(st_mode=stat.S_IFCHR, st_rdev=_FAKE_RDEV)
+        return info
+
+    monkeypatch.setattr(os, "fstat", fake_fstat)
+
+
+class TestDaxDeviceGeometry:
+    def test_regular_file_reports_size_and_no_alignment(self, tmp_path: Path):
+        backing = tmp_path / "dax.bin"
+        backing.write_bytes(b"\0" * 8192)
+        fd = os.open(backing, os.O_RDWR)
+        try:
+            assert get_dax_device_geometry(fd) == DaxDeviceGeometry(
+                capacity=8192, align=1
+            )
+            check_dax_range(str(backing), fd, 4096, 4096)
+            with pytest.raises(RuntimeError, match="exceeds .* capacity"):
+                check_dax_range(str(backing), fd, 4096, 4097)
+        finally:
+            os.close(fd)
+
+    def test_character_device_reads_sysfs(self, tmp_path: Path, monkeypatch):
+        backing = tmp_path / "dax0.0"
+        backing.touch()
+        _fake_devdax_node(monkeypatch, tmp_path, backing, size=8 << 20, align=1 << 20)
+        fd = os.open(backing, os.O_RDWR)
+        try:
+            assert get_dax_device_geometry(fd) == DaxDeviceGeometry(
+                capacity=8 << 20, align=1 << 20
+            )
+            check_dax_range("/dev/dax0.0", fd, 6 << 20, 2 << 20)
+        finally:
+            os.close(fd)
+
+    def test_range_starting_at_capacity_is_rejected(self, tmp_path: Path, monkeypatch):
+        # mmap of this range succeeds on real hardware and SIGBUSes on first
+        # access, so it must be caught here.
+        backing = tmp_path / "dax0.0"
+        backing.touch()
+        _fake_devdax_node(monkeypatch, tmp_path, backing, size=8 << 20)
+        fd = os.open(backing, os.O_RDWR)
+        try:
+            with pytest.raises(RuntimeError, match="exceeds /dev/dax0.0 capacity"):
+                check_dax_range("/dev/dax0.0", fd, 8 << 20, 2 << 20)
+        finally:
+            os.close(fd)
+
+    @pytest.mark.parametrize("offset,size", [(1 << 20, 2 << 20), (0, 3 << 20)])
+    def test_misaligned_range_is_rejected(
+        self, tmp_path: Path, monkeypatch, offset: int, size: int
+    ):
+        backing = tmp_path / "dax0.0"
+        backing.touch()
+        _fake_devdax_node(monkeypatch, tmp_path, backing, size=8 << 20)
+        fd = os.open(backing, os.O_RDWR)
+        try:
+            with pytest.raises(RuntimeError, match="device alignment"):
+                check_dax_range("/dev/dax0.0", fd, offset, size)
+        finally:
+            os.close(fd)
+
+    def test_character_device_without_sysfs_size_fails_closed(
+        self, tmp_path: Path, monkeypatch
+    ):
+        backing = tmp_path / "null"
+        backing.touch()
+        _fake_devdax_node(monkeypatch, tmp_path, backing, size=None)
+        fd = os.open(backing, os.O_RDWR)
+        try:
+            with pytest.raises(RuntimeError, match="cannot read Device-DAX size"):
+                check_dax_range("/dev/null", fd, 0, 2 << 20)
+        finally:
+            os.close(fd)

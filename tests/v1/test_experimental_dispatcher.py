@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for experimental-feature gating and dispatch.
 Both connector-side dispatcher (feature construction, hook fan-out,
-re-registration failure handling) and the server-side --enable gating.
+re-registration failure handling) and the gating on the server's advertised
+experimental features.
 """
 
 # Standard
@@ -18,7 +19,7 @@ from lmcache.integration.vllm.experimental.dispatcher import (
     dispatch,
     init_dispatcher,
 )
-from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
+from lmcache.v1.multiprocess.custom_types import TRANSFER_QUERY
 
 MODEL = "org/model"
 HOOKS = tuple(

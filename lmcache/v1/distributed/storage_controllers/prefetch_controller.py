@@ -40,7 +40,7 @@ from lmcache.v1.distributed.bitmap_ops.fold import (
     fold_unfold_grouped,
 )
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
@@ -218,7 +218,7 @@ def _scatter_bitmaps_full_global(
 
 
 def _reserve_l1_cells(
-    l1_manager: L1Manager,
+    l1_manager: L1ManagerInterface,
     key_groups: list[GroupedObjectKeys],
     cells: Bitmap2D,
     retain: dict[ObjectKey, bool],
@@ -440,14 +440,14 @@ class PrefetchController(StorageControllerInterface):
 
     def __init__(
         self,
-        l1_managers: list[L1Manager],
+        l1_managers: list[L1ManagerInterface],
         l1_manager_descriptors: list[L1ManagerDescriptor],
         l2_adapters: list[L2AdapterInterface],
         adapter_descriptors: list[L2AdapterDescriptor],
         policy: PrefetchPolicy,
         max_in_flight: int = 8,
     ) -> None:
-        self._l1_managers: dict[int, L1Manager] = {
+        self._l1_managers: dict[int, L1ManagerInterface] = {
             desc.index: mgr
             for desc, mgr in zip(l1_manager_descriptors, l1_managers, strict=True)
         }

@@ -134,7 +134,7 @@ the same device even though their GitHub status contexts are independent.
 - LMCache builds its common native extensions with the MUSA build profile.
 - LMCache selects the `musa` device backend.
 - The MUSA-compatible unit-test allowlist passes, excluding benchmark tests,
-  CUDA/XPU/SGLang markers, and known optional Triton/NIXL modules.
+  CUDA/XPU markers, and known optional Triton/NIXL modules.
 - Focused MUSA connector, pin-memory, real-device block-transfer, and MP tests
   pass.
 - The LMCache MP server reaches `/healthcheck` and terminates cleanly.
