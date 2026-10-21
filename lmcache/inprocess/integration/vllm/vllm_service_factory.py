@@ -179,9 +179,9 @@ class VllmServiceFactory(BaseServiceFactory):
             return None
 
         # First Party
+        from lmcache.inprocess.v1.gpu_connector import CreateGPUConnector
         from lmcache.integration.vllm.utils import ENGINE_NAME
         from lmcache.utils import EngineType
-        from lmcache.v1.gpu_connector import CreateGPUConnector
 
         if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
             self.lmcache_engine = curr_engine
