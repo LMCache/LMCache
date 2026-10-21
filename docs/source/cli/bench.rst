@@ -1028,8 +1028,7 @@ server
 The ``lmcache bench server`` command is an end-to-end sanity test for the
 LMCache Multi-Process (MP) cache server. It connects to a running server
 over ZMQ and exercises the full KV-cache data path for a sequence of
-synthetic requests, then verifies retrieved chunks in the registered worker
-buffers.
+synthetic requests, then verifies per-chunk checksums in local worker buffers.
 
 .. code-block:: bash
 
@@ -1047,10 +1046,10 @@ What it does
 
 For each sequence in ``[--start, --end)``, the tool runs two passes:
 
-1. **Cold pass** -- ``LOOKUP`` is expected to miss. The case saves the
-   request blocks' checksums and issues ``STORE``.
-2. **Warm pass** -- ``LOOKUP`` is expected to hit. The case clears the
-   destination blocks before ``RETRIEVE`` and compares their checksums to the
+1. **Cold pass** -- ``LOOKUP`` is expected to miss, so the generated KV
+   tensors are ``STORE``\ d on the server.
+2. **Warm pass** -- ``LOOKUP`` is expected to hit; the tool clears destination
+   blocks, issues ``RETRIEVE`` and compares the retrieved KV chunks' checksums to the
    originals.
 
 The full RPC path exercised is::
@@ -1059,24 +1058,8 @@ The full RPC path exercised is::
      → QUERY_PREFETCH_STATUS → RETRIEVE → STORE
      → END_SESSION
 
-Both transfer modes hash every reader's local buffers, including replicated
-readers. Preparation, device synchronization, and checksum computation run
-outside STORE/RETRIEVE latency measurements.
-``--url`` remains accepted for compatibility; verification no longer uses HTTP.
-
-
-Custom cases reserve blocks with ``client.create_request(..., token_ids=...)``
-and return them with ``client.release_request(request)``. Each group has an
-independent pool shared by all TP workers. Blocks are request-exclusive;
-the allocator does not implement prefix sharing or accept caller-specified IDs.
-Allocation either succeeds for all pools or changes none; insufficient capacity
-raises immediately. Released requests cannot perform further client operations.
-``release_request`` ends the server session and returns local blocks, even if
-session cleanup raises. The baseline calls it in ``finally`` for each request.
-
-Client control is single-threaded. If a transfer times out or raises, block
-reuse is disabled until the client is closed; releasing the request then
-invalidates it but retains its blocks for teardown.
+Both transfer modes verify local buffers. ``--url`` remains accepted for
+compatibility but is unused.
 
 
 Quick start
@@ -1118,8 +1101,7 @@ Options
      - ZMQ endpoint of the MP cache server.
    * - ``--url URL``
      - ``http://localhost:8080``
-     - Legacy HTTP URL, accepted for compatibility. Buffer verification
-       no longer uses this endpoint.
+     - Accepted for compatibility; unused by local checksum verification.
    * - ``--mode {gpu,cpu}``
      - ``gpu``
      - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
@@ -1138,7 +1120,7 @@ Options
      - Tokens per synthetic request.
    * - ``--block-allocation {sequential,random}``
      - ``sequential``
-     - Allocate the lowest free IDs or sample from all free IDs.
+     - Allocate the lowest free block IDs or sample from all free IDs.
    * - ``--num-blocks N``
      - ``1024``
      - Number of paged blocks allocated on the GPU.
@@ -1310,8 +1292,7 @@ Example: MLA + TP=2, exercising rank 0 STORE + both-rank RETRIEVE:
        --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:8" \
        --tp-size 2
 
-Checksums include every reader rank, so a missing or incorrect restore on a
-non-writer rank also fails verification. The bench reports the rank and
+The bench verifies retrieved data on every rank and reports the rank and
 chunk for checksum mismatches.
 
 See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
