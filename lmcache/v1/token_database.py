@@ -23,6 +23,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
+from lmcache.v1.cache_identity import materialize_cache_identity_revision
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.metadata import LMCacheMetadata
 
@@ -401,6 +402,7 @@ class ChunkedTokenDatabase(TokenDatabase):
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        request_configs = materialize_cache_identity_revision(request_configs)
         if mask is not None:
             num_falses = mask.numel() - mask.long().sum().item()
         else:
@@ -524,6 +526,7 @@ class SegmentTokenDatabase(TokenDatabase):
             the cache engine key for the tokens.
 
         """
+        request_configs = materialize_cache_identity_revision(request_configs)
 
         if tokens is not None:
             if not isinstance(tokens, torch.Tensor):
