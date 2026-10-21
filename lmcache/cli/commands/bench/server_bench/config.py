@@ -15,7 +15,26 @@ from lmcache.cli.commands.bench.server_bench.cases.base import BenchCase
 
 @dataclass(frozen=True)
 class BenchConfig:
-    """Immutable client configuration for one server benchmark run."""
+    """Immutable client configuration for one server benchmark run.
+
+    CLI-only concerns such as profiling stay with the command layer.
+
+    Attributes:
+        rpc_url: Multiprocess request endpoint of the LMCache server.
+        http_url: Legacy HTTP endpoint, unused by local checksum verification.
+        mode: ``"cpu"`` or ``"gpu"`` for mock Worker resources.
+        transfer_mode: ``"auto"``, ``"engine_driven"``, or
+            ``"lmcache_driven"``.
+        tp_size: Number of simulated tensor-parallel Workers.
+        use_mla: Whether the CLI explicitly requested MLA routing.
+        num_tokens: Synthetic payload tokens per request, excluding the
+            sequence token prepended by the benchmark.
+        kvcache_shape_spec: LMCache KV shape specification string.
+        num_blocks: Fallback number of paged KV blocks.
+        block_size: Fallback number of tokens per paged KV block.
+        concurrency: Number of clients sending requests at the same time.
+        block_allocation: Allocate the lowest free IDs or sample free IDs randomly.
+    """
 
     rpc_url: str
     http_url: str
