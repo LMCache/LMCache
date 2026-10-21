@@ -26,4 +26,6 @@ message ServerModuleCallResponse {
 service ExtensionService {
   rpc ServerModuleCall(ServerModuleCallRequest)
       returns (ServerModuleCallResponse);
+  rpc ServerModuleAffinityCall(ServerModuleCallRequest)
+      returns (ServerModuleCallResponse);
 }

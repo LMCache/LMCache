@@ -163,7 +163,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
             .. note::
                To customize further, create a config file. See
-               :doc:`../api_reference/configurations` for all options.
+               :doc:`/legacy/api_reference/configurations` for all options.
 
             **Alternative simpler command:**
 
@@ -176,7 +176,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
             The ``--disable-hybrid-kv-cache-manager`` flag is mandatory.
             All configuration options from the
-            :doc:`../api_reference/configurations` page still apply.
+            :doc:`/legacy/api_reference/configurations` page still apply.
 
             **Test** -- open a new terminal and send two requests whose
             prompts share a prefix:
@@ -497,7 +497,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          The TRT-LLM adapter reads :class:`LMCacheEngineConfig` the
          same way the vLLM adapter does: ``LMCACHE_CONFIG_FILE`` for
          a YAML file, otherwise individual ``LMCACHE_*`` environment
-         variables. See :doc:`../api_reference/configurations` for
+         variables. See :doc:`/legacy/api_reference/configurations` for
          all options.
 
 🎉 **You now have LMCache caching and reusing KV caches across all three engines.**

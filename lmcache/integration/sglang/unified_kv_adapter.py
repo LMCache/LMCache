@@ -455,14 +455,12 @@ class SGLangUnifiedKVAdapter:
         for (
             field,
             layer_tensor,
-            slice_axis,
+            _slice_axis,
             layer_id,
         ) in mamba_pool._iter_transfer_state_entries():
-            if slice_axis != 0:
-                raise NotImplementedError(
-                    f"LMCache MP does not support {field} state with slot "
-                    f"slice_axis={slice_axis}"
-                )
+            # SGLang always exposes these tensors as [slot, ...]. slice_axis
+            # describes TP slicing within one slot and does not affect LMCache's
+            # same-TP full-slot store/retrieve layout.
             if not layer_tensor.is_contiguous():
                 raise NotImplementedError(
                     f"LMCache MP requires contiguous {field} state for "

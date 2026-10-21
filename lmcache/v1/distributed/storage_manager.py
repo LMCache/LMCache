@@ -688,16 +688,21 @@ class StorageManager:
             handle.prefetch_request_id, timeout
         )
 
-    def touch_l1_keys(self, keys: list[ObjectKey]):
-        """
-        Touch the keys in L1 storage, marking the keys
-        as accessed(retrieved or stored).
+    def touch_cached_keys(self, keys: list[ObjectKey]) -> None:
+        """Refresh eviction recency in L1 *and* L2, without I/O.
+
+        A real load refreshes both tiers, so an L1-only touch would leave
+        the keys cold to L2.
 
         Args:
             keys (list[ObjectKey]): List of object keys to touch.
         """
         for manager in self._l1_managers_by_id.values():
             manager.touch_keys(keys)
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            adapter.submit_touch(keys)
 
     def delete_l1_keys(
         self, keys: list[ObjectKey], force: bool = False
@@ -889,8 +894,9 @@ class StorageManager:
         self,
         device_path: str,
         size_in_bytes: int,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
-        """Add a Device-DAX device to the L1 arena pool.
+        """Add a Device-DAX range to the L1 arena pool.
 
         A successful addition publishes the current whole capacity topology.
 
@@ -901,6 +907,7 @@ class StorageManager:
         Args:
             device_path: Path of the Device-DAX device to map.
             size_in_bytes: Number of bytes to map.
+            offset_in_bytes: Byte offset into the device.
 
         Returns:
             Status of the newly added arena.
@@ -932,7 +939,9 @@ class StorageManager:
                     "is already mapped by L2 adapter(s) "
                     f"({', '.join(device_owners)})",
                 )
-            status = self._l1_manager.add_devdax_device(device_path, size_in_bytes)
+            status = self._l1_manager.add_devdax_device(
+                device_path, size_in_bytes, offset_in_bytes
+            )
         self._publish_capacity_changed()
         return status
 
@@ -940,8 +949,9 @@ class StorageManager:
         self,
         device_path: str,
         mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
-        """Remove a Device-DAX device from the L1 arena pool.
+        """Remove a Device-DAX arena from the L1 arena pool.
 
         Whenever the call changes usable capacity, it publishes the current
         whole topology. This includes a drain transition whose later device
@@ -950,6 +960,7 @@ class StorageManager:
         Args:
             device_path: Path of the mapped Device-DAX device.
             mode: Removal strategy. Only drain mode is currently supported.
+            offset_in_bytes: Device offset the arena was added with.
 
         Returns:
             Status of the arena after the removal request.
@@ -964,16 +975,20 @@ class StorageManager:
             ValueError: This legacy operation requires a single L1 manager.
         """
         self._require_single_l1()
-        target_was_active = self._l1_devdax_arena_is_active(device_path)
+        target_was_active = self._l1_devdax_arena_is_active(
+            device_path, offset_in_bytes
+        )
         try:
-            status = self._l1_manager.remove_devdax_device(device_path, mode)
+            status = self._l1_manager.remove_devdax_device(
+                device_path, mode, offset_in_bytes
+            )
         except Exception:
             # Draining begins before an empty arena is synchronized and
             # unmapped. If that cleanup raises, usable capacity has still
             # changed and the coordinator must not retain the old topology.
             try:
                 if target_was_active and not self._l1_devdax_arena_is_active(
-                    device_path
+                    device_path, offset_in_bytes
                 ):
                     self._publish_capacity_changed()
             except Exception:
@@ -998,14 +1013,18 @@ class StorageManager:
             if (name := requires_single_l1_memory_region(descriptor.config)) is not None
         ]
 
-    def _l1_devdax_arena_is_active(self, device_path: str) -> bool:
-        """Return whether an ACTIVE Device-DAX arena is mapped at ``device_path``.
+    def _l1_devdax_arena_is_active(
+        self, device_path: str, offset_in_bytes: int
+    ) -> bool:
+        """Return whether an ACTIVE Device-DAX arena is at ``(device_path, offset)``.
 
-        The path must match the one used when adding the arena. ``False``
-        when L1 is not Device-DAX backed or nothing is registered there.
+        Both must match the values used when adding the arena. ``False`` when
+        L1 is not Device-DAX backed or nothing is registered there.
         """
         try:
-            status = self._l1_manager.get_devdax_arena_status(device_path)
+            status = self._l1_manager.get_devdax_arena_status(
+                device_path, offset_in_bytes
+            )
         except L1ReconfigureError:
             return False
         return status.state is DevDaxArenaState.ACTIVE

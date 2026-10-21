@@ -23,12 +23,12 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.gpu_connector import GPUConnectorInterface
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventStatus, EventType
-from lmcache.v1.gpu_connector import GPUConnectorInterface
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
 from lmcache.v1.metadata import LMCacheMetadata

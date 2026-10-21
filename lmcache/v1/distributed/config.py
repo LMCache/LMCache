@@ -10,6 +10,7 @@ from typing import Any, Literal, TypeVar, cast
 import argparse
 import json
 import math
+import mmap
 import os
 
 # First Party
@@ -58,6 +59,19 @@ def _l1_path(values: dict[str, object]) -> str:
     if not isinstance(path, str) or not path.strip():
         raise ValueError("path must be a non-empty string")
     return path
+
+
+def _l1_offset_bytes(values: dict[str, object]) -> int:
+    """Read the optional ``offset_gb`` JSON field as a byte count (default 0)."""
+    value = values.get("offset_gb", 0)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise ValueError("offset_gb must be a finite non-negative number")
+    return int(value * (1 << 30))
 
 
 def _parse_l1_common(
@@ -315,6 +329,10 @@ class L1MemoryManagerConfig:
     devdax_size_in_bytes: int = 0
     """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
 
+    devdax_offset_in_bytes: int = 0
+    """ Page-aligned byte offset into ``devdax_path`` where the L1 mapping
+    starts. Lets several servers share one device with disjoint ranges. """
+
     mlock: bool = False
     """ mlock the L1 buffer so compaction cannot migrate it (ROCm only). """
 
@@ -328,6 +346,15 @@ class L1MemoryManagerConfig:
             raise ValueError("devdax_size_in_bytes must be >= 0")
         if self.devdax_size_in_bytes and not self.devdax_path:
             raise ValueError("devdax_size_in_bytes requires devdax_path")
+        if self.devdax_offset_in_bytes < 0:
+            raise ValueError("devdax_offset_in_bytes must be >= 0")
+        if self.devdax_offset_in_bytes and not self.devdax_path:
+            raise ValueError("devdax_offset_in_bytes requires devdax_path")
+        if self.devdax_offset_in_bytes % mmap.ALLOCATIONGRANULARITY:
+            raise ValueError(
+                "devdax_offset_in_bytes must be a multiple of "
+                f"{mmap.ALLOCATIONGRANULARITY} bytes"
+            )
 
         if self.devdax_path and self.use_lazy:
             raise ValueError(
@@ -584,9 +611,13 @@ class DevDaxL1ManagerConfig(L1ManagerConfig):
         Raises:
             ValueError: A field is unknown, malformed, or incompatible.
         """
-        config = _parse_l1_common(cls, values, defaults, read_ttl, write_ttl, {"path"})
+        config = _parse_l1_common(
+            cls, values, defaults, read_ttl, write_ttl, {"path", "offset_gb"}
+        )
         config.memory_config = replace(
-            config.memory_config, devdax_path=_l1_path(values)
+            config.memory_config,
+            devdax_path=_l1_path(values),
+            devdax_offset_in_bytes=_l1_offset_bytes(values),
         )
         return config
 
@@ -882,6 +913,17 @@ def add_storage_manager_args(
         ),
     )
     memory_group.add_argument(
+        "--l1-devdax-offset-gb",
+        type=float,
+        default=0.0,
+        help=(
+            "Byte offset into --l1-devdax-path, in GiB, where the L1 mapping "
+            "starts (default 0). Lets several LMCache servers share one CXL "
+            "device by mapping disjoint ranges. Must land on a page boundary; "
+            "the kernel also enforces the device alignment (usually 2 MiB)."
+        ),
+    )
+    memory_group.add_argument(
         "--l1-mlock",
         action="store_true",
         help=(
@@ -1138,6 +1180,7 @@ def parse_args_to_config(
             logger.error("Hugepage availability check failed: %s", e)
             raise
 
+    devdax_offset = int(getattr(args, "l1_devdax_offset_gb", 0.0) * (1 << 30))
     if shm_name is None:
         memory_config = L1MemoryManagerConfig(
             size_in_bytes=int(args.l1_size_gb * (1 << 30)),
@@ -1146,6 +1189,7 @@ def parse_args_to_config(
             align_bytes=args.l1_align_bytes,
             use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
+            devdax_offset_in_bytes=devdax_offset,
             mlock=args.l1_mlock,
         )
     else:
@@ -1157,6 +1201,7 @@ def parse_args_to_config(
             shm_name=shm_name,
             use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
+            devdax_offset_in_bytes=devdax_offset,
             mlock=args.l1_mlock,
         )
 
