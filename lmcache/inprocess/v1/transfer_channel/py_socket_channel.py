@@ -16,14 +16,14 @@ import msgspec
 import zmq
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
-from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
-from lmcache.v1.transfer_channel.transfer_utils import (
+from lmcache.inprocess.v1.transfer_channel.abstract import BaseTransferChannel
+from lmcache.inprocess.v1.transfer_channel.transfer_utils import (
     InitSideMsgBase,
     InitSideRetMsgBase,
     SideMsg,
 )
+from lmcache.logging import init_logger
+from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 
 logger = init_logger(__name__)
 

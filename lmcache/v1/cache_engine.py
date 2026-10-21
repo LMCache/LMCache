@@ -2044,7 +2044,7 @@ class LMCacheEngineBuilder:
         if enable_nixl_storage:
             # TODO(Jiayi): weird to import from transfer utils.
             # First Party
-            from lmcache.v1.transfer_channel.transfer_utils import (
+            from lmcache.inprocess.v1.transfer_channel.transfer_utils import (
                 get_correct_device,
             )
 

@@ -7,9 +7,9 @@ import asyncio
 import torch
 
 # First Party
+from lmcache.inprocess.v1.transfer_channel.py_socket_channel import PySocketChannel
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.transfer_channel.py_socket_channel import PySocketChannel
 
 logger = init_logger(__name__)
 
