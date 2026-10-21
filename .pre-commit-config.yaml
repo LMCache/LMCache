@@ -9,34 +9,15 @@ repos:
     types: [python]
   - id: ban-direct-torch-device
     name: Ban direct torch device usage
-    entry: >-
-      bash -c '
-      pattern=$(find lmcache/v1/platform/devices -mindepth 1 -maxdepth 1 -type d \
-        -exec basename {} \; | grep -v "^__" | sort | paste -sd "|");
-      if [ -z "$pattern" ]; then
-        echo "WARNING: no device dirs found, skipping check";
-        exit 0;
-      fi;
-      echo "Detected devices: ${pattern//|/, }";
-      echo "Ban pattern: torch.($pattern)";
-      matches=$(grep -rHnE "torch\.($pattern)" "$@");
-      if [ -n "$matches" ]; then
-        echo "";
-        echo "========================================";
-        echo "  BANNED: Direct torch device API usage";
-        echo "  Use lmcache.v1.platform abstractions instead";
-        echo "========================================";
-        echo "";
-        echo "$matches";
-        exit 1;
-      fi' --
+    entry: python3 tools/check_direct_torch_device.py
     language: system
     types: [python]
-    files: ^lmcache/
+    files: ^(lmcache|tests)/
     exclude: |
       (?x)^(
         lmcache/.*/gpu_connector/.*|
-        lmcache/v1/platform/.*
+        lmcache/v1/platform/.*|
+        tests/v1/platform/.*
       )$
   - id: ban-cuda-host-register
     name: Ban cudaHostRegister/Unregister outside platform

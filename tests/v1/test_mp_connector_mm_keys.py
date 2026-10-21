@@ -211,6 +211,34 @@ def test_eager_prefetch_forwards_request_configs():
     assert tracker.lookup_started_at is not None
 
 
+def test_lookup_hint_carries_vllm_prefix_hit() -> None:
+    """The scheduler-time lookup reports vLLM's prefix-cache hit to the
+    server's load policy, overriding any client-supplied value."""
+    request = _FakeRequest(
+        list(range(128)),
+        sampling_params_extra_args={
+            "kv_transfer_params": {
+                "lmcache.skip_load": True,
+                "lmcache.hint.engine_computed_tokens": 999,
+            },
+        },
+    )
+    scheduler_adapter = MagicMock()
+    scheduler_adapter.lmcache_tokens_per_chunk = 64
+    scheduler_adapter.check_lookup_result.return_value = None
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector.request_trackers = {}
+    connector.scheduler_adapter = scheduler_adapter
+    connector._reserve_last_token_for_lookup = False
+    connector.lazy_offload = False
+    connector._hit_alignment_tokens = 64
+
+    assert connector.get_num_new_matched_tokens(request, 16) == (None, True)
+    assert scheduler_adapter.maybe_submit_lookup_request.call_args.kwargs[
+        "request_configs"
+    ] == {"lmcache.skip_load": True, "lmcache.hint.engine_computed_tokens": 16}
+
+
 def test_recurrent_lookup_reserves_final_prompt_token() -> None:
     """A recurrent full hit stops at the preceding checkpoint boundary."""
     request = _FakeRequest(list(range(128)))
@@ -232,8 +260,9 @@ def test_recurrent_lookup_reserves_final_prompt_token() -> None:
         request.request_id,
         token_ids=list(range(128)),
         cache_salt="",
-        request_configs=None,
+        request_configs={"lmcache.hint.engine_computed_tokens": 0},
         reserve_last_token=True,
+        start=0,
     )
     tracker = connector.request_trackers[request.request_id]
     assert tracker.num_lmcache_hit_tokens == 64

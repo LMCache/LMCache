@@ -260,8 +260,11 @@ class NixlStorageConfig:
                     (config.nixl_buffer_size + align_bytes - 1) // align_bytes
                 ) * align_bytes
                 logger.warning(
-                    f"Nixl buffer size {config.nixl_buffer_size} is not a multiple of "
-                    f"align bytes {align_bytes}, auto aligned to {buffer_size}"
+                    "Nixl buffer size %s is not a multiple of "
+                    "align bytes %s, auto aligned to %s",
+                    config.nixl_buffer_size,
+                    align_bytes,
+                    buffer_size,
                 )
                 config.nixl_buffer_size = buffer_size
             else:
@@ -759,7 +762,7 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
                 return False
             return True
         except Exception as exc:
-            logger.warning(f"NIXL Desc {meta_info} query failed: {exc}")
+            logger.warning("NIXL Desc %s query failed: %s", meta_info, exc)
             return False
 
     def batched_nixl_desc_exists(
@@ -813,7 +816,7 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
 
             return consecutive_count
         except Exception as exc:
-            logger.warning(f"NIXL batched query failed: {exc}")
+            logger.warning("NIXL batched query failed: %s", exc)
             return 0
 
     def close(self):
@@ -1625,7 +1628,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         self.hit_counter += 1 if found else 0
         self.total_counter += 1
         if self.total_counter % 100 == 0:
-            logger.debug(f"Cache hit: {self.hit_counter} vs {self.total_counter}")
+            logger.debug("Cache hit: %s vs %s", self.hit_counter, self.total_counter)
         return found
 
     def _cache_add(self, chunk_hash: int) -> None:
@@ -1659,10 +1662,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
         )
         logger.info(
-            f"Initialized nixl object backend metadata: "
-            f"shape: {self.meta_shape}, "
-            f"dtype: {self.meta_dtype}, "
-            f"fmt: {self.meta_fmt}"
+            "Initialized nixl object backend metadata: shape: %s, dtype: %s, fmt: %s",
+            self.meta_shape,
+            self.meta_dtype,
+            self.meta_fmt,
         )
 
     def _format_object_key(self, key: CacheEngineKey) -> str:
@@ -1869,7 +1872,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                 self.agent.post_blocking(handle)
                 xfer_state = True
             except nixlBind.nixlBackendError as exc:
-                logger.warning(f"Batch Transfer failed: {exc}")
+                logger.warning("Batch Transfer failed: %s", exc)
                 # Treat transfer failures (not found, timeout, etc.) as a
                 # miss rather than raising and terminating the program.
                 xfer_state = False
@@ -1896,8 +1899,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             self._cache_add(key.chunk_hash)
         duration = time.time() - start_time
         logger.debug(
-            f"storage_to_mem for {len(keys)} objects size "
-            f"{page_size * len(keys)} took {duration:.6f} seconds"
+            "storage_to_mem for %s objects size %s took %.6f seconds",
+            len(keys),
+            page_size * len(keys),
+            duration,
         )
         return cast(list[Optional[MemoryObj]], obj_list)
 
@@ -2091,8 +2096,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
 
         duration = time.time() - start_time
         logger.debug(
-            f"mem_to_storage for {len(keys)} objects size "
-            f"{page_size * len(keys)} took {duration:.3f} seconds"
+            "mem_to_storage for %s objects size %s took %.3f seconds",
+            len(keys),
+            page_size * len(keys),
+            duration,
         )
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
@@ -2119,7 +2126,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         """
         # Check if already in progress
         if self.exists_in_put_tasks(key):
-            logger.debug(f"Key {key.chunk_hash:x} is in put tasks")
+            logger.debug("Key %x is in put tasks", key.chunk_hash)
             return True, False
 
         # Check presence cache before issuing a query_memory call if not prefetching
@@ -2320,7 +2327,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                 try:
                     on_complete_callback(key)
                 except Exception as e:
-                    logger.warning(f"on_complete_callback failed for key {key}: {e}")
+                    logger.warning("on_complete_callback failed for key %s: %s", key, e)
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
