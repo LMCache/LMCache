@@ -186,7 +186,7 @@ jobs:
 
       - name: Build raw-block Rust extension
         run: |
-          python -m maturin build --release \
+          python -m maturin build --release --locked \
             --manifest-path rust/raw_block/Cargo.toml \
             --out .pytest-tmp/raw-block-dist
           python -m pip install .pytest-tmp/raw-block-dist/*.whl
