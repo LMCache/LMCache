@@ -1323,11 +1323,6 @@ requested page in first-pinned order, each with its current ``pin_count``.
 
 Delete a token sequence on one named server.
 
-This endpoint is served by the eviction controller, because it honors that
-controller's pins. With ``FleetEvictionController`` disabled, the controller
-that replaced it serves ``/cache/delete`` if it provides one; otherwise the
-path returns ``404``.
-
 **Request body:** (``model_name``,
 ``world_size``, ``token_ids``, ``cache_salt``) plus ``tier`` (``l1`` / ``l2`` /
 ``all``) and ``force`` (bool, default ``false``). When ``force`` is ``true``,
