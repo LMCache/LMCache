@@ -1924,6 +1924,12 @@ ids) and ``session_id``; the span's start time is the lookup timestamp.
 A request the engine looks up again (for example after preemption) emits
 one span per lookup; the analyzer keeps only its earliest span.
 
+This is the ``lmcache`` trace format, the default and currently only
+value of ``--trace-format``. ``lmcache.input_ids`` may be the OTLP
+integer array as emitted or one JSON string of the same integers, which
+a collector ``transform`` processor may write to keep the file small.
+When no span matches, the tool reports what the files did hold.
+
 Persist the spans with the Collector's ``file`` exporter. Starting from
 ``examples/observability``, add the exporter to the traces pipeline in
 ``otel-collector.yml``:
@@ -2024,6 +2030,9 @@ Options
      - Cache token budgets to simulate. ``K`` and ``M`` suffixes are
        binary (``64k``, ``1M``). Default: half-octave steps from 4096
        tokens up to the trace size.
+   * - ``--trace-format {lmcache}``
+     - Producer format of the input spans. ``lmcache`` is the MP
+       server's ``mp.request.trace`` span (default).
    * - ``--model NAME``
      - Only analyze requests for this model name. Use it when one trace
        mixes models, since the simulated cache is shared.

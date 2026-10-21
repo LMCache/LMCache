@@ -35,11 +35,17 @@ class TestLoadTraceRecords:
     def test_reads_trace_spans_sorted_by_timestamp(self) -> None:
         records = load_trace_records([FIXTURE])
 
-        assert [r.session_id for r in records] == ["sess-r1", "sess-r2", "sess-r3"]
+        assert [r.session_id for r in records] == [
+            "sess-r1",
+            "sess-r2",
+            "sess-r3",
+            "sess-r4",
+        ]
         assert [r.timestamp_ns for r in records] == [
             1_700_000_001_000_000_000,
             1_700_000_002_000_000_000,
             1_700_000_003_000_000_000,
+            1_700_000_004_500_000_000,
         ]
         assert records[0].input_ids == list(range(1, 9))
         assert records[1].input_ids == list(range(1, 13)) + [100, 101]
@@ -49,6 +55,22 @@ class TestLoadTraceRecords:
     def test_model_filter(self) -> None:
         records = load_trace_records([FIXTURE], model=LLAMA)
         assert [r.session_id for r in records] == ["sess-r1", "sess-r2"]
+
+    def test_input_ids_as_json_string(self) -> None:
+        # The fixture's sess-r4 carries lmcache.input_ids as one JSON string,
+        # as a collector transform may write it.
+        (r4,) = [r for r in load_trace_records([FIXTURE]) if r.session_id == "sess-r4"]
+        assert r4.input_ids == list(range(300, 308))
+
+    def test_no_match_error_describes_the_file(self, tmp_path: Path) -> None:
+        span = {"name": "request", "startTimeUnixNano": "1", "attributes": []}
+        path = tmp_path / "other.jsonl"
+        path.write_text(
+            '{"resourceSpans":[{"scopeSpans":[{"spans":[%s,%s]}]}]}\n'
+            % (json.dumps(span), json.dumps(span))
+        )
+        with pytest.raises(ValueError, match=r"read 2 span\(s\) named request \(2\)"):
+            load_trace_records([path])
 
     def test_repeat_lookup_keeps_earliest_span(self) -> None:
         # The fixture's last batch looks sess-r1 up again, later.

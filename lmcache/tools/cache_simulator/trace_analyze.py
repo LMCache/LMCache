@@ -24,7 +24,8 @@ no KV shape.
 """
 
 # Standard
-from collections.abc import Iterable, Sequence
+from collections import Counter
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -195,26 +196,68 @@ def _iter_spans(batch: dict[str, Any]) -> Iterable[dict[str, Any]]:
             yield from scope_spans.get("spans", [])
 
 
+def _lmcache_record(span: dict[str, Any]) -> TraceRecord | None:
+    """Record for the ``lmcache`` trace format, or ``None`` for other spans.
+
+    The format is the MP server's ``mp.request.trace`` span with
+    ``lmcache.model``, ``lmcache.input_ids`` and ``session_id``.
+    ``lmcache.input_ids`` is the OTLP integer array as emitted, or one JSON
+    string of the same integers, which is how a collector ``transform``
+    may carry it compactly; both decode to the same ids.
+    """
+    if span.get("name") != TRACE_SPAN_NAME:
+        return None
+    attrs = {a["key"]: _attribute_value(a["value"]) for a in span.get("attributes", [])}
+    ids = attrs["lmcache.input_ids"]
+    if isinstance(ids, str):
+        ids = json.loads(ids)
+    return TraceRecord(
+        timestamp_ns=int(span["startTimeUnixNano"]),
+        model=attrs["lmcache.model"],
+        input_ids=[int(t) for t in ids],
+        session_id=str(attrs["session_id"]),
+    )
+
+
+#: Producer formats ``--trace-format`` accepts, each a span-to-record
+#: function that returns ``None`` for spans the format does not cover.
+TRACE_FORMATS: dict[str, Callable[[dict[str, Any]], TraceRecord | None]] = {
+    "lmcache": _lmcache_record,
+}
+
+
 def load_trace_records(
-    paths: Sequence[Path], model: str | None = None
+    paths: Sequence[Path],
+    trace_format: str = "lmcache",
+    model: str | None = None,
 ) -> list[TraceRecord]:
-    """Read ``mp.request.trace`` spans from OTLP JSON files.
+    """Read request-trace spans from OTLP JSON files.
 
     Each line of each file is one OTLP JSON export batch as written by the
-    OpenTelemetry Collector ``file`` exporter. Spans with any other name
-    are ignored. A request the engine looked up more than once (for example
-    after preemption) emits one span per lookup; only its earliest span is
-    kept, so every request counts once.
+    OpenTelemetry Collector ``file`` exporter. Spans the format does not
+    cover are ignored. A request the engine looked up more than once (for
+    example after preemption) emits one span per lookup; only its earliest
+    span is kept, so every request counts once.
 
     Args:
         paths: Files to read, in any order.
+        trace_format: Producer format of the spans, a key of
+            :data:`TRACE_FORMATS`.
         model: When given, keep only requests for this model name.
 
     Returns:
         One record per session id, sorted by timestamp (ties keep file
         order).
+
+    Raises:
+        ValueError: If no span matched the format. The message says what
+            the files did hold, so a wrong file, a server started without
+            the token trace, or a collector pipeline that renamed the span
+            can be told apart.
     """
+    to_record = TRACE_FORMATS[trace_format]
     records: list[TraceRecord] = []
+    seen: Counter[str] = Counter()
     for path in paths:
         with open(path, encoding="utf-8") as fh:
             for line in fh:
@@ -222,22 +265,21 @@ def load_trace_records(
                 if not line:
                     continue
                 for span in _iter_spans(json.loads(line)):
-                    if span.get("name") != TRACE_SPAN_NAME:
+                    seen[span.get("name", "")] += 1
+                    record = to_record(span)
+                    if record is None or (model is not None and record.model != model):
                         continue
-                    attrs = {
-                        a["key"]: _attribute_value(a["value"])
-                        for a in span.get("attributes", [])
-                    }
-                    if model is not None and attrs["lmcache.model"] != model:
-                        continue
-                    records.append(
-                        TraceRecord(
-                            timestamp_ns=int(span["startTimeUnixNano"]),
-                            model=attrs["lmcache.model"],
-                            input_ids=list(attrs["lmcache.input_ids"]),
-                            session_id=str(attrs["session_id"]),
-                        )
-                    )
+                    records.append(record)
+    if not records:
+        files = ", ".join(str(p) for p in paths)
+        names = ", ".join(f"{n} ({c})" for n, c in seen.most_common(8)) or "none"
+        raise ValueError(
+            f"No {trace_format!r} trace records in {files}: read "
+            f"{sum(seen.values())} span(s) named {names}. Expected "
+            f"{TRACE_SPAN_NAME} spans with lmcache.input_ids, which the MP "
+            "server emits under --enable-token-trace and the collector's "
+            "file exporter writes; see the trace-analyze docs."
+        )
     records.sort(key=lambda r: r.timestamp_ns)
     first_lookup: dict[str, TraceRecord] = {}
     for r in records:
@@ -666,6 +708,15 @@ def add_trace_analyze_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--trace-format",
+        choices=sorted(TRACE_FORMATS),
+        default="lmcache",
+        help=(
+            "Producer format of the input spans (default: lmcache, the MP "
+            "server's mp.request.trace span)"
+        ),
+    )
+    parser.add_argument(
         "--model",
         default=None,
         metavar="NAME",
@@ -681,7 +732,7 @@ def run_trace_analyze(args: argparse.Namespace, metrics: Metrics) -> None:
         metrics: Receives the summary (sections ``trace`` and ``grid``).
 
     Raises:
-        SystemExit: If the input holds no trace spans (after filtering).
+        SystemExit: If the input holds no trace records for the format.
     """
     # Per-lookup matcher and per-hasher construction logs would drown the
     # summary; only problems are worth printing here.
@@ -691,10 +742,12 @@ def run_trace_analyze(args: argparse.Namespace, metrics: Metrics) -> None:
     ):
         logging.getLogger(name).setLevel(logging.WARNING)
 
-    records = load_trace_records(args.input, model=args.model)
-    if not records:
-        inputs = ", ".join(str(p) for p in args.input)
-        raise SystemExit(f"No {TRACE_SPAN_NAME} spans found in {inputs}")
+    try:
+        records = load_trace_records(
+            args.input, trace_format=args.trace_format, model=args.model
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     total_tokens = sum(len(r.input_ids) for r in records)
     if args.capacity is None:

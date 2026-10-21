@@ -26,6 +26,7 @@ def test_registered_under_bench() -> None:
     assert args.bench_target == "trace-analyze"
     assert args.chunk_size == [256]
     assert args.capacity is None
+    assert args.trace_format == "lmcache"
     assert args.html == "trace_analysis.html"
 
 
@@ -56,8 +57,8 @@ def test_end_to_end_writes_report_and_summary(
     args.func(args)
 
     out = json.loads(capsys.readouterr().out)["metrics"]
-    assert out["trace"]["requests"] == 3
-    assert out["trace"]["total_tokens"] == 30
+    assert out["trace"]["requests"] == 4
+    assert out["trace"]["total_tokens"] == 38
     rows = out["grid"]
     assert [(r["chunk_size"], r["capacity_tokens"]) for r in rows] == [
         (4, 8),
