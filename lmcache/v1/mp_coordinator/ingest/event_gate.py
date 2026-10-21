@@ -14,15 +14,18 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import cast
 import threading
+import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
+from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 
@@ -55,21 +58,86 @@ class CacheEventIngestSummary:
 
 @dataclass(frozen=True)
 class InstanceStreamStats:
-    """The gate's cursor for one emitter stream. ``gap_detected`` marks
-    the emitter's slice stale until its stream is replayed."""
+    """The gate's cursor for one emitter stream.
+
+    The loss counts cover the emitter's current incarnation, since this
+    coordinator process began tracking it; they are not checkpointed.
+
+    Attributes:
+        incarnation: The emitter incarnation the cursor belongs to.
+        last_seq: Highest ``seq`` admitted from that incarnation.
+        gap_detected: The coordinator knows it is missing part of this
+            emitter's slice: a batch skipped a ``seq`` or reported more
+            dropped events. Cleared only when the slice is rebuilt (a new
+            incarnation, or the emitter leaving).
+        missing_batches: Batches that never arrived: the ``seq`` values
+            skipped. The first batch of a stream the gate was not tracking
+            counts none, since earlier batches were sent before it listened.
+        events_dropped: Events the emitter reported dropping before they
+            reached the coordinator (the increases of ``dropped_events``).
+        seconds_since_last_event: Seconds since the gate last admitted a
+            batch from this emitter, or since it restored the cursor from a
+            checkpoint if none was admitted since.
+        event_delivery_delay_seconds: For the last admitted batch, the
+            emitter's send time (``ts``) to admission, measured across the
+            two hosts' clocks; ``None`` until a batch carrying ``ts``
+            arrives.
+    """
 
     incarnation: int
     last_seq: int
     gap_detected: bool
+    missing_batches: int = 0
+    events_dropped: int = 0
+    seconds_since_last_event: float = 0.0
+    event_delivery_delay_seconds: float | None = None
+
+
+@dataclass
+class EventGateStats:
+    """What the gate has seen from the emitters.
+
+    The totals cover every emitter since this process started: unlike the
+    per-stream counts they never reset when an emitter restarts or leaves,
+    and they are not checkpointed.
+
+    Attributes:
+        batches_applied: Batches admitted and broadcast to the consumers.
+        batches_duplicate: Batches dropped because their ``seq`` was seen.
+        batches_stale: Batches dropped because their incarnation was older.
+        batches_missing: Batches that never arrived (skipped ``seq``
+            values in streams the gate was already tracking).
+        events_dropped: Events the emitters reported dropping before they
+            reached the coordinator.
+        streams: Each tracked emitter's cursor, keyed by ``instance_id``.
+    """
+
+    batches_applied: int = 0
+    batches_duplicate: int = 0
+    batches_stale: int = 0
+    batches_missing: int = 0
+    events_dropped: int = 0
+    streams: dict[str, InstanceStreamStats] = field(default_factory=dict)
 
 
 @dataclass
 class _StreamCursor:
-    """Mutable form of :class:`InstanceStreamStats`."""
+    """Mutable form of :class:`InstanceStreamStats`.
+
+    ``last_dropped_events`` is the ``dropped_events`` of the last admitted
+    batch, or ``None`` until the gate knows it (a stream joined midway).
+    ``last_admitted_monotonic`` is when the cursor last admitted a batch, or
+    when it was created or restored.
+    """
 
     incarnation: int
     last_seq: int = 0
     gap_detected: bool = False
+    last_dropped_events: int | None = None
+    missing_batches: int = 0
+    events_dropped: int = 0
+    last_admitted_monotonic: float = field(default_factory=time.monotonic)
+    event_delivery_delay_seconds: float | None = None
 
 
 class EventGate:
@@ -91,13 +159,18 @@ class EventGate:
         self._lock = threading.Lock()
         self._broadcaster = broadcaster
         self._cursors: dict[str, _StreamCursor] = {}
+        self._departed: dict[str, int] = {}
         # Acquired outside self._lock on every mutating path, so a capture
         # and an ingest take the two locks in the same order.
         self._quiesce = quiesce
+        # The totals; ``streams`` stays empty here and is filled from the
+        # cursors when stats() takes a snapshot.
+        self._stats = EventGateStats()
+        register_metric_source(self)
 
     def ingest(self, batch: CacheEventBatch) -> IngestResult:
         """Offer one batch to the consumers, applying incarnation
-        fencing, ``seq`` dedup, and gap detection.
+        fencing, ``seq`` dedup, and loss detection.
 
         Args:
             batch: The batch to offer.
@@ -107,34 +180,14 @@ class EventGate:
             it was dropped.
         """
         with self._quiesce.applying(), self._lock:
-            cursor = self._cursors.get(batch.instance_id)
-            if cursor is not None:
-                if batch.incarnation < cursor.incarnation:
-                    return IngestResult.STALE_INCARNATION
-                if batch.incarnation > cursor.incarnation:
-                    # Restart: the emitter's memory is empty, so the L1
-                    # facts its previous incarnation reported are void.
-                    self._broadcaster.fence_instance(batch.instance_id)
-                    cursor = None
-                elif batch.seq <= cursor.last_seq:
-                    return IngestResult.DUPLICATE
-            if cursor is None:
-                cursor = _StreamCursor(incarnation=batch.incarnation)
-                self._cursors[batch.instance_id] = cursor
-
-            if batch.seq > cursor.last_seq + 1 and not cursor.gap_detected:
-                cursor.gap_detected = True
-                logger.warning(
-                    "Event gap for instance %s (incarnation %d): "
-                    "seq jumped %d -> %d; slice needs replay",
-                    batch.instance_id,
-                    batch.incarnation,
-                    cursor.last_seq,
-                    batch.seq,
-                )
-            cursor.last_seq = batch.seq
-            self._broadcaster.broadcast(batch)
-            return IngestResult.ADMITTED
+            result = self._admit(batch)
+            if result == IngestResult.ADMITTED:
+                self._stats.batches_applied += 1
+            elif result == IngestResult.DUPLICATE:
+                self._stats.batches_duplicate += 1
+            else:
+                self._stats.batches_stale += 1
+        return result
 
     def ingest_batches(self, batches: list[CacheEventBatch]) -> CacheEventIngestSummary:
         """Offer ``batches`` to the gate in list order.
@@ -178,7 +231,18 @@ class EventGate:
         """
         with self._quiesce.applying(), self._lock:
             self._broadcaster.fence_instance(instance_id)
-            self._cursors.pop(instance_id, None)
+            cursor = self._cursors.pop(instance_id, None)
+            if cursor is not None:
+                self._departed[instance_id] = cursor.incarnation
+
+    def readmit_instance(self, instance_id: str) -> None:
+        """Take L1 batches from ``instance_id`` again after it re-registers.
+
+        Args:
+            instance_id: The instance that registered again.
+        """
+        with self._lock:
+            self._departed.pop(instance_id, None)
 
     @property
     def name(self) -> str:
@@ -199,9 +263,14 @@ class EventGate:
         has nothing to compare, so a restarted server's stale L1 slice
         would be advertised forever.
 
+        ``last_dropped_events`` rides along, so a restarted coordinator
+        measures the next report against the last one instead of losing a
+        whole report to re-learning it.
+
         Returns:
             ``{"cursors": {instance_id: (incarnation, last_seq,
-            gap_detected)}}``.
+            gap_detected, last_dropped_events)}}``; ``last_dropped_events`` is
+            ``None`` when not yet known.
         """
         with self._lock:
             return {
@@ -210,6 +279,7 @@ class EventGate:
                         cursor.incarnation,
                         cursor.last_seq,
                         cursor.gap_detected,
+                        cursor.last_dropped_events,
                     )
                     for instance_id, cursor in self._cursors.items()
                 }
@@ -219,34 +289,125 @@ class EventGate:
         """Load captured cursors into a gate that has admitted nothing.
 
         Args:
-            state: A :meth:`capture` value.
+            state: A :meth:`capture` value. Cursors captured before the
+                ``last_dropped_events`` existed hold three fields; they
+                restore with it unknown.
 
         Raises:
             ValueError: If the gate already holds cursors -- a batch was
                 admitted before the restore and would be overwritten.
         """
-        cursors = cast("Mapping[str, tuple[int, int, bool]]", state["cursors"])
+        cursors = cast(
+            "Mapping[str, tuple[int, int, bool] | tuple[int, int, bool, int | None]]",
+            state["cursors"],
+        )
         with self._lock:
             if self._cursors:
                 raise ValueError(
                     "restore() requires a gate that has admitted nothing "
                     f"(holds {len(self._cursors)} cursors)"
                 )
-            for instance_id, (incarnation, last_seq, gap_detected) in cursors.items():
+            for instance_id, fields in cursors.items():
+                incarnation, last_seq, gap_detected = fields[:3]
                 self._cursors[instance_id] = _StreamCursor(
                     incarnation=incarnation,
                     last_seq=last_seq,
                     gap_detected=gap_detected,
+                    last_dropped_events=fields[3] if len(fields) > 3 else None,
                 )
 
-    def stats(self) -> dict[str, InstanceStreamStats]:
-        """Return a cursor snapshot keyed by ``instance_id``."""
+    def stats(self) -> EventGateStats:
+        """Return a snapshot of the totals and every emitter's cursor."""
+        now = time.monotonic()
         with self._lock:
-            return {
-                instance_id: InstanceStreamStats(
-                    incarnation=cursor.incarnation,
-                    last_seq=cursor.last_seq,
-                    gap_detected=cursor.gap_detected,
+            return replace(
+                self._stats,
+                streams={
+                    instance_id: InstanceStreamStats(
+                        incarnation=cursor.incarnation,
+                        last_seq=cursor.last_seq,
+                        gap_detected=cursor.gap_detected,
+                        missing_batches=cursor.missing_batches,
+                        events_dropped=cursor.events_dropped,
+                        seconds_since_last_event=now - cursor.last_admitted_monotonic,
+                        event_delivery_delay_seconds=(
+                            cursor.event_delivery_delay_seconds
+                        ),
+                    )
+                    for instance_id, cursor in self._cursors.items()
+                },
+            )
+
+    # -- Internals ------------------------------------------------------------
+
+    def _admit(self, batch: CacheEventBatch) -> IngestResult:
+        """Decide ``batch``'s fate and, if admitted, account its loss and
+        broadcast it. Call holding the quiesce and ``self._lock``."""
+        departed = self._departed.get(batch.instance_id)
+        if departed is not None:
+            if batch.incarnation > departed:
+                del self._departed[batch.instance_id]
+            elif batch.tier == Tier.L1:
+                return IngestResult.STALE_INCARNATION
+        cursor = self._cursors.get(batch.instance_id)
+        # Loss is measured only from a known starting point: a stream the
+        # gate already tracks, including across a restart.
+        tracked = cursor is not None
+        if cursor is not None:
+            if batch.incarnation < cursor.incarnation:
+                return IngestResult.STALE_INCARNATION
+            if batch.incarnation > cursor.incarnation:
+                # Restart: the emitter's memory is empty, so the L1
+                # facts its previous incarnation reported are void.
+                self._broadcaster.fence_instance(batch.instance_id)
+                cursor = None
+            elif batch.seq <= cursor.last_seq:
+                return IngestResult.DUPLICATE
+        if cursor is None:
+            cursor = _StreamCursor(
+                incarnation=batch.incarnation,
+                # A new incarnation, or a stream seen from its first batch,
+                # has dropped nothing yet; one joined midway has an unknown
+                # history, so its first report is only remembered.
+                last_dropped_events=0 if tracked or batch.seq == 1 else None,
+            )
+            self._cursors[batch.instance_id] = cursor
+
+        skipped = batch.seq - cursor.last_seq - 1
+        if skipped > 0:
+            self._mark_gap(
+                cursor,
+                batch,
+                f"seq jumped {cursor.last_seq} -> {batch.seq}",
+            )
+            if tracked:
+                cursor.missing_batches += skipped
+                self._stats.batches_missing += skipped
+        if cursor.last_dropped_events is not None:
+            dropped = batch.dropped_events - cursor.last_dropped_events
+            if dropped > 0:
+                self._mark_gap(
+                    cursor, batch, f"emitter reported {dropped} dropped events"
                 )
-                for instance_id, cursor in self._cursors.items()
-            }
+                cursor.events_dropped += dropped
+                self._stats.events_dropped += dropped
+        cursor.last_dropped_events = batch.dropped_events
+        cursor.last_seq = batch.seq
+        cursor.last_admitted_monotonic = time.monotonic()
+        if batch.ts > 0:
+            cursor.event_delivery_delay_seconds = time.time() - batch.ts
+        self._broadcaster.broadcast(batch)
+        return IngestResult.ADMITTED
+
+    @staticmethod
+    def _mark_gap(cursor: _StreamCursor, batch: CacheEventBatch, reason: str) -> None:
+        """Flag ``cursor``'s slice incomplete, warning the first time."""
+        if cursor.gap_detected:
+            return
+        cursor.gap_detected = True
+        logger.warning(
+            "Event loss for instance %s (incarnation %d): %s; slice needs replay",
+            batch.instance_id,
+            batch.incarnation,
+            reason,
+        )

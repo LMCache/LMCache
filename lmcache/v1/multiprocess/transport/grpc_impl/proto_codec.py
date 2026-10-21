@@ -551,15 +551,30 @@ def compile_response_encoder_for_type(
     response_type: Any,
 ) -> ResponseEncoder:
     """Compile a protobuf response encoder for a Python return type."""
-    proto_fields = tuple(message_cls.DESCRIPTOR.fields)
+    descriptor = message_cls.DESCRIPTOR
+    proto_fields = tuple(descriptor.fields)
     response_type, optional = _unwrap_optional(response_type)
+    write_value: FieldWriter | None = None
+
+    def write_response(message: Any, result: Any) -> None:
+        # Compiled on first use, so a handler that only returns protobuf
+        # messages never needs a structural codec.
+        nonlocal write_value
+        if _proto_has_same_descriptor(result, descriptor):
+            message.CopyFrom(result)
+            return
+        if write_value is None:
+            write_value = _compile_response_writer(
+                descriptor, proto_fields, response_type
+            )
+        write_value(message, result)
 
     if optional:
 
         def encode_optional(result: Any) -> Any:
             message = message_cls()
             if result is not None:
-                _write_response_value(message, proto_fields, response_type, result)
+                write_response(message, result)
             return message
 
         return encode_optional
@@ -579,44 +594,54 @@ def compile_response_encoder_for_type(
                     "non-empty response"
                 )
             return message
-        _write_response_value(message, proto_fields, response_type, result)
+        write_response(message, result)
         return message
 
     return encode_response
 
 
-def _write_response_value(
-    message: Any,
+def _compile_response_writer(
+    descriptor: Any,
     proto_fields: tuple[Any, ...],
     response_type: Any,
-    result: Any,
-) -> None:
-    if _proto_has_same_descriptor(result, message.DESCRIPTOR):
-        message.CopyFrom(result)
-        return
+) -> FieldWriter:
+    """Compile the writer for a non-protobuf response value.
 
+    Args:
+        descriptor: Descriptor of the response message.
+        proto_fields: Fields of the response message, in declaration order.
+        response_type: Python return type, already unwrapped from Optional.
+
+    Returns:
+        A writer that sets a response value of ``response_type`` on a message.
+
+    Raises:
+        TypeError: If no codec maps ``response_type`` to the message.
+    """
     py_fields = _structured_fields(response_type)
     if py_fields is not None and len(py_fields) == len(proto_fields):
-        writer, _reader = _compile_message_codec(message.DESCRIPTOR, response_type)
-        writer(message, result)
-        return
+        writer, _reader = _compile_message_codec(descriptor, response_type)
+        return writer
 
     tuple_types = _fixed_tuple_types(response_type)
     if tuple_types is not None and len(tuple_types) == len(proto_fields):
-        for field, item_type, item in zip(
-            proto_fields, tuple_types, result, strict=True
-        ):
-            writer, _reader = _compile_field_codec(field, item_type)
-            writer(message, item)
-        return
+        writers = tuple(
+            _compile_field_codec(field, item_type)[0]
+            for field, item_type in zip(proto_fields, tuple_types, strict=True)
+        )
+
+        def write_tuple(message: Any, value: Any) -> None:
+            for writer, item in zip(writers, value, strict=True):
+                writer(message, item)
+
+        return write_tuple
 
     if len(proto_fields) == 1:
         writer, _reader = _compile_field_codec(proto_fields[0], response_type)
-        writer(message, result)
-        return
+        return writer
 
     raise TypeError(
-        f"no response codec from {response_type!r} to {message.DESCRIPTOR.full_name}"
+        f"no response codec from {response_type!r} to {descriptor.full_name}"
     )
 
 

@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from enum import IntEnum, auto
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional
 import struct
 
 # Third Party
@@ -10,32 +9,13 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import parse_cache_key
 from lmcache.v1.memory_management import MemoryFormat
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.utils import CacheEngineKey, LayerCacheEngineKey
 
 logger = init_logger(__name__)
 
 
-MAX_KEY_LENGTH = 150
 REMOTE_METADATA_FMT: Optional[str] = None
 REMOTE_METADATA_BYTES: Optional[int] = None
-
-
-class ClientCommand(IntEnum):
-    PUT = auto()
-    GET = auto()
-    EXIST = auto()
-    LIST = auto()
-    HEALTH = auto()
-
-
-class ServerReturnCode(IntEnum):
-    SUCCESS = 200
-    FAIL = 400
 
 
 DTYPE_TO_INT = {
@@ -62,19 +42,6 @@ INT_TO_DTYPE = {
     6: torch.uint8,
     7: torch.float8_e4m3fn,
     8: torch.float8_e5m2,
-}
-
-# TODO (Jiayi): Add more backends
-LOCATION_TO_INT = {
-    None: 0,
-    "LocalCPUBackend": 1,
-    "LocalDiskBackend": 2,
-}
-
-INT_TO_LOCATION = {
-    0: None,
-    1: "LocalCPUBackend",
-    2: "LocalDiskBackend",
 }
 
 
@@ -205,117 +172,4 @@ class RemoteMetadata:
             shapes,
             dtypes,
             memory_fmt,
-        )
-
-
-# TODO(Jiayi): Server and client message can be merged into one.
-
-
-@dataclass
-class ClientMetaMessage:
-    """
-    Request message from LMCache workers or servers.
-    """
-
-    command: ClientCommand
-    key: Union["CacheEngineKey", "LayerCacheEngineKey"]
-    length: int
-    fmt: MemoryFormat
-    dtype: Optional[torch.dtype]
-    shape: torch.Size
-    location: Optional[str] = None
-
-    def serialize(self) -> bytes:
-        key_str = self.key.to_string()
-        assert len(key_str) <= MAX_KEY_LENGTH, (
-            f"Key length {len(key_str)} exceeds maximum {MAX_KEY_LENGTH}"
-        )
-
-        # NOTE(Jiayi): 4 is the maximum dimension of memory object.
-        # Pass in shape [x, 0, 0, 0] if it is a bytes memory object
-        padded = pad_shape_to_4d(self.shape)
-
-        packed_bytes = struct.pack(
-            f"iiiiiiiii{MAX_KEY_LENGTH}s",
-            self.command.value,
-            self.length,
-            int(self.fmt.value),
-            DTYPE_TO_INT[self.dtype],
-            LOCATION_TO_INT[self.location],
-            padded[0],
-            padded[1],
-            padded[2],
-            padded[3],
-            key_str.encode().ljust(MAX_KEY_LENGTH),
-        )
-        return packed_bytes
-
-    @staticmethod
-    def deserialize(s: bytes) -> "ClientMetaMessage":
-        command, length, fmt, dtype, location, shape0, shape1, shape2, shape3, key = (
-            struct.unpack(f"iiiiiiiii{MAX_KEY_LENGTH}s", s)
-        )
-        shape = strip_shape_padding([shape0, shape1, shape2, shape3], MemoryFormat(fmt))
-        return ClientMetaMessage(
-            ClientCommand(command),
-            parse_cache_key(key.decode().strip()),
-            length,
-            MemoryFormat(fmt),
-            INT_TO_DTYPE[dtype],
-            shape,
-            INT_TO_LOCATION[location],
-        )
-
-    @staticmethod
-    def packlength() -> int:
-        # NOTE: 9 is the number of integers
-        return 4 * 9 + MAX_KEY_LENGTH
-
-
-@dataclass
-class ServerMetaMessage:
-    """
-    Reply message from LMCache workers or servers.
-    """
-
-    code: ServerReturnCode
-    length: int
-    fmt: MemoryFormat
-    dtype: Optional[torch.dtype]
-    shape: torch.Size
-    location: Optional[str] = None
-
-    def serialize(self) -> bytes:
-        padded = pad_shape_to_4d(self.shape)
-        packed_bytes = struct.pack(
-            "iiiiiiiii",
-            self.code.value,
-            self.length,
-            int(self.fmt.value),
-            DTYPE_TO_INT[self.dtype],
-            padded[0],
-            padded[1],
-            padded[2],
-            padded[3],
-            LOCATION_TO_INT[self.location],
-        )
-        return packed_bytes
-
-    @staticmethod
-    def packlength() -> int:
-        return 4 * 9
-
-    @staticmethod
-    def deserialize(s: bytes) -> "ServerMetaMessage":
-        code, length, fmt, dtype, shape0, shape1, shape2, shape3, location = (
-            struct.unpack("iiiiiiiii", s)
-        )
-        shape = strip_shape_padding([shape0, shape1, shape2, shape3], MemoryFormat(fmt))
-        return ServerMetaMessage(
-            ServerReturnCode(code),
-            length,
-            MemoryFormat(fmt),
-            INT_TO_DTYPE[dtype],
-            shape,
-            INT_TO_LOCATION[location],
         )

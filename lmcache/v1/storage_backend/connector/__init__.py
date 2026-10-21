@@ -54,7 +54,7 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
         ValueError: If the URL is invalid
     """
 
-    logger.debug(f"Parsing remote URL: {url}")
+    logger.debug("Parsing remote URL: %s", url)
     parsed = urlparse(url)
 
     username = parsed.username
@@ -253,9 +253,9 @@ class ConnectorManager:
         ):
             try:
                 self.adapters.append(cls())
-                logger.info(f"Discovered adapter: {cls.__name__}")
+                logger.info("Discovered adapter: %s", cls.__name__)
             except Exception as e:
-                logger.error(f"Failed to instantiate adapter {cls.__name__}: {str(e)}")
+                logger.error("Failed to instantiate adapter %s: %s", cls.__name__, e)
 
     def _remote_adapters_plugin_launcher(self, config: LMCacheEngineConfig) -> None:
         """Automatically load all plug and play remote connector adapters."""
@@ -336,19 +336,22 @@ class ConnectorManager:
                 )
             except (ImportError, AttributeError) as e:
                 logger.error(
-                    f"Failed to load remote connector {remote_storage_plugin} due to "
-                    f"import/attribute error: {e}"
+                    "Failed to load remote connector %s due to import/attribute "
+                    "error: %s",
+                    remote_storage_plugin,
+                    e,
                 )
             except Exception as e:
                 logger.error(
-                    f"Failed to create remote connector {remote_storage_plugin} "
-                    f"adapter: {str(e)}"
+                    "Failed to create remote connector %s adapter: %s",
+                    remote_storage_plugin,
+                    e,
                 )
 
     def create_connector(self) -> RemoteConnector:
         for adapter in self.adapters:
             if adapter.can_parse(self.context.url):
-                logger.info(f"Creating connector for URL: {self.context.url}")
+                logger.info("Creating connector for URL: %s", self.context.url)
                 connector = adapter.create_connector(self.context)
                 return connector
 
@@ -370,7 +373,6 @@ def CreateConnector(
     - redis://[[username]:[password]@]host[:port][/database][?option=value]
     - rediss://[[username]:[password]@]host[:port][/database][?option=value] (SSL)
     - redis-sentinel://[[username]:[password]@]host1:port1[,host2:port2,...]/service_name
-    - lm://host:port
     - infinistore://host:port[?device=device_name]
     - mooncakestore://host:port[?device=device_name]
     - blackhole://[any_text]
@@ -385,7 +387,6 @@ def CreateConnector(
     - redis://localhost:6379
     - rediss://user:password@redis.example.com:6380/0
     - redis-sentinel://user:password@sentinel1:26379,sentinel2:26379/mymaster
-    - lm://localhost:65432
     - infinistore://127.0.0.1:12345?device=mlx5_0
     - mooncakestore://127.0.0.1:50051
     - blackhole://

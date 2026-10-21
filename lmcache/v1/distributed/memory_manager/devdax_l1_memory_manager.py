@@ -62,6 +62,7 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             shm_name=config.shm_name or None,
             align_bytes=config.align_bytes,
             use_hugepages=config.use_hugepages,
+            offset=config.devdax_offset_in_bytes,
         )
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
@@ -111,28 +112,30 @@ class DevDaxL1MemoryManager(L1MemoryManager):
         """
         return cast(DevDaxMemoryAllocator, self._allocator).owns_device(device_path)
 
-    def add_device(self, device_path: str, size_in_bytes: int) -> DevDaxArenaStatus:
-        """Map an additional Device-DAX device into the L1 arena pool at runtime.
+    def add_device(
+        self, device_path: str, size_in_bytes: int, offset_in_bytes: int = 0
+    ) -> DevDaxArenaStatus:
+        """Map an additional Device-DAX range into the L1 arena pool at runtime.
 
-        The new device becomes overflow capacity available to subsequent
+        The new range becomes overflow capacity available to subsequent
         allocations. Existing allocations are untouched.
 
         Args:
-            device_path: Path to a readable and writable Device-DAX device that
-                is not already mapped.
+            device_path: Path to a readable and writable Device-DAX device.
             size_in_bytes: Number of bytes to map from the device.
+            offset_in_bytes: Byte offset into the device.
 
         Returns:
             The status of the newly added arena.
 
         Raises:
             L1ReconfigureError: 409 when the request conflicts with the device
-                or pool state (already mapped, capacity exceeded, allocator
-                closed, device not openable).
+                or pool state (range overlap, capacity exceeded, allocator
+                closed, device not openable, invalid offset).
         """
         allocator = cast(DevDaxMemoryAllocator, self._allocator)
         try:
-            return allocator.add_device(device_path, size_in_bytes)
+            return allocator.add_device(device_path, size_in_bytes, offset_in_bytes)
         except (ValueError, RuntimeError, OSError) as exc:
             raise L1ReconfigureError(409, str(exc)) from exc
 
@@ -140,51 +143,55 @@ class DevDaxL1MemoryManager(L1MemoryManager):
         self,
         device_path: str,
         mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
-        """Retire a Device-DAX device from the L1 arena pool at runtime.
+        """Retire a Device-DAX arena from the L1 arena pool at runtime.
 
-        The device stops accepting new allocations and is unmapped once its
+        The arena stops accepting new allocations and is unmapped once its
         already-issued allocations are all freed. The primary arena (the one
         backing :meth:`get_l1_memory_desc` in a pure Device-DAX configuration)
         may not be removed.
 
         Args:
-            device_path: Path of the device to remove.
+            device_path: Path of the arena to remove.
             mode: Removal strategy. Only :attr:`DevDaxRemoveMode.DRAIN` is
                 supported.
+            offset_in_bytes: Device offset the arena was added with.
 
         Returns:
             The arena status after the request: ``REMOVED`` if it was unmapped
             immediately, otherwise ``DRAINING`` with the live allocation count.
 
         Raises:
-            L1ReconfigureError: 404 when no arena is mapped at ``device_path``;
-                409 when ``mode`` is unsupported or the arena is primary and
-                non-removable.
+            L1ReconfigureError: 404 when no arena matches; 409 when ``mode`` is
+                unsupported or the arena is primary and non-removable.
         """
         allocator = cast(DevDaxMemoryAllocator, self._allocator)
         try:
-            return allocator.remove_device(device_path, mode)
+            return allocator.remove_device(device_path, mode, offset_in_bytes)
         except DevDaxNotMappedError as exc:
             raise L1ReconfigureError(404, str(exc)) from exc
         except ValueError as exc:
             raise L1ReconfigureError(409, str(exc)) from exc
 
-    def get_arena_status(self, device_path: str) -> DevDaxArenaStatus:
-        """Return the status of the Device-DAX arena mapped at ``device_path``.
+    def get_arena_status(
+        self, device_path: str, offset_in_bytes: int = 0
+    ) -> DevDaxArenaStatus:
+        """Return the status of the Device-DAX arena at ``(device_path, offset)``.
 
         Args:
             device_path: The exact path used when the arena was added.
+            offset_in_bytes: Device offset the arena was added with.
 
         Returns:
             The arena's current status.
 
         Raises:
-            L1ReconfigureError: 404 when no arena is mapped at ``device_path``.
+            L1ReconfigureError: 404 when no arena matches.
         """
         allocator = cast(DevDaxMemoryAllocator, self._allocator)
         try:
-            return allocator.arena_status(device_path)
+            return allocator.arena_status(device_path, offset_in_bytes)
         except DevDaxNotMappedError as exc:
             raise L1ReconfigureError(404, str(exc)) from exc
 
