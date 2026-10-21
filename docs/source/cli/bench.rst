@@ -1065,6 +1065,15 @@ Both transfer modes verify local buffers. ``--url`` remains accepted for
 compatibility but is unused.
 
 
+Client control is single-threaded; each STORE/RETRIEVE runs enabled workers
+concurrently, including synchronous engine-driven transfers. The client starts
+and reuses transfer threads outside measured operations. Transfer latency covers
+dispatch through completion of all workers. A timeout or exception disables
+further client operations until close.
+``--transfer-timeout`` bounds each transfer wait (default: 10 seconds).
+``close()`` waits for transfer threads before synchronously releasing resources;
+a stuck native call can block shutdown.
+
 Quick start
 ~~~~~~~~~~~
 
@@ -1124,6 +1133,9 @@ Options
    * - ``--block-allocation {sequential,random}``
      - ``sequential``
      - Allocate the lowest free block IDs or sample from all free IDs.
+   * - ``--transfer-timeout SECS``
+     - ``10``
+     - Positive, finite wait budget for each STORE or RETRIEVE call.
    * - ``--num-blocks N``
      - ``1024``
      - Fallback block capacity per KV group; overridden by the shape spec.

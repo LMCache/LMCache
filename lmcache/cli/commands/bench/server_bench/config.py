@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 import argparse
+import math
 
 # First Party
 from lmcache.cli.commands.bench.server_bench.cases.base import BenchCase
@@ -48,6 +49,7 @@ class BenchConfig:
     block_size: int
     concurrency: int = 1
     block_allocation: Literal["sequential", "random"] = "sequential"
+    transfer_timeout_s: float = 10.0
 
     def __post_init__(self) -> None:
         if self.mode not in ("cpu", "gpu"):
@@ -65,6 +67,8 @@ class BenchConfig:
 
         if self.block_allocation not in ("sequential", "random"):
             raise ValueError(f"unsupported block allocation: {self.block_allocation}")
+        if not math.isfinite(self.transfer_timeout_s) or self.transfer_timeout_s <= 0:
+            raise ValueError("transfer_timeout_s must be finite and positive")
 
     @property
     def is_gpu(self) -> bool:
@@ -147,4 +151,5 @@ def parse_args_to_config(args: argparse.Namespace) -> BenchConfig:
         block_size=args.block_size,
         concurrency=int(getattr(args, "concurrency", 1)),
         block_allocation=getattr(args, "block_allocation", "sequential"),
+        transfer_timeout_s=float(getattr(args, "transfer_timeout", 10.0)),
     )
