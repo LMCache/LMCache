@@ -20,6 +20,7 @@ import zmq
 from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.integration.vllm.experimental import dispatch
+from lmcache.integration.vllm.mp_lookup_state import LookupState
 from lmcache.integration.vllm.mp_server_launcher import (
     maybe_start_mp_server_from_url,
     wait_for_mp_server_from_url,
@@ -238,24 +239,6 @@ def _resolve_extra_config(
 
 class _IpcEvent(Protocol):
     def wait(self, stream: Any = None) -> None: ...
-
-
-@dataclass
-class _LookupAck:
-    """LOOKUP requests whose server acknowledgement has not been observed yet.
-
-    ``LMCacheMPSchedulerAdapter.maybe_submit_lookup_request`` sends one LOOKUP
-    per server and returns without waiting for the reply.  The futures are
-    kept here so that ``check_lookup_result`` can confirm every server has
-    registered the prefetch job before it sends QUERY_PREFETCH_STATUS, and so
-    a reply that never arrives can be detected via ``submitted_at``.
-    """
-
-    futures: dict[str, MessagingFuture[None]]
-    """Outstanding LOOKUP futures keyed by server URL; acked ones are removed."""
-
-    submitted_at: float
-    """``time.monotonic()`` timestamp taken when the LOOKUPs were sent."""
 
 
 def get_lmcache_chunk_size(
@@ -774,27 +757,10 @@ class LMCacheMPSchedulerAdapter:
         self._mq_timeout = mq_timeout
         self._required_chunk_alignment = required_chunk_alignment
 
-        # Lookup state tracking:
-        # - _pending_lookups: request_ids submitted but not yet resolved
-        # - _unacked_lookups: LOOKUP futures not yet acknowledged by every
-        #   server. check_lookup_result never sends QUERY_PREFETCH_STATUS for
-        #   a request until its LOOKUP has been acked (see _LookupAck).
-        # - _finished_lookup_results: cached chunk count keyed by request_id,
-        #   so that repeated calls to check_lookup_result return the same value
-        #   even after the server has already popped the job (exactly-once).
-        # - _per_server_hits: {request_id: {server_url: hit_chunks}}.
-        #   Per-server hit counts, used to detect disagreement and free tail locks.
-        self._pending_lookups: set[str] = set()
-        self._unacked_lookups: dict[str, _LookupAck] = {}
-        self._finished_lookup_results: dict[str, int] = {}
-        self._per_server_hits: dict[str, dict[str, int]] = {}
-        # request_id -> server URL -> (in-flight status future, submission time).
-        self._lookup_status: dict[
-            str, dict[str, tuple[MessagingFuture[Any], float]]
-        ] = {}
-        self._lookup_params: dict[
-            str, tuple[list[int], str, dict[str, Any] | None]
-        ] = {}
+        # Submitted lookups until cleanup_lookup_result. Each keeps its result
+        # once resolved, so repeated checks return the same value after the
+        # server has handed the hit count over (exactly once).
+        self._lookups: dict[str, LookupState] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -921,8 +887,9 @@ class LMCacheMPSchedulerAdapter:
         Submit a new lookup request to LMCache if there is no ongoing request.
 
         Sends LOOKUP to every server without waiting for the ack, so the
-        scheduler thread is not blocked here.  ``check_lookup_result``
-        polls the acks and then queries the prefetch result.
+        scheduler thread is not blocked here. Each server's prefetch status
+        is queried as soon as that server acks, and ``check_lookup_result``
+        reports the result.
 
         Args:
             request_id: The ID of the lookup request. The same ID indicates it's
@@ -956,7 +923,7 @@ class LMCacheMPSchedulerAdapter:
         if not self.is_healthy:
             return False
 
-        if request_id in self._pending_lookups:
+        if request_id in self._lookups:
             # Skip if there is already a lookup request
             return False
 
@@ -974,76 +941,36 @@ class LMCacheMPSchedulerAdapter:
             request_configs=request_configs,
         ).no_worker_id_version()
 
-        futures: dict[str, MessagingFuture[None]] = {
-            url: self.req_clients[url].lookup(key, self.tp_size)
-            for url in self._server_urls
-        }
-
         # Do not wait for the acknowledgement here: that is a full server
-        # round trip on the scheduler thread. check_lookup_result resolves
-        # the futures lazily, one non-blocking poll per call.
-        self._unacked_lookups[request_id] = _LookupAck(
-            futures=futures, submitted_at=time.monotonic()
+        # round trip on the scheduler thread.
+        lookup = LookupState(
+            key,
+            self.req_clients,
+            tp_size=self.tp_size,
+            tokens_per_chunk=self.lmcache_tokens_per_chunk,
+            timeout=self._mq_timeout,
+            blocking_lookup=not self._nonblocking_lookup_status,
         )
-        self._pending_lookups.add(request_id)
-        self._lookup_params[request_id] = (token_ids, cache_salt, request_configs)
+        self._lookups[request_id] = lookup
+        lookup.submit()
         return True
-
-    def _free_inconsistent_lookup_locks(
-        self,
-        request_id: str,
-        per_server: dict[str, int],
-        min_chunks: int,
-    ) -> None:
-        """Release over-hit tail locks on servers that reported more than min.
-
-        When servers disagree on hit chunk counts, servers reporting more
-        than min_chunks have locked chunks in the range
-        [min_chunks * tokens_per_chunk, hit_chunks * tokens_per_chunk)
-        that will never be retrieved. This method frees those tail locks.
-
-        Args:
-            request_id: The lookup request ID.
-            per_server: Per-server hit chunk counts.
-            min_chunks: Minimum hit chunk count across all servers.
-        """
-        token_ids_l, cs, request_configs = self._lookup_params.pop(
-            request_id, (None, None, None)
-        )
-        if token_ids_l is not None:
-            for url, hit_chunks in per_server.items():
-                if hit_chunks <= min_chunks:
-                    continue
-                tail_end = min(
-                    hit_chunks * self.lmcache_tokens_per_chunk, len(token_ids_l)
-                )
-                tail_key = self._create_key(
-                    token_ids=token_ids_l,
-                    start=min_chunks * self.lmcache_tokens_per_chunk,
-                    end=tail_end,
-                    request_id=request_id,
-                    cache_salt=cs or "",
-                    request_configs=request_configs,
-                ).no_worker_id_version()
-                self.req_clients[url].free_lookup_locks(tail_key, self.tp_size)
 
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
         """
         Check the result of a previously submitted lookup request.
 
-        First polls, without blocking, whether every server has acknowledged
-        the LOOKUP sent by ``maybe_submit_lookup_request``; while any ack is
-        outstanding this returns None. Once all servers have acked, polls one
-        outstanding QUERY_PREFETCH_STATUS future per unresolved server without
-        waiting by default. Setting ``lmcache.mp.nonblocking_lookup_status`` to
-        False instead waits for each reply in the current callback. Returns the
-        matched token count when the prefetch is complete, or None if still
-        in progress.
+        Never waits for a LOOKUP ack. A server's QUERY_PREFETCH_STATUS goes
+        out once that server has acked, and is re-sent while the server
+        answers that the prefetch is still running. By default this call does
+        not wait for status replies either; setting
+        ``lmcache.mp.nonblocking_lookup_status`` to False makes it wait for the
+        replies in flight. Returns the matched token count once every server
+        has reported, or None while the prefetch is in progress.
 
-        A LOOKUP that is not acknowledged within the MQ timeout marks that
-        server unhealthy and makes this return 0, matching the behaviour of
-        a timed-out synchronous submit.
+        A LOOKUP or status RPC that is not answered within the MQ timeout
+        marks that server unhealthy and makes this return 0 from then on,
+        matching the behaviour of a timed-out synchronous submit.
 
         Args:
             request_id: The ID of the lookup request submitted in
@@ -1054,94 +981,15 @@ class LMCacheMPSchedulerAdapter:
             in LMCache (prefix matching), or
             None if the lookup request is not finished yet.
         """
-        if request_id not in self._pending_lookups:
-            # No job — either unhealthy at submit time or already cleaned up.
-            # Return the cached aggregate if any, otherwise 0.
-            return self._finished_lookup_results.get(request_id, 0)
-
-        if not self.is_healthy:
-            # Server went down — give up on this lookup
+        lookup = self._lookups.get(request_id)
+        if lookup is None or not self.is_healthy:
+            # No job (unhealthy at submit time or already cleaned up), or a
+            # server went down: give up on this lookup.
             return 0
 
-        if request_id in self._finished_lookup_results:
-            # Aggregation already done; return the cached value.
-            return self._finished_lookup_results[request_id]
-
-        ack = self._unacked_lookups.get(request_id)
-        if ack is not None:
-            # The server registers the prefetch job while handling LOOKUP.
-            # LOOKUP and QUERY_PREFETCH_STATUS run on the same server thread
-            # pool and may be reordered, and a status query for an unknown
-            # request_id answers 0: a spurious miss whose prefetch locks are
-            # never released. So never query until every server has acked.
-            ack.futures = {
-                url: fut for url, fut in ack.futures.items() if not fut.query()
-            }
-            if ack.futures:
-                if time.monotonic() - ack.submitted_at >= self._mq_timeout:
-                    for url in ack.futures:
-                        self._mark_lookup_timed_out(url)
-                    del self._unacked_lookups[request_id]
-                    return 0
-                # Acknowledgement still in flight; poll again next step.
-                return None
-            del self._unacked_lookups[request_id]
-
-        # Persistent accumulator for this request. A server present in
-        # the dict has already handed over its final hit count and must
-        # not be polled again; absence means "not yet observed".
-        per_server = self._per_server_hits.setdefault(request_id, {})
-        unresolved_urls = [u for u in self._server_urls if u not in per_server]
-
-        futures = self._lookup_status.setdefault(request_id, {})
-        for url in unresolved_urls:
-            # Keep the same future until its reply arrives; never restart a poll.
-            if url not in futures:
-                futures[url] = (
-                    self.req_clients[url].query_prefetch_status(request_id),
-                    time.monotonic(),
-                )
-
-        for url, (fut, submitted_at) in list(futures.items()):
-            if self._nonblocking_lookup_status and not fut.query():
-                if time.monotonic() - submitted_at >= self._mq_timeout:
-                    self._mark_lookup_timed_out(url)
-                    return 0
-                continue
-            del futures[url]
-            try:
-                r = fut.result(
-                    timeout=0 if self._nonblocking_lookup_status else self._mq_timeout
-                )
-            except TimeoutError:
-                logger.warning(
-                    "QUERY_PREFETCH_STATUS to %s timed out. Marking unhealthy.",
-                    url,
-                )
-                self._health_events[url].clear()
-                return 0
-            if r is None:
-                continue
-            per_server[url] = int(r)
-
-        if len(per_server) < len(self._server_urls):
-            return None
-
-        min_chunks = min(per_server.values())
-        max_chunks = max(per_server.values())
-        if min_chunks != max_chunks:
-            logger.warning(
-                "[req=%s] LMCache hit mismatch across servers: %s → take min=%d",
-                request_id,
-                dict(per_server),
-                min_chunks,
-            )
-            self._free_inconsistent_lookup_locks(request_id, per_server, min_chunks)
-
-        token_count = min_chunks * self.lmcache_tokens_per_chunk
-
-        self._finished_lookup_results[request_id] = token_count
-        return token_count
+        for url in lookup.on_scheduler_check():
+            self._mark_lookup_timed_out(url)
+        return lookup.get_result()
 
     def num_blocks_per_chunk(self) -> int:
         """
@@ -1153,15 +1001,16 @@ class LMCacheMPSchedulerAdapter:
     def cleanup_lookup_result(self, request_id: str) -> None:
         """
         Clean up lookup state for a finished request to prevent memory leak.
+
+        The request's lookup stops sending RPCs, and replies still in flight
+        are ignored.
+
         Args:
             request_id: The ID of the finished request.
         """
-        self._pending_lookups.discard(request_id)
-        self._unacked_lookups.pop(request_id, None)
-        self._lookup_status.pop(request_id, None)
-        self._finished_lookup_results.pop(request_id, None)
-        self._per_server_hits.pop(request_id, None)
-        self._lookup_params.pop(request_id, None)
+        lookup = self._lookups.pop(request_id, None)
+        if lookup is not None:
+            lookup.close()
 
     def reset_cache(self) -> bool:
         """Ask every backing LMCache server to best-effort clear idle cache.
@@ -1266,9 +1115,10 @@ class LMCacheMPSchedulerAdapter:
         """
         Notify LMCache server to remove the session for a finished request.
 
-        For unacked lookup results, this function will block waiting until
-        they are acked. Already-submitted status requests are also drained
-        before END_SESSION so their handlers cannot recreate the session.
+        If the request's lookup is still tracked, it stops sending RPCs, and
+        this function blocks until its LOOKUP and status RPCs already in
+        flight complete, so their handlers cannot recreate the session after
+        END_SESSION.
 
         Args:
             request_id: The ID of the finished request.
@@ -1276,25 +1126,10 @@ class LMCacheMPSchedulerAdapter:
         if not self.is_healthy:
             return
 
-        ack = self._unacked_lookups.pop(request_id, None)
-        if ack is not None:
-            remaining = max(
-                0.0, self._mq_timeout - (time.monotonic() - ack.submitted_at)
-            )
-            for url, fut in ack.futures.items():
-                try:
-                    fut.result(timeout=remaining)
-                except TimeoutError:
-                    self._mark_lookup_timed_out(url)
-                    return
-
-        # Status polling used to complete inside check_lookup_result(). Keep
-        # its ordering before END_SESSION when a request finishes early.
-        for url, (future, submitted_at) in self._lookup_status.pop(
-            request_id, {}
-        ).items():
-            remaining = max(0.0, self._mq_timeout - (time.monotonic() - submitted_at))
-            if not future.wait(timeout=remaining):
+        lookup = self._lookups.get(request_id)
+        if lookup is not None:
+            url = lookup.drain()
+            if url is not None:
                 self._mark_lookup_timed_out(url)
                 return
 
@@ -1381,9 +1216,9 @@ class LMCacheMPSchedulerAdapter:
             return False
 
     def _mark_lookup_timed_out(self, url: str) -> None:
-        """Log and mark ``url`` unhealthy after an unacknowledged LOOKUP."""
+        """Log and mark ``url`` unhealthy after an unanswered lookup RPC."""
         logger.warning(
-            "LOOKUP to %s timed out after %ss. Marking server as unhealthy.",
+            "Lookup RPC to %s timed out after %ss. Marking server as unhealthy.",
             url,
             self._mq_timeout,
         )

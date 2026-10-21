@@ -263,6 +263,70 @@ def test_messaging_future_retains_reference_for_its_lifetime() -> None:
     assert resource_ref() is None
 
 
+@pytest.mark.parametrize("fail", [False, True])
+def test_done_callback_runs_once_on_completion(fail: bool) -> None:
+    """A pending callback runs once, with the future, when it completes."""
+    future = MessagingFuture[int]()
+    seen: list[MessagingFuture[int]] = []
+    future.add_done_callback(seen.append)
+    assert not seen
+
+    if fail:
+        future.set_exception(RuntimeError("boom"))
+    else:
+        future.set_result(1)
+    assert seen == [future]
+    assert future.query()
+
+
+def test_done_callback_runs_inline_when_already_done() -> None:
+    """A callback added after completion runs before add_done_callback returns."""
+    future = MessagingFuture[int]()
+    future.set_result(1)
+    seen: list[int] = []
+    future.add_done_callback(lambda f: seen.append(f.result(timeout=0)))
+    assert seen == [1]
+
+
+def test_done_callback_runs_on_completing_thread() -> None:
+    """A pending callback runs in the thread that completes the future."""
+    future = MessagingFuture[int]()
+    threads: list[threading.Thread] = []
+    future.add_done_callback(lambda _f: threads.append(threading.current_thread()))
+    completer = threading.Thread(target=future.set_result, args=(1,))
+    completer.start()
+    completer.join(timeout=5)
+    assert threads == [completer]
+
+
+def test_raising_done_callback_is_logged_and_isolated(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A raising callback is logged and later callbacks and the result survive."""
+
+    def explode(_future: MessagingFuture[int]) -> None:
+        raise ValueError("callback failed")
+
+    future = MessagingFuture[int]()
+    seen: list[int] = []
+    future.add_done_callback(explode)
+    future.add_done_callback(lambda f: seen.append(f.result(timeout=0)))
+    with caplog.at_level("ERROR"):
+        future.set_result(7)
+        future.add_done_callback(explode)
+    assert seen == [7]
+    assert future.result(timeout=0) == 7
+    assert caplog.text.count("done callback failed") == 2
+
+
+def test_device_future_rejects_done_callbacks() -> None:
+    """Device futures complete by polling, so they refuse done callbacks."""
+    raw: MessagingFuture[tuple[bytes, int]] = MessagingFuture()
+    device_future = raw.to_device_future(device="cpu")
+    with pytest.raises(NotImplementedError):
+        device_future.add_done_callback(lambda _f: None)
+
+
 # ==============================================================================
 # CUDAMessagingFuture Tests
 # ==============================================================================
