@@ -34,6 +34,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventType,
 )
 from lmcache.v1.mp_coordinator.blend_index import BlendIndex, BlendIndexStats
+from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
@@ -170,6 +171,9 @@ class KeyDirectory(View):
         # enable_blend_lookup() swaps in one sized to the fleet's chunk size.
         self._blend_index = BlendIndex()
         self._blend_lookup_enabled = False
+        self._blend_chunk_size: int | None = None
+        self._blend_probe_stride = 1
+        register_metric_source(self)
 
     @classmethod
     def from_config(
@@ -214,8 +218,41 @@ class KeyDirectory(View):
         Raises:
             ValueError: If ``chunk_size`` or ``probe_stride`` is < 1.
         """
-        self._blend_index = BlendIndex(chunk_size=chunk_size, probe_stride=probe_stride)
-        self._blend_lookup_enabled = True
+        with self._lock:
+            self._blend_index = BlendIndex(
+                chunk_size=chunk_size, probe_stride=probe_stride
+            )
+            self._blend_lookup_enabled = True
+            self._blend_chunk_size = chunk_size
+            self._blend_probe_stride = probe_stride
+
+    def bind_chunk_size(self, chunk_size: int) -> None:
+        """Rebuild the optional blend index for the fleet's finalized size."""
+        with self._lock:
+            if not self._blend_lookup_enabled or self._blend_chunk_size == chunk_size:
+                return
+
+            blend_index = BlendIndex(
+                chunk_size=chunk_size, probe_stride=self._blend_probe_stride
+            )
+            for chunk_hash, binding in self._token_bindings.items():
+                if (
+                    not binding.token_ids.size
+                    or binding.token_offset == UNKNOWN_TOKEN_OFFSET
+                ):
+                    continue
+                namespaces = {
+                    BlendNamespace.from_object_key(key) for key in binding.keys
+                }
+                for namespace in namespaces:
+                    blend_index.add(
+                        binding.token_ids,
+                        chunk_hash,
+                        binding.token_offset,
+                        namespace,
+                    )
+            self._blend_index = blend_index
+            self._blend_chunk_size = chunk_size
 
     def consume(self, batch: CacheEventBatch) -> None:
         """Apply one gate-admitted batch, idempotently: re-storing
@@ -562,17 +599,18 @@ class KeyDirectory(View):
                 }
 
     def stats(self) -> DirectoryStats:
-        """Return a point-in-time summary of directory contents."""
+        """Return a point-in-time summary of directory contents.
+
+        Reads running totals, so its cost does not grow with the number of
+        keys: a metrics scrape calls it while ingest waits on the same lock.
+        """
         blend = self._blend_index.stats()
         with self._lock:
             l1_stats = self._placement_stats[Tier.L1]
             l2_stats = self._placement_stats[Tier.L2]
-            num_placements = sum(
-                len(record.placements) for record in self._directory.values()
-            )
             return DirectoryStats(
                 num_keys=len(self._directory),
-                num_placements=num_placements,
+                num_placements=l1_stats.count + l2_stats.count,
                 l1_keys_by_instance={
                     instance_id: len(keys)
                     for instance_id, keys in self._l1_keys_by_instance.items()

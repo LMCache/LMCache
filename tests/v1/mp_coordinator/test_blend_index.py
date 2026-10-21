@@ -38,6 +38,16 @@ def _index(probe_stride: int = 1) -> BlendIndex:
     return BlendIndex(chunk_size=CHUNK, probe_stride=probe_stride)
 
 
+def _counts(index: BlendIndex) -> tuple[int, int, int, int]:
+    stats = index.stats()
+    return (
+        stats.num_contents,
+        stats.num_chunks,
+        stats.num_claims,
+        stats.num_namespaces,
+    )
+
+
 def _tuples(matches) -> list[tuple[bytes, int, int]]:
     return [(m.chunk_hash, m.old_st, m.cur_st) for m in matches]
 
@@ -177,6 +187,81 @@ def test_identical_content_under_two_prefixes_survives_one_eviction():
     assert _tuples(index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64), NS)) == [
         (b"B", 512, 0)
     ]
+
+
+def test_stats_count_contents_chunks_claims_and_namespaces():
+    index = _index()
+    shared = _content(1, 2, 3, 4)
+    index.add(shared, b"A", token_offset=0, namespace=NS)
+    index.add(shared, b"A", token_offset=0, namespace=OTHER_NS)
+    index.add(shared, b"B", token_offset=512, namespace=NS)
+    index.add(_content(5, 6, 7, 8), b"C", token_offset=0, namespace=NS)
+
+    assert _counts(index) == (2, 3, 4, 2)
+
+
+def test_stats_follow_claim_and_chunk_removal():
+    index = _index()
+    shared = _content(1, 2, 3, 4)
+    index.add(shared, b"A", token_offset=0, namespace=NS)
+    index.add(shared, b"A", token_offset=0, namespace=OTHER_NS)
+    index.add(shared, b"B", token_offset=512, namespace=NS)
+
+    index.remove_claim(shared, b"A", OTHER_NS)
+    assert _counts(index) == (1, 2, 2, 1)
+
+    index.remove_chunk(shared, b"B")
+    assert _counts(index) == (1, 1, 1, 1)
+
+    index.remove_claim(shared, b"A", NS)
+    assert _counts(index) == (0, 0, 0, 0)
+
+
+def test_releasing_a_claim_the_namespace_never_held_changes_nothing():
+    index = _index()
+    content = _content(1, 2, 3, 4)
+    index.add(content, b"A", token_offset=0, namespace=NS)
+
+    index.remove_claim(content, b"A", OTHER_NS)
+
+    assert _counts(index) == (1, 1, 1, 1)
+
+
+def test_stats_match_a_recount_after_random_mutations():
+    """The running totals behind stats() must equal a recount of what was
+    added and not yet removed, whatever the order of operations."""
+    rng = random.Random(7)
+    index = _index()
+    contents = [_content(c, c, c, c) for c in range(3)]
+    hashes = [b"H0", b"H1", b"H2", b"H3"]
+    namespaces = [NS, OTHER_NS, BlendNamespace(model_name="third", world_size=2)]
+    # chunk hash -> (content position, claiming namespaces): the model.
+    held: dict[bytes, tuple[int, set[BlendNamespace]]] = {}
+    for _ in range(500):
+        chunk_hash = rng.choice(hashes)
+        namespace = rng.choice(namespaces)
+        op = rng.random()
+        if op < 0.5:
+            position = held[chunk_hash][0] if chunk_hash in held else rng.randrange(3)
+            index.add(contents[position], chunk_hash, 0, namespace)
+            held.setdefault(chunk_hash, (position, set()))[1].add(namespace)
+        elif chunk_hash in held and op < 0.85:
+            position, claimants = held[chunk_hash]
+            index.remove_claim(contents[position], chunk_hash, namespace)
+            claimants.discard(namespace)
+            if not claimants:
+                del held[chunk_hash]
+        elif chunk_hash in held:
+            index.remove_chunk(contents[held[chunk_hash][0]], chunk_hash)
+            del held[chunk_hash]
+
+        expected = (
+            len({position for position, _ in held.values()}),
+            len(held),
+            sum(len(claimants) for _, claimants in held.values()),
+            len({ns for _, claimants in held.values() for ns in claimants}),
+        )
+        assert _counts(index) == expected
 
 
 def test_content_of_the_wrong_length_is_not_indexed():

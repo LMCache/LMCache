@@ -47,7 +47,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
     Store is three-phase, all executed entirely in a background thread:
 
     1. prepare: call prepare_store() to negotiate buffers with the server
-       (the costliest step in pickle mode due to the synchronous RPC round-trip).
+       (the costliest step in inline mode due to the synchronous RPC round-trip).
     2. gather: wait for the forward event on the copy stream, then enqueue
        GPU->CPU copies. When SHM buffers are available, gather writes directly
        into SHM views (matching the synchronous path). Otherwise, gather
@@ -196,9 +196,9 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
             _request_id: External request identifier (used for logging).
             key: LMCache key object for the store range.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to store, indexed by LMCache KV group id.
+            block_ids: Engine block IDs to store, indexed by LMCache KV group id.
             _event: Synchronization event; ``wait()`` is called in background.
-            blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
+            blocks_in_chunk: Number of engine blocks per LMCache chunk.
 
         Returns:
             An unresolved :class:`MessagingFuture` that resolves to ``True``
@@ -241,7 +241,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                 staged_chunks: list[torch.Tensor] = []
                 try:
                     # --- Phase 1: prepare_store ---
-                    # In pickle mode this is the costliest step (sync RPC
+                    # In inline mode this is the costliest step (sync RPC
                     # round-trip).  Running it here keeps the forward thread free.
                     result = engine_driven_context.prepare_store(key, self._instance_id)
                     out_buffers, chunk_indices = (
@@ -261,7 +261,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
 
                     # Determine gather target:
                     # - SHM path (out_buffers available): gather into SHM views
-                    # - Pickle path (no out_buffers): gather into pinned staging
+                    # - Inline path (no out_buffers): gather into pinned staging
                     if out_buffers is not None:
                         gather_target = out_buffers
                         used_shm_direct = True
@@ -294,6 +294,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                             engine_kv_format=self._engine_kv_format,
                             out=gather_target,
                             chunk_indices=chunk_indices,
+                            engine_type=self._engine_type,
                         )
 
                         gather_done = torch_dev.Event()
