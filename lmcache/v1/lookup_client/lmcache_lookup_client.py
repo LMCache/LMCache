@@ -10,6 +10,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
+from lmcache.v1.pcp_shard import shard_store_enabled
 
 if TYPE_CHECKING:
     # First Party
@@ -72,6 +73,11 @@ class LMCacheLookupClient(LookupClientInterface):
         )
 
         self.enable_blending = config.enable_blending
+        # PCP shard mode: ranks answer for different chunks, so their results
+        # differ by design; the minimum below is the sharded prefix.
+        self._pcp_shard = shard_store_enabled(
+            config, metadata.use_mla, metadata.world_size
+        )
         self.token_database: TokenDatabase
         if self.enable_blending:
             self.token_database = SegmentTokenDatabase(config, metadata)
@@ -146,7 +152,7 @@ class LMCacheLookupClient(LookupClientInterface):
         results = [int.from_bytes(resp, "big") for resp in responses]
 
         assert len(results) == self.transport.world_size
-        if len(set(results)) > 1:
+        if len(set(results)) > 1 and not self._pcp_shard:
             logger.warning(
                 "Lookup results (number of hit tokens) "
                 "differ across (TP and PP) ranks: %s.",

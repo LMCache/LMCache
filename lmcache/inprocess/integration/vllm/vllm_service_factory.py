@@ -197,6 +197,18 @@ class VllmServiceFactory(BaseServiceFactory):
             from vllm.distributed.parallel_state import get_tp_group
 
             tpg = get_tp_group()
+            # TP1 + prefill context parallel: the MLA KV cache is replicated on
+            # the PCP ranks, so loaded chunks must be broadcast over the PCP
+            # group (the TP group has a single rank).
+            try:
+                # Third Party
+                from vllm.distributed.parallel_state import get_pcp_group
+
+                pcpg = get_pcp_group()
+                if tpg.world_size == 1 and pcpg.world_size > 1:
+                    tpg = pcpg
+            except (ImportError, AssertionError):
+                pass
             # First Party
             from lmcache.integration.vllm.utils import vllm_layout_hints
 
