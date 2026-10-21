@@ -56,6 +56,9 @@ export INFERENCE_ENGINE
 
 # Install test extras (lm-eval for eval workload, openai/pandas/matplotlib for benchmarks)
 uv pip install 'lm-eval[api]' openai pandas matplotlib
+if [[ "$TORCH_DEVICE_TYPE" == "xpu" ]]; then
+    python -c "from importlib.metadata import version; print('vLLM version:', version('vllm'))"
+fi
 
 # ── Ensure all scripts are executable ────────────────────────
 find "${SCRIPT_DIR}/scripts" -type f -name '*.sh' -exec chmod +x {} +

@@ -66,7 +66,8 @@ class _BuildPyWithGrpcStubs(_build_py):
         distribution_name = self.distribution.get_name().replace("_", "-").lower()
         if distribution_name != "lmcache-cli":
             generator = _load_proto_generator()
-            generator.generate()
+            for package in generator.GENERATED_PACKAGES:
+                generator.generate(package)
         super().run()
 
 

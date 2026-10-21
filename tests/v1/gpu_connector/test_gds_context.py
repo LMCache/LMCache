@@ -40,8 +40,8 @@ from lmcache.v1.memory_management import GDSMemoryObject
 
 
 def _fake_stream(handle: int):
-    """A stand-in for ``torch_dev.current_stream()`` (no CUDA needed)."""
-    return SimpleNamespace(cuda_stream=handle, synchronize=lambda: None)
+    """A stand-in for a platform stream (no accelerator needed)."""
+    return SimpleNamespace(raw_handle=handle, synchronize=lambda: None)
 
 
 def _use_fake_stream(monkeypatch: pytest.MonkeyPatch, handle: int) -> None:
@@ -54,7 +54,7 @@ def _use_fake_stream(monkeypatch: pytest.MonkeyPatch, handle: int) -> None:
     monkeypatch.setattr(
         gds_context.platform_stream,
         "stream_handle",
-        lambda device, stream: stream.cuda_stream,
+        lambda device, stream: stream.raw_handle,
     )
 
 
@@ -92,7 +92,7 @@ def _ugds_device() -> str:
     device = os.environ.get("UGDS_TEST_DEVICE", "")
     if not device or not os.path.exists(device):
         return ""
-    if not torch.cuda.is_available():
+    if torch_device_type != "cuda" or not torch_dev.is_available():
         return ""
     # Standard
     import ctypes
@@ -245,6 +245,41 @@ class TestRegisterGpuBuffer:
 
         assert sizes == [16 << 20, 16 << 20, 8 << 20]
 
+    def test_rolls_back_regions_when_registration_fails(self, monkeypatch):
+        backend = Mock(spec=GDSBackend)
+        ctx = GDSContext(backend)
+        ctx.initialized = True
+        registered_sizes: list[int] = []
+        deregistered_sizes: list[int] = []
+        stream_registrations: list[int] = []
+        stream_deregistrations: list[int] = []
+
+        def register_buffer(region):
+            registered_sizes.append(region.numel() * region.element_size())
+            if len(registered_sizes) == 2:
+                raise RuntimeError("registration failed")
+
+        monkeypatch.setattr(backend, "register_buffer", register_buffer)
+        monkeypatch.setattr(
+            backend,
+            "deregister_buffer",
+            lambda region: deregistered_sizes.append(
+                region.numel() * region.element_size()
+            ),
+        )
+        monkeypatch.setattr(backend, "register_stream", stream_registrations.append)
+        monkeypatch.setattr(backend, "deregister_stream", stream_deregistrations.append)
+        _use_fake_stream(monkeypatch, 7)
+
+        with pytest.raises(RuntimeError, match="registration failed"):
+            ctx.register_gpu_buffer(torch.empty(40 << 20, dtype=torch.uint8))
+
+        assert registered_sizes == [16 << 20, 16 << 20]
+        assert deregistered_sizes == [16 << 20]
+        assert stream_registrations == [7]
+        assert stream_deregistrations == [7]
+        assert ctx._base_ptrs == []
+
 
 class TestResolveBuffer:
     """Region mapping: a buffer slice resolves to ``(region base, offset)``,
@@ -353,14 +388,14 @@ def test_ugds_context_roundtrip():
 
         expected = (torch.arange(chunk_bytes, dtype=torch.int64) % 251).to(torch.uint8)
         buffer.copy_(expected.cuda())
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
         ctx.transfer_async(objects[0], buffer, SlabDirection.WRITE)
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
 
         buffer.zero_()
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
         ctx.transfer_async(objects[0], buffer, SlabDirection.READ)
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
 
         assert torch.equal(buffer.cpu(), expected)
         ctx.deregister_gpu_buffer(buffer)
