@@ -88,7 +88,7 @@ class AerospikeStorageBackend(StorageBackendProfile):
                 extra_objects=extra_objects,
                 runtime_library_dirs=runtime_library_dirs,
                 extra_compile_args={
-                    "cxx": extra_cxx_flags + ["-O3", "-std=c++17"],
+                    "cxx": extra_cxx_flags + ["-O3"],
                 },
                 extra_link_args=["-Wl,--no-as-needed"],
             ),

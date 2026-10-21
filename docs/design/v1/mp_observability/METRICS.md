@@ -18,10 +18,22 @@ The MP Coordinator reuses the same `init_otel_metrics()` pipeline without
 starting a standalone Prometheus HTTP server. In pull mode its FastAPI app
 serves `GET /metrics` on the coordinator port (default `9300`). In OTLP push
 mode, or when coordinator metrics are disabled, that route returns 404. The
-coordinator provider carries `service.name=lmcache-mp-coordinator`; concrete
-coordinator instruments are registered separately from this transport setup.
+coordinator provider carries `service.name=lmcache-mp-coordinator` and
+`service.instance.id` (the host name); concrete coordinator instruments are
+registered separately from this transport setup and use the
+`lmcache_coordinator.` prefix (see
+[`../mp_coordinator/observability.md`](../mp_coordinator/observability.md)).
 
-All metrics use the `lmcache_mp.` prefix (mp = multiprocess), distinct from the main
+When `ObservabilityConfig.grpc_metrics_enabled` resolves to true,
+`init_otel_metrics()` also registers gRPC Python's official OpenTelemetry
+observability plugin with the same `MeterProvider`. The MP server resolves the
+default (`None`) from the request transport: enabled for gRPC, disabled for
+ZMQ. These metrics come from gRPC Core rather than the LMCache EventBus and
+therefore use the upstream `grpc.*` namespace instead of the `lmcache_mp.*`
+prefix. The integration depends on `grpcio-observability`, which upstream
+currently distributes for Linux.
+
+All MP server metrics use the `lmcache_mp.` prefix (mp = multiprocess), distinct from the main
 engine's `lmcache.` namespace. On Prometheus, `.` is converted to `_` and counters get
 a `_total` suffix (e.g., `lmcache_mp.l1_read` with `unit="chunks"` is exposed as
 `lmcache_mp_l1_read_chunks_total`).
@@ -44,6 +56,21 @@ the `target_info` series rather than on each time-series.
 
 Per-metric attributes (e.g. `cache_salt`) remain on the individual
 datapoints and are orthogonal to these Resource attributes.
+
+---
+
+## gRPC Runtime Metrics
+
+| OTel metric name | Prometheus name | Type | Source | Description |
+|---|---|---|---|---|
+| `grpc.client.attempt.started` | `grpc_client_attempt_started_total` | Counter | gRPC Python observability plugin | Number of client call attempts started |
+| `grpc.client.attempt.duration` | `grpc_client_attempt_duration_seconds` | Histogram | gRPC Python observability plugin | End-to-end time to complete a client call attempt |
+| `grpc.client.attempt.sent_total_compressed_message_size` | `grpc_client_attempt_sent_total_compressed_message_size_bytes` | Histogram | gRPC Python observability plugin | Compressed bytes sent per client call attempt |
+| `grpc.client.attempt.rcvd_total_compressed_message_size` | `grpc_client_attempt_rcvd_total_compressed_message_size_bytes` | Histogram | gRPC Python observability plugin | Compressed bytes received per client call attempt |
+| `grpc.server.call.started` | `grpc_server_call_started_total` | Counter | gRPC Python observability plugin | Number of server calls started |
+| `grpc.server.call.duration` | `grpc_server_call_duration_seconds` | Histogram | gRPC Python observability plugin | End-to-end time to complete a server transport call |
+| `grpc.server.call.sent_total_compressed_message_size` | `grpc_server_call_sent_total_compressed_message_size_bytes` | Histogram | gRPC Python observability plugin | Compressed bytes sent per server call |
+| `grpc.server.call.rcvd_total_compressed_message_size` | `grpc_server_call_rcvd_total_compressed_message_size_bytes` | Histogram | gRPC Python observability plugin | Compressed bytes received per server call |
 
 ---
 
@@ -214,20 +241,33 @@ scrape time with `metric_relabel_configs` if storage cost matters.
 | `lmcache_mp.lookup_hit_l2` | `lmcache_mp_lookup_hit_l2_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l2_hit_tokens` (0 if absent); `l1 + l2 == lookup_hit` per event |
 | `lmcache_mp.lookup_hit_l1_keys` | `lmcache_mp_lookup_hit_l1_keys_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l1_hit_keys` (0 if absent) |
 | `lmcache_mp.lookup_hit_l2_keys` | `lmcache_mp_lookup_hit_l2_keys_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l2_hit_keys` (0 if absent) |
+| `lmcache_mp.lookup_prompt` | `lmcache_mp_lookup_prompt_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+prompt_tokens` (0 if absent); whole prompt, request-level denominator |
+| `lmcache_mp.lookup_request_hit` | `lmcache_mp_lookup_request_hit_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+request_hit_tokens` (0 if absent); prefix served by the engine's prefix cache or LMCache, request-level numerator |
 | `lmcache_mp.lookups` | `lmcache_mp_lookups_requests_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+1` per completed lookup |
 | `lmcache_mp.lookup_early_exit` | `lmcache_mp_lookup_early_exit_requests_total` | Counter (attrs: `model_name`, `cache_salt`, `reason` ∈ {`no_gpu_context`, `empty_chunk_hashes`, `no_group_layout_descs`}) | `MP_LOOKUP_PREFETCH_END` | `+1` when `early_exit_reason != ""` |
 
-**What it answers:** What fraction of tokens requested by a lookup were served from cache (L1 or L2)?
+**What it answers:** What share of each request's prompt did LMCache serve,
+and what share did the engine's prefix cache plus LMCache serve together?
+Both use the whole prompt as the denominator (see the
+`MP_LOOKUP_PREFETCH_END` notes in [EVENTS.md](EVENTS.md) for what the
+request-level view does and does not count):
 
 ```promql
-# Aggregate hit rate (all models, all salts):
+# LMCache token hit rate, share of prompt tokens (all models, all salts):
 rate(lmcache_mp_lookup_hit_tokens_total[5m])
-/ rate(lmcache_mp_lookup_requested_tokens_total[5m])
+/ rate(lmcache_mp_lookup_prompt_tokens_total[5m])
 
-# Per-model hit rate:
+# Request-level: share of prompt tokens served by the engine or LMCache:
+rate(lmcache_mp_lookup_request_hit_tokens_total[5m])
+/ rate(lmcache_mp_lookup_prompt_tokens_total[5m])
+
+# Per-model:
 sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
-/ sum(rate(lmcache_mp_lookup_requested_tokens_total[5m])) by (model_name)
+/ sum(rate(lmcache_mp_lookup_prompt_tokens_total[5m])) by (model_name)
 ```
+
+`lookup_hit / lookup_requested` instead gives LMCache's hit rate on only the
+range it was asked to look up, i.e. past the prefix the engine already held.
 
 **Per-tier split and early exits:**
 

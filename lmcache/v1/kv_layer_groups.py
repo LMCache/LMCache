@@ -41,6 +41,7 @@ DTYPE_MAP: dict[str, torch.dtype] = {
     "float32": torch.float32,
     "bfloat16": torch.bfloat16,
     "uint8": torch.uint8,
+    "int8": torch.int8,
 }
 
 
@@ -360,7 +361,7 @@ class KVLayerGroupsManager:
                 object group.
         """
         # Import here to break a circular import via
-        # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
+        # lmcache.inprocess.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
         # First Party
         from lmcache.v1.gpu_connector.utils import (
             get_num_blocks,

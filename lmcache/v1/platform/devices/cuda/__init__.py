@@ -158,6 +158,10 @@ class CudaDeviceSpec(DeviceSpec):
         except Exception:
             return False
 
+    def is_lmcache_driven_available(self) -> bool:
+        """CUDA has the full IPC stack, so the lmcache-driven path is available."""
+        return True
+
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         # First Party
         from lmcache.v1.platform.devices.cuda.cache_context import GPUCacheContext
