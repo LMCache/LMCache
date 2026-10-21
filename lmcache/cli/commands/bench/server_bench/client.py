@@ -13,15 +13,19 @@ import time
 
 # First Party
 from lmcache import torch_dev
-from lmcache.cli.commands.bench.server_bench import helpers
 from lmcache.cli.commands.bench.server_bench.config import (
     BenchConfig,
     WorkerSpec,
 )
+from lmcache.cli.commands.bench.server_bench.helpers import _IMPORT_ERROR
+
+# The thin CLI can load its parser without the full runtime dependencies.
+if _IMPORT_ERROR is None:
+    # First Party
+    from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
     from lmcache.v1.multiprocess.transfer_context import TransferContext
     from lmcache.v1.multiprocess.transport.base import RequestClient
 
@@ -790,7 +794,7 @@ class ServerBenchClient:
         for rank in range(config.tp_size):
             instance_id = _INSTANCE_ID_BASE + self._client_index * config.tp_size + rank
             kv_worker_id = 0 if use_mla else rank
-            buffers = helpers.KVCacheBuffers(
+            buffers = KVCacheBuffers(
                 groups=layer_groups,
                 device=None if use_gpu else "cpu",
                 block_size=self._block_size,

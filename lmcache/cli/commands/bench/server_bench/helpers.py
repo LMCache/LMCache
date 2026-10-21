@@ -38,9 +38,6 @@ try:
     import zmq  # noqa: F401  # availability probe; used by command.py
 
     # First Party
-    from lmcache.cli.commands.bench.server_bench.buffers import (  # noqa: F401
-        KVCacheBuffers,
-    )
     from lmcache.v1.kv_layer_groups import DTYPE_MAP
     from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
     from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture

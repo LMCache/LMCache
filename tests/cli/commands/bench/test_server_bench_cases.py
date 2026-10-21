@@ -12,6 +12,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.cli.commands.bench.server_bench import client as client_module
 from lmcache.cli.commands.bench.server_bench import helpers
 from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
 from lmcache.cli.commands.bench.server_bench.cases.base import BenchResult
@@ -176,7 +177,7 @@ def run_bench(
         monkeypatch.setattr(zmq, "Context", MagicMock())
         monkeypatch.setattr(RequestClientFactory, "create", MagicMock())
         monkeypatch.setattr(helpers, "_get_chunk_size", lambda _client: 2)
-        monkeypatch.setattr(helpers, "KVCacheBuffers", allocate)
+        monkeypatch.setattr(client_module, "KVCacheBuffers", allocate)
         monkeypatch.setattr(helpers, "_send_lookup", MagicMock(return_value=True))
         monkeypatch.setattr(
             helpers, "_poll_prefetch_status", MagicMock(side_effect=[0, 2])

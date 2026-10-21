@@ -26,6 +26,7 @@ import zmq
 
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
+from lmcache.cli.commands.bench.server_bench import client as client_module
 from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
 from lmcache.cli.commands.bench.server_bench.helpers import (
     _build_token_ids,
@@ -873,7 +874,7 @@ class TestClientMultiWorker:
         monkeypatch.setattr(RequestClientFactory, "create", MagicMock())
         monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 2)
         monkeypatch.setattr(
-            sv_helpers,
+            client_module,
             "KVCacheBuffers",
             lambda **kw: KVCacheBuffers(kw["groups"], device="cpu"),
         )
@@ -956,7 +957,7 @@ class TestClientMultiWorker:
         monkeypatch.setattr(zmq, "Context", lambda: context)
         monkeypatch.setattr(RequestClientFactory, "create", lambda *a, **kw: transport)
         monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 16)
-        monkeypatch.setattr(sv_helpers, "KVCacheBuffers", fake_allocate)
+        monkeypatch.setattr(client_module, "KVCacheBuffers", fake_allocate)
         monkeypatch.setattr(worker_transfer, "get_event_ipc_backend", MagicMock())
         monkeypatch.setattr(worker_transfer, "wrap_kv_caches", lambda caches: [])
         bench_client = ServerBenchClient(
@@ -1127,7 +1128,7 @@ class TestClientMultiWorker:
             transfer_calls.append(("factory", (kv_caches, mode)))
             return FakeTransferContext(instance_id, req_client)
 
-        monkeypatch.setattr(sv_helpers, "KVCacheBuffers", fake_allocate)
+        monkeypatch.setattr(client_module, "KVCacheBuffers", fake_allocate)
         monkeypatch.setattr(zmq, "Context", FakeContext)
         monkeypatch.setattr(
             RequestClientFactory,
