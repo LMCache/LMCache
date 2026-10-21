@@ -36,12 +36,18 @@ VLLM_BENCH_DIR="$RESULTS_DIR/vllm_bench"
 CACHE_HIT_DIR="$VLLM_BENCH_DIR/cache_hit_validation"
 
 MANIFEST_SAVED=0
+CURRENT_VERDICT="UNKNOWN"
+VERIFIED_LMCACHE_TP="null"
+VERIFIED_BASELINE_TP="null"
+VERIFIED_SLOWDOWN_PCT="null"
 
 save_comparison_manifest() {
     local verdict="$1"
     local lmcache_tp="${2:-null}"
     local baseline_tp="${3:-null}"
     local slowdown="${4:-null}"
+
+    CURRENT_VERDICT="$verdict"
 
     local manifest_file="$VLLM_BENCH_DIR/manifest.json"
     local attempt="${BUILDKITE_RETRY_COUNT:-0}"
@@ -149,8 +155,8 @@ PY
 
 on_exit() {
     local rc=$?
-    if [ "$rc" -ne 0 ] && [ "$MANIFEST_SAVED" -eq 0 ]; then
-        save_comparison_manifest "FAIL" "null" "null" "null"
+    if [ "$rc" -ne 0 ] && [ "${CURRENT_VERDICT:-}" != "FAIL" ]; then
+        save_comparison_manifest "FAIL" "${VERIFIED_LMCACHE_TP:-null}" "${VERIFIED_BASELINE_TP:-null}" "${VERIFIED_SLOWDOWN_PCT:-null}"
     fi
 }
 trap on_exit EXIT
@@ -219,12 +225,12 @@ verify_results() {
 
     if [ ! -f "$lmcache_result" ]; then
         echo "LMCache result file not found: $lmcache_result"
-        save_comparison_manifest "FAIL" "null" "null" "null"
+        save_comparison_manifest "FAIL" "${VERIFIED_LMCACHE_TP:-null}" "${VERIFIED_BASELINE_TP:-null}" "${VERIFIED_SLOWDOWN_PCT:-null}"
         return 1
     fi
     if [ ! -f "$baseline_result" ]; then
         echo "Baseline result file not found: $baseline_result"
-        save_comparison_manifest "FAIL" "null" "null" "null"
+        save_comparison_manifest "FAIL" "${VERIFIED_LMCACHE_TP:-null}" "${VERIFIED_BASELINE_TP:-null}" "${VERIFIED_SLOWDOWN_PCT:-null}"
         return 1
     fi
 
@@ -343,11 +349,13 @@ else:
     fi
 
     echo ""
-    local verdict="PASS"
+    VERIFIED_LMCACHE_TP="$lmcache_throughput"
+    VERIFIED_BASELINE_TP="$baseline_throughput"
+    VERIFIED_SLOWDOWN_PCT="$slowdown_pct"
     if [ "$failed" -ne 0 ]; then
-        verdict="FAIL"
+        save_comparison_manifest "FAIL" "$VERIFIED_LMCACHE_TP" "$VERIFIED_BASELINE_TP" "$VERIFIED_SLOWDOWN_PCT"
     fi
-    save_comparison_manifest "$verdict" "$lmcache_throughput" "$baseline_throughput" "$slowdown_pct"
+
 
     return "$failed"
 }
@@ -358,7 +366,7 @@ verify_single_instance_result() {
     echo "=== LMCache Benchmark Result ==="
     if [ ! -f "$lmcache_result" ]; then
         echo "LMCache result file not found: $lmcache_result"
-        save_comparison_manifest "FAIL" "null" "null" "null"
+        save_comparison_manifest "FAIL" "${VERIFIED_LMCACHE_TP:-null}" "${VERIFIED_BASELINE_TP:-null}" "${VERIFIED_SLOWDOWN_PCT:-null}"
         return 1
     fi
 
@@ -371,13 +379,16 @@ verify_single_instance_result() {
     echo "  completed: $lmcache_completed"
     echo "  total_token_throughput: $lmcache_throughput"
 
+    VERIFIED_LMCACHE_TP="$lmcache_throughput"
+    VERIFIED_BASELINE_TP="null"
+    VERIFIED_SLOWDOWN_PCT="null"
     if [ "$lmcache_completed" -ne "$EXPECTED_COMPLETED" ] 2>/dev/null; then
         echo "LMCache completed: $lmcache_completed (expected: $EXPECTED_COMPLETED) FAIL"
         save_comparison_manifest "FAIL" "$lmcache_throughput" "null" "null"
         return 1
     fi
     echo "LMCache completed: $lmcache_completed (expected: $EXPECTED_COMPLETED) PASS"
-    save_comparison_manifest "PASS" "$lmcache_throughput" "null" "null"
+
     return 0
 }
 
@@ -621,10 +632,13 @@ if [ "${LMCACHE_MP_LAZY_OFFLOAD:-false}" = "true" ]; then
 else
     if ! verify_cache_hit_replay; then
         echo "Cache-hit replay validation failed"
+        save_comparison_manifest "FAIL" "${VERIFIED_LMCACHE_TP:-null}" "${VERIFIED_BASELINE_TP:-null}" "${VERIFIED_SLOWDOWN_PCT:-null}"
         exit 1
     fi
 fi
 
 echo "============================================"
+save_comparison_manifest "PASS" "${VERIFIED_LMCACHE_TP:-null}" "${VERIFIED_BASELINE_TP:-null}" "${VERIFIED_SLOWDOWN_PCT:-null}"
+
 echo "=== vLLM Bench test completed ==="
 echo "============================================"

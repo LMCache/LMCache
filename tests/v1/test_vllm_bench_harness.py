@@ -318,6 +318,30 @@ def test_vllm_bench_attempt_preservation() -> None:
         assert os.path.isfile(os.path.join(attempt_dir, "lmcache.json"))
 
 
+def test_vllm_bench_replay_failure_records_fail_manifest() -> None:
+    """
+    Verify that if the benchmark comparisons pass but the subsequent cache-hit
+    replay validation fails, the manifest records a FAIL verdict and preserves
+    the measured throughput metrics.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        proc, _, manifest = run_stubbed_benchmark(
+            tmpdir,
+            extra_env={"LMCACHE_MP_LAZY_OFFLOAD": "false"},
+            mock_baseline_tp=100.0,
+            mock_lmcache_tp=98.0,
+        )
+
+        assert proc.returncode != 0
+        assert manifest.get("verdict") == "FAIL"
+        assert manifest.get("baseline_throughput") == 100.0
+        assert manifest.get("lmcache_throughput") == 98.0
+        assert manifest.get("slowdown_percent") == pytest.approx(2.0, rel=0.01)
+        assert manifest.get("max_slowdown_percent") == 5.0
+        assert manifest.get("num_prompts") == 50
+        assert "=== Benchmark Comparison Manifest ===" in proc.stdout
+
+
 if __name__ == "__main__":
     print(
         "Running test_vllm_bench_default_seed_repeatable_and_symmetric...", flush=True
@@ -329,6 +353,11 @@ if __name__ == "__main__":
     test_vllm_bench_pass_summary_retains_numbers()
     print("Running test_vllm_bench_fail_summary_retains_numbers...", flush=True)
     test_vllm_bench_fail_summary_retains_numbers()
+    print(
+        "Running test_vllm_bench_replay_failure_records_fail_manifest...",
+        flush=True,
+    )
+    test_vllm_bench_replay_failure_records_fail_manifest()
     print("Running test_vllm_bench_attempt_preservation...", flush=True)
     test_vllm_bench_attempt_preservation()
     print("All regression tests passed successfully!", flush=True)
