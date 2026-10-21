@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the ``lmcache bench server`` CLI command."""
+"""Tests for the ``lmcache bench server`` CLI command.
+
+Covers:
+- Sub-command registration under ``lmcache bench``
+- Argument registration and defaults
+- Pure helper functions (_build_token_ids, _make_key, _query_checksum)
+"""
 
 # Standard
 from http.server import BaseHTTPRequestHandler, HTTPServer
