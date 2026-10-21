@@ -14,6 +14,7 @@ vllm:num_preemptions_total{engine="0"} 2
 vllm:num_preemptions_total{engine="1"} 3
 vllm:prompt_tokens_by_source_total{source="local_compute"} 10
 vllm:generation_tokens_total 7
+vllm:num_requests_running 4
 """
 
 
@@ -45,7 +46,8 @@ def test_counters_are_summed_over_labels(tmp_path: Path) -> None:
     rec = json.loads(out.read_text().splitlines()[0])
     assert rec["vllm:num_preemptions_total"] == 5.0
     assert rec["vllm:prompt_tokens_by_source/local_compute"] == 10.0
-    assert "vllm:generation_tokens_total" not in rec
+    assert rec["vllm:generation_tokens_total"] == 7.0
+    assert "vllm:num_requests_running" not in rec
 
 
 def test_an_unreachable_url_is_recorded_not_raised(tmp_path: Path) -> None:

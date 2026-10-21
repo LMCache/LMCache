@@ -38,7 +38,8 @@ only the cache layer differs:
 
 Tested metrics: decode p10/p50 (tok/s per request) and TTFT p50/p95.
 Recorded only: request count, errors, preemptions, prompt tokens by source
-(and the cache layer's share), L2 disk used.
+(and the cache layer's share), input and output token throughput (tok/s over
+the window, from vLLM's counters), L2 disk used.
 
 ## How a regression is decided
 

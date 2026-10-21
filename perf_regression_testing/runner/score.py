@@ -150,6 +150,10 @@ def score(run_dir: Path, window_s: float) -> dict[str, Any]:
         "prompt_tokens_by_source": src,
         # Served by the cache layer (L1 and L2), the same meter everywhere.
         "external_token_share": src["external_kv_transfer"] / total if total else None,
+        # Token throughput over the window, from the server's counters: every
+        # prompt token whatever its source, and every generated token.
+        "input_tok_s": total / (we - ws),
+        "output_tok_s": delta("vllm:generation_tokens_total") / (we - ws),
         "preemptions": delta("vllm:num_preemptions_total"),
         # Peak over the window of the vLLM container's own memory and of the
         # page cache charged to it (a [deployments] vllm_memory_gb caps both).
