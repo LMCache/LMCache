@@ -64,6 +64,36 @@ engine modules and passes them to `create_request_server()`, which returns the
 protocol; concrete server classes are accessed only inside their transport
 packages and implementation-level tests.
 
+### gRPC server modes
+
+`--grpc-server-mode` picks one of two gRPC servers that serve the same
+handlers:
+
+| Mode | Receives requests on | Handler runs on |
+|---|---|---|
+| `sync` (default) | `grpc_server_workers` threads | the receiving thread, or the client's affinity worker |
+| `aio` | one `grpc.aio` event loop thread | a pool picked by handler type |
+
+In `sync` mode each in-flight call holds a gRPC thread until its handler
+returns, and every call also passes through grpcio's Python polling thread. In `aio` mode one event loop receives every call and only the
+handlers take threads.
+
+Handler types mean the same in both modes: `SERIALIZED` handlers run one at a
+time, at most `max_cpu_workers` normal `BLOCKING` handlers run at once, and
+affinity handlers stay on the worker bound to their client. Each
+server-streaming call is read on its own thread, so idle subscriptions never
+occupy a handler worker. In `aio` mode, the `grpc_server_workers` threads only
+run out-of-tree services that register plain functions instead of coroutines.
+
+Both servers subclass `GrpcMultiprocessServerBase` in `grpc_impl/server_base.py`,
+which owns the affinity pool, port binding, service registration and the close
+sequence. `GrpcMultiprocessServer` (sync) and `GrpcAioMultiprocessServer` only
+provide the gRPC server object, the servicer for each generated service, how
+normal handlers are bounded (a semaphore on the sync server, a thread pool on
+the aio event loop), and how the server starts and stops.
+`build_grpc_request_server` in `grpc_impl/server_builder.py` picks one of them
+from `grpc_server_mode` and returns it as a `GrpcMultiprocessServerBase`.
+
 ## Adding an RPC
 
 An ordinary RPC requires three changes:

@@ -26,14 +26,16 @@ import zmq
 
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
+from lmcache.cli.commands.bench.server_bench import client as client_module
+from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
 from lmcache.cli.commands.bench.server_bench.helpers import (
-    _allocate_kv_cache,
     _build_token_ids,
     _make_key,
     _poll_prefetch_status,
     _query_checksum,
     _send_lookup,
 )
+from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, parse_kvcache_shape_spec
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
@@ -564,12 +566,12 @@ def router_endpoint() -> str:
 
 
 # ------------------------------------------------------------------ #
-#  _allocate_kv_cache (dtype branching)
+#  KVCacheBuffers allocation (dtype branching)
 # ------------------------------------------------------------------ #
 
 
 class TestAllocateKVCache:
-    """Regression tests for ``_allocate_kv_cache`` dtype handling.
+    """Regression tests for ``KVCacheBuffers`` dtype handling.
 
     ``torch.randn`` only supports floating-point dtypes, so integer
     dtypes in ``DTYPE_MAP`` (e.g. ``uint8`` used by FP8 quantized
@@ -579,16 +581,11 @@ class TestAllocateKVCache:
 
     @staticmethod
     def _alloc(dtype: torch.dtype) -> list[torch.Tensor]:
-        return _allocate_kv_cache(
-            num_layers=1,
-            num_heads=2,
-            head_size=4,
-            num_blocks=2,
-            block_size=2,
-            dtype=dtype,
-            device="cpu",
-            kv_size=2,
+        dtype_name = str(dtype).removeprefix("torch.")
+        buffers = KVCacheBuffers(
+            parse_kvcache_shape_spec(f"(2,2,2,2,4):{dtype_name}:1"), device="cpu"
         )
+        return list(buffers.kv_caches.values())
 
     @pytest.mark.parametrize(
         "dtype",
@@ -648,10 +645,8 @@ class TestAllocateKVCache:
             ),
             dtype=torch.bfloat16,
         )
-        tensors = _allocate_kv_cache(
-            device="cpu",
-            groups=[group_a, group_b],
-        )
+        buffers = KVCacheBuffers([group_a, group_b], device="cpu")
+        tensors = list(buffers.kv_caches.values())
         assert len(tensors) == 5
         for t in tensors[:3]:
             assert t.shape == (2, 2, 2, 8, 16)
@@ -788,9 +783,6 @@ class TestAllocShapeContract:
 
     def test_mla_alloc_shape_is_rank3(self) -> None:
         # First Party
-        from lmcache.cli.commands.bench.server_bench.helpers import (
-            _allocate_kv_cache,
-        )
         from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
 
         group = KVLayerGroupInfo(
@@ -806,7 +798,7 @@ class TestAllocShapeContract:
             ),
             dtype=torch.bfloat16,
         )
-        tensors = _allocate_kv_cache(device="cpu", groups=[group])
+        tensors = list(KVCacheBuffers([group], device="cpu").kv_caches.values())
         assert len(tensors) == 2
         for t in tensors:
             assert t.dim() == 3
@@ -815,9 +807,6 @@ class TestAllocShapeContract:
 
     def test_classical_alloc_shape_is_rank5(self) -> None:
         # First Party
-        from lmcache.cli.commands.bench.server_bench.helpers import (
-            _allocate_kv_cache,
-        )
         from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
 
         group = KVLayerGroupInfo(
@@ -833,7 +822,7 @@ class TestAllocShapeContract:
             ),
             dtype=torch.float16,
         )
-        tensors = _allocate_kv_cache(device="cpu", groups=[group])
+        tensors = list(KVCacheBuffers([group], device="cpu").kv_caches.values())
         assert len(tensors) == 1
         assert tensors[0].shape == (2, 4, 2, 8, 16)
 
@@ -885,7 +874,9 @@ class TestClientMultiWorker:
         monkeypatch.setattr(RequestClientFactory, "create", MagicMock())
         monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 2)
         monkeypatch.setattr(
-            sv_helpers, "_allocate_kv_cache", lambda **kw: [torch.ones(1)]
+            client_module,
+            "KVCacheBuffers",
+            lambda **kw: KVCacheBuffers(kw["groups"], device="cpu"),
         )
         bench = ServerBenchClient(
             BenchConfig(
@@ -935,10 +926,15 @@ class TestClientMultiWorker:
 
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
 
-        def fake_allocate(**kwargs: Any) -> list[torch.Tensor]:
-            tensor = torch.ones(2, 64, 16, 1, 4, dtype=torch.float16)
-            tensor_refs.append(weakref.ref(tensor))
-            return [tensor]
+        def fake_allocate(
+            *,
+            groups: list[KVLayerGroupInfo],
+            device: str | torch.device | None,
+            block_size: int,
+        ) -> KVCacheBuffers:
+            buffers = KVCacheBuffers(groups, device="cpu", block_size=block_size)
+            tensor_refs.extend(weakref.ref(t) for t in buffers.kv_caches.values())
+            return buffers
 
         ready: MessagingFuture[None] = MessagingFuture()
         ready.set_result(None)
@@ -961,7 +957,7 @@ class TestClientMultiWorker:
         monkeypatch.setattr(zmq, "Context", lambda: context)
         monkeypatch.setattr(RequestClientFactory, "create", lambda *a, **kw: transport)
         monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 16)
-        monkeypatch.setattr(sv_helpers, "_allocate_kv_cache", fake_allocate)
+        monkeypatch.setattr(client_module, "KVCacheBuffers", fake_allocate)
         monkeypatch.setattr(worker_transfer, "get_event_ipc_backend", MagicMock())
         monkeypatch.setattr(worker_transfer, "wrap_kv_caches", lambda caches: [])
         bench_client = ServerBenchClient(
@@ -1019,6 +1015,7 @@ class TestClientMultiWorker:
         request_calls: list[tuple[str, tuple[Any, ...]]] = []
         transfer_calls: list[tuple[str, tuple[Any, ...]]] = []
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
+        lifetimes: list[tuple[str, bool]] = []
 
         class FakeContext:
             def setsockopt(self, option: int, value: int) -> None:
@@ -1072,6 +1069,9 @@ class TestClientMultiWorker:
                 transfer_calls.append(("register", (self.instance_id,)))
 
             def unregister(self) -> SimpleNamespace:
+                lifetimes.append(
+                    ("unregister", all(ref() is not None for ref in tensor_refs))
+                )
                 return self.req_client.unregister_kv_cache(self.instance_id)
 
             def create_recorded_event(self) -> None:
@@ -1086,10 +1086,14 @@ class TestClientMultiWorker:
                 return FakeFuture()
 
             def flush_inflight_stores(self) -> None:
-                pass
+                lifetimes.append(
+                    ("flush", all(ref() is not None for ref in tensor_refs))
+                )
 
             def close(self) -> None:
-                pass
+                lifetimes.append(
+                    ("close", all(ref() is not None for ref in tensor_refs))
+                )
 
         class FakeEngineDrivenTransferContext(FakeTransferContext):
             def __init__(self, instance_id: int, req_client: FakeClient) -> None:
@@ -1097,15 +1101,22 @@ class TestClientMultiWorker:
                 transfer_calls.append(("sync_context", ()))
 
             def unregister(self) -> SimpleNamespace:
+                lifetimes.append(
+                    ("unregister", all(ref() is not None for ref in tensor_refs))
+                )
                 return self.req_client.unregister_kv_cache_engine_driven_context(
                     self.instance_id
                 )
 
-        def fake_allocate(*, groups: Any, device: Any) -> list[torch.Tensor]:
-            del groups, device
-            tensor = torch.ones(1)
-            tensor_refs.append(weakref.ref(tensor))
-            return [tensor]
+        def fake_allocate(
+            *,
+            groups: list[KVLayerGroupInfo],
+            device: str | torch.device | None,
+            block_size: int,
+        ) -> KVCacheBuffers:
+            buffers = KVCacheBuffers(groups, device="cpu", block_size=block_size)
+            tensor_refs.extend(weakref.ref(t) for t in buffers.kv_caches.values())
+            return buffers
 
         def fake_create_transfer_context(
             kv_caches: dict[str, torch.Tensor],
@@ -1117,7 +1128,7 @@ class TestClientMultiWorker:
             transfer_calls.append(("factory", (kv_caches, mode)))
             return FakeTransferContext(instance_id, req_client)
 
-        monkeypatch.setattr(sv_helpers, "_allocate_kv_cache", fake_allocate)
+        monkeypatch.setattr(client_module, "KVCacheBuffers", fake_allocate)
         monkeypatch.setattr(zmq, "Context", FakeContext)
         monkeypatch.setattr(
             RequestClientFactory,
@@ -1176,6 +1187,11 @@ class TestClientMultiWorker:
             bench_client.close()
         gc.collect()
         assert all(ref() is None for ref in tensor_refs)
+        assert (
+            lifetimes
+            == [("flush", True), ("unregister", True)] * tp_size
+            + [("close", True)] * tp_size
+        )
 
         return request_calls, transfer_calls, result
 

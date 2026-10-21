@@ -9,6 +9,7 @@
 #include <cstring>
 #include <functional>
 #include <limits.h>
+#include <random>
 #include <stdexcept>
 #include <sstream>
 #include <thread>
@@ -232,10 +233,17 @@ WorkerHf3fsConn Hf3fsConnector::create_connection() {
  */
 void Hf3fsConnector::open_file(WorkerHf3fsConn& conn,
                                const std::string& file_path, bool for_write) {
-  int flags = for_write ? (O_WRONLY | O_CREAT) : O_RDONLY;
-  mode_t mode = for_write ? 0644 : 0;
-
-  conn.fd = ::open(file_path.c_str(), flags, mode);
+  std::string opened_path = file_path;
+  if (for_write) {
+    std::random_device random;
+    do {
+      // O_EXCL prevents collisions across workers, processes, and hosts.
+      opened_path = file_path + "." + std::to_string(random());
+      conn.fd = ::open(opened_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+    } while (conn.fd < 0 && errno == EEXIST);
+  } else {
+    conn.fd = ::open(opened_path.c_str(), O_RDONLY);
+  }
   if (conn.fd < 0) {
     throw std::runtime_error("open failed: " + std::string(strerror(errno)));
   }
@@ -244,12 +252,16 @@ void Hf3fsConnector::open_file(WorkerHf3fsConn& conn,
   if (reg_result > 0) {
     ::close(conn.fd);
     conn.fd = -1;
+    if (for_write && ::unlink(opened_path.c_str()) < 0) {
+      fprintf(stderr, "[LMCache HF3FS] Remove temporary file %s failed: %s\n",
+              opened_path.c_str(), strerror(errno));
+    }
     throw std::runtime_error(
         "hf3fs_reg_fd failed: " + std::to_string(reg_result) +
         " (errno=" + strerror(reg_result) + ")");
   }
   conn.registered = true;
-  conn.file_path = file_path;
+  conn.file_path = std::move(opened_path);
 }
 
 /**
@@ -487,9 +499,10 @@ void Hf3fsConnector::do_single_get(WorkerHf3fsConn& conn,
  *
  * Steps:
  * 1. Convert key to file path
- * 2. Open file for writing
+ * 2. Open a unique temporary file for writing
  * 3. Write data using 3FS I/O
- * 4. Close file
+ * 4. Close file and atomically rename to final path
+ * 5. Update key buffer
  *
  * @param conn Connection to use
  * @param key Key to store
@@ -504,13 +517,19 @@ void Hf3fsConnector::do_single_set(WorkerHf3fsConn& conn,
 
   std::string file_path = key_to_path(key);
   open_file(conn, file_path, true);
+  const std::string temporary_path = conn.file_path;
   try {
     write_file(conn, conn.write_ior, conn.write_iov, buf, len);
+    close_file(conn);
+    std::filesystem::rename(temporary_path, file_path);
   } catch (const std::exception& e) {
     close_file(conn);
+    if (::unlink(temporary_path.c_str()) < 0) {
+      fprintf(stderr, "[LMCache HF3FS] Remove temporary file %s failed: %s\n",
+              temporary_path.c_str(), strerror(errno));
+    }
     throw;
   }
-  close_file(conn);
   if (buffer_enabled_) {
     buffer_add_(key);
   }
