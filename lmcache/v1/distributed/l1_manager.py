@@ -16,7 +16,12 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError
-from lmcache.v1.distributed.internal_api import L1ManagerListener, L1ObjectMeta
+from lmcache.v1.distributed.internal_api import (
+    L1ManagerInterface,
+    L1ManagerListener,
+    L1ObjectMeta,
+    L1OperationResult,
+)
 from lmcache.v1.distributed.memory_manager import (
     GDSL1MemoryManager,
     L1ManagerProtocol,
@@ -41,6 +46,44 @@ from lmcache.v1.mp_observability.otel_init import register_gauge
 
 logger = init_logger(__name__)
 _l1_manager_ids = count()
+
+# Upper bound for the count parameter in reserve_read / finish_read
+# to prevent a single call from holding the global lock for too long.
+MAX_READ_LOCK_COUNT = 128
+
+
+def next_l1_manager_id() -> int:
+    """Return a fresh process-local L1 identity.
+
+    Every L1 binding draws from this counter, so the identity doubles as
+    the owner tag stamped on memory objects and stays unique across bindings.
+    """
+    return next(_l1_manager_ids)
+
+
+def validate_read_locks(read_locks: int) -> int:
+    """Validate and clamp a per-key read-lock count.
+
+    Args:
+        read_locks: Total read locks to take or release per key.
+
+    Returns:
+        Clamped value in [1, MAX_READ_LOCK_COUNT].
+    """
+    if read_locks < 1:
+        logger.warning(
+            "L1Manager: read_locks=%d is invalid, clamping to 1",
+            read_locks,
+        )
+        return 1
+    if read_locks > MAX_READ_LOCK_COUNT:
+        logger.warning(
+            "L1Manager: read_locks=%d exceeds limit=%d, clamping",
+            read_locks,
+            MAX_READ_LOCK_COUNT,
+        )
+        return MAX_READ_LOCK_COUNT
+    return read_locks
 
 
 # Internal classes and helper functions
@@ -75,38 +118,6 @@ def l1_mgr_synchronized(func):
     return wrapper
 
 
-L1OperationResult = tuple[L1Error, MemoryObj | None]
-
-# Upper bound for the count parameter in reserve_read / finish_read
-# to prevent a single call from holding the global lock for too long.
-MAX_READ_LOCK_COUNT = 128
-
-
-def _validate_read_locks(read_locks: int) -> int:
-    """Validate and clamp a per-key read-lock count.
-
-    Args:
-        read_locks: Total read locks to take or release per key.
-
-    Returns:
-        Clamped value in [1, MAX_READ_LOCK_COUNT].
-    """
-    if read_locks < 1:
-        logger.warning(
-            "L1Manager: read_locks=%d is invalid, clamping to 1",
-            read_locks,
-        )
-        return 1
-    if read_locks > MAX_READ_LOCK_COUNT:
-        logger.warning(
-            "L1Manager: read_locks=%d exceeds limit=%d, clamping",
-            read_locks,
-            MAX_READ_LOCK_COUNT,
-        )
-        return MAX_READ_LOCK_COUNT
-    return read_locks
-
-
 def _l1_usage_ratio_or_zero(target: "L1Manager | None") -> float:
     """Return ``target.get_memory_usage()`` as a 0.0-1.0 ratio.
 
@@ -131,7 +142,7 @@ def _l1_staging_bytes_or_zero(target: "L1Manager | None") -> int:
 # Main classes
 
 
-class L1Manager:
+class L1Manager(L1ManagerInterface):
     """
     Object lifecycle state machine for L1 cache
 
@@ -187,7 +198,7 @@ class L1Manager:
 
     def __init__(self, config: L1ManagerConfig):
         self._config = config
-        self._l1_manager_id = next(_l1_manager_ids)
+        self._l1_manager_id = next_l1_manager_id()
         self._lock = threading.Lock()
 
         # Resident objects: readable, never write-locked.
@@ -303,7 +314,7 @@ class L1Manager:
             Staging objects are never readable; a key that is only
             being written is reported as ``KEY_NOT_EXIST``.
         """
-        total = _validate_read_locks(read_locks)
+        total = validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         for key in keys:
@@ -390,7 +401,7 @@ class L1Manager:
             KEY_IN_WRONG_STATE: The key is not read-locked, which
                 means the reader may read inconsistent data.
         """
-        total = _validate_read_locks(read_locks)
+        total = validate_read_locks(read_locks)
         need_to_free: list[MemoryObj] = []
         need_to_free_keys: list[ObjectKey] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -682,7 +693,7 @@ class L1Manager:
             the read locks are taken on the resident object, so the caller
             always holds the object that readers see.
         """
-        total = _validate_read_locks(read_locks)
+        total = validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         successful_keys_meta: list[L1ObjectMeta] = []
@@ -1039,20 +1050,25 @@ class L1Manager:
         """
         return self._require_devdax_memory_manager().get_arena_statuses()
 
-    def get_devdax_arena_status(self, device_path: str) -> DevDaxArenaStatus:
-        """Return the status of the Device-DAX arena mapped at ``device_path``.
+    def get_devdax_arena_status(
+        self, device_path: str, offset_in_bytes: int = 0
+    ) -> DevDaxArenaStatus:
+        """Return the status of the Device-DAX arena at ``(device_path, offset)``.
 
         Args:
             device_path: The exact path used when the arena was added.
+            offset_in_bytes: Device offset the arena was added with.
 
         Returns:
             The arena's current status.
 
         Raises:
             L1ReconfigureError: If L1 is not Device-DAX backed (409) or no
-                arena is mapped at ``device_path`` (404).
+                arena matches (404).
         """
-        return self._require_devdax_memory_manager().get_arena_status(device_path)
+        return self._require_devdax_memory_manager().get_arena_status(
+            device_path, offset_in_bytes
+        )
 
     def owns_device(self, device_path: str) -> bool:
         """Return whether L1 maps the physical device at a path.
@@ -1084,12 +1100,14 @@ class L1Manager:
         self,
         device_path: str,
         size_in_bytes: int,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
-        """Add a Device-DAX device to the L1 arena pool.
+        """Add a Device-DAX range to the L1 arena pool.
 
         Args:
             device_path: Path of the Device-DAX device to map.
             size_in_bytes: Number of bytes to map.
+            offset_in_bytes: Byte offset into the device.
 
         Returns:
             Status of the newly added arena.
@@ -1099,19 +1117,21 @@ class L1Manager:
                 cannot be applied.
         """
         return self._require_devdax_memory_manager().add_device(
-            device_path, size_in_bytes
+            device_path, size_in_bytes, offset_in_bytes
         )
 
     def remove_devdax_device(
         self,
         device_path: str,
         mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
-        """Remove a Device-DAX device from the L1 arena pool.
+        """Remove a Device-DAX arena from the L1 arena pool.
 
         Args:
             device_path: Path of the mapped Device-DAX device.
             mode: Removal strategy. Only drain mode is currently supported.
+            offset_in_bytes: Device offset the arena was added with.
 
         Returns:
             Status of the arena after the removal request.
@@ -1120,7 +1140,9 @@ class L1Manager:
             L1ReconfigureError: If L1 is not Device-DAX backed or the request
                 cannot be applied.
         """
-        return self._require_devdax_memory_manager().remove_device(device_path, mode)
+        return self._require_devdax_memory_manager().remove_device(
+            device_path, mode, offset_in_bytes
+        )
 
     @property
     def config(self) -> L1ManagerConfig:
