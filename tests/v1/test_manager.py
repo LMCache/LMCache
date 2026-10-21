@@ -4,6 +4,8 @@ Tests for LMCacheManager.
 """
 
 # Standard
+from concurrent.futures import TimeoutError
+from typing import Any, Callable
 from unittest.mock import MagicMock, patch
 
 # Third Party
@@ -328,6 +330,61 @@ class TestLMCacheManagerShutdown:
 
             # lookup_client should still be closed even if offload_server failed
             mock_lookup_client.close.assert_called_once()
+
+    def test_shutdown_continues_after_component_timeout(self):
+        """Test that a timed-out component does not block later shutdown steps."""
+        config = LMCacheEngineConfig.from_defaults()
+        mock_health_monitor = MagicMock()
+        mock_offload = MagicMock()
+        factory = _make_mock_factory(
+            health_monitor=mock_health_monitor,
+            offload_server=mock_offload,
+        )
+        manager = LMCacheManager(config=config, service_factory=factory)
+        manager.post_init()
+
+        executors: list[Any] = []
+
+        class FakeFuture:
+            """Minimal future double for the shutdown timeout path."""
+
+            def __init__(
+                self, callback: Callable[[], Any], should_timeout: bool
+            ) -> None:
+                self._callback = callback
+                self._should_timeout = should_timeout
+
+            def result(self, timeout: float) -> None:
+                """Run the callback or simulate a timed-out first step."""
+                if self._should_timeout:
+                    raise TimeoutError
+                self._callback()
+
+        class FakeExecutor:
+            """Executor double that records non-blocking shutdown cleanup."""
+
+            def __init__(self, max_workers: int) -> None:
+                self._should_timeout = not executors
+                self.shutdown_args = None
+                executors.append(self)
+
+            def submit(self, callback: Callable[[], Any]) -> FakeFuture:
+                """Return a future for the submitted callback."""
+                return FakeFuture(callback, self._should_timeout)
+
+            def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+                """Record the shutdown mode used by the manager."""
+                self.shutdown_args = (wait, cancel_futures)
+
+        with (
+            patch("lmcache.v1.manager.ThreadPoolExecutor", FakeExecutor),
+            patch("lmcache.v1.manager.LMCacheEngineBuilder") as mock_builder,
+        ):
+            manager.stop_services()
+
+        mock_offload.close.assert_called_once()
+        mock_builder.destroy.assert_called_once()
+        assert executors[0].shutdown_args == (False, True)
 
 
 class TestLMCacheManagerHelpers:
