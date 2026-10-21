@@ -2,11 +2,13 @@
 """Tests for the ``lmcache bench server`` CLI command."""
 
 # Standard
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 import argparse
 import gc
+import json
 import threading
 import weakref
 
@@ -24,6 +26,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _build_token_ids,
     _make_key,
     _poll_prefetch_status,
+    _query_checksum,
     _send_lookup,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, parse_kvcache_shape_spec
@@ -461,6 +464,91 @@ class TestMakeKey:
             worker_id=0,
         )
         assert key.worker_id == 0
+
+
+# ------------------------------------------------------------------ #
+#  _query_checksum
+# ------------------------------------------------------------------ #
+
+
+class _ChecksumHandler(BaseHTTPRequestHandler):
+    """Tiny HTTP handler that records the POST body and returns fake checksums.
+
+    Mirrors the MP server's ``POST /cache/checksums`` (the old ``GET
+    /kvcache/check`` was removed). The received JSON is stored on the server so
+    the test can assert the request shape ``_query_checksum`` sends.
+    """
+
+    def do_POST(self):
+        if "/cache/checksums" not in self.path:
+            self.send_response(404)
+            self.end_headers()
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        payload = json.loads(self.rfile.read(length).decode())
+        self.server.received_payloads.append(payload)
+        body = json.dumps(
+            {
+                "status": "success",
+                "chunk_checksums": ["a" * 32, "b" * 32],
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass  # suppress logs
+
+
+class TestQueryChecksum:
+    @pytest.fixture(autouse=True)
+    def _start_server(self):
+        """Start a tiny HTTP server for the test."""
+        self.server = HTTPServer(
+            ("127.0.0.1", 0),
+            _ChecksumHandler,
+        )
+        self.server.received_payloads = []
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+        )
+        self.thread.daemon = True
+        self.thread.start()
+        yield
+        self.server.shutdown()
+
+    def test_success(self):
+        base = "http://127.0.0.1:%d" % self.port
+        result = _query_checksum(
+            base,
+            block_offset=0,
+            num_blocks=2,
+            block_size=2,
+            chunk_size=2,
+        )
+        assert result is not None
+        assert len(result) == 2
+        assert result[0] == "a" * 32
+        # The POST body matches the MP /cache/checksums contract: block-native
+        # ids and a block-level chunk_size (token chunk_size 2 / block_size 2).
+        assert len(self.server.received_payloads) == 1
+        sent = self.server.received_payloads[0]
+        assert sent["block_ids"] == [0, 1]
+        assert sent["chunk_size"] == 1
+        assert sent["layerwise"] is False
+
+    def test_unreachable_returns_none(self):
+        result = _query_checksum(
+            "http://127.0.0.1:1",
+            block_offset=0,
+            num_blocks=2,
+            block_size=2,
+            chunk_size=2,
+        )
+        assert result is None
 
 
 # ------------------------------------------------------------------ #
