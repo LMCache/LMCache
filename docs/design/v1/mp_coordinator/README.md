@@ -183,7 +183,7 @@ dropped from the backbone as it had no consumer yet).
 > work sent to a thread (`run_in_executor`), so request latency and the health
 > loop are not blocked.
 
-## Registry (`registry.py`)
+## Registry (`views/instance_registry.py`)
 
 `InstanceRegistry` maps `instance_id` → `MPInstance` (ip, http_port,
 heartbeat timestamps, metadata). Membership is pure — no sockets, no model or
@@ -273,8 +273,8 @@ The endpoint adds no usage tracking of its own: the per-instance,
 per-backend rollup it needs is exactly what the usage manager publishes.
 
 `ServerConfigRegistry` holds the declarations. It lives outside
-`registry.py` because that file is membership only; a capacity is not a way
-to reach a server.
+`instance_registry.py` because that file is membership only; a capacity is
+not a way to reach a server.
 
 Two properties the endpoint depends on. Shared backends (one S3 bucket
 mounted by N servers) are counted **once** for the fleet, never summed —
@@ -320,11 +320,18 @@ The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
   `EVICTION_CHECK_INTERVAL = 0` makes `FleetEvictionController.start`
   create no task.
 - Registration is idempotent: re-registering replaces the entry. The registry
-  is ephemeral — rebuilt from heartbeats after a coordinator restart. Durable
-  state (registered quotas) belongs in an external store, not here. The
-  directory, usage view, and LRU are rebuilt only from the cache-event
-  stream, so after a coordinator restart they start empty and refill as
-  events arrive — quotas under-report until they do.
+  is ephemeral — rebuilt from heartbeats after a coordinator restart (a
+  heartbeat's `404` makes each server re-register).
+- What else survives a restart depends on two flags (see
+  [persistence/README.md](persistence/README.md)). `--metadata-path` keeps
+  operator intent — pins, per-salt quotas and the default limit — written
+  on every change. `--checkpoint-path` keeps the event-derived state — key
+  directory, usage view, LRU order, capacity declarations, gate cursors and
+  the Kafka read position — written every `--checkpoint-interval` and on a
+  clean stop. Whatever an unset flag would have kept starts empty: the
+  views refill as events arrive (with Kafka, from the topic's oldest
+  retained record) and quotas under-report until they do; pins, quotas and
+  the default limit must be re-applied by the operator.
 
 ## Observability
 

@@ -176,8 +176,9 @@ class CoordinatorCommand(BaseCommand):
             type=str,
             default=None,
             help=(
-                "File to store operator-set state (L2 pins and per-cache_salt "
-                "quotas) in. Unset means that state is lost on restart."
+                "File to store operator-set state (L2 pins, per-cache_salt "
+                "quotas and the default quota limit) in. Unset means that "
+                "state is lost on restart."
             ),
         )
         parser.add_argument(
@@ -239,8 +240,9 @@ class CoordinatorCommand(BaseCommand):
             type=str,
             default=None,
             help=(
-                "Consumer group whose committed offsets a restart resumes "
-                "from (default: lmcache-coordinator). Ignored unless "
+                "Consumer group to join (default: lmcache-coordinator). "
+                "Restarts resume from the --checkpoint-path checkpoint, not "
+                "from offsets committed to the group. Ignored unless "
                 "--event-transport kafka."
             ),
         )

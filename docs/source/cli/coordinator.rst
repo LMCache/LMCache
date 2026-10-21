@@ -69,15 +69,17 @@ Options
      - Positions between CacheBlend match probes; ``1`` probes every offset
        for full recall (default: ``1``). Ignored unless blend lookup is on.
    * - ``--checkpoint-path FILE``
-     - Checkpoint the coordinator's directory, usage view and stream cursors
-       to this file, so a restart resumes instead of starting cold. Unset
-       disables checkpointing.
+     - Checkpoint the coordinator's event-derived state -- key directory,
+       usage view, LRU order, declared server capacities, per-server stream
+       cursors and, with ``--event-transport kafka``, the topic read
+       position -- to this file, so a restart resumes instead of starting
+       cold. Unset disables checkpointing.
    * - ``--checkpoint-interval SECS``
      - Seconds between checkpoint writes; ``0`` writes only on a clean stop
        (default: ``60``). Ignored unless ``--checkpoint-path`` is set.
    * - ``--metadata-path FILE``
-     - Store operator-set state -- L2 pins and per-``cache_salt`` quotas -- in
-       this file, written whenever it changes. Unset means that state is lost
+     - Store operator-set state -- L2 pins, per-``cache_salt`` quotas and the
+       default quota limit -- in this file, written whenever it changes. Unset means that state is lost
        on restart.
    * - ``--extra-config JSON``
      - JSON object of settings the core flags do not name, read by whichever
@@ -111,8 +113,12 @@ Options
        ``--coordinator-kafka-topic`` (default: ``lmcache-cache-events``).
        Ignored unless ``--event-transport kafka``.
    * - ``--kafka-group-id GROUP``
-     - Consumer group whose committed offsets a restart resumes from
-       (default: ``lmcache-coordinator``). Ignored unless
+     - Consumer group the coordinator joins, which decides how partitions
+       are shared between members (default: ``lmcache-coordinator``). The
+       coordinator never commits offsets to the group: a restart resumes
+       from the read position in the ``--checkpoint-path`` checkpoint, or,
+       without one, from the oldest retained record (unless another client
+       committed offsets for the group). Ignored unless
        ``--event-transport kafka``.
 
 Configuration

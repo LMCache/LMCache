@@ -90,8 +90,10 @@ keeps the default below.
        for full recall. Ignored unless blend lookup is on.
    * - ``--checkpoint-path``
      - (empty)
-     - File the coordinator's derived state is checkpointed to. Empty
-       disables it and the coordinator starts cold after every restart.
+     - File the coordinator's event-derived state (key directory, usage
+       view, LRU order, server capacities, stream cursors and the Kafka read
+       position) is checkpointed to. Empty disables it and the coordinator
+       starts cold after every restart.
    * - ``--checkpoint-interval``
      - ``60``
      - Seconds between checkpoint writes; ``0`` writes only on a clean stop.
@@ -99,8 +101,9 @@ keeps the default below.
        written whenever pins or quotas change.
    * - ``--metadata-path``
      - (empty)
-     - File the operator-set state (L2 pins and per-``cache_salt`` quotas)
-       is stored in. Empty means that state is lost on restart.
+     - File the operator-set state (L2 pins, per-``cache_salt`` quotas and
+       the default quota limit) is stored in. Empty means that state is lost
+       on restart.
    * - ``--extra-config``
      - (empty)
      - JSON object of settings the core flags do not name, read by whichever
@@ -317,9 +320,16 @@ With the Kafka transport, start the coordinator with
 instead of serving ``POST /events``; without that, the broker retains the
 records but nothing reads them. Both sides need the optional
 ``lmcache[kafka]`` extra (``pip install 'lmcache[kafka]'``), imported only
-when Kafka is selected. A restarted coordinator resumes from its consumer
-group's committed offsets; coordinator-driven replay of a detected gap is a
-follow-up.
+when Kafka is selected. The coordinator never commits offsets to its consumer
+group: the read position is saved in the ``--checkpoint-path`` checkpoint,
+beside the state it produced, and a restart resumes each partition at or
+just before the first record that state does not include. A record read
+again is dropped by the gate as a duplicate, so nothing is applied twice or
+skipped. A partition with no saved position (no ``--checkpoint-path``, a
+first start, or a partition added since) starts at the group's committed
+offset if something else committed one, otherwise at its oldest retained
+record (``auto.offset.reset`` is ``earliest``). Coordinator-driven replay of
+a detected gap is a follow-up.
 
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a
@@ -565,14 +575,16 @@ target the empty-string salt.
    untouched.
 
 Salts without an explicit quota are governed by the registry's **default
-limit** (``PUT /quota/config``). On boot the default is unset, and unquota'd
-salts are **exempt** from eviction — quotas live in memory, so a freshly
-(re)started coordinator has an empty quota table until the external quota
-controller re-syncs it, and the exempt default keeps that window from
-mass-evicting unknown tenants. After re-registering every per-salt quota, the
-controller sets the default to ``0`` — the signal that arms strict allowlist
-enforcement (all bytes under unquota'd salts become evictable on the next
-cycle):
+limit** (``PUT /quota/config``). While the default is unset, unquota'd salts
+are **exempt** from eviction. Without ``--metadata-path`` quotas live only in
+memory, so every (re)start begins with an empty quota table and an unset
+default until the external quota controller re-syncs it, and the exempt
+default keeps that window from mass-evicting unknown tenants. With
+``--metadata-path``, per-salt quotas and the default limit are reloaded from
+that file at startup, so a restart needs no re-sync. Once every per-salt
+quota is registered, the controller sets the default to ``0`` — the signal
+that arms strict allowlist enforcement (all bytes under unquota'd salts
+become evictable on the next cycle):
 
 .. code-block:: bash
 
@@ -608,14 +620,24 @@ per-salt totals. Dispatch failures or no-instances-registered fall
 through to the next cycle — at-least-once semantics, safe because the
 S3 delete is idempotent.
 
-**Cold start.** The coordinator's trackers are in-memory and are built
-only from the cache-event stream, so after a restart per-salt usage
-starts at zero even though the bytes are still resident in L2. Quotas
-under-report until enough events accumulate. Unquota'd salts are exempt
-from eviction until the quota controller sets a default limit, so a cold
-coordinator cannot mass-evict — but it can under-evict, and an operator
-re-arming quotas right after a restart should expect the usage numbers
-to climb toward the true value rather than start at it.
+**Restart.** Per-salt usage and the LRU order are built only from the
+cache-event stream, so what a restarted coordinator knows depends on
+``--checkpoint-path``:
+
+- **With it**, both are restored at startup as of the last checkpoint write
+  (a clean stop writes one on the way out). With ``--event-transport kafka``
+  the coordinator then reads on from the position saved in that same
+  checkpoint, so it misses nothing the topic still retains. Over HTTP,
+  events posted between the last write and a crash are lost; the gate
+  detects them as a sequence gap when that server's next batch arrives.
+- **Without it**, the coordinator starts cold: per-salt usage starts at
+  zero even though the bytes are still resident in L2 (with Kafka, it is
+  rebuilt only as far back as the topic retains records). Quotas
+  under-report until enough events accumulate. The eviction loop only picks
+  keys whose store events it has consumed, so a cold coordinator cannot
+  evict bytes it has not seen — but it can under-evict, and an operator re-arming quotas
+  right after a cold restart should expect the usage numbers to climb
+  toward the true value rather than start at it.
 
 ``PUT /quota/config`` / ``GET /quota/config``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -14,17 +14,22 @@ contract below and restores itself from its own section:
 |---|---|---|
 | `KeyDirectory` | `key_directory` | A restarted MP server re-announces its L1, but nothing re-announces bytes already resting in L2 |
 | `CacheUsageManager` | `cache_usage` | Byte accounting for those same placements; quota enforcement is blind without it |
+| `ServerConfigRegistry` | `server_config` | Servers declare capacity only at (re-)registration and on change, so without it `GET /instances/usage` reads no capacity until each one re-registers; the captured `(incarnation, revision)` stamp keeps a straggling older declaration from regressing the restored one |
 | `EventGate` | `stream_cursors` | Fencing compares an arriving batch against a prior incarnation; with no cursor there is nothing to compare, and a restarted server's stale L1 slice is advertised forever |
+| `StreamPosition` (Kafka only) | `kafka_stream_position` | The coordinator never commits offsets to its consumer group, so nothing else records where the restored state stops; without it a restart re-reads the topic from `earliest` (see [ingest.md](../ingest.md)) |
 | `IsolatedLRUEvictionPolicy` | `lru_order` | Recency is position, not a timestamp |
 | `FleetEvictionController` | `pins` | Operator intent |
 | `QuotaManager` | `quotas` | Operator intent |
 
-Nothing in `create_app` enumerates them. Controllers are discovered by
-scanning `controllers/`, each advertises what it needs persisted, and each
-component says which artifact it belongs in -- so a new controller with
-durable state is one file, and the wiring follows. The directory and the
-ingest gate are named explicitly because they are durable but are not
-controllers.
+Nothing in `create_app` enumerates the views and controllers. Both are
+discovered by scanning `views/` and `controllers/`, each advertises what
+it needs persisted, and each component says which artifact it belongs in
+-- so a new view or controller with checkpoint state, or a controller with
+metadata state, is one file, and the wiring follows. Only controllers'
+`METADATA` components are registered with the metadata file; a view's
+would be ignored. The ingest gate and, with the Kafka source, its
+`StreamPosition` are named explicitly because they are durable but are
+neither views nor controllers.
 
 The alternative -- restore the directory, then re-deliver its placements
 as synthesized `STORE` batches to rebuild the views -- couples every
@@ -40,7 +45,7 @@ rather than double-counting.
 ## The contract
 
 A `DurableComponent`
-([`durable.py`](../../../../../lmcache/v1/mp_coordinator/persistence/durable.py))
+([`durable_component.py`](../../../../../lmcache/v1/mp_coordinator/persistence/durable_component.py))
 owns one section end to end:
 
 | Member | Meaning |
@@ -83,8 +88,9 @@ the numbers look fine and the quota arithmetic is quietly wrong.
 
 `QuiesceLock`
 ([`quiesce.py`](../../../../../lmcache/v1/mp_coordinator/persistence/quiesce.py))
-closes the window with a condition variable shared by two roles, and
-`CacheEventBroadcaster` owns the one instance:
+closes the window with a condition variable shared by two roles.
+`create_app` builds the one instance and hands it to the gate and to
+`save_checkpoint`:
 
 - **The gate** holds `applying()` around each mutating call -- `ingest`
   and `drop_instance` -- so the unit of atomicity is one batch (or one
@@ -92,11 +98,13 @@ closes the window with a condition variable shared by two roles, and
   it. Arriving while a quiesce is pending parks the call before it starts,
   so a quiesce never interrupts work half-done.
 - **A capture** takes the same lock, reads every component, and
-  releases. Nothing in this PR does so yet; the checkpoint module will,
-  and it keeps the quiesce and the reads together so a caller cannot take
-  the torn version by forgetting to hold the lock. One capturer at a
-  time: two overlapping captures would each clear the request on the way
-  out, letting ingest resume while the second was still reading.
+  releases. `save_checkpoint`
+  ([`checkpoint.py`](../../../../../lmcache/v1/mp_coordinator/persistence/checkpoint.py))
+  does this, keeping the quiesce and the reads together so a caller
+  cannot take the torn version by forgetting to hold the lock. One
+  capturer at a time: two overlapping captures would each clear the
+  request on the way out, letting ingest resume while the second was
+  still reading.
 
 The gate holds the lock rather than the broadcaster, for three reasons. It is where
 every mutation enters -- `fence_instance` reaches consumers without going
@@ -109,10 +117,10 @@ the quiesce, while the capture -- holding the quiesce -- waits for that
 same lock to read the cursors. That deadlock is permanent; the entry
 timeout is long spent by then.
 
-Captures are serialized against each other, so two cannot interleave over
-the same state.
+Nothing enforces a single capturer: the lifespan stops the checkpoint
+timer before the final write, so the two never overlap.
 
-Two consequences worth keeping in mind:
+Three consequences worth keeping in mind:
 
 - **A quiesce stalls ingest**, so it must cover reads of in-memory state
   and nothing else. Encoding or writing under one pauses the fleet's
