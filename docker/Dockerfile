@@ -148,8 +148,9 @@ RUN . /opt/venv/bin/activate && \
     LMCACHE_INSTALLED=$(python3 -c 'import importlib.metadata as m; print(m.version("lmcache"))') && \
     uv pip install "lmcache-rust-raw-block-io==${LMCACHE_INSTALLED}" && \
     python3 -c 'import lmcache_rust_raw_block_io' && \
-  
-    uv pip install --reinstall-package nixl nixl
+    # lmcache-nixl is published the same way.
+    uv pip install --reinstall-package nixl "lmcache-nixl==${LMCACHE_INSTALLED}" && \
+    python3 -c 'import nixl, lmcache_nixl'
 
 WORKDIR /workspace
 USER lmcache
@@ -179,8 +180,8 @@ RUN . /opt/venv/bin/activate && \
         --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu129 \
         --index-strategy unsafe-best-match --verbose && \
     python3 -c 'import lmcache_rust_raw_block_io' && \
-    
-    uv pip install --reinstall-package nixl nixl
+    uv pip install --reinstall-package nixl "lmcache-nixl==${VER}" && \
+    python3 -c 'import nixl, lmcache_nixl'
 
 WORKDIR /workspace
 USER lmcache

@@ -142,15 +142,36 @@ def _create_nixl_native_l2_adapter(
     if l1_memory_desc.align_bytes <= 0:
         raise ValueError("nixl_native requires a positive L1 alignment")
 
+    # A source build (BUILD_WITH_NIXL=1) has lmcache.lmcache_nixl, linked to
+    # its NIXL SDK through a RUNPATH. The lmcache-nixl wheel's lmcache_nixl has
+    # no RUNPATH: it links libnixl by SONAME, so import nixl first, which loads
+    # the libnixl matching torch's CUDA, and the loader reuses that copy.
     try:
         # First Party
         from lmcache.lmcache_nixl import LMCacheNixlClient
-    except ImportError as exc:
-        raise RuntimeError(
-            "nixl_native requires the optional C++ extension built with NIXL "
-            ">= 1.3 development files. Set BUILD_WITH_NIXL=1, "
-            "NIXL_INCLUDE_DIR, and NIXL_LIBRARY_DIR, then reinstall LMCache."
-        ) from exc
+    except ImportError as source_exc:
+        try:
+            # Third Party
+            import nixl  # noqa: F401
+
+            # isort: split
+            # Third Party
+            from lmcache_nixl import LMCacheNixlClient
+        except ImportError as exc:
+            # First Party
+            from lmcache import __version__
+
+            # Releases publish it at lmcache's version; dev builds have no
+            # matching package, so leave those unpinned.
+            is_release = re.fullmatch(r"\d+\.\d+\.\d+((a|b|rc)\d+)?", __version__)
+            pin = f"=={__version__}" if is_release else ""
+            raise RuntimeError(
+                "nixl_native requires LMCache's NIXL connector. Install it with "
+                f"`pip install lmcache-nixl{pin}`, or build LMCache from source "
+                "with BUILD_WITH_NIXL=1, NIXL_INCLUDE_DIR, and NIXL_LIBRARY_DIR "
+                f"set. Importing lmcache.lmcache_nixl failed with: {source_exc}; "
+                f"importing nixl and lmcache_nixl failed with: {exc}"
+            ) from exc
 
     # First Party
     from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (

@@ -22,8 +22,25 @@ checks those capabilities when it starts and rejects ambiguous plugins.
 Build and runtime requirements
 ------------------------------
 
-The minimum supported NIXL version is 1.3.0. A source installation must install
-the public C++ headers as well as ``libnixl``. Build LMCache with:
+The connector is published as the ``lmcache-nixl`` package, at the same
+version as ``lmcache``. The ``lmcache/vllm-openai`` release images include it.
+Elsewhere, install the version matching the installed ``lmcache``:
+
+.. code-block:: bash
+
+   LMCACHE_VERSION=$(python -c 'import importlib.metadata as m; print(m.version("lmcache"))')
+   pip install "lmcache-nixl==${LMCACHE_VERSION}"
+
+``lmcache-nixl`` is compiled against NIXL 1.3.1 and depends on ``nixl>=1.3.0``,
+which bundles ``libnixl`` and its plugins for CUDA 12 and CUDA 13; the adapter
+loads the one matching torch's CUDA build, so no build flags or environment
+variables are needed. The ``nixl`` wheel requires the system OpenSSL 3
+libraries (``libssl.so.3``), present on Ubuntu 22.04+ and RHEL 9; on
+RHEL/Alma/Rocky 8 install ``openssl3-libs`` from EPEL.
+
+A source installation can build the connector into LMCache instead. The minimum
+supported NIXL version is 1.3.0, and the NIXL installation must provide the
+public C++ headers as well as ``libnixl``. Build LMCache with:
 
 .. code-block:: bash
 
@@ -270,8 +287,15 @@ Troubleshooting
 ---------------
 
 ``lmcache_nixl`` cannot be imported
-   Rebuild with ``BUILD_WITH_NIXL=1`` and verify that ``NIXL_INCLUDE_DIR``
-   contains ``nixl.h`` and ``NIXL_LIBRARY_DIR`` contains ``libnixl.so``.
+   Install ``lmcache-nixl`` at the installed ``lmcache`` version. For a source
+   build, rebuild with ``BUILD_WITH_NIXL=1`` and verify that
+   ``NIXL_INCLUDE_DIR`` contains ``nixl.h`` and ``NIXL_LIBRARY_DIR`` contains
+   ``libnixl.so``.
+
+``import nixl`` fails with ``libssl.so.3: cannot open shared object file``
+   The host lacks OpenSSL 3, which the ``nixl`` wheel links but does not
+   bundle. Install it (``openssl3-libs`` from EPEL on RHEL-family 8) or use a
+   newer base OS.
 
 Plugin discovery or backend creation fails
    Verify NIXL 1.3 or newer, set ``NIXL_PLUGIN_DIR`` to the installed plugin
