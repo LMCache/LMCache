@@ -14,7 +14,8 @@ rather than copying the code around them:
   runtime test lives in ``test_gpu_cache_context.py``).
 * ``LMCacheMPWorkerAdapter._create_transfer_context`` -- the worker-side
   transfer context.
-* ``LMCacheMPConnector._worker_adapter_cls`` -- the worker adapter class.
+* ``LMCacheMPConnector.create_lmcache_mp_worker_adapter`` -- the worker
+  adapter.
 
 Subclasses of ``LMCacheDrivenTransferContext`` also rely on the state its
 constructor sets, so that is pinned too.
@@ -281,18 +282,35 @@ def test_transfer_context_state_for_subclasses_is_stable():
 
 
 # ------------------------------------------------------------------ #
-#  LMCacheMPConnector._worker_adapter_cls                              #
+#  LMCacheMPConnector.create_lmcache_mp_worker_adapter                 #
 # ------------------------------------------------------------------ #
 
 
-def test_connector_defaults_to_the_stock_worker_adapter():
+def test_connector_builds_the_stock_worker_adapter(monkeypatch):
+    pytest.importorskip("vllm")
+    # First Party
+    from lmcache.integration.vllm import lmcache_mp_connector as connector_mod
+
+    # Resolved at call time, so tests patching the module-level name still
+    # take effect.
+    built = MagicMock()
+    monkeypatch.setattr(connector_mod, "LMCacheMPWorkerAdapter", built)
+    connector = connector_mod.LMCacheMPConnector.__new__(
+        connector_mod.LMCacheMPConnector
+    )
+    adapter = connector.create_lmcache_mp_worker_adapter(server_url="u", x=1)
+    built.assert_called_once_with(server_url="u", x=1)
+    assert adapter is built.return_value
+
+
+def test_connector_worker_role_routes_through_the_adapter_hook():
     pytest.importorskip("vllm")
     # First Party
     from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
 
-    # None means "the module-level LMCacheMPWorkerAdapter, resolved at call
-    # time", so tests patching that name keep working.
-    assert LMCacheMPConnector._worker_adapter_cls is None
+    source = inspect.getsource(LMCacheMPConnector.__init__)
+    assert "self.create_lmcache_mp_worker_adapter(" in source
+    assert "LMCacheMPWorkerAdapter(" not in source
 
 
 # ------------------------------------------------------------------ #

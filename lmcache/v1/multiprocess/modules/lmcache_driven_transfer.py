@@ -871,17 +871,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     ) -> BaseCacheContext:
         """Build the cache context for a newly registered instance.
 
-        :meth:`register_kv_cache` builds every context through here, so a
-        subclass can return a different context type (for example, one with
-        another staging layout and the matching
-        :meth:`~BaseCacheContext.transfer_object_group`) without
-        re-implementing registration. The
-        server-wide settings -- chunk size, object-group split and the
-        CacheBlend sliding-window mode -- come from the shared context.
-
         ``instance_id`` is the registering instance. The default ignores it;
         a subclass can use it to look up per-instance data that its worker
-        sent before registering (for example, through ``server_module_call``).
+        sent before registering.
         """
         return create_cache_context(
             kv_caches,
