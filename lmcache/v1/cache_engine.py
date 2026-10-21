@@ -16,7 +16,7 @@ from typing import (
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.health_monitor.base import HealthMonitor
+    from lmcache.inprocess.v1.health_monitor.base import HealthMonitor
 
 # Standard
 import asyncio

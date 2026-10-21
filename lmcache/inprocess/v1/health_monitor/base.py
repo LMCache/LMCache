@@ -9,13 +9,13 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 import threading
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.exceptions import IrrecoverableException
-from lmcache.v1.health_monitor.constants import (
+from lmcache.inprocess.v1.health_monitor.constants import (
     DEFAULT_FALLBACK_POLICY,
     DEFAULT_PING_INTERVAL,
     FallbackPolicy,
 )
+from lmcache.logging import init_logger
+from lmcache.v1.exceptions import IrrecoverableException
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     PeriodicThreadRegistry,
@@ -234,7 +234,7 @@ class HealthMonitor(PeriodicThread):
         """
         cls: type[HealthCheck]
         for cls in discover_subclasses(
-            "lmcache.v1.health_monitor.checks",
+            "lmcache.inprocess.v1.health_monitor.checks",
             HealthCheck,  # type: ignore[type-abstract]
             module_filter=lambda name: not name.startswith("_"),
             include_abstract=True,

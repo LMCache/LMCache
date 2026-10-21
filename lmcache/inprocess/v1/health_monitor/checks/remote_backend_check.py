@@ -13,11 +13,8 @@ import time
 import torch
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.health_monitor.base import HealthCheck
-from lmcache.v1.health_monitor.constants import (
+from lmcache.inprocess.v1.health_monitor.base import HealthCheck
+from lmcache.inprocess.v1.health_monitor.constants import (
     DEFAULT_FALLBACK_POLICY,
     DEFAULT_GET_BLOCKING_FAILED_THRESHOLD,
     DEFAULT_PING_TIMEOUT,
@@ -30,6 +27,9 @@ from lmcache.v1.health_monitor.constants import (
     WAITING_TIME_FOR_RECOVERY_CONFIG_KEY,
     FallbackPolicy,
 )
+from lmcache.logging import init_logger
+from lmcache.observability import LMCStatsMonitor
+from lmcache.utils import CacheEngineKey
 from lmcache.v1.storage_backend.connector import InstrumentedRemoteConnector
 from lmcache.v1.storage_backend.connector.audit_connector import AuditConnector
 

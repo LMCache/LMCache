@@ -12,11 +12,11 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.exceptions import IrrecoverableException
-from lmcache.v1.health_monitor.base import HealthCheck, HealthMonitor
-from lmcache.v1.health_monitor.checks.remote_backend_check import (
+from lmcache.inprocess.v1.health_monitor.base import HealthCheck, HealthMonitor
+from lmcache.inprocess.v1.health_monitor.checks.remote_backend_check import (
     RemoteBackendHealthCheck,
 )
+from lmcache.v1.exceptions import IrrecoverableException
 
 # ============================================================================
 # Mock Classes

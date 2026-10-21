@@ -11,13 +11,13 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.health_monitor.base import HealthMonitor
-from lmcache.v1.health_monitor.constants import (
+from lmcache.inprocess.v1.health_monitor.base import HealthMonitor
+from lmcache.inprocess.v1.health_monitor.constants import (
     DEFAULT_PING_INTERVAL,
     PING_INTERVAL_CONFIG_KEY,
 )
+from lmcache.logging import init_logger
+from lmcache.v1.config import LMCacheEngineConfig
 
 if TYPE_CHECKING:
     # First Party
