@@ -54,7 +54,8 @@ leaves nothing behind.
 
 ```python
 PrefetchController(l1_managers, l1_manager_descriptors,
-                   l2_adapters, adapter_descriptors, policy, max_in_flight=8)
+                   l2_adapters, adapter_descriptors, policy, max_in_flight=8,
+                   l2_load_timeout=None, clock=time.monotonic)
 
 submit_prefetch_request(spec: PrefetchTaskSpec, skip_l2=False) -> PrefetchRequestId
 query_prefetch_result(request_id) -> PrefetchResult | None   # consume-once
@@ -134,6 +135,31 @@ staging buffers and release L1 read locks, an all-zero result is published,
 and the request is retired. `stop()` does the same for every in-flight
 request. Outstanding adapter tasks are left to complete on their own.
 
+## Load deadline
+
+`--l2-prefetch-load-timeout` sets a finite positive budget in seconds from
+submission, including queueing and lookup. It is disabled by default and
+does not apply to `NO_LOCK` warmup requests.
+
+Submission copies `PrefetchTaskSpec` with a controller-assigned `deadline_at`;
+reusing the caller's spec starts a fresh budget without modifying that spec.
+
+At expiry, the controller publishes the available L1 result once: a valid
+prefix for `prefix` fetching, or complete found columns for `full` fetching.
+Only the selected cells keep caller read locks. Queued requests can expire
+without waiting for an admission slot.
+
+Outstanding I/O continues draining after the caller receives its fallback.
+The request keeps its staging buffers and L2 locks until that I/O completes,
+and still occupies an admission slot. Late successful loads use
+`finish_prefetch`, which admits them without caller read locks or a new L2
+store notification; late failures release their staging buffers. Neither
+can change the published result or release its caller-owned locks.
+
+The deadline event reports retained and missed chunks, not rank cells.
+This is a caller latency budget, not adapter cancellation; existing lock
+TTLs and shutdown behavior remain unchanged.
+
 ## Policy
 
 `PrefetchPolicy` (`prefetch_policy.py`) is **pure**: `plan_load` sees the two
@@ -164,6 +190,7 @@ selected with `--l2-prefetch-policy`.
 | `L2_LOAD_TASK_SUBMITTED` / `L2_LOAD_TASK_COMPLETED` | Per adapter, per request. |
 | `L2_PREFETCH_LOAD_COMPLETED` | Per adapter, as its load is admitted. |
 | `L2_PREFETCH_FAILED` | `l1_oom` / `l1_contended` from the reserve step, `not_found` from admission. |
+| `L2_PREFETCH_DEADLINE` | Caller fallback published after queue, lookup, or load expiry. |
 
 Gauges: `lmcache_mp.num_inflight_l2_loads`,
 `lmcache_mp.inflight_load_memory_usage_bytes` (per adapter) and
