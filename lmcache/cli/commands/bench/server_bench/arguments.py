@@ -165,7 +165,10 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--url",
         default="http://localhost:8080",
-        help=("Legacy HTTP URL; checksums are computed from local worker buffers"),
+        help=(
+            "HTTP URL for checksum verification in lmcache_driven mode; "
+            "empty disables it; engine_driven mode skips HTTP checks"
+        ),
     )
 
     prof = parser.add_argument_group(

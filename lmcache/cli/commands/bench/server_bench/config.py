@@ -21,7 +21,7 @@ class BenchConfig:
 
     Attributes:
         rpc_url: Multiprocess request endpoint of the LMCache server.
-        http_url: Legacy HTTP endpoint, unused by local checksum verification.
+        http_url: HTTP endpoint for checksum verification in ``lmcache_driven`` mode.
         mode: ``"cpu"`` or ``"gpu"`` for mock Worker resources.
         transfer_mode: ``"auto"``, ``"engine_driven"``, or
             ``"lmcache_driven"``.

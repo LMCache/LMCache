@@ -34,6 +34,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _get_chunk_size,
     _make_key,
     _poll_prefetch_status,
+    _query_checksum,
     _send_end_session,
     _send_lookup,
     _wait_for_result,
@@ -521,6 +522,67 @@ class ServerBenchClient:
                 )
             )
         return checksums or None
+
+    def verify_server_checksums(
+        self,
+        request: RequestContext,
+        start_token: int,
+        token_count: int,
+        *,
+        operation: Literal["store", "retrieve"],
+    ) -> bool | None:
+        """Compare local and HTTP digests; return None for empty or disabled checks."""
+        self._check_request_ready(request)
+        self._validate_token_range(request, start_token, token_count)
+        if token_count == 0:
+            return None
+        if not self._config.uses_handle_transfer or not self._config.http_url:
+            self._log("  SERVER CHECKSUM SKIP: requires lmcache_driven mode and --url")
+            return None
+
+        allocation = request.blocks(start_token, token_count)
+        matched = True
+        for worker in self._workers:
+            enabled = (
+                worker.spec.store_enabled
+                if operation == "store"
+                else worker.spec.retrieve_enabled
+            )
+            if not enabled:
+                continue
+            expected: dict[int, list[str]] = {}
+            for offset in range(
+                start_token, start_token + token_count, self._chunk_size
+            ):
+                for index, digest in worker.buffers.tensor_checksums(
+                    request.blocks(offset, self._chunk_size).as_block_ids()
+                ).items():
+                    expected.setdefault(index, []).append(digest)
+            queried: dict[tuple[int, ...], dict[str, list[str]] | None] = {}
+            for group, blocks in zip(
+                worker.buffers.engine_group_infos, allocation.groups, strict=True
+            ):
+                if blocks.block_ids not in queried:
+                    queried[blocks.block_ids] = _query_checksum(
+                        self._config.http_url,
+                        list(blocks.block_ids),
+                        self._blocks_in_chunk,
+                        worker.spec.instance_id,
+                    )
+                actual = queried[blocks.block_ids]
+                # The legacy endpoint hashes every tensor; select this group's results.
+                for index in group.layer_indices:
+                    if (
+                        actual is None
+                        or actual.get(f"layer_{index}") != expected[index]
+                    ):
+                        matched = False
+                        self._log(
+                            "  SERVER CHECKSUM FAIL: rank %d tensor %d (%s)"
+                            % (worker.spec.rank, index, operation)
+                        )
+        self._log("  SERVER CHECKSUM %s" % ("OK" if matched else "FAIL"))
+        return matched
 
     def close(self) -> None:
         """Close transfer contexts before releasing their worker-owned buffers.
