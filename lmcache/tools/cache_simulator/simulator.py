@@ -76,6 +76,10 @@ def compute_kv_bytes_per_chunk(event: dict[str, Any]) -> int:
     per chunk (e.g. key and value tensors for all layers); their byte sizes are
     summed.
 
+    Dtype names are accepted either torch-qualified (``"torch.float16"``, how
+    the server serialises them) or bare (``"float16"``, how the table above and
+    the README example are written).
+
     Returns 0 if ``shapes`` or ``dtypes`` is empty (caller must handle this).
     """
     shapes = event.get("shapes", [])
@@ -84,7 +88,7 @@ def compute_kv_bytes_per_chunk(event: dict[str, Any]) -> int:
         return 0
     total = 0
     for shape, dt in zip(shapes, dtypes, strict=False):
-        elem_bytes = _DTYPE_BYTES.get(dt, 0)
+        elem_bytes = _DTYPE_BYTES.get(dt.removeprefix("torch."), 0)
         if elem_bytes == 0:
             warnings.warn(
                 f"Unknown dtype '{dt}' — treating as 0 bytes per element.",

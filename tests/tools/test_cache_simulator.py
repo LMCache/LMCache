@@ -135,6 +135,25 @@ class TestComputeKvBytesPerChunk:
         expected = 4 * 256 * 64 * 2 + 4 * 256 * 64 * 1
         assert compute_kv_bytes_per_chunk(event) == expected
 
+    def test_torch_qualified_dtype(self):
+        # The server serialises dtypes as str(torch.dtype), so a float8 KV
+        # cache is logged as "torch.float8_e4m3fn"
+        event = {"shapes": [[32, 256, 128]], "dtypes": ["torch.float8_e4m3fn"]}
+        assert compute_kv_bytes_per_chunk(event) == 32 * 256 * 128 * 1
+
+    def test_torch_qualified_and_bare_dtypes_mixed(self):
+        event = {
+            "shapes": [[4, 256, 64], [4, 256, 64]],
+            "dtypes": ["torch.float16", "float8_e4m3fn"],
+        }
+        expected = 4 * 256 * 64 * 2 + 4 * 256 * 64 * 1
+        assert compute_kv_bytes_per_chunk(event) == expected
+
+    def test_unknown_qualified_dtype_still_warns(self):
+        event = {"shapes": [[2, 2]], "dtypes": ["torch.float64"]}
+        with pytest.warns(UserWarning, match="Unknown dtype 'torch.float64'"):
+            assert compute_kv_bytes_per_chunk(event) == 0
+
     def test_empty_shapes_returns_zero(self):
         assert compute_kv_bytes_per_chunk({"shapes": [], "dtypes": []}) == 0
 
