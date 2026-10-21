@@ -482,10 +482,14 @@ class UnifiedLMCacheMPConnector:
         full_indices: torch.Tensor,
         *,
         swa_indices: Optional[torch.Tensor],
+        mamba_indices: Optional[torch.Tensor] = None,
+        mamba_transfer_tokens: int = 0,
     ) -> list[torch.Tensor]:
         return self._sglang_kv_adapter.device_indices_for_linker_load(
             full_indices,
             swa_indices=swa_indices,
+            mamba_indices=mamba_indices,
+            mamba_transfer_tokens=mamba_transfer_tokens,
         )
 
     def parallel_all_reduce(self, tensor: torch.Tensor, op: dist.ReduceOp) -> None:
