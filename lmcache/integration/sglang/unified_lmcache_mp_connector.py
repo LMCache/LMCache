@@ -604,6 +604,7 @@ class UnifiedLMCacheMPConnector:
         start: int,
         end: int,
         worker_id: Optional[int],
+        request_configs: Optional[dict[str, Any]] = None,
     ) -> Any:
         # First Party
         from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -621,6 +622,7 @@ class UnifiedLMCacheMPConnector:
             end=end,
             request_id=operation.request_id,
             cache_salt=operation.cache_salt,
+            request_configs=request_configs,
         )
 
     def submit_lookup(
@@ -649,7 +651,16 @@ class UnifiedLMCacheMPConnector:
         if self.is_lookup_leader:
             try:
                 key = self._create_key(
-                    operation, start=0, end=aligned_end, worker_id=None
+                    operation,
+                    start=0,
+                    end=aligned_end,
+                    worker_id=None,
+                    # SGLang's prefix-cache hit, for the server's KV load policy.
+                    request_configs={
+                        "lmcache.hint.engine_computed_tokens": (
+                            operation.local_hit_tokens
+                        )
+                    },
                 )
                 operation.submission_future = self._req_client.lookup(
                     key, self.kv_world_size

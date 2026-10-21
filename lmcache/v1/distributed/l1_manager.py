@@ -1050,20 +1050,25 @@ class L1Manager(L1ManagerInterface):
         """
         return self._require_devdax_memory_manager().get_arena_statuses()
 
-    def get_devdax_arena_status(self, device_path: str) -> DevDaxArenaStatus:
-        """Return the status of the Device-DAX arena mapped at ``device_path``.
+    def get_devdax_arena_status(
+        self, device_path: str, offset_in_bytes: int = 0
+    ) -> DevDaxArenaStatus:
+        """Return the status of the Device-DAX arena at ``(device_path, offset)``.
 
         Args:
             device_path: The exact path used when the arena was added.
+            offset_in_bytes: Device offset the arena was added with.
 
         Returns:
             The arena's current status.
 
         Raises:
             L1ReconfigureError: If L1 is not Device-DAX backed (409) or no
-                arena is mapped at ``device_path`` (404).
+                arena matches (404).
         """
-        return self._require_devdax_memory_manager().get_arena_status(device_path)
+        return self._require_devdax_memory_manager().get_arena_status(
+            device_path, offset_in_bytes
+        )
 
     def owns_device(self, device_path: str) -> bool:
         """Return whether L1 maps the physical device at a path.
@@ -1095,12 +1100,14 @@ class L1Manager(L1ManagerInterface):
         self,
         device_path: str,
         size_in_bytes: int,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
-        """Add a Device-DAX device to the L1 arena pool.
+        """Add a Device-DAX range to the L1 arena pool.
 
         Args:
             device_path: Path of the Device-DAX device to map.
             size_in_bytes: Number of bytes to map.
+            offset_in_bytes: Byte offset into the device.
 
         Returns:
             Status of the newly added arena.
@@ -1110,19 +1117,21 @@ class L1Manager(L1ManagerInterface):
                 cannot be applied.
         """
         return self._require_devdax_memory_manager().add_device(
-            device_path, size_in_bytes
+            device_path, size_in_bytes, offset_in_bytes
         )
 
     def remove_devdax_device(
         self,
         device_path: str,
         mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
-        """Remove a Device-DAX device from the L1 arena pool.
+        """Remove a Device-DAX arena from the L1 arena pool.
 
         Args:
             device_path: Path of the mapped Device-DAX device.
             mode: Removal strategy. Only drain mode is currently supported.
+            offset_in_bytes: Device offset the arena was added with.
 
         Returns:
             Status of the arena after the removal request.
@@ -1131,7 +1140,9 @@ class L1Manager(L1ManagerInterface):
             L1ReconfigureError: If L1 is not Device-DAX backed or the request
                 cannot be applied.
         """
-        return self._require_devdax_memory_manager().remove_device(device_path, mode)
+        return self._require_devdax_memory_manager().remove_device(
+            device_path, mode, offset_in_bytes
+        )
 
     @property
     def config(self) -> L1ManagerConfig:

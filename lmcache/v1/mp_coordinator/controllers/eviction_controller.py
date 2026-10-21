@@ -380,11 +380,16 @@ class FleetEvictionController(Controller):
         would otherwise die with the process; the exit half waits for it.
 
         Args:
-            runtime: Supplies the client for the outbound DELETEs.
+            runtime: Supplies the client for the outbound DELETEs and the
+                runner the sweep loop is started on (as ``eviction``).
         """
         task: asyncio.Task | None = None
         if self._check_interval > 0:
-            task = asyncio.create_task(self._sweep_forever(runtime.http_client))
+            task = runtime.background_loops.start(
+                "eviction",
+                self._check_interval,
+                lambda: self.execute_evictions(runtime.http_client),
+            )
         else:
             logger.debug("Eviction loop disabled (check_interval=0)")
         try:
@@ -452,12 +457,6 @@ class FleetEvictionController(Controller):
     async def wait_for_in_flight_dispatches(self) -> None:
         """Await every outstanding fire-and-forget dispatch."""
         await asyncio.gather(*self._in_flight_dispatches, return_exceptions=True)
-
-    async def _sweep_forever(self, http_client: httpx.AsyncClient) -> None:
-        """Evict on a cadence until cancelled, sleeping first."""
-        while True:
-            await asyncio.sleep(self._check_interval)
-            await self.execute_evictions(http_client)
 
     @staticmethod
     async def _dispatch_eviction(

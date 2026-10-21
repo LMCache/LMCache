@@ -1059,8 +1059,14 @@ class PDBackendAsync(AllocatorBackendInterface):
         :param keys: Cache keys for this batch.
         :param memory_objs: Memory objects to transfer.
         :param transfer_spec: Transfer specification (carries req_id, etc.).
+            ``None`` for local requests, which are not transferred.
         :param on_complete_callback: Optional per-key completion callback.
         """
+        # Skip PD transfer for local requests (no transfer_spec), as PDBackend
+        # does. Requests without kv_transfer_params have no disagg_spec.
+        if transfer_spec is None:
+            return
+
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
