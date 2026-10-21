@@ -13,13 +13,13 @@ from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.cache_engine import LMCacheEngine
-    from lmcache.v1.config import LMCacheEngineConfig
-    from lmcache.v1.metadata import LMCacheMetadata
-    from lmcache.v1.rpc.transport import (
+    from lmcache.inprocess.v1.rpc.transport import (
         RpcClientTransport,
         RpcServerTransport,
     )
+    from lmcache.v1.cache_engine import LMCacheEngine
+    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
