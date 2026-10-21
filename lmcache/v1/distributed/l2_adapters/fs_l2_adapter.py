@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Optional, Union
 import asyncio
 import os
 import threading
+import uuid
 
 if TYPE_CHECKING:
     # First Party
@@ -55,6 +56,38 @@ _KEY_SEP = "@"
 # csrc/storage_backends/fs/connector.cpp.
 _PATH_SLASH_REPLACEMENT = "-SEP-"
 _FILE_EXT = ".data"
+
+
+def _write_all(fd: int, buf: bytes | bytearray | memoryview) -> None:
+    """Write all bytes to ``fd``, retrying short writes."""
+    view = memoryview(buf)
+    written = 0
+    while written < len(view):
+        count = os.write(fd, view[written:])
+        if count <= 0:
+            raise OSError("write returned 0 before the buffer was complete")
+        written += count
+
+
+def _publish_temp_file(tmp_path: Path, file_path: Path) -> bool:
+    """Publish a complete inode without replacing an established value.
+
+    Returns ``True`` when this writer created ``file_path`` and ``False`` when
+    another writer already published the same key. The writer-owned temporary
+    link is removed in both cases.
+    """
+    try:
+        os.link(tmp_path, file_path)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("Failed to remove temporary cache file %s", tmp_path)
 
 
 def _readinto_full(
@@ -526,9 +559,10 @@ class FSL2Adapter(L2AdapterInterface):
         fname = _object_key_to_filename(key)
         final = self._base_path / fname
         if self._relative_tmp_dir is not None:
-            tmp = self._base_path / self._relative_tmp_dir / fname
+            tmp_dir = self._base_path / self._relative_tmp_dir
         else:
-            tmp = final.with_suffix(".tmp")
+            tmp_dir = self._base_path
+        tmp = tmp_dir / f"{fname}.tmp"
         return final, tmp
 
     # ---- O_DIRECT helpers -----------------------------------------------
@@ -572,7 +606,9 @@ class FSL2Adapter(L2AdapterInterface):
                 except OSError:
                     pass
 
-    def _write_with_odirect(self, file_path: Path, buf: bytes) -> None:
+    def _write_with_odirect(
+        self, file_path: Path, buf: Union[bytearray, memoryview, bytes]
+    ) -> None:
         """Synchronous O_DIRECT write of *buf*.
 
         Runs in an executor (not on the event loop).
@@ -581,10 +617,12 @@ class FSL2Adapter(L2AdapterInterface):
         try:
             fd = os.open(
                 str(file_path),
-                os.O_CREAT | os.O_WRONLY | getattr(os, "O_DIRECT", 0),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_DIRECT", 0),
                 0o644,
             )
-            os.write(fd, buf)
+            _write_all(fd, buf)
+            os.close(fd)
+            fd = -1
         except Exception:
             logger.exception("Failed to O_DIRECT write %s", file_path)
             raise
@@ -609,13 +647,16 @@ class FSL2Adapter(L2AdapterInterface):
         stored_sizes: list[int] = []
         try:
             for key, obj in zip(keys, objects, strict=True):
-                file_path, tmp_path = self._key_to_file_and_tmp_path(key)
+                file_path, tmp_template = self._key_to_file_and_tmp_path(key)
 
                 # Skip if already stored on disk
                 if await aiofiles.os.path.exists(file_path):
                     continue
                 buf = obj.byte_array
                 size = len(buf)
+                tmp_path = tmp_template.with_name(
+                    f"{tmp_template.name}.{os.getpid()}.{uuid.uuid4().hex}"
+                )
 
                 try:
                     # Decide whether O_DIRECT is usable
@@ -641,18 +682,26 @@ class FSL2Adapter(L2AdapterInterface):
                             buf,
                         )
                     else:
-                        async with aiofiles.open(tmp_path, "wb") as f:
+                        async with aiofiles.open(tmp_path, "xb") as f:
                             await f.write(buf)
 
-                    await aiofiles.os.replace(tmp_path, file_path)
-                    bytes_written += size
-                    stored_keys.append(key)
-                    stored_sizes.append(size)
-                    logger.debug(
-                        "FSL2Adapter stored key %s (%d bytes)",
-                        file_path.name,
-                        size,
+                    published = await self._loop.run_in_executor(
+                        None, _publish_temp_file, tmp_path, file_path
                     )
+                    if published:
+                        bytes_written += size
+                        stored_keys.append(key)
+                        stored_sizes.append(size)
+                        logger.debug(
+                            "FSL2Adapter stored key %s (%d bytes)",
+                            file_path.name,
+                            size,
+                        )
+                    else:
+                        logger.debug(
+                            "FSL2Adapter duplicate store kept existing key %s",
+                            file_path.name,
+                        )
                 except Exception:
                     logger.exception(
                         "FSL2Adapter failed to store %s",
