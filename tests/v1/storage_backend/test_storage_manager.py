@@ -20,6 +20,7 @@ Key scenarios tested:
 """
 
 # Standard
+from collections import OrderedDict
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, Iterator, cast
@@ -428,3 +429,79 @@ class TestStorageManagerPrefetchCallback:
             assert not obj.ref_count_down_called
         for obj in tier0_objs[4:]:
             assert obj.ref_count_down_called
+
+
+class FakeAllocatorBackend:
+    """Stands in for the allocator backend; only its class name is used."""
+
+
+class FakePutBackend:
+    """Backend that records batched puts, or raises if ``error`` is set.
+
+    It shares the manager's allocator, so ``batched_put`` passes it the
+    caller's objects directly instead of making copies.
+    """
+
+    def __init__(self, allocator, error=None):
+        self.allocator = allocator
+        self.error = error
+        self.put_calls = []
+
+    def get_allocator_backend(self):
+        return self.allocator
+
+    def batched_submit_put_task(self, keys, memory_objs, transfer_spec=None):
+        if self.error is not None:
+            raise self.error
+        self.put_calls.append((list(keys), list(memory_objs)))
+
+    def close(self):
+        pass
+
+
+class TestStorageManagerBatchedPutRefCount:
+    """batched_put must release the references it owns even when a backend
+    raises during dispatch, without releasing any reference twice."""
+
+    @staticmethod
+    def _setup(storage_manager, backends):
+        allocator = FakeAllocatorBackend()
+        storage_manager.allocator_backend = allocator
+        storage_manager.storage_backends = OrderedDict(
+            (name, FakePutBackend(allocator, error)) for name, error in backends
+        )
+        keys = [CacheEngineKey("test_model", 1, 0, i, torch.bfloat16) for i in range(3)]
+        objs = [MockMemoryObj(i) for i in range(3)]
+        return keys, objs
+
+    def test_backend_raises_releases_refs(self, storage_manager):
+        keys, objs = self._setup(
+            storage_manager, [("Failing", RuntimeError("submit failed"))]
+        )
+
+        with pytest.raises(RuntimeError, match="submit failed"):
+            storage_manager.batched_put(keys, objs)
+
+        assert [obj.ref_count for obj in objs] == [0, 0, 0]
+
+    def test_second_backend_raises_releases_refs_once(self, storage_manager):
+        keys, objs = self._setup(
+            storage_manager,
+            [("First", None), ("Second", RuntimeError("submit failed"))],
+        )
+
+        with pytest.raises(RuntimeError, match="submit failed"):
+            storage_manager.batched_put(keys, objs)
+
+        first = storage_manager.storage_backends["First"]
+        assert len(first.put_calls) == 1
+        assert [obj.ref_count for obj in objs] == [0, 0, 0]
+
+    def test_success_releases_refs(self, storage_manager):
+        keys, objs = self._setup(storage_manager, [("First", None), ("Second", None)])
+
+        storage_manager.batched_put(keys, objs)
+
+        for backend in storage_manager.storage_backends.values():
+            assert backend.put_calls == [(keys, objs)]
+        assert [obj.ref_count for obj in objs] == [0, 0, 0]
