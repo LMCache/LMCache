@@ -97,8 +97,8 @@ class LMCacheMetadata:
         Raises:
             ValueError: If a fused-packed group reports an odd hidden dim.
         """
-        # Lazy: the spec registry transitively imports modules that import
-        # this one at package init.
+        # Lazy: the spec registry imports lmcache_native; keep this module
+        # importable without the native extension.
         # First Party
         from lmcache.v1.gpu_connector.kv_format.specs.registry import (
             get_spec_class,
