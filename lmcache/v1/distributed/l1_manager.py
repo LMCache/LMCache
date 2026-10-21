@@ -105,6 +105,13 @@ class L1ObjectState:
     is_temporary: bool
     """ Whether the object is temporary (need to be deleted after read). """
 
+    write_buffer_pins: int = 0
+    """Active I/O borrowers of this writer's staging buffer, without a TTL.
+
+    Each pin is released after its I/O completes. Normal reclamation cannot
+    free this buffer while the count is nonzero.
+    """
+
 
 def l1_mgr_synchronized(func):
     """
@@ -518,7 +525,7 @@ class L1Manager(L1ManagerInterface):
 
             staged = self._get_staging(key, tag)
             if staged is not None:
-                if staged.write_lock.is_locked():
+                if staged.write_lock.is_locked() or staged.write_buffer_pins:
                     ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
                     continue
                 # The previous reservation expired: hand the buffer over.
@@ -583,6 +590,60 @@ class L1Manager(L1ManagerInterface):
         return ret
 
     @l1_mgr_synchronized
+    def pin_write_buffers(
+        self, keys: list[ObjectKey], tag: str = ""
+    ) -> dict[ObjectKey, L1Error]:
+        """Keep this writer's staging buffers alive while asynchronous I/O uses them.
+
+        Pins do not expire with the write TTL. Acquire a pin before handing a
+        buffer to an adapter and release it only after the adapter completes.
+
+        Args:
+            keys: Object keys whose staging buffers will be borrowed.
+            tag: The writer tag used at reservation.
+
+        Returns:
+            SUCCESS per pinned key, or KEY_NOT_EXIST if the tag has no staging
+            buffer. Resident objects and other writers' buffers are unaffected.
+        """
+        ret: dict[ObjectKey, L1Error] = {}
+        for key in keys:
+            entry = self._get_staging(key, tag)
+            if entry is None:
+                ret[key] = L1Error.KEY_NOT_EXIST
+                continue
+            entry.write_buffer_pins += 1
+            ret[key] = L1Error.SUCCESS
+        return ret
+
+    @l1_mgr_synchronized
+    def unpin_write_buffers(
+        self, keys: list[ObjectKey], tag: str = ""
+    ) -> dict[ObjectKey, L1Error]:
+        """Release one completed I/O borrow of each writer-owned staging buffer.
+
+        Args:
+            keys: Object keys whose I/O has completed.
+            tag: The writer tag passed to :meth:`pin_write_buffers`.
+
+        Returns:
+            SUCCESS per released pin, KEY_NOT_EXIST when the staging buffer was
+            force-cleared, or KEY_IN_WRONG_STATE when this writer has no pin.
+            The buffer stays staged for admission or explicit discard.
+        """
+        ret: dict[ObjectKey, L1Error] = {}
+        for key in keys:
+            entry = self._get_staging(key, tag)
+            if entry is None:
+                ret[key] = L1Error.KEY_NOT_EXIST
+            elif entry.write_buffer_pins == 0:
+                ret[key] = L1Error.KEY_IN_WRONG_STATE
+            else:
+                entry.write_buffer_pins -= 1
+                ret[key] = L1Error.SUCCESS
+        return ret
+
+    @l1_mgr_synchronized
     def finish_write(
         self,
         keys: list[ObjectKey],
@@ -606,6 +667,7 @@ class L1Manager(L1ManagerInterface):
 
         Errors:
             KEY_NOT_EXIST: ``tag`` stages nothing for the key.
+            KEY_IS_LOCKED: I/O still holds a staging buffer pin.
             KEY_IN_WRONG_STATE: The staging object is not write-locked (its
                 reservation expired), which means the writer may have
                 caused inconsistent data.
@@ -684,6 +746,7 @@ class L1Manager(L1ManagerInterface):
 
         Errors:
             KEY_NOT_EXIST: ``tag`` stages nothing for the key.
+            KEY_IS_LOCKED: I/O still holds a staging buffer pin.
             KEY_IN_WRONG_STATE: The staging object is not write-locked (its
                 reservation expired).
 
@@ -749,7 +812,8 @@ class L1Manager(L1ManagerInterface):
         """Delete the given keys from L1 cache.
 
         Deletes the resident object and reclaims the key's staging objects
-        whose write lock expired (all of them when ``force`` is True).
+        whose write lock expired and whose I/O pins have been released
+        (all of them when ``force`` is True).
 
         Args:
             keys: The list of object keys to delete.
@@ -763,9 +827,8 @@ class L1Manager(L1ManagerInterface):
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_IS_LOCKED: The key is read-locked, or a live staging object
-                exists for it, so it cannot be deleted. Never returned when
-                ``force`` is True.
+            KEY_IS_LOCKED: The key is read-locked, or a staging object is
+                write-locked or I/O-pinned. Never returned when ``force`` is True.
         """
         need_to_free: list[MemoryObj] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -813,10 +876,11 @@ class L1Manager(L1ManagerInterface):
     ) -> dict[ObjectKey, L1Error]:
         """Atomically finish write access and discard the staging objects.
 
-        Unlock and discard happen in one critical section, so no other
+        Discard happens in one critical section, so no other
         component can observe or lock the object in between. The staging
         objects never become resident, and no write-finished notification is
-        emitted.
+        emitted. Expired reservations can also be discarded: expiry prevents
+        admission, but does not prevent their writer from releasing memory.
 
         Args:
             keys: The list of object keys whose staging objects to discard.
@@ -827,18 +891,27 @@ class L1Manager(L1ManagerInterface):
 
         Errors:
             KEY_NOT_EXIST: ``tag`` stages nothing for the key.
-            KEY_IN_WRONG_STATE: The staging object is not write-locked (its
-                reservation expired).
+            KEY_IS_LOCKED: An I/O borrower still pins the staging buffer.
+
+        Note:
+            The caller must ensure any I/O against these objects has finished.
+            Only this writer's staging objects are removed; resident objects
+            and other tags' staging objects are unaffected.
         """
         ret: dict[ObjectKey, L1Error] = {}
         discarded: list[MemoryObj] = []
         gone_keys: list[ObjectKey] = []
 
         for key in keys:
-            err, entry = self._take_staging(key, tag, "finish_write_and_delete")
-            ret[key] = err
-            if err != L1Error.SUCCESS or entry is None:
+            staged = self._get_staging(key, tag)
+            if staged is None:
+                ret[key] = L1Error.KEY_NOT_EXIST
                 continue
+            if staged.write_buffer_pins:
+                ret[key] = L1Error.KEY_IS_LOCKED
+                continue
+            entry = self._pop_staging(key, tag)
+            ret[key] = L1Error.SUCCESS
             logger.debug(
                 "L1Manager: discarding staging object for key %s (tag %r)",
                 key,
@@ -877,8 +950,8 @@ class L1Manager(L1ManagerInterface):
                 every staging object. This may corrupt in-flight
                 store/prefetch operations. If False (default), only clear
                 unlocked resident objects and staging objects whose write
-                lock expired, keeping read-locked objects and live staging
-                objects intact.
+                lock expired and whose I/O pins were released, keeping
+                read-locked objects and borrowed staging buffers intact.
         """
         if force:
             staging_count = sum(len(per_tag) for per_tag in self._staging.values())
@@ -955,7 +1028,9 @@ class L1Manager(L1ManagerInterface):
         )
 
     def is_key_evictable(self, key: ObjectKey) -> bool:
-        """Check if a key is eligible for eviction (not locked).
+        """Check if a resident or staging object is eligible for eviction.
+
+        I/O-pinned staging buffers remain ineligible after their write TTL.
 
         This method does NOT acquire the global L1Manager lock.
         L1Manager.delete() will check again and safely reject a key
@@ -966,7 +1041,8 @@ class L1Manager(L1ManagerInterface):
 
         Returns:
             True if the key has a resident object that is not read-locked,
-            or a staging object whose write lock expired; False otherwise.
+            or a staging object whose write lock expired and has no I/O pins;
+            False otherwise.
         """
         entry = self._objects.get(key, None)
         if entry is not None and not entry.read_lock.is_locked():
@@ -976,7 +1052,8 @@ class L1Manager(L1ManagerInterface):
             return False
         # Snapshot: this runs without the manager lock.
         return any(
-            not staged.write_lock.is_locked() for staged in list(per_tag.values())
+            not staged.write_lock.is_locked() and not staged.write_buffer_pins
+            for staged in list(per_tag.values())
         )
 
     def get_memory_usage(self) -> tuple[int, int]:
@@ -1292,12 +1369,16 @@ class L1Manager(L1ManagerInterface):
         Returns:
             (SUCCESS, entry) with the entry removed from the staging table;
             (KEY_NOT_EXIST, None) when ``tag`` stages nothing for ``key``;
+            (KEY_IS_LOCKED, None) while I/O still pins the staging buffer;
             (KEY_IN_WRONG_STATE, None) when the reservation's write lock
             expired (the object stays staged for eviction to reclaim).
         """
         staged = self._get_staging(key, tag)
         if staged is None:
             return L1Error.KEY_NOT_EXIST, None
+
+        if staged.write_buffer_pins:
+            return L1Error.KEY_IS_LOCKED, None
 
         if not staged.write_lock.is_locked():
             logger.warning(
@@ -1313,12 +1394,12 @@ class L1Manager(L1ManagerInterface):
         return L1Error.SUCCESS, self._pop_staging(key, tag)
 
     def _reclaim_staging(self, key: ObjectKey, force: bool) -> int:
-        """Free ``key``'s staging objects whose write lock expired.
+        """Free expired staging objects after their I/O pins are released.
 
         Args:
             key: The object key.
-            force: When True, free live (still write-locked) staging objects
-                too, with a warning.
+            force: When True, free write-locked or I/O-pinned staging objects
+                too, with a warning. This can invalidate an active adapter.
 
         Returns:
             The number of staging objects freed.
@@ -1328,7 +1409,7 @@ class L1Manager(L1ManagerInterface):
             return 0
         freed: list[MemoryObj] = []
         for tag, staged in list(per_tag.items()):
-            if staged.write_lock.is_locked():
+            if staged.write_lock.is_locked() or staged.write_buffer_pins:
                 if not force:
                     continue
                 logger.warning(
