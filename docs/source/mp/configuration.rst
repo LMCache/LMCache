@@ -400,6 +400,12 @@ single-L1 interface. For placing L1 on CXL-attached memory see
      - ``False``
      - ROCm only. ``mlock`` the DRAM L1 so memory compaction cannot migrate
        it. See *Locked L1 on ROCm* below. ``--l1-manager`` key: ``mlock``.
+   * - ``--l1-numa-node``
+     - *(not set)*
+     - Place the lazy L1 pool on this NUMA node. Each chunk is first-touched
+       from the node's CPUs before it is pinned, so no ``mbind`` privilege
+       (``CAP_SYS_NICE``) is needed. Requires lazy allocation. See
+       *NUMA-local L1 pools* below. ``--l1-manager`` key: ``numa_node``.
 
 .. _mp-devdax-l1:
 
@@ -491,6 +497,50 @@ Not covered: explicit page migration (``move_pages``, ``migrate_pages``,
 NUMA balancing), khugepaged when transparent huge pages are ``always``
 (use ``madvise`` or ``never``), and host memory registered by other
 processes such as vLLM. Device-DAX L1 is rejected.
+
+NUMA-local L1 pools
+-------------------
+
+On a multi-socket host every GPU is attached to one NUMA node, and its copies
+to and from an L1 page on the other node cross the inter-socket link. One
+server's pool can be local to only one node, so to keep every GPU's L1 traffic
+local run one server per NUMA node, each with ``--l1-numa-node`` and its share
+of host memory, and list them in ``lmcache.mp.server_urls`` in the order of
+the ranks they serve. Ranks map to servers in contiguous blocks (see
+*vLLM Client Configuration* below), so with 8-way tensor parallelism ranks
+0-3 use the first server and ranks 4-7 the second:
+
+.. code-block:: bash
+
+   nvidia-smi topo -m        # "NUMA Affinity" column; here GPUs 0-3 -> node 0
+
+   lmcache server --port 6555 --chunk-size 256 --eviction-policy LRU \
+       --l1-size-gb 350 --l1-numa-node 0
+   lmcache server --port 6556 --chunk-size 256 --eviction-policy LRU \
+       --l1-size-gb 350 --l1-numa-node 1
+
+   vllm serve <model> --tensor-parallel-size 8 \
+       --kv-transfer-config \
+       '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.server_urls": "tcp://127.0.0.1:6555,tcp://127.0.0.1:6556"}}'
+
+The pool is backed by a fresh anonymous mapping, and each chunk is faulted in
+from the node's CPUs right before it is pinned, so the kernel's default
+local-node policy allocates it on that node; a successful CUDA host
+registration then keeps it there (on ROCm, see *Locked L1 on ROCm*). This
+sets the initial placement only, with these limits:
+
+- pages fall back to another node when the target node runs out of free
+  memory, so size the pools to fit;
+- an explicit memory policy inherited by the server (for example
+  ``numactl --membind`` or ``--interleave``) overrides the local-node policy;
+- the server's CPU and memory cpuset must include the node, or startup fails;
+- chunks are placed as lazy expansion reaches them, so a transfer channel that
+  registers the whole L1 at startup (NIXL, Mooncake) can fault the tail
+  first; set ``--l1-init-size-gb`` to ``--l1-size-gb`` in that case.
+
+Check the placement with ``numastat -p <server pid>``. Each server holds its
+own cache, so a prefix stored through one server is not visible to ranks
+served by the other.
 
 GDS L1 Tier
 -----------
