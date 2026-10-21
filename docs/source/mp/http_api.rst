@@ -49,11 +49,22 @@ Server Configuration
      - Description
    * - ``--http-host``
      - ``127.0.0.1``
-     - Host to bind the HTTP server. The admin API has no authentication;
-       only bind a non-loopback address on a trusted network.
+     - Host to bind the HTTP server.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
+   * - ``--http-api-key-file``
+     - unset
+     - Read a bearer API key from a file. Repeat the option to accept multiple
+       keys during rotation. Authentication is disabled when no CLI or
+       environment key source is configured.
+
+The environment variables ``LMCACHE_HTTP_API_KEY_FILE`` and
+``LMCACHE_HTTP_API_KEY`` provide deployment-friendly alternatives for one key
+file or one key value. Environment sources and repeated
+``--http-api-key-file`` options are cumulative, so old and new keys can overlap
+during rotation. The ``/env`` endpoint redacts ``LMCACHE_HTTP_API_KEY`` while
+leaving the non-secret key-file path visible.
 
 Example:
 
@@ -61,10 +72,24 @@ Example:
 
     lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
-        --http-host 0.0.0.0 --http-port 8080
+        --http-host 0.0.0.0 --http-port 8080 \
+        --http-api-key-file /run/secrets/lmcache-http-api-key
 
 All examples below assume the server is reachable at
-``http://localhost:8080``.
+``http://localhost:8080``. When authentication is enabled, include the key as
+``Authorization: Bearer <api-key>``. The ``/`` and ``/healthcheck`` routes
+remain public for liveness and readiness probes; every other route requires a
+valid key. For example:
+
+.. code-block:: bash
+
+    curl -H "Authorization: Bearer $(cat /run/secrets/lmcache-http-api-key)" \
+        http://localhost:8080/status
+
+Use a high-entropy value such as ``openssl rand -hex 32`` and restrict the key
+file so only the LMCache server process can read it. API-key authentication
+does not encrypt traffic; use TLS at a trusted reverse proxy when requests
+cross an untrusted network.
 
 Endpoint Overview
 -----------------
@@ -1329,7 +1354,9 @@ Runtime L1 Reconfiguration (Device-DAX)
 
 These routes manage the Device-DAX L1 arena pool configured with
 ``--l1-devdax-path``. Devices must already be provisioned, and requests do not
-use ``adapter_index``.
+use ``adapter_index``. Every arena maps ``[offset, offset + size)`` of its
+device; the same device may be added more than once with disjoint ranges, and
+independent servers can share one device the same way.
 
 ``GET /reconfigure/dax/l1/status``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1347,7 +1374,8 @@ use ``adapter_index``.
           "free_bytes": 12884901888,
           "active_allocations": 2048,
           "state": "active",
-          "is_primary": false
+          "is_primary": false,
+          "offset_in_bytes": 0
         }
       ]
     }
@@ -1355,8 +1383,10 @@ use ``adapter_index``.
 ``POST /reconfigure/dax/l1/add``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Request body:** ``device_path`` (string) and ``size`` (integer byte count or a
-string such as ``"16GiB"``).
+**Request body:** ``device_path`` (string), ``size`` (integer byte count or a
+string such as ``"16GiB"``), and optional ``offset`` (non-negative byte count
+or size string, default ``0``): where in the device the mapping starts. A
+range that overlaps one this pool already maps is rejected with ``409``.
 
 **Response** (``200 OK``): ``{"added": <arena>}``.
 
@@ -1366,7 +1396,7 @@ string such as ``"16GiB"``).
 
     curl -s -X POST http://localhost:8080/reconfigure/dax/l1/add \
         -H 'Content-Type: application/json' \
-        -d '{"device_path": "/dev/dax1.2", "size": "16GiB"}'
+        -d '{"device_path": "/dev/dax1.2", "size": "16GiB", "offset": "512GiB"}'
 
 ``POST /reconfigure/dax/l1/remove``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1374,10 +1404,13 @@ string such as ``"16GiB"``).
 Only drain mode is supported. A draining arena accepts no new allocations and
 is unmapped after its live allocations are freed. The primary arena cannot be
 removed.
-Use the exact device path supplied when adding the arena.
+``device_path`` and ``offset`` together identify the arena; pass the exact
+values used when adding it. ``offset`` defaults to ``0``, so omitting it
+addresses the arena at the start of the device.
 
-**Request body:** ``device_path`` (string) and optional ``mode`` (``drain``;
-default ``drain``).
+**Request body:** ``device_path`` (string), optional ``mode`` (``drain``;
+default ``drain``), and optional ``offset`` (byte count or size string,
+default ``0``).
 
 **Response** (``200 OK``):
 
