@@ -27,12 +27,15 @@ from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     CBUnifiedLookupResult,
     IPCCacheServerKey,
+    KVEventBatch,
+    KVEventRecord,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
+from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
@@ -53,6 +56,9 @@ from lmcache.v1.multiprocess.request_handler import (
     HandlerType,
     iter_request_handlers,
     request_handler,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl import (
+    proto_codec,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl import (
     server_builder as grpc_server_builder,
@@ -562,6 +568,35 @@ def test_service_message_codec_registry_round_trips_custom_types() -> None:
     assert shape_codec.reader(shape_message) == shape
 
 
+def test_response_encoder_compiles_its_codec_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Encoding many responses compiles the structural codec only once."""
+    kv_event_service_pb2 = importlib.import_module(
+        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.kv_event_service_pb2"
+    )
+    compiled: list[Any] = []
+    compile_message_codec = proto_codec._compile_message_codec
+
+    def counting_compile(descriptor: Any, py_type: Any) -> Any:
+        compiled.append(descriptor.full_name)
+        return compile_message_codec(descriptor, py_type)
+
+    monkeypatch.setattr(proto_codec, "_compile_message_codec", counting_compile)
+    encode = proto_codec.compile_response_encoder_for_type(
+        kv_event_service_pb2.KVEventBatch, KVEventBatch
+    )
+    record = KVEventRecord(1, "stored", "cpu", "model", [b"h"], None, [1, 2, 3])
+    batch = KVEventBatch(True, 1, 2, False, [record])
+
+    first = encode(batch).SerializeToString()
+    after_first = len(compiled)
+    for _ in range(3):
+        assert encode(batch).SerializeToString() == first
+    assert after_first > 0
+    assert len(compiled) == after_first
+
+
 def test_generated_grpc_services_communicate_end_to_end(
     grpc_client: tuple[GrpcMultiprocessClient, _Calls],
 ) -> None:
@@ -700,6 +735,56 @@ def test_grpc_server_keeps_handler_concurrency(grpc_server_mode: str) -> None:
 
     assert peak == 2
     assert [len(threads) for threads in affinity_threads.values()] == [1, 1]
+
+
+@pytest.mark.parametrize("grpc_server_mode", ["sync", "aio"])
+def test_stalled_stream_subscriber_stops_server_reads(grpc_server_mode: str) -> None:
+    """A subscriber that stops reading leaves later batches unread in the
+    handler's stream instead of buffered on the server."""
+    reads = 0
+
+    class Module:
+        @request_handler()
+        def subscribe_kv_events(
+            self, instance_id: int, model_name: str, cursor: int, max_events: int
+        ) -> MessagingStream[KVEventBatch]:
+            def read(closed: threading.Event) -> KVEventBatch:
+                nonlocal reads
+                if closed.is_set():
+                    raise StopIteration
+                reads += 1
+                record = KVEventRecord(
+                    reads, "store", "cpu", model_name, [b"h"], None, [1] * 4096
+                )
+                return KVEventBatch(True, 1, reads, False, [record])
+
+            return MessagingStream(read, lambda: None)
+
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=0,
+        max_cpu_workers=2,
+        max_gpu_workers=1,
+        grpc_server_mode=cast(Any, grpc_server_mode),
+    )
+    server = build_grpc_request_server([cast(Any, Module())], config)
+    server.start()
+    client = GrpcMultiprocessClient(f"grpc://127.0.0.1:{server.bound_port}")  # type: ignore[abstract]
+    try:
+        stream = client.subscribe_kv_events(1, "model", 0, 16)
+        next(stream)
+        # Reads stop once the flow-control window is full.
+        deadline = time.monotonic() + 10
+        last = -1
+        while reads != last:
+            assert time.monotonic() < deadline, f"server kept reading: {reads}"
+            last = reads
+            time.sleep(0.5)
+        stream.close()
+    finally:
+        client.close()
+        server.close()
 
 
 def test_aio_server_releases_threads_when_bind_fails() -> None:

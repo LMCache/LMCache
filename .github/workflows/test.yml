@@ -112,6 +112,10 @@ jobs:
           NO_GPU_EXT=1 python -m pip install -e . --no-build-isolation
 
       - name: "CPU only unit tests"
+        env:
+          RUN_DEVDAX_L1_INTEGRATION: "1"
+          RUN_DAX_L2_INTEGRATION: "1"
+          LMCACHE_TEST_DEVDAX_L1_PATHS: ""
         run: |
           pytest -m "not (cuda or musa or xpu or npu or neuron or rbln)"
 
@@ -182,7 +186,7 @@ jobs:
 
       - name: Build raw-block Rust extension
         run: |
-          python -m maturin build --release \
+          python -m maturin build --release --locked \
             --manifest-path rust/raw_block/Cargo.toml \
             --out .pytest-tmp/raw-block-dist
           python -m pip install .pytest-tmp/raw-block-dist/*.whl
