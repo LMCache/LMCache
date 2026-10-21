@@ -1058,6 +1058,15 @@ mismatch between producer and consumer surfaces as a loud
 ``CHECKSUM MISMATCH`` log line.
 
 
+Client control is single-threaded; each STORE/RETRIEVE runs enabled workers
+concurrently, including synchronous engine-driven transfers. The client starts
+and reuses transfer threads outside measured operations. Transfer latency covers
+dispatch through completion of all workers. A timeout or exception disables
+further client operations until close.
+``--transfer-timeout`` bounds each transfer wait (default: 10 seconds).
+``close()`` waits for transfer threads before synchronously releasing resources;
+a stuck native call can block shutdown.
+
 Quick start
 ~~~~~~~~~~~
 
@@ -1115,6 +1124,9 @@ Options
    * - ``--num-tokens N``
      - ``512``
      - Tokens per synthetic request.
+   * - ``--transfer-timeout SECS``
+     - ``10``
+     - Positive, finite wait budget for each STORE or RETRIEVE call.
    * - ``--num-blocks N``
      - ``1024``
      - Number of paged blocks allocated on the GPU.
