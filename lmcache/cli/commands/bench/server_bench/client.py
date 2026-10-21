@@ -11,18 +11,42 @@ from typing import TYPE_CHECKING, Any, Literal
 import hashlib
 import time
 
+# Third Party
+import zmq
+
 # First Party
 from lmcache import torch_dev
+from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
 from lmcache.cli.commands.bench.server_bench.config import (
     BenchConfig,
     WorkerSpec,
 )
-from lmcache.cli.commands.bench.server_bench.helpers import _IMPORT_ERROR
-
-# The thin CLI can load its parser without the full runtime dependencies.
-if _IMPORT_ERROR is None:
-    # First Party
-    from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
+from lmcache.cli.commands.bench.server_bench.helpers import (
+    _DEFAULT_RPC_TIMEOUT_S,
+    _INSTANCE_ID_BASE,
+    _MODEL_NAME,
+    _TIMEOUT,
+    _build_token_ids,
+    _get_chunk_size,
+    _make_key,
+    _poll_prefetch_status,
+    _query_checksum,
+    _send_end_session,
+    _send_lookup,
+    _wait_for_result,
+)
+from lmcache.utils import EngineType
+from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.kv_layer_groups import (
+    DTYPE_MAP,
+    format_kvcache_shape_spec,
+    parse_kvcache_shape_spec,
+)
+from lmcache.v1.multiprocess.transfer_context import (
+    EngineDrivenTransferContext,
+    create_transfer_context,
+)
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 if TYPE_CHECKING:
     # First Party
@@ -219,9 +243,6 @@ class ServerBenchClient:
         """
         self._require_started()
 
-        # First Party
-        from lmcache.cli.commands.bench.server_bench.helpers import _build_token_ids
-
         token_ids = tuple(_build_token_ids(sequence_id, self._config.num_tokens))
         num_full_tokens = (len(token_ids) // self._chunk_size) * self._chunk_size
         if num_full_tokens == 0:
@@ -258,13 +279,6 @@ class ServerBenchClient:
             RuntimeError: If the client is not started.
         """
         req_client = self._require_started()
-
-        # First Party
-        from lmcache.cli.commands.bench.server_bench.helpers import (
-            _make_key,
-            _poll_prefetch_status,
-            _send_lookup,
-        )
 
         lookup_key = _make_key(
             request.token_ids,
@@ -416,11 +430,6 @@ class ServerBenchClient:
             return None
         self._validate_token_range(request, start_token, token_count)
 
-        # First Party
-        from lmcache.cli.commands.bench.server_bench.helpers import (
-            _query_checksum,
-        )
-
         block_offset = request.block_offset + (start_token // self._block_size)
         num_blocks = token_count // self._block_size
         workers = [
@@ -483,9 +492,6 @@ class ServerBenchClient:
         """End the request's Server-side session."""
         req_client = self._require_started()
 
-        # First Party
-        from lmcache.cli.commands.bench.server_bench.helpers import _send_end_session
-
         _send_end_session(req_client, request.request_id)
 
     def close(self) -> None:
@@ -493,11 +499,6 @@ class ServerBenchClient:
 
         Cleanup is idempotent, including after partial startup.
         """
-        # First Party
-        from lmcache.cli.commands.bench.server_bench.helpers import (
-            _DEFAULT_RPC_TIMEOUT_S,
-        )
-
         if self._req_client is not None:
             for worker in self._workers:
                 instance_id = worker.spec.instance_id
@@ -561,13 +562,6 @@ class ServerBenchClient:
         if token_count == 0:
             return None
         self._validate_token_range(request, start_token, token_count)
-
-        # First Party
-        from lmcache.cli.commands.bench.server_bench.helpers import (
-            _TIMEOUT,
-            _make_key,
-            _wait_for_result,
-        )
 
         attempted: list[int] = []
         successful: list[int] = []
@@ -650,30 +644,6 @@ class ServerBenchClient:
 
     def _initialize(self) -> None:
         """Allocate resources and register Workers."""
-
-        # Keep heavy imports out of the thin CLI package path.
-        # Third Party
-        import zmq
-
-        # First Party
-        from lmcache.cli.commands.bench.server_bench.helpers import (
-            _DEFAULT_RPC_TIMEOUT_S,
-            _INSTANCE_ID_BASE,
-            _MODEL_NAME,
-            DTYPE_MAP,
-            _get_chunk_size,
-        )
-        from lmcache.utils import EngineType
-        from lmcache.v1.gpu_connector.utils import LayoutHints
-        from lmcache.v1.kv_layer_groups import (
-            format_kvcache_shape_spec,
-            parse_kvcache_shape_spec,
-        )
-        from lmcache.v1.multiprocess.transfer_context import (
-            EngineDrivenTransferContext,
-            create_transfer_context,
-        )
-        from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
         config = self._config
         use_gpu = config.is_gpu

@@ -13,7 +13,6 @@ import zmq
 
 # First Party
 from lmcache.cli.commands.bench.server_bench import client as client_module
-from lmcache.cli.commands.bench.server_bench import helpers
 from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
 from lmcache.cli.commands.bench.server_bench.cases.base import BenchResult
 from lmcache.cli.commands.bench.server_bench.cases.baseline import (
@@ -30,7 +29,6 @@ from lmcache.cli.commands.bench.server_bench.client import (
 )
 from lmcache.cli.commands.bench.server_bench.config import BenchConfig
 from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
-from lmcache.v1.multiprocess import transfer_context
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
@@ -176,19 +174,19 @@ def run_bench(
         checksum_query = MagicMock(side_effect=query_checksum)
         monkeypatch.setattr(zmq, "Context", MagicMock())
         monkeypatch.setattr(RequestClientFactory, "create", MagicMock())
-        monkeypatch.setattr(helpers, "_get_chunk_size", lambda _client: 2)
+        monkeypatch.setattr(client_module, "_get_chunk_size", lambda _client: 2)
         monkeypatch.setattr(client_module, "KVCacheBuffers", allocate)
-        monkeypatch.setattr(helpers, "_send_lookup", MagicMock(return_value=True))
+        monkeypatch.setattr(client_module, "_send_lookup", MagicMock(return_value=True))
         monkeypatch.setattr(
-            helpers, "_poll_prefetch_status", MagicMock(side_effect=[0, 2])
+            client_module, "_poll_prefetch_status", MagicMock(side_effect=[0, 2])
         )
-        monkeypatch.setattr(helpers, "_send_end_session", MagicMock())
-        monkeypatch.setattr(helpers, "_query_checksum", checksum_query)
+        monkeypatch.setattr(client_module, "_send_end_session", MagicMock())
+        monkeypatch.setattr(client_module, "_query_checksum", checksum_query)
         monkeypatch.setattr(
-            transfer_context, "EngineDrivenTransferContext", MemoryTransferContext
+            client_module, "EngineDrivenTransferContext", MemoryTransferContext
         )
         monkeypatch.setattr(
-            transfer_context,
+            client_module,
             "create_transfer_context",
             lambda _caches, *, instance_id, **_kwargs: MemoryTransferContext(
                 instance_id

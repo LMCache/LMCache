@@ -35,7 +35,11 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _query_checksum,
     _send_lookup,
 )
-from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, parse_kvcache_shape_spec
+from lmcache.v1.kv_layer_groups import (
+    DTYPE_MAP,
+    KVLayerGroupInfo,
+    parse_kvcache_shape_spec,
+)
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
@@ -102,6 +106,7 @@ class TestCommandMetadata:
         ``server_bench`` sub-package, mirroring the engine / l2 layout.
         """
         # First Party
+        from lmcache.cli.commands.bench.server_bench import arguments as sv_args
         from lmcache.cli.commands.bench.server_bench import command as sv_cmd
         from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
 
@@ -109,8 +114,7 @@ class TestCommandMetadata:
         assert sv_helpers.__name__ == (
             "lmcache.cli.commands.bench.server_bench.helpers"
         )
-        # Public command surface mirrors the sibling subpackages.
-        assert callable(sv_cmd.add_server_arguments)
+        assert callable(sv_args.add_server_arguments)
         assert callable(sv_cmd.run_server_bench)
 
 
@@ -323,6 +327,18 @@ class TestCaseDelegation:
 
 
 class TestCommandArguments:
+    def test_help_lists_supported_kv_dtypes(
+        self,
+        parser: argparse.ArgumentParser,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The runtime-independent help stays consistent with the shape parser."""
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args(["bench", "server", "--help"])
+        assert exc.value.code == 0
+        help_text = " ".join(capsys.readouterr().out.split())
+        assert "supported: " + ", ".join(DTYPE_MAP) in help_text
+
     def test_registers_subcommand(
         self,
         parser: argparse.ArgumentParser,
@@ -855,7 +871,6 @@ class TestClientMultiWorker:
         """Reject unsupported groups before registration, including async contexts."""
         # First Party
         from lmcache import torch_dev
-        from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
         from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
         from lmcache.v1.multiprocess import transfer_context as tc
@@ -868,11 +883,13 @@ class TestClientMultiWorker:
         )
         context = MagicMock(spec=context_type, register=register)
         monkeypatch.setattr(tc.EngineDrivenTransferContext, "register", register)
-        monkeypatch.setattr(tc, "create_transfer_context", lambda *a, **kw: context)
+        monkeypatch.setattr(
+            client_module, "create_transfer_context", lambda *a, **kw: context
+        )
         monkeypatch.setattr(torch_dev, "is_available", lambda: True)
         monkeypatch.setattr(zmq, "Context", MagicMock)
         monkeypatch.setattr(RequestClientFactory, "create", MagicMock())
-        monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 2)
+        monkeypatch.setattr(client_module, "_get_chunk_size", lambda client: 2)
         monkeypatch.setattr(
             client_module,
             "KVCacheBuffers",
@@ -919,7 +936,6 @@ class TestClientMultiWorker:
         from unittest.mock import call
 
         # First Party
-        from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
         from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
         from lmcache.v1.multiprocess.transfer_context import worker_transfer
@@ -956,7 +972,7 @@ class TestClientMultiWorker:
         context = MagicMock()
         monkeypatch.setattr(zmq, "Context", lambda: context)
         monkeypatch.setattr(RequestClientFactory, "create", lambda *a, **kw: transport)
-        monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 16)
+        monkeypatch.setattr(client_module, "_get_chunk_size", lambda client: 16)
         monkeypatch.setattr(client_module, "KVCacheBuffers", fake_allocate)
         monkeypatch.setattr(worker_transfer, "get_event_ipc_backend", MagicMock())
         monkeypatch.setattr(worker_transfer, "wrap_kv_caches", lambda caches: [])
@@ -1005,12 +1021,10 @@ class TestClientMultiWorker:
         import weakref
 
         # First Party
-        from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
         from lmcache.cli.commands.bench.server_bench.client import (
             ServerBenchClient,
         )
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.v1.multiprocess import transfer_context as transfer_context_module
 
         request_calls: list[tuple[str, tuple[Any, ...]]] = []
         transfer_calls: list[tuple[str, tuple[Any, ...]]] = []
@@ -1135,14 +1149,14 @@ class TestClientMultiWorker:
             "create",
             lambda *_args, **_kwargs: FakeClient(),
         )
-        monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda _client: 16)
+        monkeypatch.setattr(client_module, "_get_chunk_size", lambda _client: 16)
         monkeypatch.setattr(
-            transfer_context_module,
+            client_module,
             "create_transfer_context",
             fake_create_transfer_context,
         )
         monkeypatch.setattr(
-            transfer_context_module,
+            client_module,
             "EngineDrivenTransferContext",
             FakeEngineDrivenTransferContext,
         )
@@ -1345,7 +1359,6 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     device future, replacing only transport and platform event operations.
     """
     # First Party
-    from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
     from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
     from lmcache.cli.commands.bench.server_bench.config import BenchConfig
     from lmcache.v1.multiprocess.transfer_context import worker_transfer
@@ -1401,7 +1414,7 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     transport.retrieve.return_value = raw_future
     monkeypatch.setattr(zmq, "Context", MagicMock)
     monkeypatch.setattr(RequestClientFactory, "create", lambda *a, **kw: transport)
-    monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda client: 2)
+    monkeypatch.setattr(client_module, "_get_chunk_size", lambda client: 2)
     monkeypatch.setattr(
         worker_transfer, "get_event_ipc_backend", lambda device: backend
     )
