@@ -10,11 +10,13 @@ removing vLLM dependencies and simplifying the initialization logic.
 from typing import Any, Callable, Optional
 
 # First Party
+from lmcache.inprocess.standalone.standalone_service_factory import (
+    StandaloneServiceFactory,
+)
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.manager import LMCacheManager
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.standalone.standalone_service_factory import StandaloneServiceFactory
 
 logger = init_logger(__name__)
 
