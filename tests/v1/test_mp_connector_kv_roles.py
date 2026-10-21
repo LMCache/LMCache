@@ -14,7 +14,7 @@ import torch
 pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
 
 # Third Party
-from vllm.config import KVTransferConfig, VllmConfig  # noqa: E402
+from vllm.config import CacheConfig, KVTransferConfig, VllmConfig  # noqa: E402
 from vllm.distributed.kv_events import (  # noqa: E402
     BlockRemoved,
     BlockStored,
@@ -102,11 +102,13 @@ def _config(transfer_config: KVTransferConfig) -> VllmConfig:
     return cast(
         VllmConfig,
         SimpleNamespace(
-            model_config=SimpleNamespace(model="test-model", use_mla=False),
+            model_config=SimpleNamespace(
+                model="test-model", use_mla=False, dtype=torch.float16
+            ),
             parallel_config=SimpleNamespace(
                 world_size=1, rank=0, tensor_parallel_size=1, pipeline_parallel_size=1
             ),
-            cache_config=SimpleNamespace(block_size=4, enable_prefix_caching=True),
+            cache_config=CacheConfig(block_size=4, enable_prefix_caching=True),
             scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
             kv_transfer_config=transfer_config,
         ),
@@ -189,7 +191,7 @@ def mock_io(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     telemetry = MagicMock()
     pool = MagicMock(blocks=[SimpleNamespace(block_hash=bytes([i])) for i in range(8)])
     monkeypatch.setattr(
-        connector_mod, "LMCacheMPSchedulerAdapter", lambda **kw: scheduler
+        connector_mod, "LMCacheMPSchedulerAdapter", MagicMock(return_value=scheduler)
     )
     monkeypatch.setattr(connector_mod, "print_banner_once", MagicMock())
     monkeypatch.setattr(connector_mod, "vllm_layout_hints", lambda config: {})
@@ -234,6 +236,15 @@ def connectors(
     worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
     scheduler.bind_gpu_block_pool(mock_io.pool)
     worker.register_kv_caches(mock_io.kv_caches)
+    scheduler_adapter = cast(MagicMock, connector_mod.LMCacheMPSchedulerAdapter)
+    scheduler_args = scheduler_adapter.call_args.kwargs
+    assert scheduler_args["model_name"] == worker.worker_adapter.model_name
+    assert scheduler_args["model_name"] == config.model_config.model
+    assert scheduler_args["cache_format"] == worker.worker_adapter.cache_format
+    assert (
+        mock_io.transfer.register.call_args.kwargs["cache_format"]
+        == scheduler_args["cache_format"]
+    )
     try:
         yield scheduler, worker
     finally:
@@ -386,7 +397,7 @@ def test_chunked_prefill_stores_and_completion(
     if can_store:
         mock_io.telemetry.on_request_store_finished.assert_called_once_with(
             request_ids_set={"request"},
-            model_name="test-model",
+            model_name=worker.worker_adapter.model_name,
             world_size=1,
             kv_rank=0,
         )

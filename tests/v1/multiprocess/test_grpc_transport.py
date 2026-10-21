@@ -190,6 +190,7 @@ def grpc_client(
             self, payload: RegisterEngineDrivenContextPayload
         ) -> RegisterEngineDrivenContextResponse:
             assert payload.num_physical_slots == 32
+            assert payload.cache_format == "fp8"
             return RegisterEngineDrivenContextResponse("shared-memory", 4096)
 
         @request_handler(HandlerType.BLOCKING)
@@ -239,6 +240,7 @@ def grpc_client(
             group_layout_descs: dict[int, MemoryLayoutDesc],
         ) -> int:
             assert keys[0].cache_salt == "tenant"
+            assert keys[0].cache_format == "fp8"
             assert group_layout_descs[0].shapes == [torch.Size([2, 4])]
             assert group_layout_descs[0].dtypes == [torch.float16]
             return 41
@@ -337,6 +339,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
             "dtype_str": "float16",
             "use_mla": False,
             "num_physical_slots": 32,
+            "cache_format": "fp8",
         },
     )
     assert registration_codec.request_decoder(registration_request) == (
@@ -350,6 +353,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
             dtype_str="float16",
             use_mla=False,
             num_physical_slots=32,
+            cache_format="fp8",
         ),
     )
     server_module_codec = registry.by_full_name[
@@ -610,6 +614,7 @@ def test_generated_grpc_services_communicate_end_to_end(
         end=3,
         request_id="request",
         cache_salt="tenant",
+        cache_format="fp8",
         request_configs={"blend": True},
         num_kv_readers=2,
     )
@@ -639,6 +644,7 @@ def test_generated_grpc_services_communicate_end_to_end(
             dtype_str="float16",
             use_mla=False,
             num_physical_slots=32,
+            cache_format="fp8",
         )
     ).result(5)
     assert registration == RegisterEngineDrivenContextResponse("shared-memory", 4096)
@@ -662,7 +668,7 @@ def test_generated_grpc_services_communicate_end_to_end(
     )
 
     task_id = client.p2p_lookup_and_lock(
-        [ObjectKey(b"chunk", "model", 0, cache_salt="tenant")],
+        [ObjectKey(b"chunk", "model", 0, cache_salt="tenant", cache_format="fp8")],
         {0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])},
     ).result(5)
     assert task_id == 41

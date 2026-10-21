@@ -7,6 +7,7 @@ C++ IStorageConnector interface, so no Redis or C++ build is needed.
 """
 
 # Standard
+from dataclasses import replace
 from types import ModuleType
 import ctypes
 import os
@@ -1619,3 +1620,22 @@ class TestPadBuffersToAlignment:
             assert adp_padded.get_usage().total_bytes_used == 4096
         finally:
             adp_padded.close()
+
+
+@pytest.mark.parametrize("cache_salt", ["", "alice"])
+def test_format_isolation_through_native_lookup(adapter, cache_salt: str) -> None:
+    """A native backend lookup must distinguish same-content KV encodings."""
+    original = ObjectKey(b"fmt", "model", 1, cache_salt=cache_salt)
+    fp8 = replace(original, cache_format="fp8-e4m3")
+    bf16 = replace(original, cache_format="bfloat16")
+    obj = create_memory_obj(64)
+    layout = MemoryLayoutDesc([torch.Size([64])], [torch.float32])
+    adapter.submit_store_task([fp8], [obj])
+    assert wait_for_event_fd(adapter.get_store_event_fd())
+    assert all(r.is_successful() for r in adapter.pop_completed_store_tasks().values())
+    task = adapter.submit_lookup_and_lock_task([fp8, bf16, original], {0: layout})
+    assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
+    result = adapter.query_lookup_and_lock_result(task)
+    assert result is not None
+    assert [result.test(i) for i in range(3)] == [True, False, False]
+    adapter.submit_unlock([fp8])

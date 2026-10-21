@@ -276,10 +276,12 @@ class TestIPCCacheServerKeyCacheSalt:
             worker_id=2,
             token_ids=[1],
             cache_salt="alice",
+            cache_format="fp8",
         )
         k2 = k.no_worker_id_version()
         assert k2.worker_id is None
         assert k2.cache_salt == "alice"
+        assert k2.cache_format == "fp8"
 
     def test_wire_compat_old_payload_decodes(self):
         """An old 7-field msgspec payload must decode cleanly on new code
@@ -302,6 +304,7 @@ class TestIPCCacheServerKeyCacheSalt:
         wire = msgspec.msgpack.encode(old_payload)
         decoded = msgspec.msgpack.decode(wire, type=IPCCacheServerKey)
         assert decoded.cache_salt == ""
+        assert decoded.cache_format == ""
 
     def test_wire_compat_new_payload_roundtrip(self):
         # Third Party
@@ -316,6 +319,7 @@ class TestIPCCacheServerKeyCacheSalt:
             worker_id=0,
             token_ids=[1, 2],
             cache_salt="alice",
+            cache_format="fp8",
         )
         wire = msgspec.msgpack.encode(k)
         decoded = msgspec.msgpack.decode(wire, type=IPCCacheServerKey)

@@ -224,7 +224,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         for entry in entries:
             entry.cache_context.close()
             self._ctx.layout_desc_registry.unregister(
-                entry.model_name, entry.world_size
+                entry.model_name, entry.world_size, entry.cache_format
             )
         del entry
         entries.clear()
@@ -292,6 +292,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
         """
+        cache_format = layout_hints.get("cache_format", "")
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
@@ -326,7 +327,11 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         kv_groups_manager = cache_context.kv_layer_groups_manager
         attn_desc = kv_groups_manager.get_attn_desc()
         self._ctx.layout_desc_registry.register(
-            model_name, world_size, layout_desc, attn_desc
+            model_name,
+            world_size,
+            layout_desc,
+            attn_desc,
+            cache_format=cache_format,
         )
 
         with self._lock:
@@ -334,6 +339,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                 cache_context=cache_context,
                 model_name=model_name,
                 world_size=world_size,
+                cache_format=cache_format,
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,

@@ -75,6 +75,7 @@ async def lookup_placements(
                 world_size=body.world_size,
                 token_ids=body.token_ids,
                 cache_salt=body.cache_salt,
+                cache_format=body.cache_format,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -124,6 +125,7 @@ async def blend_lookup(
     namespace = BlendNamespace(
         model_name=body.model_name,
         cache_salt=body.cache_salt,
+        cache_format=body.cache_format,
         world_size=body.world_size,
     )
 

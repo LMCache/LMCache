@@ -67,7 +67,7 @@ def resolve_prefetched_obj_keys(
     if group_windows is None:
         group_windows = tuple(
             ctx.layout_desc_registry.find_attn_desc(
-                key.model_name, key.world_size
+                key.model_name, key.world_size, key.cache_format
             ).num_chunks_in_sw
         )
 
@@ -218,7 +218,9 @@ class LookupModule(DiscoverableModule):
             )
         )
 
-        layout_desc = self._ctx.layout_desc_registry.find(model_name, world_size)
+        layout_desc = self._ctx.layout_desc_registry.find(
+            model_name, world_size, key.cache_format
+        )
         if layout_desc is None:
             logger.error(
                 "No GPU context found for model %s with world size %d during lookup!",
@@ -270,7 +272,7 @@ class LookupModule(DiscoverableModule):
         # Submit one key row per (object group, kv rank), each with its own
         # attention window.
         attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
-            model_name, world_size
+            model_name, world_size, key.cache_format
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.set_tokens(list(key.token_ids))
@@ -282,7 +284,7 @@ class LookupModule(DiscoverableModule):
         session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
-            model_name, world_size
+            model_name, world_size, key.cache_format
         )
         if not group_layout_descs:
             logger.error(
@@ -618,7 +620,7 @@ class LookupModule(DiscoverableModule):
             The object keys of all groups and kv ranks for ``chunk_hashes``.
         """
         num_groups = self._ctx.layout_desc_registry.find_attn_desc(
-            key.model_name, key.world_size
+            key.model_name, key.world_size, key.cache_format
         ).num_object_groups
         per_group = ipc_key_to_object_keys(key, chunk_hashes, list(range(num_groups)))
         return [obj_key for group_keys in per_group for obj_key in group_keys]

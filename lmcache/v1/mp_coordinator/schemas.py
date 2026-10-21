@@ -359,6 +359,7 @@ class DirectoryLookupRequest(BaseModel):
         model_name: Model whose rank fan-out to use (tokens form).
         world_size: World size selecting the per-rank fan-out
             (tokens form).
+        cache_format: KV encoding identity.
         cache_salt: Per-tenant isolation salt applied to produced keys
             (tokens form).
     """
@@ -368,6 +369,7 @@ class DirectoryLookupRequest(BaseModel):
     model_name: str = ""
     world_size: int = Field(default=1, ge=1)
     cache_salt: str = ""
+    cache_format: str = ""
 
     @field_validator("keys")
     @classmethod
@@ -488,6 +490,7 @@ class BlendLookupRequest(BaseModel):
     model_name: str = ""
     world_size: int = Field(default=1, ge=1)
     cache_salt: str = ""
+    cache_format: str = ""
 
     @field_validator("tokens_b64")
     @classmethod
@@ -567,6 +570,7 @@ class PrefetchRequest(BaseModel):
         model_name: Model whose layout the target uses to allocate L1 buffers.
         world_size: World size selecting the layout and the per-rank fan-out.
         token_ids: Prompt tokens whose complete chunks should be warmed.
+        cache_format: KV encoding identity.
         cache_salt: Per-tenant isolation salt applied to the produced keys.
     """
 
@@ -575,6 +579,7 @@ class PrefetchRequest(BaseModel):
     world_size: int = Field(ge=1)
     token_ids: list[int] = Field(default_factory=list)
     cache_salt: str = ""
+    cache_format: str = ""
 
 
 class PrefetchResponse(BaseModel):
@@ -607,6 +612,7 @@ class PinRequest(BaseModel):
         model_name: Model whose rank fan-out to use when resolving keys.
         world_size: World size selecting the per-rank fan-out.
         token_ids: Prompt tokens whose complete chunks should be (un)pinned.
+        cache_format: KV encoding identity.
         cache_salt: Per-tenant isolation salt applied to the produced keys.
     """
 
@@ -614,6 +620,7 @@ class PinRequest(BaseModel):
     world_size: int = Field(ge=1)
     token_ids: list[int] = Field(default_factory=list)
     cache_salt: str = ""
+    cache_format: str = ""
 
 
 class PinResponse(BaseModel):
@@ -664,6 +671,7 @@ class DeleteRequest(BaseModel):
         model_name: Model whose layout the target uses to resolve keys.
         world_size: World size selecting the layout and the per-rank fan-out.
         token_ids: Prompt tokens whose complete chunks should be deleted.
+        cache_format: KV encoding identity.
         cache_salt: Per-tenant isolation salt applied to the produced keys.
         tier: Which tier(s) to delete: ``l1`` (L1 only), ``l2`` (L2 only), or
             ``all`` (both). ``l1`` never touches L2 and vice versa.
@@ -676,6 +684,7 @@ class DeleteRequest(BaseModel):
     world_size: int = Field(ge=1)
     token_ids: list[int] = Field(default_factory=list)
     cache_salt: str = ""
+    cache_format: str = ""
     tier: Tier = Tier.ALL
     force: bool = False
 

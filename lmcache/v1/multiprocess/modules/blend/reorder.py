@@ -219,7 +219,7 @@ def plan(
     return perm if perm != list(range(len(P))) else None
 
 
-NS = tuple[str, int, str]  # namespace: (model_name, world_size, cache_salt)
+NS = tuple[str, int, str, str]  # model_name, world_size, cache_salt, cache_format
 
 
 class PromptStore:
@@ -233,9 +233,9 @@ class PromptStore:
         # (ns, request_id) -> [seq, token ids, chain hashes]
         self._entries: "OrderedDict[tuple, list]" = OrderedDict()
         self._owner: dict[tuple, tuple] = {}  # (ns, chain hash) -> (ns, request_id)
-        # cache_salt -> (model_name, world_size) -> [its number of prompts, its
-        # newest (ns, request_id)]; a namespace goes with its last prompt.
-        self._ns: dict[str, dict[tuple[str, int], list]] = {}
+        # cache_salt -> (model_name, world_size, cache_format) ->
+        # [prompt count, newest (ns, request_id)]; removed with its last prompt.
+        self._ns: dict[str, dict[tuple[str, int, str], list]] = {}
 
     def record(
         self,
@@ -255,7 +255,9 @@ class PromptStore:
                 ids = np.asarray(token_ids, dtype=np.uint32)
                 e = self._entries[key] = [self._seq, ids, set()]
                 self._tokens += len(ids)
-                n = self._ns.setdefault(ns[2], {}).setdefault(ns[:2], [0, key])
+                n = self._ns.setdefault(ns[2], {}).setdefault(
+                    (ns[0], ns[1], ns[3]), [0, key]
+                )
                 n[0] += 1
                 n[1] = key
             self._entries.move_to_end(key)
@@ -268,7 +270,7 @@ class PromptStore:
                 for h in hashes:
                     if self._owner.get((old[0], h)) == old:
                         del self._owner[(old[0], h)]
-                salt, name = old[0][2], old[0][:2]
+                salt, name = old[0][2], (old[0][0], old[0][1], old[0][3])
                 n = self._ns[salt][name]
                 n[0] -= 1
                 if not n[0]:  # the namespace's last prompt
@@ -276,16 +278,18 @@ class PromptStore:
                     if not self._ns[salt]:
                         del self._ns[salt]
 
-    def resolve(self, model_name: str, world_size: int, cache_salt: str) -> NS | None:
-        """The one recorded namespace (model_name, world_size, cache_salt) that
-        matches the caller: the salt must be equal; an empty model_name or a
-        zero world_size match any. None if zero or several match."""
+    def resolve(
+        self, model_name: str, world_size: int, cache_salt: str, cache_format: str = ""
+    ) -> NS | None:
+        """Return the unique namespace matching salt and format, or None.
+        Empty model_name and zero world_size act as wildcards."""
         with self._lock:
             hits = [
-                (m, w, cache_salt)
-                for m, w in self._ns.get(cache_salt, ())
+                (m, w, cache_salt, fmt)
+                for m, w, fmt in self._ns.get(cache_salt, ())
                 if (not model_name or m == model_name)
                 and (not world_size or w == world_size)
+                and fmt == cache_format
             ]
         return hits[0] if len(hits) == 1 else None
 
@@ -312,7 +316,7 @@ class PromptStore:
                 base += 1
             if base:
                 keys.add(self._owner[(ns, prompt_chain[base - 1])])
-            newest = self._ns.get(ns[2], {}).get(ns[:2])
+            newest = self._ns.get(ns[2], {}).get((ns[0], ns[1], ns[3]))
             if newest and newest[1] in self._entries:
                 keys.add(newest[1])
             entries = sorted((self._entries[x] for x in keys), key=lambda e: -e[0])

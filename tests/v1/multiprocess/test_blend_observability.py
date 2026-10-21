@@ -181,6 +181,7 @@ class TestPrefixLegNoGpuContext:
             request_id="req-ctx",
             model_name="m",
             world_size=2,
+            cache_format="",
             token_ids=[1, 2, 3],
         )
 

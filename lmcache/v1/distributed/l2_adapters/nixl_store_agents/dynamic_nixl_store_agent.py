@@ -25,9 +25,8 @@ from lmcache.v1.distributed.internal_api import L1MemoryDesc
 def _object_key_to_filename(key: ObjectKey) -> str:
     """Derive a deterministic storage object name from an object key.
 
-    A non-empty ``cache_salt`` is appended as a trailing ``@``-delimited
-    field, matching the S3 and filesystem L2 adapters. An empty salt retains
-    the exact legacy filename.
+    Append ``@salt@cache_format`` when formatted, or ``@salt`` when salted.
+    Salt may be empty for formatted keys.
 
     Args:
         key: Key identifying the stored cache object.
@@ -37,7 +36,11 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     """
     safe_model_name = key.model_name.replace("/", "--")
     chunk_hex = key.chunk_hash.hex()
-    salt_suffix = f"@{key.cache_salt}" if key.cache_salt else ""
+    salt_suffix = (
+        f"@{key.cache_salt}@{key.cache_format}"
+        if key.cache_format
+        else (f"@{key.cache_salt}" if key.cache_salt else "")
+    )
     return (
         f"{safe_model_name}_{key.kv_rank:08x}_"
         f"{key.object_group_id:x}_{chunk_hex}{salt_suffix}.bin"

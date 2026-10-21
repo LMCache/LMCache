@@ -262,6 +262,7 @@ class TransferContext(ABC):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
+        cache_format: str = "",
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -277,6 +278,7 @@ class TransferContext(ABC):
                 contexts use it to normalize engine-specific KV layouts.
                 Adapters should pass their own :class:`EngineType`; the
                 default is :attr:`EngineType.VLLM` for backwards compatibility.
+            cache_format: KV encoding identity.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -504,6 +506,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
+        cache_format: str = "",
     ) -> None:
         """Register the worker KV cache with the LMCache server.
 
@@ -515,6 +518,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             mq_timeout: Timeout for the registration response.
             layout_hints: Optional KV-layout metadata.
             engine_group_infos: Optional engine KV-group metadata.
+            cache_format: KV encoding identity.
             engine_type: Serving engine that produced the caches.
 
         Raises:
@@ -525,6 +529,10 @@ class LMCacheDrivenTransferContext(TransferContext):
         event_backend = get_event_ipc_backend(device)
         event_backend.check_event_support(device)
 
+        registration_hints: LayoutHints = (
+            layout_hints.copy() if layout_hints is not None else {}
+        )
+        registration_hints["cache_format"] = cache_format
         future = self._submit_registration(
             lambda: self._req_client.register_kv_cache(
                 self._instance_id,
@@ -532,7 +540,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                 model_name,
                 world_size,
                 engine_type,
-                layout_hints or {},
+                registration_hints,
                 list(engine_group_infos),
             )
         )
@@ -789,6 +797,7 @@ class EngineDrivenTransferContext(TransferContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
+        cache_format: str = "",
     ) -> None:
         """Register KV caches with the engine-driven context server.
 
@@ -850,6 +859,7 @@ class EngineDrivenTransferContext(TransferContext):
                     dtype_str=dtype_str,
                     use_mla=use_mla_flag,
                     num_physical_slots=blocks_in_chunk * block_size,
+                    cache_format=cache_format,
                 )
             )
         )

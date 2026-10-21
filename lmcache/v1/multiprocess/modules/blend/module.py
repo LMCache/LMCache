@@ -259,7 +259,9 @@ class BlendModule(
         deadline = time.monotonic() + budget_ms / 1e3
         P = list(key.token_ids)
         try:
-            ns = store.resolve(key.model_name, key.world_size, key.cache_salt)
+            ns = store.resolve(
+                key.model_name, key.world_size, key.cache_salt, key.cache_format
+            )
             if ns is None:  # the salt must match; empty name / zero size = any
                 return []
             hits = self._token_range_matcher.match_sub_sequence(P)

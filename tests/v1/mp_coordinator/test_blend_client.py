@@ -44,6 +44,7 @@ def _directory_request(
             namespace = BlendNamespace(
                 model_name=payload["model_name"],
                 cache_salt=payload["cache_salt"],
+                cache_format=payload["cache_format"],
                 world_size=payload["world_size"],
             )
             matches = directory.blend_match(
@@ -228,7 +229,7 @@ def test_match_carries_the_namespace_to_the_coordinator():
     client = BlendCoordinatorClient(request_fn=capture)
     try:
         namespace = BlendNamespace(
-            model_name="llama", cache_salt="tenant-a", world_size=4
+            model_name="llama", cache_salt="tenant-a", world_size=4, cache_format="fp8"
         )
         client.submit_match("r1", [1, 2, 3], namespace)
         _wait_match(client, "r1")
@@ -237,6 +238,7 @@ def test_match_carries_the_namespace_to_the_coordinator():
                 "tokens_b64": encode_tokens([1, 2, 3]),
                 "model_name": "llama",
                 "cache_salt": "tenant-a",
+                "cache_format": "fp8",
                 "world_size": 4,
             }
         ]

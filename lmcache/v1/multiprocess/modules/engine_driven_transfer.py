@@ -50,6 +50,7 @@ class EngineDrivenContextEntry:
         metadata: Layout metadata describing the non-CUDA chunk format.
         model_name: The name of the model associated with this context.
         world_size: The world size associated with this context.
+        cache_format: KV encoding identity.
         last_seen: ``time.monotonic()`` of the most recent activity from this
             instance (register, PING, prepare/commit). Drives reaping.
         has_liveness_signal: True once the instance has sent at least one
@@ -61,6 +62,7 @@ class EngineDrivenContextEntry:
     world_size: int
     last_seen: float = 0.0
     has_liveness_signal: bool = False
+    cache_format: str = ""
 
 
 class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
@@ -123,6 +125,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             non_cuda_context_meta[str(instance_id)] = {
                 "model_name": entry.model_name,
                 "world_size": entry.world_size,
+                "cache_format": entry.cache_format,
                 "block_size": entry.metadata.block_size,
                 "use_mla": entry.metadata.use_mla,
             }
@@ -253,7 +256,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             if obj_keys:
                 self._ctx.storage_manager.finish_read_prefetched(obj_keys)
 
-        self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
+        self._ctx.layout_desc_registry.unregister(
+            entry.model_name, entry.world_size, entry.cache_format
+        )
 
     @staticmethod
     def _make_transfer_key(
@@ -338,6 +343,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             metadata=metadata,
             model_name=payload.model_name,
             world_size=payload.world_size,
+            cache_format=payload.cache_format,
             last_seen=now,
             has_liveness_signal=False,
         )
@@ -363,7 +369,10 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         )
 
         self._ctx.layout_desc_registry.register(
-            payload.model_name, payload.world_size, layout_desc
+            payload.model_name,
+            payload.world_size,
+            layout_desc,
+            cache_format=payload.cache_format,
         )
         return RegisterEngineDrivenContextResponse(
             shm_name=shm_name, pool_size=pool_size

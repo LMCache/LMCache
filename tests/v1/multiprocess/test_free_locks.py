@@ -437,6 +437,7 @@ def test_adapter_free_lookup_locks_sends_request():
 
     adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
     adapter.model_name = "test_model"
+    adapter.cache_format = "bf16"
     adapter.lmcache_tokens_per_chunk = 256
     adapter.blocks_in_chunk = 16
     adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1, 1)
@@ -466,6 +467,7 @@ def test_adapter_free_lookup_locks_sends_request():
     assert isinstance(key, IPCCacheServerKey)
     assert key.worker_id is None
     assert key.model_name == "test_model"
+    assert key.cache_format == "bf16"
     assert key.request_id == "req-1"
     assert key.request_configs == {"lmcache.skip_save": True}
     assert tp_size == 1
@@ -483,6 +485,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
 
     adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
     adapter.model_name = "test_model"
+    adapter.cache_format = "bf16"
     adapter.lmcache_tokens_per_chunk = 256
     adapter.blocks_in_chunk = 16
     adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1, 1)
@@ -533,6 +536,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
 
     # Keys should be identical
     assert lookup_key.model_name == free_key.model_name
+    assert lookup_key.cache_format == free_key.cache_format == "bf16"
     assert lookup_key.world_size == free_key.world_size
     assert lookup_key.worker_id == free_key.worker_id
     assert lookup_key.worker_id is None
