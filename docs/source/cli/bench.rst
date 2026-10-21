@@ -1021,8 +1021,8 @@ server
 The ``lmcache bench server`` command is an end-to-end sanity test for the
 LMCache Multi-Process (MP) cache server. It connects to a running server
 over ZMQ and exercises the full KV-cache data path for a sequence of
-synthetic requests, then optionally verifies per-chunk checksums through
-the HTTP API.
+synthetic requests, then verifies retrieved chunks in the registered worker
+buffers.
 
 .. code-block:: bash
 
@@ -1030,7 +1030,7 @@ the HTTP API.
 
 Unlike :ref:`lmcache bench engine <lmcache-bench-engine>`, this command does
 **not** require an inference engine. It only needs a running LMCache MP
-server (ZMQ + HTTP). GPU mode additionally requires a CUDA-capable device.
+server (ZMQ). GPU mode additionally requires a CUDA-capable device.
 It also requires the full ``lmcache`` install (not the lightweight
 ``lmcache-cli`` package).
 
@@ -1040,10 +1040,10 @@ What it does
 
 For each sequence in ``[--start, --end)``, the tool runs two passes:
 
-1. **Cold pass** -- ``LOOKUP`` is expected to miss, so the generated KV
-   tensors are ``STORE``\ d on the server.
-2. **Warm pass** -- ``LOOKUP`` is expected to hit; the tool issues
-   ``RETRIEVE`` and compares the retrieved KV chunks' checksums to the
+1. **Cold pass** -- ``LOOKUP`` is expected to miss. The case saves the
+   request blocks' checksums and issues ``STORE``.
+2. **Warm pass** -- ``LOOKUP`` is expected to hit. The case clears the
+   destination blocks before ``RETRIEVE`` and compares their checksums to the
    originals.
 
 The full RPC path exercised is::
@@ -1052,10 +1052,24 @@ The full RPC path exercised is::
      → QUERY_PREFETCH_STATUS → RETRIEVE → STORE
      → END_SESSION
 
-When ``--url`` points to the server's HTTP endpoint, per-chunk checksums
-are additionally cross-checked against the server-side computation, so a
-mismatch between producer and consumer surfaces as a loud
-``CHECKSUM MISMATCH`` log line.
+Both transfer modes hash every reader's local buffers, including replicated
+readers. Preparation, device synchronization, and checksum computation run
+outside STORE/RETRIEVE latency measurements.
+``--url`` remains accepted for compatibility; verification no longer uses HTTP.
+
+
+Custom cases reserve blocks with ``client.create_request(..., token_ids=...)``
+and return them with ``client.release_request(request)``. Each group has an
+independent pool shared by all TP workers. Blocks are request-exclusive;
+the allocator does not implement prefix sharing or accept caller-specified IDs.
+Allocation either succeeds for all pools or changes none; insufficient capacity
+raises immediately. Released requests cannot perform further client operations.
+``release_request`` ends the server session and returns local blocks, even if
+session cleanup raises. The baseline calls it in ``finally`` for each request.
+
+Client control is single-threaded. If a transfer times out or raises, block
+reuse is disabled until the client is closed; releasing the request then
+invalidates it but retains its blocks for teardown.
 
 
 Quick start
@@ -1097,8 +1111,8 @@ Options
      - ZMQ endpoint of the MP cache server.
    * - ``--url URL``
      - ``http://localhost:8080``
-     - HTTP base URL of the server's checksum API. Used to
-       verify per-chunk checksums end-to-end.
+     - Legacy HTTP URL, accepted for compatibility. Buffer verification
+       no longer uses this endpoint.
    * - ``--mode {gpu,cpu}``
      - ``gpu``
      - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
@@ -1115,6 +1129,9 @@ Options
    * - ``--num-tokens N``
      - ``512``
      - Tokens per synthetic request.
+   * - ``--block-allocation {sequential,random}``
+     - ``sequential``
+     - Allocate the lowest free IDs or sample from all free IDs.
    * - ``--num-blocks N``
      - ``1024``
      - Number of paged blocks allocated on the GPU.
@@ -1286,7 +1303,8 @@ Example: MLA + TP=2, exercising rank 0 STORE + both-rank RETRIEVE:
        --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:8" \
        --tp-size 2
 
-The bench verifies retrieved data on every rank and reports the rank and
+Checksums include every reader rank, so a missing or incorrect restore on a
+non-writer rank also fails verification. The bench reports the rank and
 chunk for checksum mismatches.
 
 See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
@@ -1363,7 +1381,7 @@ metrics summary is printed. The summary includes:
 
 * **Configuration** -- RPC URL, mode, transfer mode, tokens per request,
   interval, concurrency.
-* **Results** -- total requests, checksum OK / FAIL counts, pass rate,
+* **Results** -- total requests, checksum OK / FAIL counts, checksum pass rate,
   elapsed time, requests per second.
 * **Latency sections** -- per-operation latency statistics (count, mean,
   min, max, p50, p99) for cold lookup, cold store, warm lookup, and warm
@@ -1385,7 +1403,7 @@ to save the summary to a file.
    Total requests:                   3
    Checksum OK:                      3
    Checksum FAIL:                    0
-   Pass rate (%):                    100.0
+   Checksum pass rate (%):           100.0
    -------------------- Cold Lookup (ms) ---------------
    count:                            3
    mean:                             1.647
