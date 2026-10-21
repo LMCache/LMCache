@@ -1796,6 +1796,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             num_new_tokens = scheduler_output.num_scheduled_tokens[new_request.req_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
+            request_tracker.update_num_engine_computed_tokens(
+                new_request.num_computed_tokens, num_new_tokens
+            )
 
             if not self._can_store:
                 continue
@@ -1835,6 +1838,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # stay consistent with _process_new_requests.
             num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
+            request_tracker.update_num_engine_computed_tokens(
+                cached_reqs.num_computed_tokens[idx], num_new_tokens
+            )
 
             if not self._can_store:
                 continue

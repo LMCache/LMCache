@@ -61,16 +61,29 @@ Open **http://localhost:3000** → **Explore** → datasource **Tempo**.
 
 # Complete misses (lookup ran but nothing was cached)
 { name = "request" && span.requested_tokens > 0 && span.hit_tokens = 0 }
+
+# Requests where neither the engine's prefix cache nor LMCache served half the prompt
+{ name = "request" && span.request_hit_rate < 0.5 }
 ```
 
-Click any trace to open the waterfall. Each root `request` span carries three
-per-request cache hit rate attributes:
+Click any trace to open the waterfall. Each root `request` span carries the
+cache hit rate attributes below. The lookup-level ones cover only the range
+LMCache was asked to look up; the request-level ones cover the whole prompt.
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `hit_tokens` | int | tokens served from L1+L2 cache |
-| `requested_tokens` | int | total chunk-aligned tokens submitted for lookup |
+| `requested_tokens` | int | chunk-aligned tokens submitted for lookup, past the engine-covered prefix |
 | `hit_rate` | float | `hit_tokens / requested_tokens` (0.0 on a total miss) |
+| `apc_covered_tokens` | int | chunk-aligned prefix the engine's prefix cache held, skipped by the lookup |
+| `prompt_tokens` | int | whole prompt length |
+| `engine_hit_tokens` | int | the engine's own prefix-cache hit, not chunk-aligned |
+| `request_hit_tokens` | int | prefix served by the engine or LMCache: `max(engine_hit, apc_covered + hit)` |
+| `engine_hit_rate` | float | `engine_hit_tokens / prompt_tokens` |
+| `request_hit_rate` | float | `request_hit_tokens / prompt_tokens` |
+
+Span attributes beyond these (the L1/L2 split, hit keys, early-exit reason)
+are listed in `docs/source/mp/observability/traces.rst`.
 
 ```
 request                       [═════════════════════════════]  hit_rate=0.75

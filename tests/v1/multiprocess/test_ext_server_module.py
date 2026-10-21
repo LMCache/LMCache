@@ -199,8 +199,10 @@ def test_server_module_router_dispatches_extension_handlers() -> None:
     assert router is not None
 
     registered = iter_request_handlers(router)
-    assert len(registered) == 1
-    assert registered[0].operation == "server_module_call"
+    assert [handler.operation for handler in registered] == [
+        "server_module_affinity_call",
+        "server_module_call",
+    ]
 
     ok = router.server_module_call(
         ServerModuleCallRequest(method="fake.echo", payload=b"hello")

@@ -200,8 +200,8 @@ to correlate START/END pairs.
 | `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name`, `transfer_key` | `str`, `int`, `str`, `str` |
 | `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens`, `transfer_key` | `str`, `int`, `int`, `str`, `str`, `int`, `int`, `str` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
-| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `l1_hit_tokens`, `l2_hit_tokens`, `l1_hit_keys`, `l2_hit_keys`, `early_exit_reason`, `model_name`, `cache_salt` | `int`, `int`, `int`, `int`, `int`, `int`, `int`, `str`, `str`, `str` |
-| `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
+| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `apc_covered_tokens`, `hit_tokens`, `l1_hit_tokens`, `l2_hit_tokens`, `l1_hit_keys`, `l2_hit_keys`, `prompt_tokens`, `engine_hit_tokens`, `request_hit_tokens`, `early_exit_reason`, `model_name`, `cache_salt` | `int`, `int`, `int`, `int`, `int`, `int`, `int`, `int`, `int`, `int`, `int`, `str`, `str`, `str` |
+| `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes`, `token_ids` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]`, `tuple[int, ...]` (the IPC key's prompt token ids, shared by reference) |
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
 
@@ -232,15 +232,27 @@ fully succeed.
 ### `MP_LOOKUP_PREFETCH_END` metadata
 
 `found_count` is the contiguous prefix hit at chunk granularity, already
-divided by `world_size` at the emit site.  `requested_tokens` and
-`hit_tokens` are denormalized token-level counts so subscribers need not
-know `chunk_size`:
+divided by `world_size` at the emit site.  It is absolute: when the lookup
+key's `start` skips an engine-covered prefix (see
+[apc_covered_lookup.md](../multiprocess/modules/apc_covered_lookup.md)), it
+includes the skipped chunks, because that is the hit the engine resolves.
+The token fields below do not.  `requested_tokens` and `hit_tokens` are
+denormalized token-level counts so subscribers need not know `chunk_size`:
 
-- `requested_tokens = len(chunk_hashes) * chunk_size` on the happy path; `0`
-  on the two early-exit paths in `lookup()` (no matching GPU context,
-  empty `chunk_hashes`).  Sub-chunk trailing tokens are excluded — they
-  cannot hit at chunk granularity.
-- `hit_tokens = found_count * chunk_size`.
+- `requested_tokens = len(chunk_hashes) * chunk_size - apc_covered_tokens`
+  on the happy path; `0` on the two early-exit paths in `lookup()` (no
+  matching GPU context, empty `chunk_hashes`).  Sub-chunk trailing tokens
+  are excluded — they cannot hit at chunk granularity.
+- `hit_tokens`: only the tokens the lookup actually found, past the
+  skipped prefix.
+- `apc_covered_tokens` is the APC-covered prefix LMCache was told to skip:
+  the key's `start`, as fixed when the lookup was submitted and rounded down
+  to `chunk_size`.  It is not the engine's exact APC hit at completion,
+  which may have grown or shrunk since.  LMCache never looks this prefix
+  up, so it is excluded from `requested_tokens` and from every hit field
+  (otherwise it would read as an L1 hit), and reported here instead.  `0`
+  when the key starts at `0` and on the early-exit paths; still reported
+  on a lookup the load policy declined.
 - `l1_hit_tokens` and `l2_hit_tokens` split `hit_tokens` by the tier that
   served it.  `l1_hit_tokens` is the fold of `PrefetchResult.l1_hit_cells`
   — the prefix L1 alone could serve under each object group's attention
@@ -256,6 +268,28 @@ know `chunk_size`:
   complement the token split: when L1 holds the full-attention keys but L2
   serves the sliding-window keys, `l1_hit_tokens` is `0` while `l1_hit_keys`
   is most of the hit.
+- `prompt_tokens`, `engine_hit_tokens` and `request_hit_tokens` are the
+  request-level view, reported on every path (early exits and declined
+  lookups included) because they describe the request, not the lookup:
+  - `prompt_tokens = len(key.token_ids)`: the whole prompt, sub-chunk tail
+    included, so a request-level rate uses the same denominator a user
+    would.
+  - `engine_hit_tokens`: the engine's own prefix-cache hit, read from the
+    `lmcache.hint.engine_computed_tokens` request config (see
+    [kv_load_policy.md](../multiprocess/kv_load_policy.md)).  Unlike
+    `apc_covered_tokens` it is not rounded down to a chunk boundary; `0`
+    when the integration sends no hint.
+  - `request_hit_tokens = max(engine_hit_tokens, apc_covered_tokens +
+    hit_tokens)`: the prefix of the prompt served by either cache.  Both
+    ranges start at token 0 and the lookup starts at or below the engine
+    hit, so the longer one is their union; summing them would double count
+    the sub-chunk gap between the raw engine hit and the aligned lookup
+    start.
+
+  It is a per-lookup snapshot of the request: a request that bypasses
+  LMCache never reaches the server, a request that looks up twice (APC
+  shrink, preemption) is counted twice, and the engine hit is the value at
+  submit time.
 - `early_exit_reason` names the branch of `lookup()` that returned before a
   prefetch task was submitted.  Always present; `""` on the normal path.
   Vocabulary:
