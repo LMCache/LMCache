@@ -15,6 +15,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, ClassVar
 import array
+import threading
 
 # Third Party
 import torch
@@ -28,8 +29,12 @@ from lmcache.v1.gpu_connector.utils import (
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
+    # Standard
+    from collections.abc import Sequence
+
     # First Party
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+    from lmcache.v1.memory_management import MemoryObj
     from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
@@ -67,6 +72,39 @@ class BaseCacheContext(ABC):
         self.kv_layer_groups_manager_ = kv_layer_groups_manager
         self.block_ids_buffer_ = block_ids_buffer
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        # Imported worker events, held until the stream wait queued on each
+        # has been consumed (see hold_imported_event / release_imported_event).
+        self._held_imports: dict[int, object] = {}
+        self._next_import_token = 0
+        self._held_imports_lock = threading.Lock()
+
+    def hold_imported_event(self, event: object) -> int:
+        """Keep an imported worker event alive until :meth:`release_imported_event`.
+
+        A stream wait queued on an imported event refers to it until the
+        stream has consumed the wait, so the import must outlive the handler
+        that queued it.
+
+        Args:
+            event: The imported event.
+
+        Returns:
+            The token that releases this import.
+        """
+        with self._held_imports_lock:
+            token = self._next_import_token
+            self._next_import_token += 1
+            self._held_imports[token] = event
+            return token
+
+    def release_imported_event(self, token: int) -> None:
+        """Drop the imported event behind ``token``; its stream wait has drained.
+
+        Args:
+            token: Token returned by :meth:`hold_imported_event`.
+        """
+        with self._held_imports_lock:
+            self._held_imports.pop(token, None)
 
     # ------------------------------------------------------------------
     # Abstract -- subclasses MUST implement
@@ -326,6 +364,45 @@ class BaseCacheContext(ABC):
             self.block_ids_buffer_[offsets[i] : offsets[i + 1]]
             for i in range(len(block_ids_per_group))
         ]
+
+    def transfer_object_group(
+        self,
+        block_ids_gpu: list[torch.Tensor],
+        memory_objs: Sequence[MemoryObj | None],
+        *,
+        object_group_id: int,
+        batch_size: int,
+        skip_first_n_tokens: int,
+        direction: lmcache_native.TransferDirection,
+        transfer_key: str,
+        block_ids_host: Sequence[Sequence[int]] = (),
+    ) -> None:
+        """Enqueue the copy of one object group between the KV cache and
+        *memory_objs*, in either direction.
+
+        The copy is defined by the staging buffers, shape descriptors and
+        KV formats this context owns, so it lives here: a subclass that
+        changes the staging layout overrides this method together with it,
+        and the two cannot disagree. The default is
+        :func:`~lmcache.v1.multiprocess.object_group_transfer.transfer_kv_per_object_group`;
+        see it for the argument semantics.
+        """
+        # First Party
+        from lmcache.v1.multiprocess.object_group_transfer import (
+            transfer_kv_per_object_group,
+        )
+
+        transfer_kv_per_object_group(
+            self,
+            block_ids_gpu,
+            memory_objs,
+            object_group_id=object_group_id,
+            batch_size=batch_size,
+            skip_first_n_tokens=skip_first_n_tokens,
+            direction=direction,
+            transfer_key=transfer_key,
+            block_ids_host=block_ids_host,
+        )
 
     # ------------------------------------------------------------------
     # Derived properties (pure helpers)

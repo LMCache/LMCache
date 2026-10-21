@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, TypeVar,
 import asyncio
 import functools
 import hashlib
+import os
 import re
+import stat
 import threading
 import traceback
 import warnings
@@ -46,6 +48,122 @@ KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 
 
 # Device utility functions
+def get_device_identity(source: str | int) -> tuple[bool, int, int] | None:
+    """Return the physical identity of a character device or regular file.
+
+    Args:
+        source: Path (str, following symlinks) or open file descriptor (int).
+
+    Returns:
+        ``(True, st_rdev, 0)`` for a character device,
+        ``(False, st_dev, st_ino)`` for a regular file, or ``None`` otherwise.
+
+        ``None`` means unidentified (unsupported type or failed path/fd lookup),
+        not unowned. Callers must check for ``None`` candidates before comparing
+        identities.
+    """
+    try:
+        info = os.fstat(source) if isinstance(source, int) else os.stat(source)
+    except (OSError, ValueError) as exc:
+        if isinstance(source, int):
+            logger.warning("Failed to inspect DAX device fd %s: %s", source, exc)
+        return None
+    if stat.S_ISCHR(info.st_mode):
+        return True, info.st_rdev, 0
+    if stat.S_ISREG(info.st_mode):
+        return False, info.st_dev, info.st_ino
+    return None
+
+
+DAX_SYSFS_CHAR_ROOT = "/sys/dev/char"
+"""Where a character device's sysfs node is looked up by ``major:minor``."""
+
+
+@dataclass(frozen=True)
+class DaxDeviceGeometry:
+    """Capacity and mapping alignment of a DAX target, in bytes.
+
+    Regular files report ``align == 1``: beyond the page-aligned offset that
+    ``mmap`` already requires, they impose no alignment on a mapping.
+    """
+
+    capacity: int
+    align: int
+
+
+def get_dax_device_geometry(fd: int) -> DaxDeviceGeometry:
+    """Return the capacity and alignment of the DAX target open at ``fd``.
+
+    A regular file reports its ``st_size``. A character device reports the
+    ``size`` and ``align`` attributes of its sysfs node under
+    :data:`DAX_SYSFS_CHAR_ROOT`, found by ``major:minor`` so any path or
+    symlink to the node resolves. ``fstat`` reports size 0 for character
+    devices and the kernel only checks Device-DAX bounds on page fault, so
+    sysfs is the only pre-mapping source of truth.
+
+    Args:
+        fd: Open descriptor of the regular file or Device-DAX node.
+
+    Returns:
+        The target's geometry.
+
+    Raises:
+        RuntimeError: If ``fd`` is neither a regular file nor a character
+            device, or the sysfs attributes are missing or unreadable.
+    """
+    info = os.fstat(fd)
+    if stat.S_ISREG(info.st_mode):
+        return DaxDeviceGeometry(capacity=info.st_size, align=1)
+    if not stat.S_ISCHR(info.st_mode):
+        raise RuntimeError("DAX target must be a character device or a regular file")
+    node = os.path.join(
+        DAX_SYSFS_CHAR_ROOT,
+        f"{os.major(info.st_rdev)}:{os.minor(info.st_rdev)}",
+    )
+    values: dict[str, int] = {}
+    for attr in ("size", "align"):
+        path = os.path.join(node, attr)
+        try:
+            with open(path, encoding="ascii") as handle:
+                values[attr] = int(handle.read().strip(), 0)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                f"cannot read Device-DAX {attr} from {path}: {exc}; "
+                "the node is not a Device-DAX device or sysfs is unavailable"
+            ) from exc
+    return DaxDeviceGeometry(capacity=values["size"], align=values["align"])
+
+
+def check_dax_range(device_path: str, fd: int, offset: int, size: int) -> None:
+    """Reject a DAX mapping that would leave the device or break its alignment.
+
+    Call this before ``mmap``: a Device-DAX mapping past the end of the device
+    succeeds at ``mmap`` time and raises SIGBUS on first access.
+
+    Args:
+        device_path: Device path, used in error messages.
+        fd: Open descriptor of the device, as passed to ``mmap``.
+        offset: Byte offset of the mapping into the device.
+        size: Mapping length in bytes.
+
+    Raises:
+        RuntimeError: If ``[offset, offset + size)`` exceeds the device
+            capacity, ``offset`` or ``size`` is not a multiple of the device
+            alignment, or the capacity cannot be determined.
+    """
+    geometry = get_dax_device_geometry(fd)
+    if offset + size > geometry.capacity:
+        raise RuntimeError(
+            f"dax range [{offset}, {offset + size}) exceeds {device_path} "
+            f"capacity ({geometry.capacity} bytes)"
+        )
+    if offset % geometry.align or size % geometry.align:
+        raise RuntimeError(
+            f"dax range [{offset}, {offset + size}) of {device_path} must start "
+            f"and end on the device alignment ({geometry.align} bytes)"
+        )
+
+
 def check_interprocess_event_support() -> None:
     """Check if the current backend supports interprocess device events.
 
@@ -642,6 +760,17 @@ class CacheStoreEvent:
     lora_name: str | None
 
 
+@dataclass
+class CacheRemoveEvent:
+    """Removal of previously announced CPU chunks, paired with CacheStoreEvent."""
+
+    block_hashes: list[int | bytes]
+    medium: str | None
+
+
+CacheEvent = CacheStoreEvent | CacheRemoveEvent
+
+
 class EngineType(Enum):
     VLLM = "vllm"
     ATOM = "atom"
@@ -738,7 +867,10 @@ def handle_thread_exception(args):
         args: Thread exception information provided by ``threading``.
     """
     logger.error(
-        f"Thread {args.thread.name} crashed: {args.exc_type.__name__}: {args.exc_value}"
+        "Thread %s crashed: %s: %s",
+        args.thread.name,
+        args.exc_type.__name__,
+        args.exc_value,
     )
 
 

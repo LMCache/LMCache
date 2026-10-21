@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 import asyncio
 import os
@@ -46,6 +46,9 @@ class NixlStoreObj:
     """
     The object stored in Nixl L2 cache.
     Can be used for both file and object.
+
+    ``pin_count`` is adapter-shared state: every read and transition
+    holds the owning adapter's ``_lock``.
     """
 
     page_indices: list[int]
@@ -55,23 +58,20 @@ class NixlStoreObj:
     layout: Optional[MemoryLayoutDesc] = None
 
     pin_count: int = 0
-    _lock: threading.Lock = field(
-        default_factory=threading.Lock, repr=False, compare=False
-    )
 
-    def increase_pin_count(self):
-        with self._lock:
-            self.pin_count += 1
+    def increase_pin_count(self) -> None:
+        """Increment the pin count (caller holds the adapter lock)."""
+        self.pin_count += 1
 
-    def decrease_pin_count(self):
-        with self._lock:
-            if self.pin_count > 0:
-                self.pin_count -= 1
-            else:
-                logger.warning(
-                    "Trying to decrease pin count of object at page indices %s below 0",
-                    self.page_indices,
-                )
+    def decrease_pin_count(self) -> None:
+        """Decrement the pin count, floored at zero (caller holds the adapter lock)."""
+        if self.pin_count > 0:
+            self.pin_count -= 1
+        else:
+            logger.warning(
+                "Trying to decrease pin count of object at page indices %s below 0",
+                self.page_indices,
+            )
 
 
 class NixlObjPool:
@@ -185,7 +185,7 @@ class NixlStorageAgent:
             device_id=0,  # 0 indicates cpu
         )
 
-        if self.backend in ["GDS", "GDS_MT", "POSIX", "HF3FS"]:
+        if self.backend in _FILE_BACKENDS:
             file_size = int(
                 self.backend_params.get("file_size", l1_memory_desc.align_bytes)
             )
@@ -368,20 +368,35 @@ class NixlStorageAgent:
             raise RuntimeError("NIXL transfer failed")
 
     async def post_non_blocking(self, handle: NixlXferHandle) -> None:
-        """Post a Nixl transfer handle and await until the transfer is done."""
+        """Post a Nixl transfer handle and await until the transfer is done.
 
+        Spin-checks up to 20 times without yielding before falling back to a
+        1 ms cooperative sleep.  io_uring-backed backends (IBM_SCALE, GDS)
+        typically complete in <1 ms and will be "DONE" during the spin,
+        eliminating the 10 ms floor that the old unconditional sleep imposed.
+
+        The sleep is placed *before* check_xfer_state in the back-off loop
+        (not after) so that a transfer completing on the first check exits
+        immediately without paying an extra sleep on the way out.
+        """
         state = self.nixl_agent.transfer(handle)
-
+        # Fast path: spin-check without yielding for io_uring-backed backends.
+        if state != "DONE" and state != "ERR":
+            for _ in range(20):
+                try:
+                    state = self.nixl_agent.check_xfer_state(handle)
+                except nixlBind.nixlBackendError:
+                    raise
+                if state == "DONE" or state == "ERR":
+                    break
+        # Back-off path: sleep *before* each check so we exit immediately
+        # once "DONE" is returned without paying an extra sleep on the way out.
         while state != "DONE" and state != "ERR":
+            await asyncio.sleep(0.001)
             try:
                 state = self.nixl_agent.check_xfer_state(handle)
             except nixlBind.nixlBackendError:
                 raise
-
-            # TODO(Jiayi): Tune this for better perf
-            if state != "DONE" and state != "ERR":
-                await asyncio.sleep(0.01)
-
         if state == "ERR":
             raise RuntimeError("NIXL transfer failed")
 
@@ -546,12 +561,11 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         def _unlock_keys(keys: list[ObjectKey]) -> None:
-            """
-            Unlock keys in the event loop thread.
-            """
-            for key in keys:
-                if (obj := self._memory_objects.get(key)) is not None:
-                    obj.decrease_pin_count()
+            """Unlock keys on the event loop thread under the adapter lock."""
+            with self._lock:
+                for key in keys:
+                    if (obj := self._memory_objects.get(key)) is not None:
+                        obj.decrease_pin_count()
 
         # Schedule the unlock operation in the event loop thread
         self._loop.call_soon_threadsafe(_unlock_keys, keys)
@@ -678,7 +692,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             "backend": self._config.backend,
             "stored_object_count": stored_object_count,
             "pinned_object_count": pinned_object_count,
-            "pool_size": self._config.pool_size,
+            "pool_size": pool.total_objs,
             "pool_free_slots": pool_free_slots,
             "event_loop_alive": self._loop_thread.is_alive(),
         }
@@ -724,9 +738,9 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
         For each key-object pair, memory page indices are mapped to storage
         slot indices and a single batched DMA write is issued. On success the
-        key-to-storage mapping is recorded in ``_memory_objects``. On transfer
-        failure, all allocated storage slots are freed and the task is marked
-        as failed.
+        key-to-storage mapping is recorded in ``_memory_objects``. On preparation
+        or transfer failure, all allocated storage slots are freed and the
+        task is marked as failed.
 
         Args:
             keys: Keys identifying each object to store.
@@ -755,8 +769,8 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                     num_objs=len(mem_indices)
                 )
 
-                if storage_indices == []:
-                    break
+                if not storage_indices:
+                    raise RuntimeError("Insufficient NIXL storage capacity")
 
                 mem_indices_flat.extend(mem_indices)
                 storage_indices_flat.extend(storage_indices)
@@ -775,7 +789,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 )
 
             if not mem_indices_flat:
-                # Nothing to store (all keys already existed or pool empty)
+                # Nothing to store because all keys already existed
                 with self._lock:
                     self._completed_store_tasks[task_id] = L2StoreResult(True, 0)
                 self._signal_store_event()
@@ -794,21 +808,17 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 for key, storage_obj in zip(stored_keys, storage_objs, strict=False):
                     self._memory_objects[key] = storage_obj
                     storage_obj.decrease_pin_count()
-            # ``stored_keys`` and ``storage_objs`` are built together in the
-            # pre-alloc loop above, so the size lists stay aligned even
-            # when the pool ran out of slots mid-batch.
             if stored_keys:
                 stored_sizes = [obj.size for obj in storage_objs]
                 self._notify_keys_stored(stored_keys, stored_sizes)
             bytes_transferred = sum(obj.size for obj in storage_objs)
 
-        # success is only set to false for transfer failures
         except Exception:
             logger.exception("NIXL store task %d failed", task_id)
             success = False
             bytes_transferred = 0
 
-            # free storage indices if transfer fails
+            # Free storage indices after preparation or transfer failures.
             self.nixl_agent.pool.batched_free(storage_indices_flat)
 
         with self._lock:
@@ -925,8 +935,9 @@ _VALID_NIXL_BACKENDS = (
     "HF3FS",
     "OBJ",
     "AZURE_BLOB",
+    "IBM_SCALE",
 )
-_FILE_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
+_FILE_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS", "IBM_SCALE")
 
 
 class NixlStoreL2AdapterConfig(L2AdapterConfigBase):

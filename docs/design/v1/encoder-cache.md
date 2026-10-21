@@ -21,7 +21,7 @@ no layerwise streaming, and no paged gather/scatter.
         vLLM scheduler / worker
                  │
                  ▼
-   ┌──────────────────────────────┐    lmcache/integration/vllm/
+   ┌──────────────────────────────┐    lmcache/inprocess/integration/vllm/
    │  LMCacheECConnectorImpl      │    vllm_ec_adapter.py
    │  (vLLM ECConnectorBase glue) │
    └──────────────────────────────┘
@@ -170,7 +170,8 @@ chunks unless an EC-specific override changes the relevant config.
 
 ## Testing
 
-`tests/v1/test_ec_connector.py` exercises the full save → contains →
+`tests/inprocess/integration/vllm/test_ec_connector.py` exercises the full
+save → contains →
 load roundtrip through `LMCacheECConnectorImpl` against a real
 `StorageManager` backed by a temporary directory. The test depends on
 vLLM being importable and uses `pytest.importorskip("vllm")` at module

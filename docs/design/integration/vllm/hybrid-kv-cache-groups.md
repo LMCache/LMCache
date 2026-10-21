@@ -172,6 +172,8 @@ store is skipped and nothing is committed — a later retrieve simply misses and
 the engine recomputes. The non-GPU transfer path rejects multi-group transfers
 outright.
 
+**Failed retrieves:** on vLLM versions exposing `KVConnectorTransferResults`, multi-group receive failures are reported by request ID in both `finished_recving` and `failed_recving`, without flat block errors. This lets vLLM wait for all workers and apply its configured failure policy instead of rejecting an incompatible error report. Single-group models retain block-level reporting so a valid partial prefix can remain reusable; older vLLM versions retain the legacy completion and block-error hooks.
+
 ## Example
 
 vLLM exposes two engine groups — group 0: layers [0,2,4], group 1: [1,3]. If

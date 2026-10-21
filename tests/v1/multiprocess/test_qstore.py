@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for QStoreModule: the server side of query-tensor transfer.
 Covers Q ring registration/liveness/reaping, IPC release ordering, handler and
-protocol wiring, and store_q's fail-closed guards.
+protocol wiring, store_q's fail-closed guards, and composition through
+``--server-module`` (the module is an opt-in plugin, never auto-discovered).
 """
 
 # Standard
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock
 import contextlib
 import time
@@ -16,13 +17,21 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess import server as server_mod
-from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
-from lmcache.v1.multiprocess.modules.experimental import qstore as qstore_mod
-from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
+from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
+from lmcache.v1.multiprocess.custom_types import TRANSFER_QUERY
+from lmcache.v1.multiprocess.engine_module import discover_modules
+from lmcache.v1.multiprocess.ext_server_module import (
+    ExtServerModuleSpec,
+    load_server_module_classes,
+)
+from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import ContextEntry
+from lmcache.v1.multiprocess.modules.management import ManagementModule
+from lmcache.v1.multiprocess.plugin_modules import qstore as qstore_mod
+from lmcache.v1.multiprocess.plugin_modules.qstore import QStoreModule
 
 REGISTER_ARGS = ("model##query", 2)
+QSTORE_SPEC = ExtServerModuleSpec("lmcache.v1.multiprocess.plugin_modules.qstore")
 
 
 def _ctx() -> MagicMock:
@@ -253,80 +262,91 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
     cast(MagicMock, ctx.event_bus.publish).assert_not_called()
 
 
-class _FakeLMCacheDriven:
-    def __init__(self, ctx) -> None:
-        self.ctx = ctx
-
-
-class _FakeEngineDriven:
-    def __init__(self, ctx) -> None:
-        self.ctx = ctx
-
-
-class _FakeQStore:
-    def __init__(self, ctx) -> None:
-        self.ctx = ctx
-
-
-@pytest.fixture
-def stub_server_modules(monkeypatch):
-    """Stub the server's module constructors. Returns the ManagementModule mock.
-    The transfer modules stay real classes: _build_modules isinstance-checks
-    them to pick liveness targets and the lmcache-driven module."""
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
-    monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
-    monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
-    monkeypatch.setattr(server_mod, "QStoreModule", _FakeQStore)
-    management = MagicMock(name="ManagementModule")
-    monkeypatch.setattr(server_mod, "ManagementModule", management)
-    return management
-
-
-def _build(stub_server_modules, **config) -> list:
+def _build(**config: Any) -> list:
     return server_mod._build_modules(
-        MagicMock(name="ctx"), MPServerConfig(**config), MagicMock(url="")
+        MagicMock(name="ctx"),
+        MPServerConfig(worker_reap_timeout_seconds=0, **config),
+        CoordinatorConfig(),
     )
 
 
-def test_server_rejects_an_unknown_experimental_module(stub_server_modules) -> None:
-    """Check that the server rejects an unknown experimental module.
-    Only 'transfer_query' is supported right now."""
-    with pytest.raises(ValueError, match="Unknown --enable"):
-        _build(stub_server_modules, enable=["query"])
+def test_qstore_is_not_auto_discovered() -> None:
+    """QStore is an opt-in plugin: absent from the built-in scan, and loading
+    its module path yields exactly that one class (its imported dependency
+    LMCacheDrivenTransferModule is not re-registered)."""
+    discovered = discover_modules()
+
+    assert QStoreModule not in discovered
+    assert not any(
+        cls.__module__.startswith("lmcache.v1.multiprocess.plugin_modules")
+        for cls in discovered
+    )
+    assert load_server_module_classes([QSTORE_SPEC]) == [(QStoreModule, {})]
 
 
-def test_server_requires_lmcache_driven_transfer(stub_server_modules) -> None:
-    """Check that the server rejects a request to enable transfer_query when the
-    transfer mode is not lmcache-driven."""
+def test_server_requires_lmcache_driven_transfer(stub_module_resources) -> None:
+    """Check that the server rejects the qstore module when the transfer mode is
+    not lmcache-driven."""
     with pytest.raises(ValueError, match="lmcache_driven"):
         _build(
-            stub_server_modules,
-            enable=[TRANSFER_QUERY],
+            server_modules=[QSTORE_SPEC],
             supported_transfer_mode="engine_driven",
         )
 
 
-def test_server_builds_q_store_module(stub_server_modules) -> None:
-    """Check that the server builds the Q store module and puts it to the
-    ManagementModule."""
+def test_server_builds_q_store_module(
+    stub_module_resources, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check that --server-module builds the Q store module after its transfer
+    dependency, advertises transfer_query, and wires it to the reaper."""
     modules = _build(
-        stub_server_modules,
-        enable=[TRANSFER_QUERY],
+        server_modules=[QSTORE_SPEC],
         supported_transfer_mode="lmcache_driven",
     )
 
-    assert any(isinstance(m, _FakeQStore) for m in modules)
-    kwargs = stub_server_modules.call_args.kwargs
-    assert kwargs["experimental_transfer"] == [TRANSFER_QUERY]
-    assert any(isinstance(t, _FakeQStore) for t in kwargs["liveness_targets"])
+    qstore = next(m for m in modules if isinstance(m, QStoreModule))
+    management = next(m for m in modules if isinstance(m, ManagementModule))
+    assert management.get_experimental() == [TRANSFER_QUERY]
+    touch = MagicMock()
+    monkeypatch.setattr(qstore, "touch_instance", touch)
+    management.ping(123)
+    touch.assert_called_once_with(123)
 
 
-def test_server_builds_nothing_when_no_feature_is_enabled(
-    stub_server_modules,
+def test_server_omits_qstore_without_server_module(
+    stub_module_resources,
 ) -> None:
-    """Check that the server builds nothing when no feature is enabled."""
-    modules = _build(stub_server_modules)
+    """Check that QStore and its advertised feature are absent by default."""
+    modules = _build()
 
-    assert not any(isinstance(m, _FakeQStore) for m in modules)
-    assert stub_server_modules.call_args.kwargs["experimental_transfer"] == []
+    assert not any(isinstance(m, QStoreModule) for m in modules)
+    management = next(m for m in modules if isinstance(m, ManagementModule))
+    assert management.get_experimental() == []
+
+
+@pytest.mark.parametrize(
+    ("log_size", "bus_enabled", "enabled"),
+    [(0, True, False), (3, False, False), (3, True, True)],
+)
+def test_server_wires_event_module_liveness(
+    stub_module_resources,
+    monkeypatch: pytest.MonkeyPatch,
+    log_size: int,
+    bus_enabled: bool,
+    enabled: bool,
+) -> None:
+    ctx = MagicMock(name="ctx")
+    ctx.event_bus.enabled = bus_enabled
+    modules = server_mod._build_modules(
+        ctx,
+        MPServerConfig(worker_reap_timeout_seconds=0, kv_event_log_size=log_size),
+        CoordinatorConfig(),
+    )
+    events = next(module for module in modules if isinstance(module, KVEventModule))
+    management = next(m for m in modules if isinstance(m, ManagementModule))
+    assert events.enabled is enabled
+    assert management.get_experimental() == []
+    touch = MagicMock()
+    monkeypatch.setattr(events, "touch_instance", touch)
+    management.ping(123)
+    touch.assert_called_once_with(123)

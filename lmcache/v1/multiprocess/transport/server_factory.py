@@ -29,7 +29,7 @@ def create_request_server(
     """
     if mp_config.transport == "grpc":
         # First Party
-        from lmcache.v1.multiprocess.transport.grpc_impl.server import (
+        from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
             build_grpc_request_server,
         )
 

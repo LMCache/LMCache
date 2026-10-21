@@ -40,7 +40,9 @@ pytestmark = [
     pytest.mark.skipif(
         not hasattr(cuda_ops, "execute_direct_copy_transfer")
         or not cuda_ops.batch_memcpy_supported(),
-        reason="cudaMemcpyBatchAsync unavailable (needs CUDA >= 12.8 build/driver)",
+        reason=(
+            "cudaMemcpyBatchAsync unavailable (needs CUDA >= 12.8 or ROCm/HIP >= 7.15)"
+        ),
     ),
 ]
 
@@ -200,7 +202,7 @@ def _kernel_reference(
             )
         if direction == D2H:
             host_obj.copy_(staging)
-    torch.cuda.synchronize(device)
+    torch_dev.synchronize(device)
 
 
 def _direct(
@@ -242,7 +244,7 @@ def _direct(
     cuda_ops.execute_direct_copy_transfer(
         direction, device, _PIN_ALIGNMENT, specs, objects
     )
-    torch.cuda.synchronize(device)
+    torch_dev.synchronize(device)
 
 
 def _pinned_objects(groups: list[_Geometry], fill: bool) -> list[torch.Tensor]:

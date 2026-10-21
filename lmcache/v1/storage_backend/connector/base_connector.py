@@ -344,7 +344,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
             else:
                 # First failure encountered (None or Exception)
                 if isinstance(result, Exception):
-                    logger.warning(f"Exception during batched get: {result}")
+                    logger.warning("Exception during batched get: %s", result)
                 found_failure = True
 
         return memory_objs

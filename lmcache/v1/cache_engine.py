@@ -16,7 +16,7 @@ from typing import (
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.health_monitor.base import HealthMonitor
+    from lmcache.inprocess.v1.health_monitor.base import HealthMonitor
 
 # Standard
 import asyncio
@@ -29,6 +29,8 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
+from lmcache.inprocess.v1.gpu_connector.utils import assert_layerwise_gpu_connector
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_telemetry import InitializeUsageContext
@@ -41,8 +43,6 @@ from lmcache.utils import (
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
-from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
-from lmcache.v1.gpu_connector.utils import assert_layerwise_gpu_connector
 from lmcache.v1.hidden_state_store import HiddenStateStore
 from lmcache.v1.memory_allocators.cu_file_memory_allocator import CuFileMemoryAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
@@ -824,6 +824,10 @@ class LMCacheEngine:
 
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
+
+        Active synchronous retrieval does not release lookup pins. After
+        retrieval, the caller must release its pins with ``lookup_unpin(lookup_id)``
+        before issuing further blocking retrievals that may need cache space.
         """
         # Health check: block operation if LMCache is unhealthy
         if not self.is_healthy():
@@ -953,7 +957,9 @@ class LMCacheEngine:
                 if self._is_sync_pd_backend():
                     memory_obj.ref_count_down()
             else:
-                if memory_obj.is_pinned:
+                # Blocking gets acquire references, not ownership of lookup pins.
+                # The lookup owner releases those pins through lookup_unpin().
+                if (self.async_loading or self._is_passive()) and memory_obj.is_pinned:
                     memory_obj.unpin()
                 memory_obj.ref_count_down()
 
@@ -1102,12 +1108,7 @@ class LMCacheEngine:
 
                 assert task is not None
 
-                if layer_id == 0:
-                    # NOTE(Yuwei): For sglang integration we need to provide retrieved
-                    # tokens number in the first layer loading since there is no lookup
-                    yield torch.sum(ret_mask)
-                else:
-                    yield None
+                yield None
 
                 mem_objs_layer = task.result()
                 mem_obj_consumer.send(mem_objs_layer)
@@ -2043,7 +2044,7 @@ class LMCacheEngineBuilder:
         if enable_nixl_storage:
             # TODO(Jiayi): weird to import from transfer utils.
             # First Party
-            from lmcache.v1.transfer_channel.transfer_utils import (
+            from lmcache.inprocess.v1.transfer_channel.transfer_utils import (
                 get_correct_device,
             )
 

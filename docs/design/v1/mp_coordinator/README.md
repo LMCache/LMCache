@@ -31,6 +31,7 @@ shape.
 | `DELETE /instances/{id}` | mp → coordinator | deregister (idempotent, 204) |
 | `GET /instances` | operator/tools | list the fleet |
 | `GET /healthz` | k8s probe | liveness |
+| `PUT /config/chunk-size` | mp → coordinator | bind token hashing and blend lookup to the fleet's negotiated chunk size |
 | `PUT/GET /quota/config` | operator | fleet-wide quota configuration |
 | `PUT/GET/DELETE /quota/{cache_salt}` | operator | per-tenant byte budgets |
 | `GET /quota` | operator | fleet-wide usage summary |
@@ -70,6 +71,7 @@ lmcache/v1/mp_coordinator/
     event_source.py     # source lifecycle/status contract
     http_event_source.py  # non-durable POST /events push source
     kafka_event_source.py  # durable Kafka pull source (poll thread -> gate)
+    stream_position.py  # StreamPosition: the checkpoint's own read cursor
   discovery.py          # Registry + package scan, shared by views and controllers
   views/                # read models of the fleet: what is cached, and how much
     __init__.py         # build_views: scans this package
@@ -106,11 +108,23 @@ sequenceDiagram
     participant API as POST /instances
     participant Reg as InstanceRegistry
 
-    C->>API: POST /instances {instance_id, ip, http_port}
+    C->>API: POST /instances {instance_id, ip, http_port, chunk_size?}
     API->>API: validate JSON body
     API->>Reg: register(MPInstance(...))
     API-->>C: 200 {instance_id, re_registered}
 ```
+
+Chunk size is a fleet invariant. Before an MP server reports chunk-size
+negotiation success, it calls `PUT /config/chunk-size`; the coordinator updates
+its `TokenHasher` and optional `BlendIndex` first. Repeating the same binding is
+idempotent, while a different value is rejected. An MP server also includes the
+value on later registrations once finalization has completed, so a restarted
+coordinator restores the same binding.
+
+A finalized MP server can serve another model only when its chunk size is a
+multiple of that model's required alignment. Otherwise, preconfigure a common
+multiple or use a separate MP server. MP servers using different final chunk
+sizes also need separate coordinators.
 
 Heartbeat is `PUT /instances/{id}/heartbeat` → `registry.update_heartbeat`; a
 404 tells the client to re-register. The health loop (in `app.py`, started by
@@ -189,9 +203,15 @@ it. It holds no cache state itself. See [ingest.md](ingest.md).
   `POST /events` push adapter.
 - `kafka_event_source.py` — `KafkaCacheEventSource`, the durable pull
   adapter: a poll thread reads the fleet's Kafka topic and offers each
-  record to the same `EventGate.ingest_batches`; offsets commit via the
-  consumer group. Selected by `--event-transport kafka` in place of the
-  HTTP source; a coordinator runs exactly one.
+  record to the same `EventGate.ingest_batches`. Selected by
+  `--event-transport kafka` in place of the HTTP source; a coordinator
+  runs exactly one.
+- `stream_position.py` — `StreamPosition`, checkpointed beside the state
+  it describes: the cursor a restarted `KafkaCacheEventSource` seeks each
+  partition to. It is the only cursor — the consumer group never commits
+  — so the resume point moves only when a checkpoint is written, and the
+  offset in a checkpoint always describes the state stored beside it. A
+  partition it has never seen falls back to `auto.offset.reset`.
 - `event_gate.py` — the admission point for every source. Owns the
   per-emitter stream cursor: incarnation fencing (a restart voids the
   emitter's L1 facts), `seq` dedup, and gap detection. Scan sources
@@ -305,6 +325,14 @@ The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
   directory, usage view, and LRU are rebuilt only from the cache-event
   stream, so after a coordinator restart they start empty and refill as
   events arrive — quotas under-report until they do.
+
+## Observability
+
+Every answer the coordinator gives is derived from the cache-event stream,
+so its observability is organized around ingest fidelity, freshness, and
+control-loop liveness rather than request rates. Metrics catalog,
+`/status`, cardinality rules, and phasing: see
+[observability.md](observability.md).
 
 ## Running
 

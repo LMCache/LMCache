@@ -170,6 +170,9 @@ class L2AdapterConfigBase(ABC):
 
     #: Populated by ``_parse_eviction_config`` after ``from_dict``; ``None``
     #: means L2 eviction is disabled for this adapter.
+    affinity_tag: str = "_default"
+    """Fixed L1 tag whose buffers this adapter uses for stores and loads."""
+
     eviction_config: EvictionConfig | None = None
 
     #: ``True`` when this adapter mounts a storage domain shared by
@@ -416,7 +419,9 @@ def add_l2_adapters_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
     Example:
         >>> parser = argparse.ArgumentParser()
         >>> add_l2_adapters_args(parser)
-        >>> args = parser.parse_args(["--l2-adapter", '{"type":"disk","path":"/data"}'])
+        >>> args = parser.parse_args(
+        ...     ["--l2-adapter", '{"type":"fs","base_path":"/data"}']
+        ... )
         >>> config = parse_args_to_l2_adapters_config(args)
     """
     group = parser.add_argument_group(
@@ -432,7 +437,7 @@ def add_l2_adapters_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
         type=str,
         metavar="JSON",
         help='Adapter spec as JSON with a "type" field and adapter-specific configs'
-        ', e.g. \'{"type":"disk","path":"/data"}\'.'
+        ', e.g. \'{"type":"fs","base_path":"/data"}\'.'
         "Repeat for multiple adapters."
         "Supported adapters are: ["
         + ", ".join(sorted(get_registered_l2_adapter_types()))
@@ -491,7 +496,13 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
 
         config_cls = _L2_ADAPTER_CONFIG_REGISTRY[type_name]
         try:
-            adapter_cfg = config_cls.from_dict(d)
+            affinity_tag = d.get("affinity_tag", "_default")
+            if not isinstance(affinity_tag, str) or not affinity_tag.strip():
+                raise ValueError("affinity_tag must be a non-empty string")
+            adapter_cfg = config_cls.from_dict(
+                {k: v for k, v in d.items() if k != "affinity_tag"}
+            )
+            adapter_cfg.affinity_tag = affinity_tag
             adapter_cfg.shared = bool(d.get("shared", False))
             adapter_cfg.eviction_config = L2AdapterConfigBase._parse_eviction_config(d)
             adapter_cfg.persist_config = L2AdapterConfigBase._parse_persist_config(d)

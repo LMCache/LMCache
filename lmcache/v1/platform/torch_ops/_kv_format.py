@@ -3,6 +3,9 @@
 # Standard
 from typing import TYPE_CHECKING
 
+# Third Party
+import torch
+
 # First Party
 from lmcache.lmcache_native import EngineKVFormat
 
@@ -10,16 +13,40 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
 
-__all__ = [
-    "_format_spec",
-    "_is_hnd_format",
-    "_is_fused_kv_format",
-    "_is_single_kv_format",
-    "_is_two_major_format",
-    "_is_pbs_fused_format",
-    "_is_kv_second_tuple_format",
-    "_is_mla_plane_tuple_format",
-]
+__all__ = ["_blocked_scale_views", "_format_spec"]
+
+# Each token's scale in a blocked-scale page is one fp32 (vllm
+# ``indexer_k_quant_and_cache``); the rest of the row is its fp8 values.
+_BLOCKED_SCALE_BYTES = 4
+
+
+def _blocked_scale_views(
+    blocks: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split a blocked-scale page into token-indexed value and scale views.
+
+    A blocked-scale block stores all tokens' values first, then all tokens'
+    scales (``[BS x vals][BS x scales]``), while LMCache chunk rows are
+    token-major ``[vals | scale]``. Indexing the returned views by
+    ``[block, token]`` addresses one token's values or scale, so callers can
+    gather and scatter canonical rows without a whole-block copy.
+
+    Args:
+        blocks: One layer's ``[NB, BS, row]`` page; each block's ``BS * row``
+            elements must be contiguous.
+
+    Returns:
+        ``(vals, scales)`` views aliasing ``blocks``, shaped
+        ``[NB, BS, row - scale_units]`` and ``[NB, BS, scale_units]``.
+    """
+    num_blocks, block_size, row = blocks.shape
+    scale_units = _BLOCKED_SCALE_BYTES // blocks.element_size()
+    val_units = row - scale_units
+    # ``view`` rather than ``flatten``: a copy would silently drop the writes.
+    flat = blocks.view(num_blocks, block_size * row)
+    vals = flat[:, : block_size * val_units].unflatten(1, (block_size, val_units))
+    scales = flat[:, block_size * val_units :].unflatten(1, (block_size, scale_units))
+    return vals, scales
 
 
 def _format_spec(engine_kv_format: EngineKVFormat) -> "type[KVFormatSpec]":
@@ -41,42 +68,3 @@ def _format_spec(engine_kv_format: EngineKVFormat) -> "type[KVFormatSpec]":
     from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec_class
 
     return get_spec_class(engine_kv_format)
-
-
-def _is_hnd_format(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True when a KV format stores heads before block tokens (HND)."""
-    return _format_spec(engine_kv_format).is_hnd
-
-
-def _is_fused_kv_format(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True for formats whose K/V pair is packed in the trailing dim
-    (kv_size == 1, shape_desc.hs == 2 * head_size)."""
-    return _format_spec(engine_kv_format).is_fused_packed
-
-
-def _is_single_kv_format(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True when every list entry is one independent component plane."""
-    return _format_spec(engine_kv_format).is_single_kv
-
-
-def _is_two_major_format(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True when the size-2 K/V axis precedes the block axis."""
-    return _format_spec(engine_kv_format).is_two_major
-
-
-def _is_pbs_fused_format(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True when num_blocks and block_size are one folded PBS axis."""
-    return _format_spec(engine_kv_format).is_pbs_fused
-
-
-def _is_kv_second_tuple_format(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True when each per-layer entry is a (K, V) tuple."""
-    return _format_spec(engine_kv_format).is_kv_second_tuple
-
-
-def _is_mla_plane_tuple_format(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True when each per-layer entry is a tuple of NP >= 1 MLA planes."""
-    return (
-        _is_kv_second_tuple_format(engine_kv_format)
-        and _format_spec(engine_kv_format).is_mla
-    )

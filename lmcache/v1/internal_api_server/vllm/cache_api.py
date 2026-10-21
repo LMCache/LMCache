@@ -860,7 +860,7 @@ async def kvcache_info(request: Request):
                 503,
             )
 
-        kv_caches = getattr(lmcache_adapter, "kvcaches", None)
+        kv_caches = getattr(lmcache_adapter, "kv_caches", None)
         if not kv_caches:
             return _create_error_response(
                 {
