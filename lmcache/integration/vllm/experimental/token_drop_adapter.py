@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Minimal vLLM 0.25.1 token-dropping adaptor (currently allocator only)."""
+"""vLLM 0.25.1 token-drop allocator and APC publication adaptors."""
 
 # Future
 from __future__ import annotations
@@ -113,3 +113,25 @@ def install_token_drop_allocator_adapter() -> None:
     # Mark the wrapper so repeated installation does not stack allocator hooks.
     wrapped_allocate._lmcache_token_drop_allocator_adapter = True  # type: ignore[attr-defined]
     KVCacheManager.allocate_slots = wrapped_allocate
+
+
+def install_token_drop_apc_publication_guard() -> None:
+    """Keep token-drop KV blocks out of the shared vLLM APC hash table."""
+    # Third Party
+    from vllm.v1.core.block_pool import BlockPool
+
+    _check_vllm_version()
+    original_publish = BlockPool.cache_full_blocks
+    if getattr(original_publish, "_lmcache_apc_publication_guard", False):
+        return
+
+    @wraps(original_publish)
+    def wrapped_publish(self, request, *args, **kwargs):
+        if "lmcache.token_drop" in (
+            extract_request_configs_from_request(request) or {}
+        ):
+            return
+        return original_publish(self, request, *args, **kwargs)
+
+    wrapped_publish._lmcache_apc_publication_guard = True  # type: ignore[attr-defined]
+    BlockPool.cache_full_blocks = wrapped_publish
