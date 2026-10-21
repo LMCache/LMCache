@@ -382,21 +382,48 @@ class KVController:
     # suffix chunk is still in the system. LMCache should guarantee
     # this does not happen.
     # TODO(Jiayi): The current implementation does not consider
-    # the location of the kv chunks. It simply returns the
-    # `instance_id` with longest prefix.
+    # the location of the kv chunks when ranking: the location is
+    # reported per instance but not ranked on.
     # TODO(Jiayi): Need to get rid of the hash somehow
     async def lookup(self, msg: LookupMsg) -> LookupRetMsg:
+        """
+        Report, for every instance, how long a prefix of ``msg.tokens``
+        it holds.
+
+        ``layout_info`` maps ``instance_id -> (location, matched_tokens)``
+        and is populated for **every** instance still matching the prefix,
+        not only the first holder found: callers that compare instances
+        (for example a cache- and load-aware router) need the full holder
+        set. An instance's credit is contiguous from token 0 - it stops
+        counting at its first missing chunk even if it holds later
+        chunks, so a reported match is a prefix the instance can actually
+        serve, not a count of scattered chunks.
+
+        The first entry of ``layout_info`` is the same instance the
+        previous first-match-only implementation credited for the first
+        chunk, so callers that read only the first entry are unaffected.
+        """
         tokens = msg.tokens
         layout_info = {}
+        # None means "first chunk": every instance is still a candidate.
+        contiguous = None
         for start, end, key in self.token_database.process_tokens(
             tokens, make_key=False
         ):
-            result = self.registry.find_kv(key)
-            if result is None:
+            holders = self.registry.find_kv_all(key)
+            if contiguous is not None:
+                holders = {
+                    instance_id: info
+                    for instance_id, info in holders.items()
+                    if instance_id in contiguous
+                }
+            if not holders:
                 break
-            matched_instance = result.instance_id
-            matched_location = result.location
-            layout_info[matched_instance] = (matched_location, end)
+            for instance_id, info in holders.items():
+                # `end` is the running token offset, so the last write per
+                # instance is its longest matched prefix.
+                layout_info[instance_id] = (info.location, end)
+            contiguous = set(holders)
         return LookupRetMsg(layout_info=layout_info, event_id=msg.event_id)
 
     # TODO: improve the matching logic, return multi results
