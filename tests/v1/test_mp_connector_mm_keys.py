@@ -37,6 +37,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
 from lmcache.integration.vllm.utils import mm_hash_to_token_values  # noqa: E402
 
 IMAGE_PLACEHOLDER_ID = 99
+pytestmark = pytest.mark.no_shared_allocator
 
 
 @dataclass
@@ -71,6 +72,7 @@ class _FakeRequest:
         self.status = RequestStatus.WAITING
         self.cache_salt = cache_salt
         self.prompt_token_ids = list(prompt_token_ids)
+        self.num_prompt_tokens = len(prompt_token_ids)
         self._live_token_ids = list(prompt_token_ids)
         self.all_token_ids = ConstantList(self._live_token_ids)
         self.mm_features = mm_features or []
@@ -209,6 +211,34 @@ def test_eager_prefetch_forwards_request_configs():
     assert tracker.lookup_started_at is not None
 
 
+def test_lookup_hint_carries_vllm_prefix_hit() -> None:
+    """The scheduler-time lookup reports vLLM's prefix-cache hit to the
+    server's load policy, overriding any client-supplied value."""
+    request = _FakeRequest(
+        list(range(128)),
+        sampling_params_extra_args={
+            "kv_transfer_params": {
+                "lmcache.skip_load": True,
+                "lmcache.hint.engine_computed_tokens": 999,
+            },
+        },
+    )
+    scheduler_adapter = MagicMock()
+    scheduler_adapter.lmcache_tokens_per_chunk = 64
+    scheduler_adapter.check_lookup_result.return_value = None
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector.request_trackers = {}
+    connector.scheduler_adapter = scheduler_adapter
+    connector._reserve_last_token_for_lookup = False
+    connector.lazy_offload = False
+    connector._hit_alignment_tokens = 64
+
+    assert connector.get_num_new_matched_tokens(request, 16) == (None, True)
+    assert scheduler_adapter.maybe_submit_lookup_request.call_args.kwargs[
+        "request_configs"
+    ] == {"lmcache.skip_load": True, "lmcache.hint.engine_computed_tokens": 16}
+
+
 def test_recurrent_lookup_reserves_final_prompt_token() -> None:
     """A recurrent full hit stops at the preceding checkpoint boundary."""
     request = _FakeRequest(list(range(128)))
@@ -230,8 +260,9 @@ def test_recurrent_lookup_reserves_final_prompt_token() -> None:
         request.request_id,
         token_ids=list(range(128)),
         cache_salt="",
-        request_configs=None,
+        request_configs={"lmcache.hint.engine_computed_tokens": 0},
         reserve_last_token=True,
+        start=0,
     )
     tracker = connector.request_trackers[request.request_id]
     assert tracker.num_lmcache_hit_tokens == 64
@@ -306,6 +337,36 @@ def test_store_metadata_respects_max_offload_tokens():
     )
 
 
+@pytest.mark.parametrize("prompt_length", [0, 34, 256, 290, 512])
+@pytest.mark.parametrize("output_length", [100, 250])
+@pytest.mark.parametrize("save_decode_cache", [False, True])
+def test_store_metadata_decode_chunk_boundary(
+    prompt_length: int, output_length: int, save_decode_cache: bool
+) -> None:
+    """Warm prompts must not write new chunks merely because decode fills one."""
+    request = _FakeRequest(list(range(prompt_length)))
+    tracker = LMCacheMPRequestTracker(request)
+    tracker.num_stored_tokens = prompt_length // 256 * 256
+    tracker.num_lmcache_hit_tokens = tracker.num_stored_tokens
+    for token_id in range(output_length):
+        request.append_decode_token(1000 + token_id)
+    total_tokens = prompt_length + output_length
+    tracker.num_scheduled_tokens = total_tokens - tracker.num_lmcache_hit_tokens
+    tracker.allocated_block_ids = {0: list(range((total_tokens + 15) // 16))}
+    kwargs = {"save_decode_cache": True} if save_decode_cache else {}
+
+    metadata = LMCacheMPRequestMetadata.GetStoreMetadata(tracker, 256, [16], **kwargs)
+
+    if save_decode_cache and total_tokens // 256 > prompt_length // 256:
+        assert metadata is not None
+        assert metadata.op.start == prompt_length // 256 * 256
+        assert metadata.op.end == total_tokens // 256 * 256
+        assert metadata.op.token_ids[:prompt_length] == list(range(prompt_length))
+    else:
+        assert metadata is None
+        assert tracker.num_stored_tokens == prompt_length // 256 * 256
+
+
 def test_retrieve_metadata_uses_mm_adjusted_token_ids():
     prompt = [1, 2] + [IMAGE_PLACEHOLDER_ID] * 2 + [3, 4, 5, 6]
     request = _make_mm_request(prompt, identifier="0xabcd", offset=2, length=2)
@@ -323,6 +384,44 @@ def test_retrieve_metadata_uses_mm_adjusted_token_ids():
     assert metadata.op.token_ids == [1, 2, *v, 3, 4, 5, 6]
     assert metadata.op.start == 0
     assert metadata.op.end == 8
+
+
+def test_recreated_tracker_keeps_original_prompt_boundary() -> None:
+    """Recomputing a preempted request must not cache its old output tokens."""
+    request = _FakeRequest(list(range(290)))
+    for token_id in range(250):
+        request.append_decode_token(1000 + token_id)
+    tracker = LMCacheMPRequestTracker(request)
+    tracker.allocated_block_ids = {0: list(range(34))}
+    tracker.num_scheduled_tokens = 540
+
+    metadata = LMCacheMPRequestMetadata.GetStoreMetadata(tracker, 256, [16])
+
+    assert metadata is not None
+    assert (metadata.op.start, metadata.op.end) == (0, 256)
+    assert LMCacheMPRequestMetadata.GetStoreMetadata(tracker, 256, [16]) is None
+
+
+def test_decode_cache_opt_in_preserves_per_request_store_limit() -> None:
+    """Opting into output caching cannot override a per-request write budget."""
+    request = _FakeRequest(
+        list(range(290)),
+        sampling_params_extra_args={
+            "kv_transfer_params": {"lmcache.max_offload_tokens": 300}
+        },
+    )
+    for token_id in range(250):
+        request.append_decode_token(1000 + token_id)
+    tracker = LMCacheMPRequestTracker(request)
+    tracker.allocated_block_ids = {0: list(range(34))}
+    tracker.num_scheduled_tokens = 540
+
+    metadata = LMCacheMPRequestMetadata.GetStoreMetadata(
+        tracker, 256, [16], save_decode_cache=True
+    )
+
+    assert metadata is not None
+    assert (metadata.op.start, metadata.op.end) == (0, 256)
 
 
 def test_store_metadata_ignores_scratch_groups():
