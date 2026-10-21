@@ -5,6 +5,7 @@ definitions, MemoryLayoutDesc wire serialization, and server handlers.
 """
 
 # Standard
+from collections.abc import Callable
 from typing import Literal
 from unittest.mock import MagicMock
 
@@ -22,6 +23,7 @@ from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.modules import p2p_controller
 from lmcache.v1.multiprocess.modules.p2p_controller import (
     _MAX_MISSES,
+    _MAX_POLLS_WITHOUT_LISTING,
     P2PController,
     _P2PState,
     _PeerInstance,
@@ -598,11 +600,24 @@ def _enable_polling(
     return client
 
 
-def _instances_response(instances: list[dict]) -> MagicMock:
+def _json_response(body: object) -> MagicMock:
     response = MagicMock()
     response.raise_for_status.return_value = None
-    response.json.return_value = {"instances": instances}
+    response.json.return_value = body
     return response
+
+
+def _instances_response(instances: list[dict]) -> MagicMock:
+    return _json_response({"instances": instances})
+
+
+def _set_poll_outcome(client: MagicMock, outcome: Exception | MagicMock) -> None:
+    """Make every following poll raise ``outcome`` or answer with it."""
+    if isinstance(outcome, Exception):
+        client.get.side_effect = outcome
+    else:
+        client.get.side_effect = None
+        client.get.return_value = outcome
 
 
 def _entry(
@@ -688,4 +703,166 @@ def test_poll_cycle_skips_peer_without_p2p_url():
     controller._poll_cycle()
 
     ctx.storage_manager.add_l2_adapter.assert_not_called()
+    assert controller.report_status()["p2p_peers"] == []
+
+
+@pytest.mark.parametrize(
+    ("make_outcome", "expected_state"),
+    [
+        pytest.param(
+            lambda: httpx.TimeoutException("boom"),
+            _P2PState.DISCONNECTED,
+            id="timeout",
+        ),
+        pytest.param(
+            lambda: httpx.ConnectError("refused"),
+            _P2PState.UNREGISTERED,
+            id="unreachable",
+        ),
+        pytest.param(
+            lambda: httpx.HTTPError("boom"),
+            _P2PState.UNREGISTERED,
+            id="http-error",
+        ),
+        pytest.param(
+            lambda: _json_response({"instances": "not-a-list"}),
+            _P2PState.UNREGISTERED,
+            id="malformed-body",
+        ),
+        pytest.param(
+            # Parsing raises AttributeError (raw.get on a str).
+            lambda: _json_response({"instances": ["not-a-dict"]}),
+            _P2PState.UNREGISTERED,
+            id="unexpected-error",
+        ),
+        pytest.param(
+            lambda: _instances_response([]),
+            _P2PState.UNREGISTERED,
+            id="empty-listing",
+        ),
+        pytest.param(
+            lambda: _instances_response([_entry("peerA", "tc:1")]),
+            _P2PState.UNREGISTERED,
+            id="self-not-listed",
+        ),
+    ],
+)
+def test_poll_cycle_without_own_listing_keeps_adapters_up_to_bound(
+    make_outcome: Callable[[], Exception | MagicMock],
+    expected_state: _P2PState,
+) -> None:
+    """Polls that fail or do not list this instance record their state and
+    keep every adapter for _MAX_POLLS_WITHOUT_LISTING polls; later ones count
+    misses, so the adapters go _MAX_MISSES + 1 polls past the bound."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+    client = _enable_polling(controller, advertise_url="me:1")
+    _set_poll_outcome(
+        client, _instances_response([_entry("self", "me:1"), _entry("peerA", "tc:1")])
+    )
+    controller._poll_cycle()
+
+    _set_poll_outcome(client, make_outcome())
+    for _ in range(_MAX_POLLS_WITHOUT_LISTING + _MAX_MISSES):
+        controller._poll_cycle()
+
+    status = controller.report_status()
+    assert status["p2p_state"] == expected_state.value
+    assert status["p2p_peers"] == ["peerA"]
+    ctx.storage_manager.delete_l2_adapter.assert_not_called()
+
+    controller._poll_cycle()
+
+    status = controller.report_status()
+    assert status["p2p_state"] == expected_state.value
+    assert status["p2p_peers"] == []
+    ctx.storage_manager.delete_l2_adapter.assert_called_once_with(7)
+
+
+def test_poll_cycle_own_listing_restarts_keep_bound() -> None:
+    """A listing that includes this instance between two outages restarts the
+    bound, so each outage up to _MAX_POLLS_WITHOUT_LISTING polls keeps peers."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+    client = _enable_polling(controller, advertise_url="me:1")
+    listing = _instances_response([_entry("self", "me:1"), _entry("peerA", "tc:1")])
+
+    for _ in range(3):
+        _set_poll_outcome(client, listing)
+        controller._poll_cycle()
+        _set_poll_outcome(client, httpx.ConnectError("refused"))
+        for _ in range(_MAX_POLLS_WITHOUT_LISTING):
+            controller._poll_cycle()
+
+    assert controller.report_status()["p2p_peers"] == ["peerA"]
+    ctx.storage_manager.add_l2_adapter.assert_called_once()
+    ctx.storage_manager.delete_l2_adapter.assert_not_called()
+
+
+def test_poll_cycle_reuses_kept_adapters_after_coordinator_restart() -> None:
+    """After an outage and a coordinator restart whose registry refills over
+    several polls, kept adapters are reused and new peers are still added."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.side_effect = [7, 8]
+    client = _enable_polling(controller, advertise_url="me:1")
+    _set_poll_outcome(
+        client, _instances_response([_entry("self", "me:1"), _entry("peerA", "tc:1")])
+    )
+    controller._poll_cycle()
+
+    # The empty listing below is one more poll without this instance.
+    _set_poll_outcome(client, httpx.ConnectError("refused"))
+    for _ in range(_MAX_POLLS_WITHOUT_LISTING - 1):
+        controller._poll_cycle()
+    for listing in (
+        [],
+        [_entry("self", "me:1")],
+        [_entry("self", "me:1"), _entry("peerA", "tc:1"), _entry("peerB", "tc:2")],
+    ):
+        _set_poll_outcome(client, _instances_response(listing))
+        controller._poll_cycle()
+
+    status = controller.report_status()
+    assert status["p2p_state"] == _P2PState.REGISTERED.value
+    assert status["p2p_peers"] == ["peerA", "peerB"]
+    assert ctx.storage_manager.add_l2_adapter.call_count == 2
+    ctx.storage_manager.delete_l2_adapter.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "make_interleaved",
+    [
+        pytest.param(lambda: httpx.TimeoutException("boom"), id="timeout"),
+        pytest.param(
+            lambda: _instances_response([_entry("peerA", "tc:1")]),
+            id="peer-listed-without-self",
+        ),
+    ],
+)
+def test_poll_cycle_removes_peer_missing_from_own_listings(
+    make_interleaved: Callable[[], Exception | MagicMock],
+) -> None:
+    """A peer missing from more than _MAX_MISSES listings that include this
+    instance is removed; polls without such a listing in between neither count
+    nor reset its misses, even when they list the peer."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+    client = _enable_polling(controller, advertise_url="me:1")
+    _set_poll_outcome(
+        client, _instances_response([_entry("self", "me:1"), _entry("peerA", "tc:1")])
+    )
+    controller._poll_cycle()
+
+    for _ in range(_MAX_MISSES):
+        _set_poll_outcome(client, _instances_response([_entry("self", "me:1")]))
+        controller._poll_cycle()
+        _set_poll_outcome(client, make_interleaved())
+        controller._poll_cycle()
+    ctx.storage_manager.delete_l2_adapter.assert_not_called()
+    assert controller.report_status()["p2p_peers"] == ["peerA"]
+
+    _set_poll_outcome(client, _instances_response([_entry("self", "me:1")]))
+    controller._poll_cycle()
+
+    ctx.storage_manager.delete_l2_adapter.assert_called_once_with(7)
     assert controller.report_status()["p2p_peers"] == []

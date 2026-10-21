@@ -49,8 +49,17 @@ logger = init_logger(__name__)
 # Sentinel address for keys that were not found (or fell past the L1 prefix).
 _INVALID_ADDRESS = TransferChannelAddress(offset=-1, size=0)
 
-# Consecutive missed polls a peer may be absent before its adapter is removed.
+# A peer's adapter is removed once more than this many consecutive listings
+# that include this instance omit the peer.
 _MAX_MISSES = 3
+
+# Consecutive polls without a listing that includes this instance (failed, or
+# self-less) during which adapters are kept as is. Sized to ride out a
+# coordinator restart and the fleet's re-registration (~60 s at the default 5 s
+# interval) while bounding how long a peer that is unreachable from here -- dead,
+# or behind the same partition that cut off the coordinator -- keeps costing
+# every lookup an RPC timeout. Past it, every such poll counts a miss.
+_MAX_POLLS_WITHOUT_LISTING = 12
 
 
 def _group_keys_by_object_group(
@@ -161,6 +170,15 @@ class P2PController(DiscoverableModule):
     P2P is enabled when ``p2p_config`` carries an advertise URL; otherwise the
     controller only answers lookup/unlock RPCs.
 
+    Peers are discovered by polling the coordinator's ``GET /instances``. A
+    peer's adapter is removed once the peer is missing from more than
+    ``_MAX_MISSES`` consecutive listings that include this instance. A failed
+    poll, or a listing without this instance, keeps every adapter and its
+    miss count for up to ``_MAX_POLLS_WITHOUT_LISTING`` consecutive polls;
+    after that, each such poll counts a miss for every peer, so all adapters
+    are removed ``_MAX_MISSES + 1`` polls later unless a listing that includes
+    this instance arrives first.
+
     Args:
         ctx: Shared engine context providing the storage manager and friends.
         p2p_config: Peer-to-peer configuration; inert when its advertise URL is
@@ -208,6 +226,8 @@ class P2PController(DiscoverableModule):
         self._orch_lock = threading.Lock()
         self._state = _P2PState.UNREGISTERED
         self._adapters: dict[str, _PeerAdapter] = {}
+        # Poll-thread only: consecutive polls without a listing of this instance.
+        self._polls_without_listing = 0
 
         self._instances_url = ""
         self._http_client: httpx.Client | None = None
@@ -490,22 +510,38 @@ class P2PController(DiscoverableModule):
     def _poll_cycle(self) -> ThreadRunSummary:
         """Run one discovery cycle: poll the coordinator and reconcile adapters.
 
+        A listing that includes this instance reconciles adapters. A failed
+        poll or a listing without this instance only records the state for up
+        to ``_MAX_POLLS_WITHOUT_LISTING`` consecutive polls: peers talk to each
+        other directly, so a coordinator that cannot answer says nothing about
+        them, and one that has not (re-)registered this instance -- e.g.
+        restarted, with its in-memory registry still refilling from
+        heartbeats -- may be missing live peers too.
+
         Returns:
             A summary of the cycle's resulting state and adapter changes.
         """
         try:
             instances = self._fetch_instances()
         except httpx.TimeoutException:
-            return self._apply_state(_P2PState.DISCONNECTED, {})
+            return self._apply_without_listing(_P2PState.DISCONNECTED)
         except (httpx.HTTPError, ValueError) as e:
             logger.warning("P2P instance discovery failed: %s", e)
-            return self._apply_state(_P2PState.UNREGISTERED, {})
+            return self._apply_without_listing(_P2PState.UNREGISTERED)
         except Exception:
             logger.exception("Unexpected error during P2P instance discovery")
-            return self._apply_state(_P2PState.UNREGISTERED, {})
+            return self._apply_without_listing(_P2PState.UNREGISTERED)
 
         if not self._is_self_registered(instances):
-            return self._apply_state(_P2PState.UNREGISTERED, {})
+            return self._apply_without_listing(_P2PState.UNREGISTERED)
+
+        if self._polls_without_listing and self._adapters:
+            logger.info(
+                "P2P discovery lists this instance again after %d polls; "
+                "reconciling peer adapters",
+                self._polls_without_listing,
+            )
+        self._polls_without_listing = 0
 
         upstream = {
             inst.instance_id: inst
@@ -572,8 +608,8 @@ class P2PController(DiscoverableModule):
 
         Args:
             state: The registration state derived from this cycle.
-            upstream: Peer instances to maintain adapters for (empty unless
-                registered).
+            upstream: The peers that should each have a live adapter; every
+                tracked peer missing from it counts a miss.
 
         Returns:
             A summary describing the state and adapter changes this cycle.
@@ -587,6 +623,46 @@ class P2PController(DiscoverableModule):
                 f"state={state.value} peers={len(upstream)} "
                 f"added={added} removed={removed}"
             ),
+        )
+
+    def _apply_without_listing(self, state: _P2PState) -> ThreadRunSummary:
+        """Record the state of a poll that yielded no listing of this instance.
+
+        Adapters and their miss counts are left as is for the first
+        ``_MAX_POLLS_WITHOUT_LISTING`` consecutive such polls; every later one
+        counts a miss for every tracked peer.
+
+        Args:
+            state: The registration state derived from this cycle.
+
+        Returns:
+            A summary describing the state and the adapter changes this cycle.
+        """
+        self._polls_without_listing += 1
+        if self._polls_without_listing > _MAX_POLLS_WITHOUT_LISTING:
+            if self._polls_without_listing == _MAX_POLLS_WITHOUT_LISTING + 1:
+                logger.warning(
+                    "P2P discovery has not listed this instance for %d polls; "
+                    "counting misses for all %d peer adapters",
+                    _MAX_POLLS_WITHOUT_LISTING,
+                    len(self._adapters),
+                )
+            return self._apply_state(state, {})
+
+        with self._orch_lock:
+            self._state = state
+            kept = len(self._adapters)
+        if self._polls_without_listing == 1 and kept:
+            logger.warning(
+                "P2P discovery returned no listing of this instance "
+                "(state=%s); keeping %d peer adapters for up to %d polls",
+                state.value,
+                kept,
+                _MAX_POLLS_WITHOUT_LISTING,
+            )
+        return ThreadRunSummary(
+            success=True,
+            message=f"state={state.value} kept={kept}",
         )
 
     def _reconcile(self, upstream: dict[str, _PeerInstance]) -> tuple[int, int]:
