@@ -13,7 +13,9 @@ import uuid
 sys.path.insert(
     0,
     os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        )
     ),
 )
 
@@ -117,7 +119,9 @@ def create_app(
 
     # Add static files for frontend
     project_root = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        )
     )
     static_dir = os.path.join(
         project_root,
