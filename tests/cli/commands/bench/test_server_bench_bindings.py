@@ -103,6 +103,34 @@ def test_live_requests_are_disjoint_and_released_blocks_can_be_reused(
 
 
 @pytest.mark.parametrize("bench", [{"block_allocation": "random"}], indirect=True)
+def test_checksums_follow_request_blocks_and_receiver_ranks(bench: Bench) -> None:
+    """Equal KV hashes equally across physical bindings, with independent TP ranks."""
+    client, _ = bench
+    first, second = _request(client, tokens=8), _request(client, 1, tokens=8)
+    assert client.compute_checksums(first, 0, 0, operation="store") is None
+    for start_token, token_count in ((2, 4), (0, 2)):
+        with pytest.raises(ValueError, match="chunk-aligned"):
+            client.compute_checksums(first, start_token, token_count, operation="store")
+    client.fill_deterministic_kv(first)
+    client.fill_deterministic_kv(second)
+    expected = client.compute_checksums(first, 0, 8, operation="store")
+    assert expected is not None and set(expected) == {0, 1}
+    assert all(len(chunks) == 2 for chunks in expected.values())
+    assert expected[0] != expected[1]
+    assert client.compute_checksums(second, 0, 8, operation="retrieve") == expected
+    assert client.compute_checksums(second, 4, 4, operation="retrieve") == {
+        rank: chunks[1:] for rank, chunks in expected.items()
+    }
+    client.zero_destination(second, 4, 4)
+    actual = client.compute_checksums(second, 0, 8, operation="retrieve")
+    assert actual is not None
+    for rank, chunks in expected.items():
+        assert actual[rank][0] == chunks[0]
+        assert actual[rank][1] != chunks[1]
+    assert client.compute_checksums(first, 0, 8, operation="store") == expected
+
+
+@pytest.mark.parametrize("bench", [{"block_allocation": "random"}], indirect=True)
 @pytest.mark.parametrize("operation", ["store", "retrieve"])
 def test_transfers_use_shared_tp_group_blocks(bench: Bench, operation: str) -> None:
     client, contexts = bench

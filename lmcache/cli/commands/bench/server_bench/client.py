@@ -393,6 +393,17 @@ class ServerBenchClient:
         """
         return self._transfer("retrieve", request, start_token, token_count)
 
+    def fill_deterministic_kv(self, request: RequestContext) -> None:
+        """Fill request blocks with reproducible pseudorandom KV, then synchronize."""
+        self._check_request_ready(request)
+        for worker in self._workers:
+            worker.buffers.fill_deterministic_kv(
+                request.block_allocation.as_block_ids(),
+                request.token_ids[: request.num_full_tokens],
+                worker.spec.kv_worker_id,
+            )
+            worker.buffers.synchronize()
+
     def zero_destination(
         self, request: RequestContext, start_token: int, token_count: int
     ) -> None:

@@ -1039,8 +1039,8 @@ What it does
 
 For each sequence in ``[--start, --end)``, the tool runs two passes:
 
-1. **Cold pass** -- ``LOOKUP`` is expected to miss, so the generated KV
-   tensors are ``STORE``\ d on the server.
+1. **Cold pass** -- ``LOOKUP`` is expected to miss. The tool fills request
+   blocks with deterministic KV, records checksums, and issues ``STORE``.
 2. **Warm pass** -- ``LOOKUP`` is expected to hit; the tool clears destination
    blocks, issues ``RETRIEVE`` and compares the retrieved KV chunks' checksums to the
    originals.
@@ -1285,6 +1285,7 @@ Example: MLA + TP=2, exercising rank 0 STORE + both-rank RETRIEVE:
        --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:8" \
        --tp-size 2
 
+Replicated readers use their writer's KV identity for deterministic filling.
 The bench verifies retrieved data on every rank and reports the rank and
 chunk for checksum mismatches.
 
