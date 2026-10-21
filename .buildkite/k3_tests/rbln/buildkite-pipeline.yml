@@ -1,0 +1,10 @@
+# Paste this into the rbln-mp-test Buildkite pipeline's "Steps" editor.
+# It uploads the RBLN hardware-smoke definition from the repo on the
+# rbln-queue agent.
+
+agents:
+  queue: "rbln-queue"
+
+steps:
+  - label: ":pipeline: Upload pipeline"
+    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/rbln/pipeline.yml

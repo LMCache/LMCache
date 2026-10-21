@@ -13,7 +13,7 @@ import time
 import uuid
 
 # Third Party
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 # First Party
@@ -52,6 +52,11 @@ async def register_instance(
     """
     instance_id = body.instance_id or f"mp-{uuid.uuid4().hex}"
     ctx = get_context(request)
+    if body.chunk_size is not None:
+        try:
+            ctx.bind_chunk_size(body.chunk_size)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     # Capacity is not taken here: it arrives as a report on the cache-event
     # stream, fenced by (incarnation, revision).
     # Wall-clock registration_time for display; monotonic last_heartbeat_time for
@@ -70,6 +75,7 @@ async def register_instance(
             mq_port=body.mq_port,
         )
     )
+    ctx.event_gate.readmit_instance(instance_id)
     logger.info("Registered instance %s at %s:%s", instance_id, body.ip, body.http_port)
     return RegisterResponse(instance_id=instance_id, re_registered=re_registered)
 

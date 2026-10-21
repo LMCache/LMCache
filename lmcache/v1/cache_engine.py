@@ -29,6 +29,8 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
+from lmcache.inprocess.v1.gpu_connector.utils import assert_layerwise_gpu_connector
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_telemetry import InitializeUsageContext
@@ -41,8 +43,6 @@ from lmcache.utils import (
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
-from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
-from lmcache.v1.gpu_connector.utils import assert_layerwise_gpu_connector
 from lmcache.v1.hidden_state_store import HiddenStateStore
 from lmcache.v1.memory_allocators.cu_file_memory_allocator import CuFileMemoryAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
@@ -1108,12 +1108,7 @@ class LMCacheEngine:
 
                 assert task is not None
 
-                if layer_id == 0:
-                    # NOTE(Yuwei): For sglang integration we need to provide retrieved
-                    # tokens number in the first layer loading since there is no lookup
-                    yield torch.sum(ret_mask)
-                else:
-                    yield None
+                yield None
 
                 mem_objs_layer = task.result()
                 mem_obj_consumer.send(mem_objs_layer)

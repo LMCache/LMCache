@@ -13,12 +13,14 @@ import pytest
 import torch
 
 # First Party
-from lmcache import device_ops
+from lmcache import device_ops, torch_dev, torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format import detect_format
 import lmcache.lmcache_native as lmcache_native
 
-cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+cuda_only = pytest.mark.skipif(
+    torch_device_type != "cuda" or not torch_dev.is_available(), reason="needs CUDA"
+)
 
 NB, NL, NH, BS, CS = 8, 3, 2, 4, 16
 SPT = NH * CS  # scalars per token
@@ -93,7 +95,7 @@ def test_kernel_roundtrip_matches_torch(order, pad_layers):
         0,
         block_stride,
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
     ref = torch_gather(buf, order, slots.cpu())
     assert torch.equal(staging.cpu(), ref.cpu())
 
@@ -114,7 +116,7 @@ def test_kernel_roundtrip_matches_torch(order, pad_layers):
         0,
         block_stride,
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
     touched = sorted({int(s) // BS for s in slots.cpu()})
     for b in touched:
         used = [int(s) % BS for s in slots.cpu() if int(s) // BS == b]

@@ -163,7 +163,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
             .. note::
                To customize further, create a config file. See
-               :doc:`../api_reference/configurations` for all options.
+               :doc:`/legacy/api_reference/configurations` for all options.
 
             **Alternative simpler command:**
 
@@ -176,7 +176,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
             The ``--disable-hybrid-kv-cache-manager`` flag is mandatory.
             All configuration options from the
-            :doc:`../api_reference/configurations` page still apply.
+            :doc:`/legacy/api_reference/configurations` page still apply.
 
             **Test** -- open a new terminal and send two requests whose
             prompts share a prefix:
@@ -249,6 +249,10 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          source .venv/bin/activate
          uv pip install --prerelease=allow lmcache "sglang"
 
+      To run SGLang in a container instead, use ``lmcache/sglang``: the
+      official SGLang release image with the matching LMCache wheel
+      installed. The ``sglang.launch_server`` command below is the same.
+
       **Configure the LMCache connection**
 
       .. code-block:: bash
@@ -261,6 +265,16 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       ``mp_host`` and ``mp_port`` identify the standalone LMCache request
       server. A bare host uses the default ZMQ transport.
 
+      Engine-driven transfer can be selected under ``extra_config`` with the
+      same name as the vLLM connector:
+
+      .. code-block:: yaml
+
+         mp_host: 127.0.0.1
+         mp_port: 5555
+         extra_config:
+           lmcache.mp.mp_transfer_mode: engine_driven
+
       **Start the LMCache server**
 
       .. code-block:: bash
@@ -269,7 +283,12 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          # prompts below. Use the default (256) for production workloads.
          lmcache server \
            --host 127.0.0.1 --port 5555 \
-           --l1-size-gb 10 --eviction-policy LRU --chunk-size 16
+           --l1-size-gb 10 --eviction-policy LRU --chunk-size 16 \
+           --supported-transfer-mode auto
+
+      The server command above enables both transfer protocols. The client and
+      server transfer modes must be compatible; a server dedicated to one mode
+      can instead use ``lmcache_driven`` or ``engine_driven``.
 
       To use gRPC instead of ZMQ, include the ``grpc://`` scheme in the
       connector configuration:
@@ -478,7 +497,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          The TRT-LLM adapter reads :class:`LMCacheEngineConfig` the
          same way the vLLM adapter does: ``LMCACHE_CONFIG_FILE`` for
          a YAML file, otherwise individual ``LMCACHE_*`` environment
-         variables. See :doc:`../api_reference/configurations` for
+         variables. See :doc:`/legacy/api_reference/configurations` for
          all options.
 
 🎉 **You now have LMCache caching and reusing KV caches across all three engines.**
