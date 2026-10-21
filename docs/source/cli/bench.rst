@@ -1113,7 +1113,7 @@ Options
        (``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` + ``PREPARE``/``COMMIT``).
        ``auto`` maps gpu→lmcache_driven and cpu→engine_driven.
    * - ``--isolated-ipc``
-     - *(unset)*
+     - ``False``
      - GPU mode only. Use the IPC mechanisms for containers that share no
        host IPC namespace or ``/dev/shm`` (CUDA timeline-semaphore events
        instead of interprocess event handles). Must match the server's

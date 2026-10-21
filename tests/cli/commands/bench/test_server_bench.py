@@ -8,6 +8,7 @@ Covers:
 """
 
 # Standard
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 from typing import Any
@@ -75,7 +76,7 @@ def cmd() -> BenchCommand:
 
 
 @pytest.fixture
-def restore_isolated_ipc():
+def restore_isolated_ipc() -> Iterator[None]:
     """Restore the process-global isolated-IPC switch after the test."""
     # First Party
     from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc

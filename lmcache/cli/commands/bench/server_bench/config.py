@@ -144,5 +144,5 @@ def parse_args_to_config(args: argparse.Namespace) -> BenchConfig:
         num_blocks=args.num_blocks,
         block_size=args.block_size,
         concurrency=int(getattr(args, "concurrency", 1)),
-        isolated_ipc=bool(getattr(args, "isolated_ipc", False)),
+        isolated_ipc=args.isolated_ipc,
     )
