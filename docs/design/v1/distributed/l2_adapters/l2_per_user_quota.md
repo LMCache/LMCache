@@ -697,7 +697,7 @@ The controller uses `policy.is_user_level` (not `isinstance`) to branch:
 
 | Field               | Type    | Default | Description                                           |
 |---------------------|---------|---------|-------------------------------------------------------|
-| `eviction_policy`   | string  | —       | `"LRU"`, `"IsolatedLRU"`, or `"noop"`. Required.         |
+| `eviction_policy`   | string  | —       | `"LRU"`, `"ARC"`, `"IsolatedLRU"`, or `"noop"`. Required.         |
 | `trigger_watermark` | float   | `0.8`   | Usage fraction to trigger eviction. For `LRU`: against aggregate capacity. For `IsolatedLRU`: against each user's quota. |
 | `eviction_ratio`    | float   | `0.2`   | Fraction of keys to evict each cycle.                 |
 
