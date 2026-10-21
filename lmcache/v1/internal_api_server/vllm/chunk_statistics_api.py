@@ -10,8 +10,8 @@ from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
 # First Party
-from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-from lmcache.v1.lookup_client.chunk_statistics_lookup_client import (
+from lmcache.inprocess.v1.lookup_client.abstract_client import LookupClientInterface
+from lmcache.inprocess.v1.lookup_client.chunk_statistics_lookup_client import (
     ChunkStatisticsLookupClient,
 )
 

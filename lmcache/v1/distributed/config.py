@@ -10,6 +10,7 @@ from typing import Any, Literal, TypeVar, cast
 import argparse
 import json
 import math
+import mmap
 import os
 
 # First Party
@@ -58,6 +59,19 @@ def _l1_path(values: dict[str, object]) -> str:
     if not isinstance(path, str) or not path.strip():
         raise ValueError("path must be a non-empty string")
     return path
+
+
+def _l1_offset_bytes(values: dict[str, object]) -> int:
+    """Read the optional ``offset_gb`` JSON field as a byte count (default 0)."""
+    value = values.get("offset_gb", 0)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise ValueError("offset_gb must be a finite non-negative number")
+    return int(value * (1 << 30))
 
 
 def _parse_l1_common(
@@ -315,6 +329,10 @@ class L1MemoryManagerConfig:
     devdax_size_in_bytes: int = 0
     """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
 
+    devdax_offset_in_bytes: int = 0
+    """ Page-aligned byte offset into ``devdax_path`` where the L1 mapping
+    starts. Lets several servers share one device with disjoint ranges. """
+
     mlock: bool = False
     """ mlock the L1 buffer so compaction cannot migrate it (ROCm only). """
 
@@ -328,6 +346,15 @@ class L1MemoryManagerConfig:
             raise ValueError("devdax_size_in_bytes must be >= 0")
         if self.devdax_size_in_bytes and not self.devdax_path:
             raise ValueError("devdax_size_in_bytes requires devdax_path")
+        if self.devdax_offset_in_bytes < 0:
+            raise ValueError("devdax_offset_in_bytes must be >= 0")
+        if self.devdax_offset_in_bytes and not self.devdax_path:
+            raise ValueError("devdax_offset_in_bytes requires devdax_path")
+        if self.devdax_offset_in_bytes % mmap.ALLOCATIONGRANULARITY:
+            raise ValueError(
+                "devdax_offset_in_bytes must be a multiple of "
+                f"{mmap.ALLOCATIONGRANULARITY} bytes"
+            )
 
         if self.devdax_path and self.use_lazy:
             raise ValueError(
@@ -584,9 +611,13 @@ class DevDaxL1ManagerConfig(L1ManagerConfig):
         Raises:
             ValueError: A field is unknown, malformed, or incompatible.
         """
-        config = _parse_l1_common(cls, values, defaults, read_ttl, write_ttl, {"path"})
+        config = _parse_l1_common(
+            cls, values, defaults, read_ttl, write_ttl, {"path", "offset_gb"}
+        )
         config.memory_config = replace(
-            config.memory_config, devdax_path=_l1_path(values)
+            config.memory_config,
+            devdax_path=_l1_path(values),
+            devdax_offset_in_bytes=_l1_offset_bytes(values),
         )
         return config
 
@@ -658,8 +689,9 @@ class StorageManagerConfig:
     prefetch_policy: str = "default"
     """ The L2 prefetch policy name. """
 
-    prefetch_max_in_flight: int = 8
-    """ Maximum number of concurrent prefetch requests. """
+    prefetch_inflight_watermark: float = 0.5
+    """ Fraction of each L1's capacity that in-flight L2 prefetches may stage
+    before new prefetch requests wait, in (0, 1]. """
 
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
@@ -682,6 +714,11 @@ class StorageManagerConfig:
         for c in self.l1_manager_configs:
             if c.eviction is None:
                 c.eviction = self.eviction_config
+        if not 0 < self.prefetch_inflight_watermark <= 1:
+            raise ValueError(
+                "prefetch_inflight_watermark must be in (0, 1], got "
+                f"{self.prefetch_inflight_watermark}"
+            )
         normalize_storage_manager_config(self)
         validate_storage_manager_config(self)
 
@@ -871,6 +908,17 @@ def add_storage_manager_args(
         ),
     )
     memory_group.add_argument(
+        "--l1-devdax-offset-gb",
+        type=float,
+        default=0.0,
+        help=(
+            "Byte offset into --l1-devdax-path, in GiB, where the L1 mapping "
+            "starts (default 0). Lets several LMCache servers share one CXL "
+            "device by mapping disjoint ranges. Must land on a page boundary; "
+            "the kernel also enforces the device alignment (usually 2 MiB)."
+        ),
+    )
+    memory_group.add_argument(
         "--l1-mlock",
         action="store_true",
         help=(
@@ -991,10 +1039,20 @@ def add_storage_manager_args(
         "Default is 'default' (pick the first adapter by index).",
     )
     policy_group.add_argument(
+        "--l2-prefetch-inflight-watermark",
+        type=float,
+        default=0.5,
+        help="Fraction of L1 capacity, in (0, 1], that in-flight L2 prefetch "
+        "requests may stage before new prefetch requests wait. Default is 0.5.",
+    )
+    # Deprecated: released deployers (operator) still render this flag into
+    # server args, and rejecting it crashes the pod on startup.
+    policy_group.add_argument(
         "--l2-prefetch-max-in-flight",
         type=int,
-        default=8,
-        help="Maximum number of concurrent prefetch requests. Default is 8.",
+        default=None,
+        help="Deprecated and ignored; prefetch admission follows "
+        "--l2-prefetch-inflight-watermark.",
     )
     policy_group.add_argument(
         "--periodic-notifier-interval-ms",
@@ -1038,6 +1096,12 @@ def parse_args_to_config(
     Returns:
         StorageManagerConfig: The configuration object.
     """
+    if args.l2_prefetch_max_in_flight is not None:
+        logger.warning(
+            "--l2-prefetch-max-in-flight is deprecated and ignored; prefetch "
+            "admission follows --l2-prefetch-inflight-watermark (%s)",
+            args.l2_prefetch_inflight_watermark,
+        )
     defaults = (
         EvictionConfig(
             args.eviction_policy,
@@ -1094,7 +1158,7 @@ def parse_args_to_config(
             l2_adapter_config=parse_args_to_l2_adapters_config(args),
             store_policy=args.l2_store_policy,
             prefetch_policy=args.l2_prefetch_policy,
-            prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+            prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
             periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
         )
     if args.l1_size_gb is None or defaults is None:
@@ -1119,6 +1183,7 @@ def parse_args_to_config(
             logger.error("Hugepage availability check failed: %s", e)
             raise
 
+    devdax_offset = int(getattr(args, "l1_devdax_offset_gb", 0.0) * (1 << 30))
     if shm_name is None:
         memory_config = L1MemoryManagerConfig(
             size_in_bytes=int(args.l1_size_gb * (1 << 30)),
@@ -1127,6 +1192,7 @@ def parse_args_to_config(
             align_bytes=args.l1_align_bytes,
             use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
+            devdax_offset_in_bytes=devdax_offset,
             mlock=args.l1_mlock,
         )
     else:
@@ -1138,6 +1204,7 @@ def parse_args_to_config(
             shm_name=shm_name,
             use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
+            devdax_offset_in_bytes=devdax_offset,
             mlock=args.l1_mlock,
         )
 
@@ -1174,7 +1241,7 @@ def parse_args_to_config(
         l2_adapter_config=l2_adapter_config,
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
-        prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+        prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
     return config

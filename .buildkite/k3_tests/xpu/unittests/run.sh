@@ -67,6 +67,7 @@ allowlist = {
   "tests/cli/**/test_*.py",
   "tests/disagg/test_*.py",
   "tests/v1/**/test_*.py",
+  "tests/inprocess/**/test_*.py",
 }
 selected: set[str] = set()
 

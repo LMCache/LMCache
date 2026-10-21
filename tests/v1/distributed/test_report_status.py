@@ -177,7 +177,7 @@ class TestStorageManagerReportStatus:
 
         assert pc["is_healthy"] is True
         assert pc["thread_alive"] is True
-        assert "max_in_flight" in pc
+        assert "inflight_watermark" in pc
         assert "submission_queue_size" in pc
         assert "pending_queue_size" in pc
         assert "in_flight_request_count" in pc

@@ -340,6 +340,14 @@ pip-installable example connector plugin that demonstrates:
 
 ## Self-Registration Mechanism
 
+CLI help calls `get_all_registered_names()` to attempt pending imports and
+list registered factories. Missing dependencies are skipped. An import-time
+`TypeError` (for example, incompatible Bigtable protobuf descriptors) is logged
+with its traceback and leaves the module pending. This lets help finish while
+`ensure_adapter_loaded()` still exposes the error on explicit loading. Each
+enumeration attempts the initially pending modules once, so a failed import
+cannot cause an infinite retry loop.
+
 The `plugin_l2_adapter.py` and `native_connector_l2_adapter.py`
 modules follow the same self-registration pattern as all other
 adapters in the package:

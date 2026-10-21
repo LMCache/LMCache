@@ -350,8 +350,10 @@ class L1ManagerInterface(Protocol):
         """Return Device-DAX arena statuses for hot-pluggable L1s."""
         ...
 
-    def get_devdax_arena_status(self, device_path: str) -> "DevDaxArenaStatus":
-        """Return one hot-pluggable Device-DAX arena's status."""
+    def get_devdax_arena_status(
+        self, device_path: str, offset_in_bytes: int = 0
+    ) -> "DevDaxArenaStatus":
+        """Return the status of the arena at ``(device_path, offset)``."""
         ...
 
     def owns_device(self, device_path: str) -> bool:
@@ -363,15 +365,18 @@ class L1ManagerInterface(Protocol):
         ...
 
     def add_devdax_device(
-        self, device_path: str, size_in_bytes: int
+        self, device_path: str, size_in_bytes: int, offset_in_bytes: int = 0
     ) -> "DevDaxArenaStatus":
-        """Hot-add a Device-DAX arena."""
+        """Hot-add a Device-DAX arena mapping ``[offset, offset + size)``."""
         ...
 
     def remove_devdax_device(
-        self, device_path: str, mode: "DevDaxRemoveMode" = ...
+        self,
+        device_path: str,
+        mode: "DevDaxRemoveMode" = ...,
+        offset_in_bytes: int = 0,
     ) -> "DevDaxArenaStatus":
-        """Hot-remove a Device-DAX arena."""
+        """Hot-remove the Device-DAX arena at ``(device_path, offset)``."""
         ...
 
     def report_status(self) -> dict:

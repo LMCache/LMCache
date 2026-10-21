@@ -54,7 +54,7 @@ leaves nothing behind.
 
 ```python
 PrefetchController(l1_managers, l1_manager_descriptors,
-                   l2_adapters, adapter_descriptors, policy, max_in_flight=8)
+                   l2_adapters, adapter_descriptors, policy, inflight_watermark=0.5)
 
 submit_prefetch_request(spec: PrefetchTaskSpec, skip_l2=False) -> PrefetchRequestId
 query_prefetch_result(request_id) -> PrefetchResult | None   # consume-once
@@ -66,12 +66,50 @@ start() / stop()
 `submit_prefetch_request` is thread-safe. When `skip_l2` is set, or no L2
 adapter is attached, the request is served from L1 on the calling thread and
 its result is queryable when the call returns. Otherwise it is queued for the
-background loop and admitted up to `max_in_flight` at a time.
+background loop and admitted in arrival order under the in-flight watermark
+(see [Admission](#admission)).
 
 `PrefetchResult` carries `hit_cells` (one bitmap per key group, in
 `key_groups` order), split into the disjoint `l1_hit_cells` (L1 already held
 them) and `l2_hit_cells` (loaded by this request). Under `LOCK` every hit cell
 is read-locked `num_kv_readers` times for the caller.
+
+## Admission
+
+Pending requests start while L1 has room for their loads, not up to a fixed
+count. `_can_admit_new_prefetch(spec)` admits the request at the head of the
+queue when, for every L1 manager that receives loads from a non-draining L2
+adapter, both conditions hold:
+
+```
+(1) staging_bytes + lookup_bytes < inflight_watermark * total_bytes
+(2) total_bytes - used_bytes - lookup_bytes >= request_bytes
+```
+
+- `staging_bytes` is `L1Manager.get_staging_memory_usage()`: buffers reserved
+  but not yet admitted, i.e. loads in flight (plus in-flight stores).
+- `lookup_bytes` sums `InFlightPrefetchRequest.get_max_load_bytes()` (every
+  cell loaded from L2) over admitted requests still in `LOOKUP`. A request
+  reserves staging only after its lookups finish; without this charge a burst
+  of submissions would all be admitted while staging still reads 0.
+- `request_bytes` is the same worst case for the head request.
+- `used_bytes, total_bytes` come from `get_memory_usage()`, the same numbers
+  eviction uses (the total is the grown heap on the lazy tier).
+- With no request in flight the head request is admitted regardless, so a
+  request that can never fit does not block the queue; its reservations then
+  fail per cell as before (`l1_oom`).
+
+Condition (1) bounds how much of L1 prefetch may occupy; condition (2) keeps a
+request from starting when L1, full of resident data, could not hold its loads.
+
+The check runs at the end of every loop iteration, so a completed load (which
+wakes the loop) admits the next requests immediately. Staging held only by
+stores is re-checked at the poll timeout (500 ms) at the latest.
+
+Example: a 16 GiB L1 with the default 0.5 watermark (an 8 GiB budget) and
+requests of 288 MiB (2048 tokens of Qwen3-8B KV). 28 requests stage 7.9 GiB,
+still under the budget, so a 29th starts: 29 requests run at once, where the
+old fixed limit was 8.
 
 ## Flow
 
@@ -174,8 +212,10 @@ Gauges: `lmcache_mp.num_inflight_l2_loads`,
 - **One L1 manager.** `_get_l2_affinity_manager` returns the only manager;
   `L1ManagerDescriptor` is the hook for describing managers to the policy once
   L1-L2 affinity is configurable.
-- **Static admission.** `max_in_flight` is a constructor constant rather than
-  a function of L1 memory committed to in-flight loads.
+- **Conservative multi-L1 admission.** A lookup-phase request's worst-case
+  bytes are charged in full to every L1 manager with an active L2 adapter,
+  because which adapter (and so which L1) serves each cell is known only after
+  planning. Exact for one L1; it under-admits with several.
 - **Full key list to L2.** Lookups are submitted with every key, not only the
   L1 misses, because the adapter interface carries a flat key list.
 - **Write conflicts are misses.** A key that becomes resident between the

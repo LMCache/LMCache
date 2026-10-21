@@ -204,7 +204,7 @@ def _kernel_reference(
             )
         if direction == D2H:
             host_obj.copy_(staging)
-    torch.cuda.synchronize(device)
+    torch_dev.synchronize(device)
 
 
 def _direct(
@@ -248,7 +248,7 @@ def _direct(
     num_copies = cuda_ops.execute_direct_copy_transfer(
         direction, device, alignment, specs, objects
     )
-    torch.cuda.synchronize(device)
+    torch_dev.synchronize(device)
     return num_copies
 
 
