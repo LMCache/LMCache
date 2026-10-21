@@ -1589,6 +1589,7 @@ class LMCacheMPWorkerAdapter:
                 f"decode_context_parallel_size). Set --chunk-size to a multiple "
                 f"of {vllm_block_size}."
             )
+        self.vllm_block_size = vllm_block_size
         self.blocks_in_chunk = lmcache_tokens_per_chunk // vllm_block_size
 
         # Experimental intermediate tensor transfer
@@ -1718,6 +1719,12 @@ class LMCacheMPWorkerAdapter:
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
+
+    def _load_error_block_ids(self, op: LoadStoreOp) -> list[int]:
+        block_ids = op.flat_block_ids
+        if len(op.block_ids) > 1 and not isinstance(op.block_ids[0], int):
+            return block_ids
+        return block_ids[op.skip_first_n_tokens // self.vllm_block_size :]
 
     def _send_register_kv_caches_request(
         self,
@@ -1987,7 +1994,7 @@ class LMCacheMPWorkerAdapter:
         self._ensure_heartbeat_started()
 
         if not self.is_healthy:
-            self.error_block_ids.update(op.flat_block_ids)
+            self.error_block_ids.update(self._load_error_block_ids(op))
             self._failed_request_ids.add(request_id)
             self._dropped_retrieves.add(request_id)
             return
@@ -2015,7 +2022,7 @@ class LMCacheMPWorkerAdapter:
             self.blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
-        self.retrieve_futures[request_id] = (future, op.flat_block_ids)
+        self.retrieve_futures[request_id] = (future, self._load_error_block_ids(op))
         if event is not None:
             self.retrieve_events[request_id] = event
 
