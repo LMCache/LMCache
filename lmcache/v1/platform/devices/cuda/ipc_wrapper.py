@@ -345,16 +345,10 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
 
         # Same layout normalization as CudaIPCWrapper: permute
         # non-contiguous views (e.g. vLLM's NHD-over-HND) into contiguous
-        # ones, metadata-only. The flat-bytes reconstruction below only
-        # supports contiguous tensors, so anything still non-contiguous
-        # is rejected rather than silently reordered.
+        # ones, metadata-only. Anything still non-contiguous is a validated
+        # dim-0-padded view (other layouts raise there), which to_tensor()
+        # rebuilds from the shipped strides.
         tensor = attempt_permute_to_contiguous_view(tensor)
-        if not tensor.is_contiguous():
-            raise ValueError(
-                "RawCudaIPCWrapper requires a tensor that is contiguous "
-                f"(possibly after permutation); got shape={tuple(tensor.shape)} "
-                f"stride={tuple(tensor.stride())}"
-            )
 
         data_ptr = tensor.data_ptr()
         _bind_primary_context(tensor.device.index)
@@ -381,7 +375,6 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
         self._alloc_offset = data_ptr - int(
             alloc_base
         )  # offset in bytes not the same as storage offset
-        self._nbytes = tensor.numel() * tensor.element_size()
 
         # DeviceIPCWrapper interface fields. ``handle`` is unused —
         # ``to_tensor`` is overridden to bypass it — but kept (None) so
@@ -401,6 +394,8 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
 
         device_index = tensor.device.index
         self.device_uuid = self._get_device_uuid(device_index)
+        # Byte range spans dim-0 padding too; equals numel bytes if contiguous.
+        self._nbytes = self.wire_metadata().byte_span()
 
     def to_wire(self) -> RawCudaIPCData:
         """Return the driver handle and tensor byte range."""
@@ -467,7 +462,7 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
             cp_flat = cupy.ndarray(self._nbytes, dtype=cupy.uint8, memptr=memptr)
 
         raw = torch.from_dlpack(cp_flat)
-        return raw.view(self.dtype).reshape(self.shape)
+        return raw.view(self.dtype).as_strided(self.shape, self.stride)
 
     def close(self) -> None:
         """Release this wrapper's references on the imported mapping.
