@@ -314,7 +314,8 @@ The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
   evicts instances whose heartbeat lapsed (`instance_timeout`) and is cancelled
   on shutdown. `HEALTH_CHECK_INTERVAL = 0` disables the stale-instance loop
   (it does not affect the L2 eviction loop, which is gated separately by
-  `EVICTION_CHECK_INTERVAL`).
+  `EVICTION_CHECK_INTERVAL`). Time the coordinator itself was not running is
+  not held against instances; see below.
 - The L2 eviction loop is the controller's own, not the app's: the lifespan
   enters every controller's `run` and names none of them.
   `EVICTION_CHECK_INTERVAL = 0` makes `FleetEvictionController.start`
@@ -325,6 +326,67 @@ The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
   directory, usage view, and LRU are rebuilt only from the cache-event
   stream, so after a coordinator restart they start empty and refill as
   events arrive — quotas under-report until they do.
+
+### Coordinator stalls
+
+Heartbeats are only read while the coordinator runs. When it does not
+(event loop blocked, GC pause, `SIGSTOP`), the servers' heartbeats queue
+unread, and on resume the overdue health pass can run before them. After a
+stall longer than `instance_timeout`, every live instance looks timed out to
+that pass. Evicting them fences their L1 placements, which nothing
+re-announces after the servers re-register (measured: a 40 s `SIGSTOP` took
+L1 placements from 4/4 to 0/4).
+
+`BackgroundLoops` records how late each pass started: a pass is due one
+interval after the previous one finished. A health pass that started more
+than one `health_check_interval` late takes the coordinator to have been
+stopped since the pass was due, and for `instance_timeout` after it judges
+liveness as of that moment instead of now (`StallGrace` in `app.py`):
+
+```
+  pass due           pass runs (late > interval)            grace ends
+ ────┬────────────────────────┬─────────────────────────────────┬────────
+     │◄──── not running ─────►│◄──────── instance_timeout ─────►│
+                              │ evict only instances already    │ judged
+                              │ out of time when the pass was   │ as of
+                              │ due; the rest can heartbeat     │ now
+```
+
+- An instance already out of time when the pass was due goes at once. The
+  rest have `instance_timeout` to heartbeat: heartbeats queued during the
+  stall land milliseconds after the resume, the next ones within a heartbeat
+  interval. One that does not heartbeat goes when the grace ends.
+- Instances restored from a checkpoint keep their window to register again
+  unless the stall surely began after it closed. The stall began no earlier
+  than one interval before the missed pass was due, so their window counts
+  as closed only if that moment is past it; otherwise they get the grace too.
+- **Why "more than one interval late".** A stall times out a live server
+  only by outlasting `instance_timeout` minus the server's heartbeat
+  interval, and the pass due in it was due at most one interval after it
+  began. So every such stall is caught while
+  `instance_timeout >= 2 * health_check_interval + heartbeat interval`
+  (30 ≥ 2 × 10 + 5 by default); a shorter stall needs no grace. Raising
+  `--health-check-interval` past that leaves a band of stalls that still
+  evict live servers.
+- **A dead instance still goes.** A stall only shields instances that
+  heartbeat within `instance_timeout` before its missed pass was due.
+  However often the coordinator stalls, a dead instance goes at the first
+  pass 2 × `instance_timeout` plus one stall after its last heartbeat.
+- **Why not `EventLoopMonitor`.** Its `blocked_seconds` is a running total,
+  which cannot tell one 30 s freeze from sixty 0.5 s blocks that starve no
+  heartbeat. It also books a freeze only when its own 0.5 s timer fires after
+  the resume, and asyncio runs overdue timers in deadline order, so the
+  health pass can run first. The pass's own lateness has neither problem.
+- **Clock.** Heartbeat ages and lateness both use `time.monotonic()`
+  (`CLOCK_MONOTONIC` on Linux). It keeps counting through a blocked loop or
+  `SIGSTOP`, which the lateness then shows. It does not advance during system
+  suspend, nor usually while a VM is paused, so heartbeat ages do not grow
+  then and there is nothing to forgive.
+- **Scope.** This only stops the coordinator's own stalls from evicting
+  servers. A server that is genuinely evicted (cut off or paused itself for
+  longer than `instance_timeout`) re-registers on its next heartbeat's 404,
+  but its fenced L1 placements stay gone until it stores them again;
+  re-announcing L1 on re-registration is a separate change.
 
 ## Observability
 

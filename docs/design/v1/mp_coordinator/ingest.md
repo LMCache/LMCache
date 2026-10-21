@@ -64,7 +64,9 @@ call back into the gate.
 
 `drop_instance(id)` is the same fence without a batch — for
 deregistration, heartbeat-timeout eviction, and instances restored from a
-checkpoint that do not re-register within `instance_timeout`. It forgets
+checkpoint that do not re-register within `instance_timeout` (extended
+after a coordinator stall; see [Coordinator stalls](README.md#coordinator-stalls)).
+It forgets
 the cursor but remembers the dropped incarnation: a late L1 batch from it
 is dropped as `STALE_INCARNATION`, while a higher incarnation or a
 re-registration (`readmit_instance`) starts a fresh cursor at any
