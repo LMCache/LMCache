@@ -9,10 +9,68 @@ import pytest
 
 # First Party
 from lmcache import torch_device_type
-from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
-from lmcache.v1.config_base import apply_remote_configs, validate_and_set_config_value
+from lmcache.v1.config import (
+    LMCacheEngineConfig,
+    load_ec_engine_config,
+    load_engine_config_with_overrides,
+)
+from lmcache.v1.config_base import (
+    apply_remote_configs,
+    load_config_with_overrides,
+    validate_and_set_config_value,
+)
 
 BASE_DIR = Path(__file__).parent
+
+
+@pytest.mark.parametrize("source", ["env", "file"])
+@pytest.mark.parametrize("remote_override", [False, True])
+def test_explicit_overrides_remote_priority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    remote_override: bool,
+) -> None:
+    for key in list(os.environ):
+        if key.startswith("LMCACHE_"):
+            monkeypatch.delenv(key)
+    config_path = None
+    if source == "file":
+        path = tmp_path / "config.yaml"
+        path.write_text("local_cpu: true\n", encoding="utf-8")
+        config_path = str(path)
+    config = cast(
+        Any,
+        load_engine_config_with_overrides(
+            config_file_path=config_path, overrides={"chunk_size": "512"}
+        ),
+    )
+    assert config.chunk_size == 512
+
+    apply_remote_configs(
+        config,
+        {
+            "configs": [
+                {"key": "chunk_size", "value": 1024, "override": remote_override},
+                {"key": "max_local_cpu_size", "value": 8, "override": False},
+            ]
+        },
+    )
+    assert config.chunk_size == (1024 if remote_override else 512)
+    assert config.max_local_cpu_size == 8
+
+
+def test_load_config_overrides_plain_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    class PlainConfig:
+        chunk_size: int = 256
+
+        @classmethod
+        def from_env(cls) -> "PlainConfig":
+            return cls()
+
+    monkeypatch.delenv("LMCACHE_CONFIG_FILE", raising=False)
+    config = load_config_with_overrides(PlainConfig, overrides={"chunk_size": 512})
+    assert config.chunk_size == 512
 
 
 def test_get_extra_config_from_file():
