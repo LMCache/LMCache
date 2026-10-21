@@ -27,6 +27,7 @@
 
 # GPU connector
 /lmcache/v1/gpu_connector/             @sammshen @ApostaC @hlin99
+/lmcache/inprocess/v1/gpu_connector/   @sammshen @ApostaC @hlin99
 /lmcache/v1/gpu_connector/_gds_async.py   @sammshen @ApostaC @hlin99 @andyluo7 @Shaoting-Feng
 /lmcache/v1/gpu_connector/gds_context.py  @sammshen @ApostaC @hlin99 @andyluo7 @Shaoting-Feng
 /lmcache/v1/gpu_connector/_cufile_async.py @sammshen @ApostaC @hlin99 @Shaoting-Feng
@@ -62,6 +63,7 @@
 /lmcache/integration/vllm/             @sammshen @maobaolong @YaoJiayi @deng451e @hlin99
 /lmcache/integration/sglang/           @Oasis-git @DongDongJu @sammshen @Shaoting-Feng
 /lmcache/integration/tensorrt_llm/     @sammshen
+/lmcache/inprocess/integration/tensorrt_llm/ @sammshen
 
 # Non-CUDA equivalents
 /lmcache/non_cuda_equivalents.py       @hlin99 @hickeyma

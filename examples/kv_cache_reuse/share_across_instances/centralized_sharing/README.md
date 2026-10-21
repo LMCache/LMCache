@@ -3,7 +3,7 @@ This shows how to share KV across different vLLM instances using LMCache.
 ## Prerequisites
 Your server should have at least 2 GPUs.  
 
-This will use the port 8000 and 8001 (for vLLM) and port 65432 (for LMCache).  
+This uses ports 8000 and 8001 for vLLM and port 6379 for Redis.
 
 **Important**: For centralized cache sharing (which is cross-process cases), ensure all processes use the same `PYTHONHASHSEED` to keep the hash of the KV cache consistent across processes.:
 ```bash
@@ -11,9 +11,9 @@ export PYTHONHASHSEED=0
 ```
 
 ## Steps
-1.  Start the lmcache centralized server,
+1. Start Redis,
 ```bash
-lmcache_server localhost 65432
+docker run --rm -p 6379:6379 redis:7
 ```  
 2. In a different terminal,  
 ```bash

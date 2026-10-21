@@ -27,7 +27,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
-from lmcache.v1.mp_coordinator.app import create_app, evict_stale
+from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.cache_events import (
     EVENTS_TRACE_BATCH,
     EVENTS_TRACE_LIFECYCLE,
@@ -407,14 +407,14 @@ def test_coordinator_target_heartbeats_until_the_stream_ends():
             await target.end("node-a")
             await asyncio.sleep(0.1)
             third = registry.get("node-a").last_heartbeat_time
-            evicted = evict_stale(registry, instance_timeout=0.05)
-            return first, second, third, evicted
+            expired = registry.stale(timeout=0.05)
+            return first, second, third, expired
 
-    first, second, third, evicted = asyncio.run(scenario())
+    first, second, third, expired = asyncio.run(scenario())
 
     assert second > first
     assert third == second
-    assert evicted == ["node-a"]
+    assert expired == ["node-a"]
 
 
 def test_coordinator_target_ends_heartbeats_for_a_stream_without_a_stop(tmp_path):

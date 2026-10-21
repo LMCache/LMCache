@@ -86,7 +86,9 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Port to bind the selected request server.
    * - ``--chunk-size``
      - ``256``
-     - Chunk size for KV cache operations (in tokens).
+     - Minimum chunk size for KV cache operations (in tokens). The vLLM MP
+       connector may negotiate it upward to satisfy the model's KV geometry;
+       see :doc:`chunk_size_negotiation`.
    * - ``--null-block-id``
      - ``0``
      - Engine block ID that denotes absent KV data. Keep the default for
@@ -108,6 +110,11 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--grpc-server-workers``
      - ``32``
      - gRPC request-dispatch threads. Used only with ``--transport grpc``.
+   * - ``--grpc-server-mode``
+     - ``sync``
+     - gRPC server implementation: ``sync`` or ``aio``. ``aio`` receives
+       requests on one event loop and hands only the handlers to worker
+       threads. Used only with ``--transport grpc``.
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.
@@ -172,17 +179,18 @@ Source: ``lmcache/v1/multiprocess/config.py``
        non-GPU path is loaded, i.e. ``--supported-transfer-mode`` is
        ``auto`` or ``engine_driven``).
        ``""`` (empty string, default): SHM disabled; KV transfer uses
-       the pickle path.  Any other value: create a SHM pool and use
+       the typed inline path.  Any other value: create a SHM pool and use
        that exact name for its segment.
    * - ``--kv-event-log-size``
      - ``32768``
      - CPU store-completion and eviction records retained for subscriptions
        and reconnects. Workers receive pushes over ZMQ or gRPC and republish
-       them as KV events. ``0`` disables the channel and its capability
-       advertisement. Requires the observability event
-       bus, which ``--disable-observability`` turns off. Workers subscribe
-       automatically when vLLM KV events are enabled and the server advertises
-       support; otherwise they report only their own completed stores.
+       them as KV events. ``0`` disables the channel. The channel requires
+       the observability event bus, which ``--disable-observability`` turns
+       off. When vLLM KV events are enabled, workers subscribe to the server
+       automatically. When the channel is disabled, the server answers the
+       subscription with ``enabled=False``. The worker then reports only its
+       own completed stores.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at
@@ -281,12 +289,17 @@ The HTTP frontend is included when running ``lmcache server``.
      - Description
    * - ``--http-host``
      - ``127.0.0.1``
-     - Host to bind the HTTP (FastAPI/uvicorn) server. The admin API has
-       no authentication; only bind a non-loopback address on a trusted
-       network.
+     - Host to bind the HTTP (FastAPI/uvicorn) server.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
+   * - ``--http-api-key-file``
+     - unset
+     - Read a bearer API key from a file. Repeat the option to accept multiple
+       keys during rotation. ``LMCACHE_HTTP_API_KEY_FILE`` and
+       ``LMCACHE_HTTP_API_KEY`` provide environment alternatives. All sources
+       are cumulative. When none are set, authentication is disabled. ``/``
+       and ``/healthcheck`` remain public when authentication is enabled.
 
 P2P
 ---
@@ -332,7 +345,8 @@ Source: ``lmcache/v1/distributed/config.py``
 Use repeatable ``--l1-manager '<JSON>'`` for tagged DRAM, Device-DAX, and
 GDS managers. See :doc:`multi_l1` for the schema, placement order, fixed
 L2 affinity, and per-manager reporting. The flags below remain the legacy
-single-L1 interface.
+single-L1 interface. For placing L1 on CXL-attached memory see
+*Device-DAX / CXL L1* below.
 
 .. list-table::
    :header-rows: 1
@@ -371,11 +385,95 @@ single-L1 interface.
        mapping.  If a
        DAX L2 adapter with the same ``device_path`` is registered, that
        adapter's ``max_dax_size_gb`` is used as the L1 Device-DAX overflow
-       size.
+       size. Pass the device node, for example
+       ``--l1-devdax-path /dev/dax0.0 --l1-size-gb 512 --no-l1-use-lazy
+       --shm-name ""``; find the node for a CXL region with ``daxctl list``.
+       See *Device-DAX / CXL L1* below.
+   * - ``--l1-devdax-offset-gb``
+     - ``0``
+     - Offset into ``--l1-devdax-path``, in GiB, where the L1 mapping starts.
+       Lets several LMCache servers share one CXL device by mapping disjoint
+       ranges, for example offset 0 and 512 with ``--l1-size-gb 512`` each.
+       The range must fit within the device, and offset and size must be
+       multiples of the device alignment (usually 2 MiB).
+       ``--l1-manager`` key: ``offset_gb``.
    * - ``--l1-mlock``
      - ``False``
      - ROCm only. ``mlock`` the DRAM L1 so memory compaction cannot migrate
        it. See *Locked L1 on ROCm* below. ``--l1-manager`` key: ``mlock``.
+
+.. _mp-devdax-l1:
+
+Device-DAX / CXL L1
+~~~~~~~~~~~~~~~~~~~
+
+L1 can live on CXL or persistent memory exposed as a Device-DAX node
+``/dev/daxX.Y``. The server maps the device with ``mmap(MAP_SHARED)`` and
+allocates KV objects inside the mapping. The index is in server memory, so
+the tier restarts empty.
+
+**Device path and offset.** The mapping covers ``[offset, offset + size)``
+of the device, with the offset defaulting to 0. Several servers can share
+one CXL device by giving each a disjoint range: ``--l1-devdax-offset-gb``
+in the legacy form, ``offset_gb`` in the tagged form. LMCache does not
+coordinate offsets between servers; overlapping ranges, or two nodes that
+alias the same physical CXL range, write over each other. The device must
+be in ``devdax`` mode (CXL memory is often onlined as ``system-ram``), the
+range must fit within the device, and offset and size must be multiples of
+the device alignment (usually 2 MiB); a range that does not is rejected:
+
+.. code-block:: bash
+
+   cxl list -r                                   # CXL regions and ids
+   daxctl list                                   # dax devices: region, size, mode, align
+   daxctl reconfigure-device --mode=devdax dax0.0
+   ls -l /dev/dax0.0                             # path to pass to LMCache
+
+**Tagged form (recommended).** ``size_gb`` is mapped from ``path`` starting
+at ``offset_gb`` (default 0); there is no implicit DRAM pool. Set every L2
+adapter's ``affinity_tag`` in a Device-DAX-only server, since the default
+``_default`` means DRAM. This is the second of two servers sharing a 1 TiB
+device:
+
+.. code-block:: bash
+
+   lmcache server --chunk-size 256 --eviction-policy LRU --port 6555 \
+       --l1-manager '{"type":"DEVDAX","tag":"cxl","size_gb":512,"offset_gb":512,"path":"/dev/dax0.0"}' \
+       --l2-adapter '{"type":"fs","base_path":"/mnt/archive/lmcache","affinity_tag":"cxl"}'
+
+List a ``DRAM`` manager first to spill into CXL only on ``OUT_OF_MEMORY``.
+Schema in :doc:`multi_l1`.
+
+**Legacy form.** ``--l1-size-gb`` is the mapped size and
+``--l1-devdax-offset-gb`` where it starts; lazy allocation and SHM must be
+off:
+
+.. code-block:: bash
+
+   lmcache server --chunk-size 256 --eviction-policy LRU --port 6555 \
+       --l1-devdax-path /dev/dax0.0 --l1-size-gb 512 --l1-devdax-offset-gb 512 \
+       --no-l1-use-lazy --shm-name ""
+
+Hybrid DRAM + Device-DAX has no overflow flag: a ``dax`` L2 adapter whose
+``device_path`` matches ``--l1-devdax-path`` is consumed, its
+``max_dax_size_gb`` becomes the overflow size, and ``--l1-size-gb`` becomes
+the DRAM half.
+
+**Verify.** ``GET /status`` reports ``l1_capacity_bytes_by_backend`` with a
+``devdax`` entry equal to the mapped size; Prometheus
+``lmcache_mp_l1_memory_usage_bytes`` carries ``backend="devdax"``. Host
+pinning of the mapping is best-effort; check the startup log for a
+fallback to pageable copies.
+
+**Runtime changes and limits.** With the legacy interface, whole ranges
+can be added and drained while serving via
+``/reconfigure/dax/l1/{status,add,remove}`` (:doc:`http_api`), each with
+its own ``offset``; the initial range is the primary arena and cannot be
+removed, and tagged multi-L1 topologies are fixed at startup. P2P, NIXL, and Mooncake-over-RDMA L2
+adapters are unsupported because they need one contiguous L1 region; the
+SHM transfer channel is disabled; GDS L1 and ``--l1-mlock`` cannot be
+combined with it. For a persistent Device-DAX tier use the L2 adapter in
+:doc:`l2_storage/dax`.
 
 Locked L1 on ROCm
 -----------------
@@ -752,13 +850,13 @@ by one interleave layout from being loaded by another. It does not change the
 model name served by vLLM, but the decorated cache model name is visible in MP
 metric labels so operators can distinguish incompatible cache layouts.
 
-One configuration change is required: the LMCache chunk size must be a
-multiple of vLLM's resolved scheduler block size. For a single attention
-group, that is ``block_size * decode_context_parallel_size``. For a hybrid
-model, it is the least common multiple of every attention group's DCP-scaled
-block span and every recurrent-state group's unscaled physical block span. If
-the chunk size is incompatible, vLLM fails at connector startup with the
-required multiple in the message (the LMCache server itself starts fine).
+The vLLM MP connector automatically negotiates a compatible chunk size. For a
+single attention group, the required alignment is
+``block_size * decode_context_parallel_size``. For a hybrid model, it is the
+least common multiple of every attention group's DCP-scaled block span and
+every recurrent-state group's unscaled physical block span. The server treats
+``--chunk-size`` as a minimum and rounds it up to the smallest compatible
+multiple; see :doc:`chunk_size_negotiation`.
 
 The example model also needs a vLLM build that can run it under DCP:
 Kimi-Linear DCP support landed after v0.27.1 (vLLM commit ``63ac04a61e``,
@@ -767,8 +865,8 @@ PR #50484). On stock v0.27.1 the command below fails at startup with
 
 .. code-block:: bash
 
-    # block_size 1024 x dcp 2 -> chunk size must be a multiple of 2048
-    lmcache server --host localhost --port 6000 --chunk-size 2048 \
+    # block_size 1024 x dcp 2 -> a configured minimum of 256 negotiates to 2048
+    lmcache server --host localhost --port 6000 --chunk-size 256 \
         --l1-size-gb 20 --eviction-policy LRU
 
     vllm serve moonshotai/Kimi-Linear-48B-A3B-Instruct \
