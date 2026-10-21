@@ -117,6 +117,8 @@ class EventBus:
         self._thread: threading.Thread | None = None
         self._registered_subscribers: list[EventSubscriber] = []
         self._discard_count: int = 0
+        self._notified_discard_count = 0
+        self._drop_callbacks: list[Callable[[], None]] = []
         self._last_discard_warning: float = 0.0
         self._subscriber_exception_counts: dict[str, int] = {}
 
@@ -143,6 +145,12 @@ class EventBus:
 
     # -- Public API --------------------------------------------------------
 
+    @property
+    def enabled(self) -> bool:
+        """Whether ``publish()`` enqueues events (``False`` for the disabled
+        default bus, where nothing ever reaches a subscriber)."""
+        return self._config.enabled
+
     def subscribe(self, event_type: EventType, callback: EventCallback) -> None:
         """Register a callback for a specific event type (thread-safe)."""
         with self._lock:
@@ -153,6 +161,15 @@ class EventBus:
         subscriber.register(self)
         with self._lock:
             self._registered_subscribers.append(subscriber)
+
+    def subscribe_drops(self, callback: Callable[[], None]) -> None:
+        """Notify callback on the drain thread when events were discarded.
+
+        Callbacks may read dropped_events_count(). Notifications are coalesced;
+        they also run when no subsequent event is published.
+        """
+        with self._lock:
+            self._drop_callbacks.append(callback)
 
     def has_subscribers(self, event_type: EventType) -> bool:
         """Return True if at least one callback is registered for *event_type*.
@@ -204,8 +221,9 @@ class EventBus:
         if not self._config.enabled:
             return
 
-        if self._admit_event(event, stamp_timestamp=True):
-            self._wake.set()
+        self._admit_event(event, stamp_timestamp=True)
+        # Drops must wake the drain thread even if no later event is admitted.
+        self._wake.set()
 
     def start(self) -> None:
         """Start the background drain thread.  No-op when disabled or
@@ -226,7 +244,13 @@ class EventBus:
 
     def stop(self) -> None:
         """Stop the drain thread, flush remaining events, and shut down
-        all registered subscribers.  Safe to call when not started."""
+        all registered subscribers.  Safe to call when not started.
+
+        Subscribers shut down in reverse registration order.  A subscriber
+        registered later may write into one registered earlier (a sink into
+        a recorder, for example), so the writer must shut down first or its
+        final output lands on a closed target.
+        """
         self._stop_flag.set()
         self._wake.set()
         if self._thread is not None and self._thread.is_alive():
@@ -235,10 +259,10 @@ class EventBus:
         # Final drain
         self._drain_all()
 
-        # Shutdown subscribers
+        # Shutdown subscribers, last registered first
         with self._lock:
             snapshot = list(self._registered_subscribers)
-        for sub in snapshot:
+        for sub in reversed(snapshot):
             try:
                 sub.shutdown()
             except Exception:
@@ -341,6 +365,16 @@ class EventBus:
                         name,
                         event.event_type.value,
                     )
+
+        if self._discard_count != self._notified_discard_count:
+            self._notified_discard_count = self._discard_count
+            with self._lock:
+                callbacks = list(self._drop_callbacks)
+            for callback in callbacks:
+                try:
+                    callback()
+                except Exception:
+                    logger.exception("EventBus: error in drop notification")
 
     def _admit_event(self, event: Event, *, stamp_timestamp: bool) -> bool:
         """Atomically admit one event without exceeding the queue bound."""

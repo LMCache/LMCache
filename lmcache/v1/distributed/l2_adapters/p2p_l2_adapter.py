@@ -37,9 +37,8 @@ from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_facto
 from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
 
 logger = init_logger(__name__)
@@ -68,7 +67,7 @@ class P2PL2AdapterConfig(L2AdapterConfigBase):
     """Config for the P2P L2 adapter.
 
     Fields:
-    - peer_mq_server_url: ZMQ url of the peer's MQ server (lookup/unlock RPCs).
+    - peer_mq_server_url: Peer request server URL (lookup/unlock RPCs).
     - peer_transfer_channel_server_url: the peer's transfer-channel server url.
     - lookup_timeout_s: deadline for a lookup result before it counts as a miss.
     - load_timeout_s: deadline for a load before it counts as a failure.
@@ -116,7 +115,7 @@ class P2PL2AdapterConfig(L2AdapterConfigBase):
     def help(cls) -> str:
         return (
             "P2P L2 adapter config fields:\n"
-            "- peer_mq_server_url (str): ZMQ url of the peer's MQ server (required)\n"
+            "- peer_mq_server_url (str): peer request server URL (required)\n"
             "- peer_transfer_channel_server_url (str): the peer's transfer channel "
             "server url (required)\n"
             "- lookup_timeout_s (float): lookup result deadline in seconds "
@@ -133,8 +132,9 @@ class P2PL2Adapter(L2AdapterInterface):
         super().__init__(max_capacity_bytes=0)
         self._config = config
 
-        self._req_client: RequestClient = ZmqMultiprocessClient(
-            MessageQueueClient(config.peer_mq_server_url, zmq.Context.instance())
+        self._req_client: RequestClient = RequestClientFactory.create(
+            config.peer_mq_server_url,
+            context=zmq.Context.instance(),
         )
         self._tc_context = get_transfer_channel_context()
         self._tc_client = self._tc_context.get_transfer_channel_client(

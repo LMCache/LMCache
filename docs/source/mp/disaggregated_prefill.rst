@@ -83,8 +83,8 @@ with two sub-connectors:
    * - ``LMCacheMPConnector``
      - Offload/load to the local LMCache server; use ``kv_role`` = ``kv_both``.
    * - ``lmcache.mp.host`` / ``lmcache.mp.port``
-     - Transport+host and ZMQ ``--port`` of the instance's LMCache server
-       (distinct per instance).
+     - Request transport, host, and ``--port`` of the instance's LMCache
+       server (distinct per instance).
 
 The NIXL transfer is tuned via environment variables on the vLLM instances:
 ``VLLM_NIXL_SIDE_CHANNEL_HOST`` (host advertised for the handshake, reachable by

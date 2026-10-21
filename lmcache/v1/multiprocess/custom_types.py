@@ -181,6 +181,30 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
 
 
 @dataclass
+class RegisterEngineDrivenContextResponse:
+    """Shared response for engine-driven context registration."""
+
+    shm_name: str = ""
+    pool_size: int = 0
+
+
+@dataclass
+class PrepareStoreResponse:
+    """Shared response for an engine-driven store preparation."""
+
+    context: dict = field(default_factory=dict)
+
+
+@dataclass
+class PrepareRetrieveResponse:
+    """Shared response for an engine-driven retrieve preparation."""
+
+    success: bool
+    data: bytes = b""
+    context: dict = field(default_factory=dict)
+
+
+@dataclass
 class CustomizedSerdeConfig:
     serializer: Callable[[Any], bytes]
     deserializer: Callable[[bytes], Any]
@@ -289,3 +313,38 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
         )
 
     return msgspec.msgpack.Decoder(ext_hook=ext_hook, dec_hook=dec_hook, type=type)
+
+
+# Experimental feature advertised through GET_EXPERIMENTAL by the opt-in qstore
+# server module (lmcache.v1.multiprocess.plugin_modules.qstore); the vLLM
+# connector requests it for ``lmcache.mp.transfer_intermediate_tensors``.
+TRANSFER_QUERY = "transfer_query"
+KV_EVENT_KIND_STORED = "stored"
+KV_EVENT_KIND_REMOVED = "removed"
+KV_EVENT_MEDIUM_CPU = "CPU"
+
+
+@dataclass
+class KVEventRecord:
+    """Sequenced CPU cache change; stores carry one chunk's tokens and parent."""
+
+    seq: int
+    kind: str
+    medium: str
+    model_name: str
+    block_hashes: list[bytes]
+    parent_block_hash: bytes | None
+    token_ids: list[int]
+
+
+@dataclass
+class KVEventBatch:
+    """One ordered batch. Incarnation changes or lost=True require withdrawal
+    of earlier announcements; enabled=False ends the stream. Resume at next_cursor.
+    """
+
+    enabled: bool
+    incarnation: int
+    next_cursor: int
+    lost: bool
+    events: list[KVEventRecord]
