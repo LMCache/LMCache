@@ -27,6 +27,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.lmcache_native import (
     EngineKVFormat,
     MemObjKVLayout,
@@ -45,7 +46,7 @@ _HND_FORMATS = {
     EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
 }
 
-_CUDA = torch.cuda.is_available()
+_CUDA = torch_device_type == "cuda" and torch_dev.is_available()
 _BACKENDS = ["py"] + (["cuda"] if _CUDA else [])
 
 
@@ -194,7 +195,7 @@ def _run_transfer(
         block_stride_elems=block_stride_elems,
         mem_obj_kv_layout=MemObjKVLayout(int(layout)),
     )
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
 
 def _device(backend: str) -> torch.device:
