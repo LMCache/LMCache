@@ -22,9 +22,9 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.gpu_connector.mock_gpu_connector import MockGPUConnector
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
-from lmcache.v1.gpu_connector.mock_gpu_connector import MockGPUConnector
 from lmcache.v1.lookup_client.factory import LookupClientFactory
 from lmcache.v1.lookup_client.lmcache_lookup_client import (
     LMCacheLookupClient,
