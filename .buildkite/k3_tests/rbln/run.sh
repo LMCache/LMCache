@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# LMCache RBLN multiprocess smoke: RBLN device tests on a real NPU, then the
-# LMCache MP server up to /healthcheck.
+# LMCache RBLN multiprocess smoke: RBLN device tests on a real NPU, the
+# LMCache MP server up to /healthcheck, then vLLM-RBLN serving through
+# LMCache end to end.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -47,3 +48,9 @@ if ! "${PYTHON}" "${SCRIPT_DIR}/wait_for_health.py" \
     tail -n 200 "${SERVER_LOG}"
     exit 1
 fi
+# The e2e below starts its own server on the same ports.
+kill "${SERVER_PID}"
+wait "${SERVER_PID}" || true
+
+echo "--- :vllm: vLLM-RBLN + LMCache e2e"
+"${PYTHON}" "${SCRIPT_DIR}/vllm_e2e.py" --model "${RBLN_E2E_MODEL:-Qwen/Qwen3-0.6B}"

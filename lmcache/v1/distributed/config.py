@@ -10,6 +10,7 @@ from typing import Any, Literal, TypeVar, cast
 import argparse
 import json
 import math
+import mmap
 import os
 
 # First Party
@@ -58,6 +59,19 @@ def _l1_path(values: dict[str, object]) -> str:
     if not isinstance(path, str) or not path.strip():
         raise ValueError("path must be a non-empty string")
     return path
+
+
+def _l1_offset_bytes(values: dict[str, object]) -> int:
+    """Read the optional ``offset_gb`` JSON field as a byte count (default 0)."""
+    value = values.get("offset_gb", 0)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise ValueError("offset_gb must be a finite non-negative number")
+    return int(value * (1 << 30))
 
 
 def _parse_l1_common(
@@ -139,6 +153,10 @@ def _parse_l1_common(
 # processes, so when hugepages are requested the bytes must come from the
 # pre-allocated 2 MiB pool rather than regular 4 KiB pinned memory.
 HUGEPAGE_SIZE_BYTES = 2 * 1024 * 1024
+
+# mlock keeps pages off the evictable LRU; compaction migrates them anyway
+# unless this sysctl is 0.
+_COMPACT_UNEVICTABLE_ALLOWED = "/proc/sys/vm/compact_unevictable_allowed"
 
 
 _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS = {
@@ -311,6 +329,13 @@ class L1MemoryManagerConfig:
     devdax_size_in_bytes: int = 0
     """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
 
+    devdax_offset_in_bytes: int = 0
+    """ Page-aligned byte offset into ``devdax_path`` where the L1 mapping
+    starts. Lets several servers share one device with disjoint ranges. """
+
+    mlock: bool = False
+    """ mlock the L1 buffer so compaction cannot migrate it (ROCm only). """
+
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
 
@@ -321,6 +346,15 @@ class L1MemoryManagerConfig:
             raise ValueError("devdax_size_in_bytes must be >= 0")
         if self.devdax_size_in_bytes and not self.devdax_path:
             raise ValueError("devdax_size_in_bytes requires devdax_path")
+        if self.devdax_offset_in_bytes < 0:
+            raise ValueError("devdax_offset_in_bytes must be >= 0")
+        if self.devdax_offset_in_bytes and not self.devdax_path:
+            raise ValueError("devdax_offset_in_bytes requires devdax_path")
+        if self.devdax_offset_in_bytes % mmap.ALLOCATIONGRANULARITY:
+            raise ValueError(
+                "devdax_offset_in_bytes must be a multiple of "
+                f"{mmap.ALLOCATIONGRANULARITY} bytes"
+            )
 
         if self.devdax_path and self.use_lazy:
             raise ValueError(
@@ -342,6 +376,17 @@ class L1MemoryManagerConfig:
                 "incompatible with lazy allocation. Please set "
                 "--no-l1-use-lazy when enabling hugepages."
             )
+        if self.mlock:
+            if current_device_spec.backend_name != "rocm":
+                raise ValueError("l1-mlock is only supported on ROCm.")
+            if self.devdax_path:
+                raise ValueError("l1-mlock cannot be used with l1-devdax-path.")
+            with open(_COMPACT_UNEVICTABLE_ALLOWED) as f:
+                if f.read().strip() != "0":
+                    raise RuntimeError(
+                        "l1-mlock requires sysctl vm.compact_unevictable_allowed=0 "
+                        "on the node."
+                    )
 
         # LazyMemoryAllocator requires pinned memory support.
         # Auto-disable on platforms that don't support it to avoid a RuntimeError.
@@ -509,7 +554,8 @@ class DRAML1ManagerConfig(L1ManagerConfig):
 
         Raises:
             ValueError: A field is unknown, malformed, or incompatible.
-            RuntimeError: The requested hugepage pool is unavailable.
+            RuntimeError: The requested hugepage pool is unavailable, or
+                mlock is requested and the node allows compacting mlocked pages.
         """
         config = _parse_l1_common(
             cls,
@@ -517,7 +563,7 @@ class DRAML1ManagerConfig(L1ManagerConfig):
             defaults,
             read_ttl,
             write_ttl,
-            {"use_lazy", "init_size_gb", "shm_name", "use_hugepages"},
+            {"use_lazy", "init_size_gb", "shm_name", "use_hugepages", "mlock"},
         )
         use_lazy = _l1_bool(values, "use_lazy", True)
         hugepages = _l1_bool(values, "use_hugepages", False)
@@ -532,6 +578,7 @@ class DRAML1ManagerConfig(L1ManagerConfig):
             init_size_in_bytes=int(_l1_number(values, "init_size_gb", 20) * (1 << 30)),
             shm_name=shm_name,
             use_hugepages=hugepages,
+            mlock=_l1_bool(values, "mlock", False),
         )
         if hugepages:
             _check_hugepage_availability(config.memory_config.size_in_bytes)
@@ -564,9 +611,13 @@ class DevDaxL1ManagerConfig(L1ManagerConfig):
         Raises:
             ValueError: A field is unknown, malformed, or incompatible.
         """
-        config = _parse_l1_common(cls, values, defaults, read_ttl, write_ttl, {"path"})
+        config = _parse_l1_common(
+            cls, values, defaults, read_ttl, write_ttl, {"path", "offset_gb"}
+        )
         config.memory_config = replace(
-            config.memory_config, devdax_path=_l1_path(values)
+            config.memory_config,
+            devdax_path=_l1_path(values),
+            devdax_offset_in_bytes=_l1_offset_bytes(values),
         )
         return config
 
@@ -850,6 +901,26 @@ def add_storage_manager_args(
             "that adapter's max_dax_size_gb is used as L1 overflow size."
         ),
     )
+    memory_group.add_argument(
+        "--l1-devdax-offset-gb",
+        type=float,
+        default=0.0,
+        help=(
+            "Byte offset into --l1-devdax-path, in GiB, where the L1 mapping "
+            "starts (default 0). Lets several LMCache servers share one CXL "
+            "device by mapping disjoint ranges. Must land on a page boundary; "
+            "the kernel also enforces the device alignment (usually 2 MiB)."
+        ),
+    )
+    memory_group.add_argument(
+        "--l1-mlock",
+        action="store_true",
+        help=(
+            "ROCm only: mlock the L1 buffer so memory compaction cannot migrate "
+            "it. Requires sysctl vm.compact_unevictable_allowed=0 and an "
+            "unlimited memlock ulimit (or CAP_IPC_LOCK)."
+        ),
+    )
 
     # GDS L1 tier (optional, opt-in via --gds-l1-path)
     gds_group = parser.add_argument_group(
@@ -1090,6 +1161,7 @@ def parse_args_to_config(
             logger.error("Hugepage availability check failed: %s", e)
             raise
 
+    devdax_offset = int(getattr(args, "l1_devdax_offset_gb", 0.0) * (1 << 30))
     if shm_name is None:
         memory_config = L1MemoryManagerConfig(
             size_in_bytes=int(args.l1_size_gb * (1 << 30)),
@@ -1098,6 +1170,8 @@ def parse_args_to_config(
             align_bytes=args.l1_align_bytes,
             use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
+            devdax_offset_in_bytes=devdax_offset,
+            mlock=args.l1_mlock,
         )
     else:
         memory_config = L1MemoryManagerConfig(
@@ -1108,6 +1182,8 @@ def parse_args_to_config(
             shm_name=shm_name,
             use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
+            devdax_offset_in_bytes=devdax_offset,
+            mlock=args.l1_mlock,
         )
 
     gds_l1_config: GdsL1Config | None = None

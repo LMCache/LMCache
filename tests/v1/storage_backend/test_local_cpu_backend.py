@@ -574,6 +574,63 @@ class TestLocalCPUBackend:
 
 
 @pytest.mark.no_shared_allocator
+class TestLocalCPUBackendClear:
+    """Contract tests for LocalCPUBackend.clear()."""
+
+    def test_clear_removes_evictable_entries_and_returns_token_count(
+        self, local_cpu_backend
+    ):
+        keys = [create_test_key(f"clear_{i}") for i in range(3)]
+        for key in keys:
+            memory_obj = create_test_memory_obj()  # 16 tokens (KV_T2D, dim 1)
+            local_cpu_backend.submit_put_task(key, memory_obj)
+            memory_obj.ref_count_down()  # drop the creator's reference
+
+        assert local_cpu_backend.clear() == 3 * 16
+        assert not any(local_cpu_backend.contains(key) for key in keys)
+        local_cpu_backend.memory_allocator.close()
+
+    def test_clear_keeps_pinned_entries(self, local_cpu_backend):
+        pinned_key = create_test_key("clear_pinned")
+        free_key = create_test_key("clear_free")
+        for key in (pinned_key, free_key):
+            memory_obj = create_test_memory_obj()
+            local_cpu_backend.submit_put_task(key, memory_obj)
+            memory_obj.ref_count_down()
+        assert local_cpu_backend.pin(pinned_key)
+
+        assert local_cpu_backend.clear() == 16
+        assert local_cpu_backend.contains(pinned_key)
+        assert not local_cpu_backend.contains(free_key)
+
+        assert local_cpu_backend.unpin(pinned_key)
+        local_cpu_backend.clear()
+        local_cpu_backend.memory_allocator.close()
+
+    def test_clear_keeps_entries_still_referenced(self, local_cpu_backend):
+        key = create_test_key("clear_referenced")
+        memory_obj = create_test_memory_obj()
+        local_cpu_backend.submit_put_task(key, memory_obj)
+        # The creator's reference is still held, so the entry is not evictable.
+
+        assert local_cpu_backend.clear() == 0
+        assert local_cpu_backend.contains(key)
+
+        memory_obj.ref_count_down()
+        assert local_cpu_backend.clear() == 16
+        local_cpu_backend.memory_allocator.close()
+
+    def test_clear_empty_cache_returns_zero(self, local_cpu_backend):
+        assert local_cpu_backend.clear() == 0
+        local_cpu_backend.memory_allocator.close()
+
+    def test_clear_returns_zero_when_hot_cache_disabled(
+        self, local_cpu_backend_disabled
+    ):
+        assert local_cpu_backend_disabled.clear() == 0
+        local_cpu_backend_disabled.memory_allocator.close()
+
+
 class TestLocalCPUBackendAllocatorRecovery:
     def teardown_method(self, method):
         LMCStatsMonitor.unregister_all_metrics()

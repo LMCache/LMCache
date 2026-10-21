@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for dynamically loaded multiprocess server modules."""
 
+# Future
+from __future__ import annotations
+
 # Standard
 from types import ModuleType
-from typing import Any, cast
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 import sys
 
@@ -12,36 +15,47 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess import server as server_mod
-from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.ext_server_module import (
-    ExtServerModuleBuildContext,
-    ExtServerModuleComponents,
     ExtServerModuleSpec,
     build_server_module_router,
-    load_server_module_components,
+    load_server_module_classes,
     parse_server_module_specs,
     register_grpc_services,
     register_zmq_services,
     server_module_handler,
 )
+from lmcache.v1.multiprocess.modules import lookup as lookup_mod
+from lmcache.v1.multiprocess.modules import management as management_mod
 from lmcache.v1.multiprocess.protocols.server_module import ServerModuleCallRequest
 from lmcache.v1.multiprocess.request_handler import iter_request_handlers
 
 
-class _FakeLMCacheDriven:
-    def __init__(self, ctx) -> None:
-        self.ctx = ctx
+class _FakePluginModule(DiscoverableModule):
+    module_name = "fake_plugin"
+    module_dependencies = (lookup_mod.LookupModule,)
+    last_created: ClassVar[_FakePluginModule | None] = None
+    last_dependency: ClassVar[EngineModule | None] = None
 
-
-class _FakeEngineDriven:
-    def __init__(self, ctx) -> None:
-        self.ctx = ctx
-
-
-class _FakePluginModule:
-    def __init__(self, ctx) -> None:
+    def __init__(self, ctx, config: dict[str, Any] | None = None) -> None:
         self._ctx = ctx
+        self.config = config or {}
         self.touched: list[int] = []
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        cls.last_dependency = build_ctx.require(lookup_mod.LookupModule)
+        module = cls(
+            build_ctx.engine_context,
+            dict(build_ctx.config_for(cls)),
+        )
+        cls.last_created = module
+        return module
 
     @property
     def context(self):
@@ -69,6 +83,8 @@ class _FakePluginModule:
 
 
 class _FakePluginProtocolModule(_FakePluginModule):
+    module_name = "fake_plugin_protocol"
+
     @server_module_handler("fake.echo")
     def echo(self, payload: bytes) -> bytes:
         return b"echo:" + payload
@@ -79,6 +95,8 @@ class _FakePluginProtocolModule(_FakePluginModule):
 
 
 class _FakePluginTransportServiceModule(_FakePluginModule):
+    module_name = "fake_plugin_transport"
+
     def __init__(self, ctx) -> None:
         super().__init__(ctx)
         self.grpc_server: object | None = None
@@ -91,15 +109,15 @@ class _FakePluginTransportServiceModule(_FakePluginModule):
         self.zmq_server = server
 
 
-def _install_fake_factory(
+def _install_fake_module(
     monkeypatch: pytest.MonkeyPatch,
-    factory,
+    module_type: type[DiscoverableModule],
     *,
     module_name: str = "fake_server_module_plugin",
-    factory_name: str = "build_server_modules",
 ) -> str:
     module = ModuleType(module_name)
-    setattr(module, factory_name, factory)
+    monkeypatch.setattr(module_type, "__module__", module_name)
+    setattr(module, module_type.__name__, module_type)
     monkeypatch.setitem(sys.modules, module_name, module)
     return module_name
 
@@ -108,11 +126,7 @@ def test_parse_server_module_specs_accepts_object_and_list() -> None:
     specs = parse_server_module_specs(
         [
             '{"module_path":"plugin.one","config":{"a":1}}',
-            (
-                '[{"module_path":"plugin.two",'
-                '"factory_name":"build_two"},'
-                '{"module_path":"plugin.three"}]'
-            ),
+            ('[{"module_path":"plugin.two"},{"module_path":"plugin.three"}]'),
         ]
     )
 
@@ -122,55 +136,61 @@ def test_parse_server_module_specs_accepts_object_and_list() -> None:
         "plugin.three",
     ]
     assert specs[0].config == {"a": 1}
-    assert specs[1].factory_name == "build_two"
-    assert specs[2].factory_name == "build_server_modules"
+    assert specs[1].config == {}
+    assert specs[2].config == {}
 
 
-def test_load_server_module_components_accepts_service_only_return(
+def test_load_server_module_classes_returns_class_and_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    grpc_registrar = MagicMock(name="grpc_registrar")
-    zmq_registrar = MagicMock(name="zmq_registrar")
-
-    def factory(build_context: ExtServerModuleBuildContext):
-        assert build_context.config == {"mode": "service-only"}
-        return ExtServerModuleComponents(
-            grpc_service_registrars=[grpc_registrar],
-            zmq_service_registrars=[zmq_registrar],
-        )
-
-    module_name = _install_fake_factory(monkeypatch, factory)
-    components = load_server_module_components(
-        [ExtServerModuleSpec(module_name, config={"mode": "service-only"})],
-        server_context=MagicMock(name="ctx"),
-        mp_config=MPServerConfig(),
-        coordinator_config=MagicMock(url=""),
-        built_modules=[],
+    module_name = _install_fake_module(monkeypatch, _FakePluginModule)
+    configured = load_server_module_classes(
+        [ExtServerModuleSpec(module_name, config={"mode": "test"})]
     )
 
-    assert components.modules == ()
-    assert components.grpc_service_registrars == (grpc_registrar,)
-    assert components.zmq_service_registrars == (zmq_registrar,)
+    assert configured == [(_FakePluginModule, {"mode": "test"})]
 
 
-def test_load_server_module_components_rejects_non_callable_service_registrar(
+def test_load_server_module_classes_rejects_duplicate_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    module_name = _install_fake_factory(
-        monkeypatch,
-        lambda _: ExtServerModuleComponents(
-            grpc_service_registrars=[cast(Any, "not-callable")]
-        ),
-    )
+    module_name = _install_fake_module(monkeypatch, _FakePluginModule)
+    spec = ExtServerModuleSpec(module_name)
+    with pytest.raises(ValueError, match="configured more than once"):
+        load_server_module_classes([spec, spec])
 
-    with pytest.raises(TypeError, match="grpc_service_registrars"):
-        load_server_module_components(
-            [ExtServerModuleSpec(module_name)],
-            server_context=MagicMock(name="ctx"),
-            mp_config=MPServerConfig(),
-            coordinator_config=MagicMock(url=""),
-            built_modules=[],
-        )
+
+def test_load_server_module_classes_requires_discoverable_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module_name = "empty_server_module_plugin"
+    monkeypatch.setitem(sys.modules, module_name, ModuleType(module_name))
+
+    with pytest.raises(TypeError, match="defines no concrete"):
+        load_server_module_classes([ExtServerModuleSpec(module_name)])
+
+
+def test_load_server_module_classes_ignores_imported_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module_name = "server_module_with_imported_dependency"
+    module: Any = ModuleType(module_name)
+    external_type = type(
+        "ExternalModule",
+        (_FakePluginModule,),
+        {
+            "__module__": module_name,
+            "module_name": "external",
+            "module_dependencies": (lookup_mod.LookupModule,),
+        },
+    )
+    module.ExternalModule = external_type
+    module.LookupModule = lookup_mod.LookupModule
+    monkeypatch.setitem(sys.modules, module_name, module)
+
+    configured = load_server_module_classes([ExtServerModuleSpec(module_name)])
+
+    assert configured == [(external_type, {})]
 
 
 def test_server_module_router_dispatches_extension_handlers() -> None:
@@ -179,8 +199,10 @@ def test_server_module_router_dispatches_extension_handlers() -> None:
     assert router is not None
 
     registered = iter_request_handlers(router)
-    assert len(registered) == 1
-    assert registered[0].operation == "server_module_call"
+    assert [handler.operation for handler in registered] == [
+        "server_module_affinity_call",
+        "server_module_call",
+    ]
 
     ok = router.server_module_call(
         ServerModuleCallRequest(method="fake.echo", payload=b"hello")
@@ -237,28 +259,6 @@ def test_transport_service_registrars_are_called() -> None:
     assert module.zmq_server is zmq_server
 
 
-@pytest.mark.parametrize("transport", ["grpc", "zmq"])
-def test_explicit_module_service_registrar_is_called_once(transport: str) -> None:
-    calls: list[tuple[object, object]] = []
-
-    class ServiceModule:
-        def register_grpc_services(self, server: object) -> None:
-            calls.append((self, server))
-
-        def register_zmq_services(self, server: object) -> None:
-            calls.append((self, server))
-
-    explicit_module = ServiceModule()
-    implicit_module = ServiceModule()
-    server = object()
-    register = register_grpc_services if transport == "grpc" else register_zmq_services
-    registrar = getattr(explicit_module, f"register_{transport}_services")
-
-    register([explicit_module, implicit_module], server, [registrar])
-
-    assert calls == [(explicit_module, server), (implicit_module, server)]
-
-
 def test_transport_service_registrars_must_be_callable() -> None:
     class BadModule:
         register_grpc_services = "not-callable"
@@ -269,89 +269,42 @@ def test_transport_service_registrars_must_be_callable() -> None:
 
 def test_build_modules_loads_plugin_and_registers_liveness_target(
     monkeypatch: pytest.MonkeyPatch,
+    stub_module_resources,
 ) -> None:
     ctx = MagicMock(name="ctx")
-    plugin_module = _FakePluginModule(ctx)
-
-    def factory(build_context: ExtServerModuleBuildContext):
-        assert build_context.server_context is ctx
-        assert any(
-            isinstance(module, server_mod.KVEventModule)
-            for module in build_context.modules
-        )
-        return plugin_module
-
-    module_name = _install_fake_factory(monkeypatch, factory)
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
-    monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
-    monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
-    management = MagicMock(name="ManagementModule")
-    monkeypatch.setattr(server_mod, "ManagementModule", management)
-
+    logger_info = MagicMock()
+    monkeypatch.setattr(server_mod.logger, "info", logger_info)
+    module_name = _install_fake_module(monkeypatch, _FakePluginModule)
     modules = server_mod._build_modules(
         ctx,
-        MPServerConfig(server_modules=[ExtServerModuleSpec(module_name)]),
-        MagicMock(url=""),
+        MPServerConfig(
+            worker_reap_timeout_seconds=0,
+            server_modules=[ExtServerModuleSpec(module_name, config={"mode": "test"})],
+        ),
+        CoordinatorConfig(),
     )
+    plugin_module = _FakePluginModule.last_created
 
-    assert modules[-1] is plugin_module
-    assert plugin_module in management.call_args.kwargs["liveness_targets"]
-
-
-def test_build_modules_adds_server_module_router(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ctx = MagicMock(name="ctx")
-    plugin_module = _FakePluginProtocolModule(ctx)
-
-    def factory(build_context: ExtServerModuleBuildContext):
-        assert build_context.server_context is ctx
-        return plugin_module
-
-    module_name = _install_fake_factory(monkeypatch, factory)
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
-    monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
-    monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
-    monkeypatch.setattr(server_mod, "ManagementModule", MagicMock())
-
-    modules = server_mod._build_modules(
-        ctx,
-        MPServerConfig(server_modules=[ExtServerModuleSpec(module_name)]),
-        MagicMock(url=""),
+    assert plugin_module is not None
+    assert plugin_module.config == {"mode": "test"}
+    assert plugin_module in modules
+    assert plugin_module.context is ctx
+    management = next(
+        m for m in modules if isinstance(m, management_mod.ManagementModule)
     )
-
-    assert modules[-2] is plugin_module
-    assert iter_request_handlers(modules[-1])[0].operation == "server_module_call"
-
-
-def test_build_server_components_collects_transport_service_registrars(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ctx = MagicMock(name="ctx")
-    grpc_registrar = MagicMock(name="grpc_registrar")
-    zmq_registrar = MagicMock(name="zmq_registrar")
-
-    def factory(build_context: ExtServerModuleBuildContext):
-        assert build_context.server_context is ctx
-        return ExtServerModuleComponents(
-            grpc_service_registrars=[grpc_registrar],
-            zmq_service_registrars=[zmq_registrar],
-        )
-
-    module_name = _install_fake_factory(monkeypatch, factory)
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
-    monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
-    monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
-    monkeypatch.setattr(server_mod, "ManagementModule", MagicMock())
-
-    components = server_mod._build_server_components(
-        ctx,
-        MPServerConfig(server_modules=[ExtServerModuleSpec(module_name)]),
-        MagicMock(url=""),
+    assert management.ping(123)
+    assert plugin_module.touched == [123]
+    dependency = _FakePluginModule.last_dependency
+    assert isinstance(dependency, lookup_mod.LookupModule)
+    assert dependency in modules
+    assert modules.index(dependency) < modules.index(plugin_module)
+    logger_info.assert_called_once()
+    log_format, module_count, module_details = logger_info.call_args.args
+    log_message = log_format % (module_count, module_details)
+    assert module_count == len(modules)
+    assert all(
+        isinstance(m, DiscoverableModule)
+        and m.module_name + "(dependencies=[" in log_message
+        for m in modules
     )
-
-    assert grpc_registrar in components.grpc_service_registrars
-    assert zmq_registrar in components.zmq_service_registrars
+    assert "fake_plugin(dependencies=[lookup])" in log_message

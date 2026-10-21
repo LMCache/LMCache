@@ -715,9 +715,12 @@ the files by ``sample_id``:
    lmcache bench engine --engine-url http://localhost:8001 $ARGS --rag-output b.json
 
 The files are comparable **only when their ``run_fingerprint`` values match**.
-It covers dataset, sample ids, budget, template kwargs, model, and chunk
-alignment, so a mismatch means the diff would report an input delta as a
-quality delta.
+It covers the selected samples' ids, rendered prompts and gold answers,
+along with the dataset path, budget, template kwargs, model, seed and chunk
+alignment. Editing a selected question, document or reference at the same
+dataset path changes the fingerprint; output paths and unmeasured records
+do not. Fingerprints from older versions that covered only sample ids are
+not comparable with these content-based fingerprints.
 
 .. note::
 
@@ -1128,6 +1131,9 @@ Options
    * - ``--interval SECS``
      - ``0.5``
      - Delay between successive sub-passes.
+   * - ``--concurrency N``
+     - ``1``
+     - Number of clients sending requests at the same time (see below).
    * - ``--kvcache-shape-spec SPEC``
      - ``(2,1024,16,8,128):float16:32``
      - KV cache shape spec (see below).
@@ -1153,7 +1159,7 @@ CPU mode (no GPU)
 runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates regular
 CPU KV tensors and exercises the full RPC path through ``TransferContext``.
 The engine-driven context uses server-owned SHM staging when available and
-falls back to pickle transport. In ``lmcache_driven`` mode, the CPU wrapper
+falls back to typed inline tensor transport. In ``lmcache_driven`` mode, the CPU wrapper
 migrates the tensors to POSIX SHM during registration.
 
 By default ``--mode cpu`` uses the engine-driven gather/scatter path
@@ -1280,14 +1286,38 @@ Example: MLA + TP=2, exercising rank 0 STORE + both-rank RETRIEVE:
        --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:8" \
        --tp-size 2
 
-The bench's client-side checksum aggregates writer-rank bytes only,
-so a cold-vs-warm mismatch pinpoints the exact rank whose round trip
-went wrong -- useful for verifying that a new server-side change
-handles per-rank ``instance_id`` routing correctly.
+The bench verifies retrieved data on every rank and reports the rank and
+chunk for checksum mismatches.
 
 See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
 for the authoritative parsing rules and validation errors.
 
+
+Concurrent clients
+~~~~~~~~~~~~~~~~~~
+
+With the default ``--concurrency 1`` a single client sends one request at a
+time, so the run measures per-request latency but never queues work on the
+server. ``--concurrency N`` runs ``N`` clients in parallel, each with its own
+connection and KV tensors, and its Workers registered under their own
+``instance_id`` block. Sequences are dealt round-robin (client ``k`` runs
+``start + k``, ``start + k + N``, ...), so no two clients touch the same
+keys and the cold/warm checks stay valid.
+
+.. code-block:: bash
+
+   lmcache bench server \
+       --rpc-url tcp://localhost:5555 --mode cpu \
+       --start 0 --end 400 --interval 0 --concurrency 8
+
+The summary adds ``Concurrency``, ``Elapsed (s)``, and ``Requests / s``.
+Use ``--interval 0`` when comparing throughput, otherwise the delay
+dominates. ``Requests / s`` counts cold/warm sequence pairs, matching
+``Total requests``.
+
+Size the server's L1 to hold the whole run. If stores arrive faster than
+the eviction controller frees memory, the server drops them, and the
+affected warm lookups miss and fail their checks.
 
 Profiling the server
 ~~~~~~~~~~~~~~~~~~~~~
@@ -1332,8 +1362,9 @@ After the run completes (or is interrupted with ``Ctrl-C``), a structured
 metrics summary is printed. The summary includes:
 
 * **Configuration** -- RPC URL, mode, transfer mode, tokens per request,
-  interval.
-* **Results** -- total requests, checksum OK / FAIL counts, pass rate.
+  interval, concurrency.
+* **Results** -- total requests, checksum OK / FAIL counts, pass rate,
+  elapsed time, requests per second.
 * **Latency sections** -- per-operation latency statistics (count, mean,
   min, max, p50, p99) for cold lookup, cold store, warm lookup, and warm
   retrieve.
