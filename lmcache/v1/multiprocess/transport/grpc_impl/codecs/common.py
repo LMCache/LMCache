@@ -12,13 +12,13 @@ from lmcache.v1.multiprocess.transport.grpc_impl.codecs.base import (
 def _write_device_ipc_wrapper(
     message: common_pb2.DeviceIpcWrapper, value: DeviceIPCWrapper
 ) -> None:
-    message.pickled_payload = DeviceIPCWrapper.Serialize(value)
+    message.descriptor_payload = DeviceIPCWrapper.Serialize(value)
 
 
 def _read_device_ipc_wrapper(
     message: common_pb2.DeviceIpcWrapper,
 ) -> DeviceIPCWrapper:
-    return DeviceIPCWrapper.Deserialize(message.pickled_payload)
+    return DeviceIPCWrapper.Deserialize(message.descriptor_payload)
 
 
 def get_message_codecs() -> tuple[
