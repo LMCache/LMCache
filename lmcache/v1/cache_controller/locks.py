@@ -33,7 +33,14 @@ class RWLockWithTimeout:
         self._condition = threading.Condition(threading.Lock())
 
     def acquire_read(self, timeout: Optional[float] = None) -> bool:
-        """Acquire a read lock with optional timeout."""
+        """Acquire a read lock with optional timeout.
+
+        Args:
+            timeout: Timeout in seconds. None means wait forever.
+
+        Returns:
+            True if the read lock was acquired, False if the timeout expired.
+        """
         deadline = time.monotonic() + timeout if timeout is not None else None
 
         with self._condition:
@@ -57,11 +64,19 @@ class RWLockWithTimeout:
                 self._condition.notify_all()
 
     def acquire_write(self, timeout: Optional[float] = None) -> bool:
-        """Acquire a write lock with optional timeout."""
+        """Acquire a write lock with optional timeout.
+
+        Args:
+            timeout: Timeout in seconds. None means wait forever.
+
+        Returns:
+            True if the write lock was acquired, False if the timeout expired.
+        """
         deadline = time.monotonic() + timeout if timeout is not None else None
 
         with self._condition:
             self._writers_waiting += 1
+            acquired = False
             try:
                 while self._readers > 0 or self._writer_active:
                     if deadline is not None and time.monotonic() >= deadline:
@@ -71,9 +86,15 @@ class RWLockWithTimeout:
                         return False
                     self._condition.wait(timeout=remaining)
                 self._writer_active = True
+                acquired = True
                 return True
             finally:
                 self._writers_waiting -= 1
+                # Readers park while a writer is waiting and only re-check the
+                # predicate after a notify. A writer that gives up must wake
+                # them, otherwise they stay blocked until their own timeout.
+                if not acquired:
+                    self._condition.notify_all()
 
     def release_write(self):
         """Release a write lock."""
