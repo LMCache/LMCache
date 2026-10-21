@@ -246,9 +246,11 @@ __device__ void multi_layer_block_transfer_single_block(
 
   if constexpr (format == EngineKVFormat::NL_X_NB_BSV_BSS) {
     // Blocked page [BSxvals][BSxscales] vs token-major chunk row: two
-    // copies per token (host pins <=4B units, so scale is whole units).
+    // copies per token. The per-token scale is exactly one transfer word
+    // (4 B fp32 for the DSA indexer, 8 B of UE8M0 for the DeepSeek-V4 main
+    // KV); the launcher picks the word so this holds.
     const size_t spt = shape_desc.scalars_per_token<ScalarType>();
-    const size_t scale_units = 4 / sizeof(ScalarType);
+    const size_t scale_units = 1;
     const size_t val_units = spt - scale_units;
     for (int t = init_token_offset; t < shape_desc.bs; t += token_stride) {
       ScalarType* eng_vals =
@@ -527,12 +529,17 @@ void multi_layer_block_kv_transfer(
               head_bytes, ") must be divisible by 2 for vectorized access");
 
   if (engine_kv_format == EngineKVFormat::NL_X_NB_BSV_BSS) {
-    // Blocked-scale indexer cache: the per-token fp32 scale must be a whole
-    // number of transfer units, so pin 4-byte units regardless of row width.
+    // Blocked-scale records: the per-token scale is one transfer word, so
+    // the word is the widest of 8/4 bytes dividing the row (584-byte V4
+    // records carry 8 B of UE8M0 scales, 132/68-byte indexer rows an fp32).
     TORCH_CHECK(head_bytes % sizeof(uint32_t) == 0,
                 "NL_X_NB_BSV_BSS row bytes (", head_bytes,
                 ") must be divisible by 4");
-    LAUNCH_TEMPLATED(uint32_t);
+    if (head_bytes % sizeof(uint64_t) == 0) {
+      LAUNCH_TEMPLATED(uint64_t);
+    } else {
+      LAUNCH_TEMPLATED(uint32_t);
+    }
     return;
   }
 

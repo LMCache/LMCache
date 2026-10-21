@@ -16,12 +16,27 @@ from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
+# Third Party
+import pytest
+
 _FMT = EngineKVFormat.NL_X_NB_BSV_BSS
 _BS = 4  # tokens per block
-_VALS = 8  # value bytes per token
-_ROW = _VALS + 4  # + fp32 scale
 _NB = 6
 _NL = 2
+# (value bytes, scale bytes) per token: the DSA indexer row and DeepSeek-V4's
+# packed main-KV row. Module globals are rebound per parametrization.
+_RECORDS = {132: (128, 4), 584: (576, 8)}
+_VALS = 128
+_SCALE = 4
+_ROW = _VALS + _SCALE
+
+
+@pytest.fixture(params=sorted(_RECORDS), ids=lambda r: f"row{r}")
+def record(request):
+    global _VALS, _SCALE, _ROW
+    _VALS, _SCALE = _RECORDS[request.param]
+    _ROW = _VALS + _SCALE
+    return request.param
 
 
 def _blocked_write(page: torch.Tensor, slot: int, row: torch.Tensor) -> None:
@@ -30,7 +45,9 @@ def _blocked_write(page: torch.Tensor, slot: int, row: torch.Tensor) -> None:
     flat = page[block].view(-1)
     flat[offset * _VALS : (offset + 1) * _VALS] = row[:_VALS]
     scale_base = _BS * _VALS
-    flat[scale_base + offset * 4 : scale_base + (offset + 1) * 4] = row[_VALS:]
+    flat[scale_base + offset * _SCALE : scale_base + (offset + 1) * _SCALE] = row[
+        _VALS:
+    ]
 
 
 def _pages() -> list[torch.Tensor]:
@@ -73,7 +90,7 @@ def _block_transfer(
     )
 
 
-def test_block_transfer_gathers_token_major_rows() -> None:
+def test_block_transfer_gathers_token_major_rows(record) -> None:
     """D2H chunk rows are canonical; H2D writes them back to blocked slots."""
     block_ids = [4, 1, 3]
     slots = [b * _BS + t for b in block_ids for t in range(_BS)]

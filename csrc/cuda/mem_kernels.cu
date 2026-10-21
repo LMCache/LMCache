@@ -320,13 +320,18 @@ page_buffer_offset(const int k_or_v, const int token_idx,
            static_cast<int64_t>(block_offset) * scalars_per_token +
            scalar_offset;
   }
-  // DSA indexer: page [BSxvals][BSxscales]; 4B units, so scale == 1 unit
+  // Blocked scales: page [BSxvals][BSxscales]; the scale is one xword (4 B
+  // for the DSA indexer, 8 B for the DeepSeek-V4 main KV record).
   else if constexpr (format == EngineKVFormat::NL_X_NB_BSV_BSS) {
     const int64_t block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
     const int vals = scalars_per_token - 1;
-    const int64_t block_base =
-        block_idx * static_cast<int64_t>(block_size) * scalars_per_token;
+    // Padded pages / shared physical blocks pass the real per-block step; 0 = tight.
+    const int64_t block_step =
+        block_stride_xwords > 0
+            ? block_stride_xwords
+            : static_cast<int64_t>(block_size) * scalars_per_token;
+    const int64_t block_base = block_idx * block_step;
     if (scalar_offset < vals) {
       return block_base + static_cast<int64_t>(block_offset) * vals +
              scalar_offset;
@@ -548,10 +553,12 @@ void multi_layer_kv_transfer_templated(
   lmc::check_head_size(engine_kv_format, head_size_xword);
   // 0 means tight; the per-format offset entries compute their own tight step.
   const int64_t block_stride_xwords = block_stride_elems / elements_per_xword;
-  TORCH_CHECK(
-      engine_kv_format != EngineKVFormat::NL_X_NB_BSV_BSS || sizeof(T) == 4,
-      "NL_X_NB_BSV_BSS requires 4-byte transfer units (row bytes "
-      "must be divisible by 4 and not by 8)");
+  // Blocked-scale pages: the per-token scale is one transfer word (4 B indexer, 8 B
+  // DeepSeek-V4 main KV); kv_format.blocked_scale refuses records that are not.
+  TORCH_CHECK(engine_kv_format != EngineKVFormat::NL_X_NB_BSV_BSS ||
+                  sizeof(T) == 4 || sizeof(T) == 8,
+              "NL_X_NB_BSV_BSS requires a 4- or 8-byte transfer word (the "
+              "per-token scale is one word)");
 
   // Fused packs K+V in the trailing dim (kv_size == 1, like MLA): single pass.
   int k_or_v_size =
@@ -700,10 +707,12 @@ void multi_layer_kv_transfer_fused_templated(
   lmc::check_head_size(engine_kv_format, head_size_xword);
   // 0 means tight; the per-format offset entries compute their own tight step.
   const int64_t block_stride_xwords = block_stride_elems / elements_per_xword;
-  TORCH_CHECK(
-      engine_kv_format != EngineKVFormat::NL_X_NB_BSV_BSS || sizeof(T) == 4,
-      "NL_X_NB_BSV_BSS requires 4-byte transfer units (row bytes "
-      "must be divisible by 4 and not by 8)");
+  // Blocked-scale pages: the per-token scale is one transfer word (4 B indexer, 8 B
+  // DeepSeek-V4 main KV); kv_format.blocked_scale refuses records that are not.
+  TORCH_CHECK(engine_kv_format != EngineKVFormat::NL_X_NB_BSV_BSS ||
+                  sizeof(T) == 4 || sizeof(T) == 8,
+              "NL_X_NB_BSV_BSS requires a 4- or 8-byte transfer word (the "
+              "per-token scale is one word)");
 
   int k_or_v_size =
       (::is_mla(engine_kv_format) || ::is_fused_packed(engine_kv_format)) ? 1
