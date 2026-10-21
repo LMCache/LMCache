@@ -18,7 +18,7 @@ from lmcache.tools.cache_simulator.trace_analyze import (
     render_html,
 )
 
-FIXTURE = Path(__file__).parent / "data" / "mp_request_trace.jsonl"
+FIXTURE = Path(__file__).parent / "data" / "trace_formats" / "lmcache.jsonl"
 LLAMA = "meta-llama/Llama-3.1-8B"
 
 

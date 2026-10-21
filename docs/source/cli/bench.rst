@@ -1924,10 +1924,8 @@ ids) and ``session_id``; the span's start time is the lookup timestamp.
 A request the engine looks up again (for example after preemption) emits
 one span per lookup; the analyzer keeps only its earliest span.
 
-This is the ``lmcache`` trace format, the default and currently only
-value of ``--trace-format``. ``lmcache.input_ids`` may be the OTLP
-integer array as emitted or one JSON string of the same integers, which
-a collector ``transform`` processor may write to keep the file small.
+This is the ``lmcache`` trace format, the default value of
+``--trace-format``; its contract is in :ref:`trace-analyze-formats`.
 When no span matches, the tool reports what the files did hold.
 
 Persist the spans with the Collector's ``file`` exporter. Starting from
@@ -1967,6 +1965,76 @@ The file then appears as ``otel-data/lmcache-traces.jsonl`` on the host.
 It holds OTLP JSON, one export batch per line. Prompt token ids are
 only exported when ``--enable-token-trace`` is set; treat the file as
 sensitive.
+
+
+.. _trace-analyze-formats:
+
+Trace formats
+~~~~~~~~~~~~~
+
+``--trace-format`` names the producer whose spans the input holds. Each
+format is a contract on the fields the analyzer reads, kept honest by a
+sample file under ``tests/tools/data/trace_formats/`` that the test
+suite replays. A new format adds a reader function, a sample file and an
+entry here.
+
+lmcache
+^^^^^^^
+
+The MP server's token-trace span, as the Collector's ``file`` exporter
+writes it with no processing. Sample:
+``tests/tools/data/trace_formats/lmcache.jsonl``.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 26 18 56
+
+   * - Field
+     - Type
+     - Meaning
+   * - span ``name``
+     - string
+     - ``mp.request.trace``. Spans with any other name are ignored.
+   * - ``startTimeUnixNano``
+     - int64
+     - Lookup time; sets the replay order.
+   * - ``session_id``
+     - string
+     - Request id. A request looked up more than once keeps its earliest
+       span.
+   * - ``lmcache.model``
+     - string
+     - Model name as the engine reports it; ``--model`` filters on it.
+   * - ``lmcache.input_ids``
+     - int64 array, or string
+     - Prompt token ids after the chat template, as the engine prefilled
+       them: the OTLP integer array as emitted, or one JSON string of the
+       same integers as a collector ``transform`` may write it.
+
+Everything else on a line (the resource block, the span's trace, span
+and parent ids, kind, flags and status) is OTLP packaging and is ignored.
+One line of the sample, pretty-printed with the token array shortened:
+
+.. code-block:: json
+
+   {"resourceSpans": [{
+     "resource": {"attributes": [
+       {"key": "service.name", "value": {"stringValue": "lmcache"}}]},
+     "scopeSpans": [{
+       "scope": {"name": "lmcache_mp.server"},
+       "spans": [{
+         "name": "mp.request.trace",
+         "startTimeUnixNano": "1792617070080115968",
+         "endTimeUnixNano": "1792617070080115968",
+         "attributes": [
+           {"key": "session_id",
+            "value": {"stringValue": "chatcmpl-ab53be3e1411e41a-81c1fd35"}},
+           {"key": "lmcache.model",
+            "value": {"stringValue": "Qwen/Qwen3-1.7B"}},
+           {"key": "lmcache.input_ids",
+            "value": {"arrayValue": {"values": [
+              {"intValue": "151644"}, {"intValue": "872"}, {"intValue": "198"}]}}}
+         ]}]}]}]}
 
 
 What it does

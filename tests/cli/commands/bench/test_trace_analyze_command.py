@@ -12,7 +12,9 @@ import pytest
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
 
-FIXTURE = Path(__file__).parents[3] / "tools" / "data" / "mp_request_trace.jsonl"
+FIXTURE = (
+    Path(__file__).parents[3] / "tools" / "data" / "trace_formats" / "lmcache.jsonl"
+)
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
