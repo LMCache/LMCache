@@ -19,12 +19,14 @@ edits exist to restore one invariant the raw tensors can violate:
 ## Structure
 
 Each case is one `KVCacheGroupEdit` rule in the module's `_EDITS` registry:
-`matches(spec, kv_cache)` decides **structurally** — from the vLLM spec kind
-(`get_kv_cache_spec_kind`, which also unwraps `UniformTypeKVCacheSpecs`) and
-the registered tensor, never from model name or architecture — and
-`apply(spec, kv_cache)` produces a view over the same storage. First matching
-rule wins; unmatched layers pass through. Covering a new group kind means
-adding one rule.
+`matches(spec, kv_cache, manager_block_size)` decides **structurally** — from
+the vLLM spec kind (`get_kv_cache_spec_kind`, which also unwraps
+`UniformTypeKVCacheSpecs`), the registered tensor, and the group manager's
+logical block width, never from model name or architecture — and
+`apply(spec, kv_cache, layout_hints, manager_block_size)` produces a view over
+the same storage. Each layer is matched against its own leaf spec. First
+matching rule wins; unmatched layers pass through. Covering a new group kind
+means adding one rule.
 
 Model name/arch is deliberately not an input: the same architecture yields
 different group structures depending on runtime decisions
@@ -33,8 +35,14 @@ the config + tensors already resolve.
 
 ## Edits
 
-Both rules apply only to Mamba-hybrid models (the registry is only consulted
-when `kv_cache_config.has_mamba_layers`).
+Mamba rules match Mamba-hybrid groups structurally. The sub-paged attention
+rules apply to any model whose registered tensor is paged finer than the
+scheduler's logical block IDs — including pure MLA models with no Mamba
+layers at all (the registry is consulted whenever a `KVCacheConfig` is
+available; each rule decides independently whether it applies). The MLA
+rule takes its target grid from the group *manager's* logical block, which
+can be wider than the leaf spec's kernel pages: GLM-5.3 (NVFP4 DSA) keeps
+256-token logical blocks over 64-slot `FLASHMLA_SPARSE` kernel pages.
 
 ### 1. Mamba state pages
 
@@ -163,16 +171,45 @@ emit today.
 The same re-paging for MLA-style caches: rank-3 `[NB, states, C]` (Kimi K3)
 or rank-4 with the single head slot on either side of the states,
 `[NB, 1, states, C]` (head-major layouts) or `[NB, states, 1, C]`
-(states-major). The order is decided by the attention backends, not the
-model, so the rule finds the states dim from the tensor and keeps the dim
-order in the view. The target is `spec.num_states`
-(`block_size / tokens_per_state`; `block_size / compress_ratio` on older
-vLLM) rather than `block_size`, so a declared slot compression survives the
-view and the compression path still derives it from
-`tokens_per_block / slots_per_block`. Each layer is matched against its own
-leaf spec: GLM-5.3-Flash's MLA and indexer layers share one
-`UniformTypeKVCacheSpecs` group with different `num_states` (sparse MLA at 64
-rows and the kpool indexer at 32 under a 1152-token block).
+(states-major). The head-slot order is decided by the attention backends,
+not the model, and a layout hint can disagree with the raw singleton-axis
+order — so the rule identifies the states axis by matching the kernel
+page's bytes per stored state against the leaf spec instead of trusting
+the hint. The target states per stored page are derived from the group
+*manager's* logical block, divided by the leaf spec's declared
+`tokens_per_state` (`compress_ratio` / `num_states` on older vLLM):
+
+> target_states = manager_block_size / tokens_per_state
+
+so a declared slot compression survives the view at its declared
+granularity, and a leaf spec whose geometry already matches its kernel
+pages passes through untouched.
+
+Each layer is matched against its own leaf spec: GLM-5.3-Flash's MLA and
+indexer layers share one `UniformTypeKVCacheSpecs` group (sparse MLA at 64
+rows, the kpool indexer with `tokens_per_state=4` at 32 rows, under a
+1152-token manager block), and GLM-5.3 (NVFP4 DSA) registers pure MLA
+groups whose leaf pages are 64-slot kernel pages under 256-token logical
+blocks.
+
+#### Opaque DSA transfer
+
+GLM-5.3's DSA values/scales planes are rank-3 `uint8[..., 132]` kernel
+pages (128 fp8 values plus one fp32 scale row). Re-viewing four 64-slot
+scale blocks into one 256-slot logical page produces a page that is **not**
+a native logical DSA page: the bytes must transfer opaquely with the
+generic MLA kernels, not with the native values/scales
+(`NL_X_NB_BSV_BSS`) format, or store/retrieve reinterprets the scale
+blocks and silently corrupts served KV. When the MLA rule edits such a
+plane with no declared packing, the registry marks the layer and sets the
+internal `subpaged_dsa_opaque` `LayoutHints` key; the vLLM detector then
+routes every `uint8[..., 132]` plane of that registration to
+`NL_X_NB_BS_HS` instead, and locates the rank-4 singleton head axis by
+shape so a stale `kv_layout` hint cannot dodge the squeezed-plane path. A
+registration that would mix opaque subpaged DSA with native logical-page
+DSA planes fails loudly (the two need different transfer formats and
+cannot share one registration-wide hint), and engines supplying the
+internal hint themselves are rejected.
 
 ## Startup validation
 
@@ -205,11 +242,14 @@ packs *bytes per slot*, not slots per block: its specs keep
 `block_size == scheduler block size` and `compress_ratio == 1`, so it never
 needs an edit either.)
 
-The sub-paged rule's `matches` excludes declared-compression specs by their
-own fields (`compress_ratio` / `tq_slot_size`), and its `apply` additionally
-verifies by byte accounting that `k` kernel pages tile the logical page's
-bytes exactly — any *undeclared* packed layout fails with a loud `ValueError`
-rather than being transferred wrongly.
+The standard-attention sub-paged rule's `matches` excludes
+declared-compression specs by their own fields (`compress_ratio` /
+`tq_slot_size`); the MLA rule instead scales its target states by the
+declared factor, preserving the slot count. Both `apply`s additionally
+identify the geometry by byte accounting (the MLA rule matches bytes per
+stored state to find the block axis uniquely) — any *undeclared* packed
+layout fails with a loud `ValueError` rather than being transferred
+wrongly.
 
 ## The opaque-page contract
 
@@ -246,6 +286,9 @@ bijective block-id → bytes mapping. Consequences:
 - A sub-paged view is only produced when `kernel_page_bytes * k ==
   spec.page_size_bytes`; any mismatch raises `ValueError` (fail loudly rather
   than silently transfer a compressed layout).
+- The MLA states axis must be identifiable *uniquely* from bytes per stored
+  state; an ambiguous or disagreeing geometry raises `ValueError` rather
+  than re-viewing the wrong axis.
 - On vLLM-Ascend, a sub-paged view is also produced when `k` kernel pages tile
   the logical page: one fused or interleaved span of `spec.page_size_bytes`,
   or the two contiguous halves added together equaling `real_page_size_bytes`
@@ -266,7 +309,7 @@ bijective block-id → bytes mapping. Consequences:
 | Compression-ratio derivation (downstream consumer) | `lmcache/v1/kv_layer_groups.py` |
 | vLLM block-size inflation | `vllm/platforms/interface.py` (`_align_hybrid_block_size`) |
 | vLLM kernel-page split + block-table expansion | `vllm/v1/worker/utils.py`, `vllm/v1/worker/block_table.py` |
-| Unit tests | `tests/v1/test_vllm_kv_cache_group_edits.py` |
+| Unit tests | `tests/v1/test_vllm_kv_cache_group_edits.py`, `tests/v1/test_vllm_kv_cache_group_edits_mla.py`, `tests/v1/test_vllm_kv_cache_group_edits_pure_mla.py` |
 | End-to-end test | `.buildkite/k3_tests/multiprocess/scripts/run-single-test.sh` (`hma_lm_eval_qwen3_5`) |
 
 The end-to-end `hma_lm_eval_qwen3_5` gsm8k store-vs-retrieve check pins the
@@ -274,4 +317,5 @@ observable contract — faithful retrieve — but needs a GPU, so it cannot gate
 *which rules fire* for a given vLLM version; the 0.26.0 regression was exactly
 that. `tests/v1/test_vllm_kv_cache_group_edits.py` covers the gap on CPU: it
 pins the matching gate per registered layout and the block-granularity
-invariant, not internal view shapes.
+invariant, not internal view shapes. The `_mla` and `_pure_mla` siblings pin
+the manager-block, declared-packing, and opaque-DSA contracts the same way.

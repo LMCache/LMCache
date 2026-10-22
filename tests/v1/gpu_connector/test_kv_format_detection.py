@@ -262,3 +262,39 @@ def test_vllm_tuple_equal_widths_stays_kv_pair():
     kv = [(_t(NB, BS, 1, HS), _t(NB, BS, 1, HS)) for _ in range(NL)]
     fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
     assert fmt == F.NL_X_TWO_X_NB_BS_NH_HS
+
+
+def test_vllm_native_dsa_uses_blocked_scale_format() -> None:
+    """A native logical DSA page keeps its values/scales-aware format."""
+    kv = [torch.zeros(NB, 256, 132, dtype=torch.uint8) for _ in range(NL)]
+    fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
+    assert fmt == F.NL_X_NB_BSV_BSS
+
+
+def test_vllm_subpaged_dsa_opaque_uses_generic_mla_format() -> None:
+    """An internally marked subpaged DSA view uses raw contiguous transfer."""
+    kv = [torch.zeros(NB, 256, 132, dtype=torch.uint8) for _ in range(NL)]
+    hints: LayoutHints = {"kv_layout": "NHD", "subpaged_dsa_opaque": True}
+    fmt, _ = detect_format(kv, EngineType.VLLM, hints)
+    assert fmt == F.NL_X_NB_BS_HS
+
+
+def test_vllm_rank4_native_dsa_indexer_plane_squeezed() -> None:
+    """vLLM >= 0.29's ``[NB, BS, 1, 132]`` indexer plane is re-shaped rank-3.
+
+    The singleton head axis is located by shape, so the squeeze works
+    independently of the kv_layout hint (which can be stale).
+    """
+    kv = [torch.zeros(NB, 256, 1, 132, dtype=torch.uint8) for _ in range(NL)]
+    fmt, out = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
+    assert fmt == F.NL_X_NB_BSV_BSS
+    assert all(t.shape == (NB, 256, 132) for t in out)
+
+
+def test_vllm_rank4_dsa_opaque_survives_stale_layout_hint() -> None:
+    """A hint misplacing the singleton axis still transfers opaquely."""
+    kv = [torch.zeros(NB, 256, 1, 132, dtype=torch.uint8) for _ in range(NL)]
+    hints: LayoutHints = {"kv_layout": "HND", "subpaged_dsa_opaque": True}
+    fmt, out = detect_format(kv, EngineType.VLLM, hints)
+    assert fmt == F.NL_X_NB_BS_HS
+    assert all(t.shape == (NB, 256, 132) for t in out)
