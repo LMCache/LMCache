@@ -14,8 +14,8 @@ import sys
 import pytest
 
 # First Party
-import lmcache
 from lmcache.cli.commands.server import ServerCommand
+import lmcache
 
 
 @pytest.fixture
