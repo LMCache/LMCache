@@ -109,6 +109,28 @@ class TestKVLayerGroupsManager:
             by_group[1].engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
         )
 
+    def test_group_identity_uses_format_kv_size_for_single_plane_non_mla(self):
+        """A single-plane format is not necessarily MLA.
+
+        ``NL_X_NB_BS_NH_HS`` preserves the SGLang component's head geometry,
+        but each registered tensor is still one independent KV plane.
+        """
+        tensors = [
+            torch.randn(32, 256, 8, 64, dtype=torch.bfloat16),
+        ]
+        groups = group_layers_by_identity(
+            tensors,
+            [lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS],
+        )
+
+        assert len(groups) == 1
+        identity, layer_indices = groups[0]
+        assert layer_indices == [0]
+        assert identity.kv_size == 1
+        assert identity.num_heads == 8
+        assert identity.head_size == 64
+        assert identity.block_size == 256
+
     def test_build_multiple_layers_same_shape(self):
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(3)

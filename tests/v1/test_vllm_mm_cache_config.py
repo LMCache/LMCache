@@ -22,10 +22,8 @@ class _InitializationStarted(RuntimeError):
 
 @pytest.fixture(
     params=[
-        "lmcache_mp_connector",
-        "lmcache_mp_connector_0180",
-        "lmcache_mp_connector_0201",
-        "vllm_v1_adapter",
+        "lmcache.integration.vllm.lmcache_mp_connector",
+        "lmcache.inprocess.integration.vllm.vllm_v1_adapter",
     ]
 )
 def implementation(request: pytest.FixtureRequest) -> str:
@@ -61,12 +59,12 @@ def _initialize_connector(
     role: KVConnectorRole,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    module = importlib.import_module(f"lmcache.integration.vllm.{implementation}")
+    module = importlib.import_module(implementation)
 
     def stop_initialization(*args: object, **kwargs: object) -> None:
         raise _InitializationStarted
 
-    if implementation == "vllm_v1_adapter":
+    if implementation.endswith(".vllm_v1_adapter"):
         monkeypatch.setattr(module, "print_banner_once", lambda *args: None)
         monkeypatch.setattr(module, "lmcache_get_or_create_config", stop_initialization)
         module.LMCacheConnectorV1Impl(config, role, parent=None)

@@ -150,6 +150,11 @@ func (in *CacheBlendEngineSpec) DeepCopyInto(out *CacheBlendEngineSpec) {
 		*out = new(string)
 		**out = **in
 	}
+	if in.RuntimeClassName != nil {
+		in, out := &in.RuntimeClassName, &out.RuntimeClassName
+		*out = new(string)
+		**out = **in
+	}
 	if in.Image != nil {
 		in, out := &in.Image, &out.Image
 		*out = new(ImageSpec)
@@ -274,6 +279,11 @@ func (in *CacheBlendEngineSpec) DeepCopyInto(out *CacheBlendEngineSpec) {
 		in, out := &in.ExtraArgs, &out.ExtraArgs
 		*out = make([]string, len(*in))
 		copy(*out, *in)
+	}
+	if in.PD != nil {
+		in, out := &in.PD, &out.PD
+		*out = new(PDSpec)
+		(*in).DeepCopyInto(*out)
 	}
 }
 
@@ -846,6 +856,11 @@ func (in *LMCacheEngineSpec) DeepCopyInto(out *LMCacheEngineSpec) {
 		*out = new(string)
 		**out = **in
 	}
+	if in.RuntimeClassName != nil {
+		in, out := &in.RuntimeClassName, &out.RuntimeClassName
+		*out = new(string)
+		**out = **in
+	}
 	if in.Image != nil {
 		in, out := &in.Image, &out.Image
 		*out = new(ImageSpec)
@@ -965,6 +980,11 @@ func (in *LMCacheEngineSpec) DeepCopyInto(out *LMCacheEngineSpec) {
 	}
 	if in.HostIPC != nil {
 		in, out := &in.HostIPC, &out.HostIPC
+		*out = new(bool)
+		**out = **in
+	}
+	if in.IsolatedIPC != nil {
+		in, out := &in.IsolatedIPC, &out.IsolatedIPC
 		*out = new(bool)
 		**out = **in
 	}

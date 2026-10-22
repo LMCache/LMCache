@@ -32,10 +32,10 @@ pools for store, lookup, and load operations, and uses one or more
 `lmcache/v1/multiprocess/http_apis/reconfigure_api.py` exposes runtime
 reconfiguration endpoints:
 
-- `GET /reconfigure/dax/status`
-- `POST /reconfigure/dax/add`
-- `POST /reconfigure/dax/remove`
-- `POST /reconfigure/dax/resize`
+- `GET /reconfigure/dax/l2/status`
+- `POST /reconfigure/dax/l2/add`
+- `POST /reconfigure/dax/l2/remove`
+- `POST /reconfigure/dax/l2/resize`
 
 The HTTP layer routes `backend`, `operation`, and adapter-specific JSON payloads
 into the generic L2 adapter reconfiguration API on `StorageManager`.
@@ -86,7 +86,7 @@ Lookup and load:
 
 The DAX facade keeps the event fds and worker pools stable. Runtime hotplug only
 mutates the device pool behind the facade, so `StoreController`,
-`PrefetchController`, and the vLLM MP connector do not need ZMQ protocol changes
+`PrefetchController`, and the vLLM MP connector do not need request-protocol changes
 or poll-set re-registration.
 
 Add:
@@ -95,6 +95,10 @@ Add:
 2. Map a new `DaxCore[ObjectKey]`.
 3. Append a `DaxDeviceEntry(state="active")`.
 4. Return per-device status. Existing KV entries stay on their current devices.
+
+Re-adding the same device at the same size, including through an alias, returns
+its existing entry without mapping it again. Use the returned
+`device_path` for remove or resize; the alias is not registered as another path.
 
 Remove with migration:
 

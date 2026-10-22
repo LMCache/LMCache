@@ -3,6 +3,17 @@ Bigtable
 
 An L2 adapter backed by Google Cloud Bigtable, enabling out-of-process remote KV caching. It supports Layer-Group Sharding to partition large tensor payloads across multiple column qualifiers to stay safely under Bigtable cell size limits.
 
+Dependency compatibility
+------------------------
+
+If ``google-cloud-bigtable`` and ``protobuf`` are incompatible, importing
+Bigtable can raise ``TypeError: Descriptors cannot be created directly``.
+``lmcache server --help`` logs the error and continues listing available
+adapters. Selecting Bigtable still raises the import error; install a compatible
+client version before using it, for example::
+
+    pip install --upgrade google-cloud-bigtable
+
 Why Choose Bigtable?
 --------------------
 

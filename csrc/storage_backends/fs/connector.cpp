@@ -6,84 +6,11 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include "../keys.h"
 
 namespace lmcache {
 namespace connector {
-
-// ---------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------
-
-std::string FSConnector::replace_all(const std::string& str,
-                                     const std::string& from,
-                                     const std::string& to) {
-  std::string result = str;
-  size_t pos = 0;
-  while ((pos = result.find(from, pos)) != std::string::npos) {
-    result.replace(pos, from.size(), to);
-    pos += to.size();
-  }
-  return result;
-}
-
-std::string FSConnector::key_to_filename(const std::string& key) {
-  // Input key format (from _object_key_to_string):
-  //   Unsalted: <model_name>@<kv_rank_hex>@<chunk_hash_hex>
-  //   Salted  : <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>
-  //
-  // Output filename (matching fs_l2_adapter.py._object_key_to_filename):
-  //   Unsalted: <model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>.data
-  //   Salted  :
-  //   <model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>.data
-  //
-  // The unsalted 3-field shape is bit-identical to the pre-cache_salt
-  // format, so existing cache directories remain valid.
-  //
-  // NOTE: both model_name and cache_salt are forbidden from containing
-  // '@' (invariant enforced on the Python side), so splitting on '@'
-  // is unambiguous — no marker, no rsplit.
-
-  // Split on '@' — must yield 3 (unsalted) or 4 (salted) fields.
-  std::vector<std::string> parts;
-  size_t start = 0;
-  for (size_t pos = 0; pos <= key.size(); ++pos) {
-    if (pos == key.size() || key[pos] == KEY_SEP) {
-      parts.emplace_back(key.substr(start, pos - start));
-      start = pos + 1;
-    }
-  }
-  if (parts.size() != 3 && parts.size() != 4) {
-    throw std::runtime_error(
-        "FSConnector: malformed key (expected 3 or 4 '@'-separated fields): " +
-        key);
-  }
-
-  const std::string& model_name = parts[0];
-  const std::string& kv_rank_hex = parts[1];
-  const std::string& chunk_hash = parts[2];
-  const std::string cache_salt = parts.size() == 4 ? parts[3] : std::string();
-
-  // Replace '/' with '-SEP-' for filesystem safety
-  std::string safe_model = replace_all(model_name, "/", PATH_SLASH_REPLACEMENT);
-
-  // Emit filename. Salt is appended at the tail so the unsalted shape
-  // matches what older builds wrote to disk.
-  std::string result;
-  result.reserve(safe_model.size() + kv_rank_hex.size() + chunk_hash.size() +
-                 cache_salt.size() + 32);
-  result += safe_model;
-  result += KEY_SEP;
-  result += "0x";
-  result += kv_rank_hex;
-  result += KEY_SEP;
-  result += chunk_hash;
-  if (!cache_salt.empty()) {
-    result += KEY_SEP;
-    result += cache_salt;
-  }
-  result += FILE_EXT;
-  return result;
-}
 
 // ---------------------------------------------------------------
 // read/write helpers
@@ -146,15 +73,30 @@ static bool try_enable_odirect(int& flags, const void* buf, size_t len,
 // FSConnector
 // ---------------------------------------------------------------
 
+// No pool, no budget.  A pool with no figure gets the default.
+static size_t effective_read_budget(int num_read_workers, size_t budget) {
+  if (num_read_workers <= 0) {
+    return 0;
+  }
+  return budget == 0 ? kDefaultReadMaxBytesInFlight : budget;
+}
+
 FSConnector::FSConnector(std::string base_path, int num_workers,
                          std::string relative_tmp_dir, bool use_odirect,
-                         size_t read_ahead_size)
+                         size_t read_ahead_size, int num_read_workers,
+                         size_t read_max_bytes_in_flight)
     : ConnectorBase(num_workers),
       base_path_(std::move(base_path)),
       relative_tmp_dir_(std::move(relative_tmp_dir)),
       use_odirect_(use_odirect),
       disk_block_size_(0),
-      read_ahead_size_(read_ahead_size) {
+      read_ahead_size_(read_ahead_size),
+      read_max_bytes_in_flight_(
+          effective_read_budget(num_read_workers, read_max_bytes_in_flight)) {
+  if (num_read_workers < 0) {
+    throw std::runtime_error("num_read_workers must be >= 0");
+  }
+
   // Create base directory
   std::filesystem::create_directories(base_path_);
 
@@ -172,7 +114,15 @@ FSConnector::FSConnector(std::string base_path, int num_workers,
     }
   }
 
-  start_workers();  // IMPORTANT: call at END of constructor
+  // Readers first.  On failure join whatever started: the destructor does
+  // not run for a half-built object.
+  try {
+    start_read_pool(num_read_workers);
+    start_workers();  // IMPORTANT: call at END of constructor
+  } catch (...) {
+    close();
+    throw;
+  }
 }
 
 FSConnector::~FSConnector() { close(); }
@@ -300,6 +250,165 @@ bool FSConnector::do_single_delete(WorkerFSConn& conn, const std::string& key) {
   auto file_path = conn.base_path / filename;
   std::error_code ec;
   return std::filesystem::remove(file_path, ec);
+}
+
+// ---------------------------------------------------------------
+// Read pool
+// ---------------------------------------------------------------
+
+size_t FSConnector::read_budget_bytes() const {
+  return read_max_bytes_in_flight_;
+}
+
+size_t FSConnector::choose_num_tiles(Op op, size_t num_items) const {
+  if (op != Op::BATCH_TILE_GET || read_threads_.empty()) {
+    return ConnectorBase::choose_num_tiles(op, num_items);
+  }
+  return 1;
+}
+
+void FSConnector::do_batch_get(WorkerFSConn& conn, const Request& req) {
+  if (read_threads_.empty()) {
+    ConnectorBase::do_batch_get(conn, req);
+    return;
+  }
+  do_batch_get_pooled(req);
+}
+
+void FSConnector::on_workers_stopped() { stop_read_pool(); }
+
+bool FSConnector::read_budget_admits(size_t len) const {
+  return reads_in_flight_ < kMinReadsInFlight ||
+         read_bytes_in_flight_ + len <= read_max_bytes_in_flight_;
+}
+
+void FSConnector::do_batch_get_pooled(const Request& req) {
+  const size_t num_keys = req.keys.size();
+  ReadTile tile;
+  tile.ok.assign(num_keys, 1);
+  tile.remaining = num_keys;
+  // Allocated before anything is published, so nothing below can throw
+  // while readers hold pointers into this frame.
+  std::vector<ReadTask> tasks(num_keys);
+
+  {
+    std::unique_lock<std::mutex> lk(read_mu_);
+    for (size_t i = 0; i < num_keys; ++i) {
+      const size_t len = req.buf_lens[i];
+      if (!read_budget_admits(len)) {
+        ++read_budget_waiters_;
+        read_budget_cv_.wait(lk,
+                             [this, len] { return read_budget_admits(len); });
+        --read_budget_waiters_;
+      }
+      read_bytes_in_flight_ += len;
+      ++reads_in_flight_;
+      tasks[i] = ReadTask{&req, i, &tile, nullptr};
+      if (read_queue_tail_ != nullptr) {
+        read_queue_tail_->next = &tasks[i];
+      } else {
+        read_queue_head_ = &tasks[i];
+      }
+      read_queue_tail_ = &tasks[i];
+      read_cv_.notify_one();
+    }
+    tile.done_cv.wait(lk, [&tile] { return tile.remaining == 0; });
+  }
+
+  for (size_t i = 0; i < num_keys; ++i) {
+    req.batch->per_key_results[req.start_idx + i] = tile.ok[i];
+  }
+}
+
+// Connections are built here so a failure surfaces in the constructor.
+void FSConnector::start_read_pool(int num_read_workers) {
+  if (num_read_workers <= 0) {
+    return;
+  }
+  const size_t num_threads = static_cast<size_t>(num_read_workers);
+  read_conns_.reserve(num_threads);
+  for (size_t i = 0; i < num_threads; ++i) {
+    read_conns_.push_back(create_connection());
+  }
+  read_threads_.reserve(num_threads);
+  for (size_t i = 0; i < num_threads; ++i) {
+    read_threads_.emplace_back(
+        [this, i] { this->read_thread_main(read_conns_[i]); });
+  }
+}
+
+// Only after the workers are joined; see on_workers_stopped().
+void FSConnector::stop_read_pool() {
+  {
+    std::lock_guard<std::mutex> lk(read_mu_);
+    read_stop_ = true;
+  }
+  read_cv_.notify_all();
+  for (auto& t : read_threads_) {
+    if (t.joinable()) {
+      t.join();
+    }
+  }
+  read_threads_.clear();
+  read_conns_.clear();
+}
+
+void FSConnector::read_thread_main(WorkerFSConn& conn) {
+  // The lock taken to record a completion is kept to pop the next task, so
+  // a busy reader takes read_mu_ once per object, not twice.
+  std::unique_lock<std::mutex> lk(read_mu_);
+  for (;;) {
+    read_cv_.wait(lk,
+                  [this] { return read_stop_ || read_queue_head_ != nullptr; });
+    if (read_queue_head_ == nullptr) {
+      return;  // the predicate admits an empty queue only on stop
+    }
+    ReadTask* task = read_queue_head_;
+    read_queue_head_ = task->next;
+    if (read_queue_head_ == nullptr) {
+      read_queue_tail_ = nullptr;
+    }
+    lk.unlock();
+
+    uint8_t ok = 1;
+    const Request& req = *task->req;
+    const std::string& key = req.keys[task->index];
+    try {
+      do_single_get(conn, key, req.buf_ptrs[task->index],
+                    req.buf_lens[task->index], req.batch_chunk_num_bytes);
+    } catch (const std::exception& e) {
+      ok = 0;
+      fprintf(stderr, "[LMCache GET] key %s failed: %s\n", key.c_str(),
+              e.what());
+    } catch (...) {
+      ok = 0;
+      fprintf(stderr, "[LMCache GET] key %s failed: unknown exception\n",
+              key.c_str());
+    }
+
+    // The submitting worker may destroy `task` and its tile as soon as it
+    // takes read_mu_ and sees remaining == 0, so nothing touches them
+    // after the notify below; notifying under the lock keeps the tile
+    // alive until then.
+    lk.lock();
+    task->tile->ok[task->index] = ok;
+    read_bytes_in_flight_ -= req.buf_lens[task->index];
+    --reads_in_flight_;
+    if (--task->tile->remaining == 0) {
+      task->tile->done_cv.notify_one();
+    }
+    // Large objects can hold more than the budget, so the free bytes are
+    // computed without wrapping.
+    const size_t free_bytes =
+        read_bytes_in_flight_ < read_max_bytes_in_flight_
+            ? read_max_bytes_in_flight_ - read_bytes_in_flight_
+            : 0;
+    if (read_budget_waiters_ != 0 &&
+        (reads_in_flight_ < kMinReadsInFlight ||
+         free_bytes >= read_max_bytes_in_flight_ / kReadBudgetWakeSlices)) {
+      read_budget_cv_.notify_all();
+    }
+  }
 }
 
 }  // namespace connector

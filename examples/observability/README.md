@@ -61,25 +61,57 @@ Open **http://localhost:3000** → **Explore** → datasource **Tempo**.
 
 # Complete misses (lookup ran but nothing was cached)
 { name = "request" && span.requested_tokens > 0 && span.hit_tokens = 0 }
+
+# Requests where neither the engine's prefix cache nor LMCache served half the prompt
+{ name = "request" && span.request_hit_rate < 0.5 }
 ```
 
-Click any trace to open the waterfall. Each root `request` span carries three
-per-request cache hit rate attributes:
+Click any trace to open the waterfall. Each root `request` span carries the
+cache hit rate attributes below. The lookup-level ones cover only the range
+LMCache was asked to look up; the request-level ones cover the whole prompt.
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `hit_tokens` | int | tokens served from L1+L2 cache |
-| `requested_tokens` | int | total chunk-aligned tokens submitted for lookup |
+| `requested_tokens` | int | chunk-aligned tokens submitted for lookup, past the engine-covered prefix |
 | `hit_rate` | float | `hit_tokens / requested_tokens` (0.0 on a total miss) |
+| `apc_covered_tokens` | int | chunk-aligned prefix the engine's prefix cache held, skipped by the lookup |
+| `prompt_tokens` | int | whole prompt length |
+| `engine_hit_tokens` | int | the engine's own prefix-cache hit, not chunk-aligned |
+| `request_hit_tokens` | int | prefix served by the engine or LMCache: `max(engine_hit, apc_covered + hit)` |
+| `engine_hit_rate` | float | `engine_hit_tokens / prompt_tokens` |
+| `request_hit_rate` | float | `request_hit_tokens / prompt_tokens` |
+
+Span attributes beyond these (the L1/L2 split, hit keys, early-exit reason)
+are listed in `docs/source/mp/observability/traces.rst`.
 
 ```
-request  [══════════════════════════════════════]  hit_rate=0.75
-  mp.lookup_prefetch  [════]
-  mp.retrieve               [════════]
-  mp.store                            [══════]
+request                       [═════════════════════════════]  hit_rate=0.75
+  mp.lookup_prefetch          [════]
+  mp.retrieve                       [══════════]
+    transfer.kernel_interval        [═════]
+    transfer.staging                       [═══]
+  mp.store                                         [════════]
+    transfer.kernel_interval                       [════]
+    transfer.staging                                     [══]
 ```
 
 Store-only requests (no lookup phase) do not carry these attributes.
+
+A build with phase timing splits each transfer into its two GPU phases. Read
+them differently: **`transfer.staging` is transfer time** -- DMA on the copy
+engine, which does not compete with the inference engine -- while
+**`transfer.kernel_interval` is a stream interval, not execution time**. The
+gather/scatter kernel needs SMs, and it queues behind the co-resident engine's
+compute, so most of that bar is the wait. A long kernel bar means the transfer
+met a busy engine, not that the copy was slow, and its bytes divided by its
+duration is not a transfer rate; each span says so in its `elapsed_meaning`
+attribute. `docs/design/observability/request-event-span.md` ("Reading the
+phase bars") has the measurements.
+
+The two children are drawn back to back, each as long as its phase's total,
+rather than at their real interleaved intervals -- they are a breakdown of the
+parent, not a timeline.
 
 The pre-provisioned **LMCache** dashboard under **Dashboards** shows cache hit
 rate, StorageManager read/write rates, and the live trace panel. The collapsed

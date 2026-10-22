@@ -10,7 +10,9 @@ is mocked.
 
 # Standard
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import MagicMock
+import socket
 import threading
 import time
 
@@ -21,14 +23,30 @@ import torch
 # First Party
 from lmcache import device_ops  # noqa: F401
 from lmcache.v1.mp_coordinator.blend_client import PENDING  # noqa: F401
+from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
+from lmcache.v1.multiprocess import server as server_mod
+from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod  # noqa: F401
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _cb_chunk_major_object_keys,
     _classify_cb_read_groups,
-    _narrow_attn_desc,
 )
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    LMCacheDrivenTransferModule,
+)
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.multiprocess.transport.server_factory import create_request_server
+from tests.v1.multiprocess.transport_test_utils import (
+    REQUEST_TRANSPORTS,
+    RequestTransport,
+    request_server_config,
+    request_server_url,
+)
 
 # ---------------------------------------------------------------------------
 # S1: async fingerprint registration
@@ -160,7 +178,58 @@ def _coord_engine(chunk_size: int = 4):
     eng._event_bus = MagicMock()
     eng._build_global_segments = BlendModule._build_global_segments.__get__(eng)
     eng._poll_coordinator_match = BlendModule._poll_coordinator_match.__get__(eng)
+    eng._submit_coordinator_match = BlendModule._submit_coordinator_match.__get__(eng)
     return eng
+
+
+def test_submit_coordinator_match_sends_this_server_s_namespace():
+    """The query carries the same model, salt, and world size the retrieve
+    path keys with."""
+    # First Party
+    from lmcache.v1.mp_coordinator.api import BlendNamespace
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+    eng = _coord_engine(chunk_size=4)
+    coordinator = MagicMock()
+    eng._coordinator = coordinator
+    key = IPCCacheServerKey(
+        model_name="llama",
+        world_size=4,
+        worker_id=None,
+        token_ids=tuple(range(8)),
+        start=0,
+        end=8,
+        request_id="rid",
+        cache_salt="tenant-a",
+    )
+
+    assert eng._submit_coordinator_match(key) is True
+    coordinator.submit_match.assert_called_once_with(
+        "rid",
+        list(range(8)),
+        BlendNamespace(model_name="llama", cache_salt="tenant-a", world_size=4),
+    )
+
+
+def test_submit_coordinator_match_skips_a_query_shorter_than_a_chunk():
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+    eng = _coord_engine(chunk_size=4)
+    coordinator = MagicMock()
+    eng._coordinator = coordinator
+    key = IPCCacheServerKey(
+        model_name="llama",
+        world_size=1,
+        worker_id=None,
+        token_ids=(1, 2),
+        start=0,
+        end=2,
+        request_id="rid",
+    )
+
+    assert eng._submit_coordinator_match(key) is False
+    coordinator.submit_match.assert_not_called()
 
 
 def test_build_global_segments_are_retrievable_cbmatchresults():
@@ -327,15 +396,16 @@ def test_register_rope_dual_cache_round_trip():
 
 
 def test_register_rope_rejects_invalid_group_to_cache():
-    """Out-of-range / negative cache indices and a map that does not cover
-    every engine group of the registered model are rejected."""
+    """Out-of-range cache indices and a map that does not cover every engine
+    group of the registered model are rejected. ``-1`` is the rope-less
+    sentinel, so only indices below it are out of range."""
     eng = _rope_registration_engine(engine_group_indices=[0, 1])
     caches = [_unit_rope_cache_ipc(), _unit_rope_cache_ipc()]
 
     with pytest.raises(ValueError, match="outside"):
         eng.cb_register_rope(1, caches, 8, True, group_to_cache=[0, 2])
     with pytest.raises(ValueError, match="outside"):
-        eng.cb_register_rope(1, caches, 8, True, group_to_cache=[-1, 0])
+        eng.cb_register_rope(1, caches, 8, True, group_to_cache=[-2, 0])
     # Model has engine groups {0, 1} but the map only covers group 0.
     with pytest.raises(ValueError, match="engine groups up to index 1"):
         eng.cb_register_rope(1, caches, 8, True, group_to_cache=[0])
@@ -343,6 +413,21 @@ def test_register_rope_rejects_invalid_group_to_cache():
     # cache list is empty (the NoPE form requires an empty map too).
     with pytest.raises(ValueError, match="outside"):
         eng.cb_register_rope(1, [], 8, True, group_to_cache=[0, 0])
+
+
+def test_register_rope_accepts_ropeless_group_sentinel():
+    """``-1`` marks an engine group carrying no rotary content (the
+    recurrent-state and aux planes of a hybrid). Registration accepts it and
+    the group skips re-RoPE, while its rope-bearing peers are unaffected."""
+    eng = _rope_registration_engine(engine_group_indices=[0, 1])
+    caches = [_unit_rope_cache_ipc()]
+
+    eng.cb_register_rope(1, caches, 8, True, group_to_cache=[0, -1])
+
+    state = eng._cb_rope_state[1]
+    assert state.cache_for_group(1) is None
+    assert state.rot_for_group(1) is None
+    assert state.cache_for_group(0) is not None
 
 
 def test_register_rope_accepts_nope_zero_caches():
@@ -448,26 +533,6 @@ def test_classify_read_groups_rejects_two_aux_groups():
         _classify_cb_read_groups(3, ("attention", "aux", "aux"))
 
 
-def test_narrow_attn_desc_selects_the_leg_gids():
-    """The fold stride is groups x ranks, so each leg's descriptor must cover
-    exactly its own gids."""
-    # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
-
-    full = AttnWindowDesc(
-        num_chunks_in_sw=[1, -1, -1],
-        world_size=2,
-        group_kinds=("recurrent", "attention", "aux"),
-    )
-    prefix = _narrow_attn_desc(full, (0, 1))
-    assert prefix.num_chunks_in_sw == [1, -1]
-    assert prefix.group_kinds == ("recurrent", "attention")
-    assert prefix.world_size == 2
-    blend = _narrow_attn_desc(full, (1, 2))
-    assert blend.num_chunks_in_sw == [-1, -1]
-    assert blend.group_kinds == ("attention", "aux")
-
-
 def test_classify_read_groups_rejects_unresolvable_layouts():
     """Multi-group layouts without kinds, with several attention buckets, or
     with several aux groups are refused loudly (silent mis-addressing
@@ -518,3 +583,193 @@ def test_classify_read_groups_recurrent_first_layout():
     assert read.attn_gid == 1
     # Read set ascending, recurrent excluded.
     assert read.blend_gids == (1, 2)
+
+
+# ---------------------------------------------------------------------------
+# STORE hook: fingerprints registered only for chunks the transfer committed
+# ---------------------------------------------------------------------------
+
+
+def _store_hook_engine(stored_mask):
+    """Engine with the real ``store`` bound; transfer and session mocked.
+    No GPU context -> fingerprint jobs land on the plain queue."""
+    # Standard
+    from queue import Queue
+
+    eng = MagicMock(spec=BlendModule)
+    eng.store = BlendModule.store.__get__(eng)
+    eng._transfer_module = MagicMock()
+    eng._transfer_module.store_with_chunk_mask.return_value = (
+        b"evt",
+        True,
+        stored_mask,
+    )
+    eng._transfer_module.get_and_touch_context_entry.return_value = None
+    eng._ctx = MagicMock()
+    eng._ctx.chunk_size = 4
+    session = MagicMock()
+    session.get_hashes.return_value = list(range(100, 100 + len(stored_mask)))
+    eng._ctx.session_manager.get_or_create.return_value = session
+    eng._pending_fp_lock = threading.Lock()
+    eng._pending_fp_hashes = set()
+    eng._fingerprint_queue = Queue()
+    return eng
+
+
+def _store_hook_key(num_chunks: int, chunk_size: int = 4):
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+    n = num_chunks * chunk_size
+    return IPCCacheServerKey(
+        model_name="m",
+        world_size=1,
+        num_kv_readers=1,
+        worker_id=0,
+        token_ids=tuple(range(1000, 1000 + n)),
+        start=0,
+        end=n,
+        request_id="req-store-mask",
+    )
+
+
+def test_store_registers_fingerprints_only_for_committed_chunks():
+    """A chunk the storage manager skipped (hole in the stored mask) gets no
+    fingerprint: one registration job per contiguous stored run, offsets
+    preserved, chunk 0 still owned by the prefix leg."""
+    # First Party
+    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+
+    eng = _store_hook_engine([True, True, False, True])
+    key = _store_hook_key(4)
+
+    result = eng.store(key, instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b"")
+
+    assert result == (b"evt", True)
+    jobs = []
+    while not eng._fingerprint_queue.empty():
+        jobs.append(eng._fingerprint_queue.get_nowait())
+    # Runs: chunks [0,2) with chunk 0 skipped (prefix leg), and chunk [3,4).
+    assert [(j[2], j[3], len(j[1])) for j in jobs] == [(1, 0, 2), (0, 12, 1)]
+    expected = {TokenHasher.hash_to_bytes(101), TokenHasher.hash_to_bytes(103)}
+    assert eng._pending_fp_hashes == expected
+
+
+def test_store_registers_nothing_when_no_chunk_committed():
+    """A store whose every chunk was skipped (or that failed) must not
+    advertise any fingerprint -- those entries could never be served."""
+    eng = _store_hook_engine([False, False, False])
+    key = _store_hook_key(3)
+
+    result = eng.store(key, instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b"")
+
+    assert result == (b"evt", True)
+    assert eng._fingerprint_queue.empty()
+    assert eng._pending_fp_hashes == set()
+
+
+@pytest.mark.parametrize(
+    ("engine_type", "mode"),
+    [("default", "lmcache_driven"), ("blend", "engine_driven")],
+)
+def test_blend_factory_gating(
+    engine_type: str,
+    mode: Literal["lmcache_driven", "engine_driven"],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constructor = MagicMock(return_value=None)
+    monkeypatch.setattr(BlendModule, "__init__", constructor)
+    build_ctx = ModuleBuildContext(
+        MagicMock(),
+        MPServerConfig(engine_type=engine_type, supported_transfer_mode=mode),
+        CoordinatorConfig(),
+    )
+    if engine_type == "default":
+        assert BlendModule.create(build_ctx) is None
+    else:
+        with pytest.raises(ValueError, match="blend engine requires"):
+            BlendModule.create(build_ctx)
+    constructor.assert_not_called()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_blend_factory_forwards_configuration(
+    enabled: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    constructor = MagicMock(return_value=None)
+    monkeypatch.setattr(BlendModule, "__init__", constructor)
+    coordinator = MagicMock()
+    factory = MagicMock(return_value=coordinator)
+    monkeypatch.setattr(BlendCoordinatorClient, "maybe_create", factory)
+    context, transfer = MagicMock(), MagicMock(spec=LMCacheDrivenTransferModule)
+    config = MPServerConfig(
+        engine_type="blend",
+        enable_segmented_prefix=enabled,
+        enable_dedup_content=enabled,
+        enable_blend_reorder=enabled,
+    )
+    coordinator_config = CoordinatorConfig(
+        url="http://coordinator",
+        event_reporting=enabled,
+        blend_timeout=2.5,
+        blend_match_concurrency=3,
+    )
+    build_ctx = ModuleBuildContext(context, config, coordinator_config)
+    build_ctx.register(LMCacheDrivenTransferModule, transfer)
+
+    assert isinstance(BlendModule.create(build_ctx), BlendModule)
+
+    constructor.assert_called_once_with(
+        context,
+        transfer,
+        coordinator=coordinator,
+        enable_segmented_prefix=enabled,
+        enable_dedup_content=enabled,
+        enable_reorder=enabled,
+    )
+    factory.assert_called_once_with(
+        coordinator_config.url if enabled else "", timeout=2.5, match_concurrency=3
+    )
+
+
+@pytest.mark.parametrize("transport", REQUEST_TRANSPORTS)
+def test_blend_store_overrides_transfer_handler(
+    transport: RequestTransport,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_module_resources,
+) -> None:
+    @request_handler(HandlerType.BLOCKING, requires_client_affinity=True)
+    def store(
+        self: object,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, bool]:
+        return type(self).__name__.encode(), True
+
+    monkeypatch.setattr(BlendModule, "store", store)
+    monkeypatch.setattr(LMCacheDrivenTransferModule, "store", store)
+    modules = server_mod._build_modules(
+        MagicMock(),
+        MPServerConfig(engine_type="blend", worker_reap_timeout_seconds=0),
+        CoordinatorConfig(),
+    )
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    url = request_server_url(transport, port)
+    server = create_request_server(modules, request_server_config(transport, url))
+    key = IPCCacheServerKey.from_token_ids("model", 1, 0, [1], end=1)
+    try:
+        server.start()
+        client = RequestClientFactory.create(url)
+        try:
+            assert client.store(key, 1, [[0]], b"").result(timeout=5) == (
+                b"BlendModule",
+                True,
+            )
+        finally:
+            client.close()
+    finally:
+        server.close()
