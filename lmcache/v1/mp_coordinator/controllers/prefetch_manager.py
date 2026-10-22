@@ -141,6 +141,7 @@ class PrefetchManager(Controller):
 
         Raises:
             httpx.HTTPError: If the target is unreachable or returns non-2xx.
+            ValueError: If the target's reply is not JSON.
         """
         url = f"http://{target.ip}:{target.http_port}/cache/prefetches"
         body = {
@@ -153,20 +154,22 @@ class PrefetchManager(Controller):
         try:
             resp = await http_client.post(url, json=body)
             resp.raise_for_status()
-        except httpx.HTTPError:
+            reply = resp.json()
+        except (httpx.HTTPError, ValueError):
             self._count_submit("server_error")
             raise
-        reply = resp.json()
         accepted_at = time.monotonic()
         submit_result = "noop" if reply.get("status") == "noop" else "submitted"
+        request_id = reply.get("request_id")
         with self._lock:
+            self._forget_abandoned_locked()
             self._stats.requests_submitted[submit_result] += 1
             self._stats.chunks_requested_per_request.observe(reply.get("chunks", 0))
             self._stats.submit_duration_seconds.observe(accepted_at - submitted_at)
-            if submit_result == "submitted":
-                self._submitted_at[(target.instance_id, reply["request_id"])] = (
-                    accepted_at
-                )
+            # Without a request id it cannot be polled, so there is nothing
+            # to track.
+            if submit_result == "submitted" and request_id:
+                self._submitted_at[(target.instance_id, request_id)] = accepted_at
         logger.info(
             "Prefetch submitted to %s: %d tokens", target.instance_id, len(token_ids)
         )
@@ -259,6 +262,7 @@ class PrefetchManager(Controller):
         or that the server no longer knows."""
         now = time.monotonic()
         with self._lock:
+            self._forget_abandoned_locked()
             self._stats.status_polls[poll_result] += 1
             if poll_result not in ("completed", "unknown_request"):
                 return

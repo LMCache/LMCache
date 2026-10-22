@@ -3,10 +3,12 @@
 checkpoint costs."""
 
 # Standard
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from typing import BinaryIO
 import time
 
 # Third Party
@@ -280,6 +282,26 @@ class TestReports:
 
         assert checkpoint_write.result == "quiesce_timeout"
         assert checkpoint_write.pause_ingest_seconds is None
+
+    def test_a_timeout_writing_the_store_is_an_error_not_a_quiesce_timeout(
+        self, tmp_path: Path
+    ):
+        """TimeoutError is an OSError; one from the store, after ingest was
+        paused and captured, is a write failure."""
+
+        class _TimingOutStore(LocalArtifactStore):
+            @contextmanager
+            def open_write(self) -> Iterator[BinaryIO]:
+                raise TimeoutError("store write timed out")
+                yield
+
+        checkpoint_write = save_checkpoint(
+            _TimingOutStore(tmp_path / "checkpoint"), QuiesceLock(), [_Section("a")]
+        )
+
+        assert checkpoint_write.result == "error"
+        assert checkpoint_write.pause_ingest_seconds is not None
+        assert checkpoint_write.copy_seconds is not None
 
     def test_load_reports_what_startup_did(self, tmp_path: Path):
         store = LocalArtifactStore(tmp_path / "checkpoint")

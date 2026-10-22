@@ -589,3 +589,29 @@ def test_blend_lookups_are_counted_as_non_prefix():
     assert (non_prefix["lookups"], non_prefix["chunks_requested"]) == (1, 1)
     assert non_prefix["chunks_found"] == 1
     assert stats["blend_lookup_enabled"] is True
+
+
+def test_overlapping_blend_matches_count_no_more_chunks_than_requested():
+    """Two stored chunks sharing tokens both match a query 1.5 chunks long:
+    two matches, but they cover one chunk's worth of the query."""
+    chunk_size = MPCoordinatorConfig().chunk_size
+    half = chunk_size // 2
+    first = _chunk_tokens(1000, chunk_size)
+    second = first[half:] + _chunk_tokens(5000, half)
+    with _blend_client() as client:
+        entries = [
+            {"key": _key("aa"), "size_bytes": 1, "token_ids": first, "token_offset": 0},
+            {
+                "key": _key("bb"),
+                "size_bytes": 1,
+                "token_ids": second,
+                "token_offset": 0,
+            },
+        ]
+        _post_events(client, [_batch(entries=entries)])
+        data = _blend_lookup(client, first + second[half:])
+        stats = client.get("/directory/stats").json()
+
+    assert len(data["matches"]) == 2
+    non_prefix = stats["lookups"]["non_prefix"]
+    assert (non_prefix["chunks_requested"], non_prefix["chunks_found"]) == (1, 1)

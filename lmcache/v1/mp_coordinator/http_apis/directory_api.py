@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 # First Party
 from lmcache.v1.distributed.api import Tier
-from lmcache.v1.mp_coordinator.api import BlendNamespace
+from lmcache.v1.mp_coordinator.api import BlendMatch, BlendNamespace
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
 from lmcache.v1.mp_coordinator.schemas import (
     BlendLookupRequest,
@@ -150,7 +150,7 @@ async def blend_lookup(
         directory.record_lookup(
             "non_prefix",
             chunks_requested=len(tokens) // chunk_size,
-            chunks_found=len(matches),
+            chunks_found=_covered_chunks(matches, chunk_size),
         )
         return BlendLookupResponse(
             matches=[
@@ -233,3 +233,29 @@ async def directory_stats(request: Request) -> DirectoryStats:
         exposed yet.
     """
     return get_context(request).views.get(KeyDirectory).stats()
+
+
+def _covered_chunks(matches: list[BlendMatch], chunk_size: int) -> int:
+    """Return how many chunks' worth of the query the matches cover.
+
+    Matches can overlap in the query (two stored chunks sharing tokens), so
+    their count can exceed the chunks the query holds; the tokens they
+    cover together, overlaps counted once, cannot.
+
+    Args:
+        matches: Matches in ascending ``cur_st`` order, each covering
+            ``chunk_size`` query tokens from ``cur_st``.
+        chunk_size: Tokens per chunk.
+
+    Returns:
+        Covered query tokens divided by ``chunk_size``, rounded down.
+    """
+    covered_tokens = 0
+    covered_until = 0
+    for match in matches:
+        start = max(match.cur_st, covered_until)
+        end = match.cur_st + chunk_size
+        if end > start:
+            covered_tokens += end - start
+            covered_until = end
+    return covered_tokens // chunk_size

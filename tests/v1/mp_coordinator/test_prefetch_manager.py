@@ -2,6 +2,7 @@
 """Tests for the coordinator warm-prefetch manager (submit + status proxy)."""
 
 # Standard
+from types import SimpleNamespace
 import asyncio
 import json as _json
 import time
@@ -11,6 +12,7 @@ import httpx
 import pytest
 
 # First Party
+from lmcache.v1.mp_coordinator.controllers import prefetch_manager
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.views.instance_registry import MPInstance
 
@@ -241,3 +243,57 @@ async def test_a_prefetch_never_polled_to_completion_is_counted_abandoned():
     stats = mgr.stats()
     assert stats.requests_abandoned == 1
     assert stats.requests_in_flight == {}
+
+
+@pytest.mark.asyncio
+async def test_a_submit_forgets_abandoned_prefetches_without_a_scrape(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """With nothing scraping metrics, old prefetches must still be dropped,
+    or the table grows without limit."""
+    clock = [0.0]
+    # Only the manager's clock: the event loop keeps the real one.
+    monkeypatch.setattr(
+        prefetch_manager, "time", SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    mgr = PrefetchManager(abandon_after_seconds=600.0)
+    transport = _server(
+        {
+            "POST": httpx.Response(
+                202, json={"request_id": "abc", "chunks": 1, "status": "submitted"}
+            ),
+        }
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        await _submit(mgr, client)
+        clock[0] = 700.0
+        await _submit(mgr, client)  # forgets the first, now 700 s old
+    clock[0] = 0.0  # so stats() itself forgets nothing more
+
+    assert mgr.stats().requests_abandoned == 1
+
+
+@pytest.mark.asyncio
+async def test_a_submitted_reply_without_a_request_id_is_counted_not_tracked():
+    mgr = PrefetchManager()
+    transport = _server(
+        {"POST": httpx.Response(202, json={"chunks": 1, "status": "submitted"})}
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        reply = await _submit(mgr, client)
+
+    stats = mgr.stats()
+    assert reply == {"chunks": 1, "status": "submitted"}
+    assert stats.requests_submitted["submitted"] == 1
+    assert stats.requests_in_flight == {}
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_is_not_json_is_counted_as_a_server_error():
+    mgr = PrefetchManager()
+    transport = _server({"POST": httpx.Response(202, text="not json")})
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(ValueError):
+            await _submit(mgr, client)
+
+    assert mgr.stats().requests_submitted["server_error"] == 1

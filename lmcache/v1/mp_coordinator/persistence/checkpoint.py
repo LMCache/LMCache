@@ -207,13 +207,15 @@ def save_checkpoint(
         copy_seconds = copied_at - quiesced_at
         with store.open_write() as stream:
             size_bytes = _write_checkpoint(sections, stream)
-    except TimeoutError as e:
-        logger.warning("Failed to write checkpoint %s: %s", store.location(), e)
-        return CheckpointWrite(result="quiesce_timeout", error=_describe(e))
     except (OSError, ValueError) as e:
         logger.warning("Failed to write checkpoint %s: %s", store.location(), e)
+        # TimeoutError is an OSError; only one raised before ingest paused
+        # is the quiesce's -- a later one came from the store.
+        timed_out_quiescing = (
+            isinstance(e, TimeoutError) and pause_ingest_seconds is None
+        )
         return CheckpointWrite(
-            result="error",
+            result="quiesce_timeout" if timed_out_quiescing else "error",
             error=_describe(e),
             pause_ingest_seconds=pause_ingest_seconds,
             copy_seconds=copy_seconds,
