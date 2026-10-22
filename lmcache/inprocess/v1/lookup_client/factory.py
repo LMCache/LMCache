@@ -16,15 +16,15 @@ from lmcache.inprocess.v1.lookup_client.lmcache_lookup_client_bypass import (
 from lmcache.inprocess.v1.lookup_client.mooncake_lookup_client import (
     MooncakeLookupClient,
 )
-from lmcache.logging import init_logger
-from lmcache.v1.cache_engine import LMCacheEngine
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.rpc.zmq_transport import (
+from lmcache.inprocess.v1.rpc.zmq_transport import (
     SocketParams,
     ZmqReqRepClientTransport,
     ZmqRouterServerTransport,
 )
+from lmcache.logging import init_logger
+from lmcache.v1.cache_engine import LMCacheEngine
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import get_zmq_rpc_path_lmcache
 
 if TYPE_CHECKING:

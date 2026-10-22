@@ -28,12 +28,12 @@ if TYPE_CHECKING:
     from lmcache.inprocess.v1.lookup_client.lmcache_lookup_client import (
         LMCacheLookupServer,
     )
+    from lmcache.inprocess.v1.manager import LMCacheManager
+    from lmcache.inprocess.v1.offload_server.zmq_server import ZMQOffloadServer
     from lmcache.observability import PrometheusLogger
     from lmcache.v1.cache_engine import LMCacheEngine
     from lmcache.v1.internal_api_server.api_server import InternalAPIServer
-    from lmcache.v1.manager import LMCacheManager
     from lmcache.v1.metadata import LMCacheMetadata
-    from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
     from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
 logger = init_logger(__name__)

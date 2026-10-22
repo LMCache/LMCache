@@ -5,10 +5,10 @@
 import asyncio
 
 # First Party
-from lmcache.v1.check import check_mode
+from lmcache.inprocess.v1.check import check_mode
 
 # Import shared utilities
-from lmcache.v1.check.utils import (
+from lmcache.inprocess.v1.check.utils import (
     DEFAULT_KV_DTYPE_STR,
     create_storage_manager_with_config,
     create_test_key,

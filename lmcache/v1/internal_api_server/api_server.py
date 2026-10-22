@@ -17,7 +17,7 @@ from .api_registry import APIRegistry
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.manager import LMCacheManager
+    from lmcache.inprocess.v1.manager import LMCacheManager
 
 logger = init_logger(__name__)
 

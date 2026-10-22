@@ -35,7 +35,7 @@ from lmcache.v1.storage_backend.connector.audit_connector import AuditConnector
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.manager import LMCacheManager
+    from lmcache.inprocess.v1.manager import LMCacheManager
     from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 
 logger = init_logger(__name__)

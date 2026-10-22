@@ -134,8 +134,8 @@ def create_storage_manager_with_config(
 ):
     """Create storage manager with default configuration"""
     # First Party
+    from lmcache.inprocess.v1.event_manager import EventManager
     from lmcache.integration.vllm.utils import lmcache_get_or_create_config
-    from lmcache.v1.event_manager import EventManager
 
     config = lmcache_get_or_create_config()
     metadata = _get_default_metadata(model, kv_dtype=kv_dtype, obj_size=obj_size)

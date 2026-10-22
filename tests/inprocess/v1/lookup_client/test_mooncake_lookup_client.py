@@ -18,9 +18,9 @@ import torch
 from lmcache.inprocess.v1.lookup_client.mooncake_lookup_client import (
     MooncakeLookupClient,
 )
+from lmcache.inprocess.v1.token_database import ChunkedTokenDatabase
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.token_database import ChunkedTokenDatabase
 from tests.v1.utils import create_test_config, create_test_metadata, generate_tokens
 
 TENANT_A = {"lmcache.tag.tenant": "tenant-a"}

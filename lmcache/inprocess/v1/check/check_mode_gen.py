@@ -5,8 +5,8 @@
 import tqdm
 
 # First Party
-from lmcache.v1.check import check_mode
-from lmcache.v1.check.utils import (
+from lmcache.inprocess.v1.check import check_mode
+from lmcache.inprocess.v1.check.utils import (
     _get_default_metadata,
     create_memory_objects_batch,
     create_storage_manager_with_config,

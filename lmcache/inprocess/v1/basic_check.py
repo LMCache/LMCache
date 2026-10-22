@@ -4,7 +4,7 @@ import argparse
 import asyncio
 
 # First Party
-from lmcache.v1.check import registry
+from lmcache.inprocess.v1.check import registry
 
 model_name = "/lmcache_test_model/"
 

@@ -5,11 +5,10 @@
 import asyncio
 
 # First Party
-from lmcache.integration.vllm.utils import lmcache_get_or_create_config
-from lmcache.v1.check import check_mode
+from lmcache.inprocess.v1.check import check_mode
 
 # Import shared utilities
-from lmcache.v1.check.utils import (
+from lmcache.inprocess.v1.check.utils import (
     DEFAULT_KV_DTYPE_STR,
     EventLoopManager,
     _get_default_metadata,
@@ -18,6 +17,7 @@ from lmcache.v1.check.utils import (
     run_common_test_framework,
     validate_get_results,
 )
+from lmcache.integration.vllm.utils import lmcache_get_or_create_config
 from lmcache.v1.memory_management import MemoryObj
 
 # Import from lmcache with absolute paths

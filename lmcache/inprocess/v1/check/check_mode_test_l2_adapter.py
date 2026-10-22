@@ -10,8 +10,8 @@ import time
 import torch
 
 # First Party
-from lmcache.v1.check import check_mode
-from lmcache.v1.check.utils import (
+from lmcache.inprocess.v1.check import check_mode
+from lmcache.inprocess.v1.check.utils import (
     DEFAULT_KV_DTYPE_STR,
     DEFAULT_OBJ_SIZE,
     parse_kv_dtype,

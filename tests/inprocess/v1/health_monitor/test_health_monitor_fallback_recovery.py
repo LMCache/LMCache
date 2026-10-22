@@ -622,7 +622,7 @@ class TestFallbackIntegrationWithRealStorageManager:
     @pytest.fixture
     def real_storage_manager(self, test_metadata):
         # First Party
-        from lmcache.v1.event_manager import EventManager
+        from lmcache.inprocess.v1.event_manager import EventManager
         from lmcache.v1.storage_backend.storage_manager import StorageManager
 
         config = LMCacheEngineConfig.from_defaults(

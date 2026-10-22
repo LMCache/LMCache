@@ -26,7 +26,7 @@ from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.manager import LMCacheManager
+    from lmcache.inprocess.v1.manager import LMCacheManager
     from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
     from lmcache.v1.storage_backend.storage_manager import StorageManager
 

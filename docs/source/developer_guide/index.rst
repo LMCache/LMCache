@@ -11,7 +11,6 @@ commands, and HTTP endpoints.
    integration
    extending_lmcache/storage_plugins
    usage/index
-   usage/basic_check
    extending_lmcache/native_connectors
    extending_lmcache/adding_a_new_device_backend
    extending_lmcache/server_modules
