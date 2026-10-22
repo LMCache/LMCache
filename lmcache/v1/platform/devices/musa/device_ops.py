@@ -464,6 +464,16 @@ class MusaDeviceOps(DeviceOps):
 
     device_type: ClassVar[str] = "musa"
 
+    def tensor_from_ptr(
+        self,
+        ptr: int,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Create a non-owning MUSA tensor from a process-local pointer."""
+        return construct_musa_tensor_from_data_pointer(ptr, shape, dtype, device)
+
     def lmcache_memcpy_async(
         self,
         dest: int | torch.Tensor,

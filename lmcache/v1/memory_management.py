@@ -16,10 +16,10 @@ import torch
 # First Party
 from lmcache import device_ops, torch_dev
 from lmcache import torch_device_type as torch_device_type  # noqa: F401
+from lmcache.inprocess.v1.pin_monitor import PinMonitor
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
-from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.platform import current_device_spec as current_device_spec  # noqa: F401
 from lmcache.v1.system_detection import NUMAMapping
 
@@ -992,7 +992,7 @@ class BytesBufferMemoryObj(MemoryObj):
         return [self.get_shape()]
 
     def get_dtypes(self) -> list[torch.dtype]:
-        return []
+        return [self.get_dtype()]  # type: ignore[list-item]
 
     def get_memory_format(self) -> MemoryFormat:
         return self.metadata.fmt
@@ -1105,7 +1105,7 @@ class GDSMemoryObject(MemoryObj):
         return self.valid
 
     def get_size(self) -> int:
-        return self.meta.phy_size
+        return self.meta.get_size()
 
     def get_shape(self) -> torch.Size:
         return self.meta.shape
@@ -1114,16 +1114,18 @@ class GDSMemoryObject(MemoryObj):
         return self.meta.dtype
 
     def get_shapes(self) -> list[torch.Size]:
-        raise NotImplementedError(
-            "GDSMemoryObject.get_shapes: per-group shapes are not tracked on "
-            "the GDS path (only the singular meta.shape is); use get_shape()"
+        return (
+            list(self.meta.shapes)
+            if self.meta.shapes is not None
+            else [self.meta.shape]
         )
 
     def get_dtypes(self) -> list[torch.dtype]:
-        raise NotImplementedError(
-            "GDSMemoryObject.get_dtypes: per-group dtypes are not tracked on "
-            "the GDS path (only the singular meta.dtype is); use get_dtype()"
-        )
+        if self.meta.dtypes is not None:
+            return list(self.meta.dtypes)
+        if self.meta.dtype is None:
+            raise ValueError("GDS object has no dtype")
+        return [self.meta.dtype]
 
     def get_memory_format(self) -> MemoryFormat:
         return self.meta.fmt

@@ -1,7 +1,8 @@
 name: PR Full Build
 
-# Build all release artifacts (sdist + CUDA wheel, CLI wheel, cu129 wheel,
-# standard ROCm wheel, ROCm torch 2.10 wheel) on PRs carrying the `full` label.
+# Build all release artifacts (sdist + CUDA wheel, CLI wheel, raw-block Rust
+# module wheels, cu129 wheel, standard ROCm wheel, ROCm torch 2.10 wheel) on
+# PRs carrying the `full` label.
 # The `full` label is added automatically by automerge-labeler.yml when
 # auto-merge is enabled on a code-change PR, so this acts as a pre-merge sanity
 # check that wheels still build.
@@ -38,6 +39,11 @@ jobs:
         name: Build CLI
         if: contains(github.event.pull_request.labels.*.name, 'full')
         uses: ./.github/workflows/build_cli_artifacts.yml
+
+    build-raw-block:
+        name: Build raw-block Rust module
+        if: contains(github.event.pull_request.labels.*.name, 'full')
+        uses: ./.github/workflows/build_raw_block_artifacts.yml
 
     build-cpu:
         name: Build CPU

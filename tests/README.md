@@ -22,7 +22,7 @@ Top-level test areas:
 - `tests/v1/mp_coordinator/`: coordinator lifecycle, worker orchestration, and MP control-plane coordination checks.
 - `tests/v1/mp_observability/`: MP observability coverage, including event recording, error surfacing, and timeout/reporting behavior.
 - `tests/v1/shm_allocator/`: shared-memory allocation, reuse, boundary handling, and allocator safety checks.
-- Other v1 areas (for example `compute`, `gpu_connector`, `distributed`, `cache_controller`, etc.): specialized kernel, connector, distributed, and service-behavior tests.
+- Other v1 areas (for example `compute`, `gpu_connector`, `distributed`, etc.): specialized kernel, connector, distributed, and service-behavior tests.
 
 ## Requirements for New Tests
 
@@ -60,7 +60,6 @@ If a test depends on a specific device/runtime, add matching pytest marks define
 - `@pytest.mark.cuda`
 - `@pytest.mark.xpu`
 - `@pytest.mark.musa`
-- `@pytest.mark.sglang` (for SGLang-specific tests)
 
 When the test is runtime-availability dependent, also gate with `skipif`, for example:
 
