@@ -14,6 +14,7 @@ from lmcache.v1.distributed.l2_adapters.raw_block.io_engine import (
     IoUringBlockIOConfig,
     PosixBlockIOConfig,
     RawBlockIOConfig,
+    SpdkBlockIOConfig,
     normalize_raw_block_io_engine,
 )
 from lmcache.v1.distributed.l2_adapters.raw_block.key_codec import (
@@ -47,4 +48,5 @@ __all__ = [
     "RawBlockIOConfig",
     "PosixBlockIOConfig",
     "IoUringBlockIOConfig",
+    "SpdkBlockIOConfig",
 ]
