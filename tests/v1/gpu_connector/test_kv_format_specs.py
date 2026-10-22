@@ -24,10 +24,26 @@ import lmcache.lmcache_native as lmcache_native
 NB, NL, BS, NH, HS = 7, 5, 3, 2, 4
 PBS = NB * BS  # 21
 DT = torch.float16
+# Only the element size matters to the TorchTPU packing.
+FP8 = getattr(torch, "float8_e4m3fn", torch.uint8)
 
 
 def _t(*shape: int) -> torch.Tensor:
     return torch.zeros(shape, dtype=DT)
+
+
+def _torchtpu_layer(
+    num_kv_heads: int, head_dim: int, dtype: torch.dtype
+) -> torch.Tensor:
+    """One layer as vllm-torchtpu allocates it.
+
+    ``[NB, BS, align(2 * NH, P) / P, P, align(head_dim, 128)]`` with the dtype
+    packing ``P = 4 // itemsize`` (2 for bf16, 4 for fp8).
+    """
+    packing = 4 // dtype.itemsize
+    row_groups = -(-2 * num_kv_heads // packing)
+    padded_head_dim = -(-head_dim // 128) * 128
+    return torch.zeros((NB, BS, row_groups, packing, padded_head_dim), dtype=dtype)
 
 
 def _build(name: str):
@@ -58,6 +74,8 @@ def _build(name: str):
         "NL_X_NB_NH_BS_CS": lambda: [_t(NB, NH, BS, 2 * HS) for _ in range(NL)],
         "NL_X_NB_BS_NH_CS": lambda: [_t(NB, BS, NH, 2 * HS) for _ in range(NL)],
         "NL_X_NB_BS_NH_HS": lambda: [_t(NB, BS, NH, HS) for _ in range(NL)],
+        # Packing 2 (bf16): one row group per head.
+        "NL_X_NB_BS_NHP_P_HS": lambda: [_t(NB, BS, NH, 2, HS) for _ in range(NL)],
     }
     return builders[name]()
 
@@ -289,6 +307,20 @@ GOLDEN = {
         elements_per_layer=NB * BS * NH * HS,
         concrete="5 x [7, 3, 2, 4]",
     ),
+    # Fused heads: head_size is the packed 2 * HS, as for the CS formats.
+    "NL_X_NB_BS_NHP_P_HS": dict(
+        shape_desc="NL x [NB, BS, NHP, P, HS]",
+        num_layers=NL,
+        num_blocks=NB,
+        block_size=BS,
+        page_buffer_size=PBS,
+        num_heads=NH,
+        hidden_dim=NH * HS * 2,
+        head_size=HS * 2,
+        tokens_per_layer=PBS,
+        elements_per_layer=NB * BS * NH * 2 * HS,
+        concrete="5 x [7, 3, 2, 2, 4]",
+    ),
 }
 
 # Only formats the installed extension actually exposes.
@@ -390,3 +422,35 @@ def test_facade_diagnostic_labels(case):
     # get_attention_backend is a diagnostic-only representative label.
     label = utils.get_attention_backend(fmt)
     assert isinstance(label, str) and not label.startswith("Unknown"), name
+
+
+@pytest.mark.parametrize(
+    ("dtype", "num_kv_heads", "head_dim", "num_heads", "head_size"),
+    [
+        (torch.bfloat16, 8, 128, 8, 256),
+        # head_dim is padded up to 128.
+        (torch.bfloat16, 4, 80, 4, 256),
+        (FP8, 8, 128, 8, 256),
+        # 2 * NH rows are padded up to the packing, adding one padding head.
+        (FP8, 1, 128, 2, 256),
+        (FP8, 3, 64, 4, 256),
+    ],
+)
+def test_torchtpu_packed_geometry(
+    dtype: torch.dtype,
+    num_kv_heads: int,
+    head_dim: int,
+    num_heads: int,
+    head_size: int,
+) -> None:
+    kv = [_torchtpu_layer(num_kv_heads, head_dim, dtype) for _ in range(NL)]
+    spec = get_spec(kv, lmcache_native.EngineKVFormat.NL_X_NB_BS_NHP_P_HS)
+    assert spec.num_blocks() == NB
+    assert spec.block_size() == BS
+    assert spec.kv_size() == 1
+    assert spec.num_heads() == num_heads
+    assert spec.head_size() == head_size
+    # A token's chunk row is its whole packed slice, alignment padding included.
+    assert spec.hidden_dim() == num_heads * head_size == kv[0][0, 0].numel()
+    assert spec.elements_per_layer() == kv[0].numel()
+    assert spec.data_ptrs([0, NL - 1]) == [kv[0].data_ptr(), kv[-1].data_ptr()]

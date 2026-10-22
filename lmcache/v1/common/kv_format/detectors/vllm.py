@@ -123,6 +123,11 @@ class VLLM_Detector(EngineDetector):
             and first_tensor.shape[3] == 1
         ):
             return lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_ONE_BS_HS, kv_caches
+        # vllm-torchtpu packs fused K/V rows by dtype: [NB, BS, NHP, P, HS]. Its
+        # axes can collide with the flash-attn / flash-infer checks below, so
+        # the device decides; the format is NHD by definition.
+        if torch_device_type == "tpu" and list_depth == 1 and tensor_ndim == 5:
+            return lmcache_native.EngineKVFormat.NL_X_NB_BS_NHP_P_HS, kv_caches
         if list_depth == 1 and tensor_ndim == 5:
             if first_tensor.shape[0] == 2:  # K/V axis first
                 if is_hnd:
