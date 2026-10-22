@@ -2,15 +2,19 @@
 
 # First Party
 from lmcache.v1.storage_backend.raw_block.core import (
-    DEFAULT_IOURING_QUEUE_DEPTH,
-    RAW_BLOCK_IO_ENGINES,
     RawBlockCore,
     RawBlockCoreConfig,
     RawBlockPutManyResult,
-    normalize_raw_block_io_engine,
     normalize_raw_block_placement_ids,
     round_up,
-    validate_raw_block_io_options,
+)
+from lmcache.v1.storage_backend.raw_block.io_engine import (
+    DEFAULT_IOURING_QUEUE_DEPTH,
+    RAW_BLOCK_IO_ENGINES,
+    IoUringIoEngineConfig,
+    PosixIoEngineConfig,
+    RawBlockIoEngineConfig,
+    normalize_raw_block_io_engine,
 )
 from lmcache.v1.storage_backend.raw_block.key_codec import (
     RawBlockKeyNamespace,
@@ -40,5 +44,7 @@ __all__ = [
     "normalize_raw_block_io_engine",
     "round_up",
     "slot_identity_from_encoded_key",
-    "validate_raw_block_io_options",
+    "RawBlockIoEngineConfig",
+    "PosixIoEngineConfig",
+    "IoUringIoEngineConfig",
 ]
