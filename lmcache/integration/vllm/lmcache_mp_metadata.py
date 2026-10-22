@@ -21,14 +21,11 @@ from lmcache.integration.vllm.utils import (
     extract_request_configs_from_request,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
-from lmcache.utils import init_logger
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
 
 if TYPE_CHECKING:
     # Third Party
     from vllm.v1.request import Request
-
-logger = init_logger(__name__)
 
 
 class LMCacheMPRequestState(enum.Enum):
@@ -410,28 +407,6 @@ class LMCacheMPRequestMetadata:
                 start_token_idx,
                 end_token_idx,
             )
-            short = [
-                (g, len(ids), (end_token_idx - start_token_idx) // tpb)
-                for g, (ids, tpb) in enumerate(
-                    zip(block_ids, group_tokens_per_block, strict=True)
-                )
-                if tpb > 0 and len(ids) < (end_token_idx - start_token_idx) // tpb
-            ]
-            if short:
-                logger.warning(
-                    "RETRIEVE op for request %s covers [%d, %d) but the engine "
-                    "allocated fewer blocks than that range needs: "
-                    "(group, have, need)=%s; allocated per group=%s, "
-                    "vllm_hit=%d, lmcache_hit=%d, prompt=%d",
-                    tracker.request_id,
-                    start_token_idx,
-                    end_token_idx,
-                    short,
-                    tracker.num_allocated_blocks(),
-                    tracker.num_vllm_hit_tokens,
-                    tracker.num_lmcache_hit_tokens,
-                    tracker.num_prompt_tokens,
-                )
             token_ids = tracker.get_token_ids()
 
             # Compute how many tokens at the start of the retrieve range
