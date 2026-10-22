@@ -10,6 +10,10 @@ cached KV, decode), which are encoded as different requests.
 `LMCacheRequestStream` binds all inference passes belonging to one request
 instead of leaving the management to the user.
 
+Decode-time retention policies can use a
+[topology-aware token-selection plan](token_selection.md) to keep logical token
+decisions separate from compressed, sliding-window, and hybrid cache geometry.
+
 ```py
 import lmcache.sdk as lmc_sdk
 
