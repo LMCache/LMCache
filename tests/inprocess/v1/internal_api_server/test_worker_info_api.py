@@ -22,8 +22,8 @@ from lmcache.inprocess.v1.cache_controller.message import (
     RegisterMsg,
     RegisterRetMsg,
 )
+from lmcache.inprocess.v1.internal_api_server.api_server import app
 from lmcache.logging import init_logger
-from lmcache.v1.internal_api_server.api_server import app
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 
 logger = init_logger(__name__)

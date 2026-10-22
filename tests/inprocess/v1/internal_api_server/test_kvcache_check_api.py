@@ -11,8 +11,8 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.internal_api_server.api_server import app
 from lmcache.utils import compress_slot_mapping
-from lmcache.v1.internal_api_server.api_server import app
 
 
 class TestKVCacheCheckAPI:

@@ -7,9 +7,16 @@ from typing import List, Literal, Optional
 from fastapi import APIRouter
 
 # First Party
+from lmcache.v1 import internal_api_server as shared_api_server
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
 APICategory = Literal["common", "vllm", "controller"]
+
+# The ``common`` routers are shared with the multiprocess HTTP server and
+# therefore remain under ``lmcache.v1.internal_api_server.common``; the
+# ``vllm`` and ``controller`` categories live next to this package.
+_SHARED_COMMON_PATH = Path(shared_api_server.__file__).parent / "common"
+_SHARED_COMMON_PACKAGE = f"{shared_api_server.__name__}.common"
 
 
 class APIRegistry:
@@ -41,11 +48,15 @@ class APIRegistry:
         package_name = __package__
 
         for category in categories:
-            category_path = package_path / category
-            if not category_path.exists():
-                continue
+            if category == "common":
+                category_path = _SHARED_COMMON_PATH
+                category_package = _SHARED_COMMON_PACKAGE
+            else:
+                category_path = package_path / category
+                if not category_path.exists():
+                    continue
+                category_package = f"{package_name}.{category}"
 
-            category_package = f"{package_name}.{category}"
             for r in discover_api_routers(category_path, category_package):
                 self.router.include_router(r)
 

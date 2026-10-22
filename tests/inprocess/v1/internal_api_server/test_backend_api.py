@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
-from lmcache.v1.internal_api_server.api_server import app
+from lmcache.inprocess.v1.internal_api_server.api_server import app
 
 # ------------------------------------------------------------------ #
 #  Fixtures
