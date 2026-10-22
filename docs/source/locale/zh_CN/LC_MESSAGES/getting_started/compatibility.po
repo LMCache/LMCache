@@ -1,0 +1,488 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/getting_started/compatibility.rst:4
+msgid "vLLM and LMCache compatibility"
+msgstr "vLLM 和 LMCache 兼容性"
+
+#: ../../source/getting_started/compatibility.rst:6
+msgid ""
+"There is no single ``LMCache x vLLM`` version pair that guarantees every "
+"model, connector, device, and storage backend. Compatibility has three "
+"independent layers:"
+msgstr "没有单一的 ``LMCache x vLLM`` 版本组合可以保证与每个模型、连接器、设备和存储后端的兼容性。兼容性有三个独立的层次："
+
+#: ../../source/getting_started/compatibility.rst:10
+msgid "the Python, PyTorch, and accelerator runtime must be ABI-compatible;"
+msgstr "Python、PyTorch 和加速器运行时必须是 ABI 兼容的；"
+
+#: ../../source/getting_started/compatibility.rst:11
+msgid ""
+"vLLM must be able to load the LMCache connector implementation that you "
+"intend to use; and"
+msgstr "vLLM 必须能够加载您打算使用的 LMCache 连接器实现；并且"
+
+#: ../../source/getting_started/compatibility.rst:13
+msgid "the specific model or feature must be validated for that combination."
+msgstr "该组合必须验证特定模型或功能。"
+
+#: ../../source/getting_started/compatibility.rst:15
+msgid ""
+"Use this page to choose an installation path and to report an exact "
+"compatibility result. The :doc:`installation` page contains the commands "
+"for each runtime and release channel."
+msgstr "使用此页面选择安装路径并报告确切的兼容性结果。:doc:`安装`页面包含每个运行时和发布渠道的命令。"
+
+#: ../../source/getting_started/compatibility.rst:20
+msgid "What the version numbers mean"
+msgstr "版本号的含义"
+
+#: ../../source/getting_started/compatibility.rst:22
+msgid ""
+"``vLLM`` and ``LMCache`` are released independently. A newer LMCache "
+"release does not automatically mean that every older vLLM release can "
+"load every LMCache connector, and a newer vLLM release can change the KV-"
+"cache APIs that an integration uses."
+msgstr "``vLLM`` 和 ``LMCache`` 是独立发布的。更新的 LMCache 版本并不意味着每个旧的 vLLM 版本都可以加载每个 LMCache 连接器，并且更新的 vLLM 版本可能会更改集成所使用的 KV Cache API。"
+
+#: ../../source/getting_started/compatibility.rst:27
+msgid ""
+"The following table separates the checks that are often incorrectly "
+"treated as one compatibility matrix:"
+msgstr "下表将常常被错误地视为一个兼容性矩阵的检查分开："
+
+#: ../../source/getting_started/compatibility.rst:30
+msgid "Compatibility layers"
+msgstr "兼容性层"
+
+#: ../../source/getting_started/compatibility.rst:34
+msgid "Layer"
+msgstr "层"
+
+#: ../../source/getting_started/compatibility.rst:35
+msgid "What must match"
+msgstr "必须匹配的内容"
+
+#: ../../source/getting_started/compatibility.rst:36
+msgid "Recommended action"
+msgstr "推荐的操作"
+
+#: ../../source/getting_started/compatibility.rst:37
+msgid "Runtime and ABI"
+msgstr "运行时和 ABI"
+
+#: ../../source/getting_started/compatibility.rst:38
+msgid ""
+"Python minor version, PyTorch build, CUDA/ROCm/oneAPI runtime, native "
+"extension ABI, and C++ ABI where applicable."
+msgstr "Python 次版本、PyTorch 构建、CUDA/ROCm/oneAPI 运行时、本地扩展 ABI，以及适用时的 C++ ABI。"
+
+#: ../../source/getting_started/compatibility.rst:40
+msgid ""
+"Use the LMCache wheel or container for the matching runtime. If the "
+"environment uses a different PyTorch build, build LMCache from source "
+"against that already-installed PyTorch."
+msgstr "使用与匹配运行时相对应的 LMCache wheel 或容器。如果环境使用不同的 PyTorch 构建，请从源代码构建 LMCache，以便与已安装的 PyTorch 兼容。"
+
+#: ../../source/getting_started/compatibility.rst:43
+msgid "Connector loading"
+msgstr "连接器加载"
+
+#: ../../source/getting_started/compatibility.rst:44
+msgid ""
+"The vLLM release must support the connector loading mechanism used by the"
+" deployment."
+msgstr "vLLM 版本必须支持部署中使用的连接器加载机制。"
+
+#: ../../source/getting_started/compatibility.rst:46
+msgid ""
+"For vLLM versions that support external connector modules, set "
+"``kv_connector_module_path`` to the LMCache connector explicitly. Older "
+"releases use the connector implementation bundled by vLLM."
+msgstr "对于支持外部连接器模块的 vLLM 版本，明确将 ``kv_connector_module_path`` 设置为 LMCache 连接器。较旧的版本使用 vLLM 捆绑的连接器实现。"
+
+#: ../../source/getting_started/compatibility.rst:49
+msgid "Feature and model"
+msgstr "特性和模型"
+
+#: ../../source/getting_started/compatibility.rst:50
+msgid ""
+"KV layout, block size, hybrid/recurrent behavior, transfer mode, device, "
+"and storage backend."
+msgstr "KV 布局、块大小、混合/递归行为、传输模式、设备和存储后端。"
+
+#: ../../source/getting_started/compatibility.rst:52
+msgid ""
+"Follow the relevant model or feature recipe and treat an unlisted "
+"combination as unverified until it has been smoke-tested."
+msgstr "遵循相关模型或功能的配方，并将未列出的组合视为未经验证，直到经过冒烟测试。"
+
+#: ../../source/getting_started/compatibility.rst:56
+msgid "Installation and ABI compatibility"
+msgstr "安装和 ABI 兼容性"
+
+#: ../../source/getting_started/compatibility.rst:58
+msgid ""
+"For a published CUDA installation, use the stable or nightly instructions"
+" in :doc:`installation`. LMCache's published native artifacts are built "
+"for a particular PyTorch and accelerator runtime; installing a wheel from"
+" a different runtime channel can produce native-extension or undefined-"
+"symbol errors even when the Python package versions look compatible."
+msgstr "对于已发布的 CUDA 安装，请使用 :doc:`installation` 中的稳定版或每日构建版说明。LMCache 发布的本地工件是为特定的 PyTorch 和加速器运行时构建的；从不同的运行时通道安装 wheel 可能会导致本地扩展或未定义符号错误，即使 Python 包版本看起来兼容。"
+
+#: ../../source/getting_started/compatibility.rst:64
+msgid "The practical choices are:"
+msgstr "实际选择包括："
+
+#: ../../source/getting_started/compatibility.rst:66
+msgid ""
+"**Published stable image or wheel:** use the LMCache release and runtime "
+"channel documented together on the installation page. This is the "
+"simplest choice for a production deployment."
+msgstr "**发布的稳定镜像或轮子：** 使用安装页面上文档中记录的 LMCache 发布和运行时通道。这是生产部署中最简单的选择。"
+
+#: ../../source/getting_started/compatibility.rst:69
+msgid ""
+"**Nightly vLLM or a vLLM source checkout:** use the matching LMCache "
+"nightly when the feature is only available on ``dev``. Nightlies are "
+"appropriate for testing upcoming integration changes, not as a stable-"
+"version guarantee."
+msgstr "**每日构建版 vLLM 或 vLLM 源代码检出：** 当功能仅在 ``dev`` 上可用时，请使用匹配的 LMCache 每日构建版。每日构建版适合测试即将到来的集成更改，而不是作为稳定版本的保证。"
+
+#: ../../source/getting_started/compatibility.rst:72
+msgid ""
+"**Custom PyTorch or accelerator build:** install LMCache from source with"
+" ``--no-build-isolation`` so its native extensions are compiled against "
+"the PyTorch already present in the environment."
+msgstr "**自定义 PyTorch 或加速器构建：** 从源代码安装 LMCache，使用 ``--no-build-isolation`` 选项，以便其本地扩展与环境中已存在的 PyTorch 进行编译。"
+
+#: ../../source/getting_started/compatibility.rst:76
+msgid ""
+"The release image follows the same rule: the vLLM and LMCache packages "
+"inside the image are built as one runtime stack. Do not copy a native "
+"LMCache wheel from another CUDA, ROCm, XPU, Python, or PyTorch channel "
+"into that image unless the ABI tuple is known to match."
+msgstr "发布镜像遵循相同的规则：镜像中的 vLLM 和 LMCache 包作为一个运行时栈构建。除非已知 ABI 元组匹配，否则请勿将来自其他 CUDA、ROCm、XPU、Python 或 PyTorch 渠道的本地 LMCache wheel 复制到该镜像中。"
+
+#: ../../source/getting_started/compatibility.rst:82
+msgid "Connector loading in vLLM"
+msgstr "在 vLLM 中加载连接器"
+
+#: ../../source/getting_started/compatibility.rst:84
+msgid ""
+"For the vLLM multiprocess connector, the version boundary that matters is"
+" whether vLLM can select an external connector module:"
+msgstr "对于 vLLM 多进程连接器，重要的版本边界是 vLLM 是否能够选择外部连接器模块："
+
+#: ../../source/getting_started/compatibility.rst:87
+msgid "MP connector loading"
+msgstr "MP 连接器加载"
+
+#: ../../source/getting_started/compatibility.rst:91
+msgid "vLLM version"
+msgstr "vLLM 版本"
+
+#: ../../source/getting_started/compatibility.rst:92
+msgid "What ``LMCacheMPConnector`` resolves to"
+msgstr "``LMCacheMPConnector`` 解析为什么"
+
+#: ../../source/getting_started/compatibility.rst:93
+msgid "Configuration guidance"
+msgstr "配置指导"
+
+#: ../../source/getting_started/compatibility.rst:94
+msgid "``< 0.20.0``"
+msgstr "``< 0.20.0``"
+
+#: ../../source/getting_started/compatibility.rst:95
+msgid ""
+"vLLM's bundled ``LMCacheMPConnector``. These releases cannot redirect the"
+" name to the connector shipped by the LMCache package."
+msgstr "vLLM 捆绑的 ``LMCacheMPConnector``。这些版本无法将名称重定向到 LMCache 包中提供的连接器。"
+
+#: ../../source/getting_started/compatibility.rst:97
+msgid ""
+"Use the connector and server protocol supported by that vLLM release, or "
+"upgrade vLLM before relying on a newer LMCache connector feature."
+msgstr "使用该 vLLM 版本支持的连接器和服务器协议，或者在依赖更新的 LMCache 连接器功能之前升级 vLLM。"
+
+#: ../../source/getting_started/compatibility.rst:99
+msgid "``>= 0.20.0``"
+msgstr "``>= 0.20.0``"
+
+#: ../../source/getting_started/compatibility.rst:100
+msgid ""
+"The name still defaults to vLLM's bundled connector, but vLLM can load an"
+" external implementation."
+msgstr "名称仍然默认为 vLLM 打包的连接器，但 vLLM 可以加载外部实现。"
+
+#: ../../source/getting_started/compatibility.rst:102
+msgid ""
+"Set ``kv_connector_module_path`` explicitly when using the connector "
+"shipped by LMCache."
+msgstr "在使用 LMCache 附带的连接器时，请明确设置 ``kv_connector_module_path``。"
+
+#: ../../source/getting_started/compatibility.rst:105
+msgid "The explicit external-connector configuration is:"
+msgstr "显式的外部连接器配置为："
+
+#: ../../source/getting_started/compatibility.rst:116
+msgid ""
+"The external module path is important in a mixed environment: without it,"
+" vLLM may silently select a bundled connector whose protocol or feature "
+"set is older than the LMCache server. See :doc:`quickstart` for a "
+"complete MP command and the :doc:`../api_reference/dynamic_connector` "
+"page for the vLLM external connector mechanism."
+msgstr "外部模块路径在混合环境中非常重要：如果没有它，vLLM 可能会默默选择一个捆绑的连接器，其协议或功能集比 LMCache 服务器要旧。有关完整的 MP 命令，请参见 :doc:`quickstart`，有关 vLLM 外部连接器机制，请参见 :doc:`../api_reference/dynamic_connector` 页面。"
+
+#: ../../source/getting_started/compatibility.rst:123
+msgid "Known version-specific validation points"
+msgstr "已知版本特定的验证点"
+
+#: ../../source/getting_started/compatibility.rst:125
+msgid ""
+"The following entries are exact facts currently recorded in the LMCache "
+"documentation. They are validation points, not claims that all versions "
+"in the same row or column are interchangeable."
+msgstr "以下条目是当前记录在 LMCache 文档中的确切事实。它们是验证点，而不是同一行或列中的所有版本可以互换的声明。"
+
+#: ../../source/getting_started/compatibility.rst:129
+msgid "Feature-level compatibility points"
+msgstr "特性级兼容性点"
+
+#: ../../source/getting_started/compatibility.rst:133
+msgid "Feature or model"
+msgstr "特性或模型"
+
+#: ../../source/getting_started/compatibility.rst:134
+msgid "Version point"
+msgstr "版本点"
+
+#: ../../source/getting_started/compatibility.rst:135
+msgid "Meaning"
+msgstr "含义"
+
+#: ../../source/getting_started/compatibility.rst:136
+msgid "vLLM external MP connector"
+msgstr "vLLM 外部 MP 连接器"
+
+#: ../../source/getting_started/compatibility.rst:137
+msgid "vLLM ``>= 0.20.0``"
+msgstr "vLLM ``>= 0.20.0``"
+
+#: ../../source/getting_started/compatibility.rst:138
+msgid ""
+"The LMCache-shipped connector can be selected with "
+"``kv_connector_module_path``. The vLLM bundled connector remains the "
+"default unless it is overridden."
+msgstr "可以通过 ``kv_connector_module_path`` 选择 LMCache 附带的连接器。除非被覆盖，否则 vLLM 打包的连接器仍然是默认选项。"
+
+#: ../../source/getting_started/compatibility.rst:141
+msgid "vLLM KV events"
+msgstr "vLLM KV 事件"
+
+#: ../../source/getting_started/compatibility.rst:142
+msgid "vLLM ``0.13.0+``"
+msgstr "vLLM ``0.13.0+``"
+
+#: ../../source/getting_started/compatibility.rst:143
+msgid ""
+"This is the minimum version documented for the KV-events integration; "
+"event publishing still requires the corresponding vLLM configuration; see"
+" :doc:`../production/kv_cache_events`."
+msgstr "这是 KV-events 集成文档中记录的最低版本；事件发布仍然需要相应的 vLLM 配置；请参见 :doc:`../production/kv_cache_events`。"
+
+#: ../../source/getting_started/compatibility.rst:146
+msgid ":doc:`../recipes/glm5_2` (GLM-5.2 DSA)"
+msgstr ":doc:`../recipes/glm5_2` (GLM-5.2 DSA)"
+
+#: ../../source/getting_started/compatibility.rst:147
+msgid "vLLM ``0.23.0`` + LMCache ``0.4.7``"
+msgstr "vLLM ``0.23.0`` + LMCache ``0.4.7``"
+
+#: ../../source/getting_started/compatibility.rst:148
+msgid ""
+"This exact model/engine combination is recorded as validated in the "
+"GLM-5.2 recipe. It is not a general support promise for every GLM or "
+"every later release."
+msgstr "此确切的模型/引擎组合在 GLM-5.2 配方中被记录为已验证。这并不是对每个 GLM 或每个后续版本的通用支持承诺。"
+
+#: ../../source/getting_started/compatibility.rst:151
+msgid ":doc:`../recipes/kimi_k3` (Kimi K3 hybrid)"
+msgstr ":doc:`../recipes/kimi_k3` (Kimi K3 混合型)"
+
+#: ../../source/getting_started/compatibility.rst:152
+msgid "LMCache nightly from 2026-07-27 or newer; stable LMCache from ``0.5.3``"
+msgstr "2026-07-27 或更新版本的 LMCache 每日构建版；稳定版 LMCache 从 ``0.5.3`` 开始"
+
+#: ../../source/getting_started/compatibility.rst:153
+msgid ""
+"The recipe currently requires the pre-release vLLM K3 image because the "
+"model support had not reached a stable vLLM release when it was "
+"validated. Check the recipe before upgrading the engine image."
+msgstr "该配方目前需要预发布的 vLLM K3 镜像，因为在验证时模型支持尚未达到稳定的 vLLM 版本。在升级引擎镜像之前，请检查配方。"
+
+#: ../../source/getting_started/compatibility.rst:156
+msgid ":doc:`../recipes/kimi_linear` (Kimi-Linear DCP)"
+msgstr ":doc:`../recipes/kimi_linear` (Kimi-Linear DCP)"
+
+#: ../../source/getting_started/compatibility.rst:157
+msgid "vLLM newer than ``0.27.1``"
+msgstr "vLLM 版本高于 ``0.27.1``"
+
+#: ../../source/getting_started/compatibility.rst:158
+msgid ""
+"DCP support for the documented Kimi-Linear example depends on the vLLM "
+"change identified in the MP configuration guide. The LMCache server chunk"
+" size must also satisfy the resolved block-span constraints."
+msgstr "DCP 对文档中 Kimi-Linear 示例的支持取决于 MP 配置指南中识别的 vLLM 更改。LMCache 服务器块大小还必须满足解决的块跨度约束。"
+
+#: ../../source/getting_started/compatibility.rst:162
+msgid ""
+"For hybrid models, the model recipe and :doc:`../mp/hybrid_models` are "
+"more authoritative than a package-version comparison. Different attention"
+" and recurrent groups can have different physical page geometry, and a "
+"deployment can be incompatible even when both packages import "
+"successfully."
+msgstr "对于混合模型，模型配方和 :doc:`../mp/hybrid_models` 比包版本比较更具权威性。不同的注意力和递归组可能具有不同的物理页面几何形状，即使两个包都成功导入，部署也可能不兼容。"
+
+#: ../../source/getting_started/compatibility.rst:168
+msgid "How to evaluate a new combination"
+msgstr "如何评估新的组合"
+
+#: ../../source/getting_started/compatibility.rst:170
+msgid ""
+"When trying a vLLM release that is not listed in a recipe, record the "
+"complete runtime tuple:"
+msgstr "在尝试一个未在配方中列出的 vLLM 版本时，记录完整的运行时元组："
+
+#: ../../source/getting_started/compatibility.rst:173
+msgid ""
+"This includes a newly released version such as vLLM ``0.28.0``: being the"
+" latest vLLM release does not by itself make the combination validated. "
+"Select the appropriate LMCache stable/nightly channel, load the intended "
+"external connector explicitly, and run the checks below before using it "
+"in production."
+msgstr "这包括一个新发布的版本，例如 vLLM ``0.28.0``：仅仅是最新的 vLLM 发布并不能使组合得到验证。选择适当的 LMCache 稳定版/每日构建版通道，明确加载预期的外部连接器，并在生产中使用之前运行以下检查。"
+
+#: ../../source/getting_started/compatibility.rst:178
+msgid "LMCache version or commit and vLLM version or commit;"
+msgstr "LMCache 版本或提交和 vLLM 版本或提交;"
+
+#: ../../source/getting_started/compatibility.rst:179
+msgid "Python minor version and PyTorch version/build;"
+msgstr "Python 次版本和 PyTorch 版本/构建;"
+
+#: ../../source/getting_started/compatibility.rst:180
+msgid "CUDA, ROCm, or XPU runtime and GPU model;"
+msgstr "CUDA、ROCm 或 XPU 运行时和 GPU 型号；"
+
+#: ../../source/getting_started/compatibility.rst:181
+msgid "connector name, external module path, transfer mode, and server version;"
+msgstr "连接器名称、外部模块路径、传输模式和服务器版本；"
+
+#: ../../source/getting_started/compatibility.rst:182
+msgid ""
+"model, tensor/pipeline/context parallel sizes, KV cache dtype, and block "
+"size; and"
+msgstr "模型、张量/管道/上下文并行大小、KV Cache 数据类型和块大小；以及"
+
+#: ../../source/getting_started/compatibility.rst:184
+msgid "the storage backend and whether the test is cold, warm, or cross-process."
+msgstr "存储后端以及测试是冷启动、热启动还是跨进程。"
+
+#: ../../source/getting_started/compatibility.rst:186
+msgid "At minimum, run these checks:"
+msgstr "至少运行以下检查："
+
+#: ../../source/getting_started/compatibility.rst:188
+msgid "start the server and confirm that the intended connector module is loaded;"
+msgstr "启动服务器并确认所需的连接器模块已加载；"
+
+#: ../../source/getting_started/compatibility.rst:189
+msgid "run one cold request that stores a prefix;"
+msgstr "运行一个冷请求以存储前缀；"
+
+#: ../../source/getting_started/compatibility.rst:190
+msgid ""
+"run a second request with the same prefix and confirm a non-zero cache "
+"hit;"
+msgstr "运行第二个请求，使用相同的前缀，并确认缓存命中不为零；"
+
+#: ../../source/getting_started/compatibility.rst:191
+msgid ""
+"clear or restart the engine as appropriate and verify a cross-process "
+"retrieve; and"
+msgstr "清除或重启引擎，并验证跨进程检索；并"
+
+#: ../../source/getting_started/compatibility.rst:193
+msgid ""
+"compare output correctness and inspect the LMCache server logs for "
+"layout, transfer, or worker-liveness errors."
+msgstr "比较输出正确性并检查 LMCache 服务器日志以查找布局、传输或工作进程存活错误。"
+
+#: ../../source/getting_started/compatibility.rst:196
+msgid ""
+"For a model-specific feature, also run the commands and correctness "
+"checks in its recipe. A successful import or a single cache hit is not "
+"enough to mark a new model, hybrid layout, or accelerator path as "
+"validated."
+msgstr "对于特定模型的功能，还需在其配方中运行命令和正确性检查。成功导入或单个缓存命中不足以将新模型、混合布局或加速器路径标记为已验证。"
+
+#: ../../source/getting_started/compatibility.rst:201
+msgid "Support labels used on this page"
+msgstr "支持本页使用的标签"
+
+#: ../../source/getting_started/compatibility.rst:203
+msgid ""
+"**Validated** means the exact environment and scenario are documented "
+"with a successful test result."
+msgstr "**已验证**意味着确切的环境和场景已记录，并且有成功的测试结果。"
+
+#: ../../source/getting_started/compatibility.rst:205
+msgid ""
+"**Required** means a version boundary is needed to access a particular "
+"API or integration path; it does not validate every feature above that "
+"boundary."
+msgstr "**必需**意味着需要一个版本边界才能访问特定的 API 或集成路径；它并不验证该边界以上的每个功能。"
+
+#: ../../source/getting_started/compatibility.rst:207
+msgid ""
+"**Recommended** means the installation or development workflow should "
+"prefer that channel, but it is not a compatibility guarantee."
+msgstr "**推荐**意味着安装或开发工作流应该优先选择该渠道，但这并不保证兼容性。"
+
+#: ../../source/getting_started/compatibility.rst:209
+msgid ""
+"**Unverified** means that no exact LMCache result is recorded in the "
+"current documentation. It may work, but it should be tested before "
+"production use."
+msgstr "**未验证**意味着当前文档中没有记录确切的 LMCache 结果。它可能有效，但在生产使用之前应进行测试。"
+
+#: ../../source/getting_started/compatibility.rst:212
+msgid ""
+"The historical :download:`Installation compatibility CSV "
+"<Installation_compatibility_matrix.csv>` covers older LMCache 0.3--0.4 "
+"releases. It should not be used as the current source of truth; this page"
+" and the linked feature recipes describe the current compatibility "
+"policy."
+msgstr "历史 :download:`安装兼容性 CSV <Installation_compatibility_matrix.csv>` 涵盖了较早的 LMCache 0.3--0.4 版本。它不应作为当前的真实来源；本页面及链接的功能食谱描述了当前的兼容性政策。"
+

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-20 10:08+0000\n"
+"POT-Creation-Date: 2026-10-19 09:28+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -53,8 +53,8 @@ msgstr "使用统计信息在 ``lmcache/usage_telemetry/`` 包中实现。启动
 #: ../../source/developer_guide/usage/usage_stats_collection.rst:16
 msgid ""
 "When LMCache runs **inside the serving engine** (the single-process "
-"integrations for vLLM, SGLang, and TensorRT-LLM), engine startup sends:"
-msgstr "当 LMCache **在服务引擎内部**（vLLM、SGLang 和 TensorRT-LLM 的单进程集成）运行时，引擎启动会发送："
+"integrations for vLLM and TensorRT-LLM), engine startup sends:"
+msgstr "当 LMCache **在服务引擎内部**（vLLM 和 TensorRT-LLM 的单进程集成）运行时，引擎启动会发送："
 
 #: ../../source/developer_guide/usage/usage_stats_collection.rst:19
 msgid ""
@@ -121,7 +121,11 @@ msgid ""
 "process mode additionally sends a cache-lifespan histogram "
 "(**CacheLifespanMessage**). The flush interval is "
 "``LMCACHE_USAGE_TRACK_INTERVAL`` seconds (default 600)."
-msgstr "除了上述一次性消息外，两种部署模式定期发送间隔计数器（**ContinuousContextMessage**：检索的令牌、存储的令牌、存储的 KV 字节、进程运行时间）。空闲间隔仍然会发送，并双重作为存活心跳。单进程模式还额外发送缓存生命周期直方图（**CacheLifespanMessage**）。刷新间隔为 ``LMCACHE_USAGE_TRACK_INTERVAL`` 秒（默认 600）。"
+msgstr ""
+"除了上述一次性消息外，两种部署模式定期发送间隔计数器（**ContinuousContextMessage**：检索的令牌、存储的令牌、存储的 "
+"KV "
+"字节、进程运行时间）。空闲间隔仍然会发送，并双重作为存活心跳。单进程模式还额外发送缓存生命周期直方图（**CacheLifespanMessage**）。刷新间隔为"
+" ``LMCACHE_USAGE_TRACK_INTERVAL`` 秒（默认 600）。"
 
 #: ../../source/developer_guide/usage/usage_stats_collection.rst:54
 msgid "Every payload carries four common fields:"
