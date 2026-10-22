@@ -86,12 +86,20 @@ def create_app(
     controller_urls: dict[str, str],
     health_check_interval: int,
     lmcache_worker_timeout: int,
+    advertise_host: str = "",
 ) -> FastAPI:
     """
     Create a FastAPI application with endpoints for LMCache operations.
+
+    ``advertise_host`` is passed to the controller manager: when set, workers
+    are given this host instead of the controller's IP for sockets bound to
+    0.0.0.0/* (see ``controller_advertise_host``).
     """
     lmcache_controller_manager = LMCacheControllerManager(
-        controller_urls, health_check_interval, lmcache_worker_timeout
+        controller_urls,
+        health_check_interval,
+        lmcache_worker_timeout,
+        advertise_host=advertise_host,
     )
 
     @asynccontextmanager
@@ -446,6 +454,14 @@ def main():
         default=300,
         help="The lmcache worker timeout in seconds.",
     )
+    parser.add_argument(
+        "--advertise-host",
+        type=str,
+        default=None,
+        help="Host advertised to workers in place of the controller's IP for "
+        "sockets bound to 0.0.0.0 (e.g. a Kubernetes Service name). "
+        "Default: this host's IP.",
+    )
 
     # Parse known args first, then handle extra parameters
     args, extra = parser.parse_known_args()
@@ -462,6 +478,7 @@ def main():
             "monitor_ports": "controller_monitor_ports",
             "health_check_interval": "health_check_interval",
             "lmcache_worker_timeout": "lmcache_worker_timeout",
+            "advertise_host": "controller_advertise_host",
         }
 
         for arg_name, config_key in arg_mappings.items():
@@ -514,7 +531,12 @@ def main():
         health_check_interval = config.health_check_interval
         lmcache_worker_timeout = config.lmcache_worker_timeout
 
-        app = create_app(controller_urls, health_check_interval, lmcache_worker_timeout)
+        app = create_app(
+            controller_urls,
+            health_check_interval,
+            lmcache_worker_timeout,
+            advertise_host=config.controller_advertise_host,
+        )
 
         logger.info(
             "Starting LMCache controller at %s:%s",
