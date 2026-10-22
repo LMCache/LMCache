@@ -13,10 +13,18 @@ import weakref
 # First Party
 from lmcache.lmcache_native import TTLLock
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    L1BackendType,
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError
 from lmcache.v1.distributed.internal_api import (
+    L1ManagerInterface,
     L1ManagerListener,
     L1ObjectMeta,
     L1OperationResult,
@@ -141,7 +149,7 @@ def _l1_staging_bytes_or_zero(target: "L1Manager | None") -> int:
 # Main classes
 
 
-class L1Manager:
+class L1Manager(L1ManagerInterface):
     """
     Object lifecycle state machine for L1 cache
 
@@ -1038,6 +1046,26 @@ class L1Manager:
         """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
         return self._memory_manager.get_l1_memory_desc()
 
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this L1's primary pool.
+
+        Returns:
+            ``GDS`` for a GDS slab, ``CXL`` for a pure Device-DAX tier, and
+            ``DRAM`` otherwise, all ``LOCAL``.
+
+        Note:
+            A hybrid DRAM + Device-DAX tier reports ``DRAM``, its primary
+            pool. Tags are fixed at construction.
+        """
+        memory_config = self._config.memory_config
+        if self._config.gds_l1_config is not None:
+            segment = MemorySegment.GDS
+        elif memory_config.devdax_path and not memory_config.devdax_size_in_bytes:
+            segment = MemorySegment.CXL
+        else:
+            segment = MemorySegment.DRAM
+        return MemoryTags(segment=segment, residency=MemoryResidency.LOCAL)
+
     def get_devdax_arena_statuses(self) -> list[DevDaxArenaStatus]:
         """Return runtime status for every Device-DAX arena.
 
@@ -1049,33 +1077,43 @@ class L1Manager:
         """
         return self._require_devdax_memory_manager().get_arena_statuses()
 
-    def get_devdax_arena_status(self, device_path: str) -> DevDaxArenaStatus:
-        """Return the status of the Device-DAX arena mapped at ``device_path``.
+    def get_devdax_arena_status(
+        self, device_path: str, offset_in_bytes: int = 0
+    ) -> DevDaxArenaStatus:
+        """Return the status of the Device-DAX arena at ``(device_path, offset)``.
 
         Args:
             device_path: The exact path used when the arena was added.
+            offset_in_bytes: Device offset the arena was added with.
 
         Returns:
             The arena's current status.
 
         Raises:
             L1ReconfigureError: If L1 is not Device-DAX backed (409) or no
-                arena is mapped at ``device_path`` (404).
+                arena matches (404).
         """
-        return self._require_devdax_memory_manager().get_arena_status(device_path)
+        return self._require_devdax_memory_manager().get_arena_status(
+            device_path, offset_in_bytes
+        )
 
-    def owns_device(self, device_path: str) -> bool:
-        """Return whether L1 maps the physical device at a path.
+    def owns_range(
+        self, device_path: str, offset_in_bytes: int, size_in_bytes: int
+    ) -> bool:
+        """Return whether L1 maps a range overlapping one on a physical device.
 
         Args:
             device_path: Candidate device path or alias.
+            offset_in_bytes: Start of the candidate range on that device.
+            size_in_bytes: Length of the candidate range.
 
         Returns:
-            ``True`` while the device remains mapped; ``False`` for non-DAX L1.
+            ``True`` while an overlapping arena is mapped; ``False`` for
+            non-DAX L1.
         """
         manager = self._memory_manager
-        return isinstance(manager, DevDaxL1MemoryManager) and manager.owns_device(
-            device_path
+        return isinstance(manager, DevDaxL1MemoryManager) and manager.owns_range(
+            device_path, offset_in_bytes, size_in_bytes
         )
 
     def memory_region_count(self) -> int:
@@ -1094,12 +1132,14 @@ class L1Manager:
         self,
         device_path: str,
         size_in_bytes: int,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
-        """Add a Device-DAX device to the L1 arena pool.
+        """Add a Device-DAX range to the L1 arena pool.
 
         Args:
             device_path: Path of the Device-DAX device to map.
             size_in_bytes: Number of bytes to map.
+            offset_in_bytes: Byte offset into the device.
 
         Returns:
             Status of the newly added arena.
@@ -1109,19 +1149,21 @@ class L1Manager:
                 cannot be applied.
         """
         return self._require_devdax_memory_manager().add_device(
-            device_path, size_in_bytes
+            device_path, size_in_bytes, offset_in_bytes
         )
 
     def remove_devdax_device(
         self,
         device_path: str,
         mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
-        """Remove a Device-DAX device from the L1 arena pool.
+        """Remove a Device-DAX arena from the L1 arena pool.
 
         Args:
             device_path: Path of the mapped Device-DAX device.
             mode: Removal strategy. Only drain mode is currently supported.
+            offset_in_bytes: Device offset the arena was added with.
 
         Returns:
             Status of the arena after the removal request.
@@ -1130,7 +1172,9 @@ class L1Manager:
             L1ReconfigureError: If L1 is not Device-DAX backed or the request
                 cannot be applied.
         """
-        return self._require_devdax_memory_manager().remove_device(device_path, mode)
+        return self._require_devdax_memory_manager().remove_device(
+            device_path, mode, offset_in_bytes
+        )
 
     @property
     def config(self) -> L1ManagerConfig:

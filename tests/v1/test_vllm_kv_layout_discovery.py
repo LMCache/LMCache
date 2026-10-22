@@ -118,6 +118,19 @@ class TestTryGetVllmKVCacheLayout:
         config = SimpleNamespace(cache_config=LegacyCacheConfig())
         assert try_get_vllm_kv_cache_layout(config) == "HND"
 
+    def test_legacy_neuron_nhd_is_normalized_at_vllm_boundary(self, monkeypatch):
+        """vllm-neuron reports NHD but allocates [2, NB, NH, BS, HS]."""
+        monkeypatch.setattr(
+            "lmcache.integration.vllm.utils.torch_device_type", "neuron"
+        )
+        stub_module(
+            monkeypatch,
+            "vllm.v1.attention.backends.utils",
+            get_kv_cache_layout=lambda: "NHD",
+        )
+        config = SimpleNamespace(cache_config=LegacyCacheConfig())
+        assert try_get_vllm_kv_cache_layout(config) == "HND"
+
     def test_vllm_absent_returns_none(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "vllm", None)
         monkeypatch.setitem(sys.modules, "vllm.config", None)

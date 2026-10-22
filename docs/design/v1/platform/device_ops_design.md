@@ -50,8 +50,8 @@ Plain instance methods + inheritance:
   Partial backends (XPU: 12 SYCL + 24 torch) shadow only what they ship.
   Focused backends (MUSA) override individual methods directly.
 - Raw-pointer tensor construction is resolved through
-  `DeviceOps.tensor_from_ptr()`. CPU, CUDA, and MUSA override that method, so
-  adding another pointer-capable device does not change the central
+  `DeviceOps.tensor_from_ptr()`. CPU, CUDA, MUSA, and NPU override that method,
+  so adding another pointer-capable device does not change the central
   `_tensor_from_ptr()` entry point.
 
 The one-line base methods are intentional boilerplate: they keep the contract
@@ -145,6 +145,15 @@ class DeviceOps:
   `resolve_device_ops(device.type).tensor_from_ptr(...)`. There is no second
   device-name registry or `if/elif` dispatch table to keep synchronized.
 
+- **Tensor-to-pointer conversion lives in the platform.** The CUDA/ROCm, XPU
+  and Ascend block kernels take addresses: a device tensor of per-layer base
+  addresses, chunk addresses as `list[int]` and a device block-ID tensor, at
+  most four chunks per launch, with host chunks pinned. Engine-driven
+  `gather_paged_kv_to_cpu` / `scatter_cpu_to_paged_kv` keep tensors and call
+  `transfer_with_address_kernel` (`platform/native_block_transfer.py`) for
+  those kernels. It builds the operands, splits the launches, pins or stages
+  unpinned chunks, and synchronizes only when it had to pin or stage.
+
 ### 3.4 What got migrated
 
 | Old | New |
@@ -167,6 +176,7 @@ classDiagram
     DeviceOps <|-- MusaDeviceOps
     DeviceOps <|-- HpuDeviceOps
     DeviceOps <|-- CudaDeviceOps
+    DeviceOps <|-- NpuDeviceOps
     class DeviceOps {
       +device_type = "" (unregistered)
       torch/CPU baseline (36 ops)
@@ -177,6 +187,7 @@ classDiagram
     class CudaDeviceOps { "cuda"; +tensor_from_ptr(); bind_native(cuda_ops) }
     class XpuDeviceOps { "xpu"; bind_native(xpu_ops): 12 SYCL + 24 torch }
     class MusaDeviceOps { "musa"; +tensor_from_ptr(); transfer overrides }
+    class NpuDeviceOps { "npu"; +tensor_from_ptr(); sync-recorder; memcpy }
     class HpuDeviceOps { "hpu"; pure inherit }
 ```
 

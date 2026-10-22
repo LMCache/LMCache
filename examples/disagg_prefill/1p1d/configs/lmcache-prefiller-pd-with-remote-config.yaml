@@ -1,7 +1,7 @@
 local_cpu: True
 max_local_cpu_size: 5
 
-remote_url: "lm://localhost:6800"
+remote_url: "redis://localhost:6379"
 remote_serde: "cachegen"
 
 retrieve_locations: ["LocalCPUBackend", "RemoteBackend"]

@@ -130,8 +130,23 @@ def _stream(
     chat: bool,
     max_tokens: int,
 ) -> dict[str, Any]:
-    """POST with ``stream: true``; parse SSE; return the completion text plus
-    TTFT/TPOT and token metrics."""
+    """POST with ``stream: true`` and collect text and token/latency metrics.
+
+    Args:
+        url: Endpoint URL for the streaming request.
+        body: OpenAI-compatible request payload.
+        timeout: HTTP request timeout in seconds.
+        chat: Whether the endpoint uses chat completion chunks.
+        max_tokens: Output-token estimate when the server omits its count.
+
+    Returns:
+        Completion text, server token counts, and measured latency metrics.
+        A reported completion count of zero is preserved.
+
+    Raises:
+        RuntimeError: If the HTTP request fails, the server reports an error,
+            or the stream contains neither text nor usage.
+    """
     payload = {
         **body,
         "stream": True,
@@ -199,9 +214,8 @@ def _stream(
 
     u = usage or {}
     prompt_tokens = int(u.get("prompt_tokens") or 0)
-    num_completion = int(u.get("completion_tokens") or 0)
-    # Match V2RequestSender: server count if present, else max_tokens cap.
-    num_generated = num_completion if num_completion > 0 else max_tokens
+    num_completion = u.get("completion_tokens")
+    num_generated = int(num_completion) if num_completion is not None else max_tokens
     if first_token_t is None:
         # Use total round-trip as a conservative TTFT approximation.
         ttft_s = t1 - t0
@@ -294,7 +308,9 @@ class Request:
         Returns:
             A ``(answer, metrics)`` tuple where ``answer`` is the model's
             completion text and ``metrics`` is a :data:`MetricMap` of token
-            and latency stats keyed by metric id.
+            and latency stats keyed by metric id. Output tokens use the
+            server's completion count, including zero, or ``max_tokens``
+            when the count is absent.
         """
         request_data = self.build_request(prompt)
         result = self._query_with_fallback(request_data)

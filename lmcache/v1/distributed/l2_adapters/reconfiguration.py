@@ -43,15 +43,19 @@ class L2ReconfigureStatus(TypedDict):
 class L2DeviceOwner(Protocol):
     """Protocol for L2 adapters that own a local physical device."""
 
-    def owns_device(self, device_path: str) -> bool:
-        """Return whether the adapter currently maps ``device_path``.
+    def owns_range(
+        self, device_path: str, offset_in_bytes: int, size_in_bytes: int
+    ) -> bool:
+        """Return whether the adapter maps a range overlapping the given one.
 
         Args:
             device_path: Path whose physical backing identity should be checked.
+            offset_in_bytes: Start of the candidate range on that device.
+            size_in_bytes: Length of the candidate range.
 
         Returns:
-            ``True`` when the adapter owns the same physical device, even if it
-            was opened through another path; otherwise ``False``.
+            ``True`` when a mapping on the same physical device, even one opened
+            through another path, overlaps the range; otherwise ``False``.
         """
         ...
 
@@ -69,14 +73,15 @@ class L2ReconfigurableAdapter(Protocol):
         operation: str,
         payload: dict[str, object],
         *,
-        device_owners: Callable[[str], list[str]],
+        device_owners: Callable[[str, int, int], list[str]],
     ) -> dict:
         """Apply an adapter-specific runtime reconfiguration operation.
 
         Args:
             operation: Adapter-specific operation name.
             payload: Adapter-specific operation payload.
-            device_owners: Query other L1 or L2 owners on each add, before
+            device_owners: Query other L1 or L2 owners of a device byte range
+                ``(path, offset, size)`` on each add or resize, before
                 acquiring the adapter's device lock. The caller holds the
                 lifecycle lock through add completion. The callback must not
                 reacquire it; it may acquire other owners' locks one at a time.

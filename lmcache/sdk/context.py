@@ -450,10 +450,16 @@ class LMCacheSDKContext:
         self._finished_lookups: dict[str, int] = {}
 
         logger.info(
-            f"Initialized LMCacheSDKContext with instance_id={self.instance_id}, "
-            f"model_name={self._model_name}, chunk_size={self._chunk_size}, "
-            f"device={self._device}, kind={self._kind}, "
-            f"sw_size_tokens={self._sw_size_tokens}"
+            "Initialized LMCacheSDKContext with instance_id=%s, "
+            "model_name=%s, chunk_size=%s, "
+            "device=%s, kind=%s, "
+            "sw_size_tokens=%s",
+            self.instance_id,
+            self._model_name,
+            self._chunk_size,
+            self._device,
+            self._kind,
+            self._sw_size_tokens,
         )
 
     @property

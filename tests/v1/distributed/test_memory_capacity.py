@@ -82,7 +82,9 @@ class _FakeL1Manager:
     def get_devdax_arena_statuses(self) -> list[DevDaxArenaStatus]:
         return []
 
-    def get_devdax_arena_status(self, device_path: str) -> DevDaxArenaStatus:
+    def get_devdax_arena_status(
+        self, device_path: str, offset_in_bytes: int = 0
+    ) -> DevDaxArenaStatus:
         for status in self.get_devdax_arena_statuses():
             if status.device_path == device_path:
                 return status
@@ -133,12 +135,16 @@ class _StorageManagerStub:
     def _single_region_adapter_names(self) -> list[str]:
         return StorageManager._single_region_adapter_names(cast("StorageManager", self))
 
-    def _l2_device_owner_names(self, _device_path: str) -> list[str]:
+    def _l2_device_owner_names(
+        self, _device_path: str, _offset: int = 0, _size: int = 0
+    ) -> list[str]:
         return []
 
-    def _l1_devdax_arena_is_active(self, device_path: str) -> bool:
+    def _l1_devdax_arena_is_active(
+        self, device_path: str, offset_in_bytes: int = 0
+    ) -> bool:
         return StorageManager._l1_devdax_arena_is_active(
-            cast("StorageManager", self), device_path
+            cast("StorageManager", self), device_path, offset_in_bytes
         )
 
     def _snapshot_adapters(
@@ -456,13 +462,13 @@ class TestCapacityChangePublishing:
                 )
 
             def add_devdax_device(
-                self, _device_path: str, _size_in_bytes: int
+                self, _device_path: str, _size_in_bytes: int, _offset: int = 0
             ) -> DevDaxArenaStatus:
                 self._capacities = {L1BackendType.DEVDAX: 8192}
                 return active
 
             def remove_devdax_device(
-                self, _device_path: str, _mode: object
+                self, _device_path: str, _mode: object, _offset: int = 0
             ) -> DevDaxArenaStatus:
                 if self._capacities[L1BackendType.DEVDAX] == 4096:
                     raise ValueError("Device-DAX arena is not mapped")
@@ -517,7 +523,9 @@ class TestCapacityChangePublishing:
                     )
                 ]
 
-            def remove_devdax_device(self, _device_path: str, _mode: object) -> None:
+            def remove_devdax_device(
+                self, _device_path: str, _mode: object, _offset: int = 0
+            ) -> None:
                 self._target_state = DevDaxArenaState.DRAINING
                 raise RuntimeError("cleanup failed after drain started")
 
