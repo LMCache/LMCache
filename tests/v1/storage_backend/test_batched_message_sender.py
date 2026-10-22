@@ -8,9 +8,9 @@ import time
 import torch
 
 # First Party
+from lmcache.inprocess.v1.cache_controller.message import OpType
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.storage_backend.batched_message_sender import (
     BatchedMessageSender,

@@ -190,6 +190,37 @@ class TestAnswerMatch:
     def test_rounded_figure_matches(self) -> None:
         assert answer_match("about $8.74 billion", ["$8738.00"])
 
+    @pytest.mark.parametrize(
+        "prediction,reference",
+        [
+            ("15", "1.5"),
+            ("1.5", "15"),
+            ("$1158800", "$11,588.00"),
+            ("$11,588.00", "$1158800"),
+            ("100%", "1.00%"),
+            ("It was 15 dollars.", "1.5"),
+        ],
+    )
+    def test_decimal_place_changes_do_not_match(
+        self, prediction: str, reference: str
+    ) -> None:
+        """Punctuation removal must not turn different figures into a match."""
+        assert not answer_match(prediction, [reference])
+
+    @pytest.mark.parametrize(
+        "prediction,reference",
+        [
+            ("1,500", "1500"),
+            ("1.500", "1.5"),
+            ("about 1.5 units", "1.5"),
+        ],
+    )
+    def test_equivalent_numeric_phrases_still_match(
+        self, prediction: str, reference: str
+    ) -> None:
+        """Formatting and surrounding prose do not change a numeric answer."""
+        assert answer_match(prediction, [reference])
+
     def test_neighbouring_figure_does_not_match(self) -> None:
         """The wrong line of the same table must not pass."""
         assert not answer_match("$3,033 million", ["$11588.00"])

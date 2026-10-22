@@ -39,12 +39,17 @@ If you discover a security vulnerability, please follow the instructions in the 
 To contribute to this repo, you'll use the Fork and Pull model common in many open source repositories. For details on this process, check out `The GitHub Workflow Guide <https://github.com/kubernetes/community/blob/master/contributors/guide/github-workflow.md>`_ from Kubernetes. In short:
 
 - Fork the repository
-- Create a branch
+- Create a branch off ``dev`` -- ``dev`` is the default branch, and all pull requests are opened against it
 - Run code style checks and fix any issues
 - Run unit tests and fix any broken tests
 - Submit a pull request with detailed descriptions
 
 When your contribution is ready, you can create a pull request. Pull requests are often referred to as "PRs". In general, we follow the standard `GitHub pull request <https://help.github.com/en/articles/about-pull-requests>`_ process. Follow the template to provide details about your pull request to the maintainers.
+
+The full step-by-step walkthrough -- the exact git commands, the sign-off requirement, the
+title prefixes, and how to ask for a reviewer once the PR is open -- is in
+`CONTRIBUTING.md <https://github.com/LMCache/LMCache/blob/dev/CONTRIBUTING.md#submitting-a-pull-request>`_
+at the repository root.
 
 Please try to classify PRs for easy understanding of the type of changes. The PR title is prefixed appropriately to indicate the type of change. Please use one of the following:
 
@@ -91,6 +96,18 @@ Once you've created a pull request, maintainers will review your code and may ma
 .. note::
 
     Maintainers will perform "squash and merge" actions on PRs in this repo, so it doesn't matter how many commits your PR has, as they will end up being a single commit after merging.
+
+Opening a pull request does not notify anyone in particular. `CODEOWNERS <https://github.com/LMCache/LMCache/blob/dev/.github/CODEOWNERS>`_
+automatically requests review from the owners of the paths you touched, but the reliable way to get
+a reviewer is to ask for one: after you open your PR, post the link in :code:`#pr-reviews` in the
+`LMCache Slack workspace <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA>`_
+with a one-line summary of what it does. If you would rather not use Slack, comment on your own PR
+and mention the ``CODEOWNERS`` for the paths you changed.
+
+.. note::
+
+    A pull request with no activity for 60 days is marked :code:`stale` and closed 30 days later,
+    so follow up if yours goes quiet.
 
 Development
 -----------
@@ -154,11 +171,15 @@ Unit tests
 
 When making changes, run the tests before pushing the changes. Running unit tests ensures your contributions do not break existing code. We use the `pytest <https://docs.pytest.org/>`_ framework to run unit tests. The framework is setup to run all files in the `tests <https://github.com/LMCache/LMCache/tree/dev/tests>`_ directory which have a prefix or posfix of "test".
 
-Running unit tests is as simple as:
+Run the same suite CI runs:
 
 .. code-block:: bash
 
-    pytest
+    pytest -xvs --ignore=tests/disagg \
+      --ignore=tests/v1/multiprocess/ \
+      --ignore=tests/v1/distributed/ \
+      --ignore=tests/skipped \
+      --ignore=tests/v1/storage_backend/test_eic.py
 
 .. note::
 

@@ -62,7 +62,7 @@ def get_service_bindings() -> dict[str, ServiceBinding]:
 
 
 def iter_methods() -> list[tuple[ServiceBinding, MethodDescriptor]]:
-    """Return all generated unary RPC methods in descriptor order."""
+    """Return all generated RPC methods in descriptor order."""
     return [
         (binding, method)
         for binding in get_service_bindings().values()

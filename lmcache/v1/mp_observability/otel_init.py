@@ -16,6 +16,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Callable
 from typing import TYPE_CHECKING
+import os
 import sys
 
 if TYPE_CHECKING:
@@ -29,6 +30,12 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 _GRPC_OTEL_PLUGIN: object | None = None
+
+# grpcio-observability flushes its stats from a Python thread every 0.5s by
+# default and holds the GIL for the whole batch. Under load that stalls requests
+# for several ms, so flush smaller batches more often.
+_GRPC_EXPORT_INTERVAL_ENV = "GRPC_PYTHON_CENSUS_EXPORT_BATCH_INTERVAL_SECS"
+_GRPC_EXPORT_INTERVAL_SECS = "0.05"
 
 
 def _build_resource(resource_attributes: dict[str, str] | None) -> "Resource":
@@ -138,6 +145,9 @@ def init_grpc_otel_metrics(meter_provider: "MeterProvider") -> None:
     treats it as an optional runtime integration and keeps metrics startup
     working when the package is unavailable.
 
+    Sets ``GRPC_PYTHON_CENSUS_EXPORT_BATCH_INTERVAL_SECS`` to 0.05 unless it
+    is already set, so the plugin flushes its stats in small batches.
+
     Args:
         meter_provider: The OTel SDK provider used by the LMCache metrics
             pipeline.
@@ -156,6 +166,8 @@ def init_grpc_otel_metrics(meter_provider: "MeterProvider") -> None:
         )
         return
 
+    # Only read when grpc_observability is first imported.
+    os.environ.setdefault(_GRPC_EXPORT_INTERVAL_ENV, _GRPC_EXPORT_INTERVAL_SECS)
     try:
         # Third Party
         from grpc_observability import OpenTelemetryPlugin

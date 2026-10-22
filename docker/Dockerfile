@@ -39,6 +39,13 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 
 WORKDIR /workspace
 
+# The NGC Ubuntu base reserves uid 1000 for its default ubuntu account.
+# Replace that account with a dedicated user to reduce container privileges.
+RUN if [ "$(getent passwd 1000 | cut -d: -f1)" = "ubuntu" ]; then userdel ubuntu; fi \
+    && useradd --create-home --uid 1000 --shell /usr/sbin/nologin lmcache \
+    && mkdir -p /home/lmcache/.cache/huggingface \
+    && chown -R lmcache:lmcache /workspace /home/lmcache/.cache
+
 # CUDA arch list used by torch
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
@@ -106,9 +113,12 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     test -f "${NIXL_PLUGIN_DIR}/libplugin_OBJ.so" && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
-    uv pip install ./dist_lmcache/*.whl --verbose
+    bash docker/build_raw_block_wheel.sh dist_lmcache && \
+    uv pip install ./dist_lmcache/*.whl --verbose && \
+    python3 -c 'import lmcache_rust_raw_block_io'
 
 WORKDIR /workspace
+USER lmcache
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
 #################### vLLM IMAGE & LMCache (Release, cu13) #######################
@@ -133,10 +143,16 @@ RUN . /opt/venv/bin/activate && \
     uv pip install "lmcache${VER:+==${VER}}" \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match --verbose && \
+    # The Rust module is published at lmcache's version; pin it to the lmcache
+    # actually installed, so the two match even when LMCACHE_VERSION is unset.
+    LMCACHE_INSTALLED=$(python3 -c 'import importlib.metadata as m; print(m.version("lmcache"))') && \
+    uv pip install "lmcache-rust-raw-block-io==${LMCACHE_INSTALLED}" && \
+    python3 -c 'import lmcache_rust_raw_block_io' && \
   
     uv pip install --reinstall-package nixl nixl
 
 WORKDIR /workspace
+USER lmcache
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
 #################### vLLM IMAGE & LMCache (Release, cu129) ######################
@@ -158,12 +174,14 @@ RUN . /opt/venv/bin/activate && \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
-    uv pip install lmcache==${VER} \
+    uv pip install lmcache==${VER} lmcache-rust-raw-block-io==${VER} \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu129 \
         --index-strategy unsafe-best-match --verbose && \
+    python3 -c 'import lmcache_rust_raw_block_io' && \
     
     uv pip install --reinstall-package nixl nixl
 
 WORKDIR /workspace
+USER lmcache
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
