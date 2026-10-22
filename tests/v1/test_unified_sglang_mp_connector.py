@@ -754,6 +754,23 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             [[2, 3], [0, 7]],
         )
 
+        connector._store_submitted_tokens = {}
+        connector._transfer_ctx = _TransferContext()
+        operation = connector.submit_store(
+            "linker-request",
+            list(range(16)),
+            [torch.arange(8, 16), torch.tensor([0, 7])],
+            device_indices_start=8,
+            cache_salt="",
+            store_start=8,
+        )
+
+        self.assertIsNotNone(operation)
+        self.assertEqual(
+            connector._transfer_ctx.store_args[3],
+            [[2, 3], [0, 7]],
+        )
+
     def test_mla_non_writer_uses_collective_placeholder(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
         connector.page_size = 4
