@@ -21,9 +21,10 @@ exit 0 pass | 1 regressed (nightly only) | 2 invalid run / no images / host setu
 ## What a run measures
 
 Workload `agentic`: a Claude Code session replay
-(`semianalysisai/cc-traces-weka-062126-256k`, pinned revision), 230
-concurrent sessions, closed loop. Model Step-3.7-Flash-FP8 on 4 x H200
-(TP4 + EP, FP8 KV, MTP). Every deployment runs the same stock vLLM image and
+(`semianalysisai/cc-traces-weka-062126-256k`, pinned revision), closed loop.
+Model Step-3.7-Flash-FP8 on 4 x H200 (TP4 + EP, FP8 KV, MTP), 230 concurrent
+sessions; `vllm_lmcache_ssm` serves the hybrid Qwen3.8-Flash-Next-FP8
+(Gated DeltaNet + attention) instead, at 150. Every deployment runs the same stock vLLM image and
 the same budget, 800 GiB DRAM + 1500 GiB disk (`vllm_simple`: the DRAM only;
 `vllm_simple_l2`: the disk, with the DRAM as page cache under a memory cap);
 only the cache layer differs:
@@ -35,6 +36,7 @@ only the cache layer differs:
 | `vllm_simple` | weekly | vLLM `SimpleCPUOffloadConnector`, CPU only (one tier by design) |
 | `vllm_simple_l2` | weekly | the same connector's disk backend, page cache as the DRAM tier (container memory capped) |
 | `vllm_mooncake` | weekly | Mooncake store, 4 clients, CPU pool + SSD offload |
+| `vllm_lmcache_ssm` | weekly | as `vllm_lmcache`, on the hybrid model |
 
 Tested metrics: decode p10/p50 (tok/s per request) and TTFT p50/p95.
 Recorded only: request count, errors, preemptions, prompt tokens by source
@@ -64,10 +66,13 @@ Host paths come from the environment:
 | `PRT_RDMA_DEVICES` | comma-separated RDMA devices, needed by the weekly Mooncake |
 
 ```bash
-# Model, at the [model] revision; runs are offline and never download it.
+# Models, at their [models] revisions; runs are offline and never download.
 HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
     stepfun-ai/Step-3.7-Flash-FP8 \
     --revision b3d7916fccac844cca050d7520f2aaa513f9a84f
+HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
+    Qwen/Qwen3.8-Flash-Next-FP8 \
+    --revision 236dfdf285828023ca3bcd3f37366c58a3469b13
 
 # Trace, verified against the pinned sha256 and dir_digest.
 python3.11 perf_regression_testing/workloads/agentic/fetch_trace.py \

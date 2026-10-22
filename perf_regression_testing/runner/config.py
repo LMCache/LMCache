@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Resolve config.toml into the concrete settings of one run.
 
-:func:`resolve` merges the shared base, the deployment and the workload, later
-layers overriding earlier ones key by key. A service with ``replicas = N``
-expands into N services: ``<i>`` becomes ``i`` and ``<B+Si>`` becomes
-``B + S * i``; a string that is only a placeholder becomes an integer.
+:func:`resolve` merges the shared base, the deployment's model, the deployment
+and the workload, later layers overriding earlier ones key by key. A service
+with ``replicas = N`` expands into N services: ``<i>`` becomes ``i`` and
+``<B+Si>`` becomes ``B + S * i``; a string that is only a placeholder becomes
+an integer.
 """
 
 # Standard
@@ -79,10 +80,11 @@ def load(path: Path = CONFIG_PATH) -> dict[str, Any]:
 
     * ``<root>``: ``$PRT_ROOT`` (required), also set as ``[host].root``.
     * ``<hf_cache>``: ``$PRT_HF_CACHE``, default :data:`DEFAULT_HF_CACHE`.
-    * ``<model_path>``: the ``[model]`` snapshot in that cache, also set as
-      ``[model].path``; ``<model_repo>`` and ``<model_revision>`` are its
-      ``repo`` and ``revision``.
     * ``<rdma_devices>``: ``$PRT_RDMA_DEVICES``, left in place when unset.
+
+    Each ``[models.<name>]`` gets ``path``, its snapshot in that cache. The
+    ``<model_*>`` placeholders depend on the run's model; :func:`resolve`
+    fills them.
 
     Args:
         path: TOML file to read.
@@ -98,24 +100,17 @@ def load(path: Path = CONFIG_PATH) -> dict[str, Any]:
     root = os.environ.get("PRT_ROOT")
     if not root:
         raise HostSetupError("PRT_ROOT is unset: set it to PRT's state dir")
-    model = cfg["model"]
     hf_cache = os.environ.get("PRT_HF_CACHE") or DEFAULT_HF_CACHE
-    model_path = (
-        f"{hf_cache}/hub/models--{model['repo'].replace('/', '--')}"
-        f"/snapshots/{model['revision']}"
-    )
-    subst = {
-        "<root>": root,
-        "<hf_cache>": hf_cache,
-        "<model_path>": model_path,
-        "<model_repo>": model["repo"],
-        "<model_revision>": model["revision"],
-    }
+    subst = {"<root>": root, "<hf_cache>": hf_cache}
     if os.environ.get("PRT_RDMA_DEVICES"):
         subst["<rdma_devices>"] = os.environ["PRT_RDMA_DEVICES"]
     cfg = substitute(cfg, subst)
     cfg["host"]["root"] = root
-    cfg["model"]["path"] = model_path
+    for m in cfg["models"].values():
+        m["path"] = (
+            f"{hf_cache}/hub/models--{m['repo'].replace('/', '--')}"
+            f"/snapshots/{m['revision']}"
+        )
     return cfg
 
 
@@ -127,15 +122,17 @@ def check_host(cfg: dict[str, Any], deployments: list[str]) -> None:
         deployments: Keys under ``[deployments]`` about to run.
 
     Raises:
-        HostSetupError: The model snapshot is missing, or a deployment uses
-            ``<rdma_devices>`` while ``PRT_RDMA_DEVICES`` is unset.
+        HostSetupError: A deployment's model snapshot is missing, or a
+            deployment uses ``<rdma_devices>`` while ``PRT_RDMA_DEVICES`` is
+            unset.
     """
-    if not Path(cfg["model"]["path"], "config.json").is_file():
-        raise HostSetupError(
-            f"model snapshot {cfg['model']['path']} is missing: hf download "
-            f"{cfg['model']['repo']} --revision {cfg['model']['revision']}"
-            " (HF_HOME = PRT_HF_CACHE)"
-        )
+    for name in dict.fromkeys(cfg["deployments"][d]["model"] for d in deployments):
+        m = cfg["models"][name]
+        if not Path(m["path"], "config.json").is_file():
+            raise HostSetupError(
+                f"model snapshot {m['path']} is missing: hf download "
+                f"{m['repo']} --revision {m['revision']} (HF_HOME = PRT_HF_CACHE)"
+            )
     for d in deployments:
         if "<rdma_devices>" in json.dumps(cfg["deployments"][d]):
             raise HostSetupError(f"{d} needs PRT_RDMA_DEVICES, which is unset")
@@ -215,6 +212,10 @@ class RunSpec:
 def resolve(cfg: dict[str, Any], workload: str, deployment: str) -> RunSpec:
     """Merge the config layers for one (workload, deployment) pair.
 
+    ``<model_path>``, ``<model_repo>`` and ``<model_revision>`` in the vLLM
+    and AIPerf settings become the deployment's model's snapshot path, repo
+    and revision.
+
     Args:
         cfg: Parsed config from :func:`load`.
         workload: Key under ``[workloads]``.
@@ -224,10 +225,17 @@ def resolve(cfg: dict[str, Any], workload: str, deployment: str) -> RunSpec:
         The merged run settings.
 
     Raises:
-        KeyError: if ``workload`` or ``deployment`` is not in the config.
+        KeyError: if ``workload``, ``deployment`` or its model is not in the
+            config.
     """
     w = cfg["workloads"][workload]
     d = cfg["deployments"][deployment]
+    m = cfg["models"][d["model"]]
+    msubst = {
+        "<model_path>": m["path"],
+        "<model_repo>": m["repo"],
+        "<model_revision>": m["revision"],
+    }
     host = cfg["host"]
     templates = d.get("services", [])
     raw_services = []
@@ -252,7 +260,15 @@ def resolve(cfg: dict[str, Any], workload: str, deployment: str) -> RunSpec:
     ]
     trace = w["trace"]
     trace_dir = Path(host["root"]) / trace["dir"]
-    aiperf_args = {**cfg["aiperf"]["args"], **w["aiperf"].get("args", {})}
+    aiperf_args = substitute(
+        {
+            **cfg["aiperf"]["args"],
+            "model": m["served_name"],
+            **m.get("aiperf_args", {}),
+            **w["aiperf"].get("args", {}),
+        },
+        msubst,
+    )
     aiperf_args["input-file"] = str(trace_dir)
     return RunSpec(
         workload=workload,
@@ -261,23 +277,29 @@ def resolve(cfg: dict[str, Any], workload: str, deployment: str) -> RunSpec:
         gpu_count=host["gpu_count"],
         gpu_busy_wait_s=host["gpu_busy_wait_s"],
         container=cfg["container"],
-        model_path=cfg["model"]["path"],
-        served_name=cfg["model"]["served_name"],
+        model_path=m["path"],
+        served_name=m["served_name"],
         vllm_port=cfg["vllm"]["port"],
         vllm_startup_timeout_s=cfg["vllm"]["startup_timeout_s"],
         vllm_env={**cfg["vllm"]["env"], **d.get("vllm_env", {})},
-        vllm_args={
-            **cfg["vllm"]["args"],
-            **d.get("vllm_args", {}),
-            **w.get("vllm_args", {}),
-        },
+        vllm_args=substitute(
+            {
+                **cfg["vllm"]["args"],
+                **m.get("vllm_args", {}),
+                **d.get("vllm_args", {}),
+                **w.get("vllm_args", {}),
+            },
+            msubst,
+        ),
         services=services,
         vllm_scratch=d.get("vllm_scratch", []),
         vllm_memory_gb=d.get("vllm_memory_gb"),
         devices=d.get("devices", []),
         cap_add=d.get("cap_add", []),
         files=d.get("files", {}),
-        aiperf_env={**cfg["aiperf"]["env"], **w["aiperf"].get("env", {})},
+        aiperf_env=substitute(
+            {**cfg["aiperf"]["env"], **w["aiperf"].get("env", {})}, msubst
+        ),
         aiperf_args=aiperf_args,
         aiperf_timeout_s=cfg["aiperf"]["timeout_s"],
         trace=trace,

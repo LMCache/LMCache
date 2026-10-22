@@ -1,14 +1,16 @@
 # LMCache performance regression test (PRT): the single configuration file.
 #
 # Runs are the cross product of [workloads.<name>] (load and scoring) and
-# [deployments.<name>] (vLLM + a KV cache layer). Shared by both: [host],
-# [model], [container], [vllm] (the base every deployment starts from),
-# [aiperf], [validity]. Images are built from docker/.
+# [deployments.<name>] (a model on vLLM + a KV cache layer). Shared by both:
+# [host], [container], [vllm] (the base every deployment starts from),
+# [aiperf], [validity]. [models.<name>] holds what depends on the model.
+# Images are built from docker/.
 #
 # Placeholders filled by runner/config.py from the environment:
 #   <root>          $PRT_ROOT (required): PRT state, caches, 1.5 TB L2 scratch
 #   <hf_cache>      $PRT_HF_CACHE, default /root/.cache/huggingface (an HF_HOME)
-#   <model_path>    <hf_cache>/hub/models--<repo>/snapshots/<rev>
+#   <model_path>    <hf_cache>/hub/models--<repo>/snapshots/<rev> of the
+#                   deployment's model; <model_repo>, <model_revision> likewise
 #   <rdma_devices>  $PRT_RDMA_DEVICES, comma-separated (only Mooncake needs it)
 
 [host]
@@ -18,11 +20,38 @@ gpu_busy_wait_s = 240        # wait this long for enough free GPUs, then give up
 # A full disk breaks LMCache inside the container and looks like a code bug.
 min_docker_free_gb = 10
 
-[model]
-# Served offline from the HF cache snapshot.
+# Served offline from the HF cache snapshot. `vllm_args` go on top of
+# [vllm.args], `aiperf_args` on top of [aiperf.args].
+[models.step37]
 repo = "stepfun-ai/Step-3.7-Flash-FP8"
 revision = "b3d7916fccac844cca050d7520f2aaa513f9a84f"
 served_name = "step3p7"
+# Just past the KV-capacity knee on purpose: more load on the cache layer.
+aiperf_args = { concurrency = 230 }
+
+[models.step37.vllm_args]
+# Matches LMCache's chunk-size; at the default 0 MooncakeStoreConnector never
+# hits. Here so every deployment keeps the same local prefix cache.
+prefix-cache-retention-interval = 1024
+reasoning-parser = "step3p5"
+enable-auto-tool-choice = true
+tool-call-parser = "step3p5"
+speculative-config = '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
+
+# Hybrid: 36 Gated DeltaNet (SSM) layers and 12 full-attention layers.
+[models.qwen38]
+repo = "Qwen/Qwen3.8-Flash-Next-FP8"
+revision = "236dfdf285828023ca3bcd3f37366c58a3469b13"
+served_name = "qwen3p8"
+# A first guess, not yet calibrated to this model's KV knee.
+aiperf_args = { concurrency = 150 }
+
+[models.qwen38.vllm_args]
+reasoning-parser = "qwen3"
+enable-auto-tool-choice = true
+tool-call-parser = "qwen3_coder"
+# The checkpoint has one MTP layer.
+speculative-config = '{"method":"mtp","num_speculative_tokens":1}'
 
 [container]
 network = "host"           # services and AIPerf talk over 127.0.0.1
@@ -71,15 +100,8 @@ max-num-batched-tokens = 8192
 max-num-seqs = 256
 max-model-len = "auto"
 enable-prefix-caching = true
-# Matches LMCache's chunk-size; at the default 0 MooncakeStoreConnector never
-# hits. In the base so every deployment keeps the same local prefix cache.
-prefix-cache-retention-interval = 1024
 disable-cascade-attn = true
-reasoning-parser = "step3p5"
-enable-auto-tool-choice = true
-tool-call-parser = "step3p5"
 enable-prompt-tokens-details = true
-speculative-config = '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
 # The H200 TP4 default; unset, the API server initializes CUDA to look it up.
 compilation-config = '{"pass_config":{"fi_allreduce_fusion_max_size_mb":2}}'
 
@@ -98,7 +120,6 @@ AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT = "3600"
 # Arguments shared by every workload.
 [aiperf.args]
 url = "http://127.0.0.1:18000"
-model = "step3p7"
 endpoint-type = "chat"
 streaming = true
 extra-inputs = "ignore_eos:true"
@@ -112,13 +133,15 @@ no-gpu-telemetry = true
 # Run is invalid if vllm.log contains any of these.
 invalid_log_patterns = ["unhealthy"]
 
-# A deployment = vLLM base + `vllm_env` / `vllm_args` + `services`, the
-# cache-layer containers started before vLLM from the same image.
+# A deployment = `model` (a key of [models]) + vLLM base + `vllm_env` /
+# `vllm_args` + `services`, the cache-layer containers started before vLLM
+# from the same image.
 # Service fields: `command` + `args` (a table value is passed as JSON), `env`,
 # `ready_url`, and `scratch` dirs that are mounted, checked for `min_free_gb`,
 # and wiped before and after the run.
 
 [deployments.vllm_lmcache]
+model = "step37"
 image_target = "lmcache"
 
 [deployments.vllm_lmcache.vllm_args]
@@ -157,7 +180,52 @@ num_workers = 16
 max_capacity_gb = 1500
 eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 0.1 }
 
+[deployments.vllm_lmcache_ssm]
+# vllm_lmcache on the hybrid model. With prefix caching vLLM caches Mamba
+# state per block (mamba_cache_mode "align") and LMCache needs chunk-size equal
+# to that block size. 1568 is derived from the page sizes at TP4 with fp8 KV,
+# not yet read off a vllm.log.
+model = "qwen38"
+image_target = "lmcache"
+
+[deployments.vllm_lmcache_ssm.vllm_args]
+kv-transfer-config = '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://localhost","lmcache.mp.port":16555,"lmcache.mp.mq_timeout":1500}}'
+
+[[deployments.vllm_lmcache_ssm.services]]
+name = "lmcache"
+command = ["lmcache", "server"]
+ready_url = "http://127.0.0.1:18080/metrics"
+ready_timeout_s = 120
+env = { LMCACHE_LOG_LEVEL = "WARNING" }
+scratch = [{ path = "<root>/l2", min_free_gb = 1500 }]
+
+[deployments.vllm_lmcache_ssm.services.args]
+host = "127.0.0.1"
+port = 16555
+http-port = 18080
+chunk-size = 1568
+separate-object-groups = true
+l1-size-gb = 800
+eviction-policy = "LRU"
+disable-observability = true
+eviction-trigger-watermark = 0.95
+eviction-ratio = 0.05
+l2-prefetch-policy = "retain"
+# One GPU and one CPU worker by default: all 4 TP ranks' stores and loads queue
+# on a single thread.
+max-workers = 4
+
+[deployments.vllm_lmcache_ssm.services.args.l2-adapter]
+type = "fs_native"
+base_path = "<root>/l2"
+# Bypass the page cache, which would serve L2 from RAM outside the L1 budget.
+use_odirect = true
+num_workers = 16
+max_capacity_gb = 1500
+eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 0.1 }
+
 [deployments.vllm_native]
+model = "step37"
 # Both tiers live in the vLLM workers. CPU tier 800 GiB total over the TP
 # ranks. vLLM's fs tier has no capacity limit, so cap_gb freezes the dir at
 # 1500 GiB (runner/disk_cap.py): full means no new entries, not eviction.
@@ -171,6 +239,7 @@ vllm_scratch = [{ path = "<root>/l2", min_free_gb = 1500, cap_gb = 1500 }]
 kv-transfer-config = '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","block_size":1024,"cpu_bytes_to_use":858993459200,"eviction_policy":"lru","secondary_tiers":[{"type":"fs","root_dir":"<root>/l2/fs"}]}}'
 
 [deployments.vllm_simple]
+model = "step37"
 # vLLM SimpleCPUOffloadConnector. Its offload pool is one tier, CPU or disk,
 # never both: this runs CPU, 800 GiB total over the TP ranks, and no disk.
 image_target = "serving"
@@ -179,6 +248,7 @@ image_target = "serving"
 kv-transfer-config = '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":858993459200}}'
 
 [deployments.vllm_simple_l2]
+model = "step37"
 # SimpleCPUOffloadConnector's disk backend, 1500 GiB (375 GiB per TP rank),
 # read through the page cache. That cache is the DRAM tier: vllm_memory_gb
 # caps the container's memory, page cache included, at 800 GiB plus the
@@ -191,6 +261,7 @@ vllm_memory_gb = 832
 kv-transfer-config = '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"kv_offload_backend":"disk","disk_path":"<root>/l2/simple","disk_capacity_bytes":402653184000,"use_page_cache":true}}'
 
 [deployments.vllm_mooncake]
+model = "step37"
 # Tuned through Mooncake's own config only. Standalone-store layout:
 # mooncake_client owns the CPU pool and SSD tier. Budget 800 GiB pool, 1500
 # GiB disk, split over four clients since one client writes SSD from a single
@@ -279,7 +350,7 @@ enable_http_server = true
 http_port = "<19301+i>"
 
 # Every (workload, deployment) pair of a suite, on tonight's images. LMCache
-# nightly gates; competitors run weekly and never gate.
+# nightly gates; competitors and the hybrid model run weekly and never gate.
 
 [suites.nightly]
 workloads = ["agentic"]
@@ -288,7 +359,13 @@ gate = true
 
 [suites.weekly]
 workloads = ["agentic"]
-deployments = ["vllm_native", "vllm_simple", "vllm_simple_l2", "vllm_mooncake"]
+deployments = [
+  "vllm_native",
+  "vllm_simple",
+  "vllm_simple_l2",
+  "vllm_mooncake",
+  "vllm_lmcache_ssm",
+]
 gate = false
 
 # Cross-night check (runner/baseline.py): each metric's series is tested for a
@@ -316,8 +393,7 @@ env = { PRT_LIVE_HISTORY_TOKENIZER = "<model_path>", AIPERF_DATASET_WEKA_PARALLE
 # PRT_LIVE_HISTORY_LOG_DIR is set by the runner.
 
 [workloads.agentic.aiperf.args]
-# Just past the KV-capacity knee on purpose: more load on the cache layer.
-concurrency = 230
+# concurrency is set per model, by its KV capacity.
 scenario = "inferencex-agentx-mvp"
 unsafe-override = true
 # A repo id, not a path: offline AIPerf passes it to snapshot_download.

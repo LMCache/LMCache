@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
+from typing import Any
 
 # Third Party
 import pytest
@@ -17,19 +18,22 @@ from perf_regression_testing.runner.config import (
 def test_load_fills_host_values_from_the_env(tmp_path: Path) -> None:
     path = tmp_path / "c.toml"
     path.write_text(
-        '[host]\n[model]\nrepo = "org/m"\nrevision = "abc"\n'
+        '[host]\n[models.m]\nrepo = "org/m"\nrevision = "abc"\n'
         '[a]\nx = "<root>/l2"\n'
-        'mounts = [{ path = "<model_path>" }, { path = "<artifact_dir>" }]\n'
+        'mounts = [{ path = "<hf_cache>" }, { path = "<artifact_dir>" }]\n'
         'd = "<rdma_devices>"\nn = 3\n'
     )
     cfg = load(path)
-    snap = f"{tmp_path}/hf/hub/models--org--m/snapshots/abc"
     assert cfg["a"]["x"] == f"{tmp_path}/l2"
-    assert cfg["a"]["mounts"] == [{"path": snap}, {"path": "<artifact_dir>"}]
+    assert cfg["a"]["mounts"] == [
+        {"path": f"{tmp_path}/hf"},
+        {"path": "<artifact_dir>"},
+    ]
     assert cfg["a"]["d"] == "mlx5_0,mlx5_1"
     assert cfg["a"]["n"] == 3
     assert cfg["host"]["root"] == str(tmp_path)
-    assert cfg["model"]["path"] == snap
+    snap = f"{tmp_path}/hf/hub/models--org--m/snapshots/abc"
+    assert cfg["models"]["m"]["path"] == snap
 
 
 def test_load_requires_prt_root(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -40,22 +44,55 @@ def test_load_requires_prt_root(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_hf_cache_defaults_to_roots_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PRT_HF_CACHE")
-    assert load()["model"]["path"].startswith("/root/.cache/huggingface/hub/")
+    for m in load()["models"].values():
+        assert m["path"].startswith("/root/.cache/huggingface/hub/")
 
 
 def test_shipped_config_has_no_unresolved_host_placeholder() -> None:
-    text = repr(load())
-    for p in ("<root>", "<hf_cache>", "<model_path>", "<model_", "<rdma_devices>"):
+    cfg = load()
+    text = repr(cfg)
+    for p in ("<root>", "<hf_cache>", "<rdma_devices>"):
         assert p not in text
+    for w in cfg["workloads"]:
+        for d in cfg["deployments"]:
+            assert "<model_" not in repr(resolve(cfg, w, d))
 
 
-def test_check_host_needs_the_model_snapshot(tmp_path: Path) -> None:
+def _fetch(cfg: dict[str, Any], model: str) -> None:
+    path = Path(cfg["models"][model]["path"])
+    path.mkdir(parents=True)
+    (path / "config.json").write_text("{}")
+
+
+def test_check_host_needs_each_deployments_model_snapshot() -> None:
     cfg = load()
     with pytest.raises(HostSetupError, match="hf download"):
         check_host(cfg, ["vllm_lmcache"])
-    Path(cfg["model"]["path"]).mkdir(parents=True)
-    (Path(cfg["model"]["path"]) / "config.json").write_text("{}")
+    _fetch(cfg, "step37")
     check_host(cfg, ["vllm_lmcache", "vllm_mooncake"])
+    with pytest.raises(HostSetupError, match="Qwen3.8"):
+        check_host(cfg, ["vllm_lmcache", "vllm_lmcache_ssm"])
+    _fetch(cfg, "qwen38")
+    check_host(cfg, ["vllm_lmcache", "vllm_lmcache_ssm"])
+
+
+def test_a_deployment_runs_its_own_model() -> None:
+    cfg = load()
+    for d, model, served in [
+        ("vllm_lmcache", "step37", "step3p7"),
+        ("vllm_lmcache_ssm", "qwen38", "qwen3p8"),
+    ]:
+        spec = resolve(cfg, "agentic", d)
+        m = cfg["models"][model]
+        assert spec.model_path == m["path"]
+        assert spec.served_name == spec.aiperf_args["model"] == served
+        assert spec.aiperf_args["tokenizer"] == m["repo"]
+        assert spec.aiperf_args["tokenizer-revision"] == m["revision"]
+        assert spec.aiperf_env["PRT_LIVE_HISTORY_TOKENIZER"] == m["path"]
+        assert (
+            spec.vllm_args["speculative-config"]
+            == (m["vllm_args"]["speculative-config"])
+        )
 
 
 def test_check_host_needs_rdma_devices_only_for_mooncake(
@@ -63,8 +100,7 @@ def test_check_host_needs_rdma_devices_only_for_mooncake(
 ) -> None:
     monkeypatch.delenv("PRT_RDMA_DEVICES")
     cfg = load()
-    Path(cfg["model"]["path"]).mkdir(parents=True)
-    (Path(cfg["model"]["path"]) / "config.json").write_text("{}")
+    _fetch(cfg, "step37")
     check_host(cfg, ["vllm_lmcache", "vllm_native"])
     with pytest.raises(HostSetupError, match="PRT_RDMA_DEVICES"):
         check_host(cfg, ["vllm_mooncake"])

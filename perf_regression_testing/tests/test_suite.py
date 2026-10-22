@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
+from typing import Any
 import json
 
 # Third Party
@@ -10,12 +11,16 @@ import pytest
 from perf_regression_testing import suite
 
 
+def _fetch_models(cfg: dict[str, Any]) -> None:
+    for m in cfg["models"].values():
+        Path(m["path"]).mkdir(parents=True)
+        (Path(m["path"]) / "config.json").write_text("{}")
+
+
 def test_low_docker_disk_stops_the_suite_before_any_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    model = Path(suite.load()["model"]["path"])
-    model.mkdir(parents=True)
-    (model / "config.json").write_text("{}")
+    _fetch_models(suite.load())
     monkeypatch.setattr(suite.docker, "root_free_gb", lambda: 0.2)
 
     def no_build(*args: object, **kwargs: object) -> dict:
@@ -41,14 +46,23 @@ def test_missing_model_stops_the_suite_before_any_build(
     assert "NOT RUN" in (tmp_path / "s" / "report.md").read_text()
 
 
-@pytest.mark.parametrize("name, pinned", [("nightly", True), ("weekly", False)])
+@pytest.mark.parametrize(
+    "name, deployments, pinned",
+    [
+        ("nightly", None, True),
+        ("weekly", None, True),
+        ("weekly", ["vllm_simple"], False),
+    ],
+)
 def test_only_a_suite_that_ran_lmcache_pins_a_new_vllm(
-    name: str, pinned: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    name: str,
+    deployments: list[str] | None,
+    pinned: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cfg = suite.load()
-    model = Path(cfg["model"]["path"])
-    model.mkdir(parents=True)
-    (model / "config.json").write_text("{}")
+    _fetch_models(cfg)
     monkeypatch.setattr(suite.docker, "root_free_gb", lambda: 1e9)
     monkeypatch.setattr(suite.docker, "image_label", lambda image, key: "x")
 
@@ -69,7 +83,7 @@ def test_only_a_suite_that_ran_lmcache_pins_a_new_vllm(
     monkeypatch.setattr(suite.images, "prune", lambda keep: [])
     monkeypatch.setattr(suite.docker, "save", lambda image, path: path.touch())
     monkeypatch.setattr(suite, "run", run)
-    assert suite.suite(name, tmp_path / "s") == suite.EXIT_VALID
+    assert suite.suite(name, tmp_path / "s", deployments) == suite.EXIT_VALID
     pin = Path(cfg["host"]["root"]) / "prt-images" / "pinned.json"
     assert pin.exists() == pinned
 
@@ -96,9 +110,7 @@ def test_an_unknown_suite_is_a_usage_error_naming_the_suites(
 def test_deployments_runs_only_the_named_pairs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    model = Path(suite.load()["model"]["path"])
-    model.mkdir(parents=True)
-    (model / "config.json").write_text("{}")
+    _fetch_models(suite.load())
     monkeypatch.setattr(suite.docker, "root_free_gb", lambda: 1e9)
     monkeypatch.setattr(suite.docker, "image_label", lambda image, key: "x")
     builds: list[str] = []
