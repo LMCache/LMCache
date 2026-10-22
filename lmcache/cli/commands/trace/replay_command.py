@@ -13,7 +13,6 @@ import sys
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.cli.metrics import Metrics, StreamHandler, get_formatter
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -37,7 +36,7 @@ class ReplayCommand(BaseCommand):
         add_replay_arguments(parser)
 
     def execute(self, args: argparse.Namespace) -> None:
-        run_trace_replay(args)
+        run_trace_replay(self, args)
 
 
 def add_replay_arguments(parser: argparse.ArgumentParser) -> None:
@@ -97,7 +96,7 @@ def add_replay_arguments(parser: argparse.ArgumentParser) -> None:
         logger.warning("lmcache trace replay import error, error is %s", e)
 
 
-def run_trace_replay(args: argparse.Namespace) -> None:
+def run_trace_replay(command: BaseCommand, args: argparse.Namespace) -> None:
     """Construct a StorageManager from *args* and drive replay.
 
     Produces three kinds of output:
@@ -109,10 +108,14 @@ def run_trace_replay(args: argparse.Namespace) -> None:
       to ``PATH`` for post-hoc analysis.
     * Aggregated per-qualname summary: CSV (unless ``--no-csv``)
       and JSON (with ``--json``) written under ``--output-dir``.
-    * Terminal metrics table (unless ``--quiet``) using the shared
-      :class:`~lmcache.cli.metrics.Metrics` renderer.
+    * Metrics summary using the shared
+      :class:`~lmcache.cli.metrics.Metrics` renderer, printed to stdout
+      in ``--format`` (unless ``--quiet``) and saved to ``--output``
+      when set.
 
     Args:
+        command: The replay command; its ``create_metrics`` builds the
+            summary handlers.
         args: Parsed CLI arguments.
     """
     # First Party
@@ -232,26 +235,29 @@ def run_trace_replay(args: argparse.Namespace) -> None:
         result.stats.export_json(json_path)
         logger.info("JSON written to %s", json_path)
 
-    if not args.quiet:
-        _emit_replay_metrics(result.stats, result)
+    _emit_replay_metrics(command, args, result.stats, result)
 
     if result.records_failed > 0:
         sys.exit(1)
 
 
 def _emit_replay_metrics(
+    command: BaseCommand,
+    args: argparse.Namespace,
     stats: "ReplayStatsCollector",
     result: "ReplayResult",
 ) -> None:
-    """Print the replay summary using the shared :class:`Metrics` renderer.
+    """Emit the replay summary using the shared :class:`Metrics` renderer.
 
     Args:
+        command: The replay command; its ``create_metrics`` honours
+            ``--format``, ``--output`` and ``--quiet``.
+        args: Parsed CLI arguments.
         stats: The stats collector populated during replay.
         result: The full :class:`ReplayResult` — used for the
             replayed/skipped/failed totals and digest comparison.
     """
-    metrics = Metrics(title="Trace Replay Result")
-    metrics.add_handler(StreamHandler(get_formatter("terminal", width=64)))
+    metrics = command.create_metrics("Trace Replay Result", args, width=64)
 
     overall = metrics.add_section("overall", "Overall")
     overall.add("level", "Trace level", result.header_level)

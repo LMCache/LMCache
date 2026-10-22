@@ -142,6 +142,11 @@ Options
      - Skip the aggregated CSV summary export.
    * - ``--json``
      - Also export an aggregated JSON summary.
+   * - ``--format FORMAT``
+     - Summary format on stdout and in ``--output``: ``terminal``
+       (default) or ``json``.
+   * - ``--output PATH``
+     - Also save the summary to ``PATH``.
    * - ``-q`` / ``--quiet``
      - Suppress the terminal metrics table (files are still written).
 
@@ -202,8 +207,13 @@ Options
    * - ``--heartbeat-interval SECONDS``
      - Heartbeat each registered server this often (default ``5``, below
        the coordinator's 30 s instance timeout); ``0`` sends none.
+   * - ``--format FORMAT``
+     - Summary format on stdout and in ``--output``: ``terminal``
+       (default) or ``json``.
+   * - ``--output PATH``
+     - Also save the summary to ``PATH``.
    * - ``-q`` / ``--quiet``
-     - Suppress the terminal summary.
+     - Suppress the summary on stdout (``--output`` is still written).
 
 ``replay-events`` exits with status ``2`` if a file is not an ``events``
 trace this build can replay, and with status ``1`` if the coordinator
