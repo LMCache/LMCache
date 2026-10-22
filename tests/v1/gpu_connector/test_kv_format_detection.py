@@ -94,6 +94,23 @@ def test_vllm_rbln_num_blocks_2_keeps_kv_first_reading(monkeypatch):
     mock_warning.assert_called_once()
 
 
+@pytest.mark.parametrize("hint", [{}, {"kv_layout": "NHD"}, {"kv_layout": "HND"}])
+@pytest.mark.parametrize("packing", [2, 4])
+def test_vllm_torchtpu_packed_layout(
+    monkeypatch: pytest.MonkeyPatch, hint: LayoutHints, packing: int
+) -> None:
+    # On TPU every per-layer 5-D cache is the packed layout, whatever the hint;
+    # NB == 2 would otherwise read as flash-attn's leading K/V axis.
+    monkeypatch.setattr(_VLLM_DEV, "tpu")
+    kv = [_t(2, BS, NH, packing, HS) for _ in range(NL)]
+    fmt, out = detect_format(kv, EngineType.VLLM, hint)
+    assert fmt == F.NL_X_NB_BS_NHP_P_HS
+    assert isinstance(out, list)
+    assert isinstance(out[0], torch.Tensor)
+    assert tuple(out[0].shape) == (2, BS, NH, packing, HS)
+    assert out[0].data_ptr() == kv[0].data_ptr()
+
+
 def test_vllm_blocks_first_fused_num_heads_2(monkeypatch):
     # Raw 4-D [NB, NH, BS, 2*HS] with NH == 2 (a common GQA config): a 5-D
     # split would make the K/V axis and the head axis both equal 2, ambiguous

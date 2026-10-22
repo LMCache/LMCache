@@ -39,6 +39,9 @@ _LABELS = {
     "NH": "NH",
     "HS": "HS",
     "CS": "CS",
+    # TorchTPU packed heads: NHP groups of P K/V rows, P being the dtype packing.
+    "NHP": "NHP",
+    "P": "P",
     # Blocked-scale indexer cache: per-block value / scale regions. Rendered
     # symbolically; the logical per-layer tensor is [NB, BS, HS(=132)].
     "BSV": "BSxVALS",
