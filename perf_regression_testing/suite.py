@@ -11,13 +11,14 @@ Flow::
     lock <host.root>/prt-suite.lock (suites share the L2 dir)
     -> LMCache under test: this checkout (Buildkite's commit)
     -> tonight's images (runner/images.py), mooncake if needed, AIPerf
+    -> any model missing from the HF cache, downloaded (runner/hf.py)
     -> runner/run.py for each pair of [suites.<name>], one after another
     -> each valid run vs its own history (runner/baseline.py), then into history
     -> <out>/report.json and report.md
 
 Exit codes: 0 every pair valid and none regressed; 1 a gated pair regressed;
-2 a pair was invalid, no usable images, or the host lacks the model or an
-env var the suite needs; 75 another suite held the lock past --lock-wait-s.
+2 a pair was invalid, no usable images, or the host lacks an env var the
+suite needs; 75 another suite held the lock past --lock-wait-s.
 A non-gating suite returns 0 whenever every pair produced a valid result.
 """
 
@@ -34,12 +35,13 @@ import time
 import traceback
 
 # First Party
-from perf_regression_testing.runner import baseline, docker, images
+from perf_regression_testing.runner import baseline, docker, hf, images
 from perf_regression_testing.runner.config import (
     PKG_DIR,
     HostSetupError,
     check_host,
     load,
+    missing_models,
     resolve,
 )
 from perf_regression_testing.runner.run import EXIT_VALID, Cancelled, run
@@ -215,6 +217,19 @@ def suite(name: str, out: Path, deployments: list[str] | None = None) -> int:
         im["usable"] = False
         im["error"] = f"aiperf image: {e}"
         return finish(EXIT_SUITE_INVALID)
+    # A failed download invalidates only the pairs of that model.
+    model_errors = {}
+    for model in missing_models(cfg, deps):
+        try:
+            hf.fetch(
+                cfg["models"][model],
+                cfg["host"]["hf_cache"],
+                im["serving"],
+                cfg["container"],
+                out / f"download_{model}.log",
+            )
+        except RuntimeError as e:
+            model_errors[model] = str(e)
     reg = cfg["regression"]
     alpha = reg["false_alarm_rate"] / len(reg["metrics"])
     hist_path = root / "prt-results" / "history.jsonl"
@@ -225,8 +240,14 @@ def suite(name: str, out: Path, deployments: list[str] | None = None) -> int:
         for d in deps:
             spec = resolve(cfg, w, d)
             run_dir = out / f"{stamp}-{w}-{d}"
+            model = cfg["deployments"][d]["model"]
+            skip = None
             if spec.image_target == "mooncake" and mooncake_error:
-                summary = {"invalid": [f"no mooncake image: {mooncake_error}"]}
+                skip = f"no mooncake image: {mooncake_error}"
+            elif model in model_errors:
+                skip = f"no {model} snapshot: {model_errors[model]}"
+            if skip:
+                summary = {"invalid": [skip]}
                 rep["runs"].append({"workload": w, "deployment": d, "summary": summary})
                 codes.append(EXIT_SUITE_INVALID)
                 continue

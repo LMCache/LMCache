@@ -79,10 +79,13 @@ def load(path: Path = CONFIG_PATH) -> dict[str, Any]:
     """Read the config file and fill in the host-specific placeholders.
 
     * ``<root>``: ``$PRT_ROOT`` (required), also set as ``[host].root``.
-    * ``<hf_cache>``: ``$PRT_HF_CACHE``, default :data:`DEFAULT_HF_CACHE`.
+    * ``<hf_cache>``: ``$PRT_HF_CACHE``, default :data:`DEFAULT_HF_CACHE`,
+      also set as ``[host].hf_cache``.
     * ``<rdma_devices>``: ``$PRT_RDMA_DEVICES``, left in place when unset.
 
-    Each ``[models.<name>]`` gets ``path``, its snapshot in that cache. The
+    Each ``[models.<name>]`` gets ``path``, its snapshot in that cache, and
+    ``done``, a marker under ``<root>/state`` written once the snapshot is
+    complete (a partial snapshot already holds ``config.json``). The
     ``<model_*>`` placeholders depend on the run's model; :func:`resolve`
     fills them.
 
@@ -106,11 +109,13 @@ def load(path: Path = CONFIG_PATH) -> dict[str, Any]:
         subst["<rdma_devices>"] = os.environ["PRT_RDMA_DEVICES"]
     cfg = substitute(cfg, subst)
     cfg["host"]["root"] = root
+    cfg["host"]["hf_cache"] = hf_cache
     for m in cfg["models"].values():
         m["path"] = (
             f"{hf_cache}/hub/models--{m['repo'].replace('/', '--')}"
             f"/snapshots/{m['revision']}"
         )
+        m["done"] = f"{root}/state/model-{m['revision']}.done"
     return cfg
 
 
@@ -122,20 +127,26 @@ def check_host(cfg: dict[str, Any], deployments: list[str]) -> None:
         deployments: Keys under ``[deployments]`` about to run.
 
     Raises:
-        HostSetupError: A deployment's model snapshot is missing, or a
-            deployment uses ``<rdma_devices>`` while ``PRT_RDMA_DEVICES`` is
-            unset.
+        HostSetupError: A deployment uses ``<rdma_devices>`` while
+            ``PRT_RDMA_DEVICES`` is unset.
     """
-    for name in dict.fromkeys(cfg["deployments"][d]["model"] for d in deployments):
-        m = cfg["models"][name]
-        if not Path(m["path"], "config.json").is_file():
-            raise HostSetupError(
-                f"model snapshot {m['path']} is missing: hf download "
-                f"{m['repo']} --revision {m['revision']} (HF_HOME = PRT_HF_CACHE)"
-            )
     for d in deployments:
         if "<rdma_devices>" in json.dumps(cfg["deployments"][d]):
             raise HostSetupError(f"{d} needs PRT_RDMA_DEVICES, which is unset")
+
+
+def missing_models(cfg: dict[str, Any], deployments: list[str]) -> list[str]:
+    """Return the models of ``deployments`` with no complete snapshot.
+
+    Args:
+        cfg: Parsed config from :func:`load`.
+        deployments: Keys under ``[deployments]`` about to run.
+
+    Returns:
+        Keys under ``[models]``, each once, in deployment order.
+    """
+    names = dict.fromkeys(cfg["deployments"][d]["model"] for d in deployments)
+    return [n for n in names if not Path(cfg["models"][n]["done"]).is_file()]
 
 
 def cli_args(args: dict[str, Any]) -> list[str]:

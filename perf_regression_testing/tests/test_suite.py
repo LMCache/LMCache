@@ -13,8 +13,8 @@ from perf_regression_testing import suite
 
 def _fetch_models(cfg: dict[str, Any]) -> None:
     for m in cfg["models"].values():
-        Path(m["path"]).mkdir(parents=True)
-        (Path(m["path"]) / "config.json").write_text("{}")
+        Path(m["done"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(m["done"]).touch()
 
 
 def test_low_docker_disk_stops_the_suite_before_any_build(
@@ -33,17 +33,50 @@ def test_low_docker_disk_stops_the_suite_before_any_build(
     assert "NOT RUN" in (tmp_path / "s" / "report.md").read_text()
 
 
-def test_missing_model_stops_the_suite_before_any_build(
+def test_missing_models_are_downloaded_and_a_failed_one_skips_its_pairs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def no_build(*args: object, **kwargs: object) -> dict:
-        raise AssertionError("built without the model")
+    monkeypatch.setattr(suite.docker, "root_free_gb", lambda: 1e9)
+    monkeypatch.setattr(suite.docker, "image_label", lambda image, key: "x")
 
-    monkeypatch.setattr(suite.images, "tonight", no_build)
-    assert suite.suite("nightly", tmp_path / "s") == suite.EXIT_SUITE_INVALID
+    def tonight(root: Path, src: Path, out: Path, need_lmcache: bool) -> dict:
+        im = {"usable": True, "vllm_source": "nightly", "time": 0.0}
+        im |= {"serving": "prt-serving:x", "vllm_commit": "v"}
+        return im | {"lmcache": "prt-lmcache:x", "lmcache_commit": "l"}
+
+    fetched: list[str] = []
+
+    def fetch(model: dict, hf_cache: str, image: str, container: dict, log: Path):
+        fetched.append(model["repo"])
+        if model["repo"].startswith("Qwen/"):
+            raise RuntimeError("disk full")
+        Path(model["done"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(model["done"]).touch()
+
+    ran: list[str] = []
+
+    def run(spec: Any, out: Path, image: str, aiperf: str) -> int:
+        ran.append(spec.deployment)
+        out.mkdir(parents=True)
+        summary = {"invalid": [], "vllm_commit": "v", "lmcache_commit": "l"}
+        (out / "summary.json").write_text(json.dumps(summary))
+        return suite.EXIT_VALID
+
+    monkeypatch.setattr(suite.images, "tonight", tonight)
+    monkeypatch.setattr(suite.images, "build", lambda args, log: f"prt-{args[0]}")
+    monkeypatch.setattr(suite.images, "prune", lambda keep: [])
+    monkeypatch.setattr(suite.hf, "fetch", fetch)
+    monkeypatch.setattr(suite, "run", run)
+    deps = ["vllm_simple", "vllm_lmcache_ssm"]
+    assert suite.suite("weekly", tmp_path / "s", deps) == suite.EXIT_SUITE_INVALID
+    assert fetched == ["stepfun-ai/Step-3.7-Flash-FP8", "Qwen/Qwen3.8-Flash-Next-FP8"]
+    assert ran == ["vllm_simple"]
     rep = json.loads((tmp_path / "s" / "report.json").read_text())
-    assert "hf download" in rep["images"]["error"]
-    assert "NOT RUN" in (tmp_path / "s" / "report.md").read_text()
+    skipped = [r for r in rep["runs"] if r["deployment"] == "vllm_lmcache_ssm"]
+    assert "disk full" in skipped[0]["summary"]["invalid"][0]
+    root = Path(suite.load()["host"]["root"])
+    history = (root / "prt-results" / "history.jsonl").read_text().splitlines()
+    assert [json.loads(h)["suite"] for h in history] == ["weekly"]
 
 
 @pytest.mark.parametrize(

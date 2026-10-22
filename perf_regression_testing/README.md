@@ -66,7 +66,8 @@ Host paths come from the environment:
 | `PRT_RDMA_DEVICES` | comma-separated RDMA devices, needed by the weekly Mooncake |
 
 ```bash
-# Models, at their [models] revisions; runs are offline and never download.
+# Models, at their [models] revisions. Runs are offline; a suite downloads a
+# missing one first (runner/hf.py), so this only saves that time.
 HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
     stepfun-ai/Step-3.7-Flash-FP8 \
     --revision b3d7916fccac844cca050d7520f2aaa513f9a84f

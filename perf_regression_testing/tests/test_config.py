@@ -11,6 +11,7 @@ from perf_regression_testing.runner.config import (
     HostSetupError,
     check_host,
     load,
+    missing_models,
     resolve,
 )
 
@@ -59,21 +60,28 @@ def test_shipped_config_has_no_unresolved_host_placeholder() -> None:
 
 
 def _fetch(cfg: dict[str, Any], model: str) -> None:
-    path = Path(cfg["models"][model]["path"])
+    done = Path(cfg["models"][model]["done"])
+    done.parent.mkdir(parents=True, exist_ok=True)
+    done.touch()
+
+
+def test_missing_models_names_each_absent_model_once() -> None:
+    cfg = load()
+    deps = ["vllm_lmcache", "vllm_lmcache_ssm", "vllm_native"]
+    assert missing_models(cfg, deps) == ["step37", "qwen38"]
+    _fetch(cfg, "step37")
+    assert missing_models(cfg, deps) == ["qwen38"]
+    _fetch(cfg, "qwen38")
+    assert missing_models(cfg, deps) == []
+
+
+def test_a_snapshot_without_its_done_marker_is_still_missing() -> None:
+    # An interrupted download leaves config.json but not every weight.
+    cfg = load()
+    path = Path(cfg["models"]["qwen38"]["path"])
     path.mkdir(parents=True)
     (path / "config.json").write_text("{}")
-
-
-def test_check_host_needs_each_deployments_model_snapshot() -> None:
-    cfg = load()
-    with pytest.raises(HostSetupError, match="hf download"):
-        check_host(cfg, ["vllm_lmcache"])
-    _fetch(cfg, "step37")
-    check_host(cfg, ["vllm_lmcache", "vllm_mooncake"])
-    with pytest.raises(HostSetupError, match="Qwen3.8"):
-        check_host(cfg, ["vllm_lmcache", "vllm_lmcache_ssm"])
-    _fetch(cfg, "qwen38")
-    check_host(cfg, ["vllm_lmcache", "vllm_lmcache_ssm"])
+    assert missing_models(cfg, ["vllm_lmcache_ssm"]) == ["qwen38"]
 
 
 def test_a_deployment_runs_its_own_model() -> None:
