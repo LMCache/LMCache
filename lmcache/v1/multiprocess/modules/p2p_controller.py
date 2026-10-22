@@ -31,6 +31,11 @@ from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
@@ -145,8 +150,12 @@ class _P2PLookupJob:
     """ The same keys as submitted to the storage manager, one row per
     object group; the status result is one bitmap per row """
 
+    submitted_at: float
+    """ ``time.monotonic()`` when the lookup was submitted; a job older than
+    the lookup timeout is treated as abandoned by its requester """
 
-class P2PController:
+
+class P2PController(DiscoverableModule):
     """Serves lookup requests from peers and maintains one L2 adapter per peer.
 
     P2P is enabled when ``p2p_config`` carries an advertise URL; otherwise the
@@ -163,6 +172,19 @@ class P2PController:
             discovered peers.
     """
 
+    module_name = "p2p_controller"
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        """Build the controller; it applies to every configuration."""
+        return cls(
+            build_ctx.engine_context,
+            build_ctx.mp_config.p2p_config,
+            build_ctx.coordinator_config,
+            build_ctx.mp_config.instance_id,
+            build_ctx.mp_config.transport,
+        )
+
     def __init__(
         self,
         ctx: MPCacheServerContext,
@@ -178,6 +200,8 @@ class P2PController:
         self._next_task_id = 0
         self._jobs: dict[int, _P2PLookupJob] = {}
         self._job_lock = threading.Lock()
+        # Last abandoned-job scan time; unlocked, as a race only adds a scan.
+        self._last_drop_time = time.monotonic()
 
         # Orchestration state (guarded by _orch_lock; written only by the poll
         # thread, read by report_status).
@@ -279,6 +303,11 @@ class P2PController:
         Returns:
             A unique task id (int) for querying the lookup status later
         """
+        # Scan at most once per lookup timeout; abandoned jobs live <= 2 timeouts.
+        now = time.monotonic()
+        if now - self._last_drop_time >= self._p2p_config.lookup_timeout:
+            self._last_drop_time = now
+            self._drop_abandoned_jobs(now)
         with self._job_lock:
             task_id = self._next_task_id
             self._next_task_id += 1
@@ -297,22 +326,23 @@ class P2PController:
             handle = PrefetchHandle(
                 prefetch_request_id=-1,
                 external_request_id=f"p2p-{task_id}",
-                l1_found_indices=(),
-                l1_hit_chunks=0,
                 total_requested_keys=0,
                 submit_time=time.monotonic(),
             )
 
         with self._job_lock:
             self._jobs[task_id] = _P2PLookupJob(
-                handle=handle, keys=keys, key_groups=key_groups
+                handle=handle,
+                keys=keys,
+                key_groups=key_groups,
+                submitted_at=time.monotonic(),
             )
 
         logger.debug(
-            "P2P lookup submitted: task_id=%d, %d keys, %d L1 hits",
+            "P2P lookup submitted: task_id=%d, %d keys, %d requested",
             task_id,
             len(keys),
-            len(handle.l1_found_indices),
+            handle.total_requested_keys,
         )
         return task_id
 
@@ -348,12 +378,12 @@ class P2PController:
             )
             return None
 
-        found_rows = self._ctx.storage_manager.query_prefetch_status(job.handle)
-        if found_rows is None:
+        result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        if result is None:
             # Still in progress (only possible once L2 prefetch is enabled).
             return None
 
-        addresses = self._build_addresses(job, found_rows)
+        addresses = self._build_addresses(job, result.hit_cells)
 
         with self._job_lock:
             self._jobs.pop(task_id, None)
@@ -376,6 +406,39 @@ class P2PController:
     # -----------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------
+
+    def _drop_abandoned_jobs(self, now: float) -> None:
+        """Drop finished jobs older than the lookup timeout, draining results.
+
+        Args:
+            now: ``time.monotonic()`` at the call; jobs submitted more than
+                one lookup timeout before it are abandoned.
+
+        Note:
+            Read locks are left to the L1 read TTL; unlocking after expiry
+            could release a later reader's lock.
+        """
+        cutoff = now - self._p2p_config.lookup_timeout
+        with self._job_lock:
+            stale = [
+                task_id
+                for task_id, job in self._jobs.items()
+                if job.submitted_at < cutoff
+            ]
+            jobs = [(task_id, self._jobs.pop(task_id)) for task_id in stale]
+        unfinished: list[tuple[int, _P2PLookupJob]] = []
+        for task_id, job in jobs:
+            if self._ctx.storage_manager.query_prefetch_status(job.handle) is None:
+                unfinished.append((task_id, job))
+        if jobs:
+            logger.debug(
+                "Dropped %d abandoned P2P lookup jobs (%d still running)",
+                len(jobs) - len(unfinished),
+                len(unfinished),
+            )
+        if unfinished:
+            with self._job_lock:
+                self._jobs.update(unfinished)
 
     def _build_addresses(
         self,

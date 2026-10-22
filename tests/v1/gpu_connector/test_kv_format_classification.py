@@ -32,6 +32,7 @@ EXPECTED = {
     F.NL_X_TWO_NB_NH_BS_HS: (False, False, True, False, False),
     F.NL_X_NB_TWO_NH_BS_HS: (False, False, True, False, False),
     F.NL_X_TWO_NB_NH_ONE_BS_HS: (False, False, True, False, False),
+    F.NL_X_NB_TWO_NH_ONE_BS_HS: (False, False, True, False, False),
     F.NL_X_NB_NH_BS_TWO_HS: (False, False, True, False, False),
     F.NL_X_NB_BS_NH_TWO_HS: (False, False, True, False, False),
     F.NL_X_NB_NH_BS_CS: (False, False, True, False, False),
@@ -40,6 +41,7 @@ EXPECTED = {
     F.NL_X_NBBS_ONE_HS: (False, False, True, True, False),
     F.NL_X_NB_BSV_BSS: (False, False, True, True, False),
     F.NL_X_TWO_X_NB_BS_NH_HS: (False, False, True, False, True),
+    F.NL_X_NB_BS_NH_HS: (False, False, True, False, False),
     F.NB_NL_TWO_NH_BS_HS: (True, False, False, False, False),
     F.TWO_X_NL_X_NBBS_NH_HS: (False, True, False, False, False),
     F.TWO_X_NL_X_NB_BS_NH_HS: (False, True, False, False, False),
@@ -70,6 +72,7 @@ EXPECTED_SPEC_FACTS = {
     F.NL_X_TWO_NB_NH_BS_HS: (True, False, True, False),
     F.NL_X_TWO_NB_NH_ONE_BS_HS: (True, False, True, False),
     F.NL_X_NB_TWO_NH_BS_HS: (True, False, False, False),
+    F.NL_X_NB_TWO_NH_ONE_BS_HS: (True, False, False, False),
     F.NL_X_NB_NH_BS_TWO_HS: (True, True, False, False),
     F.NL_X_NB_BS_NH_TWO_HS: (False, True, False, False),
     F.NL_X_NB_NH_BS_CS: (True, True, False, False),
@@ -79,6 +82,7 @@ EXPECTED_SPEC_FACTS = {
     F.NL_X_NB_BSV_BSS: (False, False, False, False),
     F.NL_X_TWO_X_NB_BS_NH_HS: (False, False, False, False),
     F.NL_X_NP_X_NB_BS_ONE_HS: (False, False, False, False),
+    F.NL_X_NB_BS_NH_HS: (False, False, False, False),
 }
 
 
@@ -163,6 +167,22 @@ def test_spec_only_facts_match_golden():
         spec = get_spec_class(fmt)
         got = (spec.is_hnd, spec.is_fused_packed, spec.is_two_major, spec.is_pbs_fused)
         assert got == expected, f"{fmt}: got {got}, expected {expected}"
+
+
+def test_single_kv_fact_is_unique() -> None:
+    component_formats = {
+        fmt for fmt in _all_formats() if get_spec_class(fmt).is_single_kv
+    }
+    assert component_formats == {F.NL_X_NB_BS_NH_HS}
+
+
+def test_blocked_scale_repacking_fact_is_unique() -> None:
+    repacked_formats = {
+        fmt
+        for fmt in _all_formats()
+        if get_spec_class(fmt).requires_blocked_scale_repacking
+    }
+    assert repacked_formats == {F.NL_X_NB_BSV_BSS}
 
 
 def test_every_format_is_pinned():

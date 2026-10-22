@@ -182,14 +182,18 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
             )
         elif status == -1:
             logger.error(
-                "Transfer failed %s batch_id %d", self._remote_session_id, batch_id
+                "Transfer failed %s batch_id %s",
+                self._remote_session_id,
+                batch_id,
             )
             return TransferChannelReadResult(
                 finished=True, succeeded_mask=[False] * len(remote_addresses)
             )
         elif status == -2:
             logger.error(
-                "Transfer timed out %s batch_id %d", self._remote_session_id, batch_id
+                "Transfer timed out %s batch_id %s",
+                self._remote_session_id,
+                batch_id,
             )
             return TransferChannelReadResult(
                 finished=True, succeeded_mask=[False] * len(remote_addresses)
@@ -264,7 +268,7 @@ class MooncakeTeTransferChannelServer(TransferChannelServer):
             # Learn the connecting peer's agent (idempotent on repeat).
             logger.info(
                 "initialized transfer channel server with mooncake transfer engine "
-                "%s:%d",
+                "%s:%s",
                 self._ctx.advertise_host,
                 self._ctx.mooncake_te_port,
             )
@@ -335,8 +339,8 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
         if ret != 0:
             raise RuntimeError(f"Failed to initialize mooncake_te engine, ret={ret}")
         logger.info(
-            "mooncake_te engine created, mooncake transfer engine port %d, "
-            "protocol: %s, device: %s",
+            "mooncake_te engine created, mooncake transfer engine port "
+            "%s, protocol: %s, device: %s",
             self._mooncake_te_engine.get_rpc_port(),
             self._protocol,
             self._device_id,

@@ -46,8 +46,7 @@ dynamic = ["dependencies", "optional-dependencies", "version"]
 
 [project.scripts]
 lmcache="lmcache.cli.main:main"
-lmcache_server="lmcache.v1.server.__main__:main"
-lmcache_controller="lmcache.v1.api_server.__main__:main"
+lmcache_controller="lmcache.inprocess.v1.api_server.__main__:main"
 
 [project.urls]
 homepage = "https://docs.lmcache.ai"
@@ -95,6 +94,8 @@ select = [
     "SLF",
     # pylint: logging call has more arguments than format placeholders
     "PLE1205",
+    # flake8-tidy-imports: banned API imports
+    "TID251",
 ]
 ignore = [
     # star imports
@@ -119,46 +120,9 @@ ignore = [
 # why mixed directories are listed file by file, and "<dir>/**" is used only
 # where every file below the directory still violates the rule.
 # Tracking issue: https://github.com/LMCache/LMCache/issues/5118
-"benchmarks/multi_round_qa/multi-round-qa.py" = ["G004"]
-"benchmarks/multi_round_qa/utils.py" = ["G004"]
-"examples/disagg_prefill/**" = ["G004"]
-"examples/token_dropping/random_token_dropping.ipynb" = ["G004"]
-"examples/token_dropping/rkv_colab.ipynb" = ["G004"]
-"examples/token_dropping/rkv_token_dropping.ipynb" = ["G004"]
-"examples/token_dropping/snapkv_colab.ipynb" = ["G004"]
-"examples/token_dropping/snapkv_token_dropping.ipynb" = ["G004"]
-"lmcache/integration/vllm/utils.py" = ["G004"]
-"lmcache/observability.py" = ["G004"]
-"lmcache/sdk/context.py" = ["G004"]
 "lmcache/storage_backend/serde/cachegen_basics.py" = ["G004"]
-"lmcache/utils.py" = ["G004"]
-"lmcache/v1/api_server/__main__.py" = ["G004"]
-"lmcache/v1/cache_engine.py" = ["G004"]
-"lmcache/v1/check/__init__.py" = ["G004"]
-"lmcache/v1/compute/blend/blender.py" = ["G004"]
-"lmcache/v1/compute/blend/utils.py" = ["G004"]
-"lmcache/v1/compute/models/utils.py" = ["G004"]
-"lmcache/v1/config.py" = ["G004"]
-"lmcache/v1/config_base.py" = ["G004"]
-"lmcache/v1/gpu_connector/utils.py" = ["G004"]
-"lmcache/v1/memory_management.py" = ["G004"]
-"lmcache/v1/server/__main__.py" = ["G004"]
-"lmcache/v1/standalone/__main__.py" = ["G004"]
-"lmcache/v1/storage_backend/connector/__init__.py" = ["G004"]
-"lmcache/v1/storage_backend/connector/audit_adapter.py" = ["G004"]
-"lmcache/v1/storage_backend/connector/azure_adapter.py" = ["G004"]
-"lmcache/v1/storage_backend/connector/azure_connector.py" = ["G004"]
-"lmcache/v1/storage_backend/connector/base_connector.py" = ["G004"]
-"lmcache/v1/storage_backend/connector/eic_adapter.py" = ["G004"]
-"lmcache/v1/storage_backend/connector/external_adapter.py" = ["G004"]
-"lmcache/v1/storage_backend/connector/hf3fs_adapter.py" = ["G004"]
-"lmcache/v1/storage_backend/connector/infinistore_connector.py" = ["G004"]
-"lmcache/v1/storage_backend/connector/mooncakestore_connector.py" = ["G004"]
-"lmcache/v1/storage_backend/connector/redis_connector.py" = ["G004"]
-"lmcache/v1/storage_backend/connector/s3_adapter.py" = ["G004"]
-"lmcache/v1/storage_backend/nixl_storage_backend.py" = ["G004"]
-"lmcache/v1/transfer_channel/nixl_channel.py" = ["G004"]
-"tests/disagg/test_nixl_channel.py" = ["G004"]
+"lmcache/storage_backend/**" = ["TID251"]
+"tests/v1/platform/test_ipc_wire.py" = ["TID251"]
 
 [tool.ruff.lint.isort]
 # same as .isort.cfg
@@ -169,6 +133,9 @@ from-first = true
 # import-heading-thirdparty=Third Party
 # import-heading-firstparty=First Party
 # import-heading-localfolder=Local
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"pickle".msg = "Use a data-only serialization format instead."
 
 [tool.mypy]
 
@@ -207,12 +174,13 @@ follow_imports = "silent"
 [[tool.mypy.overrides]]
 module = [
     "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.*",
+    "lmcache.v1.memory_orchestrator._proto_gen.*",
 ]
 ignore_errors = true
 follow_imports = "skip"
 
 [tool.codespell]
-ignore-words-list = "afterall,allready,notin,te,cann"
+ignore-words-list = "afterall,allready,notin,te,cann,wqs"
 skip = "operator/config/crd/bases/*,lmcache/integration/vllm/lmcache_mp_connector_*.py"
 # Base64 image payloads in executed notebooks are random-looking and will
 # eventually contain something that looks like a typo.

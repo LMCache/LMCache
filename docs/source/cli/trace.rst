@@ -4,11 +4,11 @@ lmcache trace
 The ``lmcache trace`` command inspects and replays LMCache trace files
 (``.lct``). A file holds one trace *level*: ``storage`` records
 ``StorageManager`` calls; ``events`` records the cache-event stream a server
-emits for the MP coordinator. It has two sub-commands:
+emits for the MP coordinator. It has three sub-commands:
 
 .. code-block:: bash
 
-   lmcache trace {info,replay} FILE [options]
+   lmcache trace {info,replay,replay-events} FILE [options]
 
 .. note::
 
@@ -98,7 +98,7 @@ replay
 Reissue every recorded call against a fresh ``StorageManager``, honoring the
 recorded inter-call timings. ``replay`` accepts ``storage`` files only; an
 ``events`` file is refused with a message saying so, since its records are
-coordinator input rather than storage calls.
+coordinator input rather than storage calls (see ``replay-events``).
 
 .. code-block:: bash
 
@@ -148,3 +148,65 @@ Options
 The terminal summary reports overall replay stats (records replayed /
 skipped / failed, duration, config-digest match) and per-op latency
 percentiles. ``replay`` exits with status ``1`` if any record failed.
+
+
+replay-events
+-------------
+
+Deliver the cache-event stream an ``events`` file holds to a coordinator,
+the way the server that wrote it would have. Several files, one per server,
+replay as one fleet, merged by wall-clock time:
+
+.. code-block:: bash
+
+   lmcache trace replay-events node-a.lct node-b.lct \
+       --coordinator-url http://coordinator:9300
+
+Each ``start`` mark registers its server with the coordinator (at the
+address the server recorded, or loopback) and begins heartbeating it every
+``--heartbeat-interval`` seconds, each batch is one ``POST /events``
+carrying the record unchanged, and each ``stop`` mark deregisters. A file
+that ends without a ``stop`` is a server that died or a recording that was
+cut: its heartbeats end with its last record, and the coordinator retires
+it after its instance timeout, as it would a real crash. By default the
+stream goes as fast as the coordinator takes it; ``--speed 1`` replays at
+the recorded rate. The servers are not there to be called back, so a replay
+exercises ingest and the views (directory, usage, declared capacity), not a
+controller's deletes or prefetches; run the coordinator with its eviction
+loop off to keep it from addressing them. The summary says how the
+coordinator counted the batches: applied, duplicate (a sequence it had
+already admitted) and stale (an incarnation it had already moved past).
+
+.. warning::
+
+   Replay into a coordinator that does not have the same fleet live.
+   Registering a recorded server replaces a live one's registration, and
+   the coordinator would address the live server at the recorded address.
+
+Options
+~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Flag
+     - Description
+   * - ``FILE``
+     - One or more ``events``-level ``.lct`` files (positional, required).
+   * - ``--coordinator-url URL``
+     - The coordinator to deliver the stream to (required).
+   * - ``--speed N``
+     - Pacing relative to the recording; ``1`` is the recorded rate, ``0``
+       (default) as fast as the coordinator takes it.
+   * - ``--heartbeat-interval SECONDS``
+     - Heartbeat each registered server this often (default ``5``, below
+       the coordinator's 30 s instance timeout); ``0`` sends none.
+   * - ``-q`` / ``--quiet``
+     - Suppress the terminal summary.
+
+``replay-events`` exits with status ``2`` if a file is not an ``events``
+trace this build can replay, and with status ``1`` if the coordinator
+cannot be reached or refuses a call; the replay stops there rather than
+skip records, since a partly delivered stream would leave views that look
+complete and are not. The per-record log says how far it got.

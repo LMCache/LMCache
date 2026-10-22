@@ -6,115 +6,48 @@ Class for distributed storage manager internal API data structures
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import enum
 
 # First Party
 from lmcache.v1.distributed.api import (
-    DEFAULT_ATTN_WINDOW_DESC,
-    AttnWindowDesc,
     L1BackendType,
     MemoryLayoutDesc,
+    MemoryTags,
     ObjectKey,
 )
+from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.memory_management import MemoryObj
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.config import L1ManagerConfig
+    from lmcache.v1.memory_allocators.devdax_memory_allocator import (
+        DevDaxArenaStatus,
+        DevDaxRemoveMode,
+    )
 
-class TrimPolicy(enum.Enum):
-    """How the prefetch controller picks the retained subset of found keys.
-
-    .. deprecated::
-        Controller-internal; superseded by ``PrefetchTaskSpec.fetching_policy``.
-        Removed with prefetch controller v2.
-
-    PREFIX retains the longest contiguous run from index 0; SEGMENTED_PREFIX
-    keeps the keys that loaded when an L2 hit failed to load into L1 mid-prefix
-    (gaps and all); SPARSE retains every found key for an intentional scatter.
-    """
-
-    PREFIX = enum.auto()
-    SEGMENTED_PREFIX = enum.auto()
-    SPARSE = enum.auto()
-
-
-class PrefetchMode(enum.Enum):
-    """The intent of a prefetch request, as seen by the prefetch controller.
-
-    .. deprecated::
-        Controller-internal; superseded by ``PrefetchTaskSpec.lock_mode``.
-        Removed with prefetch controller v2.
-
-    ``LOOKUP`` -- prefetch for an imminent reader: loaded keys are read-locked
-    for the requesting workers, and whether they persist or are dropped after
-    use follows the configured prefetch policy.
-
-    ``WARM`` -- speculative pre-warm with no imminent reader: loaded keys are
-    retained and left unlocked (immediately resident and evictable), so a later
-    lookup can hit them.
-    """
-
-    LOOKUP = enum.auto()
-    WARM = enum.auto()
-
-
-@dataclass(frozen=True)
-class PrefetchRequestSpec:
-    """Immutable inputs of a single L2 prefetch request (controller payload).
-
-    .. deprecated::
-        Controller-internal; superseded by ``PrefetchTaskSpec``. Removed with
-        prefetch controller v2.
-
-    Bundles the caller-supplied arguments that travel together into the
-    prefetch controller's submission queue. See
-    ``PrefetchController._start_lookup_phase`` for per-field semantics.
-
-    Attributes:
-        keys: Object keys to prefetch; order defines the prefix.
-        group_layout_descs: Maps object_group_id to that group's memory
-            layout for L1 write-buffer allocation; must cover every object
-            group that appears in ``keys``.
-        num_kv_readers: Total read locks to take per key -- one per
-            reader that will retrieve the object.
-        policy: Retained-subset policy (see :class:`TrimPolicy`).
-        attn_desc: Cross-chunk attention windows for the groups ``keys``
-            covers; a caller prefetching a subset of the registration's
-            groups must narrow it to that subset (it drives the fold
-            stride).
-        mode: Prefetch intent (see :class:`PrefetchMode`).
-    """
-
-    keys: list[ObjectKey]
-    group_layout_descs: dict[int, MemoryLayoutDesc]
-    num_kv_readers: int = 1
-    policy: TrimPolicy = TrimPolicy.PREFIX
-    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
-    mode: PrefetchMode = PrefetchMode.LOOKUP
-
-    def __post_init__(self) -> None:
-        if self.num_kv_readers < 1:
-            raise ValueError(
-                f"PrefetchRequestSpec: num_kv_readers={self.num_kv_readers} "
-                "must be >= 1 (total read locks per key)"
-            )
-        # Every object group that appears in ``keys`` needs a layout; the ids
-        # need not be contiguous or start at 0.
-        missing = {k.object_group_id for k in self.keys} - set(self.group_layout_descs)
-        if missing:
-            raise ValueError(
-                "PrefetchRequestSpec: group_layout_descs must cover the object "
-                f"groups of every key; missing {sorted(missing)}, got "
-                f"{sorted(self.group_layout_descs)}"
-            )
+L1OperationResult = tuple[L1Error, "MemoryObj | None"]
 
 
 @dataclass(frozen=True)
 class L1MemoryDesc:
-    """
-    Describes the L1 memory buffer registered with an external backend (e.g. Nixl).
+    """Describe the contiguous L1 memory arena exposed to external backends.
+
+    Attributes:
+        ptr: Base address of the L1 arena.
+        size: Final size of the L1 arena in bytes.
+        align_bytes: Allocation alignment within the arena.
+        stable_registration_size: Stable size of the L1 arena. For a lazy
+            allocator, this is a snapshot of the currently pinned prefix and
+            does not change as the allocator grows. ``None`` means that no
+            stable size is exposed.
     """
 
     ptr: int
     size: int
     align_bytes: int
+    stable_registration_size: int | None = None
 
 
 @dataclass(frozen=True)
@@ -314,3 +247,157 @@ class QuotaEntry:
 
     cache_salt: str
     limit_bytes: int
+
+
+@runtime_checkable
+class L1ManagerInterface(Protocol):
+    """The L1 surface ``StorageManager`` and the storage controllers call.
+
+    ``L1Manager`` implements it with the allocator, index, locks and
+    eviction in this process. An implementation that cannot honour a call
+    answers with the documented ``L1Error`` codes instead of raising, so
+    the callers keep one code path.
+    """
+
+    @property
+    def l1_manager_id(self) -> int:
+        """Process-local identity, also the owner tag on memory objects."""
+        ...
+
+    @property
+    def config(self) -> "L1ManagerConfig":
+        """The configuration this L1 was built from."""
+        ...
+
+    def register_listener(self, listener: L1ManagerListener) -> None:
+        """Register a listener for this L1's lifecycle notifications."""
+        ...
+
+    def reserve_read(
+        self, keys: list[ObjectKey], read_locks: int = 1
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Take ``read_locks`` read locks on each resident key."""
+        ...
+
+    def unsafe_read(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1OperationResult]:
+        """Return already read-locked objects without new locks."""
+        ...
+
+    def finish_read(
+        self, keys: list[ObjectKey], read_locks: int = 1
+    ) -> dict[ObjectKey, L1Error]:
+        """Release ``read_locks`` read locks on each key."""
+        ...
+
+    def reserve_write(
+        self,
+        keys: list[ObjectKey],
+        is_temporary: list[bool],
+        layout_desc: MemoryLayoutDesc,
+        tag: str = "",
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Reserve a write buffer per key for the writer ``tag``."""
+        ...
+
+    def finish_write(
+        self, keys: list[ObjectKey], tag: str = ""
+    ) -> dict[ObjectKey, L1Error]:
+        """Commit ``tag``'s written buffers so readers can see them."""
+        ...
+
+    def finish_write_and_reserve_read(
+        self, keys: list[ObjectKey], read_locks: int = 1, tag: str = ""
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Commit ``tag``'s buffers and read-lock the resident objects."""
+        ...
+
+    def finish_write_and_delete(
+        self, keys: list[ObjectKey], tag: str = ""
+    ) -> dict[ObjectKey, L1Error]:
+        """Discard ``tag``'s write reservations without committing them."""
+        ...
+
+    def delete(
+        self, keys: list[ObjectKey], force: bool = False
+    ) -> dict[ObjectKey, L1Error]:
+        """Delete resident objects."""
+        ...
+
+    def touch_keys(self, keys: list[ObjectKey]) -> None:
+        """Record an access to the keys; takes no lock."""
+        ...
+
+    def clear(self, force: bool = False) -> None:
+        """Drop every object this L1 is allowed to drop."""
+        ...
+
+    def is_key_evictable(self, key: ObjectKey) -> bool:
+        """Whether eviction may delete the key now."""
+        ...
+
+    def get_memory_usage(self) -> tuple[int, int]:
+        """Return ``(used_bytes, total_bytes)``."""
+        ...
+
+    def get_staging_memory_usage(self) -> int:
+        """Return bytes held by uncommitted write reservations."""
+        ...
+
+    def get_capacity_bytes_by_backend(self) -> dict[L1BackendType, int]:
+        """Return usable capacity per backing medium."""
+        ...
+
+    def get_l1_memory_desc(self) -> L1MemoryDesc | None:
+        """Describe a registerable L1 buffer, or None when there is none."""
+        ...
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this L1's primary pool."""
+        ...
+
+    def get_devdax_arena_statuses(self) -> list["DevDaxArenaStatus"]:
+        """Return Device-DAX arena statuses for hot-pluggable L1s."""
+        ...
+
+    def get_devdax_arena_status(
+        self, device_path: str, offset_in_bytes: int = 0
+    ) -> "DevDaxArenaStatus":
+        """Return the status of the arena at ``(device_path, offset)``."""
+        ...
+
+    def owns_range(
+        self, device_path: str, offset_in_bytes: int, size_in_bytes: int
+    ) -> bool:
+        """Whether this L1 maps a range of the device overlapping the given one."""
+        ...
+
+    def memory_region_count(self) -> int:
+        """Return the number of memory regions backing this L1."""
+        ...
+
+    def add_devdax_device(
+        self, device_path: str, size_in_bytes: int, offset_in_bytes: int = 0
+    ) -> "DevDaxArenaStatus":
+        """Hot-add a Device-DAX arena mapping ``[offset, offset + size)``."""
+        ...
+
+    def remove_devdax_device(
+        self,
+        device_path: str,
+        mode: "DevDaxRemoveMode" = ...,
+        offset_in_bytes: int = 0,
+    ) -> "DevDaxArenaStatus":
+        """Hot-remove the Device-DAX arena at ``(device_path, offset)``."""
+        ...
+
+    def report_status(self) -> dict:
+        """Return a status dictionary for the status endpoints."""
+        ...
+
+    def memcheck(self) -> bool:
+        """Check bookkeeping consistency."""
+        ...
+
+    def close(self) -> None:
+        """Release every resource held by this L1."""
+        ...

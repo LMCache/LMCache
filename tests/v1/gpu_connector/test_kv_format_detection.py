@@ -8,6 +8,9 @@ format -- covering the vLLM NHD/HND branch, the SGLang depth-1/depth-2
 branch, and the TRT-LLM cross-layer branch.
 """
 
+# Standard
+from unittest.mock import patch
+
 # Third Party
 import pytest
 import torch
@@ -16,6 +19,7 @@ import torch
 from lmcache import torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format import detect_format, extract_kv_cache_shapes
+from lmcache.v1.gpu_connector.kv_format.detectors import vllm as vllm_detector
 from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 import lmcache.lmcache_native as lmcache_native
 
@@ -69,11 +73,25 @@ def test_vllm_rbln_native_singleton_axis(monkeypatch, hint):
     # layout, and the format is HND by definition).
     monkeypatch.setattr(_VLLM_DEV, "cuda")
     kv = [_t(2, NB, NH, 1, BS, HS) for _ in range(NL)]
-    fmt, out = detect_format(kv, EngineType.VLLM, hint)
+    with patch.object(vllm_detector.logger, "warning") as mock_warning:
+        fmt, out = detect_format(kv, EngineType.VLLM, hint)
     assert fmt == F.NL_X_TWO_NB_NH_ONE_BS_HS
+    mock_warning.assert_not_called()
     # Detection must not reshape it away: the singleton axis survives.
     assert tuple(out[0].shape) == (2, NB, NH, 1, BS, HS)
     assert out[0].data_ptr() == kv[0].data_ptr()
+
+
+def test_vllm_rbln_num_blocks_2_keeps_kv_first_reading(monkeypatch):
+    # [2, 2, NH, 1, BS, HS] fits both RBLN layouts; the K/V-first reading wins
+    # and the ambiguity is logged. LMCache loggers do not propagate, so the
+    # module logger is patched instead of using caplog.
+    monkeypatch.setattr(_VLLM_DEV, "cuda")
+    kv = [_t(2, 2, NH, 1, BS, HS) for _ in range(NL)]
+    with patch.object(vllm_detector.logger, "warning") as mock_warning:
+        fmt, _ = detect_format(kv, EngineType.VLLM, {})
+    assert fmt == F.NL_X_TWO_NB_NH_ONE_BS_HS
+    mock_warning.assert_called_once()
 
 
 def test_vllm_blocks_first_fused_num_heads_2(monkeypatch):
@@ -99,6 +117,28 @@ def test_sglang_mla_depth1():
     kv = [_t(NB * BS, 1, HS) for _ in range(NL)]
     fmt, _ = detect_format(kv, EngineType.SGLANG, {})
     assert fmt == F.NL_X_NBBS_ONE_HS
+
+
+def test_sglang_unified_components_keep_explicit_block_geometry() -> None:
+    kv = [_t(NB, BS, NH, HS) for _ in range(2 * NL)]
+
+    fmt, out = detect_format(kv, EngineType.SGLANG, {"kv_list_layout": "unified"})
+
+    assert fmt == F.NL_X_NB_BS_NH_HS
+    assert isinstance(out, list)
+    assert isinstance(out[0], torch.Tensor)
+    assert tuple(out[0].shape) == (NB, BS, NH, HS)
+
+
+def test_sglang_unified_mla_keeps_single_latent_plane() -> None:
+    kv = [_t(NB, BS, HS) for _ in range(NL)]
+
+    fmt, out = detect_format(kv, EngineType.SGLANG, {"kv_list_layout": "unified"})
+
+    assert fmt == F.NL_X_NB_BS_HS
+    assert isinstance(out, list)
+    assert isinstance(out[0], torch.Tensor)
+    assert tuple(out[0].shape) == (NB, BS, HS)
 
 
 def test_sglang_mha_depth2_fused():

@@ -80,6 +80,42 @@ breakdown of ``hit_tokens`` (prefix / segmented-prefix / non-prefix).
      - ``l2_hit_tokens / requested_tokens``; ``0.0`` when the denominator
        is zero.  Sums with ``l1_hit_rate`` to ``hit_rate`` up to float
        rounding.  ``request`` span only.
+   * - ``apc_covered_tokens``
+     - ``int``
+     - Prefix tokens the engine's prefix cache already held.  The lookup
+       skips them, so they are not in ``requested_tokens`` or any hit
+       count.  ``request`` span only.
+   * - ``prompt_tokens``
+     - ``int``
+     - Whole prompt length of the request, sub-chunk tail included.
+       ``request`` span only.
+   * - ``engine_hit_tokens``
+     - ``int``
+     - Tokens the engine's own prefix cache held, from the connector's
+       hint; not rounded to a chunk boundary.  ``request`` span only.
+   * - ``request_hit_tokens``
+     - ``int``
+     - Prefix of the prompt served by the engine or LMCache: the longer of
+       ``engine_hit_tokens`` and ``apc_covered_tokens + hit_tokens``.
+       ``request`` span only.
+   * - ``engine_hit_rate``
+     - ``float``
+     - ``engine_hit_tokens / prompt_tokens``; ``0.0`` when the prompt is
+       empty.  ``request`` span only.
+   * - ``request_hit_rate``
+     - ``float``
+     - ``request_hit_tokens / prompt_tokens``; ``0.0`` when the prompt is
+       empty.  The request-level hit rate: what share of the prompt either
+       cache served.  ``request`` span only.
+   * - ``l1_hit_keys``
+     - ``int``
+     - Hit keys (one per object group, kv rank and chunk) L1 already
+       held.  ``request`` span only.
+   * - ``l2_hit_keys``
+     - ``int``
+     - Hit keys loaded from L2.  On hybrid models this can be small while
+       ``l2_hit_tokens`` covers the whole hit (L2 supplied only the
+       sliding-window keys).  ``request`` span only.
    * - ``early_exit_reason``
      - ``str``
      - Which branch of the lookup returned before a prefetch was
@@ -109,6 +145,12 @@ Example TraceQL queries (Grafana Tempo):
 
     # Requests that had to go to L2 for most of their hit
     { name = "request" && span.l2_hit_rate > 0.5 }
+
+    # Requests where neither the engine nor LMCache served half the prompt
+    { name = "request" && span.request_hit_rate < 0.5 }
+
+    # Requests that loaded anything from L2
+    { name = "request" && span.l2_hit_keys > 0 }
 
     # Lookups that exited early rather than genuinely missing
     { name = "request" && span.early_exit_reason != "" }

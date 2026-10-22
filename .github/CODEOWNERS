@@ -2,8 +2,8 @@
 
 # Core engine
 /lmcache/v1/cache_engine.py            @ApostaC @YaoJiayi @sammshen
-/lmcache/v1/cache_controller/          @maobaolong @YaoJiayi @chunxiaozheng
-/lmcache/v1/offload_server/            @maobaolong @YaoJiayi
+/lmcache/inprocess/v1/cache_controller/  @maobaolong @YaoJiayi @chunxiaozheng
+/lmcache/inprocess/v1/offload_server/            @maobaolong @YaoJiayi
 
 # Memory management
 /lmcache/v1/memory_management.py       @sammshen @deng451e @chunxiaozheng @DongDongJu @ApostaC
@@ -27,6 +27,7 @@
 
 # GPU connector
 /lmcache/v1/gpu_connector/             @sammshen @ApostaC @hlin99
+/lmcache/inprocess/v1/gpu_connector/   @sammshen @ApostaC @hlin99
 /lmcache/v1/gpu_connector/_gds_async.py   @sammshen @ApostaC @hlin99 @andyluo7 @Shaoting-Feng
 /lmcache/v1/gpu_connector/gds_context.py  @sammshen @ApostaC @hlin99 @andyluo7 @Shaoting-Feng
 /lmcache/v1/gpu_connector/_cufile_async.py @sammshen @ApostaC @hlin99 @Shaoting-Feng
@@ -38,8 +39,8 @@
 /lmcache/v1/platform/devices/rocm/     @maobaolong @hlin99 @andyluo7
 
 # Lookup client
-/lmcache/v1/lookup_client/             @maobaolong @YaoJiayi @sammshen
-/lmcache/v1/lookup_client/mooncake_lookup_client.py  @maobaolong
+/lmcache/inprocess/v1/lookup_client/             @maobaolong @YaoJiayi @sammshen
+/lmcache/inprocess/v1/lookup_client/mooncake_lookup_client.py  @maobaolong
 
 # Storage backends
 /lmcache/v1/storage_backend/           @maobaolong @sammshen @chunxiaozheng @DongDongJu @zhengfeihe
@@ -60,8 +61,10 @@
 
 # Integration
 /lmcache/integration/vllm/             @sammshen @maobaolong @YaoJiayi @deng451e @hlin99
+/lmcache/inprocess/integration/vllm/   @sammshen @maobaolong @YaoJiayi @deng451e @hlin99
 /lmcache/integration/sglang/           @Oasis-git @DongDongJu @sammshen @Shaoting-Feng
 /lmcache/integration/tensorrt_llm/     @sammshen
+/lmcache/inprocess/integration/tensorrt_llm/ @sammshen
 
 # Non-CUDA equivalents
 /lmcache/non_cuda_equivalents.py       @hlin99 @hickeyma
@@ -79,7 +82,7 @@
 /lmcache/tools/                        @yoo-kumaneko
 
 # Tests
-/tests/                                @hickeyma @sammshen @ApostaC @deng451e
+/tests/                                @hickeyma @sammshen @ApostaC @deng451e @VincyZhang
 
 # CLI
 /lmcache/cli/                          @KuntaiDu @deng451e @royyhuang @ApostaC @sammshen @zhengfeihe @ruizhang0101
@@ -98,11 +101,11 @@
 /examples/                             @sammshen @deng451e
 
 # CI / Infrastructure
-/.github/                              @hickeyma @sammshen @ApostaC @deng451e
-/.buildkite/                           @sammshen @ApostaC @deng451e @hickeyma
+/.github/                              @hickeyma @sammshen @ApostaC @deng451e @VincyZhang
+/.buildkite/                           @sammshen @ApostaC @deng451e @hickeyma @VincyZhang
 
 # Operator
-/operator/                             @royyhuang @DongDongJu @ruizhang0101
+/operator/                             @royyhuang @DongDongJu @ruizhang0101 @VincyZhang
 
 # Rust
 /rust/                                 @DongDongJu @zhengfeihe

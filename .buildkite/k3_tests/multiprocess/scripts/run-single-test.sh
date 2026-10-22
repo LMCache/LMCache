@@ -107,8 +107,8 @@ elif [ "$TEST_NAME" = "kimi_linear_tp" ]; then
     export MODEL="${MODEL:-moonshotai/Kimi-Linear-48B-A3B-Instruct}"
 elif [ "$TEST_NAME" = "dsv4_flash_tp" ]; then
     # Self-contained test: dsv4-flash-tp.sh owns the server lifecycle and
-    # all launch flags (TP=4, fp8_ds_mla, deepseek_v4 tokenizer). Only the
-    # model name is declared here so the banner and the script's ${MODEL:-}
+    # each engine-specific implementation owns its TP=4 launch flags. Only
+    # the model name is declared here so the banner and the script's ${MODEL:-}
     # fallback both resolve to DeepSeek-V4-Flash.
     export MODEL="${MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
 elif [ "$TEST_NAME" = "deadlock" ]; then
@@ -167,7 +167,7 @@ SELF_CONTAINED_TESTS=" mp_autostart_tp2 p2p kimi_linear_tp dsv4_flash_tp "
 # else runs on GPU 0 alone, so launch-processes.sh skips the baseline.
 # Respect an explicit environment override from a device-specific wrapper
 # before applying the default baseline heuristic below.
-BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 "
+BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 preemption_correctness "
 if [ -n "${LAUNCH_BASELINE:-}" ]; then
     export LAUNCH_BASELINE
 elif [[ "$BASELINE_TESTS" == *" $TEST_NAME "* ]]; then

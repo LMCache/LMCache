@@ -30,7 +30,7 @@ Validated models
       **Status:** Validated with LMCache.
 
       Every model in this family needs the same three settings: the ``align``
-      Mamba cache mode, prefix caching, and a chunk size matched to vLLM's
+      Mamba cache mode, prefix caching, and a chunk size negotiated from vLLM's
       *unified block size*. That block size is model-specific — vLLM logs
       ``Setting attention block size to N tokens`` at startup:
 
@@ -51,8 +51,7 @@ Validated models
            - 544
            - 1
 
-      Set the LMCache server's ``--chunk-size`` to that ``N`` (or a multiple of
-      it) and enable ``--separate-object-groups``, then set vLLM's
+      Enable ``--separate-object-groups`` on the LMCache server, then set vLLM's
       ``--max-num-batched-tokens`` to at least ``N``. Keeping it below ``2N``
       (e.g. ``2N-1``) snapshots the Mamba state at every block boundary for the
       finest cache reuse; larger values raise prefill throughput at coarser
@@ -84,6 +83,8 @@ Validated models
 
       **Qwen3.5-0.8B** (1 GPU, ``N = 544`` → ``2N-1 = 1087``): identical to the
       above, with ``--chunk-size 544`` and ``--max-num-batched-tokens 1087``.
+      A lower configured chunk-size minimum, including the default 256,
+      negotiates to 544; see :doc:`/mp/chunk_size_negotiation`.
 
       ``--mamba-cache-mode align`` is required (GDN does not support the
       ``all`` mode). ``--separate-object-groups`` (server) is required for

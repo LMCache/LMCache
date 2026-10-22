@@ -68,6 +68,13 @@ The ``OBJ`` and ``AZURE_BLOB`` backends (object stores) do not require ``file_pa
    * - ``AZURE_BLOB``
      - Object store backend for Azure Blob Storage.  No local file path required.
 
+.. note::
+
+   In MP mode the L2 adapters move data between the L1 pool, which is pinned
+   host memory, and storage. With ``GDS`` and ``GDS_MT`` the cuFile calls
+   therefore operate on host buffers, not on GPU memory. GPU-direct I/O is
+   provided by the GDS L1 tier (:ref:`mp/configuration:GDS L1 Tier`).
+
 **Configuration examples:**
 
 .. code-block:: bash
