@@ -126,6 +126,22 @@ straightforward with per-operation locks or lock-free queues.
 `L2TaskId` values are only unique **within a single adapter**. When tracking
 tasks across multiple adapters, use the composite key `(adapter_index, task_id)`.
 
+### Memory Tags
+
+```
+get_memory_tags() -> MemoryTags                      # adapter instance
+get_wanted_l1_memory_tags() -> tuple[MemoryTags, ...]  # adapter config
+```
+
+- **Own tags:** every adapter declares the segment and residency of the medium
+  it stores bytes in. Declare `REMOTE` for anything off this host or shared
+  with other hosts.
+- **Wanted L1 tags:** the config lists acceptable L1 tags, most preferred
+  first. The default `((DRAM, LOCAL), (CXL, LOCAL))` fits every host-buffer
+  adapter; override it only for adapters that need a different L1.
+- The storage manager picks the adapter's L1 from these tags before building
+  the adapter. See `../memory_tags.md` for the rules and the scope restriction.
+
 ## StoreController
 
 **Purpose:** Asynchronously replicate L1 data to L2 after writes complete.

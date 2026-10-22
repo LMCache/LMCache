@@ -18,7 +18,13 @@ if TYPE_CHECKING:
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.utils import get_device_identity
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     AdapterUsage,
@@ -665,6 +671,13 @@ class DaxL2Adapter(L2AdapterInterface):
             total_capacity_bytes=total_capacity_bytes,
             bytes_by_cache_salt=MappingProxyType(dict(base_usage.bytes_by_cache_salt)),
         )
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return local CXL tags; remote when the adapter is shared."""
+        residency = (
+            MemoryResidency.REMOTE if self._config.shared else MemoryResidency.LOCAL
+        )
+        return MemoryTags(MemorySegment.CXL, residency)
 
     def close(self) -> None:
         """Stop worker pools and release DAX resources.

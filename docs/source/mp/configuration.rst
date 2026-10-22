@@ -343,8 +343,8 @@ L1 Memory Manager
 Source: ``lmcache/v1/distributed/config.py``
 
 Use repeatable ``--l1-manager '<JSON>'`` for tagged DRAM, Device-DAX, and
-GDS managers. See :doc:`multi_l1` for the schema, placement order, fixed
-L2 affinity, and per-manager reporting. The flags below remain the legacy
+GDS managers. See :doc:`multi_l1` for the schema, placement order,
+automatic L2 affinity, and per-manager reporting. The flags below remain the legacy
 single-L1 interface. For placing L1 on CXL-attached memory see
 *Device-DAX / CXL L1* below.
 
@@ -429,16 +429,15 @@ and offset and size must be multiples of the device alignment:
    ls -l /dev/dax0.0                             # path to pass to LMCache
 
 **Tagged form (recommended).** ``size_gb`` is mapped from ``path`` starting
-at ``offset_gb`` (default 0); there is no implicit DRAM pool. Set every L2
-adapter's ``affinity_tag`` in a Device-DAX-only server, since the default
-``_default`` means DRAM. This is the second of two servers sharing a 1 TiB
-device:
+at ``offset_gb`` (default 0); there is no implicit DRAM pool. With no DRAM
+manager, L2 adapters use the Device-DAX L1. This is the second of two servers
+sharing a 1 TiB device:
 
 .. code-block:: bash
 
    lmcache server --chunk-size 256 --eviction-policy LRU --port 6555 \
        --l1-manager '{"type":"DEVDAX","tag":"cxl","size_gb":512,"offset_gb":512,"path":"/dev/dax0.0"}' \
-       --l2-adapter '{"type":"fs","base_path":"/mnt/archive/lmcache","affinity_tag":"cxl"}'
+       --l2-adapter '{"type":"fs","base_path":"/mnt/archive/lmcache"}'
 
 List a ``DRAM`` manager first to spill into CXL only on ``OUT_OF_MEMORY``.
 Schema in :doc:`multi_l1`.
@@ -710,8 +709,8 @@ Source: ``lmcache/v1/distributed/l2_adapters/config.py``
 
 L2 adapters are configured via repeatable ``--l2-adapter <JSON>`` arguments.
 Each JSON object must include a ``"type"`` field that selects the adapter type.
-The optional ``"affinity_tag"`` field (default ``"_default"``) names the
-host-backed L1 used for both stores and reloads; see :doc:`multi_l1`.
+Each adapter stores from and reloads into an L1 chosen automatically; see
+:doc:`multi_l1`.
 The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
 Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,

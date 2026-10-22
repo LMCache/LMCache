@@ -1326,7 +1326,9 @@ class EvictionRacingL1Manager:
 
     def __getattr__(self, name: str):
         attr = getattr(self._inner, name)
-        if not callable(attr):
+        # Memory tags are static metadata read when the controller is built,
+        # not a request-path call for the evictor to race with.
+        if not callable(attr) or name == "get_memory_tags":
             return attr
 
         def wrapped(*args, **kwargs):
