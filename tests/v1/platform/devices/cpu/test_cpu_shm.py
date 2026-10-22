@@ -399,9 +399,7 @@ def test_shm_name_format():
     src = torch.zeros((2, 2), dtype=torch.float32)
     w = migrate_to_shm_and_wrap(src)
     try:
-        pattern = re.compile(
-            r"/lmcache_kv_[0-9a-f]{%d}\Z" % SHM_KV_NAME_TOKEN_HEX_LEN
-        )
+        pattern = re.compile(r"/lmcache_kv_[0-9a-f]{%d}\Z" % SHM_KV_NAME_TOKEN_HEX_LEN)
         assert pattern.fullmatch(w.shm_name), (
             f"SHM name {w.shm_name!r} does not match expected format "
             f"'/lmcache_kv_<{SHM_KV_NAME_TOKEN_HEX_LEN} hex chars>'"

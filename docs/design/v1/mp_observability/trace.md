@@ -276,8 +276,8 @@ Length-prefixed frames keep the reader simple and let truncated tails
 | `trace_schema_version` | `int` (1) | Bumped on incompatible changes to the captured API surface (e.g. a traced method's args change, a codec wire form changes). Owned by the trace subsystem, not tied to `lmcache.__version__`; reader rejects mismatches |
 | `t_mono_start` | `float` | `time.monotonic()` at recorder construction; record `t_mono` is relative to this |
 | `t_wall_start` | `float` | `time.time()` at construction, for absolute correlation with external logs |
-| `sm_config_json` | `str` | JSON dump of `StorageManagerConfig` at record time, or empty string if attach was skipped |
-| `sm_config_digest` | `str` | SHA-256 of `sm_config_json`. Replay drivers use this to detect mismatched configurations |
+| `sm_config_json` | `str` | JSON dump of `StorageManagerConfig` at record time, or empty string if attach was skipped. Auto-generated L1 pool SHM names (`lmcache_l1_pool_<uuid hex>`) are redacted to `<generated>` — see `sm_config_digest` |
+| `sm_config_digest` | `str` | SHA-256 of `sm_config_json`. Replay drivers use this to detect mismatched configurations. Generated L1 pool SHM names are redacted before hashing because they are drawn fresh per config instance; two semantically identical default configs must digest equally on the record and replay sides. Pinned names and `""` (SHM disabled) hash verbatim |
 | `level_meta` | `dict` (default `{}`) | Level-specific metadata. Empty for `storage`. `events` records `instance_id`, `cache_event_schema_version`, `lmcache_version`. Defaulted, so older files decode |
 
 ### `Record`

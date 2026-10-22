@@ -18,9 +18,9 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     generated_l1_pool_shm_name,
 )
-from lmcache.v1.multiprocess.posix_shm import POSIX_SHM_MAX_NAME_LEN
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
+from lmcache.v1.multiprocess.posix_shm import POSIX_SHM_MAX_NAME_LEN
 
 _NAME_PATTERN = re.compile(
     r"lmcache_l1_pool_[0-9a-f]{%d}\Z" % L1_POOL_SHM_NAME_TOKEN_HEX_LEN
@@ -49,15 +49,17 @@ def test_default_shm_name_is_uuid_derived():
 
 
 def test_generated_l1_pool_shm_name_fits_posix_limit():
-    """The ``shm_open`` name for a generated L1 pool must fit ``POSIX_SHM_MAX_NAME_LEN``."""
+    """A generated L1 pool ``shm_open`` name must fit the platform limit."""
     bare = generated_l1_pool_shm_name()
     shm_open_name = "/" + bare
     assert len(shm_open_name) <= POSIX_SHM_MAX_NAME_LEN
-    assert len(shm_open_name) == len("/lmcache_l1_pool_") + L1_POOL_SHM_NAME_TOKEN_HEX_LEN
+    assert (
+        len(shm_open_name) == len("/lmcache_l1_pool_") + L1_POOL_SHM_NAME_TOKEN_HEX_LEN
+    )
 
 
 def test_l1_pool_token_hex_len_matches_platform_limit():
-    """Token length is ``min(16, POSIX_SHM_MAX_NAME_LEN - len('/lmcache_l1_pool_'))``."""
+    """Token hex length is derived from ``POSIX_SHM_MAX_NAME_LEN``."""
     expected = min(16, POSIX_SHM_MAX_NAME_LEN - len("/lmcache_l1_pool_"))
     assert L1_POOL_SHM_NAME_TOKEN_HEX_LEN == expected
     if sys.platform == "darwin":
