@@ -33,6 +33,7 @@ Configuration
 
      dax.device_path: "/dev/dax1.0"
      dax.max_dax_size: 100
+     dax.offset_gb: 0   # device offset where the mapping starts
      dax.restore_workers: 8
      dax.restore_max_regions: 8
      dax.retrieve_staging_slab_bytes: 268435456
@@ -65,8 +66,8 @@ are required.
 The legacy single-device ``--l2-adapter`` JSON accepts these fields:
 
 - ``device_path``: required path to a readable and writable DAX device.
-- ``max_dax_size_gb``: required mapped size in GiB. The value must fit within
-  the device capacity when capacity can be determined with ``fstat``.
+- ``max_dax_size_gb``: required mapped size in GiB. ``offset_gb`` plus this
+  size must fit within the device.
 - ``slot_bytes``: required fixed slot size in bytes. It must be large enough
   for one full LMCache chunk.
 - ``num_store_workers``: optional store worker count, default ``1``.

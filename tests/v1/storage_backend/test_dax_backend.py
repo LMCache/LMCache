@@ -3,8 +3,11 @@
 # Standard
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from types import SimpleNamespace
 import asyncio
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -23,9 +26,11 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.storage_backend.dax.core import DaxCore
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.plugins.dax_backend import DaxBackend
 import lmcache.lmcache_native as lmcache_native
+import lmcache.utils as lmcache_utils
 import lmcache.v1.storage_backend.plugins.dax_backend as dax_backend_module
 
 
@@ -137,6 +142,56 @@ def _store_tensor(
                 future.result(timeout=5)
     finally:
         obj.ref_count_down()
+
+
+def test_dax_backend_maps_at_offset_gb(memory_allocator, loop_in_thread):
+    """``dax.offset_gb`` moves the plugin's arena past the start of the device."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dax.bin")
+        with open(dev_path, "wb") as fout:
+            fout.truncate(32 * 1024 * 1024)
+        config = _create_config(
+            extra_config={
+                "dax.device_path": dev_path,
+                "dax.max_dax_size": 16 / 1024,
+                "dax.offset_gb": 16 / 1024,
+            },
+        )
+        metadata = _create_metadata(chunk_size=16)
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = DaxBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+        try:
+            assert backend._core.offset_bytes == 16 * 1024 * 1024
+        finally:
+            backend.close()
+            local_cpu.close()
+
+    for bad in (-1, True):
+        with pytest.raises(ValueError, match="dax.offset_gb"):
+            DaxBackend(
+                config=_create_config(
+                    extra_config={
+                        "dax.device_path": "/unused",
+                        "dax.max_dax_size": 1,
+                        "dax.offset_gb": bad,
+                    }
+                ),
+                metadata=_create_metadata(chunk_size=16),
+                local_cpu_backend=local_cpu,
+                loop=loop_in_thread,
+                dst_device="cpu",
+            )
 
 
 def test_dax_backend_roundtrip(memory_allocator, loop_in_thread):
@@ -638,7 +693,7 @@ def test_dax_backend_failed_init_does_not_leak_fds() -> None:
                 dst_device="cpu",
                 memory_allocator=AdHocMemoryAllocator(device="cpu"),
             )
-            with pytest.raises(RuntimeError, match="exceeds device capacity"):
+            with pytest.raises(RuntimeError, match="exceeds .* capacity"):
                 DaxBackend(
                     config=config,
                     metadata=metadata,
@@ -2088,3 +2143,52 @@ def test_dax_backend_async_close_waits_for_active_put(
             loop_in_thread.call_soon_threadsafe(loop_in_thread.stop)
             loop_thread.join(timeout=2)
             backend.close()
+
+
+@pytest.mark.parametrize(
+    "offset_bytes,size_bytes,match",
+    [
+        (8 << 20, 2 << 20, "exceeds .* capacity"),  # starts at capacity
+        (1 << 20, 2 << 20, "device alignment"),
+    ],
+)
+def test_dax_core_rejects_bad_range_on_character_device(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    offset_bytes: int,
+    size_bytes: int,
+    match: str,
+) -> None:
+    """DaxCore checks a Device-DAX range against sysfs before mapping it.
+
+    ``fstat`` reports size 0 for the node and the kernel accepts an
+    out-of-range mmap, so this check is what prevents a SIGBUS on first access.
+    """
+    backing = tmp_path / "dax0.0"
+    backing.write_bytes(b"\0" * (8 << 20))
+    rdev = os.makedev(252, 7)
+    node = tmp_path / "sysfs" / f"{os.major(rdev)}:{os.minor(rdev)}"
+    node.mkdir(parents=True)
+    (node / "size").write_text(f"{8 << 20}\n")
+    (node / "align").write_text(f"{2 << 20}\n")
+    monkeypatch.setattr(lmcache_utils, "DAX_SYSFS_CHAR_ROOT", str(tmp_path / "sysfs"))
+    real_fstat = os.fstat
+    identity = (backing.stat().st_dev, backing.stat().st_ino)
+
+    def fake_fstat(fd: int) -> object:
+        info = real_fstat(fd)
+        if (info.st_dev, info.st_ino) == identity:
+            return SimpleNamespace(st_mode=stat.S_IFCHR, st_rdev=rdev)
+        return info
+
+    monkeypatch.setattr(os, "fstat", fake_fstat)
+
+    fds_before = len(os.listdir("/proc/self/fd"))
+    with pytest.raises(RuntimeError, match=match):
+        DaxCore(
+            device_path=str(backing),
+            max_dax_size_bytes=size_bytes,
+            slot_bytes=4096,
+            offset_bytes=offset_bytes,
+        )
+    assert len(os.listdir("/proc/self/fd")) == fds_before

@@ -39,7 +39,13 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -1184,6 +1190,10 @@ class ValkeyL2Adapter(L2AdapterInterface):
         if self._config.cluster_mode:
             status["node_memory"] = self._pool.node_memory_usage()
         return status
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this adapter: remote storage."""
+        return MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
 
     def close(self) -> None:
         """Close the worker pool (and its glide clients) and event fds.
