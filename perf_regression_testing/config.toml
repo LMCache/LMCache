@@ -183,8 +183,7 @@ eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 
 [deployments.vllm_lmcache_ssm]
 # vllm_lmcache on the hybrid model. With prefix caching vLLM caches Mamba
 # state per block (mamba_cache_mode "align") and LMCache needs chunk-size equal
-# to that block size. 1568 is derived from the page sizes at TP4 with fp8 KV,
-# not yet read off a vllm.log.
+# to that block size: 1600 at TP4 with fp8 KV (vLLM's error message, build 28).
 model = "qwen38"
 image_target = "lmcache"
 
@@ -203,7 +202,7 @@ scratch = [{ path = "<root>/l2", min_free_gb = 1500 }]
 host = "127.0.0.1"
 port = 16555
 http-port = 18080
-chunk-size = 1568
+chunk-size = 1600
 separate-object-groups = true
 l1-size-gb = 800
 eviction-policy = "LRU"
