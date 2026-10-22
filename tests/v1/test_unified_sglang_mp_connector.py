@@ -20,6 +20,7 @@ from lmcache.integration.sglang.unified_lmcache_mp_connector import (
     UnifiedLMCacheMPConnector,
 )
 from lmcache.utils import EngineType
+from lmcache.v1.distributed.api import ipc_key_to_object_keys
 from lmcache.v1.gpu_connector.kv_format import detect_format
 import lmcache.lmcache_native as lmcache_native
 
@@ -346,6 +347,54 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             self.connector._create_key.call_args.kwargs["request_configs"],
             {"lmcache.hint.engine_computed_tokens": 4},
         )
+
+    def test_submitted_lookup_keeps_cache_salt(self) -> None:
+        self.connector.chunk_size = 4
+        self.connector.kv_world_size = 1
+        self.connector._lookups = {}
+        self.connector._active_sessions = set()
+        self.connector._lookup_leader = True
+        self.connector._req_client = Mock()
+        self.connector._req_client.lookup.return_value = _Future(False)
+        self.connector._create_key = Mock(return_value=object())
+        self.connector._sync_success = lambda success: success
+
+        operation = self.connector.submit_lookup(
+            "lookup-request",
+            [1, 2, 3, 4],
+            local_hit_tokens=0,
+            cache_salt="tenant-a",
+        )
+
+        self.assertEqual(operation.cache_salt, "tenant-a")
+
+    def test_create_key_carries_cache_salt(self) -> None:
+        # Regression test for LMCache#4825: the SGLang path used to build
+        # server keys without the request's cache_salt, so the salt must be
+        # visible on the key the connector hands to the server.
+        self.assertEqual(self._ipc_key_for_salt("tenant-a").cache_salt, "tenant-a")
+        self.assertEqual(self._ipc_key_for_salt("tenant-b").cache_salt, "tenant-b")
+        self.assertEqual(self._ipc_key_for_salt("").cache_salt, "")
+
+    def test_cache_salt_produces_distinct_object_keys(self) -> None:
+        # Isolation is only real if the salt survives the server-side
+        # conversion into ObjectKeys: same tokens, different salts must be
+        # different objects, and the same salt must reproduce the same
+        # objects so legitimate hits still work.
+        chunk_hashes = [b"\xab" * 32]
+
+        objects_a = ipc_key_to_object_keys(
+            self._ipc_key_for_salt("tenant-a"), chunk_hashes, [0]
+        )
+        objects_b = ipc_key_to_object_keys(
+            self._ipc_key_for_salt("tenant-b"), chunk_hashes, [0]
+        )
+        objects_a2 = ipc_key_to_object_keys(
+            self._ipc_key_for_salt("tenant-a"), chunk_hashes, [0]
+        )
+
+        self.assertNotEqual(objects_a, objects_b)
+        self.assertEqual(objects_a, objects_a2)
 
     def test_poll_lookup_uses_short_lived_status_queries(self):
         self.connector.chunk_size = 4
@@ -1091,3 +1140,15 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
 
         self.assertEqual(key.num_kv_readers, 4)
         self.assertEqual(key.world_size, 1)
+
+    def _ipc_key_for_salt(self, cache_salt: str):
+        self.connector.model_name = "test-model"
+        self.connector.kv_world_size = 1
+        self.connector.num_kv_readers = 1
+        operation = LMCacheLookupOperation(
+            request_id="req",
+            token_ids=[1, 2, 3, 4],
+            local_hit_tokens=0,
+            cache_salt=cache_salt,
+        )
+        return self.connector._create_key(operation, start=0, end=4, worker_id=0)
