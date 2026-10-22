@@ -322,7 +322,7 @@ def test_raw_block_core_load_many_into_batches_iouring_reads(monkeypatch):
         put_result = core.put_many(specs, objects)
         assert put_result.results == [True, True, True]
 
-        raw_dev = core._rawdev()
+        raw_dev = core._io_engine._raw_device()
         raw_dev.batched_reads.clear()
 
         loaded = [_make_byte_obj(len(payload)) for payload in payloads]
@@ -342,8 +342,9 @@ def test_raw_block_core_uring_cmd_reads_batch_split_chunks(monkeypatch):
     _install_fake_raw_block_device(monkeypatch)
     core = _make_raw_block_core(io_engine="io_uring")
     try:
-        raw_dev = core._rawdev()
+        raw_dev = core._io_engine._raw_device()
         core.max_data_transfer_size = core.block_align
+        core._io_engine._max_data_transfer_size = core.block_align
 
         payload1 = b"a" * (core.block_align + 512)
         payload2 = b"b" * core.block_align
@@ -357,7 +358,7 @@ def test_raw_block_core_uring_cmd_reads_batch_split_chunks(monkeypatch):
 
         out1 = bytearray(len(payload1))
         out2 = bytearray(len(payload2))
-        results = core._read_uring_cmd_buffers(
+        results = core._io_engine._read_uring_cmd_buffers(
             [offset1, offset2],
             [out1, out2],
             [len(payload1), len(payload2)],
@@ -386,13 +387,14 @@ def test_raw_block_core_uring_cmd_write_rejects_short_completion_bitmap(
     _install_fake_raw_block_device(monkeypatch)
     core = _make_raw_block_core(io_engine="io_uring")
     try:
-        raw_dev = core._rawdev()
+        raw_dev = core._io_engine._raw_device()
         raw_dev.wait_iouring = lambda batch_id: (completion_results, [])
         core.max_data_transfer_size = core.block_align
+        core._io_engine._max_data_transfer_size = core.block_align
 
         payload = bytearray(b"x" * (core.block_align * 2))
         with pytest.raises(RuntimeError, match="io_uring_cmd write failed"):
-            core._write_uring_cmd_buffers(
+            core._io_engine._write_uring_cmd_buffers(
                 [core.block_align],
                 [payload],
                 [len(payload)],
@@ -409,12 +411,13 @@ def test_raw_block_core_uring_cmd_read_rejects_short_completion_bitmap(
     _install_fake_raw_block_device(monkeypatch)
     core = _make_raw_block_core(io_engine="io_uring")
     try:
-        raw_dev = core._rawdev()
+        raw_dev = core._io_engine._raw_device()
         raw_dev.wait_iouring = lambda batch_id: (completion_results, [])
         core.max_data_transfer_size = core.block_align
+        core._io_engine._max_data_transfer_size = core.block_align
 
         out = bytearray(core.block_align * 2)
-        results = core._read_uring_cmd_buffers(
+        results = core._io_engine._read_uring_cmd_buffers(
             [core.block_align],
             [out],
             [len(out)],
@@ -433,7 +436,7 @@ def test_raw_block_core_iouring_write_rejects_short_completion_bitmap(
     _install_fake_raw_block_device(monkeypatch)
     core = _make_raw_block_core(io_engine="io_uring")
     try:
-        raw_dev = core._rawdev()
+        raw_dev = core._io_engine._raw_device()
         raw_dev.wait_iouring = lambda batch_id: (completion_results, [])
 
         payloads = [bytearray(b"x" * 512), bytearray(b"y" * 512)]
@@ -455,7 +458,7 @@ def test_raw_block_core_iouring_read_rejects_short_completion_bitmap(
     _install_fake_raw_block_device(monkeypatch)
     core = _make_raw_block_core(io_engine="io_uring")
     try:
-        raw_dev = core._rawdev()
+        raw_dev = core._io_engine._raw_device()
         raw_dev.wait_iouring = lambda batch_id: (completion_results, [])
 
         out1 = bytearray(512)
@@ -476,18 +479,17 @@ def test_raw_block_core_logs_iouring_completion_errors(monkeypatch):
     _install_fake_raw_block_device(monkeypatch)
     core = _make_raw_block_core(io_engine="io_uring")
     try:
-        raw_dev = core._rawdev()
+        raw_dev = core._io_engine._raw_device()
         raw_dev.wait_iouring = lambda batch_id: (
             [True, False],
             [(1, "io_uring I/O error")],
         )
 
         with patch(
-            "lmcache.v1.distributed.l2_adapters.raw_block.core.logger.error"
+            "lmcache.v1.distributed.l2_adapters.raw_block.io_engine.logger.error"
         ) as log_error:
-            results = core._wait_iouring_results(
-                raw_dev,
-                batch_id=7,
+            results = core._io_engine._wait_iouring_batch(
+                7,
                 expected_count=2,
                 operation="io_uring read",
             )
@@ -1102,7 +1104,9 @@ def test_rust_raw_block_backend_batched_get_returns_none_on_rawdev_error(
             obj.ref_count_down()
 
             with patch.object(
-                backend._core, "_rawdev", side_effect=RuntimeError("boom")
+                backend._core._io_engine,
+                "_raw_device",
+                side_effect=RuntimeError("boom"),
             ):
                 assert backend.get_blocking(key) is None
             assert backend.inflight_io_count() == 0
@@ -1253,7 +1257,9 @@ def test_rust_raw_block_backend_batched_get_releases_allocation_on_read_error(
             raw_dev = MagicMock()
             raw_dev.pread_into.side_effect = OSError("read failed")
             with patch.object(local_cpu, "allocate", return_value=leaked_obj):
-                with patch.object(backend._core, "_rawdev", return_value=raw_dev):
+                with patch.object(
+                    backend._core._io_engine, "_raw_device", return_value=raw_dev
+                ):
                     assert backend.get_blocking(key) is None
 
             assert leaked_obj.get_ref_count() == 0
@@ -1348,7 +1354,9 @@ def test_rust_raw_block_backend_batched_get_returns_loaded_prefix_on_read_error(
             with patch.object(
                 local_cpu, "allocate", side_effect=[loaded_obj, failed_obj]
             ):
-                with patch.object(backend._core, "_rawdev", return_value=raw_dev):
+                with patch.object(
+                    backend._core._io_engine, "_raw_device", return_value=raw_dev
+                ):
                     results = backend.batched_get_blocking([key1, key2])
 
             assert results == [loaded_obj, None]
