@@ -66,10 +66,11 @@ def downsample_and_stage_block_ids(
 
     Args:
         cache_context: The cache context containing the KV cache information.
-        block_ids: The original block id lists, indexed by LMCache KV group index.
+        block_ids: Per-kernel-group block IDs, trimmed in place to the blocks
+            actually transferred for each chunk.
 
     Returns:
-        The cut block id lists, indexed by LMCache KV group index.
+        Device tensors containing the retained IDs, in kernel-group order.
 
     Note:
         This function has some coupled logic with transfer_kv_per_object_group below.
