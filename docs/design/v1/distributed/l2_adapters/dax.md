@@ -91,14 +91,19 @@ or poll-set re-registration.
 
 Add:
 
-1. Validate `hotplug_enabled`, path, and size.
-2. Map a new `DaxCore[ObjectKey]`.
+1. Validate `hotplug_enabled`, path, size, and `offset_bytes` (default 0).
+   The storage manager rejects a range that overlaps one mapped by any L1 or
+   other L2 owner on the same physical device.
+2. Map a new `DaxCore[ObjectKey]` over `[offset, offset + size)`; the core
+   checks the range against the device size and alignment before `mmap`.
 3. Append a `DaxDeviceEntry(state="active")`.
 4. Return per-device status. Existing KV entries stay on their current devices.
 
-Re-adding the same device at the same size, including through an alias, returns
-its existing entry without mapping it again. Use the returned
-`device_path` for remove or resize; the alias is not registered as another path.
+A range is identified by `(device_path, offset_bytes)`. Re-adding the same
+range at the same size, including through an alias, returns its existing entry;
+an overlapping range is a 409. Disjoint ranges of one device may back several
+entries. Use the returned `device_path` and `offset_bytes` for remove or
+resize; the alias is not registered as another path.
 
 Remove with migration:
 
@@ -113,7 +118,8 @@ Remove with migration:
 Resize:
 
 - Grow remaps the same core to a larger size after active reads and writes
-  drain. No KV payload movement is needed.
+  drain. No KV payload movement is needed. The grown range is checked against
+  sibling entries and other L1 or L2 owners like an add.
 - Shrink first proves that every live slot fits below the new slot count. If
   not, the out-of-range keys must migrate to another active device or the
   request fails. Shrink never silently evicts data.

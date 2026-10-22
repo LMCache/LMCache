@@ -329,6 +329,32 @@ def test_unpinned_h2d_chunks_sync_after_launch(
     assert syncs == [1], "expected exactly one sync, after the launch"
 
 
+@pytest.mark.parametrize(("ops_cls", "module_name"), _NATIVE_BACKENDS)
+def test_pinned_chunks_keep_the_async_path(
+    monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
+) -> None:
+    """Already pinned chunks are passed as-is and nothing synchronizes."""
+    ops, kernel = _native_ops(monkeypatch, ops_cls, module_name)
+    syncs: list[torch.device] = []
+    monkeypatch.setattr(native_block_transfer, "synchronize_device", syncs.append)
+    paged, fmt, desc = _paged_kv(num_blocks=2)
+
+    ops.multi_layer_block_kv_transfer(
+        paged,
+        cast(list[torch.Tensor], [_host_chunk(0x3000)]),
+        [0, 1],
+        CPU,
+        H2D,
+        desc,
+        _CHUNK_TOKENS,
+        fmt,
+        0,
+    )
+
+    assert [launch.chunks for launch in kernel.launches] == [[0x3000]]
+    assert syncs == []
+
+
 def test_binding_one_instance_leaves_others_on_baseline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

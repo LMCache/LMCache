@@ -18,7 +18,13 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -476,6 +482,10 @@ class SageMakerHyperPodL2Adapter(L2AdapterInterface):
             "shared_memory_name": self._config.shared_memory_name,
             "backend": backend,
         }
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this adapter: remote storage."""
+        return MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
 
     def close(self) -> None:
         """Cancel in-flight work, release leases, and close all resources.

@@ -3,7 +3,8 @@ Multiple L1 Managers
 
 The MP server can serve KV objects from independently configured DRAM,
 Device-DAX, and GDS L1 managers. Each manager has its own capacity, eviction
-controller, and store controller. L2 adapters use a fixed L1 affinity tag.
+controller, and store controller. Each L2 adapter is bound to one L1 chosen
+automatically from the managers' memory types.
 
 Configuration
 -------------
@@ -11,7 +12,7 @@ Configuration
 Repeat ``--l1-manager`` in write-placement order. Each JSON object requires
 ``type``, a unique non-empty ``tag``, and ``size_gb`` (GiB). The types are
 ``DRAM``, ``DEVDAX``, and ``GDS``. The ``_default`` tag is reserved for DRAM
-in this interface and is the default affinity target for L2 adapters.
+in this interface.
 
 For example, use a dedicated Device-DAX device and a GDS-capable directory:
 
@@ -21,7 +22,7 @@ For example, use a dedicated Device-DAX device and a GDS-capable directory:
        --l1-manager '{"type":"DRAM","tag":"_default","size_gb":8}' \
        --l1-manager '{"type":"DEVDAX","tag":"dax","size_gb":16,"path":"/dev/dax0.0"}' \
        --l1-manager '{"type":"GDS","tag":"gds","size_gb":32,"path":"/mnt/nvme/lmcache"}' \
-       --l2-adapter '{"type":"fs","base_path":"/mnt/archive/lmcache","affinity_tag":"dax"}'
+       --l2-adapter '{"type":"fs","base_path":"/mnt/archive/lmcache"}'
 
 For an end-to-end CXL / Device-DAX deployment walkthrough see
 :ref:`mp-devdax-l1`.
@@ -97,12 +98,14 @@ the next manager; conflicts and exceptions do not. Allocation remains atomic
 within each batch, so a batch can fail even when combined free space across
 managers would suffice. This does not add cross-L1 deduplication or migration.
 
-An L2 adapter's ``affinity_tag`` selects the host-backed L1 used for both
-stores and reloads. It defaults to ``_default`` and must name a configured
-manager. An adapter sees completed stores from that manager only. Set the tag
-explicitly for a Device-DAX-only configuration. GDS cannot be an affinity
-target for the existing host-buffer L2 adapters. Affinity is fixed; runtime
-adapter additions are validated against the same tags.
+Each L2 adapter stores from and reloads into one L1, chosen at startup:
+the first ``DRAM`` manager in argument order, or the first ``DEVDAX`` manager
+when there is no ``DRAM`` manager. An adapter sees completed stores from that
+manager only, so in the example above objects that overflow into Device-DAX
+are not archived to ``fs``. A server whose only L1 is ``GDS`` cannot use the
+existing L2 adapters and fails at startup. Runtime adapter additions follow
+the same rule. The ``affinity_tag`` field of earlier releases is rejected; each
+adapter's chosen L1 is logged at startup.
 
 Lookups visit L1 managers synchronously. Prefetch selects one owner per key
 and keeps that selection in the request's result. GPU completion releases
@@ -124,7 +127,7 @@ Status and Prometheus
   ``dram``, ``devdax``, and ``gds``. Draining Device-DAX arenas are excluded.
 
 The legacy singular status fields remain available when there is one manager.
-``GET /config`` includes every L1 configuration and each adapter's affinity.
+``GET /config`` includes every L1 configuration.
 
 Prometheus exports ``lmcache_mp_l1_memory_usage_bytes``,
 ``lmcache_mp_l1_usage_ratio``, and ``lmcache_mp_l1_staging_bytes`` with

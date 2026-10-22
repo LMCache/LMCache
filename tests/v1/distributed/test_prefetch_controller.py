@@ -163,7 +163,7 @@ def make_controller(
     l1_manager: L1Manager,
     adapters: list,
     policy: PrefetchPolicy | None = None,
-    max_in_flight: int = 8,
+    inflight_watermark: float = 0.5,
 ) -> PrefetchController:
     """Build a controller over one L1 manager and the given adapters."""
     return PrefetchController(
@@ -172,7 +172,7 @@ def make_controller(
         l2_adapters=adapters,
         adapter_descriptors=[make_descriptor(i) for i in range(len(adapters))],
         policy=policy or DefaultPrefetchPolicy(),
-        max_in_flight=max_in_flight,
+        inflight_watermark=inflight_watermark,
     )
 
 
@@ -829,25 +829,101 @@ class TestL2LockRelease:
 
 
 class TestAdmission:
-    def test_queuing_beyond_max_in_flight(self, l1_manager):
-        """More requests than max_in_flight all complete eventually."""
-        adapter = make_adapter()
+    def test_admits_more_than_eight_below_watermark(self, l1_manager):
+        """Requests whose loads stay far below the watermark are all in
+        flight at once, past the old fixed limit of eight."""
+        adapter = make_adapter(bandwidth_gb=0.001)
         layout = make_layout()
-        all_keys = [make_object_key(i) for i in range(8)]
+        all_keys = [make_object_key(i) for i in range(12)]
         store_keys_in_l2(adapter, all_keys, layout)
-        ctrl = make_controller(l1_manager, [adapter], max_in_flight=2)
+        ctrl = make_controller(l1_manager, [adapter])
         ctrl.start()
 
-        req_ids = [
-            ctrl.submit_prefetch_request(single_row_spec(all_keys[i * 2 : i * 2 + 2]))
-            for i in range(4)
-        ]
-        results = [wait_for_result(ctrl, r, timeout=10.0) for r in req_ids]
-
-        assert [row_bits(r) for r in results] == [[0, 1]] * 4
-        l1_manager.finish_read(all_keys)
+        req_ids = [ctrl.submit_prefetch_request(single_row_spec([k])) for k in all_keys]
+        all_in_flight = wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_request_count"] == len(all_keys)
+        )
+        results = [wait_for_result(ctrl, r, timeout=15.0) for r in req_ids]
         ctrl.stop()
         adapter.close()
+
+        assert all_in_flight
+        assert [row_bits(r) for r in results] == [[0]] * len(all_keys)
+        assert l1_manager.get_staging_memory_usage() == 0
+        l1_manager.finish_read(all_keys)
+
+    def test_watermark_holds_back_requests(self):
+        """Once in-flight requests reach the watermark, later requests wait
+        in the pending queue; the first is admitted even though it alone
+        exceeds the budget, and every request completes."""
+        layout = make_layout()
+        object_bytes = 100 * 2 * 512 * 2
+        l1_manager = L1Manager(
+            make_l1_config(size_in_bytes=object_bytes * 16 + 65536, use_lazy=False)
+        )
+        adapter = make_adapter(bandwidth_gb=0.001)
+        all_keys = [make_object_key(i) for i in range(8)]
+        store_keys_in_l2(adapter, all_keys, layout)
+        # The budget is ~1.6 objects; every request loads two.
+        ctrl = make_controller(l1_manager, [adapter], inflight_watermark=0.1)
+        ctrl.start()
+        try:
+            req_ids = [
+                ctrl.submit_prefetch_request(
+                    single_row_spec(all_keys[i * 2 : i * 2 + 2])
+                )
+                for i in range(4)
+            ]
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_queue_size"] == 3
+                and ctrl.report_status()["in_flight_request_count"] == 1
+            ), ctrl.report_status()
+            results = [wait_for_result(ctrl, r, timeout=15.0) for r in req_ids]
+
+            assert [row_bits(r) for r in results] == [[0, 1]] * 4
+            assert l1_manager.get_staging_memory_usage() == 0
+            l1_manager.finish_read(all_keys)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            l1_manager.close()
+
+    def test_request_waits_for_l1_free_space(self):
+        """Below the watermark, a request still waits while L1 lacks free
+        space for all of its loads, and starts once space is freed."""
+        layout = make_layout()
+        object_bytes = 100 * 2 * 512 * 2
+        l1_manager = L1Manager(
+            make_l1_config(size_in_bytes=object_bytes * 8 + 65536, use_lazy=False)
+        )
+        fillers = [make_object_key(100 + i) for i in range(6)]
+        write_keys_to_l1(l1_manager, fillers, layout)
+        adapter = make_adapter(bandwidth_gb=0.0002)
+        first, second = [make_object_key(0)], [make_object_key(1), make_object_key(2)]
+        store_keys_in_l2(adapter, first + second, layout)
+        # A watermark of 1.0 leaves free space as the only binding limit.
+        ctrl = make_controller(l1_manager, [adapter], inflight_watermark=1.0)
+        ctrl.start()
+        try:
+            req_first = ctrl.submit_prefetch_request(single_row_spec(first))
+            req_second = ctrl.submit_prefetch_request(single_row_spec(second))
+            # One object of free space is left beside the first request.
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_queue_size"] == 1
+                and ctrl.report_status()["in_flight_request_count"] == 1
+            ), ctrl.report_status()
+
+            l1_manager.delete(fillers)
+            result_first = wait_for_result(ctrl, req_first, timeout=15.0)
+            result_second = wait_for_result(ctrl, req_second, timeout=15.0)
+
+            assert row_bits(result_first) == [0]
+            assert row_bits(result_second) == [0, 1]
+            l1_manager.finish_read(first + second)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            l1_manager.close()
 
     def test_two_sequential_requests(self, l1_manager):
         """Back-to-back requests complete independently."""
@@ -1250,7 +1326,9 @@ class EvictionRacingL1Manager:
 
     def __getattr__(self, name: str):
         attr = getattr(self._inner, name)
-        if not callable(attr):
+        # Memory tags are static metadata read when the controller is built,
+        # not a request-path call for the evictor to race with.
+        if not callable(attr) or name == "get_memory_tags":
             return attr
 
         def wrapped(*args, **kwargs):
@@ -1505,7 +1583,7 @@ class TestRuntimeAdapters:
         layout = make_layout()
         slow_keys = [make_object_key(i) for i in range(20)]
         store_keys_in_l2(adapter, slow_keys, layout)
-        ctrl = make_controller(l1_manager, [adapter], max_in_flight=2)
+        ctrl = make_controller(l1_manager, [adapter])
         ctrl.start()
 
         slow = ctrl.submit_prefetch_request(single_row_spec(slow_keys))

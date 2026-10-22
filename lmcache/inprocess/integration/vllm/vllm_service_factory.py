@@ -15,22 +15,26 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
     # First Party
-    from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+    from lmcache.inprocess.v1.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
     )
-    from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
-    from lmcache.v1.manager import LMCacheManager
+    from lmcache.inprocess.v1.lookup_client.lmcache_lookup_client import (
+        LMCacheLookupServer,
+    )
+    from lmcache.inprocess.v1.manager import LMCacheManager
 
 # First Party
-from lmcache.integration.base_service_factory import BaseServiceFactory
+from lmcache.inprocess.integration.base_service_factory import BaseServiceFactory
+from lmcache.inprocess.v1.health_monitor.base import HealthMonitor
+from lmcache.inprocess.v1.internal_api_server.api_server import InternalAPIServer
+from lmcache.inprocess.v1.lookup_client.abstract_client import (
+    LookupClientInterface,
+)
+from lmcache.inprocess.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.health_monitor.base import HealthMonitor
-from lmcache.v1.internal_api_server.api_server import InternalAPIServer
-from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
 logger = init_logger(__name__)
@@ -251,7 +255,7 @@ class VllmServiceFactory(BaseServiceFactory):
             return None
 
         # First Party
-        from lmcache.v1.lookup_client.factory import LookupClientFactory
+        from lmcache.inprocess.v1.lookup_client.factory import LookupClientFactory
 
         self._ensure_metadata()
         assert self.metadata is not None
@@ -269,7 +273,7 @@ class VllmServiceFactory(BaseServiceFactory):
             return None
 
         # First Party
-        from lmcache.v1.lookup_client.factory import LookupClientFactory
+        from lmcache.inprocess.v1.lookup_client.factory import LookupClientFactory
 
         self._ensure_metadata()
         self._ensure_engine()
