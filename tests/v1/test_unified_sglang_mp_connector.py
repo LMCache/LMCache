@@ -369,18 +369,11 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertEqual(operation.cache_salt, "tenant-a")
 
     def test_create_key_carries_cache_salt(self) -> None:
-        # Regression test for LMCache#4825: the SGLang path used to build
-        # server keys without the request's cache_salt, so the salt must be
-        # visible on the key the connector hands to the server.
         self.assertEqual(self._ipc_key_for_salt("tenant-a").cache_salt, "tenant-a")
         self.assertEqual(self._ipc_key_for_salt("tenant-b").cache_salt, "tenant-b")
         self.assertEqual(self._ipc_key_for_salt("").cache_salt, "")
 
     def test_cache_salt_produces_distinct_object_keys(self) -> None:
-        # Isolation is only real if the salt survives the server-side
-        # conversion into ObjectKeys: same tokens, different salts must be
-        # different objects, and the same salt must reproduce the same
-        # objects so legitimate hits still work.
         chunk_hashes = [b"\xab" * 32]
 
         objects_a = ipc_key_to_object_keys(
