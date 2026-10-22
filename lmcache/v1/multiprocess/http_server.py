@@ -18,6 +18,7 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
     l1_exposes_single_memory_region,
+    l1_is_single_cxl_region,
     parse_args_to_config,
 )
 from lmcache.v1.mp_coordinator.cache_events import (
@@ -144,6 +145,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 mq_port=mp_config.port if mp_config.p2p_config.enabled else 0,
                 on_registered=engine.storage_manager.publish_capacity,
                 chunk_size_provider=lambda: engine.context.finalized_chunk_size,
+                metadata=(
+                    {"lmcache.cxl.arena": engine.storage_manager.cxl_arena.to_json()}
+                    if mp_config.p2p_config.transfer_engine == "cxl"
+                    and engine.storage_manager.cxl_arena is not None
+                    else None
+                ),
             )
         )
     # Optionally emit cache events: to the coordinator, to an events-level
@@ -230,7 +237,14 @@ def run_http_server(
                 "--coordinator-url (or LMCACHE_COORDINATOR_URL) when "
                 "--p2p-advertise-url is set."
             )
-        if not l1_exposes_single_memory_region(storage_manager_config):
+        if mp_config.p2p_config.transfer_engine == "cxl":
+            if not l1_is_single_cxl_region(storage_manager_config):
+                raise ValueError(
+                    "CXL P2P requires a single L1 that is the shared CXL slab: "
+                    "set --l1-devdax-path and --cxl-pool-id, with no other L1 "
+                    "manager and no DRAM + Device-DAX hybrid L1."
+                )
+        elif not l1_exposes_single_memory_region(storage_manager_config):
             raise ValueError(
                 "P2P requires a single L1 memory region the transfer channel "
                 "can register; it is incompatible with GDS L1 (--gds-l1-path) "

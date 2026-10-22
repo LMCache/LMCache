@@ -64,6 +64,7 @@ async def register(
     p2p_advertised_url: str = "",
     mq_port: int = 0,
     chunk_size: int | None = None,
+    metadata: dict[str, str] | None = None,
 ) -> str:
     """Register an MP server with the coordinator and return its id.
 
@@ -78,6 +79,7 @@ async def register(
         mq_port: Port of this server's ZMQ message-queue server for P2P lookup
             RPCs. 0 when P2P is disabled.
         chunk_size: Finalized MP chunk size, if negotiation has completed.
+        metadata: Optional discovery metadata, such as shared CXL slab identity.
 
     Returns:
         The registered instance id (coordinator-assigned if ``instance_id`` was
@@ -93,6 +95,7 @@ async def register(
         p2p_advertised_url=p2p_advertised_url,
         mq_port=mq_port,
         chunk_size=chunk_size,
+        metadata=metadata or {},
     )
     response = await client.post(
         f"{base_url}/instances", json=body.model_dump(mode="json")
@@ -113,6 +116,7 @@ async def keep_registered(
     mq_port: int = 0,
     on_registered: Callable[[], None],
     chunk_size_provider: Callable[[], int | None] | None = None,
+    metadata: dict[str, str] | None = None,
 ) -> None:
     """Register, heartbeat on a timer, and deregister on cancellation.
 
@@ -143,6 +147,7 @@ async def keep_registered(
             ``lambda: None`` to mean it.
         chunk_size_provider: Returns the finalized chunk size for each
             registration, or ``None`` while negotiation is still pending.
+        metadata: Discovery metadata forwarded on every registration.
     """
     base_url = coordinator_url.rstrip("/")
     ip = advertise_ip or get_ip()
@@ -164,6 +169,7 @@ async def keep_registered(
                             if chunk_size_provider is not None
                             else None
                         ),
+                        metadata=metadata,
                     )
                     logger.info("Registered with coordinator as %s", assigned_id)
                     on_registered()

@@ -23,9 +23,19 @@ message MemoryLayoutDesc {
   repeated string dtypes = 2;
 }
 
+message CxlArenaDescriptor {
+  string pool_id = 1;
+  int64 offset = 2;
+  int64 size = 3;
+  int64 alignment = 4;
+  string session_id = 5;
+}
+
 message TransferChannelAddress {
   int64 offset = 1;
   int64 size = 2;
+  optional CxlArenaDescriptor cxl_arena = 3;
+  int64 cxl_ttl_seconds = 4;
 }
 
 message P2pLookupAndLockRequest {

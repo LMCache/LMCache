@@ -104,6 +104,7 @@ reporting `REMOTE`, because a shared filesystem is visible to every peer.
 | `nixl_store`, `nixl_store_dynamic`, `nixl_native` | `POSIX`, `GDS`, `GDS_MT` backends: `(STORAGE, LOCAL)`; `REMOTE` when shared; any other backend: `(STORAGE, REMOTE)`. GDS backends still load through host L1 buffers, so they are plain storage. |
 | `mock` | `(STORAGE, LOCAL)` |
 | `p2p` | `(DRAM, REMOTE)` |
+| `cxl_peer` | `(CXL, REMOTE)`: a peer's slab in a CXL pool shared across hosts |
 | `s3`, `resp`, `valkey`, `mooncake_store`, `aerospike`, `bigtable`, `hfbucket`, `hf3fs`, `sagemaker-hyperpod`, `native_plugin` | `(STORAGE, REMOTE)` |
 | `plugin` | declared by the user's adapter class |
 | `fault_inject`, serde wrapper | forwarded from the inner adapter |
@@ -132,6 +133,10 @@ The function is pure and its inputs are fixed after startup, so
 | `DRAM a`, `DRAM b` | `a` (first in placement order) |
 | `DEVDAX` | the DEVDAX L1 (CXL fallback) |
 | `GDS` | error: no L1 has the wanted tags |
+
+`cxl_peer` overrides the default with `((CXL, LOCAL),)`: its borrowed shadows
+point into the CXL pool that this node maps through its own Device-DAX L1, so
+they must be admitted into that L1 and never into a DRAM L1.
 
 Consequences:
 
