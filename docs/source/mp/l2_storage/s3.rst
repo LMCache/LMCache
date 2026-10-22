@@ -25,6 +25,33 @@ S3-compatible endpoint (MinIO, Ceph RGW, etc.).
 - ``max_capacity_gb`` (float, default ``0.0``): Aggregate capacity used by
   ``get_usage()``.  A value of ``0`` disables aggregate eviction
   (``usage_fraction == -1.0``).
+- ``s3_breaker_initial_cooldown_s`` (float, default ``5.0``): How long the
+  circuit breaker stays open after it trips, before the adapter probes the
+  endpoint again.  See `Circuit breaker`_.
+- ``s3_breaker_max_cooldown_s`` (float, default ``300.0``): Upper bound for the
+  doubled cooldown.  Must be greater than or equal to the initial cooldown.
+
+Circuit breaker
+---------------
+
+After three consecutive connection-class failures (refused connection, socket
+error, DNS failure, or timeout) the adapter stops dialling the endpoint:
+stores, lookups and loads fail locally without a network round trip.  This
+keeps a KV cache miss cheap while the backend is unreachable.
+
+The breaker re-arms itself once ``s3_breaker_initial_cooldown_s`` has elapsed,
+so a transient outage does not disable L2 for the lifetime of the process.  The
+next request after the cooldown probes the endpoint; if it succeeds the adapter
+resumes normally, and if the endpoint is still broken the breaker re-trips with
+the cooldown doubled, up to ``s3_breaker_max_cooldown_s``.  Any successful
+request resets the cooldown to its initial value.
+
+``report_status()`` exposes ``connection_failures``, ``connection_disabled``,
+and ``breaker_retry_in_seconds`` -- the last being the time until the next
+probe, which distinguishes an adapter that is recovering on its own from one
+that is waiting out a long backoff.  Raise the cooldowns for endpoints where
+failed requests are expensive; lower them where a fast return to L2 matters
+more than the occasional wasted request.
 
 **Configuration examples:**
 
