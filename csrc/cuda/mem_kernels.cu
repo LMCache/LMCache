@@ -326,7 +326,8 @@ page_buffer_offset(const int k_or_v, const int token_idx,
     const int64_t block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
     const int vals = scalars_per_token - 1;
-    // Padded pages / shared physical blocks pass the real per-block step; 0 = tight.
+    // Padded pages / shared physical blocks pass the real per-block step; 0 =
+    // tight.
     const int64_t block_step =
         block_stride_xwords > 0
             ? block_stride_xwords
@@ -553,8 +554,9 @@ void multi_layer_kv_transfer_templated(
   lmc::check_head_size(engine_kv_format, head_size_xword);
   // 0 means tight; the per-format offset entries compute their own tight step.
   const int64_t block_stride_xwords = block_stride_elems / elements_per_xword;
-  // Blocked-scale pages: the per-token scale is one transfer word (4 B indexer, 8 B
-  // DeepSeek-V4 main KV); kv_format.blocked_scale refuses records that are not.
+  // Blocked-scale pages: the per-token scale is one transfer word (4 B indexer,
+  // 8 B DeepSeek-V4 main KV); kv_format.blocked_scale refuses records that are
+  // not.
   TORCH_CHECK(engine_kv_format != EngineKVFormat::NL_X_NB_BSV_BSS ||
                   sizeof(T) == 4 || sizeof(T) == 8,
               "NL_X_NB_BSV_BSS requires a 4- or 8-byte transfer word (the "
@@ -707,8 +709,9 @@ void multi_layer_kv_transfer_fused_templated(
   lmc::check_head_size(engine_kv_format, head_size_xword);
   // 0 means tight; the per-format offset entries compute their own tight step.
   const int64_t block_stride_xwords = block_stride_elems / elements_per_xword;
-  // Blocked-scale pages: the per-token scale is one transfer word (4 B indexer, 8 B
-  // DeepSeek-V4 main KV); kv_format.blocked_scale refuses records that are not.
+  // Blocked-scale pages: the per-token scale is one transfer word (4 B indexer,
+  // 8 B DeepSeek-V4 main KV); kv_format.blocked_scale refuses records that are
+  // not.
   TORCH_CHECK(engine_kv_format != EngineKVFormat::NL_X_NB_BSV_BSS ||
                   sizeof(T) == 4 || sizeof(T) == 8,
               "NL_X_NB_BSV_BSS requires a 4- or 8-byte transfer word (the "

@@ -9,15 +9,13 @@ rather than copying the page bytes as if they were token-major.
 """
 
 # Third Party
+import pytest
 import torch
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
-
-# Third Party
-import pytest
 
 _FMT = EngineKVFormat.NL_X_NB_BSV_BSS
 _BS = 4  # tokens per block
