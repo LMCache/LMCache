@@ -1070,18 +1070,23 @@ class L1Manager(L1ManagerInterface):
             device_path, offset_in_bytes
         )
 
-    def owns_device(self, device_path: str) -> bool:
-        """Return whether L1 maps the physical device at a path.
+    def owns_range(
+        self, device_path: str, offset_in_bytes: int, size_in_bytes: int
+    ) -> bool:
+        """Return whether L1 maps a range overlapping one on a physical device.
 
         Args:
             device_path: Candidate device path or alias.
+            offset_in_bytes: Start of the candidate range on that device.
+            size_in_bytes: Length of the candidate range.
 
         Returns:
-            ``True`` while the device remains mapped; ``False`` for non-DAX L1.
+            ``True`` while an overlapping arena is mapped; ``False`` for
+            non-DAX L1.
         """
         manager = self._memory_manager
-        return isinstance(manager, DevDaxL1MemoryManager) and manager.owns_device(
-            device_path
+        return isinstance(manager, DevDaxL1MemoryManager) and manager.owns_range(
+            device_path, offset_in_bytes, size_in_bytes
         )
 
     def memory_region_count(self) -> int:

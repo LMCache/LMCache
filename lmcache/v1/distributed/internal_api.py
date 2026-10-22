@@ -356,8 +356,10 @@ class L1ManagerInterface(Protocol):
         """Return the status of the arena at ``(device_path, offset)``."""
         ...
 
-    def owns_device(self, device_path: str) -> bool:
-        """Whether this L1 maps the physical device at ``device_path``."""
+    def owns_range(
+        self, device_path: str, offset_in_bytes: int, size_in_bytes: int
+    ) -> bool:
+        """Whether this L1 maps a range of the device overlapping the given one."""
         ...
 
     def memory_region_count(self) -> int:
