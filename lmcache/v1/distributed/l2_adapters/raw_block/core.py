@@ -33,6 +33,7 @@ from lmcache.v1.distributed.l2_adapters.raw_block.io_engine import (
     PosixBlockIOConfig,
     RawBlockIO,
     RawBlockIOConfig,
+    SpdkBlockIOConfig,
     make_raw_block_io,
     normalize_raw_block_io_engine,
     normalize_raw_block_placement_ids,
@@ -96,6 +97,14 @@ class RawBlockCoreConfig:
     use_uring_cmd: bool = False
     meta_checkpoint_placement_id: PlacementId = None
     fdp_slot_affinity_enabled: bool = False
+
+    # SPDK-specific configuration (consumed when io_engine="spdk")
+    spdk_transport_type: str = "tcp"  # "pcie" for local NVMe, "tcp" for NVMe-oF
+    spdk_target_ip: str = "127.0.0.1"  # For PCIe: device address (e.g., "0000:01:00.0")
+    spdk_target_port: str = "4420"
+    spdk_target_nqn: str = "nqn.2016-06.io.spdk:cnode1"
+    spdk_core_mask: str = ""  # Hex core mask for SPDK (e.g., "0x3f" for cores 0-5)
+    spdk_mem_size_mb: int = 4096  # MB for SPDK hugepage memory allocation
 
 
 @dataclass
@@ -163,6 +172,15 @@ class RawBlockCore:
         self.io_engine = normalize_raw_block_io_engine(config.io_engine)
         self.use_uring_cmd = bool(config.use_uring_cmd)
         self.fdp_slot_affinity_enabled = bool(config.fdp_slot_affinity_enabled)
+
+        # SPDK-specific configuration (consumed when io_engine="spdk")
+        self.spdk_transport_type = str(config.spdk_transport_type)
+        self.spdk_target_ip = str(config.spdk_target_ip)
+        self.spdk_target_port = str(config.spdk_target_port)
+        self.spdk_target_nqn = str(config.spdk_target_nqn)
+        self.spdk_core_mask = str(config.spdk_core_mask)
+        self.spdk_mem_size_mb = int(config.spdk_mem_size_mb)
+
         self.meta_checkpoint_placement_id = normalize_raw_block_placement_ids(
             [config.meta_checkpoint_placement_id],
             1,
@@ -273,8 +291,9 @@ class RawBlockCore:
                 the target engine.
 
         Returns:
-            A ``PosixBlockIOConfig`` for ``io_engine='posix'`` or an
-            ``IoUringBlockIOConfig`` otherwise.
+            A ``PosixBlockIOConfig`` for ``io_engine='posix'``, an
+            ``IoUringBlockIOConfig`` for ``io_engine='io_uring'``, or an
+            ``SpdkBlockIOConfig`` for ``io_engine='spdk'``.
         """
         if self.io_engine == "posix":
             return PosixBlockIOConfig(
@@ -282,6 +301,21 @@ class RawBlockCore:
                 block_align=self.block_align,
                 io_engine=self.io_engine,
                 use_odirect=self.use_odirect,
+            )
+        if self.io_engine == "spdk":
+            # SPDK manages the NVMe connection directly, so no host device path
+            # is required; the transport/device fields live on the core config.
+            return SpdkBlockIOConfig(
+                device_path="",
+                block_align=self.block_align,
+                io_engine=self.io_engine,
+                transport_type=config.spdk_transport_type,
+                target_ip=config.spdk_target_ip,
+                target_port=config.spdk_target_port,
+                target_nqn=config.spdk_target_nqn,
+                core_mask=config.spdk_core_mask,
+                mem_size_mb=config.spdk_mem_size_mb,
+                header_bytes=self.header_bytes,
             )
         return IoUringBlockIOConfig(
             device_path=self.device_path,
@@ -2114,8 +2148,7 @@ class RawBlockCore:
         synchronous :meth:`read_buffers`, so every accepted read is complete
         before the leased buffers are returned to the pool. Headers are decoded
         while the leased buffers are still valid, then only failed slots are
-        reread individually. Used for both regular io_uring block I/O and NVMe
-        passthrough (``use_uring_cmd``).
+        reread individually.
 
         Args:
             offsets: Device byte offsets for this batch (non-empty).
