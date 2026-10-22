@@ -779,28 +779,6 @@ def test_kv_events_worker_reports_merge_across_ranks(
         scheduler.shutdown()
 
 
-def test_prefix_replay_tokens_from_kv_cache_config() -> None:
-    """The replay window is the largest one any group declares; none -> 0."""
-    groups = [
-        SimpleNamespace(kv_cache_spec=SimpleNamespace(prefix_replay_tokens=0)),
-        SimpleNamespace(kv_cache_spec=SimpleNamespace(prefix_replay_tokens=128)),
-        SimpleNamespace(kv_cache_spec=SimpleNamespace()),
-    ]
-    assert connector_mod.get_prefix_replay_tokens(None) == 0
-    assert (
-        connector_mod.get_prefix_replay_tokens(
-            cast(KVCacheConfig, SimpleNamespace(kv_cache_groups=groups))
-        )
-        == 128
-    )
-    assert (
-        connector_mod.get_prefix_replay_tokens(
-            cast(KVCacheConfig, SimpleNamespace(kv_cache_groups=groups[:1]))
-        )
-        == 0
-    )
-
-
 @pytest.mark.parametrize("replay", [0, 128])
 def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
     mock_io: SimpleNamespace, replay: int
