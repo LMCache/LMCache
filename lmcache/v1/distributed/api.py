@@ -95,6 +95,66 @@ class L1BackendType(str, enum.Enum):
     GDS = "gds"
 
 
+class MemorySegment(str, enum.Enum):
+    """The kind of memory or storage that holds an L1's or L2's bytes.
+
+    Note:
+        Only for prefetch target filtering and L1-L2 affinity. Any other
+        use needs agreement from @ApostaC first.
+    """
+
+    VRAM = "vram"
+    """GPU memory. Reserved for GDS/GDR L2 adapters; nothing reports it yet."""
+
+    DRAM = "dram"
+    """Host CPU memory."""
+
+    CXL = "cxl"
+    """CXL memory mapped through Device-DAX."""
+
+    GDS = "gds"
+    """NVMe storage accessed through GPUDirect Storage."""
+
+    STORAGE = "storage"
+    """Any other storage medium."""
+
+
+class MemoryResidency(str, enum.Enum):
+    """Where the bytes of an L1 or L2 reside relative to this host.
+
+    Note:
+        Only for prefetch target filtering and L1-L2 affinity. Any other
+        use needs agreement from @ApostaC first.
+    """
+
+    LOCAL = "local"
+    """The bytes reside on this host."""
+
+    REMOTE = "remote"
+    """The bytes reside elsewhere, or in a domain shared with other hosts."""
+
+    DUMMY = "dummy"
+    """No bytes reside anywhere: placeholder L1 memory objects. Reserved for
+    GDS/GDR L2 adapters; nothing reports it yet."""
+
+
+@dataclass(frozen=True)
+class MemoryTags:
+    """The intrinsic memory properties of an L1 manager or an L2 adapter.
+
+    Note:
+        Only for prefetch target filtering and L1-L2 affinity. Any other
+        use needs agreement from @ApostaC first. Tags are compared by exact
+        equality.
+    """
+
+    segment: MemorySegment
+    """The kind of memory or storage that holds the bytes."""
+
+    residency: MemoryResidency
+    """Where the bytes reside relative to this host."""
+
+
 @dataclass(frozen=True)
 class ObjectKey:
     """
@@ -565,11 +625,23 @@ class PrefetchResult:
     Note:
         ``l1_hit_cells`` and ``l2_hit_cells`` are disjoint and their union is
         ``hit_cells``.
+
+    ``found_cells`` (superset of ``hit_cells``): what existed at plan time —
+    in L1 or pinned in L2. Found-but-not-hit means "didn't fit", not
+    "evicted". ``None`` when not reported.
     """
 
     hit_cells: list["Bitmap"]
     l1_hit_cells: list["Bitmap"]
     l2_hit_cells: list["Bitmap"]
+    found_cells: "list[Bitmap] | None" = None
+    l1_owners: dict[ObjectKey, int] = field(default_factory=dict)
+    """Runtime manager IDs holding this request's retained read locks.
+
+    These process-local IDs match MemoryObj ownership and read/write completion;
+    they are not persisted. Tags name configured L1s for affinity and reporting
+    and are the appropriate identity at process boundaries.
+    """
     _l1_hit_count: int = field(init=False, repr=False, compare=False)
     _l2_hit_count: int = field(init=False, repr=False, compare=False)
 

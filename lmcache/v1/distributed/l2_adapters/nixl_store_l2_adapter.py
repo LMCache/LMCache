@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 import asyncio
 import os
@@ -23,7 +23,7 @@ from nixl._api import (
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, MemoryTags, ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -32,6 +32,9 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
+)
+from lmcache.v1.distributed.l2_adapters.nixl_native_l2_adapter import (
+    nixl_backend_memory_tags,
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
@@ -46,6 +49,9 @@ class NixlStoreObj:
     """
     The object stored in Nixl L2 cache.
     Can be used for both file and object.
+
+    ``pin_count`` is adapter-shared state: every read and transition
+    holds the owning adapter's ``_lock``.
     """
 
     page_indices: list[int]
@@ -55,23 +61,20 @@ class NixlStoreObj:
     layout: Optional[MemoryLayoutDesc] = None
 
     pin_count: int = 0
-    _lock: threading.Lock = field(
-        default_factory=threading.Lock, repr=False, compare=False
-    )
 
-    def increase_pin_count(self):
-        with self._lock:
-            self.pin_count += 1
+    def increase_pin_count(self) -> None:
+        """Increment the pin count (caller holds the adapter lock)."""
+        self.pin_count += 1
 
-    def decrease_pin_count(self):
-        with self._lock:
-            if self.pin_count > 0:
-                self.pin_count -= 1
-            else:
-                logger.warning(
-                    "Trying to decrease pin count of object at page indices %s below 0",
-                    self.page_indices,
-                )
+    def decrease_pin_count(self) -> None:
+        """Decrement the pin count, floored at zero (caller holds the adapter lock)."""
+        if self.pin_count > 0:
+            self.pin_count -= 1
+        else:
+            logger.warning(
+                "Trying to decrease pin count of object at page indices %s below 0",
+                self.page_indices,
+            )
 
 
 class NixlObjPool:
@@ -561,12 +564,11 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         def _unlock_keys(keys: list[ObjectKey]) -> None:
-            """
-            Unlock keys in the event loop thread.
-            """
-            for key in keys:
-                if (obj := self._memory_objects.get(key)) is not None:
-                    obj.decrease_pin_count()
+            """Unlock keys on the event loop thread under the adapter lock."""
+            with self._lock:
+                for key in keys:
+                    if (obj := self._memory_objects.get(key)) is not None:
+                        obj.decrease_pin_count()
 
         # Schedule the unlock operation in the event loop thread
         self._loop.call_soon_threadsafe(_unlock_keys, keys)
@@ -593,6 +595,10 @@ class NixlStoreL2Adapter(L2AdapterInterface):
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
         with self._lock:
             return self._completed_load_tasks.pop(task_id, None)
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this adapter's NIXL backend."""
+        return nixl_backend_memory_tags(self._config.backend, self._config.shared)
 
     def close(self) -> None:
         """Close the adapter and release its event-loop and NIXL resources."""
@@ -693,7 +699,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             "backend": self._config.backend,
             "stored_object_count": stored_object_count,
             "pinned_object_count": pinned_object_count,
-            "pool_size": self._config.pool_size,
+            "pool_size": pool.total_objs,
             "pool_free_slots": pool_free_slots,
             "event_loop_alive": self._loop_thread.is_alive(),
         }
@@ -739,9 +745,9 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
         For each key-object pair, memory page indices are mapped to storage
         slot indices and a single batched DMA write is issued. On success the
-        key-to-storage mapping is recorded in ``_memory_objects``. On transfer
-        failure, all allocated storage slots are freed and the task is marked
-        as failed.
+        key-to-storage mapping is recorded in ``_memory_objects``. On preparation
+        or transfer failure, all allocated storage slots are freed and the
+        task is marked as failed.
 
         Args:
             keys: Keys identifying each object to store.
@@ -770,8 +776,8 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                     num_objs=len(mem_indices)
                 )
 
-                if storage_indices == []:
-                    break
+                if not storage_indices:
+                    raise RuntimeError("Insufficient NIXL storage capacity")
 
                 mem_indices_flat.extend(mem_indices)
                 storage_indices_flat.extend(storage_indices)
@@ -790,7 +796,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 )
 
             if not mem_indices_flat:
-                # Nothing to store (all keys already existed or pool empty)
+                # Nothing to store because all keys already existed
                 with self._lock:
                     self._completed_store_tasks[task_id] = L2StoreResult(True, 0)
                 self._signal_store_event()
@@ -809,21 +815,17 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 for key, storage_obj in zip(stored_keys, storage_objs, strict=False):
                     self._memory_objects[key] = storage_obj
                     storage_obj.decrease_pin_count()
-            # ``stored_keys`` and ``storage_objs`` are built together in the
-            # pre-alloc loop above, so the size lists stay aligned even
-            # when the pool ran out of slots mid-batch.
             if stored_keys:
                 stored_sizes = [obj.size for obj in storage_objs]
                 self._notify_keys_stored(stored_keys, stored_sizes)
             bytes_transferred = sum(obj.size for obj in storage_objs)
 
-        # success is only set to false for transfer failures
         except Exception:
             logger.exception("NIXL store task %d failed", task_id)
             success = False
             bytes_transferred = 0
 
-            # free storage indices if transfer fails
+            # Free storage indices after preparation or transfer failures.
             self.nixl_agent.pool.batched_free(storage_indices_flat)
 
         with self._lock:

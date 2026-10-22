@@ -16,12 +16,13 @@ import torch
 import zmq
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.cache_controller.message import (
+from lmcache.inprocess.v1.cache_controller.message import (
     BatchedP2PLookupMsg,
     BatchedP2PLookupRetMsg,
 )
+from lmcache.inprocess.v1.transfer_channel.transfer_utils import P2PInitSideRetMsg
+from lmcache.logging import init_logger
+from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
     PagedCpuGpuMemoryAllocator,
@@ -30,7 +31,6 @@ from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.p2p_backend import P2PBackend
-from lmcache.v1.transfer_channel.transfer_utils import P2PInitSideRetMsg
 from tests.v1.utils import get_available_ports
 
 logger = init_logger(__name__)

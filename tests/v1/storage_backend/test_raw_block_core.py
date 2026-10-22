@@ -444,9 +444,18 @@ class _RecordingRawDevice:
     fail_completion_entries: set[int] = field(default_factory=set)
     batch_results: dict[int, list[bool]] = field(default_factory=dict)
     next_batch_id: int = 0
+    terminal_error: str | None = None
+
+    def worker_error(self) -> str | None:
+        """Return the terminal worker failure independently of per-I/O errors."""
+        return self.terminal_error
 
     def size_bytes(self) -> int:
         return self.size
+
+    def fixed_buffer_status(self) -> tuple[bool, int]:
+        """Return the unregistered state of this recording device."""
+        return False, 0
 
     def _submit_batch(self, count: int) -> int:
         """Register an accepted batch and its per-entry completion results.
@@ -581,6 +590,68 @@ def _make_core_with_fake(
 def _available_slots(status: Mapping[str, int]) -> int:
     """Return slots still allocatable from the free list plus the high-water tail."""
     return status["free_slot_count"] + (status["max_slots"] - status["next_slot"])
+
+
+@pytest.mark.no_shared_allocator
+def test_raw_block_core_rejects_work_after_terminal_worker_failure(
+    tmp_path: Path,
+) -> None:
+    fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
+    core = _make_core_with_fake(tmp_path / "raw-block", fake, "io_uring")
+    key = encode_object_key(make_object_key(700))
+    memory_obj = make_memory_obj(b"worker-failure")
+    try:
+        assert core.report_status()["is_healthy"] is True
+        assert core.report_status()["worker_error"] is None
+        assert core.put_many([key], [memory_obj]).results == [True]
+        before = core.report_status()
+        writes_before = len(fake.batched_write_calls)
+        fake.terminal_error = "io_uring worker submission failed: test error"
+
+        status = core.report_status()
+        assert status["is_healthy"] is False
+        assert status["worker_error"] == fake.terminal_error
+        assert core.exists_many([key.encoded], lock=True) == [False]
+        assert core.contains_key(key.encoded) is False
+        with pytest.raises(RuntimeError, match="worker submission failed"):
+            core.put_many([key], [memory_obj])
+        with pytest.raises(RuntimeError, match="worker submission failed"):
+            core.load_many_into([key.encoded], [make_empty_memory_obj(14)])
+        with pytest.raises(RuntimeError, match="worker submission failed"):
+            core.raw_device()
+
+        status = core.report_status()
+        assert len(fake.batched_write_calls) == writes_before
+        assert _available_slots(status) == _available_slots(before)
+        assert status["locked_key_count"] == 0
+        assert status["inflight_key_count"] == 0
+        assert status["inflight_io_count"] == 0
+    finally:
+        core.close()
+    assert core.report_status()["is_healthy"] is False
+
+
+@pytest.mark.no_shared_allocator
+def test_raw_block_core_request_error_does_not_mark_worker_failed(
+    tmp_path: Path,
+) -> None:
+    fake = _RecordingRawDevice(
+        size=RAW_BLOCK_CI_CAPACITY_BYTES, fail_completion_entries={0}
+    )
+    core = _make_core_with_fake(tmp_path / "raw-block", fake, "io_uring")
+    try:
+        key = encode_object_key(make_object_key(701))
+        assert core.put_many([key], [make_memory_obj(b"failed-io")]).results == [False]
+        core.raise_if_failed()
+        status = core.report_status()
+        assert status["is_healthy"] is True
+        assert status["worker_error"] is None
+        fake.fail_completion_entries.clear()
+        assert core.put_many([key], [make_memory_obj(b"recovered-io")]).results == [
+            True
+        ]
+    finally:
+        core.close()
 
 
 def test_raw_block_core_io_uring_put_many_single_submit(tmp_path: Path) -> None:
@@ -1241,6 +1312,9 @@ class _FakeRawDevice:
         self.batched_write_calls: list[
             tuple[list[int], list[int], list[int | None] | None]
         ] = []
+        self.fixed_buffer_calls: list[tuple[list[int], list[int]]] = []
+        self.registered_bytes = 0
+        self.registration_error: Exception | None = None
         self.write_uring_calls: list[tuple[int, int, int, int | None]] = []
         self._batch_results: dict[int, list[bool]] = {}
 
@@ -1271,6 +1345,20 @@ class _FakeRawDevice:
         assert batch_id == 123
         return self._batch_results.pop(batch_id), []
 
+    def register_fixed_buffers(
+        self,
+        buffer_ptrs: list[int],
+        buffer_sizes: list[int],
+    ) -> None:
+        self.fixed_buffer_calls.append((list(buffer_ptrs), list(buffer_sizes)))
+        if self.registration_error is not None:
+            raise self.registration_error
+        self.registered_bytes = sum(buffer_sizes)
+
+    def fixed_buffer_status(self) -> tuple[bool, int]:
+        """Return successful registration state and bytes."""
+        return self.registered_bytes > 0, self.registered_bytes
+
     def write_uring(
         self,
         offset: int,
@@ -1283,7 +1371,7 @@ class _FakeRawDevice:
         self.write_uring_calls.append((offset, payload_len, total_len, placement_id))
 
     def close(self) -> None:
-        return None
+        self.registered_bytes = 0
 
 
 def _make_fake_io_uring_core(
@@ -1350,6 +1438,54 @@ def _make_fake_io_uring_core(
         key_namespace="object",
     )
     return core, raw_devices[0]
+
+
+def test_raw_block_core_register_fixed_range_splits_at_one_gib(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core, raw_device = _make_fake_io_uring_core(tmp_path, monkeypatch)
+    base_ptr = 0x4000
+    one_gib = 1 << 30
+
+    try:
+        assert core.report_status()["fixed_buffers_registered"] is False
+        assert core.report_status()["fixed_buffer_registered_bytes"] == 0
+        core.register_fixed_buffer_range(base_ptr, 2 * one_gib + 4096)
+
+        assert raw_device.fixed_buffer_calls == [
+            (
+                [base_ptr, base_ptr + one_gib, base_ptr + 2 * one_gib],
+                [one_gib, one_gib, 4096],
+            )
+        ]
+        status = core.report_status()
+        assert status["fixed_buffers_registered"] is True
+        assert status["fixed_buffer_registered_bytes"] == 2 * one_gib + 4096
+    finally:
+        core.close()
+
+    status = core.report_status()
+    assert status["fixed_buffers_registered"] is False
+    assert status["fixed_buffer_registered_bytes"] == 0
+
+
+def test_raw_block_core_reports_failed_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core, raw_device = _make_fake_io_uring_core(tmp_path, monkeypatch)
+    raw_device.registration_error = RuntimeError("memlock exhausted")
+    try:
+        with pytest.raises(RuntimeError, match="memlock exhausted"):
+            core.register_fixed_buffer_range(0x4000, 4096)
+
+        status = core.report_status()
+        assert status["is_healthy"] is True
+        assert status["fixed_buffers_registered"] is False
+        assert status["fixed_buffer_registered_bytes"] == 0
+    finally:
+        core.close()
 
 
 def test_raw_block_core_checkpoint_uses_metadata_placement_id(tmp_path, monkeypatch):
@@ -1923,22 +2059,19 @@ def test_validate_loaded_entries_iouring_multi_entry_uses_batched_reader(
     assert list(core._index) == [spec.encoded for spec in specs]
 
 
-def test_validate_loaded_entries_uring_cmd_keeps_sequential_reader(
+def test_validate_loaded_entries_uring_cmd_uses_batched_reader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     specs = [encode_object_key(make_object_key(i)) for i in range(3)]
     core = _make_recovery_core(specs, use_uring_cmd=True)
-    batched_mock = Mock()
+    expected_offsets = [4096, 8192, 12288]
+    batched_mock = Mock(return_value=[(spec.slot_identity, 64) for spec in specs])
     monkeypatch.setattr(core, "_read_slot_headers_batched", batched_mock)
-    read_mock = Mock(side_effect=[(spec.slot_identity, 64) for spec in specs])
+    read_mock = Mock()
     monkeypatch.setattr(core, "_read_slot_header", read_mock)
 
     core._validate_loaded_entries()
 
-    batched_mock.assert_not_called()
-    assert read_mock.call_args_list == [
-        call(4096),
-        call(8192),
-        call(12288),
-    ]
+    batched_mock.assert_called_once_with(expected_offsets)
+    read_mock.assert_not_called()
     assert list(core._index) == [spec.encoded for spec in specs]

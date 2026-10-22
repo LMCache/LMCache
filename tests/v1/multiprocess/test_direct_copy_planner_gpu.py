@@ -20,7 +20,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 
 pytest.importorskip("cupy", reason="GPU cache context tests require cupy")
 pytest.importorskip("lmcache.cuda_ops", reason="Requires lmcache.cuda_ops")
@@ -47,7 +47,9 @@ pytestmark = [
     pytest.mark.skipif(
         not hasattr(cuda_ops, "execute_direct_copy_transfer")
         or not cuda_ops.batch_memcpy_supported(),
-        reason="cudaMemcpyBatchAsync unavailable (needs CUDA >= 12.8 build/driver)",
+        reason=(
+            "cudaMemcpyBatchAsync unavailable (needs CUDA >= 12.8 or ROCm/HIP >= 7.15)"
+        ),
     ),
 ]
 
@@ -142,7 +144,7 @@ def _run(
     skip_first_n_tokens: int,
 ) -> None:
     host_ids = [list(ids) for ids in block_ids]
-    with torch.cuda.device(ctx.device), torch.cuda.stream(ctx.stream):
+    with torch_dev.device(ctx.device), torch_dev.stream(ctx.stream):
         block_ids_gpu = downsample_and_stage_block_ids(ctx, host_ids)
         assert direct_transfer_supported(ctx, 0, objs, host_ids) is True
         # Withholding the host block ids is what forces the kernel path now

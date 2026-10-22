@@ -19,7 +19,9 @@ It is **off unless the coordinator is started with
 `--enable-blend-lookup`**, which calls `KeyDirectory.enable_blend_lookup`
 at startup. Until then no chunk content is hashed and `blend_match`
 returns nothing — a fleet that does not run CacheBlend pays nothing for
-this. Chunks stored before the call are not retroactively indexed.
+this. The MP server's first chunk-size negotiation then binds the index to
+the fleet's final window size through `PUT /config/chunk-size`. Chunks stored
+before lookup is enabled are not retroactively indexed.
 An entry whose `token_offset` is `UNKNOWN_TOKEN_OFFSET` fills its
 binding's content but is not indexed: without the stored position a match
 could not say where to re-RoPE from, and a wrong position yields wrong KV
