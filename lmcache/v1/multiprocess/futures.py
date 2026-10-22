@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Callable, Iterator
 from typing import Any, Generic, Optional, TypeVar, cast
 import threading
 
@@ -13,6 +14,46 @@ from lmcache.v1.platform.base.event_ipc import (
 )
 
 T = TypeVar("T")
+
+
+class MessagingStream(Iterator[T]):
+    """A cancellable response iterator with transport-provided blocking reads.
+
+    ``read`` waits for a response or raises StopIteration. ``close`` wakes
+    that read through the supplied cancellation callback; it is idempotent.
+    No timer or polling thread is owned by this object.
+    """
+
+    def __init__(
+        self, read: Callable[[threading.Event], T], cancel: Callable[[], None]
+    ) -> None:
+        self._read = read
+        self._closed = threading.Event()
+        self._lock = threading.Lock()
+        self._callbacks = [cancel]
+
+    def __next__(self) -> T:
+        if self._closed.is_set():
+            raise StopIteration
+        return self._read(self._closed)
+
+    def add_close_callback(self, callback: Callable[[], None]) -> None:
+        """Run callback on cancellation, or immediately if already closed."""
+        with self._lock:
+            if not self._closed.is_set():
+                self._callbacks.append(callback)
+                return
+        callback()
+
+    def close(self) -> None:
+        """Cancel the stream and unblock its reader without waiting for data."""
+        with self._lock:
+            if self._closed.is_set():
+                return
+            self._closed.set()
+            callbacks, self._callbacks = self._callbacks, []
+        for callback in callbacks:
+            callback()
 
 
 class MessagingFuture(Generic[T]):
@@ -64,6 +105,28 @@ class MessagingFuture(Generic[T]):
         if self.exception_ is not None:
             raise self.exception_
         return cast(T, self.result_)
+
+    def wait_on_stream(self, stream: Any, timeout: Optional[float] = None) -> T:
+        """Wait for this future before continuing work on a device stream.
+
+        Args:
+            stream: Device stream that consumes the result. Plain messaging
+                futures have no device event, so this argument is ignored.
+            timeout: Maximum time to wait in seconds. ``None`` waits
+                indefinitely.
+
+        Returns:
+            The result of the future.
+
+        Raises:
+            LMCacheTimeoutError: If the future is not done within ``timeout``.
+
+        Notes:
+            Device-aware subclasses override this method to enqueue a stream
+            wait instead of synchronously waiting for device work.
+        """
+        del stream
+        return self.result(timeout)
 
     def set_result(self, result: T) -> None:
         """
@@ -193,6 +256,60 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         self.result_ = result
         self.event_ = event
         self._raw_response_processed = True
+
+    def _prepare(self, timeout: Optional[float] = None) -> T:
+        """Import the remote completion event without waiting for it.
+
+        Args:
+            timeout: Maximum time to wait for the raw server response. ``None``
+                waits indefinitely.
+
+        Returns:
+            The result carried by the raw response.
+
+        Raises:
+            LMCacheTimeoutError: If the server response is not available within
+                ``timeout``.
+
+        Notes:
+            This waits only until the server has submitted device work and
+            returned its completion-event handle. It does not synchronize that
+            event on the CPU.
+        """
+        if not self._raw_response_processed:
+            if not self.raw_future_.wait(timeout):
+                raise LMCacheTimeoutError(
+                    "DeviceMessagingFuture raw result not available within timeout"
+                )
+            self._on_raw_future_complete()
+
+        assert self.result_ is not None
+        return self.result_
+
+    def wait_on_stream(self, stream: Any, timeout: Optional[float] = None) -> T:
+        """Make ``stream`` wait for remote device work without blocking the CPU.
+
+        Args:
+            stream: Device stream that consumes the remotely produced data.
+            timeout: Maximum time to wait for the raw server response. ``None``
+                waits indefinitely.
+
+        Returns:
+            The result carried by the raw server response.
+
+        Raises:
+            LMCacheTimeoutError: If the server response is not available within
+                ``timeout``.
+
+        Notes:
+            The call may wait for the server to return an event handle, but
+            device completion is ordered by a stream wait rather than a host
+            synchronization.
+        """
+        result = self._prepare(timeout)
+        if self.event_ is not None:
+            self._event_backend.wait_event(self.event_, stream)
+        return result
 
     def wait(self, timeout: Optional[float] = None) -> bool:
         """

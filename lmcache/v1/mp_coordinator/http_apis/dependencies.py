@@ -10,7 +10,8 @@ handlers fetch it via :func:`get_outbound_client`.
 """
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import threading
 
 # Third Party
 from fastapi import Request
@@ -20,9 +21,10 @@ import httpx
 from lmcache.v1.mp_coordinator.controllers.base import Controller
 from lmcache.v1.mp_coordinator.discovery import Registry
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
-from lmcache.v1.mp_coordinator.ingest.http_event_source import HttpCacheEventSource
+from lmcache.v1.mp_coordinator.ingest.event_source import CacheEventSource
 from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
 from lmcache.v1.mp_coordinator.views.base import View
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 
@@ -48,8 +50,10 @@ class CoordinatorContext:
             ``ServerConfigRegistry`` for the declared capacities a usage
             ratio divides by.
         event_gate: Admission authority after a source delivers cache events.
-        event_source: HTTP source adapter used by ``POST /events`` before
-            batches reach the gate.
+        event_source: The one source adapter delivering cache events to the
+            gate, per ``MPCoordinatorConfig.event_source_config``: the HTTP
+            push source behind ``POST /events``, or the Kafka pull source
+            (in which case ``POST /events`` answers 404).
         metadata_persister: Durable store for operator intent. Every
             handler that changes a pin or a quota must ``save`` so the
             change survives a restart.
@@ -59,8 +63,48 @@ class CoordinatorContext:
     token_hasher: TokenHasher
     views: Registry[View]
     event_gate: EventGate
-    event_source: HttpCacheEventSource
+    event_source: CacheEventSource
     metadata_persister: MetadataPersister
+    _configured_chunk_size: int = field(init=False, repr=False)
+    _hash_algorithm: str = field(init=False, repr=False)
+    _chunk_size_finalized: bool = field(default=False, init=False, repr=False)
+    _chunk_size_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        self._configured_chunk_size = self.token_hasher.chunk_size
+        self._hash_algorithm = self.token_hasher.hash_algorithm_name
+
+    def bind_chunk_size(self, chunk_size: int) -> int:
+        """Bind all chunk-size-dependent coordinator components once.
+
+        Repeating the same binding is idempotent. A different size is rejected
+        because one coordinator's hashing and blend index cannot safely describe
+        fleets using different chunk boundaries.
+        """
+        with self._chunk_size_lock:
+            if self._chunk_size_finalized:
+                if chunk_size == self.token_hasher.chunk_size:
+                    return chunk_size
+                raise ValueError(
+                    f"Coordinator is already bound to chunk size "
+                    f"{self.token_hasher.chunk_size}; use a separate coordinator "
+                    f"for a fleet requiring chunk size {chunk_size}"
+                )
+            if chunk_size < self._configured_chunk_size:
+                raise ValueError(
+                    f"Chunk size {chunk_size} is smaller than the coordinator's "
+                    f"configured minimum {self._configured_chunk_size}"
+                )
+
+            token_hasher = TokenHasher(
+                chunk_size=chunk_size, hash_algorithm=self._hash_algorithm
+            )
+            self.views.get(KeyDirectory).bind_chunk_size(chunk_size)
+            self.token_hasher = token_hasher
+            self._chunk_size_finalized = True
+            return chunk_size
 
 
 def get_context(request: Request) -> CoordinatorContext:

@@ -74,7 +74,7 @@ VLLM_HF_OFFLINE="${VLLM_HF_OFFLINE:-1}"
 # Transport mode selection:
 #   LMCACHE_MP_TRANSFER_MODE=engine_driven  -> engine-driven data path,
 #       sub-selected by LMCACHE_SHM_NAME:
-#       LMCACHE_SHM_NAME=""              -> pickle transport
+#       LMCACHE_SHM_NAME=""              -> typed inline transport
 #       LMCACHE_SHM_NAME=__default__     -> shm transport (default)
 #   LMCACHE_MP_TRANSFER_MODE=lmcache_driven -> lmcache-driven IPC handle path
 LMCACHE_SHM_NAME="${LMCACHE_SHM_NAME-__default__}"
@@ -333,6 +333,9 @@ start_vllm() {
   # kept for backwards-compatibility with older vLLM CPU wheels.
   export VLLM_DEVICE=cpu
   export VLLM_TARGET_DEVICE=cpu
+  # reset_prefix_cache is a vLLM development endpoint. This E2E uses it to
+  # exercise connector-managed cache reset through the vLLM HTTP server.
+  export VLLM_SERVER_DEV_MODE=1
   export VLLM_CPU_KVCACHE_SPACE="${VLLM_CPU_KVCACHE_SPACE}"
   export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE}"
   # Force non-MLA attention backend when the matrix profile asks for it.
@@ -539,7 +542,7 @@ LMCACHE_ARGS=(
 # `engine_driven` / `lmcache_driven` resolve to different worker-side
 # TransferContexts:
 #   engine_driven -> EngineDrivenTransferContext (worker gathers/scatters data)
-#     sub-mode: SHM (--shm-name __default__) or pickle (--shm-name "")
+#     sub-mode: SHM (--shm-name __default__) or inline (--shm-name "")
 #   lmcache_driven -> LMCacheDrivenTransferContext (server-side IPC handle)
 # The server only loads the paths named by --supported-transfer-mode
 # (default: lmcache_driven), so every leg passes it explicitly. Likewise
@@ -554,9 +557,9 @@ if [ "${LMCACHE_MP_TRANSFER_MODE}" = "engine_driven" ]; then
     LMCACHE_ARGS+=(--shm-name "e2e_$$")
     EXPECTED_TRANSPORT="shm"
   else
-    echo "Transport mode: engine-driven/pickle (--shm-name '${LMCACHE_SHM_NAME}')"
+    echo "Transport mode: engine-driven/inline (--shm-name '${LMCACHE_SHM_NAME}')"
     LMCACHE_ARGS+=(--shm-name "${LMCACHE_SHM_NAME}")
-    EXPECTED_TRANSPORT="pickle"
+    EXPECTED_TRANSPORT="inline"
   fi
 elif [ "${LMCACHE_MP_TRANSFER_MODE}" = "lmcache_driven" ]; then
   echo "Transport mode: lmcache-driven (IPC handle path)"
@@ -571,9 +574,9 @@ else
     LMCACHE_ARGS+=(--shm-name "e2e_$$")
     EXPECTED_TRANSPORT="shm"
   else
-    echo "Transport mode: data/pickle (--shm-name '${LMCACHE_SHM_NAME}')"
+    echo "Transport mode: data/inline (--shm-name '${LMCACHE_SHM_NAME}')"
     LMCACHE_ARGS+=(--shm-name "${LMCACHE_SHM_NAME}")
-    EXPECTED_TRANSPORT="pickle"
+    EXPECTED_TRANSPORT="inline"
   fi
 fi
 
@@ -614,7 +617,7 @@ if [ "$(uname -s)" = "Linux" ]; then
   # torchcodec supports FFmpeg 4-8; the distro's ffmpeg package provides a
   # compatible libavutil. Detect via ldconfig so we match whichever
   # soname (56..60) the runner already ships.
-  if ! ldconfig -p 2>/dev/null | grep -q 'libavutil\.so'; then
+  if ! ldconfig -p 2>/dev/null | grep 'libavutil\.so' >/dev/null; then
     MISSING_PKGS+=(ffmpeg)
   fi
   if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
@@ -632,11 +635,11 @@ if [ "$(uname -s)" = "Linux" ]; then
 
   # Do not let a missing runtime library turn into a misleading native
   # operator error from vLLM during worker initialization.
-  if ! ldconfig -p 2>/dev/null | grep -q 'libnuma\.so\.1'; then
+  if ! ldconfig -p 2>/dev/null | grep 'libnuma\.so\.1' >/dev/null; then
     echo "❌ Required runtime library libnuma.so.1 is unavailable"
     false
   fi
-  if ! ldconfig -p 2>/dev/null | grep -q 'libavutil\.so'; then
+  if ! ldconfig -p 2>/dev/null | grep 'libavutil\.so' >/dev/null; then
     echo "❌ Required FFmpeg runtime library libavutil.so is unavailable"
     false
   fi
@@ -676,7 +679,7 @@ echo "[Phase 2 / Step 5.5] Verifying transport mode: expecting '${EXPECTED_TRANS
 # of truth for which TransferContext the worker actually entered. Note:
 # the worker is a child of `vllm serve`, so its LMCache log lines land in
 # VLLM_LOG (vllm's stdout), not in LMCACHE_LOG (lmcache server's stdout).
-# The shm/pickle branches still grep LMCACHE_LOG because the strategy
+# The shm/inline branches still grep LMCACHE_LOG because the strategy
 # line is emitted by the lmcache server itself.
 if [ "${EXPECTED_TRANSPORT}" = "lmcache_driven" ]; then
   if ! grep -q "Creating transfer context.*mode=lmcache_driven" "${VLLM_LOG}" 2>/dev/null; then
@@ -692,13 +695,13 @@ elif [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
     false
   fi
   echo "✅ Transport mode confirmed: shm"
-elif [ "${EXPECTED_TRANSPORT}" = "pickle" ]; then
-  if ! grep -q "Using pickle non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
-    echo "❌ Expected pickle transport but server strategy line not found in log"
+elif [ "${EXPECTED_TRANSPORT}" = "inline" ]; then
+  if ! grep -q "Using safe inline non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
+    echo "❌ Expected inline transport but server strategy line not found in log"
     tail -50 "${LMCACHE_LOG}"
     false
   fi
-  echo "✅ Transport mode confirmed: pickle"
+  echo "✅ Transport mode confirmed: safe inline tensor codec"
 fi
 
 echo "[Phase 2 / Step 6] Cleaning up Phase 2 vLLM"
@@ -713,8 +716,10 @@ echo "✅ CPU E2E validation passed"
 # Scenario:
 #   - LMCache server stays running the entire time
 #   - vLLM instance 1: request A → LMCache store; request A again → LMCache hit
+#   - Reset the external prefix cache through vLLM
+#   - request A → LMCache miss/store; request A again → LMCache hit
 #   - vLLM restart (instance 2): request A → LMCache hit (cross-instance)
-#   - All three outputs must be identical (bit-exact with temperature=0)
+#   - All outputs must be identical (bit-exact with temperature=0)
 # ═══════════════════════════════════════════════════════════════════
 
 echo "=== Cache Hit Validation (Phase 3) ==="
@@ -769,17 +774,70 @@ if [ "${READ_DELTA}" -lt 1 ]; then
 fi
 echo "✅ LMCache hit verified on same instance (${READ_DELTA} chunks read)"
 
+# Reset through vLLM so this exercises LMCacheMPConnector.reset_cache(), not the
+# LMCache HTTP management endpoint directly.
+echo "[Phase 3 / Step 5] Resetting the external prefix cache through vLLM"
+RESET_RESPONSE=$(curl -fsS -X POST \
+  "http://localhost:${VLLM_PORT}/reset_prefix_cache?reset_external=true")
+echo "Reset response: ${RESET_RESPONSE}"
+if ! echo "${RESET_RESPONSE}" | python3 -c \
+  "import json, sys; assert json.load(sys.stdin).get('success') is True"; then
+  echo "❌ vLLM did not report a successful external prefix-cache reset"
+  false
+fi
+echo "✅ vLLM external prefix-cache reset succeeded"
+
+# The first request after reset must miss the cleared LMCache data and store it
+# again. A read here would mean stale cache entries survived the reset.
+echo "[Phase 3 / Step 6] Request A after reset — expecting LMCache miss/store"
+L1_READ_BEFORE=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
+L1_WRITE_BEFORE=$(scrape_metric "lmcache_mp_l1_write_chunks_total")
+OUTPUT_3=$(send_completion "${PROMPT_FILE}" 50)
+echo "Output 3: ${OUTPUT_3}"
+wait_for_metric_change \
+  "lmcache_mp_l1_write_chunks_total" "${L1_WRITE_BEFORE}" 10 || true
+L1_READ_AFTER=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
+L1_WRITE_AFTER=$(scrape_metric "lmcache_mp_l1_write_chunks_total")
+READ_DELTA=$((L1_READ_AFTER - L1_READ_BEFORE))
+STORE_DELTA=$((L1_WRITE_AFTER - L1_WRITE_BEFORE))
+echo "L1 read chunks delta after reset: ${READ_DELTA}"
+echo "L1 write chunks delta after reset: ${STORE_DELTA}"
+if [ "${READ_DELTA}" -gt 0 ]; then
+  echo "❌ LMCache read stale data after the external prefix-cache reset"
+  false
+fi
+if [ "${STORE_DELTA}" -lt 1 ]; then
+  echo "❌ LMCache did not repopulate after the external prefix-cache reset"
+  false
+fi
+echo "✅ Reset verified: old data missed and ${STORE_DELTA} chunks were rewritten"
+
+# The repopulated entry must be usable on the next request.
+echo "[Phase 3 / Step 7] Request A again — expecting LMCache hit after repopulation"
+L1_READ_BEFORE=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
+OUTPUT_4=$(send_completion "${PROMPT_FILE}" 50)
+echo "Output 4: ${OUTPUT_4}"
+sleep 2
+L1_READ_AFTER=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
+READ_DELTA=$((L1_READ_AFTER - L1_READ_BEFORE))
+echo "L1 read chunks delta after repopulation: ${READ_DELTA}"
+if [ "${READ_DELTA}" -lt 1 ]; then
+  echo "❌ No LMCache hit after repopulating the cleared cache"
+  false
+fi
+echo "✅ LMCache hit verified after repopulation (${READ_DELTA} chunks read)"
+
 # Restart vLLM
-echo "[Phase 3 / Step 5] Restarting vLLM (instance 2)"
+echo "[Phase 3 / Step 8] Restarting vLLM (instance 2)"
 stop_vllm
 sleep 2
 start_vllm
 
-# Request A (third time, new vLLM instance) → should trigger read/hit from LMCache
-echo "[Phase 3 / Step 6] Request A (third) — expecting LMCache hit after vLLM restart"
+# Request A on a new vLLM instance should trigger read/hit from LMCache.
+echo "[Phase 3 / Step 9] Request A — expecting LMCache hit after vLLM restart"
 L1_READ_BEFORE=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
-OUTPUT_3=$(send_completion "${PROMPT_FILE}" 50)
-echo "Output 3: ${OUTPUT_3}"
+OUTPUT_5=$(send_completion "${PROMPT_FILE}" 50)
+echo "Output 5: ${OUTPUT_5}"
 sleep 2
 L1_READ_AFTER=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
 READ_DELTA=$((L1_READ_AFTER - L1_READ_BEFORE))
@@ -790,24 +848,22 @@ if [ "${READ_DELTA}" -lt 1 ]; then
 fi
 echo "✅ LMCache cross-instance hit verified (${READ_DELTA} chunks read)"
 
-# Verify all three outputs are identical
-echo "[Phase 3 / Step 7] Verifying output consistency"
-if [ "${OUTPUT_1}" != "${OUTPUT_2}" ]; then
-  echo "❌ Output mismatch between request 1 and request 2"
-  echo "  Output 1: ${OUTPUT_1}"
-  echo "  Output 2: ${OUTPUT_2}"
-  false
-fi
-if [ "${OUTPUT_1}" != "${OUTPUT_3}" ]; then
-  echo "❌ Output mismatch between request 1 and request 3 (after vLLM restart)"
-  echo "  Output 1: ${OUTPUT_1}"
-  echo "  Output 3: ${OUTPUT_3}"
-  false
-fi
-echo "✅ All three outputs are identical — cache does not alter inference results"
+# Verify every output is identical.
+echo "[Phase 3 / Step 10] Verifying output consistency"
+for output_number in 2 3 4 5; do
+  output_var="OUTPUT_${output_number}"
+  output_value="${!output_var}"
+  if [ "${OUTPUT_1}" != "${output_value}" ]; then
+    echo "❌ Output mismatch between request 1 and request ${output_number}"
+    echo "  Output 1: ${OUTPUT_1}"
+    echo "  Output ${output_number}: ${output_value}"
+    false
+  fi
+done
+echo "✅ All five outputs are identical — reset does not alter inference results"
 
 # Negative test: a completely different prompt should NOT hit the cache
-echo "[Phase 3 / Step 8] Request B (different prompt) — expecting cache MISS"
+echo "[Phase 3 / Step 11] Request B (different prompt) — expecting cache MISS"
 PROMPT_FILE_B="/tmp/build_${BUILD_ID}_phase3_prompt_b.txt"
 python3 -c "
 # A completely different prompt that shares no prefix with prompt A
@@ -827,7 +883,7 @@ if [ "${READ_DELTA}" -gt 0 ]; then
 fi
 echo "✅ Cache miss confirmed for different prompt — metrics are trustworthy"
 
-echo "[Phase 3 / Step 9] Cleaning up"
+echo "[Phase 3 / Step 12] Cleaning up"
 stop_vllm
 cleanup_processes
 echo "✅ Phase 3 cleanup completed"

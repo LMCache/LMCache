@@ -19,6 +19,9 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 from vllm.v1.utils import ConstantList  # noqa: E402
 
 # First Party
+from lmcache.inprocess.integration.vllm.vllm_v1_adapter import (  # noqa: E402
+    LMCacheConnectorV1Impl,
+)
 from lmcache.integration.vllm.lazy_offload_manager import (  # noqa: E402
     LazyOffloadActions,
 )
@@ -38,9 +41,6 @@ from lmcache.integration.vllm.lmcache_mp_metrics import (  # noqa: E402
     LMCacheMPConnectorStats,
 )
 from lmcache.integration.vllm.utils import is_rswa_model  # noqa: E402
-from lmcache.integration.vllm.vllm_v1_adapter import (  # noqa: E402
-    LMCacheConnectorV1Impl,
-)
 
 
 class RSWASpec:
@@ -123,6 +123,7 @@ def _lookup_connector(
     )
     connector._prompt_only_cache = True
     connector._hit_alignment_tokens = 16
+    connector._reserve_last_token_for_lookup = False
     connector._eager_prefetch = eager_prefetch
     connector._connector_stats = LMCacheMPConnectorStats()
     connector.lazy_offload = False
@@ -236,11 +237,11 @@ def test_non_mp_adapter_fails_fast_for_vllm_builtin_entry_point(
     banner = MagicMock()
     load_config = MagicMock()
     monkeypatch.setattr(
-        "lmcache.integration.vllm.vllm_v1_adapter.print_banner_once",
+        "lmcache.inprocess.integration.vllm.vllm_v1_adapter.print_banner_once",
         banner,
     )
     monkeypatch.setattr(
-        "lmcache.integration.vllm.vllm_v1_adapter.lmcache_get_or_create_config",
+        "lmcache.inprocess.integration.vllm.vllm_v1_adapter.lmcache_get_or_create_config",
         load_config,
     )
 
@@ -346,16 +347,13 @@ def test_rswa_lookup_latency_spans_pending_polls(
         assert call.kwargs["token_ids"] == list(range(256))
 
 
-@pytest.mark.parametrize("preempted", [False, True])
-def test_uncacheable_rswa_request_does_not_submit_lookup(preempted: bool) -> None:
-    """Mutable prompts and preempted requests do not issue remote lookups."""
+def test_uncacheable_rswa_request_does_not_submit_lookup() -> None:
+    """Mutable prompts do not issue remote lookups."""
     request = _FakeRequest(
         prompt_tokens=256,
         total_tokens=512,
-        resumable=not preempted,
+        resumable=True,
     )
-    if preempted:
-        request.status = RequestStatus.PREEMPTED
     adapter = MagicMock()
 
     connector = _lookup_connector(adapter)
@@ -363,10 +361,11 @@ def test_uncacheable_rswa_request_does_not_submit_lookup(preempted: bool) -> Non
     adapter.maybe_submit_lookup_request.assert_not_called()
     adapter.check_lookup_result.assert_not_called()
     tracker = connector.request_trackers[request.request_id]
-    assert tracker.get_cache_token_ids() == ([] if not preempted else list(range(256)))
+    assert tracker.get_cache_token_ids() == []
 
 
-def test_rswa_store_stops_before_freed_decode_gap() -> None:
+@pytest.mark.parametrize("save_decode_cache", [False, True])
+def test_rswa_store_stops_before_freed_decode_gap(save_decode_cache: bool) -> None:
     """Only complete prompt chunks are stored after decode advances.
 
     vLLM's RSWAManager frees logical block-table indices 16..23 in this
@@ -382,18 +381,51 @@ def test_rswa_store_stops_before_freed_decode_gap() -> None:
         tracker,
         lmcache_tokens_per_chunk=256,
         group_tokens_per_block=[16],
+        save_decode_cache=save_decode_cache,
     )
     tracker.increase_num_scheduled_tokens(256)
     decode_store = LMCacheMPRequestMetadata.GetStoreMetadata(
         tracker,
         lmcache_tokens_per_chunk=256,
         group_tokens_per_block=[16],
+        save_decode_cache=save_decode_cache,
     )
 
     assert prompt_store is not None
     assert (prompt_store.op.start, prompt_store.op.end) == (0, 256)
     assert prompt_store.op.block_ids == [list(range(1000, 1016))]
     assert decode_store is None
+
+
+def test_rswa_apc_shrink_keeps_prompt_keys_and_releases_abandoned_locks() -> None:
+    """A full re-lookup and its lock cleanup keep the immutable prompt cap."""
+    request = _FakeRequest(prompt_tokens=768, total_tokens=1024)
+    adapter = MagicMock()
+    adapter.lmcache_tokens_per_chunk = 256
+    adapter.maybe_submit_lookup_request.return_value = False
+    adapter.check_lookup_result.return_value = 768
+    connector = _lookup_connector(adapter)
+    tracker = LMCacheMPRequestTracker(request, prompt_only=True)
+    tracker.apc_covered_tokens = 512
+    connector.request_trackers[request.request_id] = tracker
+
+    assert connector.get_num_new_matched_tokens(request, 256) == (None, True)
+    assert adapter.maybe_submit_lookup_request.call_count == 2
+    for call in adapter.maybe_submit_lookup_request.call_args_list:
+        assert call.kwargs["token_ids"] == list(range(768))
+
+    assert connector.get_num_new_matched_tokens(request, 256) == (511, True)
+    connector.update_state_after_alloc(
+        request,
+        SimpleNamespace(get_block_ids=lambda: (list(range(64)),)),
+        num_external_tokens=511,
+    )
+
+    free = adapter.free_lookup_locks.call_args.kwargs
+    assert free["token_ids"] == list(range(768))
+    assert (free["start"], free["end"]) == (0, 256)
+    assert free["extra_ranges"] == ((512, 768),)
+    assert tracker.pending_free_ranges == []
 
 
 def test_rswa_store_drops_partial_prompt_tail() -> None:
@@ -561,7 +593,9 @@ def test_rswa_full_prompt_hit_recomputes_last_prompt_token() -> None:
         request.request_id,
         token_ids=list(range(256)),
         cache_salt="",
-        request_configs=None,
+        request_configs={"lmcache.hint.engine_computed_tokens": 0},
+        reserve_last_token=False,
+        start=0,
     )
 
 
@@ -586,6 +620,7 @@ def test_rswa_lock_release_uses_prompt_cache_key() -> None:
         request_id=request.request_id,
         cache_salt="",
         request_configs=None,
+        extra_ranges=(),
     )
 
 
@@ -605,6 +640,7 @@ def test_rswa_allocation_telemetry_keeps_decode_tail_tokens() -> None:
         req_ids=[request.request_id],
         resumed_req_ids=set(),
         new_block_ids=[(tail_block_ids,)],
+        num_computed_tokens=[384],
     )
     scheduler_output = SimpleNamespace(
         scheduled_new_reqs=[],
@@ -619,6 +655,8 @@ def test_rswa_allocation_telemetry_keeps_decode_tail_tokens() -> None:
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
     connector._prompt_only_cache = True
     connector._group_tokens_per_block = [16]
+    connector._can_store = True
+    connector._save_decode_cache = False
     connector.request_trackers = {request.request_id: tracker}
     connector.scheduler_adapter = adapter
     connector.lazy_offload = False
@@ -691,8 +729,9 @@ def test_lazy_offload_finish_skips_session_for_bypassed_request() -> None:
     manager.on_request_finished.assert_not_called()
 
 
-def test_uncacheable_request_uses_non_lazy_finished_handshake() -> None:
-    """The MP worker must acknowledge even a no-store non-lazy request."""
+@pytest.mark.parametrize("can_store", [False, True])
+def test_uncacheable_request_uses_non_lazy_finished_handshake(can_store: bool) -> None:
+    """Only producer workers acknowledge non-lazy requests, including bypasses."""
     request = _FakeRequest(prompt_tokens=128, total_tokens=128, resumable=True)
     tracker = LMCacheMPRequestTracker(request, prompt_only=True)
 
@@ -700,10 +739,11 @@ def test_uncacheable_request_uses_non_lazy_finished_handshake() -> None:
     connector.request_trackers = {request.request_id: tracker}
     connector.scheduler_adapter = MagicMock()
     connector.lazy_offload = False
+    connector._can_store = can_store
 
     delay_free, return_params = connector.request_finished(request, [])
 
-    assert delay_free is True
+    assert delay_free is can_store
     assert return_params is None
     connector.scheduler_adapter.end_session.assert_not_called()
     connector.scheduler_adapter.cleanup_lookup_result.assert_called_once_with(
@@ -731,6 +771,7 @@ def test_request_finished_tolerates_early_abort_without_tracker(
     connector.request_trackers = {}
     connector.scheduler_adapter = MagicMock()
     connector.lazy_offload = lazy_offload
+    connector._can_store = True
     connector._lazy_offload_manager = manager
 
     delay_free, return_params = connector.request_finished(request, [])
@@ -782,11 +823,10 @@ def test_rswa_preemption_replaces_stale_tracker_and_stays_prompt_only() -> None:
     request.status = RequestStatus.PREEMPTED
 
     adapter = MagicMock()
-    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
-    connector._prompt_only_cache = True
+    adapter.lmcache_tokens_per_chunk = 256
+    adapter.check_lookup_result.return_value = 0
+    connector = _lookup_connector(adapter)
     connector.request_trackers = {request.request_id: stale_tracker}
-    connector.scheduler_adapter = adapter
-    connector.lazy_offload = False
 
     assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
     fresh_tracker = connector.request_trackers[request.request_id]
@@ -795,12 +835,17 @@ def test_rswa_preemption_replaces_stale_tracker_and_stays_prompt_only() -> None:
     assert fresh_tracker.allocated_block_ids == {}
     assert fresh_tracker.get_token_ids() == list(range(512))
     assert fresh_tracker.get_cache_token_ids() == list(range(256))
+    assert adapter.maybe_submit_lookup_request.call_args.kwargs["token_ids"] == list(
+        range(256)
+    )
 
     # Repeated scheduler polls keep the fresh tracker instead of recreating it.
     assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
     assert connector.request_trackers[request.request_id] is fresh_tracker
-    adapter.maybe_submit_lookup_request.assert_not_called()
-    adapter.check_lookup_result.assert_not_called()
+    assert adapter.maybe_submit_lookup_request.call_count == 2
+    assert adapter.check_lookup_result.call_count == 2
+    for call in adapter.maybe_submit_lookup_request.call_args_list:
+        assert call.kwargs["token_ids"] == list(range(256))
 
     # A resumed R-SWA table contains nulls for the freed middle gap. Even after
     # accepting that full replacement table, only the prompt blocks may store.
@@ -862,7 +907,9 @@ def test_rswa_lookup_respects_short_and_unaligned_prompt_boundaries(
         request.request_id,
         token_ids=list(range(prompt_tokens)),
         cache_salt="",
-        request_configs=None,
+        request_configs={"lmcache.hint.engine_computed_tokens": 0},
+        reserve_last_token=False,
+        start=0,
     )
     tracker = connector.request_trackers[request.request_id]
     assert tracker.num_stored_tokens == remote_hit

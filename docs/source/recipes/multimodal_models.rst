@@ -30,7 +30,7 @@ model and connector combination is supported.
    multimodal processor-cache budget; see :doc:`unlimited_ocr`.
 
 Vision-encoder outputs are a separate, optional cache -- see
-:doc:`../non_kv_cache/encoder_cache` (in-process mode only; not yet available
+:doc:`/legacy/non_kv_cache/encoder_cache` (in-process mode only; not yet available
 in MP mode).
 
 Recipe page contents

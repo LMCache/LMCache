@@ -112,5 +112,5 @@ Caveats
 - **Single-image validation.** The end-to-end validation above covered one
   image. Multi-image requests have not been validated with LMCache.
 - **KV cache only.** Vision-encoder outputs are a separate cache: see
-  :doc:`../non_kv_cache/encoder_cache` (in-process mode only; not available for
+  :doc:`/legacy/non_kv_cache/encoder_cache` (in-process mode only; not available for
   this MP setup).

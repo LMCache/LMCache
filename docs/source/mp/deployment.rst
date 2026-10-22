@@ -73,9 +73,9 @@ really provides:
 
 The **isolated IPC** setting removes both: KV-cache registration switches
 to raw CUDA IPC memory handles
-(``docs/design/v1/platform/cuda/ipc_wrapper.md``) and event ordering to
+(``docs/design/v1/platform/devices/cuda/ipc_wrapper.md``) and event ordering to
 timeline-semaphore events carried over CUDA IPC memory handles
-(``docs/design/v1/platform/cuda/timeline_semaphore_event_ipc.md``). Both
+(``docs/design/v1/platform/devices/cuda/timeline_semaphore_event_ipc.md``). Both
 rendezvous in the kernel driver, so they work across containers that
 share nothing -- no host IPC namespace, no common ``/dev/shm``, no
 ``--ipc host``. It must be enabled on **both** sides of a deployment:
@@ -153,6 +153,12 @@ Step-by-Step
 .. code-block:: bash
 
     kubectl apply -f examples/multi_process/lmcache-daemonset.yaml
+
+.. note::
+   The LMCache server in the DaemonSet binds the transport port only to
+   ``127.0.0.1`` on the host network. vLLM pods reach the server on the same
+   node through the loopback interface, so the transport port is never
+   exposed beyond the node.
 
 **Step 3: Deploy vLLM**
 
@@ -306,6 +312,13 @@ override the CPU pool for lookup and other non-GPU operations.
 Allocate as much CPU memory as available after accounting for the OS and vLLM.
 A larger L1 cache means fewer L2 round-trips.
 
+**GPU memory headroom for the server process:**
+The ``lmcache server`` process holds GPU memory (CUDA contexts and streams) on
+every GPU, on top of the KV cache that vLLM sizes with
+``--gpu-memory-utilization``. If the first request fails with a CUDA
+out-of-memory error, lower vLLM's ``--gpu-memory-utilization`` to leave
+headroom for the LMCache server process.
+
 **Eviction tuning:**
 
 - ``--eviction-trigger-watermark 0.8`` (default) triggers eviction when L1 is
@@ -331,7 +344,7 @@ The server picks which paths to load via ``--supported-transfer-mode``:
 - ``lmcache_driven`` *(default)* -- load only the server-driven
   transfer path.  Supports CUDA devices (IPC) and CPU devices (SHM),
   and skips allocating the engine-driven prepare/commit resources
-  (pickle codec).
+  (inline tensor codec).
 - ``engine_driven`` -- load only the engine-driven path.  Use when
   serving CPU-only or non-CUDA accelerator workers.
 - ``auto`` -- load both paths.  Workers of either device
@@ -339,9 +352,13 @@ The server picks which paths to load via ``--supported-transfer-mode``:
   upfront knowledge of the connecting worker's device.
 
 When the engine-driven path is loaded (``auto`` or ``engine_driven``),
-KV transfers between the server and vLLM workers use a pickle-based
+KV transfers between the server and vLLM workers use a typed inline tensor
 path by default.  Pass ``--shm-name`` with a segment name to create a
 shared-memory (SHM) pool instead:
+
+The typed inline protocol is not compatible with older workers or servers.
+Upgrade both sides together; payloads from the previous untyped protocol are
+rejected rather than accepted as a fallback.
 
 .. list-table::
    :header-rows: 1
@@ -350,7 +367,7 @@ shared-memory (SHM) pool instead:
    * - Value
      - Effect
    * - ``""`` (empty string, default)
-     - No SHM pool; KV transfer uses the pickle-based path.  Works
+     - No SHM pool; KV transfer uses the typed inline path.  Works
        when ``/dev/shm`` is unavailable or when running without
        ``--ipc host`` in Docker.
    * - ``"my_pool"`` (any non-empty name)
@@ -362,7 +379,7 @@ shared-memory (SHM) pool instead:
 
 .. code-block:: bash
 
-    # Engine-driven path with pickle transfer (no SHM) -- the default:
+    # Engine-driven path with typed inline transfer (no SHM) -- the default:
     lmcache server --l1-size-gb 60 --eviction-policy LRU \
         --supported-transfer-mode engine_driven
 

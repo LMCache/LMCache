@@ -118,6 +118,7 @@ def _lazy_connector(
     )  # type: ignore[arg-type]
     connector._prompt_only_cache = True
     connector._hit_alignment_tokens = 16
+    connector._reserve_last_token_for_lookup = False
     connector._group_tokens_per_block = [16]
     connector._eager_prefetch = True
     connector._connector_stats = LMCacheMPConnectorStats()
@@ -173,10 +174,11 @@ def _receipt(
 ) -> None:
     connector.update_connector_output(
         SimpleNamespace(
+            kv_cache_events=None,
             kv_connector_worker_meta=LMCacheMPWorkerMetadata(
                 completed_store_requests={request_id: 1},
                 failed_store_requests={request_id} if failed else set(),
-            )
+            ),
         )
     )
 

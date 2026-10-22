@@ -47,6 +47,23 @@ def ready(value: Any) -> MessagingFuture[Any]:
     return future
 
 
+class NoopHeartbeatThread:
+    """Keep lookup-status tests independent of background health polling."""
+
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        self.recover_callback: Callable[[], bool] | None = None
+
+    def register_recover_callback(self, callback: Callable[[], bool]) -> None:
+        """Mirror the production heartbeat interface without running it."""
+        self.recover_callback = callback
+
+    def start(self) -> None:
+        """Do not start a thread in a synchronous polling test."""
+
+    def stop(self) -> None:
+        """Match the scheduler shutdown interface."""
+
+
 class Client:
     """Old-peer RPC surface only; no L0 capabilities or GPU API are supplied."""
 
@@ -64,6 +81,10 @@ class Client:
     def get_chunk_size(self) -> MessagingFuture[Any]:
         """Advertise the fixed chunk64 test geometry."""
         return ready(64)
+
+    def get_experimental(self) -> MessagingFuture[Any]:
+        """Advertise no optional server capabilities."""
+        return ready([])
 
     def lookup(self, key: Any, tp_size: int) -> MessagingFuture[Any]:
         """Record submission and return its controllable acknowledgement."""
@@ -100,6 +121,7 @@ def make_adapter(monkeypatch: pytest.MonkeyPatch) -> Iterator[AdapterFactory]:
     """Construct public adapters against controllable old-peer clients."""
     adapters: list[LMCacheMPSchedulerAdapter] = []
     context = zmq.Context()
+    monkeypatch.setattr(adapter_module, "HeartbeatThread", NoopHeartbeatThread)
 
     def create(
         count: int = 1,
@@ -145,6 +167,25 @@ def submit(adapter: LMCacheMPSchedulerAdapter, clients: list[Client]) -> None:
     )
     for client in clients:
         client.ack.set_result(None)
+
+
+def test_reserving_last_token_preserves_full_request_identity(
+    make_adapter: AdapterFactory,
+) -> None:
+    """A lookup cap changes the queried prefix, not the request token IDs."""
+    adapter, (client,) = make_adapter()
+    token_ids = list(range(128))
+
+    adapter.maybe_submit_lookup_request(
+        "r",
+        token_ids,
+        reserve_last_token=True,
+    )
+
+    assert len(client.lookups) == 1
+    key = client.lookups[0]
+    assert key.end == 64
+    assert key.token_ids == tuple(token_ids)
 
 
 def resolved(adapter: LMCacheMPSchedulerAdapter) -> int:

@@ -187,10 +187,36 @@ The L1 reverse index (`_l1_keys_by_instance`) is what makes
 full directory scan. The emitter's stream cursor is **not** here — it
 belongs to the gate ([ingest.md](ingest.md)).
 
+Placement counts and reported logical bytes are maintained per tier alongside
+these mutations. They are derived state rather than checkpoint payload:
+`restore()` rebuilds them from the restored placements. `stats()` includes the
+four scalar tier totals from these incrementally maintained counters, so
+placement aggregation does not scan the fleet-wide directory while holding its
+lock.
+
 The Python-phase directory is keyed by `ObjectKey` directly (hashable
 frozen dataclass). The RFC's 16-byte
 `key_hash` with interned `model_id`/`salt_id` is a memory/native-port
 optimization (M6), not a semantic change.
+
+## Object groups
+
+Under `--separate-object-groups` a model's KV is split into object groups --
+full attention, each sliding window, each recurrent layer -- and a chunk is
+stored once per group. Token-addressed operations resolve group `0`, then
+reach the rest without the coordinator knowing how many groups there are:
+
+- **Lookup and delete** act only on what is stored, so
+  `get_keys_across_object_groups` expands each resolved key to its stored
+  copies in other groups, through the chunk-hash index above. A chunk in
+  two groups is looked up and deleted in two.
+- **Pins** match regardless of group: the pin table clears
+  `object_group_id` on every entry and check. One pin covers the chunk in
+  every group, including groups it is not stored in yet.
+
+Blend is still excluded: its namespace omits `object_group_id`, and blend
+servers must not enable `--separate-object-groups` (see
+[blend_index.md](../blend_index.md)).
 
 ## HTTP surface
 
@@ -202,7 +228,8 @@ See [ingest.md](ingest.md).
 ids, in either direction (POST because the payload rides in the body).
 Supply exactly one of: `keys` (resolve keys directly) or `token_ids`
 (prefix-exact resolution via the fleet `TokenHasher` + per-rank fan-out,
-as the pin APIs do; requires `model_name` / `world_size` / `cache_salt`
+expanded to every stored object group -- see *Object groups* above;
+requires `model_name` / `world_size` / `cache_salt`
 since key identity includes them — and the sequence must be the
 request's whole prefix, since chunk hashes are prefix-chained). One
 result per resolved key, request order, with placements, token ids,
@@ -216,9 +243,10 @@ cheap indicator of whether the chunk's tokens are known. Full token ids
 are deliberately not inlined (a page repeats each chunk across its
 ranks/groups; fetch content via `/directory/lookup` for exactly the keys
 that need it).
-- `GET /directory/stats` — key/placement counts, per-instance L1 key
-counts (the fencing index), and the blend-index counts; per-key L2
-detail lives on the keys listing endpoint. Directory contents only —
+- `GET /directory/stats` — key/placement counts, per-tier placement counts and
+reported logical bytes, per-instance L1 key counts (the fencing index), and the
+blend-index counts; per-key L2 detail lives on the keys listing endpoint.
+Directory contents only —
 per-emitter stream state lives on the ingest gate and has no endpoint
 yet (see [ingest.md](ingest.md)).
 
@@ -259,4 +287,3 @@ directives (M3–M4 of the RFC).
 `key → tokens` introspection, fed by `TOKENS` events and refcounted from
 key records via the `content_hash` back-pointer. Nothing
 correctness-bearing reads it, so it ships with its first real consumer.
-

@@ -37,11 +37,11 @@ from lmcache.v1.distributed.storage_controllers.store_controller import (
     StoreListener,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
     BufferOnlyStorePolicy,
     DefaultStorePolicy,
     StorePolicy,
 )
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.memory_management import MemoryObj
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
@@ -117,7 +117,6 @@ def write_keys_to_l1(
         keys=keys,
         is_temporary=[False] * len(keys),
         layout_desc=layout,
-        mode="new",
     )
     written = [k for k, (e, m) in results.items() if m is not None]
     if written:
@@ -157,10 +156,10 @@ def make_adapter() -> MockL2Adapter:
     return MockL2Adapter(config)
 
 
-def make_descriptor(index: int) -> AdapterDescriptor:
-    """Create an AdapterDescriptor for testing."""
+def make_descriptor(index: int) -> L2AdapterDescriptor:
+    """Create an L2AdapterDescriptor for testing."""
     config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
-    return AdapterDescriptor(index=index, config=config)
+    return L2AdapterDescriptor(index=index, config=config)
 
 
 # =============================================================================
@@ -285,7 +284,6 @@ class TestStoreControllerSingleAdapter:
             keys=keys,
             is_temporary=[True],
             layout_desc=layout,
-            mode="new",
         )
         assert result[keys[0]][1] is not None
 
@@ -407,20 +405,12 @@ class TestStoreControllerSingleAdapter:
         )
         assert ok
 
-        # Verify read lock is released: the key should be updatable
+        # Verify read lock is released: the key should be evictable
         ok = wait_for_condition(
-            lambda: (
-                l1_manager.reserve_write(
-                    keys=keys,
-                    is_temporary=[False],
-                    layout_desc=layout,
-                    mode="update",
-                )[keys[0]][1]
-                is not None
-            ),
+            lambda: (l1_manager.is_key_evictable(keys[0])),
             timeout=5.0,
         )
-        assert ok, "Key should be updatable after store controller releases read lock"
+        assert ok, "Key should be evictable after store controller releases read lock"
 
         ctrl.stop()
         adapter.close()
@@ -455,24 +445,11 @@ class TestStoreControllerSingleAdapter:
         )
         assert ok, "Both batches should reach L2"
 
-        # Every key must be updatable: read locks from both requests released.
-        # ``reserve_write`` acquires a write lock on success, so release it
-        # via ``finish_write`` after each successful check — otherwise the
-        # second poll would find already-locked keys and time out.
-        def all_keys_updatable() -> bool:
-            for k in all_keys:
-                result = l1_manager.reserve_write(
-                    keys=[k],
-                    is_temporary=[False],
-                    layout_desc=layout,
-                    mode="update",
-                )
-                if result[k][1] is None:
-                    return False
-                l1_manager.finish_write([k])
-            return True
+        # Every key must be evictable: read locks from both requests released.
+        def all_keys_evictable() -> bool:
+            return all(l1_manager.is_key_evictable(k) for k in all_keys)
 
-        ok = wait_for_condition(all_keys_updatable, timeout=5.0)
+        ok = wait_for_condition(all_keys_evictable, timeout=5.0)
         assert ok, "Read locks must be released for every concurrent request"
 
         ctrl.stop()
@@ -535,18 +512,10 @@ class TestStoreControllerMultipleAdapters:
         assert ok
 
         ok = wait_for_condition(
-            lambda: (
-                l1_manager.reserve_write(
-                    keys=keys,
-                    is_temporary=[False],
-                    layout_desc=layout,
-                    mode="update",
-                )[keys[0]][1]
-                is not None
-            ),
+            lambda: (l1_manager.is_key_evictable(keys[0])),
             timeout=5.0,
         )
-        assert ok, "Key should be updatable after all adapter stores complete"
+        assert ok, "Key should be evictable after all adapter stores complete"
 
         ctrl.stop()
         for a in adapters:
@@ -573,14 +542,8 @@ class TestStoreControllerNoAdapters:
         # Give the controller time to process the listener event
         time.sleep(0.3)
 
-        # Key should be updatable (no read locks)
-        result = l1_manager.reserve_write(
-            keys=keys,
-            is_temporary=[False],
-            layout_desc=layout,
-            mode="update",
-        )
-        assert result[keys[0]][1] is not None
+        # Key should be evictable (no read locks)
+        assert l1_manager.is_key_evictable(keys[0])
 
         ctrl.stop()
 
@@ -655,14 +618,13 @@ class TestStoreControllerCustomPolicy:
         )
         assert ok, "Object should be stored in L2"
 
-        # After deletion, reserve_write with mode="new" should succeed
+        # After deletion, reserve_write should succeed
         ok = wait_for_condition(
             lambda: (
                 l1_manager.reserve_write(
                     keys=keys,
                     is_temporary=[False],
                     layout_desc=layout,
-                    mode="new",
                 )[keys[0]][1]
                 is not None
             ),
@@ -752,6 +714,50 @@ class TestBufferOnlyMode:
             timeout=5.0,
         )
         assert ok, "Key should be deleted from L1 in buffer-only mode"
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_read_locked_key_deleted_after_reader_finishes(
+        self, l1_manager, monkeypatch
+    ):
+        """A key still being read when its L2 store finishes leaves L1 once
+        the reader is done."""
+        delete_called = threading.Event()
+        delete = l1_manager.delete
+
+        def watched_delete(*args, **kwargs):
+            result = delete(*args, **kwargs)
+            delete_called.set()
+            return result
+
+        monkeypatch.setattr(l1_manager, "delete", watched_delete)
+        # Slow enough that the read lock below is taken before the store ends.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=0.001)
+        )
+
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=BufferOnlyStorePolicy(),
+        )
+        ctrl.start()
+
+        keys = [make_object_key(0)]
+        write_keys_to_l1(l1_manager, keys, make_layout())
+        assert l1_manager.reserve_read(keys)[keys[0]][0] == L1Error.SUCCESS
+
+        assert delete_called.wait(5.0), "L2 store should finish and try L1 delete"
+        assert l1_manager.get_object_state(keys[0]) is not None
+
+        l1_manager.finish_read(keys)
+        ok = wait_for_condition(
+            lambda: l1_manager.get_object_state(keys[0]) is None,
+            timeout=5.0,
+        )
+        assert ok, "Key should be deleted from L1 after the reader finishes"
 
         ctrl.stop()
         adapter.close()

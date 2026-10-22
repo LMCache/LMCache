@@ -66,7 +66,8 @@ class _BuildPyWithGrpcStubs(_build_py):
         distribution_name = self.distribution.get_name().replace("_", "-").lower()
         if distribution_name != "lmcache-cli":
             generator = _load_proto_generator()
-            generator.generate()
+            for package in generator.GENERATED_PACKAGES:
+                generator.generate(package)
         super().run()
 
 
@@ -77,7 +78,10 @@ if __name__ == "__main__":
     cmdclass["build_py"] = _BuildPyWithGrpcStubs
 
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
-    extras_require: dict[str, list[str]] = {}
+    # Platform-neutral extras; the build profile adds its own below.
+    extras_require: dict[str, list[str]] = {
+        "kafka": _read_requirements(ROOT_DIR / "requirements" / "kafka.txt"),
+    }
     if (
         not BuildProfile.is_gpu_ext_disabled()
         and req_file is not None

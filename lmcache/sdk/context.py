@@ -124,9 +124,14 @@ class LMCacheSDKContext:
         self._finished_lookups: dict[str, int] = {}
 
         logger.info(
-            f"Initialized LMCacheSDKContext with instance_id={self.instance_id}, "
-            f"model_name={self._model_name}, chunk_size={self._chunk_size}, "
-            f"shm_name={self.shm_name}, kind={self._kind}"
+            "Initialized LMCacheSDKContext with instance_id=%s, "
+            "model_name=%s, chunk_size=%s, "
+            "shm_name=%s, kind=%s",
+            self.instance_id,
+            self._model_name,
+            self._chunk_size,
+            self.shm_name,
+            self._kind,
         )
 
     @property
@@ -270,7 +275,7 @@ class LMCacheSDKContext:
         return self._transfer_ctx
 
     def close(self) -> None:
-        """Close the request client and ZMQ context."""
+        """Close the request client and release its transport resources."""
         self._req_client.close()
 
     def maybe_submit_lookup_request(
