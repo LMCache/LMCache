@@ -14,6 +14,7 @@ from __future__ import annotations
 
 # Standard
 from typing import Callable
+from unittest.mock import Mock
 import time
 
 # Third Party
@@ -41,6 +42,13 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.trace.decorator import set_tracing_enabled
+from lmcache.v1.mp_observability.trace.format import (
+    FORMAT_VERSION,
+    MAGIC,
+    Header,
+    encode_header,
+)
+from lmcache.v1.mp_observability.trace.reader import TraceReader
 from lmcache.v1.mp_observability.trace.recorder import StorageTraceRecorder
 
 # Test helpers
@@ -228,6 +236,54 @@ class TestRecordReplayRoundtrip:
 
 
 class TestMismatchHandling:
+    @pytest.mark.parametrize(
+        ("level", "schema_version", "message"),
+        [
+            ("storage", 1, "not replay-safe.*cache_salt"),
+            ("events", 1, "replays 'storage' traces only"),
+            ("events", 2, "replays 'storage' traces only"),
+        ],
+    )
+    def test_incompatible_trace_is_rejected_before_initialization(
+        self,
+        trace_path: str,
+        monkeypatch: pytest.MonkeyPatch,
+        level: str,
+        schema_version: int,
+        message: str,
+    ) -> None:
+        """Reject incompatible headers without starting resources; close the reader."""
+        header = Header(
+            magic=MAGIC,
+            format_version=FORMAT_VERSION,
+            level=level,
+            trace_schema_version=schema_version,
+            t_mono_start=0.0,
+            t_wall_start=0.0,
+            sm_config_json="",
+            sm_config_digest="",
+        )
+        frame = encode_header(header)
+        with open(trace_path, "wb") as fh:
+            fh.write(len(frame).to_bytes(4, "big") + frame)
+
+        reader = TraceReader(trace_path)
+        bus_factory = Mock(side_effect=AssertionError("EventBus initialized"))
+        sm_factory = Mock(side_effect=AssertionError("StorageManager initialized"))
+        driver_module = "lmcache.cli.commands.trace._driver"
+        monkeypatch.setattr(f"{driver_module}.TraceReader", Mock(return_value=reader))
+        monkeypatch.setattr(f"{driver_module}.init_observability", bus_factory)
+        monkeypatch.setattr(f"{driver_module}.StorageManager", sm_factory)
+        try:
+            with pytest.raises(ValueError, match=message):
+                StorageReplayDriver(_make_sm_config(), trace_path)
+            bus_factory.assert_not_called()
+            sm_factory.assert_not_called()
+            with pytest.raises(RuntimeError, match="TraceReader is closed"):
+                next(reader.records())
+        finally:
+            reader.close()
+
     def test_unknown_qualname_is_skipped(self, trace_path):
         """An empty dispatcher with no matching handlers skips every
         record without raising."""
