@@ -176,17 +176,6 @@ class TestPrefetchTaskSpec:
         )
         assert _roundtrip(spec) == spec
 
-    def test_record_without_memory_tag_filters_allows_everything(self):
-        """Specs recorded before the filters existed decode to no filter."""
-        encoded = codecs.encode_value(
-            PrefetchTaskSpec(key_groups=[_grouped_object_keys(0)])
-        )
-        del encoded["v"]["allowed_l1_memory_tags"]
-        del encoded["v"]["allowed_l2_memory_tags"]
-        out = codecs.decode_value(encoded)
-        assert out.allowed_l1_memory_tags is None
-        assert out.allowed_l2_memory_tags is None
-
 
 class TestAttnWindowDesc:
     def test_full_roundtrip(self):

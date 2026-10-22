@@ -319,15 +319,13 @@ def _enc_prefetch_task_spec(s: PrefetchTaskSpec) -> dict[str, Any]:
 
 
 def _dec_prefetch_task_spec(d: dict[str, Any]) -> PrefetchTaskSpec:
-    # Records written before the memory-tag filters existed lack their keys
-    # and decode to "allow everything".
     return PrefetchTaskSpec(
         key_groups=[decode_value(g) for g in d["key_groups"]],
         num_kv_readers=d["num_kv_readers"],
         fetching_policy=d["fetching_policy"],
         lock_mode=decode_value(d["lock_mode"]),
-        allowed_l1_memory_tags=_dec_allowed_tags(d.get("allowed_l1_memory_tags")),
-        allowed_l2_memory_tags=_dec_allowed_tags(d.get("allowed_l2_memory_tags")),
+        allowed_l1_memory_tags=_dec_allowed_tags(d["allowed_l1_memory_tags"]),
+        allowed_l2_memory_tags=_dec_allowed_tags(d["allowed_l2_memory_tags"]),
     )
 
 
