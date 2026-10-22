@@ -1,18 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 """Score one run: the same metric set for every workload.
 
-Inputs: ``aiperf/profile_export.jsonl`` and ``samples.jsonl``. The window is
+Inputs: ``aiperf/profile_export.jsonl``, ``samples.jsonl`` and the prompt ids
+the AIPerf endpoint logs in :data:`PROMPT_DIR`. The window is
 ``scoring.window_s`` from the first profiling request's start; a request (or
 error) counts if it ends inside. Decode rate is ``(output tokens - 1) /
 (latency - TTFT)``. Server counters are interpolated at the window edges.
+
+The ideal cache hit share is what an unbounded token-granular prefix cache
+would serve: each prompt, in start order from the server's first request, hits
+its longest common prefix with any earlier prompt, at most all but its last
+token, which a server always computes. Only prompts that start in the window
+count.
 """
 
 # Standard
+from array import array
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
+import hashlib
 import json
+import os
 
 _SOURCES = ("local_compute", "local_cache_hit", "external_kv_transfer")
+# Under the run dir: one ``<x_request_id>.i32`` of prompt ids per request.
+PROMPT_DIR = Path("aiperf", "prt_live_history", "prompts")
+# Tokens per hashed block in the prefix search; the result is exact either way.
+_BLOCK = 64
+_ITEM = array("i").itemsize
 
 
 def pct(xs: list[float], q: float) -> float | None:
@@ -41,7 +57,7 @@ def load_requests(path: Path) -> list[dict[str, Any]]:
         path: ``profile_export.jsonl``.
 
     Returns:
-        One dict per record: phase, start, end, ttft, lat, osl, rate, err.
+        One dict per record: id, phase, start, end, ttft, lat, osl, rate, err.
     """
     out = []
     with open(path) as f:
@@ -62,6 +78,7 @@ def load_requests(path: Path) -> list[dict[str, Any]]:
                 rate = (osl - 1) / (lat - ttft)
             out.append(
                 {
+                    "id": m.get("x_request_id"),
                     "phase": m.get("benchmark_phase"),
                     "start": m["request_start_ns"] / 1e9,
                     "end": m["request_end_ns"] / 1e9,
@@ -92,6 +109,57 @@ def window_bounds(
     ws = min(r["start"] for r in pop)
     we = ws + window_s
     return ws, we, [r for r in pop if ws <= r["end"] <= we]
+
+
+def ideal_hit_share(
+    prompt_dir: Path, reqs: list[dict[str, Any]], ws: float, we: float
+) -> float | None:
+    """Share of the window's prompt tokens an unbounded prefix cache would serve.
+
+    Full ``_BLOCK``-token blocks are matched by chained hash; the first
+    unmatched block is compared token by token with every block that followed
+    the same prefix in an earlier prompt.
+
+    Args:
+        prompt_dir: :data:`PROMPT_DIR` of the run.
+        reqs: Output of :func:`load_requests`, every phase.
+        ws: Window start.
+        we: Window end.
+
+    Returns:
+        Hit tokens over prompt tokens of the requests that start in
+        ``[ws, we]``, or None when none of them has a prompt file. A request
+        without one never reached the server's prefill and is left out.
+    """
+    width = _ITEM * _BLOCK
+    # Chained hash of a full-block prefix -> the blocks (or tails) after it.
+    after: defaultdict[bytes, set[bytes]] = defaultdict(set)
+    hit = total = 0
+    for r in sorted(reqs, key=lambda r: r["start"]):
+        path = prompt_dir / f"{r['id']}.i32"
+        if not path.exists():
+            continue
+        data = path.read_bytes()
+        blocks = [data[i : i + width] for i in range(0, len(data), width)]
+        common, h = 0, b""
+        for block in blocks:
+            nexts = after.get(h, set())
+            if block not in nexts:
+                common += max(
+                    (len(os.path.commonprefix([block, c])) for c in nexts), default=0
+                )
+                break
+            common += len(block)
+            h = hashlib.blake2b(h + block, digest_size=8).digest()
+        h = b""
+        for block in blocks:
+            after[h].add(block)
+            h = hashlib.blake2b(h + block, digest_size=8).digest()
+        if ws <= r["start"] <= we:
+            n = len(data) // _ITEM
+            hit += min(common // _ITEM, n - 1)
+            total += n
+    return hit / total if total else None
 
 
 def _at(samples: list[dict[str, Any]], t: float, key: str) -> float:
@@ -150,6 +218,9 @@ def score(run_dir: Path, window_s: float) -> dict[str, Any]:
         "prompt_tokens_by_source": src,
         # Served by the cache layer (L1 and L2), the same meter everywhere.
         "external_token_share": src["external_kv_transfer"] / total if total else None,
+        # Every prompt token not computed: prefix cache plus cache layer.
+        "cache_hit_share": 1 - src["local_compute"] / total if total else None,
+        "ideal_hit_share": ideal_hit_share(run_dir / PROMPT_DIR, reqs, ws, we),
         # Token throughput over the window, from the server's counters: every
         # prompt token whatever its source, and every generated token.
         "input_tok_s": total / (we - ws),

@@ -8,7 +8,9 @@ for a turn's full output with ``prt_src``.
   with ``{"role": "assistant", "reasoning": "", "content": "<think>\\n" +
   decode(output_ids)}``, cut to the trace message's token length.
 * ``process_responses`` stores a complete PROFILING response's ``token_ids``
-  under ``(root_correlation_id, conversation_id, turn_index)``.
+  under ``(root_correlation_id, conversation_id, turn_index)``, and every
+  request's prompt ids as ``$PRT_LIVE_HISTORY_LOG_DIR/prompts/<x_request_id>.i32``
+  (native-endian int32), from which PRT scores the ideal cache hit share.
 
 Why this rendering: the server generated after
 ``<|im_start|>assistant\\n<think>\\n``, and the Step template renders an
@@ -68,6 +70,10 @@ class LiveHistoryChatEndpoint(ChatEndpoint):
             os.environ["PRT_LIVE_HISTORY_LOG_DIR"], "store"
         )
         os.makedirs(self._prt_store_dir, exist_ok=True)
+        self._prt_prompt_dir = os.path.join(
+            os.environ["PRT_LIVE_HISTORY_LOG_DIR"], "prompts"
+        )
+        os.makedirs(self._prt_prompt_dir, exist_ok=True)
         self._prt_tok = Tokenizer.from_file(
             os.path.join(os.environ["PRT_LIVE_HISTORY_TOKENIZER"], "tokenizer.json")
         )
@@ -109,7 +115,11 @@ class LiveHistoryChatEndpoint(ChatEndpoint):
         *,
         capture_assistant_turn: bool,
     ) -> tuple[list[ParsedResponse], Turn | None]:
-        """Parse as the base endpoint, then store a complete turn's output ids.
+        """Parse as the base endpoint, then log the prompt and store a complete
+        turn's output ids.
+
+        The prompt is logged in every phase, errors included, whenever the
+        server returned its ids: whatever it prefilled can be cached.
 
         Args:
             record: The completed request record.
@@ -122,6 +132,13 @@ class LiveHistoryChatEndpoint(ChatEndpoint):
             record, capture_assistant_turn=capture_assistant_turn
         )
         info = record.request_info
+        if info is not None and record.responses:
+            # responses[0] is the role chunk: prompt_token_ids, no output ids.
+            prompt = (record.responses[0].get_json() or {}).get("prompt_token_ids")
+            if prompt:
+                path = os.path.join(self._prt_prompt_dir, f"{info.x_request_id}.i32")
+                with open(path, "wb") as f:
+                    f.write(array("i", prompt).tobytes())
         if (
             info is None
             or record.has_error
@@ -130,7 +147,6 @@ class LiveHistoryChatEndpoint(ChatEndpoint):
         ):
             return result
         ids: list[int] = []
-        # responses[0] is the role chunk: prompt_token_ids, no output ids.
         for response in record.responses[1:]:
             obj = response.get_json()
             for choice in (obj or {}).get("choices") or []:

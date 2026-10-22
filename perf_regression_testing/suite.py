@@ -55,6 +55,8 @@ REPORT_COLS = [
     ("ttft_p95", "TTFT p95 s"),
     ("preemptions", "preemptions"),
     ("external_token_share", "cache-layer token share"),
+    ("cache_hit_share", "cache hit share"),
+    ("ideal_hit_share", "ideal hit share"),
     ("l2_disk_used_gb", "L2 disk used GB"),
 ]
 

@@ -42,7 +42,7 @@ from perf_regression_testing.runner.disk_cap import (
     set_dirs_writable,
 )
 from perf_regression_testing.runner.sampler import Sampler
-from perf_regression_testing.runner.score import score
+from perf_regression_testing.runner.score import PROMPT_DIR, score
 from perf_regression_testing.workloads.agentic.fetch_trace import dir_digest
 
 # stdlib logging: PRT runs on the host, where LMCache is not installed.
@@ -502,6 +502,8 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
             summary.update(score(out, spec.window_s))
         except (KeyError, ValueError) as e:
             summary["invalid"].append(f"score failed: {e!r}")
+    # About 1 GB of prompt ids, which only the score reads.
+    shutil.rmtree(out / PROMPT_DIR, ignore_errors=True)
     if summary["invalid"]:
         logger.info("%s: INVALID: %s", run_id, "; ".join(summary["invalid"]))
         return finish(EXIT_INVALID)
