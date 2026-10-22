@@ -257,6 +257,8 @@ def server_process_runner(
         host=host,
         port=port,
         chunk_size=chunk_size,
+        # The synthetic cache uses block zero for real KV data.
+        null_block_id=-1,
     )
     storage_manager_config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(

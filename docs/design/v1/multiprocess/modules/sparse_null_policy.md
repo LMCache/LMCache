@@ -35,17 +35,26 @@ With `--null-block-id -1`, LMCache keeps PAGE block `0`, skips the first three
 STATE objects, and stores the STATE object at chunk 3. Python `None` is not a
 sentinel value here; the configuration is always an integer.
 
-PAGE and STATE must be separate object groups. Object presence is the lookup
-signal, so putting dense PAGE data and sparse STATE data in one object would
-make a PAGE hit incorrectly imply that STATE is present too. ATOM therefore
-uses `--separate-object-groups` explicitly.
+PAGE and STATE should be separate object groups. A merged object is stored
+only where both are present, discarding otherwise valid PAGE data at missing
+STATE checkpoints. Separation keeps complete PAGE objects independently
+storable. ATOM therefore uses `--separate-object-groups` explicitly.
 
 ## Store and retrieve behavior
 
-`all_null_chunk_masks` compares every block ID against the configured global
-sentinel. A chunk is skipped for an object group only when all block IDs in all
-of that object's kernel groups equal the sentinel. Skipped objects are neither
-reserved nor committed.
+`incomplete_chunk_masks` compares retained block IDs against the configured
+global sentinel. A chunk is skipped for an object group when any required block
+in any of that object's kernel groups equals the sentinel. Skipped objects are
+neither reserved nor committed.
+
+Presence is checked after per-chunk window downsampling, using the block IDs
+that will actually be transferred. For example, a recurrent group with a
+one-block window and two blocks per chunk must skip `[7, 0]` when `0` is the
+null marker: only the null tail block is transferred. A real block outside
+that window does not make the endpoint checkpoint valid. This also applies
+when PAGE and STATE are separate object groups. In a merged object, an absent
+STATE slice also prevents storing its attention pages; separation lets complete
+attention objects remain independently storable.
 
 LMCache already skips these copies in the transfer layer. On store, skipped
 objects become `None` entries and the D2H loop does not launch a kernel for
@@ -55,12 +64,13 @@ by the transfer helper. Block IDs are therefore staged with the existing
 slice-only behavior; a null ID may be present in the staged tensor, but it is
 outside every launched kernel's block-ID range and is never dereferenced.
 
-Connectors that use an unallocated sentinel such as `-1` must put only kernel
-groups with a shared presence domain in the same object group. ATOM satisfies
-this contract because its native STATE image is indivisible: every STATE
-ordinal is absent in the same prefix chunks and present at the same checkpoint
-endpoint. Independently sparse kernel groups require a separate object-group
-contract or per-kernel transfer masks and are outside this integration.
+With an unallocated sentinel such as `-1`, the incomplete-object mask prevents
+the store copy from dereferencing an absent slice. ATOM's native STATE image
+is indivisible: every STATE ordinal is absent in the same prefix chunks and
+present at the same checkpoint endpoint. An object containing independently
+sparse kernel groups is stored only where every retained slice is present;
+separation avoids discarding complete objects because another group is missing
+data.
 
 ## Testing
 
