@@ -23,13 +23,16 @@ class AddAdapterOp:
     """Attach a new adapter under the stable id ``adapter_id``.
 
     ``done`` is set by the loop once the adapter's eventfd(s) are
-    registered and the adapter is live for routing.
+    registered and the adapter is live for routing. The controller's
+    adapter-ops lock serializes attachment with timeout cancellation;
+    ``cancelled`` operations must never be attached.
     """
 
     adapter_id: int
     adapter: L2AdapterInterface
     descriptor: L2AdapterDescriptor
     done: threading.Event
+    cancelled: bool = False
 
 
 @dataclass

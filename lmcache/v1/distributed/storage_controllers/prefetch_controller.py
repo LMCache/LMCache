@@ -788,6 +788,9 @@ class PrefetchController(StorageControllerInterface):
         """Blocking function to add a new adapter into the prefetch
         controller with the specified adapter ID and descriptor.
 
+        A timed-out operation is cancelled before it can attach. If the
+        loop is already applying it, wait for attachment and report success.
+
         Args:
             adapter_id: Stable id assigned by the StorageManager.
             adapter: The adapter instance to attach.
@@ -795,8 +798,8 @@ class PrefetchController(StorageControllerInterface):
                 equal ``adapter_id``).
 
         Raises:
-            RuntimeError: If the background loop did not apply the op in
-                time (e.g. the loop is not running).
+            RuntimeError: If the operation was cancelled because the loop
+                did not begin applying it in time (e.g. it is not running).
         """
         by_tag = {d.config.tag: d.index for d in self._l1_manager_descriptors.values()}
         if descriptor.config.affinity_tag not in by_tag:
@@ -813,6 +816,10 @@ class PrefetchController(StorageControllerInterface):
             self._pending_adapter_ops.append(op)
         self._adapter_ctrl_efd.notify()
         if not op.done.wait(timeout=PREFETCH_LOOP_POLL_TIMEOUT_MS / 1000 + 5.0):
+            with self._adapter_ops_lock:
+                if op.done.is_set():
+                    return
+                op.cancelled = True
             raise RuntimeError(
                 f"PrefetchController did not attach adapter {adapter_id} in time"
             )
@@ -951,21 +958,25 @@ class PrefetchController(StorageControllerInterface):
             self._pending_adapter_ops = []
         for op in ops:
             if isinstance(op, AddAdapterOp):
-                self._l2_affinity[op.adapter_id] = next(
-                    d.index
-                    for d in self._l1_manager_descriptors.values()
-                    if d.config.tag == op.descriptor.config.affinity_tag
-                )
-                self._l2_adapters[op.adapter_id] = op.adapter
-                self._adapter_descriptors[op.adapter_id] = op.descriptor
-                lookup_efd = op.adapter.get_lookup_and_lock_event_fd()
-                load_efd = op.adapter.get_load_event_fd()
-                self._lookup_efd_to_adapter[lookup_efd] = op.adapter_id
-                self._load_efd_to_adapter[load_efd] = op.adapter_id
-                poller.register(lookup_efd, select.POLLIN)
-                poller.register(load_efd, select.POLLIN)
-                logger.info("PrefetchController attached adapter %d", op.adapter_id)
-                op.done.set()
+                # Cancellation must not race with eventfd registration.
+                with self._adapter_ops_lock:
+                    if op.cancelled:
+                        continue
+                    self._l2_affinity[op.adapter_id] = next(
+                        d.index
+                        for d in self._l1_manager_descriptors.values()
+                        if d.config.tag == op.descriptor.config.affinity_tag
+                    )
+                    self._l2_adapters[op.adapter_id] = op.adapter
+                    self._adapter_descriptors[op.adapter_id] = op.descriptor
+                    lookup_efd = op.adapter.get_lookup_and_lock_event_fd()
+                    load_efd = op.adapter.get_load_event_fd()
+                    self._lookup_efd_to_adapter[lookup_efd] = op.adapter_id
+                    self._load_efd_to_adapter[load_efd] = op.adapter_id
+                    poller.register(lookup_efd, select.POLLIN)
+                    poller.register(load_efd, select.POLLIN)
+                    logger.info("PrefetchController attached adapter %d", op.adapter_id)
+                    op.done.set()
             elif isinstance(op, RemoveAdapterOp):
                 if op.adapter_id not in self._l2_adapters:
                     op.done.set()

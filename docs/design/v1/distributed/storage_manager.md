@@ -187,3 +187,19 @@ tracks `(tag, key)` so one copy's eviction cannot end another copy's lifetime.
 Single-L1 status aliases and key-only completion remain
 compatible. Single-region descriptors, P2P, shared-memory transfer, and legacy
 Device-DAX hotplug remain guarded for multi-L1 configurations.
+
+## Runtime L2 attachment failures
+
+`add_l2_adapter` returns a stable ID only after both controllers acknowledge
+attachment. Each controller serializes attachment with timeout cancellation
+under its adapter-ops lock. A cancelled add is skipped even if the loop already
+dequeued it; if attachment wins the race, the caller observes success.
+
+If store attachment times out, the manager unregisters and closes the adapter.
+If prefetch attachment times out after store attachment succeeded, the manager
+first requests store removal and waits for accepted stores to drain, then
+unregisters and closes it. Cleanup can therefore exceed the attachment deadline;
+closing an adapter while accepted stores still reference it is unsafe. Failed
+adds do not publish a capacity change or reuse their allocated IDs. Retrying
+the same configuration creates one live adapter, with no delayed first add
+left for peer reconciliation to lose track of.
