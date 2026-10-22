@@ -668,6 +668,14 @@ void execute_object_group_transfer(
   #define LMC_HAS_BATCH_MEMCPY 0
 #endif
 
+// The 2-D path (cudaMemcpy3DBatchAsync) is CUDA-only; HIP builds keep one
+// 1-D entry per layer.
+#if LMC_HAS_BATCH_MEMCPY && !defined(USE_ROCM)
+  #define LMC_HAS_2D_BATCH_MEMCPY 1
+#else
+  #define LMC_HAS_2D_BATCH_MEMCPY 0
+#endif
+
 namespace {
 
 // Byte-level addressing of one paged block, resolved once per kernel group.
@@ -769,6 +777,120 @@ inline void append_split(std::vector<void*>& dsts, std::vector<void*>& srcs,
   }
 }
 
+#if LMC_HAS_2D_BATCH_MEMCPY
+// This function calculates the engine-side pitch of a 2-D copy that moves one
+// block of every layer of a kernel group at once (width = block bytes,
+// height = layers): the byte distance in the engine KV cache from a block of
+// layer l to the same block (and kv plane) of layer l + 1.
+// Returns:
+// - that distance, if it is the same for every pair of consecutive layers and
+//   one block of every layer fits inside one block stride. This is the
+//   block-outermost layout (e.g. vLLM's BLNHC for DeepSeek-V4), where each
+//   block packs one padded page per layer side by side, so the distance is
+//   the padded page size;
+// - 0 otherwise (e.g. layer-outermost layouts, whose layers are a whole
+//   layer apart); the caller then copies each layer with its own 1-D entry.
+// A non-zero pitch puts each layer's base inside the previous layer's first
+// block, so all layers lie in one allocation, as the rows of a 2-D copy must,
+// and the pitch stays far below cudaDevAttrMaxPitch.
+size_t uniform_layer_pitch(const BlockAddressing& addr,
+                           const DirectCopyGroupSpec& spec) {
+  const PageBufferShapeDesc& sd = spec.shape_desc;
+  if (sd.nl < 2 || sd.nb < 2) return 0;
+  const auto& ptrs = spec.paged_layer_ptrs;
+  size_t pitch = addr.layer_stride;
+  if (addr.base != BlockAddressing::Base::kSingleTensor) {
+    if (ptrs[1] <= ptrs[0]) return 0;
+    pitch = ptrs[1] - ptrs[0];
+    const int planes =
+        addr.base == BlockAddressing::Base::kPerPlaneLayer ? sd.kv_size : 1;
+    for (int p = 0; p < planes; ++p) {
+      for (int l = 1; l < sd.nl; ++l) {
+        const size_t i = static_cast<size_t>(p) * sd.nl + l;
+        if (ptrs[i] - ptrs[i - 1] != pitch) return 0;
+      }
+    }
+  }
+  const bool fits_in_block =
+      pitch >= addr.block_bytes &&
+      (sd.nl - 1) * pitch + addr.block_bytes <= addr.block_stride;
+  return fits_in_block ? pitch : 0;
+}
+
+// Append one 2-D host<->device copy of `height` rows of `width` bytes (row r
+// at host + r * host_pitch and dev + r * dev_pitch), split like append_split
+// so no op crosses a `host_buffer_alignment` boundary of the allocator's
+// virtual offset: consecutive rows inside one pin chunk stay one op, and a row
+// that straddles a boundary becomes single-row pieces.
+void append_2d_split(std::vector<cudaMemcpy3DBatchOp>& ops, uintptr_t host,
+                     uintptr_t dev, size_t width, size_t height,
+                     size_t host_pitch, size_t dev_pitch,
+                     size_t host_virtual_offset, size_t host_buffer_alignment,
+                     bool is_h2d) {
+  auto emit = [&](uintptr_t h, uintptr_t d, size_t w, size_t rows) {
+    cudaMemcpy3DBatchOp op{};
+    cudaMemcpy3DOperand host_op{};
+    host_op.type = cudaMemcpyOperandTypePointer;
+    host_op.op.ptr.ptr = reinterpret_cast<void*>(h);
+    host_op.op.ptr.rowLength = host_pitch;
+    host_op.op.ptr.layerHeight = rows;
+    cudaMemcpy3DOperand dev_op{};
+    dev_op.type = cudaMemcpyOperandTypePointer;
+    dev_op.op.ptr.ptr = reinterpret_cast<void*>(d);
+    dev_op.op.ptr.rowLength = dev_pitch;
+    dev_op.op.ptr.layerHeight = rows;
+    op.src = is_h2d ? host_op : dev_op;
+    op.dst = is_h2d ? dev_op : host_op;
+    op.extent = make_cudaExtent(w, rows, 1);  // bytes, rows, 1 layer
+    op.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+    ops.push_back(op);
+  };
+  // Consecutive rows inside one pin chunk accumulate into a pending 2-D op:
+  // `run_start` is the first row of the pending op, `run_rows` is how many
+  // rows it has (0 = nothing pending), and `run_chunk` is the index of the
+  // cudaHostRegister chunk (virtual offset / host_buffer_alignment) that all
+  // of its rows lie in. flush() emits the pending op.
+  size_t run_start = 0;
+  size_t run_rows = 0;
+  size_t run_chunk = 0;
+  auto flush = [&]() {
+    if (run_rows > 0) {
+      emit(host + run_start * host_pitch, dev + run_start * dev_pitch, width,
+           run_rows);
+      run_rows = 0;
+    }
+  };
+  for (size_t r = 0; r < height; ++r) {
+    // Pin chunks holding the first and the last byte of row r.
+    const size_t v = host_virtual_offset + r * host_pitch;
+    const size_t first_chunk = v / host_buffer_alignment;
+    const size_t last_chunk = (v + width - 1) / host_buffer_alignment;
+    if (first_chunk != last_chunk) {
+      flush();
+      size_t off = 0;
+      while (off < width) {
+        const size_t boundary =
+            ((v + off) / host_buffer_alignment + 1) * host_buffer_alignment;
+        const size_t end = std::min(width, boundary - v);
+        emit(host + r * host_pitch + off, dev + r * dev_pitch + off, end - off,
+             1);
+        off = end;
+      }
+      continue;
+    }
+    if (run_rows > 0 && first_chunk == run_chunk) {
+      ++run_rows;
+    } else {
+      flush();
+      run_start = r;
+      run_rows = 1;
+      run_chunk = first_chunk;
+    }
+  }
+  flush();
+}
+#endif
+
 }  // namespace
 
 bool batch_memcpy_supported() {
@@ -838,7 +960,7 @@ bool direct_copy_format_supported(EngineKVFormat engine_kv_format) {
   return resolve_block_addressing(engine_kv_format, probe, unused);
 }
 
-void execute_direct_copy_transfer(
+size_t execute_direct_copy_transfer(
     TransferDirection direction, const torch::Device& device,
     size_t host_buffer_alignment,
     const std::vector<DirectCopyGroupSpec>& group_specs,
@@ -850,13 +972,19 @@ void execute_direct_copy_transfer(
                   (host_buffer_alignment & (host_buffer_alignment - 1)) == 0,
               "host_buffer_alignment must be a power of two, got ",
               host_buffer_alignment);
+  size_t num_ops = 0;
 #if LMC_HAS_BATCH_MEMCPY
   const bool is_h2d = (direction == TransferDirection::H2D);
 
   // --- Per-group addressing, resolved once ---
   std::vector<BlockAddressing> addressing(group_specs.size());
   std::vector<int> blocks_per_chunk(group_specs.size());
-  std::vector<size_t> layer_bytes(group_specs.size());
+  // Bytes of one (kv plane, layer) region of a chunk in the LMCache object.
+  std::vector<size_t> lmcache_layer_bytes(group_specs.size());
+  // Bytes from a block of one layer to the same block of the next layer in
+  // the engine KV cache; non-zero means one 2-D copy moves the block of every
+  // layer (see uniform_layer_pitch).
+  std::vector<size_t> engine_layer_pitch(group_specs.size());
   for (size_t g = 0; g < group_specs.size(); ++g) {
     const DirectCopyGroupSpec& spec = group_specs[g];
     const PageBufferShapeDesc& sd = spec.shape_desc;
@@ -868,8 +996,8 @@ void execute_direct_copy_transfer(
                 "slots_per_chunk (", spec.slots_per_chunk,
                 ") must be a positive multiple of block size (", sd.bs, ")");
     blocks_per_chunk[g] = spec.slots_per_chunk / sd.bs;
-    layer_bytes[g] = static_cast<size_t>(spec.slots_per_chunk) * sd.nh * sd.hs *
-                     sd.element_size;
+    lmcache_layer_bytes[g] = static_cast<size_t>(spec.slots_per_chunk) * sd.nh *
+                             sd.hs * sd.element_size;
     const size_t ptrs_needed =
         addressing[g].base == BlockAddressing::Base::kSingleTensor ? 1
         : addressing[g].base == BlockAddressing::Base::kPerPlaneLayer
@@ -878,6 +1006,9 @@ void execute_direct_copy_transfer(
     TORCH_CHECK(spec.paged_layer_ptrs.size() >= ptrs_needed, "group ", g,
                 " has ", spec.paged_layer_ptrs.size(),
                 " paged layer pointers, needs ", ptrs_needed);
+  #if LMC_HAS_2D_BATCH_MEMCPY
+    engine_layer_pitch[g] = uniform_layer_pitch(addressing[g], spec);
+  #endif
   }
 
   const at::cuda::OptionalCUDAGuard device_guard(device);
@@ -895,10 +1026,15 @@ void execute_direct_copy_transfer(
   size_t attrs_idx = 0;
 
   // Entry tables are rebuilt per object and reused across objects: the CUDA
-  // call consumes the host arrays before it returns.
+  // call consumes the host arrays before it returns. 1-D entries (one per
+  // kv plane, layer and block) go to cudaMemcpyBatchAsync; 2-D ops (one per
+  // kv plane and block, covering every layer) to cudaMemcpy3DBatchAsync.
   std::vector<void*> dsts;
   std::vector<void*> srcs;
   std::vector<size_t> sizes;
+  #if LMC_HAS_2D_BATCH_MEMCPY
+  std::vector<cudaMemcpy3DBatchOp> ops;
+  #endif
 
   for (const DirectCopyObject& obj : objects) {
     TORCH_CHECK(obj.skip_prefix_n_blocks.size() == group_specs.size(),
@@ -910,6 +1046,9 @@ void execute_direct_copy_transfer(
     dsts.clear();
     srcs.clear();
     sizes.clear();
+  #if LMC_HAS_2D_BATCH_MEMCPY
+    ops.clear();
+  #endif
 
     for (size_t g = 0; g < group_specs.size(); ++g) {
       const DirectCopyGroupSpec& spec = group_specs[g];
@@ -928,19 +1067,23 @@ void execute_direct_copy_transfer(
       // every entry below because (kv, layer, block) only ever move forward.
       const size_t region_end =
           spec.byte_offset_in_object +
-          static_cast<size_t>(sd.kv_size) * sd.nl * layer_bytes[g];
+          static_cast<size_t>(sd.kv_size) * sd.nl * lmcache_layer_bytes[g];
       TORCH_CHECK(region_end <= obj.nbytes, "group ", g,
                   " region ends at byte ", region_end, " past the object size ",
                   obj.nbytes);
 
+      // With a uniform layer pitch, one 2-D copy starting at layer 0 covers
+      // every layer of a block, so the layer loop runs once.
+      const int layers_per_copy = engine_layer_pitch[g] > 0 ? sd.nl : 1;
       for (int kv = 0; kv < sd.kv_size; ++kv) {
-        for (int layer = 0; layer < sd.nl; ++layer) {
+        for (int layer = 0; layer < sd.nl; layer += layers_per_copy) {
           const uintptr_t dev_base = select_base(addr, spec, kv, layer) +
                                      kv * addr.kv_stride +
                                      layer * addr.layer_stride;
           const uintptr_t host_base =
               obj.host_ptr + spec.byte_offset_in_object +
-              (static_cast<size_t>(kv) * sd.nl + layer) * layer_bytes[g];
+              (static_cast<size_t>(kv) * sd.nl + layer) *
+                  lmcache_layer_bytes[g];
           for (int b = skip; b < bpc; ++b) {
             const int64_t block_id = spec.block_ids[block_base + b];
             TORCH_CHECK(block_id >= 0 && block_id < sd.nb, "block id ",
@@ -949,6 +1092,15 @@ void execute_direct_copy_transfer(
             const uintptr_t host = host_base + b * addr.block_bytes;
             const uintptr_t dev =
                 dev_base + static_cast<size_t>(block_id) * addr.block_stride;
+  #if LMC_HAS_2D_BATCH_MEMCPY
+            if (layers_per_copy > 1) {
+              append_2d_split(ops, host, dev, addr.block_bytes, sd.nl,
+                              lmcache_layer_bytes[g], engine_layer_pitch[g],
+                              obj.host_offset + (host - obj.host_ptr),
+                              host_buffer_alignment, is_h2d);
+              continue;
+            }
+  #endif
             append_split(dsts, srcs, sizes, host, dev, addr.block_bytes,
                          obj.host_offset + (host - obj.host_ptr),
                          host_buffer_alignment, is_h2d);
@@ -956,6 +1108,22 @@ void execute_direct_copy_transfer(
         }
       }
     }
+  #if LMC_HAS_2D_BATCH_MEMCPY
+    if (!ops.empty()) {
+    #if CUDART_VERSION >= 13000
+      const cudaError_t err =
+          cudaMemcpy3DBatchAsync(ops.size(), ops.data(), 0, stream);
+    #else
+      size_t fail_idx = 0;
+      const cudaError_t err =
+          cudaMemcpy3DBatchAsync(ops.size(), ops.data(), &fail_idx, 0, stream);
+    #endif
+      TORCH_CHECK(err == cudaSuccess, "cudaMemcpy3DBatchAsync failed with ",
+                  cudaGetErrorString(err), " (", ops.size(), " 2-D ops, chunk ",
+                  obj.chunk_idx, ")");
+      num_ops += ops.size();
+    }
+  #endif
     if (dsts.empty()) continue;
 
   #if CUDART_VERSION >= 13000
@@ -972,6 +1140,8 @@ void execute_direct_copy_transfer(
     TORCH_CHECK(err == cudaSuccess, "cudaMemcpyBatchAsync failed with ",
                 cudaGetErrorString(err), " (", dsts.size(), " entries, chunk ",
                 obj.chunk_idx, ")");
+    num_ops += dsts.size();
   }
 #endif
+  return num_ops;
 }

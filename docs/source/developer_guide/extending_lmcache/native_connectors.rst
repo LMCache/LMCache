@@ -298,6 +298,11 @@ Create a new file in the L2 adapters package:
         l1_memory_desc: "Optional[L1MemoryDesc]" = None,
     ) -> L2AdapterInterface:
         from lmcache.lmcache_mybackend import LMCacheMyBackendClient
+        from lmcache.v1.distributed.api import (
+            MemoryResidency,
+            MemorySegment,
+            MemoryTags,
+        )
         from lmcache.v1.distributed.l2_adapters \
             .native_connector_l2_adapter import (
             NativeConnectorL2Adapter,
@@ -307,8 +312,10 @@ Create a new file in the L2 adapters package:
         native_client = LMCacheMyBackendClient(
             config.host, config.port, config.num_workers
         )
+        # A network service, so the bytes are remote storage.
         return NativeConnectorL2Adapter(
             native_client,
+            MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE),
             max_capacity_gb=config.max_capacity_gb,
         )
 
@@ -501,7 +508,7 @@ Loading Flow
       +-- getattr(module, config.class_name)
       +-- connector_cls(**config.adapter_params)
       +-- validate 6 required methods
-      +-- NativeConnectorL2Adapter(native_client)
+      +-- NativeConnectorL2Adapter(native_client, memory_tags)
               |
               v
       L2AdapterInterface instance (ready for use)

@@ -159,11 +159,14 @@ configurations. The legacy singular config aliases the first entry. Each manager
 owns its allocator, eviction controller, and store controller. Initialization
 rolls back already-created managers, adapters, and controllers on failure.
 
-L2 affinity is a fixed mapping from `L2AdapterConfigBase.affinity_tag` to an L1
-identity. Stores and serde use that L1, and prefetch reloads allocate there. There
-is no pluggable affinity policy. Unknown targets and GDS targets for host-buffer
-adapters are rejected. Runtime adapter attachment updates the controller's
-mapping on its own loop thread; removal drops it after draining.
+L2 affinity is resolved from memory tags (see `memory_tags.md`): each adapter's
+config lists the L1 memory tags it wants, most preferred first, and
+`resolve_l1_affinity` picks the first L1 in placement order that has the most
+preferred matching tags. Stores and serde use that L1, and prefetch reloads
+allocate there. There is no pluggable affinity policy. An adapter that no L1
+matches, such as a host-buffer adapter in a GDS-only server, is rejected.
+Runtime adapter attachment updates the controller's mapping on its own loop
+thread; removal drops it after draining.
 
 Prefetch uses synchronous L1 calls and the existing per-manager lock maps. Its
 policy discards redundant copies and returns `PrefetchResult.l1_owners` for retained
