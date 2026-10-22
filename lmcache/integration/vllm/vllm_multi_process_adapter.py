@@ -126,6 +126,8 @@ class ExtraConfigDefault(enum.Enum):
     heartbeat_interval = 10.0
     # Poll status replies without blocking the scheduler by default.
     nonblocking_lookup_status = True
+    # Lookup wait budget (ms per 100 ms, shared). 0 = nonblocking.
+    lookup_wait_budget_ms = 0.0
     # Routing mode for ``create_transfer_context``: ``auto`` resolves to
     # the device spec's declared default (derived from
     # ``is_lmcache_driven_available()``: CUDA and NPU -> lmcache_driven;
@@ -764,6 +766,7 @@ class LMCacheMPSchedulerAdapter:
         self._nonblocking_lookup_status = (
             ExtraConfigDefault.nonblocking_lookup_status.default
         )
+        lookup_wait_budget_ms = ExtraConfigDefault.lookup_wait_budget_ms.default
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
@@ -771,6 +774,11 @@ class LMCacheMPSchedulerAdapter:
             self._nonblocking_lookup_status = cfg[
                 ExtraConfigDefault.nonblocking_lookup_status.name
             ]
+            lookup_wait_budget_ms = cfg[ExtraConfigDefault.lookup_wait_budget_ms.name]
+        # Shared lookup wait budget.
+        self._lookup_wait_budget_s = max(0.0, float(lookup_wait_budget_ms)) / 1000
+        self._lookup_wait_window_start = 0.0
+        self._lookup_wait_used_s = 0.0
         self._mq_timeout = mq_timeout
         self._required_chunk_alignment = required_chunk_alignment
 
@@ -1027,6 +1035,28 @@ class LMCacheMPSchedulerAdapter:
                 ).no_worker_id_version()
                 self.req_clients[url].free_lookup_locks(tail_key, self.tp_size)
 
+    def _wait_within_budget(self, fut: MessagingFuture[Any]) -> bool:
+        """Wait for ``fut`` within the shared budget; return whether done."""
+        if fut.query():
+            return True
+        left = self._lookup_wait_left()
+        if left <= 0:
+            return False
+        start = time.monotonic()
+        fut.wait(left)
+        self._lookup_wait_used_s += time.monotonic() - start
+        return fut.query()
+
+    def _lookup_wait_left(self) -> float:
+        """Budget left (s) in the current 100 ms window."""
+        if self._lookup_wait_budget_s <= 0:
+            return 0.0
+        now = time.monotonic()
+        if now - self._lookup_wait_window_start >= 0.1:
+            self._lookup_wait_window_start = now
+            self._lookup_wait_used_s = 0.0
+        return self._lookup_wait_budget_s - self._lookup_wait_used_s
+
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
         """
@@ -1037,7 +1067,8 @@ class LMCacheMPSchedulerAdapter:
         outstanding this returns None. Once all servers have acked, polls one
         outstanding QUERY_PREFETCH_STATUS future per unresolved server without
         waiting by default. Setting ``lmcache.mp.nonblocking_lookup_status`` to
-        False instead waits for each reply in the current callback. Returns the
+        False instead waits for each reply in the current callback.
+        ``lmcache.mp.lookup_wait_budget_ms`` > 0: bounded wait. Returns the
         matched token count when the prefetch is complete, or None if still
         in progress.
 
@@ -1075,7 +1106,9 @@ class LMCacheMPSchedulerAdapter:
             # request_id answers 0: a spurious miss whose prefetch locks are
             # never released. So never query until every server has acked.
             ack.futures = {
-                url: fut for url, fut in ack.futures.items() if not fut.query()
+                url: fut
+                for url, fut in ack.futures.items()
+                if not self._wait_within_budget(fut)
             }
             if ack.futures:
                 if time.monotonic() - ack.submitted_at >= self._mq_timeout:
@@ -1101,6 +1134,23 @@ class LMCacheMPSchedulerAdapter:
                     self.req_clients[url].query_prefetch_status(request_id),
                     time.monotonic(),
                 )
+
+        if self._nonblocking_lookup_status and self._lookup_wait_budget_s > 0:
+            for url in list(futures):
+                while self._wait_within_budget(futures[url][0]):
+                    fut, submitted_at = futures[url]
+                    if fut.result(timeout=0) is not None:
+                        break
+                    # In progress: re-query within budget.
+                    del futures[url]
+                    if self._lookup_wait_left() <= 0:
+                        break
+                    start = time.monotonic()
+                    futures[url] = (
+                        self.req_clients[url].query_prefetch_status(request_id),
+                        submitted_at,
+                    )
+                    self._lookup_wait_used_s += time.monotonic() - start
 
         for url, (fut, submitted_at) in list(futures.items()):
             if self._nonblocking_lookup_status and not fut.query():

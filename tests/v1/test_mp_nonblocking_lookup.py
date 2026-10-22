@@ -6,6 +6,7 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from typing import Any
 import threading
+import time
 
 # Third Party
 import pytest
@@ -442,3 +443,59 @@ def test_end_waits_for_already_sent_status_only(
         client.status.set_result(reply)
         thread.join(timeout=6)
         assert not thread.is_alive()
+
+
+def budget(ms: float) -> dict[str, Any]:
+    """Lookup wait budget config."""
+    return {"lmcache.mp.lookup_wait_budget_ms": ms}
+
+
+def test_wait_budget_resolves_late_ack_and_status_in_one_call(
+    make_adapter: AdapterFactory,
+) -> None:
+    adapter, (client,) = make_adapter(extra_config=budget(80))
+    adapter.maybe_submit_lookup_request("r", list(range(256)))
+    timers = [
+        threading.Timer(0.005, client.ack.set_result, (None,)),
+        threading.Timer(0.015, client.status.set_result, (2,)),
+    ]
+    for timer in timers:
+        timer.start()
+    try:
+        assert adapter.check_lookup_result("r") == 128
+        assert client.queries == ["r"]
+    finally:
+        for timer in timers:
+            timer.join()
+
+
+def test_wait_budget_requeries_in_progress_status_in_one_call(
+    make_adapter: AdapterFactory,
+) -> None:
+    adapter, (client,) = make_adapter(extra_config=budget(50))
+    submit(adapter, [client])
+    client.replies = deque([ready(None), ready(2)])
+    assert adapter.check_lookup_result("r") == 128
+    assert client.queries == ["r", "r"]
+
+
+def test_wait_budget_is_shared_and_bounded(make_adapter: AdapterFactory) -> None:
+    adapter, (client,) = make_adapter(extra_config=budget(20))
+    adapter.maybe_submit_lookup_request("r", list(range(256)))
+    start = time.monotonic()
+    results = [adapter.check_lookup_result("r") for _ in range(20)]
+    elapsed = time.monotonic() - start
+    assert results == [None] * 20
+    assert not client.queries
+    # Per window, not per call.
+    assert elapsed < 0.09
+
+
+def test_zero_wait_budget_keeps_polling_nonblocking(
+    make_adapter: AdapterFactory,
+) -> None:
+    adapter, (client,) = make_adapter(extra_config=budget(0))
+    submit(adapter, [client])
+    client.replies = deque([ready(None), ready(2)])
+    assert adapter.check_lookup_result("r") is None
+    assert client.queries == ["r"]

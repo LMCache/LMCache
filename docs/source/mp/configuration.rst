@@ -964,6 +964,10 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        callback, for example when long prefill steps delay observation of an
        already-ready reply. LOOKUP acknowledgement polling
        remains asynchronous. Available with the current ``LMCacheMPConnector``.
+   * - ``lmcache.mp.lookup_wait_budget_ms``
+     - ``0.0``
+     - Lookup wait budget: ms per 100 ms window, shared by all requests.
+       ``0`` = nonblocking. Pairs with ``lmcache.mp.eager_prefetch``.
    * - ``lmcache.mp.eager_prefetch``
      - ``false``
      - Submit the LMCache lookup when a request enters vLLM's waiting queue,
