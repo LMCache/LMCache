@@ -682,14 +682,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 logger.warning(
                     "STORE block ID underflow for request_id=%s: each group needs "
                     "num_chunks * blocks_per_chunk block IDs for %d chunks "
-                    "(per-group blocks_per_chunk=%s, got per-group block ids=%s, "
-                    "key range [%d, %d)); skipping the store.",
+                    "(per-group blocks_per_chunk=%s); skipping the store.",
                     key.request_id,
                     num_chunks,
                     blocks_per_chunk,
-                    [len(g) for g in gpu_block_ids],
-                    key.start,
-                    key.end,
                 )
                 event_backend.record_event(event, cache_context.stream)
                 return (
@@ -1012,16 +1008,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 logger.error(
                     "RETRIEVE block ID underflow for request_id=%s: each group "
                     "needs num_chunks * blocks_per_chunk block IDs for %d "
-                    "chunks (per-group blocks_per_chunk=%s, got per-group "
-                    "block ids=%s, key range [%d, %d), skip_first_n_tokens=%d); "
-                    "skipping the retrieve.",
+                    "chunks (per-group blocks_per_chunk=%s); skipping the "
+                    "retrieve.",
                     key.request_id,
                     num_chunks,
                     blocks_per_chunk,
-                    [len(g) for g in gpu_block_ids],
-                    key.start,
-                    key.end,
-                    skip_first_n_tokens,
                 )
                 event_backend.record_event(event, cache_context.stream)
                 return event_backend.export_event(event, cache_context.device), False
