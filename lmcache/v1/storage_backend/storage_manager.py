@@ -24,6 +24,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.logging import init_logger
 from lmcache.observability import PrometheusLogger
 from lmcache.utils import (
@@ -32,7 +33,6 @@ from lmcache.utils import (
     start_loop_in_thread_with_exceptions,
 )
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,

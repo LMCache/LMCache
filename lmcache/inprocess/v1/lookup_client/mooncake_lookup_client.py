@@ -51,7 +51,7 @@ class MooncakeLookupClient(LookupClientInterface):
         )
 
         # First Party
-        from lmcache.v1.token_database import ChunkedTokenDatabase
+        from lmcache.inprocess.v1.token_database import ChunkedTokenDatabase
 
         assert not config.enable_blending, (
             "LMCache v1 blending is not supported in MooncakeLookupClient yet."

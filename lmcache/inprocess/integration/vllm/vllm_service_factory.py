@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from lmcache.inprocess.v1.lookup_client.lmcache_lookup_client import (
         LMCacheLookupServer,
     )
-    from lmcache.v1.manager import LMCacheManager
+    from lmcache.inprocess.v1.manager import LMCacheManager
 
 # First Party
 from lmcache.inprocess.integration.base_service_factory import BaseServiceFactory

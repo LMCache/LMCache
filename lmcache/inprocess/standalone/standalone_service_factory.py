@@ -18,7 +18,7 @@ from lmcache.v1.metadata import LMCacheMetadata
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.manager import LMCacheManager
+    from lmcache.inprocess.v1.manager import LMCacheManager
 
 
 class StandaloneServiceFactory(BaseServiceFactory):

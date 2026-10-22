@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 # First Party
-from lmcache.v1.basic_check import main, parse_args
-from lmcache.v1.check import CheckModeRegistry, check_mode
+from lmcache.inprocess.v1.basic_check import main, parse_args
+from lmcache.inprocess.v1.check import CheckModeRegistry, check_mode
 
 # --------------- CheckModeRegistry tests ---------------
 
@@ -203,7 +203,7 @@ class TestMain:
         fake_reg.modes["alpha"] = lambda: None
         fake_reg.modes["beta"] = lambda: None
 
-        monkeypatch.setattr("lmcache.v1.basic_check.registry", fake_reg)
+        monkeypatch.setattr("lmcache.inprocess.v1.basic_check.registry", fake_reg)
 
         await main()
         out = capsys.readouterr().out
@@ -221,7 +221,7 @@ class TestMain:
         fake_reg = CheckModeRegistry()
         fake_reg.loaded = True  # empty registry
 
-        monkeypatch.setattr("lmcache.v1.basic_check.registry", fake_reg)
+        monkeypatch.setattr("lmcache.inprocess.v1.basic_check.registry", fake_reg)
 
         await main()
         out = capsys.readouterr().out
@@ -236,7 +236,7 @@ class TestMain:
         fake_reg.loaded = True
         fake_reg.register("run_it", handler)
 
-        monkeypatch.setattr("lmcache.v1.basic_check.registry", fake_reg)
+        monkeypatch.setattr("lmcache.inprocess.v1.basic_check.registry", fake_reg)
         monkeypatch.setattr(
             "sys.argv",
             [

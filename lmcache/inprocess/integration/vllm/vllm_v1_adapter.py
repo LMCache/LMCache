@@ -33,6 +33,7 @@ from lmcache.banner import print_banner_once
 from lmcache.inprocess.integration.vllm.vllm_service_factory import (
     VllmServiceFactory,
 )
+from lmcache.inprocess.v1.manager import LMCacheManager
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
@@ -47,7 +48,6 @@ from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import validate_and_set_config_value
-from lmcache.v1.manager import LMCacheManager
 
 if TYPE_CHECKING:
     # Third Party

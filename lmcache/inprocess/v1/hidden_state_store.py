@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Union, cast
 import torch
 
 # First Party
+from lmcache.inprocess.v1.token_database import TokenDatabase
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -23,7 +24,6 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.token_database import TokenDatabase
 
 if TYPE_CHECKING:
     # First Party

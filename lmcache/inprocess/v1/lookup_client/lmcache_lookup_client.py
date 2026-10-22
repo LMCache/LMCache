@@ -65,7 +65,7 @@ class LMCacheLookupClient(LookupClientInterface):
         self.reqs_status: dict[str, int] = {}
 
         # First Party
-        from lmcache.v1.token_database import (
+        from lmcache.inprocess.v1.token_database import (
             ChunkedTokenDatabase,
             SegmentTokenDatabase,
             TokenDatabase,
