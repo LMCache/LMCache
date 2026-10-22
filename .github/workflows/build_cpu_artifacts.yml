@@ -17,6 +17,7 @@ on:
             - 'requirements/build.txt'
             - 'lmcache/__init__.py'
             - '.github/workflows/build_cpu_artifacts.yml'
+            - '.github/actions/build-artifacts/action.yml'
 
 env:
     LC_ALL: en_US.UTF-8
@@ -49,21 +50,15 @@ jobs:
               with:
                 fetch-depth: 0
 
-            - name: Remove non-release tags
-              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+$' | xargs -r git tag -d
-
-            - name: Setup Python 3.13
-              uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+            - name: Prepare artifact build
+              uses: ./.github/actions/build-artifacts
               with:
-                python-version: "3.13"
-
-            - name: Install build tooling and CPU torch
-              run: |
-                python -m pip install --upgrade pip
-                pip install --index-url https://download.pytorch.org/whl/cpu torch
-                # Pre-install build deps for --no-isolation below.
-                pip install -r requirements/build.txt
-                pip install build
+                python_version: "3.13"
+                pip_index_url: https://download.pytorch.org/whl/cpu
+                pip_index_packages: torch
+                pip_packages: build
+                requirements_file: requirements/build.txt
+                release_tag_pattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
 
             - name: Clean up release artifacts
               run: |

@@ -16,6 +16,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.inprocess.v1.transfer_channel.transfer_utils import P2PInitSideRetMsg
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_controller.message import (
@@ -30,7 +31,6 @@ from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.p2p_backend import P2PBackend
-from lmcache.v1.transfer_channel.transfer_utils import P2PInitSideRetMsg
 from tests.v1.utils import get_available_ports
 
 logger = init_logger(__name__)
@@ -51,7 +51,8 @@ def wait_for_keys_in_cache(
             return True
         time.sleep(poll_interval)
     logger.warning(
-        f"Timeout waiting for keys: {[key.to_string() for key in missing_keys]}"
+        "Timeout waiting for keys: %s",
+        [key.to_string() for key in missing_keys],
     )
     return False
 
@@ -147,7 +148,7 @@ def run_mock_controller(
         socket.bind(controller_url)
         socket.setsockopt(zmq.RCVTIMEO, 1000)
 
-        logger.info(f"Mock controller started at {controller_url}")
+        logger.info("Mock controller started at %s", controller_url)
         ready_event.set()  # Signal that the controller is ready
 
         while not stop_event.is_set():

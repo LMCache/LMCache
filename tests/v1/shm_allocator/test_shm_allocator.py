@@ -137,7 +137,7 @@ def shm_allocator():
 @pytest.fixture
 def worker_binary():
     worker_binary_path = _build_worker_binary()
-    logger.info(f"Using shm_file_worker binary: {worker_binary_path}")
+    logger.info("Using shm_file_worker binary: %s", worker_binary_path)
     return worker_binary_path
 
 

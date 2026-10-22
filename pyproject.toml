@@ -12,6 +12,8 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
+    "grpcio==1.78.0",
+    "grpcio-tools==1.78.0",
     "torch==2.13.0",
     "wheel",
 ]
@@ -44,8 +46,7 @@ dynamic = ["dependencies", "optional-dependencies", "version"]
 
 [project.scripts]
 lmcache="lmcache.cli.main:main"
-lmcache_server="lmcache.v1.server.__main__:main"
-lmcache_controller="lmcache.v1.api_server.__main__:main"
+lmcache_controller="lmcache.inprocess.v1.api_server.__main__:main"
 
 [project.urls]
 homepage = "https://docs.lmcache.ai"
@@ -85,12 +86,16 @@ select = [
     #"SIM",
     # Ruff does not support isort's import_headings feature, yet.
     # "I",
-    # flake8-logging-format
-    #"G",
+    # flake8-logging-format: f-string in a logging call. %-format defers the
+    # formatting until the record is actually emitted. Only G004 is enabled;
+    # G201/G002 change the logged content rather than the evaluation cost.
+    "G004",
     # flake8-self (private member access)
     "SLF",
     # pylint: logging call has more arguments than format placeholders
     "PLE1205",
+    # flake8-tidy-imports: banned API imports
+    "TID251",
 ]
 ignore = [
     # star imports
@@ -107,6 +112,18 @@ ignore = [
 # Ignore SLF everywhere except lmcache/v1/multiprocess/
 "!lmcache/v1/multiprocess/**" = ["SLF"]
 "!lmcache/v1/distributed/**" = ["SLF"]
+# Temporary G004 ignores for the files/directories that have not been migrated
+# to lazy %-format logging yet. Delete an entry once its area is converted;
+# until then every already-migrated file is protected from regressing.
+# NOTE: "*" crosses directory separators in ruff's per-file-ignores, so a
+# pattern like "lmcache/*.py" would silently ignore the whole subtree -- that is
+# why mixed directories are listed file by file, and "<dir>/**" is used only
+# where every file below the directory still violates the rule.
+# Tracking issue: https://github.com/LMCache/LMCache/issues/5118
+"lmcache/storage_backend/serde/cachegen_basics.py" = ["G004"]
+"lmcache/storage_backend/**" = ["TID251"]
+"lmcache/v1/distributed/l2_adapters/bigtable_l2_adapter.py" = ["G004"]
+"tests/v1/platform/test_ipc_wire.py" = ["TID251"]
 
 [tool.ruff.lint.isort]
 # same as .isort.cfg
@@ -117,6 +134,9 @@ from-first = true
 # import-heading-thirdparty=Third Party
 # import-heading-firstparty=First Party
 # import-heading-localfolder=Local
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"pickle".msg = "Use a data-only serialization format instead."
 
 [tool.mypy]
 
@@ -152,8 +172,16 @@ warn_return_any = false
 
 follow_imports = "silent"
 
+[[tool.mypy.overrides]]
+module = [
+    "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.*",
+    "lmcache.v1.memory_orchestrator._proto_gen.*",
+]
+ignore_errors = true
+follow_imports = "skip"
+
 [tool.codespell]
-ignore-words-list = "afterall,allready,notin,te,cann"
+ignore-words-list = "afterall,allready,notin,te,cann,wqs"
 skip = "operator/config/crd/bases/*,lmcache/integration/vllm/lmcache_mp_connector_*.py"
 # Base64 image payloads in executed notebooks are random-looking and will
 # eventually contain something that looks like a typo.

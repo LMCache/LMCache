@@ -74,7 +74,6 @@ register_all_apis()
   │    ├─ info_api        → has router? ✓ → include
   │    ├─ config_api      → has router? ✓ → include
   │    ├─ cache_api       → has router? ✓ → include
-  │    ├─ quota_api       → has router? ✓ → include
   │    └─ my_new_api      → has router? ✓ → include
   │
   └─ app.include_router(collected_router)
@@ -154,7 +153,12 @@ server lifecycle and all endpoint handlers. Available attributes
 | Attribute | Type | Description |
 |---|---|---|
 | `app.state.engine` | Cache engine instance | Main cache engine for KV operations |
-| `app.state.zmq_server` | ZMQ server instance | Underlying multiprocess ZMQ server |
+| `app.state.context` | `MPCacheServerContext` wrapper | Typed dependencies shared by HTTP handlers |
+| `app.state.request_server` | `RequestServer` protocol | Transport-neutral request-server lifecycle |
+
+The selected `RequestServer` is owned and closed by the FastAPI lifespan. It
+is exposed only through its transport-neutral protocol; endpoint handlers must
+not depend on a concrete ZMQ or gRPC server.
 
 Access these via the `Request` object in your handler:
 
