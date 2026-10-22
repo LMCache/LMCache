@@ -27,12 +27,13 @@ from pydantic import BaseModel
 import uvicorn
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.config import (
+from lmcache.inprocess.v1.cache_controller.config import (
     load_controller_config_with_overrides,
 )
-from lmcache.v1.cache_controller.controller_manager import LMCacheControllerManager
-from lmcache.v1.cache_controller.message import (  # noqa: E501
+from lmcache.inprocess.v1.cache_controller.controller_manager import (
+    LMCacheControllerManager,
+)
+from lmcache.inprocess.v1.cache_controller.message import (  # noqa: E501
     CheckFinishMsg,
     CheckFinishRetMsg,
     ClearMsg,
@@ -56,6 +57,7 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     QueryWorkerInfoRetMsg,
     WorkerInfo,
 )
+from lmcache.logging import init_logger
 from lmcache.v1.config_base import parse_command_line_extra_params
 from lmcache.v1.internal_api_server.api_registry import APIRegistry
 
@@ -126,6 +128,7 @@ def create_app(
     static_dir = os.path.join(
         project_root,
         "lmcache",
+        "inprocess",
         "v1",
         "cache_controller",
         "frontend",
