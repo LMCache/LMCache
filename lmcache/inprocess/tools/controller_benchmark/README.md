@@ -39,7 +39,7 @@ python3 -m lmcache.inprocess.v1.api_server --host 0.0.0.0 --port 9009 \
 
 - Start the benchmark
 ```bash
-python3 -m lmcache.tools.controller_benchmark \
+python3 -m lmcache.inprocess.tools.controller_benchmark \
   --monitor-ports  "{\"pull\":7555,\"reply\":7556}" \
   --num-instances 50 --num-workers 1 --num-keys 1000000 --batch-size 100 \
   --operations "admit:35,evict:29,heartbeat:1,p2p_lookup:35"

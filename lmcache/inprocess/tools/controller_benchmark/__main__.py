@@ -21,13 +21,13 @@ import multiprocessing
 import statistics
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.tools.controller_benchmark.benchmark import (
+from lmcache.inprocess.tools.controller_benchmark.benchmark import (
     BenchmarkResults,
     OperationStats,
     ZMQControllerBenchmark,
 )
-from lmcache.tools.controller_benchmark.config import ZMQBenchmarkConfig
+from lmcache.inprocess.tools.controller_benchmark.config import ZMQBenchmarkConfig
+from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 

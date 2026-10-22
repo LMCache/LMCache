@@ -13,6 +13,29 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # First Party
+from lmcache.inprocess.tools.controller_benchmark.benchmark import (
+    ZMQControllerBenchmark,
+)
+from lmcache.inprocess.tools.controller_benchmark.config import ZMQBenchmarkConfig
+from lmcache.inprocess.tools.controller_benchmark.handlers import OPERATION_HANDLERS
+from lmcache.inprocess.tools.controller_benchmark.handlers.admit import AdmitHandler
+from lmcache.inprocess.tools.controller_benchmark.handlers.base import (
+    OperationHandler,
+    SocketType,
+)
+from lmcache.inprocess.tools.controller_benchmark.handlers.deregister import (
+    DeregisterHandler,
+)
+from lmcache.inprocess.tools.controller_benchmark.handlers.evict import EvictHandler
+from lmcache.inprocess.tools.controller_benchmark.handlers.heartbeat import (
+    HeartbeatHandler,
+)
+from lmcache.inprocess.tools.controller_benchmark.handlers.p2p_lookup import (
+    P2PLookupHandler,
+)
+from lmcache.inprocess.tools.controller_benchmark.handlers.register import (
+    RegisterHandler,
+)
 from lmcache.inprocess.v1.cache_controller.message import (
     BatchedKVOperationMsg,
     BatchedP2PLookupMsg,
@@ -22,19 +45,6 @@ from lmcache.inprocess.v1.cache_controller.message import (
     RegisterMsg,
 )
 from lmcache.logging import init_logger
-from lmcache.tools.controller_benchmark.benchmark import ZMQControllerBenchmark
-from lmcache.tools.controller_benchmark.config import ZMQBenchmarkConfig
-from lmcache.tools.controller_benchmark.handlers import OPERATION_HANDLERS
-from lmcache.tools.controller_benchmark.handlers.admit import AdmitHandler
-from lmcache.tools.controller_benchmark.handlers.base import (
-    OperationHandler,
-    SocketType,
-)
-from lmcache.tools.controller_benchmark.handlers.deregister import DeregisterHandler
-from lmcache.tools.controller_benchmark.handlers.evict import EvictHandler
-from lmcache.tools.controller_benchmark.handlers.heartbeat import HeartbeatHandler
-from lmcache.tools.controller_benchmark.handlers.p2p_lookup import P2PLookupHandler
-from lmcache.tools.controller_benchmark.handlers.register import RegisterHandler
 
 logger = init_logger(__name__)
 
@@ -457,7 +467,7 @@ class TestIntegration:
 
         # Mock ZMQ context and sockets
         with patch(
-            "lmcache.tools.controller_benchmark.benchmark.get_zmq_context"
+            "lmcache.inprocess.tools.controller_benchmark.benchmark.get_zmq_context"
         ) as mock_context:
             mock_ctx = MagicMock()
             mock_context.return_value = mock_ctx
