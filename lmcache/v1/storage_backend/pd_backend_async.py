@@ -18,6 +18,7 @@ import zmq.asyncio
 
 # First Party
 from lmcache import torch_dev
+from lmcache.inprocess.v1.rpc_utils import get_zmq_context
 from lmcache.inprocess.v1.transfer_channel import CreateTransferChannel
 from lmcache.inprocess.v1.transfer_channel.transfer_utils import get_correct_device
 from lmcache.integration.vllm.utils import get_size_bytes
@@ -36,7 +37,6 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.rpc_utils import get_zmq_context
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 
 logger = init_logger(__name__)
