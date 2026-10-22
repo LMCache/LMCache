@@ -6,6 +6,7 @@ Overview
 
    request_transport
    multi_l1
+   chunk_size_negotiation
 
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
 vLLM instances reach through a configurable ZMQ or gRPC request transport.
@@ -110,17 +111,18 @@ it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
 instances assembled by ``_build_modules()`` (in ``server.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
-**``server.py``** -- The transport-neutral server compositor. Creates an
-``MPCacheServer``, assembles the engine modules
-(``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
-and/or ``EngineDrivenTransferModule`` depending on
-``--supported-transfer-mode`` — ``lmcache_driven`` (default) or
-``engine_driven`` loads just one,
-``auto`` loads both — plus the blend module when
-``--engine-type blend`` is set). It calls ``create_request_server()`` to build
-the ZMQ or gRPC request server selected by ``--transport``, discovers the
-annotated operations exposed by the loaded modules, and blocks in a keep-alive
-loop.
+**``server.py``** -- The transport-neutral server compositor. It discovers
+``DiscoverableModule`` classes under the ``modules`` package, orders their
+class-referenced ``module_dependencies``, and calls ``create()`` with a shared
+``ModuleBuildContext``. Out-of-tree ``--server-module`` paths explicitly add
+classes to the same graph and lifecycle; their configuration comes from
+``ModuleBuildContext.config_for()``. This includes ``KVEventModule`` and the
+transfer, lookup, management, P2P, and blend modules; opt-in modules under
+``plugin_modules/`` (for example ``qstore``) join the same graph only when
+named by ``--server-module``. The
+compositor then creates the ZMQ or gRPC request server selected by
+``--transport``, registers module handlers and optional transport services,
+and blocks in a keep-alive loop.
 
 **``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
 blend pipeline that enables non-prefix KV cache reuse (e.g. across
@@ -163,21 +165,21 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - Handler Type
      - Description
    * - ``REGISTER_KV_CACHE``
-     - SYNC
+     - SERIALIZED
      - Register GPU KV cache tensors for a vLLM instance.
    * - ``UNREGISTER_KV_CACHE``
-     - SYNC
+     - SERIALIZED
      - Unregister KV cache tensors.
    * - ``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
-     - SYNC
+     - SERIALIZED
      - Register an engine-driven KV cache context (CPU/accelerator
        workers using the PREPARE/COMMIT transfer path). Loaded only when
        ``--supported-transfer-mode`` is ``engine_driven`` or ``auto``.
        Returns a ``RegisterEngineDrivenContextResponse`` carrying the
        SHM segment name and pool size when the SHM path is in use
-       (empty for the pickle path).
+       (empty for the inline path).
    * - ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
-     - SYNC
+     - SERIALIZED
      - Unregister an engine-driven KV cache context.
    * - ``STORE``
      - BLOCKING
@@ -197,12 +199,12 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
    * - ``COMMIT_STORE``
      - BLOCKING
      - (Engine-driven path) Worker commits the chunk's serialized bytes
-       (pickle path) or releases the prepared SHM slot (SHM path) so the
+       (typed inline path) or releases the prepared SHM slot (SHM path) so the
        server can persist into L1 storage.
    * - ``PREPARE_RETRIEVE``
      - BLOCKING
      - (Engine-driven path) Worker asks the server to prepare the
-       retrieval payload for a key. The pickle path returns the bytes
+       retrieval payload for a key. The typed inline path returns the bytes
        inline; the SHM path returns slot info so the worker can read
        from shared memory.
    * - ``COMMIT_RETRIEVE``
@@ -235,7 +237,7 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - Clear cached data. The optional ``force`` flag defaults to ``False``;
        when set, active locks may be ignored.
    * - ``GET_CHUNK_SIZE``
-     - SYNC
+     - SERIALIZED
      - Return the server's chunk size.
    * - ``PING``
      - BLOCKING
@@ -245,14 +247,14 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - Fire-and-forget channel for the vLLM scheduler to report GPU block
        allocation events to the observability subsystem.
    * - ``NOOP``
-     - SYNC
+     - SERIALIZED
      - Debug heartbeat -- returns a confirmation string.
    * - ``CB_REGISTER_ROPE``
-     - SYNC
+     - SERIALIZED
      - (Blend) Share the RoPE cos/sin cache onto a context already
        registered via ``REGISTER_KV_CACHE``.
    * - ``CB_UNREGISTER_ROPE``
-     - SYNC
+     - SERIALIZED
      - (Blend) Drop the RoPE state (paged KV cache lives on; use
        ``UNREGISTER_KV_CACHE`` to release that).
    * - ``CB_RETRIEVE_PRE_COMPUTED``
@@ -287,8 +289,8 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
 
 **Handler types:**
 
-- **SYNC** -- Serialized by the request transport (the ZMQ main loop or the
-  gRPC sync-handler lock) for fast, non-blocking work.
+- **SERIALIZED** -- Run one at a time by the request transport (the ZMQ main
+  loop or the gRPC serialized-handler lock) for fast, non-blocking work.
 - **BLOCKING** -- Dispatched to a normal or client-affinity thread pool (may
   involve GPU copies or I/O).
 
@@ -373,8 +375,8 @@ tiers selected at startup (all satisfy ``L1ManagerProtocol``):
 - ``DevDaxL1MemoryManager`` -- a Device-DAX-backed L1 slab when
   ``--l1-devdax-path`` is set. A pure Device-DAX configuration maps the DAX
   device as the full L1 arena; a hybrid configuration uses DRAM first and
-  spills overflow allocations into Device-DAX. See the *L1 Memory Manager*
-  section of :doc:`configuration` for the accepted knobs.
+  spills overflow allocations into Device-DAX. See :ref:`mp-devdax-l1` for
+  the deployment guide and accepted knobs.
 - ``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is set.
   The bytes live on disk; reads/writes DMA directly between the GPU staging
   buffer and the slab, driven by the process-global ``GDSContext``
@@ -588,10 +590,13 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/``
      - Build-time protobuf generator and generated Python package
    * - ``lmcache/v1/multiprocess/transport/grpc_impl/server.py``
-     - gRPC service binding, handler scheduling, and request-server construction
+     - gRPC service binding and handler scheduling
+   * - ``lmcache/v1/multiprocess/transport/grpc_impl/server_builder.py``
+     - gRPC request-server construction, choosing the sync or aio server
    * - ``lmcache/v1/multiprocess/modules/``
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
-       ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
+       ``management.py`` (``ManagementModule``), ``kv_events.py``
+       (``KVEventModule``, CPU event subscriptions), ``lmcache_driven_transfer.py``
        (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
        (``EngineDrivenTransferModule``), and ``blend.py``
        (``BlendModule``, the paged-aware blend pipeline selected by

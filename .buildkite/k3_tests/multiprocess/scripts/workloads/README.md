@@ -11,14 +11,25 @@ a workload owns its requests and assertions.
 - `high-concurrency.sh`: concurrent random-prefill completion validation.
 - `deadlock.sh`: high-concurrency deadlock regression.
 - `long-doc-qa-l2.sh`: L2 restart, data-flow, and performance validation.
+  Its checks live in `long-doc-qa-l2-verify.sh`, which is not a workload: it
+  runs every check before exiting so a threshold failure still leaves the
+  `/metrics` snapshot and a per-check summary in `RESULTS_DIR`, and it runs
+  on CPU with stub inputs (`tests/tools/test_long_doc_qa_l2_verify.py`).
 - `restart-recovery.sh`: LMCache server restart and worker re-registration.
 - `http-api.sh`: LMCache HTTP API and CLI coverage with a live engine.
 
+`verification/` contains shared assertions and request helpers that are sourced
+by executable workloads but are not workloads themselves. Its
+`dsv4-flash-tp-verification.sh` is used by both engine-specific
+DeepSeek-V4-Flash launchers.
+
 `vllm/` contains workloads that currently depend on vLLM-specific commands,
-response extensions, endpoints, logs, or model launch flags. A future
-`sglang/` directory holds the corresponding SGLang-only coverage. For example,
-`mp-autostart-tp2.sh` verifies vLLM-specific connector auto-start behavior and
-therefore remains under `vllm/` rather than `common/`.
+response extensions, endpoints, logs, or model launch flags. `sglang/` contains
+the corresponding SGLang-specific launchers. For example, each engine has a
+`dsv4-flash-tp.sh` because model startup is engine-specific, while both source
+the common verification helper. `mp-autostart-tp2.sh` verifies vLLM-specific
+connector auto-start behavior and therefore remains under `vllm/` rather than
+`common/`.
 
 The harness converts a test name from underscores to hyphens and discovers the
 script automatically. For example, `long_doc_qa` resolves to

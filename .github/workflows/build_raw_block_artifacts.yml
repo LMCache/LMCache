@@ -1,0 +1,100 @@
+name: Build Raw-Block Rust Artifacts
+
+# Reusable workflow that builds the wheels of the raw_block L2 adapter's Rust
+# module (lmcache_rust_raw_block_io, rust/raw_block) for amd64 and arm64,
+# CPython 3.10-3.13 (the lmcache matrix). The adapter imports the module
+# lazily, so without these wheels raw_block fails on first use. On a release
+# tag the wheels carry the release version, so images can pin
+# lmcache-rust-raw-block-io to the same version as lmcache.
+#
+# The module uses the CPython buffer protocol, which the stable ABI only has
+# from 3.11, so wheels are built per interpreter rather than as abi3.
+
+on:
+    workflow_call:
+    workflow_dispatch:
+
+env:
+    LC_ALL: en_US.UTF-8
+
+defaults:
+    run:
+        shell: bash
+
+permissions:
+    contents: read
+
+jobs:
+    build-artifacts:
+        name: Build raw-block wheels (${{ matrix.arch }})
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - arch: amd64
+                      target: x86_64
+                      runner: ubuntu-latest
+                    - arch: arm64
+                      target: aarch64
+                      runner: ubuntu-24.04-arm
+        runs-on: ${{ matrix.runner }}
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+            - name: Stamp the release version from the tag
+              if: startsWith(github.ref, 'refs/tags/v')
+              run: .github/scripts/stamp_raw_block_version.sh "${GITHUB_REF_NAME#v}"
+
+            - name: Build wheels
+              uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+              with:
+                target: ${{ matrix.target }}
+                manylinux: "2_28"
+                args: >-
+                    --release --locked --out dist
+                    --manifest-path rust/raw_block/Cargo.toml
+                    --interpreter python3.10 python3.11 python3.12 python3.13
+
+            - name: Set up Python
+              uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+              with:
+                python-version: "3.12"
+
+            # Install the cp312 wheel on the runner and use the module: an
+            # import alone wouldn't catch a broken I/O path.
+            - name: Test the cp312 wheel
+              run: |
+                wheels=(dist/*.whl)
+                printf '%s\n' "${wheels[@]}"
+                test "${#wheels[@]}" -eq 4
+                python -m pip install dist/*-cp312-cp312-*.whl
+                python - <<'EOF'
+                import os, tempfile
+                from lmcache_rust_raw_block_io import RawBlockDevice
+
+                path = os.path.join(tempfile.mkdtemp(), "dev.img")
+                with open(path, "wb") as f:
+                    f.truncate(16 << 20)
+                for engine in ("posix", "io_uring"):
+                    dev = RawBlockDevice(path, True, io_engine=engine)
+                    data = bytearray(os.urandom(16384))
+                    out = bytearray(len(data))
+                    dev.pwrite_from_buffer(8192, data)
+                    dev.pread_into(8192, out, len(data))
+                    dev.close()
+                    assert out == data, engine
+                    print(engine, "round trip OK")
+                EOF
+
+            - name: Upload release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: release-raw-block-artifacts-${{ matrix.arch }}
+                path: dist/*.whl

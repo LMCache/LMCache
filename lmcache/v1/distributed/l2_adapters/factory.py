@@ -136,12 +136,16 @@ def ensure_adapter_loaded(name: str) -> None:
 
 
 def load_all_adapters() -> None:
-    """Force-import all pending adapter modules.
+    """Attempt each currently pending adapter module for CLI enumeration.
 
-    Useful for CLI help that needs to list every
-    registered type name.
+    Missing dependencies are skipped. Import-time ``TypeError`` failures,
+    such as incompatible protobuf descriptors, are logged and left pending
+    so explicit adapter loading still raises the original error.
+
+    Returns:
+        None. Successfully imported modules populate the registries.
     """
-    while _PENDING_MODULES:
+    for _ in range(len(_PENDING_MODULES)):
         mod_path = _PENDING_MODULES.pop(0)
         try:
             importlib.import_module(mod_path)
@@ -150,13 +154,21 @@ def load_all_adapters() -> None:
                 "Skipping module %s during bulk load",
                 mod_path,
             )
+        except TypeError:
+            logger.exception(
+                "Skipping incompatible module %s during bulk load", mod_path
+            )
+            _PENDING_MODULES.append(mod_path)
 
 
 def get_all_registered_names() -> list[str]:
-    """Return all known adapter type names.
+    """Return registered adapter names after attempting pending imports.
 
-    Forces import of all pending modules so that the
-    returned list is complete.
+    Modules with missing dependencies or import-time ``TypeError`` failures
+    are skipped by :func:`load_all_adapters`.
+
+    Returns:
+        Sorted adapter type names whose factories have been registered.
     """
     load_all_adapters()
     return sorted(_L2_ADAPTER_FACTORY_REGISTRY)

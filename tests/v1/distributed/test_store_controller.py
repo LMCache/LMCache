@@ -718,6 +718,50 @@ class TestBufferOnlyMode:
         ctrl.stop()
         adapter.close()
 
+    def test_read_locked_key_deleted_after_reader_finishes(
+        self, l1_manager, monkeypatch
+    ):
+        """A key still being read when its L2 store finishes leaves L1 once
+        the reader is done."""
+        delete_called = threading.Event()
+        delete = l1_manager.delete
+
+        def watched_delete(*args, **kwargs):
+            result = delete(*args, **kwargs)
+            delete_called.set()
+            return result
+
+        monkeypatch.setattr(l1_manager, "delete", watched_delete)
+        # Slow enough that the read lock below is taken before the store ends.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=0.001)
+        )
+
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=BufferOnlyStorePolicy(),
+        )
+        ctrl.start()
+
+        keys = [make_object_key(0)]
+        write_keys_to_l1(l1_manager, keys, make_layout())
+        assert l1_manager.reserve_read(keys)[keys[0]][0] == L1Error.SUCCESS
+
+        assert delete_called.wait(5.0), "L2 store should finish and try L1 delete"
+        assert l1_manager.get_object_state(keys[0]) is not None
+
+        l1_manager.finish_read(keys)
+        ok = wait_for_condition(
+            lambda: l1_manager.get_object_state(keys[0]) is None,
+            timeout=5.0,
+        )
+        assert ok, "Key should be deleted from L1 after the reader finishes"
+
+        ctrl.stop()
+        adapter.close()
+
     def test_noop_eviction_never_evicts(self):
         """NoOpEvictionPolicy should never return eviction actions."""
         noop = NoOpEvictionPolicy()

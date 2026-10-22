@@ -20,7 +20,7 @@ Runtime test gating:
 
 # Standard
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import os
 import shutil
 import time
@@ -32,7 +32,13 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
     _object_key_to_filename,
 )
@@ -46,7 +52,13 @@ from lmcache.v1.memory_management import (
     TensorMemoryObj,
 )
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.lmcache_hf3fs import LMCacheHf3fsClient
+
 logger = init_logger(__name__)
+
+_MEMORY_TAGS = MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
 
 # ---------------------------------------------------------------------------
 # Environment / mode detection
@@ -316,6 +328,7 @@ def hf3fs_l2_adapter(hf3fs_native_client):
     client = hf3fs_native_client[0]
     return NativeConnectorL2Adapter(
         client,
+        _MEMORY_TAGS,
         type_name="Hf3fsL2Adapter",
     )
 
@@ -671,6 +684,7 @@ class TestHf3fsAdapterFactory:
         try:
             adapter = NativeConnectorL2Adapter(
                 client,
+                _MEMORY_TAGS,
                 type_name="Hf3fsL2Adapter",
             )
             assert adapter is not None
@@ -722,6 +736,25 @@ class TestHf3fsNativeConnector:
         assert client is not None
         # Verify the client can be closed without error
         client.close()
+
+    def test_concurrent_same_key_stores_publish_whole_object(
+        self, hf3fs_native_client: tuple["LMCacheHf3fsClient", str, str]
+    ) -> None:
+        """Concurrent writers publish one complete value without leftover files."""
+        client, _, base_path = hf3fs_native_client
+        object_key = create_object_key(1102)
+        key = _object_key_to_string(object_key)
+        payloads = [bytes([i]) * (4 * 1024 * 1024) for i in range(8)]
+        client.submit_batch_set(
+            [key] * len(payloads), [memoryview(data) for data in payloads]
+        )
+        assert _wait_for_completions(client)[0][1]
+        result = bytearray(len(payloads[0]))
+        client.submit_batch_get([key], [memoryview(result)])
+        assert _wait_for_completions(client)[0][3] == [True]
+        assert bytes(result) in payloads
+        path = Path(base_path) / _object_key_to_filename(object_key)
+        assert list(Path(base_path).iterdir()) == [path]
 
     def test_single_put_get_roundtrip(self, hf3fs_native_client):
         """Test single key write-read cycle with data verification."""

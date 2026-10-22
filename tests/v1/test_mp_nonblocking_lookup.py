@@ -51,7 +51,11 @@ class NoopHeartbeatThread:
     """Keep lookup-status tests independent of background health polling."""
 
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-        pass
+        self.recover_callback: Callable[[], bool] | None = None
+
+    def register_recover_callback(self, callback: Callable[[], bool]) -> None:
+        """Mirror the production heartbeat interface without running it."""
+        self.recover_callback = callback
 
     def start(self) -> None:
         """Do not start a thread in a synchronous polling test."""
@@ -77,6 +81,10 @@ class Client:
     def get_chunk_size(self) -> MessagingFuture[Any]:
         """Advertise the fixed chunk64 test geometry."""
         return ready(64)
+
+    def get_experimental(self) -> MessagingFuture[Any]:
+        """Advertise no optional server capabilities."""
+        return ready([])
 
     def lookup(self, key: Any, tp_size: int) -> MessagingFuture[Any]:
         """Record submission and return its controllable acknowledgement."""
