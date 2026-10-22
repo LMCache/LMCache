@@ -52,7 +52,7 @@ name and label **only that node** for this example:
 GPU_NODE=your-gpu-node
 kubectl label node "$GPU_NODE" lmcache.ai/cpu-server-example=true
 kubectl apply -f examples/multi_process/cpu_server/lmcache-daemonset.yaml
-kubectl -n multi-process-cpu-server rollout status ds/lmcache-cpu-server --timeout=180s
+kubectl -n multi-process-cpu-server rollout status ds/lmcache-cpu-server --timeout=600s
 ```
 
 Server readiness checks only that the transport socket accepts connections. It
