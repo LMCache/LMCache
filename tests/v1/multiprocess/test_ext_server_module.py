@@ -23,6 +23,7 @@ from lmcache.v1.multiprocess.engine_module import (
     ModuleBuildContext,
 )
 from lmcache.v1.multiprocess.ext_server_module import (
+    ExtServerModuleRouter,
     ExtServerModuleSpec,
     build_server_module_router,
     load_server_module_classes,
@@ -357,10 +358,12 @@ def test_build_modules_loads_plugin_and_registers_liveness_target(
     log_format, module_count, module_details = logger_info.call_args.args
     log_message = log_format % (module_count, module_details)
     assert module_count == len(modules)
+    # The lookup module's engine-hints handler adds the internal router.
     assert all(
         isinstance(m, DiscoverableModule)
         and m.module_name + "(dependencies=[" in log_message
         for m in modules
+        if not isinstance(m, ExtServerModuleRouter)
     )
     assert "fake_plugin(dependencies=[lookup])" in log_message
 

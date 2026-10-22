@@ -534,6 +534,68 @@ class GroupedObjectKeys:
 
 
 @dataclass(frozen=True)
+class ReusableHitRule:
+    """An engine's ``ReusableLoadRule`` bound to one prefetch.
+
+    ``engine_hit_tokens`` is the engine's own hit ``H``; row column ``j`` of
+    the prefetch is absolute chunk ``start_chunk + j``.
+    """
+
+    granularity_tokens: int
+    drop_tokens: int
+    engine_hit_tokens: int
+    chunk_size: int
+    start_chunk: int = 0
+    request_id: str = ""
+
+    def choose(self, rows: "list[Bitmap]", windows: list[int]) -> int | None:
+        """Pick the prefix to serve from the per-row presence ``rows``.
+
+        The rule maps the token match ``N`` (what the full-attention rows
+        hold), so a recurrent state missing at ``N`` does not take the drop
+        twice. Returns ``L`` (row-relative chunks) in ``case2``, the highest
+        servable prefix in ``(H, reusable_end(N)]`` when the longest servable
+        ``M`` ends above ``reusable_end(N) > H``; else None to serve ``M``
+        (``case1``, or ``no_L`` when there is no such ``L``).
+        """
+        # First Party
+        from lmcache.v1.distributed.bitmap_ops.fold import fold_grouped
+
+        servable = fold_grouped(rows, windows)
+        longest = servable.highest_set_bit() + 1
+        if longest <= 0:
+            return None
+        full = [i for i, window in enumerate(windows) if window <= 0]
+        match = longest
+        if full:
+            full_rows = fold_grouped(
+                [rows[i] for i in full], [windows[i] for i in full]
+            )
+            match = max(longest, full_rows.highest_set_bit() + 1)
+        chunk, start, hit = self.chunk_size, self.start_chunk, self.engine_hit_tokens
+        reusable = (start + match) * chunk // self.granularity_tokens
+        reusable = max(reusable * self.granularity_tokens - self.drop_tokens, 0)
+        length, case = longest, "case1"
+        if hit < reusable < (start + longest) * chunk:
+            lowest = max(1, hit // chunk - start + 1)
+            highest = min(longest - 1, reusable // chunk - start)
+            candidates = range(highest, lowest - 1, -1)
+            length = next((n for n in candidates if servable.test(n - 1)), longest)
+            case = "case2" if length < longest else "no_L"
+        logger.info(
+            "Reusable-load rule: req=%s case=%s engine_hit=%d longest=%d "
+            "returned=%d match=%d",
+            self.request_id,
+            case,
+            hit,
+            (start + longest) * chunk,
+            (start + length) * chunk,
+            (start + match) * chunk,
+        )
+        return length if case == "case2" else None
+
+
+@dataclass(frozen=True)
 class PrefetchTaskSpec:
     """A prefetch request: which objects to make resident in L1, and how.
 
@@ -544,6 +606,9 @@ class PrefetchTaskSpec:
             reader that will retrieve it. Ignored under ``NO_LOCK``.
         fetching_policy: See :data:`FetchingPolicy`.
         lock_mode: See :class:`PrefetchLockMode`.
+        hit_rule: Optional engine reusable-load rule; under ``prefix`` fetching
+            it picks the prefix to serve from the fold, once, when every tier
+            has reported. None serves the longest prefix.
 
     Note:
         Every key group holds the same number of keys (``group_size``). The
@@ -555,6 +620,7 @@ class PrefetchTaskSpec:
     num_kv_readers: int = 1
     fetching_policy: FetchingPolicy = "prefix"
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
+    hit_rule: ReusableHitRule | None = None
 
     def __post_init__(self) -> None:
         if not self.key_groups:

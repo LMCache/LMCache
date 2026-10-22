@@ -35,6 +35,7 @@ from lmcache.v1.distributed.api import (
     PrefetchLockMode,
     PrefetchResult,
     PrefetchTaskSpec,
+    ReusableHitRule,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import (
     all_grouped,
@@ -328,7 +329,18 @@ def _build_request(
         fetching_policy=spec.fetching_policy,
         lock_mode=spec.lock_mode,
         num_kv_readers=spec.num_kv_readers,
+        hit_rule=spec.hit_rule,
     )
+
+
+def _cap_columns(state: MapState, cap: int) -> MapState:
+    """Keep only the columns (chunks) below ``cap`` of every grid in ``state``."""
+    capped = MapState()
+    for idx, grid in state.items():
+        num_rows, num_cols = grid.size()
+        mask = Bitmap2D([Bitmap(num_cols, min(cap, num_cols)) for _ in range(num_rows)])
+        capped[idx] = grid & mask
+    return capped
 
 
 # Class definitions
@@ -386,6 +398,12 @@ class InFlightPrefetchRequest:
     # Cells loaded from L2 so far, one row per key group; empty until the
     # first load result is admitted.
     l2_loaded_cells: Bitmap2D = field(default_factory=lambda: Bitmap2D([]))
+
+    # Engine reusable-load rule, applied once at the first plan (every tier
+    # has reported; cleared then), and the row-relative prefix it chose to
+    # serve instead of the longest one (None: no cap).
+    hit_rule: ReusableHitRule | None = None
+    hit_cap: int | None = None
 
     # private fields
     _flattened_keys: list[ObjectKey] = field(init=False, repr=False)
@@ -1187,10 +1205,26 @@ class PrefetchController(StorageControllerInterface):
             already returned.
         """
         states = request.key_states
+        l1_locked_keys = states.l1_locked_keys
+        l2_locked_keys = states.l2_locked_keys
+        if request.hit_rule is not None and request.fetching_policy == "prefix":
+            found = None
+            for merged in (l1_locked_keys.merge(), l2_locked_keys.merge()):
+                if len(merged) > 0:
+                    found = merged if found is None else found + merged
+            if found is not None:
+                windows = [group.sliding_window_size for group in request.key_groups]
+                request.hit_cap = request.hit_rule.choose(found.to_list(), windows)
+            request.hit_rule = None
+        if request.hit_cap is not None:
+            # Cells past the chosen prefix are left out of the plan, so their
+            # locks are released below like any unplanned cell.
+            l1_locked_keys = _cap_columns(l1_locked_keys, request.hit_cap)
+            l2_locked_keys = _cap_columns(l2_locked_keys, request.hit_cap)
         load_plan = self._policy.plan_load(
             key_groups=request.key_groups,
-            l1_locked_keys=states.l1_locked_keys,
-            l2_locked_keys=states.l2_locked_keys,
+            l1_locked_keys=l1_locked_keys,
+            l2_locked_keys=l2_locked_keys,
             l1_manager_descs=self._l1_manager_descriptors,
             l2_adapter_descs=active_l2_descs,
             fetching_policy=request.fetching_policy,
