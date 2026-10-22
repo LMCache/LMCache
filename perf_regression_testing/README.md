@@ -24,7 +24,7 @@ Workload `agentic`: a Claude Code session replay
 (`semianalysisai/cc-traces-weka-062126-256k`, pinned revision), closed loop.
 Model Step-3.7-Flash-FP8 on 4 x H200 (TP4 + EP, FP8 KV, MTP), 230 concurrent
 sessions; `vllm_lmcache_ssm` serves the hybrid Qwen3.8-Flash-Next-FP8
-(Gated DeltaNet + attention) instead, at 150. Every deployment runs the same stock vLLM image and
+(Gated DeltaNet + attention) instead, also at 230. Every deployment runs the same stock vLLM image and
 the same budget, 800 GiB DRAM + 1500 GiB disk (`vllm_simple`: the DRAM only;
 `vllm_simple_l2`: the disk, with the DRAM as page cache under a memory cap);
 only the cache layer differs:

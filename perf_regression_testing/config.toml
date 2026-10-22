@@ -43,8 +43,8 @@ speculative-config = '{"method":"mtp","num_speculative_tokens":3,"draft_sample_m
 repo = "Qwen/Qwen3.8-Flash-Next-FP8"
 revision = "236dfdf285828023ca3bcd3f37366c58a3469b13"
 served_name = "qwen3p8"
-# A first guess, not yet calibrated to this model's KV knee.
-aiperf_args = { concurrency = 150 }
+# Its GPU KV cache (12.2M tokens) is within 6% of step37's, so the same load.
+aiperf_args = { concurrency = 230 }
 
 [models.qwen38.vllm_args]
 reasoning-parser = "qwen3"
