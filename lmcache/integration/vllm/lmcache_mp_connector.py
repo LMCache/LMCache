@@ -1466,13 +1466,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # `assert num_new_tokens > 0` in the scheduler.
         if ret == len(request.all_token_ids):
             if self._prefix_replay_tokens > 0:
-                # vLLM's SWA bounded replay floors the external hit to the
-                # scheduler block boundary before allocating, so ``ret - 1``
-                # would leave the retrieve one block past the allocation
-                # (RETRIEVE block ID underflow on the server). Give back the
-                # last LMCache chunk instead: the retrieve end stays
-                # chunk-aligned, vLLM recomputes that chunk, and the chunk's
-                # lookup lock is released with the APC-covered ranges.
+                # SWA bounded replay floors the hit to a block boundary before
+                # allocating, so give back a whole chunk instead of one token.
                 chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
                 aligned = max(0, (ret - 1) // chunk * chunk)
                 if aligned < ret:
