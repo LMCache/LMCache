@@ -11,6 +11,7 @@ import pytest
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.v1.multiprocess import futures as futures_module
 from lmcache.v1.multiprocess.futures import CUDAMessagingFuture, MessagingFuture
 
 
@@ -300,9 +301,13 @@ def test_done_callback_runs_on_completing_thread() -> None:
 
 
 def test_raising_done_callback_is_logged_and_isolated(
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A raising callback is logged and later callbacks and the result survive."""
+    logged: list[str] = []
+    # The module logger does not propagate (see ``lmcache.logging``), so
+    # record the call instead of relying on root-handler capture.
+    monkeypatch.setattr(futures_module.logger, "exception", logged.append)
 
     def explode(_future: MessagingFuture[int]) -> None:
         raise ValueError("callback failed")
@@ -311,12 +316,12 @@ def test_raising_done_callback_is_logged_and_isolated(
     seen: list[int] = []
     future.add_done_callback(explode)
     future.add_done_callback(lambda f: seen.append(f.result(timeout=0)))
-    with caplog.at_level("ERROR"):
-        future.set_result(7)
-        future.add_done_callback(explode)
+    future.set_result(7)
+    future.add_done_callback(explode)
+
     assert seen == [7]
     assert future.result(timeout=0) == 7
-    assert caplog.text.count("done callback failed") == 2
+    assert len(logged) == 2
 
 
 def test_device_future_rejects_done_callbacks() -> None:
