@@ -251,12 +251,12 @@ class InstanceRegistry(View):
         """
         now = time.monotonic()
         with self._lock:
-            expired = [
+            expired_instance_ids = [
                 instance_id
                 for instance_id, instance in self._instances.items()
                 if now - instance.last_heartbeat_time > timeout
             ]
-            for instance_id in expired:
+            for instance_id in expired_instance_ids:
                 del self._instances[instance_id]
-            self._membership_changes["timed_out"] += len(expired)
-            return expired
+            self._membership_changes["timed_out"] += len(expired_instance_ids)
+            return expired_instance_ids

@@ -172,14 +172,14 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
 
     async def _save_checkpoint() -> CheckpointWrite:
         """Write the checkpoint off the event loop and record how it went."""
-        write = await asyncio.to_thread(
+        checkpoint_write = await asyncio.to_thread(
             save_checkpoint,
             checkpoint_store,
             quiesce,
             checkpoint_components,
         )
-        checkpoint_monitor.record_write(write)
-        return write
+        checkpoint_monitor.record_write(checkpoint_write)
+        return checkpoint_write
 
     async def _write_checkpoint() -> None:
         """One pass of the checkpoint loop.
@@ -189,9 +189,9 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         it changes instead (see ``MetadataPersister``). A failed write
         raises, so the loop counts the pass as failed and keeps its error.
         """
-        write = await _save_checkpoint()
-        if write.error is not None:
-            raise CheckpointWriteError(write.error)
+        checkpoint_write = await _save_checkpoint()
+        if checkpoint_write.error is not None:
+            raise CheckpointWriteError(checkpoint_write.error)
 
     async def _evict_stale_instances() -> None:
         """One pass of the health loop.

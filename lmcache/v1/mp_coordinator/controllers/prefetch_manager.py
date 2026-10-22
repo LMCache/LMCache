@@ -25,12 +25,12 @@ import httpx
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.controllers.base import Controller
-from lmcache.v1.mp_coordinator.histogram import (
+from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
+from lmcache.v1.mp_coordinator.utils.histogram import (
     CHUNK_COUNT_BOUNDS,
     DURATION_SECONDS_BOUNDS,
     Histogram,
 )
-from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 
 if TYPE_CHECKING:
     # First Party
@@ -149,7 +149,7 @@ class PrefetchManager(Controller):
             "token_ids": token_ids,
             "cache_salt": cache_salt,
         }
-        started = time.monotonic()
+        submitted_at = time.monotonic()
         try:
             resp = await http_client.post(url, json=body)
             resp.raise_for_status()
@@ -157,14 +157,16 @@ class PrefetchManager(Controller):
             self._count_submit("server_error")
             raise
         reply = resp.json()
-        accepted = time.monotonic()
-        status = "noop" if reply.get("status") == "noop" else "submitted"
+        accepted_at = time.monotonic()
+        submit_result = "noop" if reply.get("status") == "noop" else "submitted"
         with self._lock:
-            self._stats.requests_submitted[status] += 1
+            self._stats.requests_submitted[submit_result] += 1
             self._stats.chunks_requested_per_request.observe(reply.get("chunks", 0))
-            self._stats.submit_duration_seconds.observe(accepted - started)
-            if status == "submitted":
-                self._submitted_at[(target.instance_id, reply["request_id"])] = accepted
+            self._stats.submit_duration_seconds.observe(accepted_at - submitted_at)
+            if submit_result == "submitted":
+                self._submitted_at[(target.instance_id, reply["request_id"])] = (
+                    accepted_at
+                )
         logger.info(
             "Prefetch submitted to %s: %d tokens", target.instance_id, len(token_ids)
         )
@@ -209,12 +211,14 @@ class PrefetchManager(Controller):
         except ValueError:
             body = {"detail": resp.text}
         if resp.status_code == 404:
-            result = "unknown_request"
+            poll_result = "unknown_request"
         elif resp.status_code == 200:
-            result = "completed" if body.get("status") == "completed" else "pending"
+            poll_result = (
+                "completed" if body.get("status") == "completed" else "pending"
+            )
         else:
-            result = "server_error"
-        self._count_poll(target.instance_id, request_id, result, body)
+            poll_result = "server_error"
+        self._count_poll(target.instance_id, request_id, poll_result, body)
         return resp.status_code, body
 
     def stats(self) -> PrefetchStats:
@@ -239,23 +243,27 @@ class PrefetchManager(Controller):
                 status_polls=dict(self._stats.status_polls),
             )
 
-    def _count_submit(self, result: str) -> None:
+    def _count_submit(self, submit_result: str) -> None:
         """Count one submit that reached no prefetch on a server."""
         with self._lock:
-            self._stats.requests_submitted[result] += 1
+            self._stats.requests_submitted[submit_result] += 1
 
     def _count_poll(
-        self, instance_id: str, request_id: str, result: str, body: dict[str, Any]
+        self,
+        instance_id: str,
+        request_id: str,
+        poll_result: str,
+        body: dict[str, Any],
     ) -> None:
         """Count one status poll, and stop tracking a prefetch that is done
         or that the server no longer knows."""
         now = time.monotonic()
         with self._lock:
-            self._stats.status_polls[result] += 1
-            if result not in ("completed", "unknown_request"):
+            self._stats.status_polls[poll_result] += 1
+            if poll_result not in ("completed", "unknown_request"):
                 return
             submitted_at = self._submitted_at.pop((instance_id, request_id), None)
-            if result == "completed" and submitted_at is not None:
+            if poll_result == "completed" and submitted_at is not None:
                 self._stats.completion_duration_seconds.observe(now - submitted_at)
                 self._stats.keys_requested += body.get("total_keys", 0)
                 self._stats.keys_found += body.get("found_keys", 0)
@@ -263,8 +271,12 @@ class PrefetchManager(Controller):
     def _forget_abandoned_locked(self) -> None:
         """Forget, and count, prefetches older than ``abandon_after_seconds``.
         Call holding ``self._lock``."""
-        cutoff = time.monotonic() - self._abandon_after_seconds
-        abandoned = [key for key, at in self._submitted_at.items() if at < cutoff]
-        for key in abandoned:
-            del self._submitted_at[key]
-        self._stats.requests_abandoned += len(abandoned)
+        submitted_before = time.monotonic() - self._abandon_after_seconds
+        abandoned_prefetches = [
+            prefetch
+            for prefetch, submitted_at in self._submitted_at.items()
+            if submitted_at < submitted_before
+        ]
+        for prefetch in abandoned_prefetches:
+            del self._submitted_at[prefetch]
+        self._stats.requests_abandoned += len(abandoned_prefetches)

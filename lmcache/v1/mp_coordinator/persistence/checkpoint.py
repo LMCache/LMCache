@@ -23,7 +23,6 @@ import msgspec
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.histogram import DURATION_SECONDS_BOUNDS, Histogram
 from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 from lmcache.v1.mp_coordinator.persistence.durable_component import DurableComponent
 from lmcache.v1.mp_coordinator.persistence.quiesce import (
@@ -34,6 +33,7 @@ from lmcache.v1.mp_coordinator.persistence.store import (
     ArtifactNotFoundError,
     ArtifactStore,
 )
+from lmcache.v1.mp_coordinator.utils.histogram import DURATION_SECONDS_BOUNDS, Histogram
 
 logger = init_logger(__name__)
 
@@ -122,25 +122,25 @@ class CheckpointMonitor:
         self._stats = CheckpointStats()
         register_metric_source(self)
 
-    def record_write(self, write: CheckpointWrite) -> None:
+    def record_write(self, checkpoint_write: CheckpointWrite) -> None:
         """Count one :func:`save_checkpoint` call.
 
         Args:
-            write: What it did.
+            checkpoint_write: What it did.
         """
-        phases = {
-            "pause_ingest": write.pause_ingest_seconds,
-            "copy": write.copy_seconds,
-            "write": write.write_seconds,
+        seconds_per_phase = {
+            "pause_ingest": checkpoint_write.pause_ingest_seconds,
+            "copy": checkpoint_write.copy_seconds,
+            "write": checkpoint_write.write_seconds,
         }
         with self._lock:
-            self._stats.writes[write.result] += 1
-            for phase, seconds in phases.items():
+            self._stats.writes[checkpoint_write.result] += 1
+            for phase, seconds in seconds_per_phase.items():
                 if seconds is not None:
                     self._stats.write_duration_seconds[phase].observe(seconds)
-            if write.result == "ok":
+            if checkpoint_write.result == "ok":
                 self._stats.last_write_timestamp = time.time()
-                self._stats.size_bytes = write.size_bytes
+                self._stats.size_bytes = checkpoint_write.size_bytes
 
     def record_restore(self, outcome: RestoreOutcome) -> None:
         """Record what :func:`load_checkpoint` did at startup.
@@ -193,18 +193,18 @@ def save_checkpoint(
         What the call did, including how long each phase took.
     """
     pause_ingest_seconds = copy_seconds = None
-    started = time.monotonic()
+    started_at = time.monotonic()
     try:
         sections: dict[str, Mapping[str, object]] = {}
         with quiesce.quiesced(timeout):
-            quiesced = time.monotonic()
-            pause_ingest_seconds = quiesced - started
+            quiesced_at = time.monotonic()
+            pause_ingest_seconds = quiesced_at - started_at
             for component in components:
                 if component.name in sections:
                     raise ValueError(f"two components named {component.name!r}")
                 sections[component.name] = component.capture()
-        copied = time.monotonic()
-        copy_seconds = copied - quiesced
+        copied_at = time.monotonic()
+        copy_seconds = copied_at - quiesced_at
         with store.open_write() as stream:
             size_bytes = _write_checkpoint(sections, stream)
     except TimeoutError as e:
@@ -223,7 +223,7 @@ def save_checkpoint(
         result="ok",
         pause_ingest_seconds=pause_ingest_seconds,
         copy_seconds=copy_seconds,
-        write_seconds=time.monotonic() - copied,
+        write_seconds=time.monotonic() - copied_at,
         size_bytes=size_bytes,
     )
 

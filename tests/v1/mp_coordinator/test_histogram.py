@@ -5,7 +5,7 @@
 import pytest
 
 # First Party
-from lmcache.v1.mp_coordinator.histogram import Histogram
+from lmcache.v1.mp_coordinator.utils.histogram import Histogram
 
 
 def test_an_observation_goes_in_the_first_bucket_at_or_above_it():

@@ -26,7 +26,6 @@ from lmcache.v1.mp_coordinator.background_loops import (
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers.base import ControllerStatus
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
-from lmcache.v1.mp_coordinator.histogram import Histogram
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
     CacheEventBroadcaster,
 )
@@ -43,6 +42,7 @@ from lmcache.v1.mp_coordinator.metric_sources import (
 )
 from lmcache.v1.mp_coordinator.persistence.checkpoint import CheckpointMonitor
 from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
+from lmcache.v1.mp_coordinator.utils.histogram import Histogram
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import (
     DirectoryStats,
@@ -699,8 +699,10 @@ def _blend_points(
     key_directory: KeyDirectory, read_value: Callable[[DirectoryStats], int]
 ) -> Points:
     """Return the blend index value, or nothing while blend lookup is off."""
-    stats = key_directory.stats()
-    return [(read_value(stats), {})] if stats.blend_lookup_enabled else []
+    directory_stats = key_directory.stats()
+    if not directory_stats.blend_lookup_enabled:
+        return []
+    return [(read_value(directory_stats), {})]
 
 
 def _lookup_points(

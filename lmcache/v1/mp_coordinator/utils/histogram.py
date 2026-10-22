@@ -90,10 +90,10 @@ class Histogram:
             ``_bucket`` series.
         """
         buckets: list[tuple[str, int]] = []
-        running = 0
+        observations_at_or_below = 0
         # bucket_counts has one more entry, above every bound: not zipped.
         for bound, bucket_count in zip(self.bounds, self.bucket_counts, strict=False):
-            running += bucket_count
-            buckets.append((f"{bound:g}", running))
+            observations_at_or_below += bucket_count
+            buckets.append((f"{bound:g}", observations_at_or_below))
         buckets.append(("+Inf", self.count))
         return buckets

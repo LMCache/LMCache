@@ -239,40 +239,47 @@ class TestReports:
     def test_a_good_write_reports_its_size_and_each_phase(self, tmp_path: Path):
         path = tmp_path / "checkpoint"
 
-        write = save_checkpoint(
+        checkpoint_write = save_checkpoint(
             LocalArtifactStore(path), QuiesceLock(), [_Section("a")]
         )
 
-        assert write.result == "ok" and write.error is None
-        assert write.size_bytes == path.stat().st_size
-        phases = (write.pause_ingest_seconds, write.copy_seconds, write.write_seconds)
-        assert all(seconds is not None and seconds >= 0 for seconds in phases)
+        assert checkpoint_write.result == "ok" and checkpoint_write.error is None
+        assert checkpoint_write.size_bytes == path.stat().st_size
+        phase_seconds = (
+            checkpoint_write.pause_ingest_seconds,
+            checkpoint_write.copy_seconds,
+            checkpoint_write.write_seconds,
+        )
+        assert all(seconds is not None and seconds >= 0 for seconds in phase_seconds)
 
     def test_a_failed_write_reports_its_error(self, tmp_path: Path):
         unwritable = tmp_path / "dir-in-the-way"
         unwritable.mkdir()
 
-        write = save_checkpoint(
+        checkpoint_write = save_checkpoint(
             LocalArtifactStore(unwritable), QuiesceLock(), [_Section("a")]
         )
 
-        assert write.result == "error"
-        assert write.error is not None
-        assert write.copy_seconds is not None
-        assert (write.write_seconds, write.size_bytes) == (None, None)
+        assert checkpoint_write.result == "error"
+        assert checkpoint_write.error is not None
+        assert checkpoint_write.copy_seconds is not None
+        assert (checkpoint_write.write_seconds, checkpoint_write.size_bytes) == (
+            None,
+            None,
+        )
 
     def test_a_batch_still_applying_reports_a_quiesce_timeout(self, tmp_path: Path):
         quiesce = QuiesceLock()
         with quiesce.applying():
-            write = save_checkpoint(
+            checkpoint_write = save_checkpoint(
                 LocalArtifactStore(tmp_path / "checkpoint"),
                 quiesce,
                 [_Section("a")],
                 timeout=0.01,
             )
 
-        assert write.result == "quiesce_timeout"
-        assert write.pause_ingest_seconds is None
+        assert checkpoint_write.result == "quiesce_timeout"
+        assert checkpoint_write.pause_ingest_seconds is None
 
     def test_load_reports_what_startup_did(self, tmp_path: Path):
         store = LocalArtifactStore(tmp_path / "checkpoint")

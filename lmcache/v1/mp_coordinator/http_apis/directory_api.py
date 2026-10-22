@@ -81,13 +81,17 @@ async def lookup_placements(
         obj_keys = directory.get_keys_across_object_groups(obj_keys)
         encoded_keys = [key.to_encoded_object_key() for key in obj_keys]
     placements = directory.lookup(obj_keys)
-    found = [
+    keys_with_placements = [
         key
         for key, key_placements in zip(obj_keys, placements, strict=True)
         if key_placements
     ]
     # By tokens, a chunk counts once across its ranks and object groups.
-    chunks_found = len(found) if body.keys else len({key.chunk_hash for key in found})
+    chunks_found = (
+        len(keys_with_placements)
+        if body.keys
+        else len({key.chunk_hash for key in keys_with_placements})
+    )
     directory.record_lookup(
         "prefix", chunks_requested=chunks, chunks_found=chunks_found
     )

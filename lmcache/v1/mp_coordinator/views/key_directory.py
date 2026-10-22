@@ -34,12 +34,12 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventType,
 )
 from lmcache.v1.mp_coordinator.blend_index import BlendIndex, BlendIndexStats
-from lmcache.v1.mp_coordinator.histogram import CHUNK_COUNT_BOUNDS, Histogram
 from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
 )
+from lmcache.v1.mp_coordinator.utils.histogram import CHUNK_COUNT_BOUNDS, Histogram
 from lmcache.v1.mp_coordinator.views.base import View
 
 if TYPE_CHECKING:
@@ -344,11 +344,11 @@ class KeyDirectory(View):
             chunks_found: Chunks with at least one placement.
         """
         with self._lock:
-            stats = self._lookups[lookup_type]
-            stats.lookups += 1
-            stats.chunks_requested += chunks_requested
-            stats.chunks_found += chunks_found
-            stats.chunks_found_per_request.observe(chunks_found)
+            lookup_stats = self._lookups[lookup_type]
+            lookup_stats.lookups += 1
+            lookup_stats.chunks_requested += chunks_requested
+            lookup_stats.chunks_found += chunks_found
+            lookup_stats.chunks_found_per_request.observe(chunks_found)
 
     def get_keys_across_object_groups(self, keys: list[ObjectKey]) -> list[ObjectKey]:
         """Return each key with its stored copies in other object groups.
