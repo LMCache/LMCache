@@ -11,7 +11,8 @@ import argparse
 import json
 import math
 import mmap
-import os
+import re
+import uuid
 
 # First Party
 from lmcache.logging import init_logger
@@ -23,6 +24,8 @@ from lmcache.v1.distributed.l2_adapters.config import (
     get_type_name_for_config,
     parse_args_to_l2_adapters_config,
 )
+# SHM name limits live in multiprocess.posix_shm (no import cycle back here).
+from lmcache.v1.multiprocess.posix_shm import POSIX_SHM_MAX_NAME_LEN
 from lmcache.v1.platform import current_device_spec
 
 logger = init_logger(__name__)
@@ -299,6 +302,69 @@ def _infer_l1_devdax_overflow_from_dax_adapter(
     l2_adapter_config.adapters = remaining_adapters
 
 
+# The generated name passed to shm_open() is "/lmcache_l1_pool_<token>".
+# We cap the token at 16 hex digits (64-bit UUID slice); the platform limit
+# further restricts it on macOS (PSHMNAMLEN = 31) where the prefix consumes
+# 17 of those 31 characters, leaving at most 14.  Linux resolves through
+# /dev/shm with NAME_MAX = 255, so 16 is always safe there.
+_L1_POOL_SHM_NAME_WITH_SLASH = "/lmcache_l1_pool_"
+
+L1_POOL_SHM_NAME_TOKEN_HEX_LEN: int = min(
+    16, POSIX_SHM_MAX_NAME_LEN - len(_L1_POOL_SHM_NAME_WITH_SLASH)
+)
+"""Hex digits in a generated L1 pool SHM name.
+
+Derived from the platform's POSIX SHM name-length limit so the generated
+name fits on every supported target:
+
+* macOS (``PSHMNAMLEN`` = 31, effective max 30 due to ``>=`` kernel check):
+  prefix ``/lmcache_l1_pool_`` (17 chars) leaves room for 13 hex digits.
+* Linux (``NAME_MAX`` = 255 via ``/dev/shm``): prefix leaves room for 238,
+  capped at 16.
+"""
+
+L1_POOL_SHM_NAME_ATTEMPTS = 5
+"""Retries when ``shm_open(O_CREAT|O_EXCL)`` reports a generated name collision."""
+
+_L1_POOL_GENERATED_NAME_PATTERN = re.compile(
+    r"lmcache_l1_pool_[0-9a-f]{%d}" % L1_POOL_SHM_NAME_TOKEN_HEX_LEN
+)
+
+
+def is_generated_l1_pool_shm_name(shm_name: str) -> bool:
+    """Return whether ``shm_name`` matches the auto-generated L1 pool format."""
+    return bool(_L1_POOL_GENERATED_NAME_PATTERN.fullmatch(shm_name.lstrip("/")))
+
+
+def normalize_l1_pool_shm_name(shm_name: str) -> str:
+    """Strip any leading ``/`` and ensure the ``lmcache_l1_pool_`` prefix.
+
+    Args:
+        shm_name: Raw SHM segment name as supplied by the caller.
+
+    Returns:
+        Normalized name without a leading ``/``, prefixed with
+        ``lmcache_l1_pool_`` when the prefix was absent.
+    """
+    bare = shm_name.lstrip("/")
+    if not bare.startswith("lmcache_l1_pool_"):
+        return f"lmcache_l1_pool_{bare}"
+    return bare
+
+
+def generated_l1_pool_shm_name() -> str:
+    """Return a fresh host-unique SHM segment name for an L1 pool.
+
+    POSIX SHM names are host-global, and containers with independent
+    PID namespaces recycle the same low PIDs, so a PID-derived name
+    would collide on ``shm_open`` between containers sharing
+    ``/dev/shm``. See
+    ``docs/design/v1/distributed/memory_manager/l1_pool_shm_naming.md``.
+    """
+    token = uuid.uuid4().hex[:L1_POOL_SHM_NAME_TOKEN_HEX_LEN]
+    return f"lmcache_l1_pool_{token}"
+
+
 @dataclass
 class L1MemoryManagerConfig:
     """
@@ -317,8 +383,21 @@ class L1MemoryManagerConfig:
     align_bytes: int = field(default=0x1000)
     """ The alignment size in bytes. Default is 4KB. """
 
-    shm_name: str = field(default_factory=lambda: f"lmcache_l1_pool_{os.getpid()}")
-    """ POSIX shared-memory segment name for L1 pool. Empty disables SHM. """
+    shm_name: str = field(default_factory=generated_l1_pool_shm_name)
+    """ POSIX shared-memory segment name for the L1 pool.
+
+    A generated (default) name is unique per pool and never reused, so
+    a segment left by a crashed process is not reclaimed by name; the
+    pool is unlinked on graceful ``close()``. Pass an explicit name to
+    pin the segment (e.g. for external tooling); a stale segment with a
+    pinned name is unlinked before creation. Empty disables SHM.
+    **Warning:** names matching the auto-generated format
+    (``lmcache_l1_pool_`` followed by exactly
+    ``L1_POOL_SHM_NAME_TOKEN_HEX_LEN`` lowercase hex characters)
+    are treated as generated and will be retried with a new UUID on
+    collision; use a suffix with at least one non-hex character for
+    strict pinned-name semantics.
+    """
 
     use_hugepages: bool = False
     """ Allocate the L1 pool from the pre-allocated 2 MiB hugepage pool. """

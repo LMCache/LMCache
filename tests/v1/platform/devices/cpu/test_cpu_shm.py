@@ -7,19 +7,33 @@ sees writes made through the original tensor.
 """
 
 # Standard
+import errno
+import multiprocessing
 import os
+import re
 
 # Third Party
 import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.posix_shm import shm_unlink
+from lmcache.v1.multiprocess.posix_shm import POSIX_SHM_MAX_NAME_LEN, shm_unlink
 from lmcache.v1.platform.devices.cpu.shm import (
+    SHM_KV_NAME_TOKEN_HEX_LEN,
+    SHM_SEGMENT_NAME_ATTEMPTS,
     CpuShmTensorWrapper,
     migrate_to_shm_and_wrap,
     shm_create_readwrite,
 )
+
+# Legacy pid+counter names collided across host-global POSIX SHM namespaces.
+_LEGACY_PID_COUNTER_SHM_NAME = re.compile(r"/lmcache_kv_\d+_\d+\Z")
+
+
+def _assert_not_legacy_pid_counter_name(name: str) -> None:
+    assert not _LEGACY_PID_COUNTER_SHM_NAME.fullmatch(name), (
+        f"SHM name {name!r} uses legacy pid+counter naming"
+    )
 
 
 def test_shm_create_unlink_roundtrip():
@@ -365,6 +379,206 @@ def test_wrapper_rejects_view_larger_than_segment():
     view = base[100:200]
     with pytest.raises(ValueError, match="segment"):
         CpuShmTensorWrapper(view, "/lmcache_test_never_created", segment_nbytes=100 * 4)
+
+
+def test_kv_shm_name_fits_posix_limit():
+    """CPU KV ``shm_open`` names must fit within ``POSIX_SHM_MAX_NAME_LEN``."""
+    prefix_len = len(CpuShmTensorWrapper.SHM_NAME_PREFIX)
+    assert prefix_len + SHM_KV_NAME_TOKEN_HEX_LEN <= POSIX_SHM_MAX_NAME_LEN
+
+
+def test_shm_name_format():
+    """SHM names must match /lmcache_kv_<N hex> (platform-derived N).
+
+    A UUID-per-segment name avoids PID collisions across containers with
+    independent PID namespaces.  We validate the format directly rather
+    than checking for the absence of the PID decimal string, which could
+    yield a false positive when the UUID hex coincidentally contains the
+    PID digits (e.g. PID 1 appears in almost any hex string).
+    """
+    src = torch.zeros((2, 2), dtype=torch.float32)
+    w = migrate_to_shm_and_wrap(src)
+    try:
+        pattern = re.compile(
+            r"/lmcache_kv_[0-9a-f]{%d}\Z" % SHM_KV_NAME_TOKEN_HEX_LEN
+        )
+        assert pattern.fullmatch(w.shm_name), (
+            f"SHM name {w.shm_name!r} does not match expected format "
+            f"'/lmcache_kv_<{SHM_KV_NAME_TOKEN_HEX_LEN} hex chars>'"
+        )
+    finally:
+        shm_unlink(w.shm_name)
+
+
+def _worker_allocate_and_report(queue: "multiprocessing.Queue[str | None]") -> None:
+    """Allocate one SHM segment and send its name back through *queue*."""
+    # First Party
+    from lmcache.v1.platform.devices.cpu.shm import migrate_to_shm_and_wrap
+
+    t = torch.zeros((4, 4), dtype=torch.float32)
+    w = migrate_to_shm_and_wrap(t)
+    queue.put(w.shm_name)
+    # Block until the parent signals it is safe to exit (segment still mapped).
+    queue.get()
+
+
+def test_shm_segment_names_ignore_monkeypatched_getpid(monkeypatch):
+    """Segment names must not revert to ``/lmcache_kv_<pid>_<n>`` naming.
+
+    If ``migrate_to_shm_and_wrap`` called ``os.getpid()`` again, a fixed
+    monkeypatched PID would produce predictable legacy names; UUID naming
+    must stay independent of process id.
+    """
+    fake_pid = 12_345
+    monkeypatch.setattr(os, "getpid", lambda: fake_pid)
+    wa = migrate_to_shm_and_wrap(torch.zeros((2, 2), dtype=torch.float32))
+    wb = migrate_to_shm_and_wrap(torch.zeros((3, 3), dtype=torch.float32))
+    try:
+        _assert_not_legacy_pid_counter_name(wa.shm_name)
+        _assert_not_legacy_pid_counter_name(wb.shm_name)
+        assert wa.shm_name != f"/lmcache_kv_{fake_pid}_0"
+        assert wb.shm_name != f"/lmcache_kv_{fake_pid}_1"
+    finally:
+        shm_unlink(wa.shm_name)
+        shm_unlink(wb.shm_name)
+
+
+def test_shm_names_are_unique_across_spawned_workers():
+    """Spawned workers must allocate distinct host-global SHM segment names.
+
+    Regression for the original ``EEXIST`` crash when legacy pid+counter
+    naming reused ``/lmcache_kv_<N>_0`` across containers.  The second
+    worker starts while the first segment is still mapped so a duplicate
+    name would fail ``shm_open(O_CREAT|O_EXCL)``.
+    """
+    ctx = multiprocessing.get_context("spawn")
+    q1: multiprocessing.Queue[str | None] = ctx.Queue()
+    q2: multiprocessing.Queue[str | None] = ctx.Queue()
+    p1 = ctx.Process(target=_worker_allocate_and_report, args=(q1,))
+    p2 = ctx.Process(target=_worker_allocate_and_report, args=(q2,))
+    name1: str | None = None
+    name2: str | None = None
+    try:
+        p1.start()
+        name1 = q1.get(timeout=30)
+        # Second worker starts while the first segment is still mapped.
+        p2.start()
+        name2 = q2.get(timeout=30)
+        assert name1 != name2, (
+            f"Both workers allocated the same SHM name {name1!r}; "
+            "per-segment UUID naming must be unique on the host"
+        )
+        _assert_not_legacy_pid_counter_name(name1)
+        _assert_not_legacy_pid_counter_name(name2)
+    finally:
+        # Unblock workers so they exit cleanly before we unlink.
+        q1.put(None)
+        q2.put(None)
+        p1.join(timeout=10)
+        p2.join(timeout=10)
+        for name in (name1, name2):
+            if name is None:
+                continue
+            try:
+                shm_unlink(name)
+            except OSError:
+                pass
+
+
+def test_shm_name_collision_retries_with_fresh_name(monkeypatch):
+    """A rare SHM name collision is retried with a fresh name.
+
+    ``shm_create_readwrite`` opens with ``O_CREAT|O_EXCL``, so an
+    already-existing segment name raises ``FileExistsError``: migration
+    must draw a new UUID name and succeed instead of propagating.  The
+    fake creator below collides twice before delegating to the real one.
+    """
+    # First Party
+    from lmcache.v1.platform.devices.cpu import shm as shm_module
+
+    real_create = shm_create_readwrite
+    attempted: list[str] = []
+
+    def flaky_create(name: str, nbytes: int) -> int:
+        attempted.append(name)
+        if len(attempted) <= 2:
+            raise FileExistsError("simulated name collision")
+        return real_create(name, nbytes)
+
+    monkeypatch.setattr(shm_module, "shm_create_readwrite", flaky_create)
+
+    src = torch.zeros((2, 2), dtype=torch.float32)
+    w = migrate_to_shm_and_wrap(src)
+    try:
+        assert len(attempted) == 3
+        # Every attempt drew a distinct name before one succeeded.
+        assert len(set(attempted)) == 3
+        src.add_(1.0)
+        view = w.to_tensor()
+        assert torch.equal(view, src)
+    finally:
+        shm_unlink(w.shm_name)
+
+
+def test_shm_name_collision_retries_on_oserror_eexist(monkeypatch):
+    """OSError(EEXIST) is retried the same way as FileExistsError.
+
+    Some POSIX implementations raise ``OSError`` with ``errno.EEXIST``
+    directly rather than ``FileExistsError``.  The retry loop must treat
+    both identically.
+    """
+    # First Party
+    from lmcache.v1.platform.devices.cpu import shm as shm_module
+
+    real_create = shm_create_readwrite
+    attempted: list[str] = []
+
+    def flaky_create(name: str, nbytes: int) -> int:
+        attempted.append(name)
+        if len(attempted) <= 2:
+            raise OSError(errno.EEXIST, "simulated EEXIST")
+        return real_create(name, nbytes)
+
+    monkeypatch.setattr(shm_module, "shm_create_readwrite", flaky_create)
+
+    src = torch.zeros((2, 2), dtype=torch.float32)
+    w = migrate_to_shm_and_wrap(src)
+    try:
+        assert len(attempted) == 3
+        assert len(set(attempted)) == 3
+        src.add_(1.0)
+        view = w.to_tensor()
+        assert torch.equal(view, src)
+    finally:
+        shm_unlink(w.shm_name)
+
+
+def test_shm_name_collision_exhausts_retries_and_raises(monkeypatch):
+    """Persistent name collisions propagate after exhausting retries.
+
+    When every attempt fails with ``FileExistsError`` the error must
+    reach the caller (after retrying with fresh names) and leave the
+    caller's tensor untouched -- name allocation happens before any
+    storage mutation.
+    """
+    # First Party
+    from lmcache.v1.platform.devices.cpu import shm as shm_module
+
+    attempted: list[str] = []
+
+    def always_collides(name: str, nbytes: int) -> int:
+        attempted.append(name)
+        raise FileExistsError("simulated persistent collision")
+
+    monkeypatch.setattr(shm_module, "shm_create_readwrite", always_collides)
+
+    src = torch.zeros((2, 2), dtype=torch.float32)
+    with pytest.raises(FileExistsError, match="simulated persistent collision"):
+        migrate_to_shm_and_wrap(src)
+    assert len(attempted) == SHM_SEGMENT_NAME_ATTEMPTS
+    assert len(set(attempted)) == len(attempted)
+    # ...and the failed migration did not touch the caller's data.
+    assert torch.equal(src, torch.zeros_like(src))
 
 
 def test_migrate_ignores_stale_entry_from_id_reuse():
