@@ -546,12 +546,12 @@ class LMCacheEngine:
                         stored_event.token_ids = convert_tokens_to_list(
                             tokens,
                             start,
-                            end,
+                            end - 1,
                         )
                         if isinstance(tokens, torch.Tensor):
                             stored_event.medium = tokens.device
                     elif hashes is not None:
-                        stored_event.token_ids = hashes[start : end + 1]
+                        stored_event.token_ids = [key.chunk_hash]
                     logger.debug(
                         (
                             "Added kv cache event '%s' to kv cache events queue"
@@ -739,7 +739,7 @@ class LMCacheEngine:
                     stored_event.token_ids = convert_tokens_to_list(
                         tokens,
                         start,
-                        end,
+                        end - 1,
                     )
                     if isinstance(tokens, torch.Tensor):
                         stored_event.medium = tokens.device

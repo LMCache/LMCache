@@ -2104,3 +2104,80 @@ def test_store_skips_degenerate_token_ranges() -> None:
     assert engine.storage_manager.allocate.call_count == 1
     engine.gpu_connector.batched_from_gpu.assert_called_once()
     assert engine.storage_manager.batched_put.call_args.args[0] == [full_chunk_key]
+
+
+def _make_event_engine(process_tokens_results: list) -> MagicMock:
+    """Create a mock engine with the attributes needed by store tests
+    that inspect the KV events a store emits."""
+    engine = MagicMock()
+    engine.is_healthy.return_value = True
+    engine.is_frozen.return_value = False
+    engine._is_passive.return_value = False
+    engine._get_req_id.return_value = "req_1"
+    engine.kv_events_enabled = True
+    engine.kv_events = []
+    engine.store_location = "LocalCPUBackend"
+    engine.config.get_extra_config_value.return_value = False
+    engine.metadata.get_shapes.return_value = [torch.Size([2, 16, 8, 128])]
+    engine.metadata.get_dtypes.return_value = [torch.bfloat16]
+    engine.stats_monitor.on_store_request.return_value.time_to_store.return_value = 1.0
+    engine.token_database.process_tokens.return_value = process_tokens_results
+    engine.storage_manager.allocate.return_value = _make_mock_memory_obj()
+    return engine
+
+
+def test_store_event_token_ids_match_chunk_bounds() -> None:
+    """Each store event's token_ids must be exactly its chunk's tokens:
+    len(token_ids) == block_size for every chunk."""
+    chunks = [(0, 4, _make_key(10)), (4, 8, _make_key(11)), (8, 10, _make_key(12))]
+    engine = _make_event_engine(chunks)
+
+    LMCacheEngine.store(engine, tokens=torch.arange(10))
+
+    assert [event.token_ids for event in engine.kv_events] == [
+        [0, 1, 2, 3],
+        [4, 5, 6, 7],
+        [8, 9],
+    ]
+    assert all(len(event.token_ids) == event.block_size for event in engine.kv_events)
+
+
+def test_store_event_token_ids_hashes_path() -> None:
+    """With precomputed hashes, each store event's token_ids must carry
+    that chunk's single hash, not a slice of the per-chunk hash list."""
+    chunks = [(0, 4, _make_key(111)), (4, 8, _make_key(222))]
+    engine = _make_event_engine(chunks)
+
+    LMCacheEngine.store(
+        engine,
+        tokens=None,
+        hashes=[111, 222],
+        offsets=[4, 4],
+        slot_mapping=[0] * 8,
+    )
+
+    assert [event.token_ids for event in engine.kv_events] == [[111], [222]]
+
+
+def test_store_layer_event_token_ids_match_chunk_bounds() -> None:
+    """The layerwise store path must emit the same per-chunk token_ids
+    contract as the batched store path."""
+    chunks = [(0, 4, _make_key(10)), (4, 8, _make_key(11)), (8, 10, _make_key(12))]
+    engine = _make_event_engine(chunks)
+    engine.num_layers = 2
+    engine.storage_manager.contains.return_value = False
+    engine.storage_manager.batched_allocate.return_value = [
+        _make_mock_memory_obj(),
+        _make_mock_memory_obj(),
+    ]
+    engine.gpu_connector.get_shape.return_value = torch.Size([2, 16])
+    engine.gpu_connector.batched_from_gpu.return_value = iter([None, None, None])
+
+    with patch("lmcache.v1.cache_engine.assert_layerwise_gpu_connector"):
+        list(LMCacheEngine.store_layer(engine, tokens=torch.arange(10)))
+
+    assert [event.token_ids for event in engine.kv_events] == [
+        [0, 1, 2, 3],
+        [4, 5, 6, 7],
+        [8, 9],
+    ]
