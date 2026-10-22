@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING
 import asyncio
 
 # First Party
+from lmcache.inprocess.v1.cache_controller.commands.base import HeartbeatCommand
 from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.commands.base import HeartbeatCommand
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.cache_controller.worker import LMCacheWorker
+    from lmcache.inprocess.v1.cache_controller.worker import LMCacheWorker
 
 logger = init_logger(__name__)
 

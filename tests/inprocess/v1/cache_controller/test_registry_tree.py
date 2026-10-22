@@ -14,8 +14,12 @@ import threading
 import time
 
 # First Party
-from lmcache.v1.cache_controller.message import BatchedKVOperationMsg, KVOpEvent, OpType
-from lmcache.v1.cache_controller.utils import (
+from lmcache.inprocess.v1.cache_controller.message import (
+    BatchedKVOperationMsg,
+    KVOpEvent,
+    OpType,
+)
+from lmcache.inprocess.v1.cache_controller.utils import (
     InstanceNode,
     RegistryTree,
     WorkerNode,

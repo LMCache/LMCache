@@ -9,7 +9,7 @@ import msgspec
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.cache_controller.worker import LMCacheWorker
+    from lmcache.inprocess.v1.cache_controller.worker import LMCacheWorker
 
 
 class HeartbeatCommand(msgspec.Struct, tag_field="command_type"):

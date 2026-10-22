@@ -9,8 +9,7 @@ import msgspec
 import zmq.asyncio
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.message import (  # noqa: E501
+from lmcache.inprocess.v1.cache_controller.message import (  # noqa: E501
     CheckFinishMsg,
     CheckFinishRetMsg,
     ClearMsg,
@@ -36,6 +35,7 @@ from lmcache.v1.cache_controller.message import (  # noqa: E501
     PinRetMsg,
     PinWorkerMsg,
 )
+from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 

@@ -3,10 +3,10 @@
 from typing import TYPE_CHECKING, Any
 
 # First Party
-from lmcache.inprocess.v1.token_database import ChunkedTokenDatabase
-from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.controllers.full_sync_tracker import FullSyncTracker
-from lmcache.v1.cache_controller.message import (
+from lmcache.inprocess.v1.cache_controller.controllers.full_sync_tracker import (
+    FullSyncTracker,
+)
+from lmcache.inprocess.v1.cache_controller.message import (
     BatchedKVOperationMsg,
     BatchedP2PLookupMsg,
     BatchedP2PLookupRetMsg,
@@ -33,12 +33,14 @@ from lmcache.v1.cache_controller.message import (
     PinMsg,
     PinRetMsg,
 )
-from lmcache.v1.cache_controller.observability import PrometheusLogger
-from lmcache.v1.cache_controller.utils import RegistryTree
+from lmcache.inprocess.v1.cache_controller.observability import PrometheusLogger
+from lmcache.inprocess.v1.cache_controller.utils import RegistryTree
+from lmcache.inprocess.v1.token_database import ChunkedTokenDatabase
+from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.cache_controller.controllers import RegistrationController
+    from lmcache.inprocess.v1.cache_controller.controllers import RegistrationController
 
 logger = init_logger(__name__)
 

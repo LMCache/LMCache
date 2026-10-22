@@ -9,10 +9,10 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.cache_controller.controllers.registration_controller import (
+from lmcache.inprocess.v1.cache_controller.controllers.registration_controller import (
     RegistrationController,
 )
-from lmcache.v1.cache_controller.message import (
+from lmcache.inprocess.v1.cache_controller.message import (
     DeRegisterMsg,
     HealthMsg,
     HeartbeatMsg,
@@ -40,7 +40,7 @@ class TestRegistrationControllerRegister:
     async def test_register_new_worker(self, reg_controller, mock_zmq_socket):
         """Test registering a new worker."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -73,7 +73,7 @@ class TestRegistrationControllerRegister:
     async def test_register_without_peer_url(self, reg_controller, mock_zmq_socket):
         """Test registering a worker without peer_init_url."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -99,7 +99,7 @@ class TestRegistrationControllerRegister:
     async def test_register_duplicate_worker(self, reg_controller, mock_zmq_socket):
         """Test duplicate registration is prevented."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -125,7 +125,7 @@ class TestRegistrationControllerRegister:
     async def test_register_multiple_workers(self, reg_controller, mock_zmq_socket):
         """Test registering multiple workers for same instance."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -152,7 +152,7 @@ class TestRegistrationControllerRegister:
     ):
         """Test worker info contains correct timestamps."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -184,7 +184,7 @@ class TestRegistrationControllerDeregister:
     async def test_deregister_worker(self, reg_controller, mock_zmq_socket):
         """Test deregistering a worker."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -234,7 +234,7 @@ class TestRegistrationControllerDeregister:
     async def test_deregister_partial_workers(self, reg_controller, mock_zmq_socket):
         """Test deregistering one of multiple workers."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -274,7 +274,7 @@ class TestRegistrationControllerGetters:
     async def test_get_socket(self, reg_controller, mock_zmq_socket):
         """Test getting socket for a worker."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -302,7 +302,7 @@ class TestRegistrationControllerGetters:
     async def test_get_peer_init_url(self, reg_controller, mock_zmq_socket):
         """Test getting peer init URL for a worker."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -329,7 +329,7 @@ class TestRegistrationControllerGetters:
     async def test_get_workers(self, reg_controller, mock_zmq_socket):
         """Test getting workers for an instance."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -362,7 +362,7 @@ class TestRegistrationControllerInstanceMapping:
     async def test_get_instance_id(self, reg_controller, mock_zmq_socket):
         """Test getting instance ID from IP."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -406,7 +406,7 @@ class TestRegistrationControllerHeartbeat:
     async def test_heartbeat_existing_worker(self, reg_controller, mock_zmq_socket):
         """Test heartbeat updates timestamp for existing worker."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -447,7 +447,7 @@ class TestRegistrationControllerHeartbeat:
     async def test_heartbeat_unregistered_worker(self, reg_controller, mock_zmq_socket):
         """Test heartbeat triggers re-registration for unregistered worker."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -473,7 +473,7 @@ class TestRegistrationControllerQueryWorkerInfo:
     async def test_query_worker_info(self, reg_controller, mock_zmq_socket):
         """Test querying worker information."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -509,7 +509,7 @@ class TestRegistrationControllerQueryWorkerInfo:
     ):
         """Test querying specific workers."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -555,7 +555,7 @@ class TestRegistrationControllerQueryWorkerInfo:
     async def test_query_worker_info_empty_list(self, reg_controller, mock_zmq_socket):
         """Test querying with empty worker_ids list returns all workers."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock_get_socket:
             mock_get_socket.return_value = mock_zmq_socket
 
@@ -603,7 +603,7 @@ class TestRegistrationControllerMetrics:
     """Test RegistrationController metrics setup."""
 
     @patch(
-        "lmcache.v1.cache_controller.controllers.registration_controller.PrometheusLogger"
+        "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.PrometheusLogger"
     )
     def test_metrics_setup(self, mock_prometheus_logger):
         """Test metrics are properly set up."""
@@ -616,7 +616,7 @@ class TestRegistrationControllerMetrics:
         mock_logger_instance.registered_workers_count.set_function.assert_called_once()
 
     @patch(
-        "lmcache.v1.cache_controller.controllers.registration_controller.PrometheusLogger"
+        "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.PrometheusLogger"
     )
     def test_metrics_setup_no_logger(self, mock_prometheus_logger):
         """Test metrics setup when no logger is available."""

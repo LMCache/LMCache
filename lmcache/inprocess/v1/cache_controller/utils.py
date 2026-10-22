@@ -9,9 +9,15 @@ import threading
 import zmq.asyncio
 
 # First Party
+from lmcache.inprocess.v1.cache_controller.locks import (
+    FastLockWithTimeout,
+    RWLockWithTimeout,
+)
+from lmcache.inprocess.v1.cache_controller.message import (
+    BatchedKVOperationMsg,
+    WorkerInfo,
+)
 from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.locks import FastLockWithTimeout, RWLockWithTimeout
-from lmcache.v1.cache_controller.message import BatchedKVOperationMsg, WorkerInfo
 from lmcache.v1.utils.cache_utils import TTLListCache
 
 logger = init_logger(__name__)

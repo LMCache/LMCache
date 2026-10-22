@@ -8,9 +8,11 @@ import zmq
 import zmq.asyncio
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.commands import FullSyncCommand, HeartbeatCommand
-from lmcache.v1.cache_controller.message import (
+from lmcache.inprocess.v1.cache_controller.commands import (
+    FullSyncCommand,
+    HeartbeatCommand,
+)
+from lmcache.inprocess.v1.cache_controller.message import (
     DeRegisterMsg,
     HealthMsg,
     HealthRetMsg,
@@ -23,8 +25,9 @@ from lmcache.v1.cache_controller.message import (
     RegisterMsg,
     RegisterRetMsg,
 )
-from lmcache.v1.cache_controller.observability import PrometheusLogger
-from lmcache.v1.cache_controller.utils import RegistryTree
+from lmcache.inprocess.v1.cache_controller.observability import PrometheusLogger
+from lmcache.inprocess.v1.cache_controller.utils import RegistryTree
+from lmcache.logging import init_logger
 from lmcache.v1.rpc_utils import (
     close_zmq_socket,
     get_zmq_context,

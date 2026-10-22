@@ -8,8 +8,8 @@ from unittest.mock import Mock, patch
 import pytest
 
 # First Party
-from lmcache.v1.cache_controller.controllers.kv_controller import KVController
-from lmcache.v1.cache_controller.message import (
+from lmcache.inprocess.v1.cache_controller.controllers.kv_controller import KVController
+from lmcache.inprocess.v1.cache_controller.message import (
     BatchedKVOperationMsg,
     BatchedP2PLookupMsg,
     CheckFinishMsg,
@@ -690,7 +690,9 @@ class TestKVControllerDelegation:
 class TestKVControllerMetrics:
     """Test KVController metrics setup."""
 
-    @patch("lmcache.v1.cache_controller.controllers.kv_controller.PrometheusLogger")
+    @patch(
+        "lmcache.inprocess.v1.cache_controller.controllers.kv_controller.PrometheusLogger"
+    )
     def test_metrics_setup(
         self, mock_prometheus_logger, mock_reg_controller, mock_cluster_executor
     ):
@@ -708,7 +710,9 @@ class TestKVControllerMetrics:
         mock_logger_instance.kv_pool_keys_count.set_function.assert_called_once()
         mock_logger_instance.kv_op_seq_discontinuity_count.set_function.assert_called_once()
 
-    @patch("lmcache.v1.cache_controller.controllers.kv_controller.PrometheusLogger")
+    @patch(
+        "lmcache.inprocess.v1.cache_controller.controllers.kv_controller.PrometheusLogger"
+    )
     def test_metrics_setup_no_logger(
         self, mock_prometheus_logger, mock_reg_controller, mock_cluster_executor
     ):

@@ -9,16 +9,16 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.cache_controller.commands.full_sync import FullSyncCommand
-from lmcache.v1.cache_controller.controllers.registration_controller import (
+from lmcache.inprocess.v1.cache_controller.commands.full_sync import FullSyncCommand
+from lmcache.inprocess.v1.cache_controller.controllers.registration_controller import (
     RegistrationController,
 )
-from lmcache.v1.cache_controller.message import (
+from lmcache.inprocess.v1.cache_controller.message import (
     FullSyncStatusMsg,
     HeartbeatMsg,
     OpType,
 )
-from lmcache.v1.cache_controller.utils import FullSyncState, RegistryTree
+from lmcache.inprocess.v1.cache_controller.utils import FullSyncState, RegistryTree
 
 # Local
 # Test utilities from conftest
@@ -382,7 +382,9 @@ class TestIntegration:
         from unittest.mock import MagicMock
 
         # First Party
-        from lmcache.v1.cache_controller.controllers.kv_controller import KVController
+        from lmcache.inprocess.v1.cache_controller.controllers.kv_controller import (
+            KVController,
+        )
 
         reg = RegistryTree()
         kv = KVController(reg, 0.5, 300.0)

@@ -10,10 +10,11 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.cache_controller.controllers.full_sync_tracker import FullSyncTracker
-from lmcache.v1.cache_controller.controllers.kv_controller import KVController
-from lmcache.v1.cache_controller.message import (
+from lmcache.inprocess.v1.cache_controller.controllers.full_sync_tracker import (
+    FullSyncTracker,
+)
+from lmcache.inprocess.v1.cache_controller.controllers.kv_controller import KVController
+from lmcache.inprocess.v1.cache_controller.message import (
     BatchedKVOperationMsg,
     FullSyncBatchMsg,
     FullSyncEndMsg,
@@ -24,7 +25,8 @@ from lmcache.v1.cache_controller.message import (
     KVOpEvent,
     RegisterMsg,
 )
-from lmcache.v1.cache_controller.utils import RegistryTree, WorkerInfo
+from lmcache.inprocess.v1.cache_controller.utils import RegistryTree, WorkerInfo
+from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 
 # Constants
@@ -167,7 +169,7 @@ class H:
     async def reg_worker_async(ctrl, inst, wid, ip="127.0.0.1", port=8000):
         """Register worker via registration controller."""
         with patch(
-            "lmcache.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
+            "lmcache.inprocess.v1.cache_controller.controllers.registration_controller.get_zmq_socket"
         ) as mock:
             mock.return_value = MagicMock()
             mock.return_value.sent_messages = []
@@ -267,7 +269,7 @@ def mock_reg_controller():
                 if key in keys:
                     # Return a mock KVChunkInfo
                     # First Party
-                    from lmcache.v1.cache_controller.utils import KVChunkInfo
+                    from lmcache.inprocess.v1.cache_controller.utils import KVChunkInfo
 
                     return KVChunkInfo(instance_id, worker_id, location)
         return None
@@ -312,7 +314,7 @@ def mock_reg_controller():
             for location, keys in locations.items():
                 if key in keys:
                     # First Party
-                    from lmcache.v1.cache_controller.utils import KVChunkInfo
+                    from lmcache.inprocess.v1.cache_controller.utils import KVChunkInfo
 
                     kv_info = KVChunkInfo(instance_id, worker_id, location)
                     # Get peer_init_url from controller
@@ -323,7 +325,7 @@ def mock_reg_controller():
     def mock_handle_batched_kv_operations(msg):
         """Handle batched KV operations"""
         # First Party
-        from lmcache.v1.cache_controller.message import OpType
+        from lmcache.inprocess.v1.cache_controller.message import OpType
 
         report_id = (msg.instance_id, msg.worker_id)
 

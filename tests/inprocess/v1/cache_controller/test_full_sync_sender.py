@@ -5,8 +5,8 @@
 import pytest
 
 # First Party
-from lmcache.v1.cache_controller.full_sync_sender import FullSyncSender
-from lmcache.v1.cache_controller.message import (
+from lmcache.inprocess.v1.cache_controller.full_sync_sender import FullSyncSender
+from lmcache.inprocess.v1.cache_controller.message import (
     FullSyncBatchMsg,
     FullSyncEndMsg,
 )

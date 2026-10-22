@@ -11,21 +11,24 @@ import msgspec
 import zmq
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.controllers import KVController, RegistrationController
-from lmcache.v1.cache_controller.executor import LMCacheClusterExecutor
-from lmcache.v1.cache_controller.observability import (
+from lmcache.inprocess.v1.cache_controller.controllers import (
+    KVController,
+    RegistrationController,
+)
+from lmcache.inprocess.v1.cache_controller.executor import LMCacheClusterExecutor
+from lmcache.inprocess.v1.cache_controller.observability import (
     PrometheusLogger,
     SocketMetricsContext,
     SocketType,
 )
+from lmcache.logging import init_logger
 from lmcache.v1.rpc_utils import (
     get_ip,
     get_zmq_context,
     get_zmq_socket,
 )
 
-from lmcache.v1.cache_controller.message import (  # isort: skip
+from lmcache.inprocess.v1.cache_controller.message import (  # isort: skip
     BatchedKVOperationMsg,
     BatchedP2PLookupMsg,
     CheckFinishMsg,

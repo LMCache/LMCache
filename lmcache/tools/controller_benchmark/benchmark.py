@@ -17,13 +17,13 @@ import zmq
 import zmq.asyncio
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.message import (
+from lmcache.inprocess.v1.cache_controller.message import (
     DeRegisterMsg,
     RegisterMsg,
     RegisterRetMsg,
 )
-from lmcache.v1.cache_controller.utils import KVChunkInfo
+from lmcache.inprocess.v1.cache_controller.utils import KVChunkInfo
+from lmcache.logging import init_logger
 from lmcache.v1.rpc_utils import (
     close_zmq_socket,
     get_zmq_context,

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Unit tests for lock utilities in lmcache.v1.cache_controller.locks.
+Unit tests for lock utilities in lmcache.inprocess.v1.cache_controller.locks.
 
 Tests cover RWLockWithTimeout and FastLockWithTimeout classes.
 """
@@ -14,7 +14,7 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.cache_controller.locks import (
+from lmcache.inprocess.v1.cache_controller.locks import (
     FastLockWithTimeout,
     RWLockTimeoutError,
     RWLockWithTimeout,

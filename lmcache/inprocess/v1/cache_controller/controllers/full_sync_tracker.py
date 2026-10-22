@@ -4,13 +4,13 @@ from typing import Optional, Tuple
 import time
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.utils import (
+from lmcache.inprocess.v1.cache_controller.utils import (
     FullSyncState,
     RegistryTree,
     WorkerNode,
     WorkerSyncInfo,
 )
+from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 

@@ -10,9 +10,8 @@ import zmq
 import zmq.asyncio
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.full_sync_sender import FullSyncSender
-from lmcache.v1.cache_controller.message import (
+from lmcache.inprocess.v1.cache_controller.full_sync_sender import FullSyncSender
+from lmcache.inprocess.v1.cache_controller.message import (
     BatchedP2PLookupMsg,
     BatchedP2PLookupRetMsg,
     ClearWorkerMsg,
@@ -42,6 +41,7 @@ from lmcache.v1.cache_controller.message import (
     WorkerReqMsg,
     WorkerReqRetMsg,
 )
+from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import (

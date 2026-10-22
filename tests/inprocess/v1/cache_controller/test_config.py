@@ -14,13 +14,13 @@ import os
 import tempfile
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.config import (
+from lmcache.inprocess.v1.cache_controller.config import (
     ControllerConfig,
     controller_get_or_create_config,
     load_controller_config_with_overrides,
     override_controller_config_from_dict,
 )
+from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 

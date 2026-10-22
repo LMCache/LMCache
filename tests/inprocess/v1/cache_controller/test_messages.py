@@ -8,7 +8,7 @@ import time
 import msgspec
 
 # First Party
-from lmcache.v1.cache_controller.message import (
+from lmcache.inprocess.v1.cache_controller.message import (
     BatchedKVOperationMsg,
     BatchedP2PLookupMsg,
     BatchedP2PLookupRetMsg,
@@ -54,7 +54,7 @@ from lmcache.v1.cache_controller.message import (
     QueryWorkerInfoRetMsg,
     RegisterMsg,
 )
-from lmcache.v1.cache_controller.utils import WorkerInfo
+from lmcache.inprocess.v1.cache_controller.utils import WorkerInfo
 
 
 class TestWorkerMessages:
