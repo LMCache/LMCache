@@ -18,6 +18,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 
 _LOOKUP_DURATION = "lookup_duration_seconds"
+LOOKUP_DURATION_BUCKETS: tuple[float, ...] = (
+    0.001,
+    0.005,
+    0.01,
+    0.05,
+    0.1,
+    0.5,
+    1.0,
+    5.0,
+)
 
 
 @dataclass
@@ -76,6 +86,7 @@ class LMCacheMPPromMetrics(KVConnectorPromMetrics):
             name="vllm:lmcache_mp_lookup_duration_seconds",
             documentation="LMCache MP lookup latency observed by vLLM.",
             labelnames=labelnames,
+            buckets=LOOKUP_DURATION_BUCKETS,
         )
         self._lookup_duration = {
             engine_idx: histogram.labels(*labelvalues)
