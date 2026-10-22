@@ -36,8 +36,10 @@ class FSConnector(RemoteConnector):
         config: Optional[LMCacheEngineConfig],
         plugin_name: Optional[str] = None,
         base_paths_str: Optional[str] = None,
-    ):
+    ) -> None:
         """
+        Initialize storage directories before inspecting the filesystem.
+
         Args:
             loop: Asyncio event loop
             local_cpu_backend: Memory allocator interface
@@ -47,6 +49,10 @@ class FSConnector(RemoteConnector):
             base_paths_str: Comma-separated base paths
                 (legacy, passed from adapter when using
                 fs:// URL)
+
+        Raises:
+            ValueError: No base path is configured.
+            OSError: A storage directory cannot be created or inspected.
         """
         # initialize base class
         super().__init__(
@@ -97,6 +103,12 @@ class FSConnector(RemoteConnector):
             else config.get_extra_config_value("fs_connector_read_ahead_size", None)
         )
 
+        # Create directories before O_DIRECT setup queries the filesystem.
+        for path in self.base_paths:
+            path.mkdir(parents=True, exist_ok=True)
+            if self.relative_tmp_dir is not None:
+                (path / self.relative_tmp_dir).mkdir(parents=False, exist_ok=True)
+
         self.use_odirect = (
             False
             if config is None
@@ -128,11 +140,6 @@ class FSConnector(RemoteConnector):
             self.read_ahead_size,
             self.use_odirect,
         )
-        # Create directories for all paths
-        for path in self.base_paths:
-            path.mkdir(parents=True, exist_ok=True)
-            if self.relative_tmp_dir is not None:
-                (path / self.relative_tmp_dir).mkdir(parents=False, exist_ok=True)
 
     def _get_base_path(self, key: CacheEngineKey) -> Path:
         """Get file base path for the given key"""
