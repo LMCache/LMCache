@@ -154,7 +154,8 @@ __global__ void rotary_embedding_kernel_fused_ramp_multi(
     const int rot_dim, const int64_t key_stride, const int num_kv_heads,
     const int head_size, const int64_t head_stride, const int64_t pos_stride) {
   // One thread block per token of one chunk; slot j sits at position
-  // st + j * pos_stride (> 1 for compressed caches, one slot per pos_stride tokens).
+  // st + j * pos_stride (> 1 for compressed caches, one slot per pos_stride
+  // tokens).
   const int token_idx = blockIdx.x;
   const FusedRopeChunk<scalar_t>& chunk = pack.chunks[blockIdx.y];
   const int64_t ramp = (token_idx % slots) * pos_stride;
@@ -258,17 +259,15 @@ void rotary_embedding_k_fused_ramp_multi_ptr(
               if (is_neox) {
                 lmc::rotary_embedding_kernel_fused_ramp_multi<scalar_t, cache_t,
                                                               true>
-                    <<<grid, block, 0, stream>>>(pack, slots, cos_sin, rot_dim,
-                                                 key_stride, num_kv_heads,
-                                                 head_size, head_stride,
-                                                 pos_stride);
+                    <<<grid, block, 0, stream>>>(
+                        pack, slots, cos_sin, rot_dim, key_stride, num_kv_heads,
+                        head_size, head_stride, pos_stride);
               } else {
                 lmc::rotary_embedding_kernel_fused_ramp_multi<scalar_t, cache_t,
                                                               false>
-                    <<<grid, block, 0, stream>>>(pack, slots, cos_sin, rot_dim,
-                                                 key_stride, num_kv_heads,
-                                                 head_size, head_stride,
-                                                 pos_stride);
+                    <<<grid, block, 0, stream>>>(
+                        pack, slots, cos_sin, rot_dim, key_stride, num_kv_heads,
+                        head_size, head_stride, pos_stride);
               }
               C10_CUDA_KERNEL_LAUNCH_CHECK();
             });

@@ -37,15 +37,13 @@ from lmcache.v1.multiprocess.modules.blend.read_set import (
     _classify_cb_read_groups,
 )
 from lmcache.v1.multiprocess.modules.blend.rope import (
-    RopeWindowDoesNotFit,
     _AT_SCALAR_ITEMSIZE,
-    _CBRopeState,
     _FP8_FLAVOR_TO_AT_SCALAR,
     _TORCH_TO_AT_SCALAR,
+    RopeWindowDoesNotFit,
     _cb_group_rope_geometry,
+    _CBRopeState,
 )
-
-
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
@@ -296,13 +294,14 @@ class RetrieveMixin:
                 # uint8 K planes are otherwise rope-able only with a declared fp8 flavor
                 # (dequant-rotate-requant; rotation commutes with the per-tensor scale).
                 rope_itemsize = buf0.element_size()
-                at_scalar = _TORCH_TO_AT_SCALAR.get(buf0.dtype) or (
+                maybe_scalar = _TORCH_TO_AT_SCALAR.get(buf0.dtype) or (
                     _FP8_FLAVOR_TO_AT_SCALAR.get(rope_state.kv_quant)
                     if buf0.dtype == torch.uint8
                     else None
                 )
-                if at_scalar is None:
+                if maybe_scalar is None:
                     return None
+                at_scalar = maybe_scalar
             try:
                 # Shared batched-rope geometry rules; the planner declines
                 # (returns None) instead of raising on unsupported layouts.

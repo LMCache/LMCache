@@ -15,6 +15,9 @@ if TYPE_CHECKING:
     from lmcache.v1.multiprocess.modules.blend.matcher import (
         BlendTokenRangeMatcher,
     )
+    from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+        LMCacheDrivenTransferModule,
+    )
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -102,6 +105,7 @@ class LookupMixin:
         _coordinator: "BlendCoordinatorClient | None"
         _segmented_prefix: bool
         _token_range_matcher: "BlendTokenRangeMatcher"
+        _transfer_module: "LMCacheDrivenTransferModule"
         _pending_fp_hashes: set[bytes]
         _pending_fp_lock: threading.Lock
         _stale_strike: dict[bytes, int]
