@@ -58,6 +58,28 @@ class L1ObjectMeta:
     backend: L1BackendType
 
 
+@dataclass(frozen=True)
+class L1CommittedUsage:
+    """Committed L1 objects among a set of keys and of their whole model.
+
+    An object is committed when it is resident in an L1 manager and not
+    temporary: its write finished. Staging (write-reserved) and temporary
+    objects never count.
+
+    Attributes:
+        matched_objects: Committed objects among the keys.
+        matched_bytes: Their logical size in bytes (``MemoryObj.get_size``).
+        model_objects: Committed objects of the model, over every kv rank,
+            object group and cache salt.
+        model_bytes: Their logical size in bytes.
+    """
+
+    matched_objects: int
+    matched_bytes: int
+    model_objects: int
+    model_bytes: int
+
+
 class EventListener(ABC):  # noqa: B024
     pass
 
@@ -381,6 +403,22 @@ class L1ManagerInterface(Protocol):
 
     def report_status(self) -> dict:
         """Return a status dictionary for the status endpoints."""
+        ...
+
+    def get_committed_usage(
+        self, keys: list[ObjectKey], model_name: str
+    ) -> L1CommittedUsage:
+        """Count committed objects among ``keys`` and of ``model_name``.
+
+        Both counts come from one consistent view; no side effects.
+
+        Args:
+            keys: Keys to look up; each occurrence counts, so pass distinct keys.
+            model_name: The ``ObjectKey.model_name`` to count.
+
+        Returns:
+            The committed usage (see :class:`L1CommittedUsage`).
+        """
         ...
 
     def memcheck(self) -> bool:

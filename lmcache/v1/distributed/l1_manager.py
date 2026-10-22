@@ -17,6 +17,7 @@ from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKe
 from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError
 from lmcache.v1.distributed.internal_api import (
+    L1CommittedUsage,
     L1ManagerInterface,
     L1ManagerListener,
     L1ObjectMeta,
@@ -1213,6 +1214,45 @@ class L1Manager(L1ManagerInterface):
             "write_ttl_seconds": self._write_ttl_seconds,
             "read_ttl_seconds": self._read_ttl_seconds,
         }
+
+    @l1_mgr_synchronized
+    def get_committed_usage(
+        self, keys: list[ObjectKey], model_name: str
+    ) -> L1CommittedUsage:
+        """Count the committed objects among ``keys`` and of ``model_name``.
+
+        Both counts are taken under one lock acquisition; the model count
+        scans every resident object, like :meth:`report_status`. No read
+        lock, recency update, listener call or event.
+
+        Args:
+            keys: Keys to look up; each occurrence counts, so pass distinct keys.
+            model_name: The ``ObjectKey.model_name`` to count.
+
+        Returns:
+            The committed usage (see :class:`L1CommittedUsage`).
+        """
+        matched_objects = 0
+        matched_bytes = 0
+        for key in keys:
+            entry = self._objects.get(key, None)
+            if entry is None or entry.is_temporary:
+                continue
+            matched_objects += 1
+            matched_bytes += entry.memory_obj.get_size()
+        model_objects = 0
+        model_bytes = 0
+        for key, entry in self._objects.items():
+            if key.model_name != model_name or entry.is_temporary:
+                continue
+            model_objects += 1
+            model_bytes += entry.memory_obj.get_size()
+        return L1CommittedUsage(
+            matched_objects=matched_objects,
+            matched_bytes=matched_bytes,
+            model_objects=model_objects,
+            model_bytes=model_bytes,
+        )
 
     # Debugging APIs
     @l1_mgr_synchronized
