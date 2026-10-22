@@ -28,11 +28,11 @@ Each server runs its own chain; no server waits for another's ack.
 ```
  submit()                  ack (own server)                                    reply int
  ───────► LOOKUP_IN_FLIGHT ─────────────────► QUERY_PREFETCH_STATUS_IN_FLIGHT ─────────► RESOLVED
-               │                                    │              ▲
-               │ deadline passed                    │ reply None / exception
-               ▼                                    ▼              │ re-sent by the callback if a check
-           TIMED_OUT ◄────── deadline ─────── NEEDS_REQUERY ───────┘ ran since the query was sent,
-       (lookup result = 0, final)                                    otherwise by the next check
+               │                                │                  │        ▲
+               │ deadline passed                │ deadline passed  │        │ re-sent by the callback if a check
+               ▼                                │     reply None / │        │ ran since the query was sent,
+           TIMED_OUT ◄──────────────────────────┘        exception ▼        │ otherwise by the next check
+       (lookup result = 0, final)                            NEEDS_REQUERY ─┘
 ```
 
 When every server is RESOLVED the result is `min(hits) * tokens_per_chunk`.
@@ -69,11 +69,19 @@ check k+1    ─ sends q3
 queries for one request race on the server's job: one gets the hit count, the
 other `None`, and every later query gets 0.
 
+**Deadlines count only time an RPC is in flight.** Each LOOKUP and
+QUERY_PREFETCH_STATUS gets its deadline when it is sent, and a server in
+NEEDS_REQUERY has nothing in flight, so it cannot expire. vLLM does not check
+waiting requests while the running batch or the token budget is full, so a
+deferred re-query can wait a long time; counting that wait would mark a server
+unhealthy although it answered every query at once.
+
 **Failures.** A failed LOOKUP is logged and still followed by a
 QUERY_PREFETCH_STATUS; a server that never got the LOOKUP answers 0. A failed
 QUERY_PREFETCH_STATUS is treated like `None` and never raised into the
-scheduler. A `None` reply restarts the query deadline, while a failure keeps
-it, so a server whose queries keep failing still times out.
+scheduler. A query that fails on every attempt is re-sent once per check
+without a limit; a server that is down stops being queried once the heartbeat
+marks it unhealthy.
 
 **Blocking mode.** With `lmcache.mp.nonblocking_lookup_status=false`,
 `on_scheduler_check()` also waits, up to each RPC's deadline, for the

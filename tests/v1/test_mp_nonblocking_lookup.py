@@ -437,6 +437,27 @@ def test_status_deadline_does_not_restart_on_poll(
     assert client.queries == ["r"]
 
 
+def test_long_wait_for_a_check_keeps_a_responsive_server_healthy(
+    make_adapter: AdapterFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [10.0]
+    monkeypatch.setattr(adapter_module.time, "monotonic", lambda: now[0])
+    adapter, (client,) = make_adapter(timeout=5)
+    requery = CheckedFuture()
+    client.replies = deque([ready(None), requery])
+    submit(adapter, [client])
+
+    # The scheduler does not check the waiting request for longer than the
+    # timeout; the server already answered the first query.
+    now[0] = 70.0
+    assert adapter.check_lookup_result("r") is None
+    assert adapter.is_healthy
+    assert client.queries == ["r", "r"]
+
+    requery.set_result(2)
+    assert adapter.check_lookup_result("r") == 128
+
+
 def test_status_exception_is_requeried_without_raising(
     make_adapter: AdapterFactory,
 ) -> None:

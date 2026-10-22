@@ -281,33 +281,38 @@ def test_failed_lookup_still_queries_status() -> None:
     assert state.get_result() == 0
 
 
-def test_failed_status_is_requeried_until_its_deadline(clock: list[float]) -> None:
+def test_failed_status_is_requeried_with_its_own_deadline(clock: list[float]) -> None:
     state, (client,) = make_state(timeout=5)
     state.submit()
     client.lookups[0].set_result(None)
     for _ in range(3):
-        clock[0] += 1.5
+        clock[0] += 4
         assert state.on_scheduler_check() == []
         client.queries[-1].set_exception(RuntimeError("status failed"))
-    assert len(client.queries) >= 3
+    assert len(client.queries) == 4
     assert state.get_result() is None
 
-    clock[0] += 1.0
+    clock[0] += 4.9
+    assert state.on_scheduler_check() == []
+    clock[0] += 0.2
     assert state.on_scheduler_check() == ["s0"]
     assert state.get_result() == 0
 
 
-def test_none_reply_restarts_the_status_deadline(clock: list[float]) -> None:
+def test_waiting_for_a_check_does_not_count_against_the_deadline(
+    clock: list[float],
+) -> None:
     state, (client,) = make_state(timeout=5)
     state.submit()
     client.lookups[0].set_result(None)
-    clock[0] += 4
     client.queries[0].set_result(None)
 
-    clock[0] += 4
+    clock[0] += 60
     assert state.on_scheduler_check() == []
     assert len(client.queries) == 2
-    clock[0] += 0.9
+    assert state.get_result() is None
+
+    clock[0] += 4.9
     assert state.on_scheduler_check() == []
     clock[0] += 0.2
     assert state.on_scheduler_check() == ["s0"]

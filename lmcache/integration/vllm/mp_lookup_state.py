@@ -54,8 +54,8 @@ class _Server:
     QUERY_PREFETCH_STATUS_IN_FLIGHT."""
 
     deadline: float = 0.0
-    """``time.monotonic()`` deadline of the RPC in flight, or of the re-query
-    in NEEDS_REQUERY."""
+    """``time.monotonic()`` deadline of the RPC in flight, counted from when it
+    was sent."""
 
     scheduler_checked: bool = False
     """Whether a scheduler check ran since the QUERY_PREFETCH_STATUS in flight
@@ -87,7 +87,9 @@ class LookupState:
           callback only if a scheduler check ran since it was sent; otherwise
           the next check re-sends it. So each server gets **at most one** new
           QUERY_PREFETCH_STATUS per scheduler check.
-        - A None reply restarts the query deadline; a failed reply keeps it.
+        - An RPC's deadline counts from when it is sent, so time spent waiting
+          for a scheduler check to re-send a query never counts against the
+          server.
         - Once the result is final (all servers resolved, a deadline passed,
           or ``close``), no further RPC is sent.
         - RPC operations are thread-safe because they may happen in different
@@ -319,7 +321,6 @@ class LookupState:
                 future.exception_,
             )
 
-        server.deadline = time.monotonic() + self._timeout
         return [self._send_query_prefetch_status(url, server)]
 
     def _handle_query_prefetch_status_reply(
@@ -343,8 +344,6 @@ class LookupState:
                 self._maybe_resolve_lookup_result()
                 return []
 
-            server.deadline = time.monotonic() + self._timeout
-
         if server.scheduler_checked:
             return [self._send_query_prefetch_status(url, server)]
 
@@ -359,6 +358,7 @@ class LookupState:
         future = server.client.query_prefetch_status(self._key.request_id)
         server.phase = _Phase.QUERY_PREFETCH_STATUS_IN_FLIGHT
         server.future = future
+        server.deadline = time.monotonic() + self._timeout
         server.scheduler_checked = False
         return url, future
 
@@ -398,20 +398,14 @@ class LookupState:
         self._result = min_chunks * self._tokens_per_chunk
 
     def _get_expired_servers(self, now: float) -> list[str]:
-        """Return the servers whose RPC passed its deadline; caller holds the lock.
-
-        A server has expired when, at its deadline, its LOOKUP or
-        QUERY_PREFETCH_STATUS is still unanswered or its re-query has not been
-        sent.
-        """
+        """Return the servers whose LOOKUP or QUERY_PREFETCH_STATUS is still
+        unanswered at its deadline; caller holds the lock."""
         return [
             url
             for url, server in self._servers.items()
-            if now >= server.deadline
-            and (
-                server.phase is _Phase.NEEDS_REQUERY
-                or (server.future is not None and not server.future.query())
-            )
+            if server.future is not None
+            and not server.future.query()
+            and now >= server.deadline
         ]
 
     def _add_query_prefetch_status_callbacks(
