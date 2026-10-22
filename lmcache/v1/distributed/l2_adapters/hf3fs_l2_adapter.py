@@ -55,7 +55,8 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
     - ior_entries: Max concurrent requests per Ior (default 256, range [128, 1024]).
     - io_depth: Batch control parameter (default 0, range [-128, 128]).
     - numa_id: NUMA node ID (default -1 = current node).
-    - iov_size: Per-thread I/O buffer in bytes (default 200MB, range [100MB, 2GB]).
+    - iov_size: Per-I/O-direction, per-thread I/O buffer in bytes (default 200MB,
+        range [100MB, 2GB]).
     - enable_key_buffer (bool): Enable in-memory key buffer for accelerated
         exists lookups. When enabled, do_batch_exists() uses a pre-scanned
         hash set instead of filesystem calls. Default: True.
@@ -178,7 +179,7 @@ class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
             "- io_depth (int): Batch control parameter "
             "(default 0, range [-128, 128])\n"
             "- numa_id (int): NUMA node ID (default -1 = current node)\n"
-            "- iov_size (int): Per-thread I/O buffer in bytes "
+            "- iov_size (int): Per-I/O-direction, per-thread I/O buffer in bytes "
             "(default 200MB, range [100MB, 2GB])\n"
             "- enable_key_buffer (bool): Enable in-memory key buffer for "
             "accelerated exists lookups (default True)\n"
