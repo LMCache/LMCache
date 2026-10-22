@@ -4,6 +4,7 @@
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 import math
+import os
 import sys
 import time
 
@@ -84,6 +85,10 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.utils import CacheRemoveEvent
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.multiprocess.engine_hints import (
+    REUSABLE_LOAD_RULE_KILL_SWITCH,
+    ReusableLoadRule,
+)
 
 try:
     # First Party
@@ -126,7 +131,7 @@ if TYPE_CHECKING:
     )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -558,6 +563,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
     # appends. The scheduler role sets it from the vLLM config.
     _mamba_relocation_window: int = 0
+    # True once every LMCache server accepted vLLM's reusable-load rule, so
+    # the servers end loads where vLLM can hit them again. Set when the
+    # scheduler binds its cache manager.
+    ends_loads_on_reusable_boundary: bool = False
 
     def __init__(
         self,
@@ -1260,6 +1269,43 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._gpu_block_pool = gpu_block_pool
             if self.lazy_offload:
                 self._lazy_offload_manager.bind_block_pool(gpu_block_pool)
+
+    def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
+        """Bind the scheduler's cache manager and negotiate reusable loads.
+
+        vLLM's ``get_reusable_load_rule() -> (granularity, drop)`` (align-mode
+        Mamba under the EAGLE block drop) is registered with the LMCache
+        servers, which then end a reload where vLLM can hit it again. Off
+        without that rule, if a server does not accept it, or with
+        ``LMCACHE_MAMBA_EAGLE_REUSABLE_LOAD=0``.
+        """
+        super().bind_kv_cache_manager(kv_cache_manager)
+        if self.role != KVConnectorRole.SCHEDULER:
+            return
+        get_rule = getattr(self, "get_reusable_load_rule", None)
+        vllm_rule = get_rule() if get_rule is not None else None
+        if vllm_rule is None:
+            state = "off (vLLM has no reusable-load rule)"
+        elif os.environ.get(REUSABLE_LOAD_RULE_KILL_SWITCH) == "0":
+            state = "off (%s=0)" % REUSABLE_LOAD_RULE_KILL_SWITCH
+        else:
+            granularity, drop = vllm_rule
+            rule = ReusableLoadRule(
+                granularity_tokens=granularity,
+                drop_tokens=drop,
+                object_group_kinds=("recurrent",),
+            )
+            self.ends_loads_on_reusable_boundary = (
+                self.scheduler_adapter.register_engine_hints(rule)
+            )
+            state = "%s (granularity=%d drop=%d)" % (
+                "on"
+                if self.ends_loads_on_reusable_boundary
+                else "off (not accepted by every server)",
+                granularity,
+                drop,
+            )
+        logger.info("Reusable-boundary load negotiation: %s", state)
 
     def get_num_new_matched_tokens(
         self,

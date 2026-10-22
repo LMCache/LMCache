@@ -4,8 +4,12 @@
 # Standard
 from dataclasses import dataclass, replace
 from functools import partial
+import os
 import threading
 import time
+
+# Third Party
+import msgspec
 
 # First Party
 from lmcache.logging import init_logger
@@ -15,6 +19,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchHandle,
     PrefetchTaskSpec,
+    ReusableHitRule,
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
@@ -23,11 +28,21 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_hints import (
+    ENGINE_HINTS_METHOD,
+    REUSABLE_LOAD_RULE_FEATURE,
+    REUSABLE_LOAD_RULE_KILL_SWITCH,
+    REUSABLE_LOAD_RULE_VERSION,
+    EngineHints,
+    EngineHintsAck,
+    ReusableLoadRule,
+)
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
     EngineModule,
     ModuleBuildContext,
 )
+from lmcache.v1.multiprocess.ext_server_module import server_module_handler
 from lmcache.v1.multiprocess.kv_load_policy import (
     DefaultKVLoadPolicy,
     KVLoadContext,
@@ -41,6 +56,8 @@ logger = init_logger(__name__)
 
 # Stateless, so one instance can serve every LookupModule.
 _DEFAULT_LOAD_POLICY = DefaultKVLoadPolicy({})
+
+_ENGINE_COMPUTED_TOKENS_HINT = "lmcache.hint.engine_computed_tokens"
 
 
 def resolve_prefetched_obj_keys(
@@ -145,6 +162,7 @@ class LookupModule(DiscoverableModule):
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
         """Build the lookup module; it applies to every configuration."""
+        build_ctx.add_experimental(REUSABLE_LOAD_RULE_FEATURE)
         return cls(
             build_ctx.engine_context,
             create_kv_load_policy(
@@ -162,6 +180,9 @@ class LookupModule(DiscoverableModule):
         self._load_policy = load_policy
         self._prefetch_jobs: dict[str, _PrefetchJob] = {}
         self._prefetch_job_lock = threading.Lock()
+        # Accepted engine reusable-load rules by (model_name, world_size).
+        self._reusable_load_rules: dict[tuple[str, int], ReusableLoadRule] = {}
+        self._rule_disabled = os.environ.get(REUSABLE_LOAD_RULE_KILL_SWITCH) == "0"
         self._setup_metrics()
 
     @property
@@ -358,6 +379,7 @@ class LookupModule(DiscoverableModule):
                 attn_desc,
             ),
             num_kv_readers=num_kv_readers,
+            hit_rule=self._resolve_hit_rule(key, attn_desc, start_chunk),
         )
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec,
@@ -557,6 +579,41 @@ class LookupModule(DiscoverableModule):
             l1_owners=self._ctx.get_read_owners(key.request_id),
         )
 
+    @server_module_handler(ENGINE_HINTS_METHOD)
+    def register_engine_hints(self, payload: bytes) -> bytes:
+        """Register msgpack :class:`EngineHints`; returns an :class:`EngineHintsAck`."""
+        hints = msgspec.msgpack.decode(payload, type=EngineHints)
+        reason = self._refuse_reusable_load_rule(hints)
+        logger.info(
+            "Engine hints for model %s world_size %d (engine %s): "
+            "reusable_load_rule %s %s",
+            hints.model_name,
+            hints.world_size,
+            hints.engine_type or "-",
+            hints.reusable_load_rule,
+            "not accepted (%s)" % reason if reason else "accepted",
+        )
+        return msgspec.msgpack.encode(
+            EngineHintsAck(accepted=not reason, reason=reason)
+        )
+
+    def _refuse_reusable_load_rule(self, hints: EngineHints) -> str:
+        """Why the hints' rule is not applied; empty when it is accepted."""
+        rule = hints.reusable_load_rule
+        if rule is None:
+            return "no rule"
+        if self._rule_disabled:
+            return "%s=0 on the server" % REUSABLE_LOAD_RULE_KILL_SWITCH
+        if rule.version != REUSABLE_LOAD_RULE_VERSION:
+            return "unknown version %d" % rule.version
+        if rule.granularity_tokens <= 0 or rule.drop_tokens < 0:
+            return "invalid granularity_tokens / drop_tokens"
+        layout = (hints.model_name, hints.world_size)
+        current = self._reusable_load_rules.setdefault(layout, rule)
+        if current != rule:
+            return "conflicts with the registered rule %s" % (current,)
+        return ""
+
     @request_handler(HandlerType.BLOCKING)
     def end_session(self, request_id: str) -> None:
         """Remove the session for a finished request.
@@ -598,6 +655,37 @@ class LookupModule(DiscoverableModule):
     # -----------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------
+
+    def _resolve_hit_rule(
+        self,
+        key: IPCCacheServerKey,
+        attn_desc: AttnWindowDesc,
+        start_chunk: int,
+    ) -> ReusableHitRule | None:
+        """The registered reusable-load rule for this lookup, if it applies.
+
+        It applies when the engine registered one for the key's layout, the
+        lookup carries the engine's hit hint, and a registered object group
+        has a kind the rule lists (any group if it lists none).
+        """
+        if not self._reusable_load_rules:
+            return None
+        rule = self._reusable_load_rules.get((key.model_name, key.world_size))
+        configs = key.request_configs or {}
+        if rule is None or _ENGINE_COMPUTED_TOKENS_HINT not in configs:
+            return None
+        if rule.object_group_kinds:
+            kinds = attn_desc.group_kinds or ("attention",)
+            if not set(kinds) & set(rule.object_group_kinds):
+                return None
+        return ReusableHitRule(
+            granularity_tokens=rule.granularity_tokens,
+            drop_tokens=rule.drop_tokens,
+            engine_hit_tokens=int(configs[_ENGINE_COMPUTED_TOKENS_HINT]),
+            chunk_size=self._ctx.chunk_size,
+            start_chunk=start_chunk,
+            request_id=key.request_id,
+        )
 
     def _all_object_keys(
         self,

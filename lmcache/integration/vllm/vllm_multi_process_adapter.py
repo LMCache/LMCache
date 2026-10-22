@@ -13,6 +13,7 @@ import uuid
 
 # Third Party
 from prometheus_client import Counter, Gauge
+import msgspec
 import torch
 import zmq
 
@@ -42,11 +43,19 @@ from lmcache.v1.multiprocess.custom_types import (
     KVEventBatch,
     KVEventRecord,
 )
+from lmcache.v1.multiprocess.engine_hints import (
+    ENGINE_HINTS_METHOD,
+    REUSABLE_LOAD_RULE_FEATURE,
+    EngineHints,
+    EngineHintsAck,
+    ReusableLoadRule,
+)
 from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
+from lmcache.v1.multiprocess.protocols.server_module import ServerModuleCallRequest
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
@@ -855,6 +864,9 @@ class LMCacheMPSchedulerAdapter:
         self._expected_worker_count = parallel_strategy.vllm_world_size
         self._store_request_pending_counts: dict[str, int] = {}
 
+        # Engine hints registered with every server; re-sent after recovery.
+        self._engine_hints: EngineHints | None = None
+
     @property
     def world_size(self) -> int:
         """Get the kv world size."""
@@ -899,13 +911,65 @@ class LMCacheMPSchedulerAdapter:
         self, server_url: str, req_client: RequestClient
     ) -> bool:
         """Restore one server's chunk-size agreement before marking it healthy."""
-        return _verify_recovered_chunk_size(
+        recovered = _verify_recovered_chunk_size(
             req_client,
             self.lmcache_tokens_per_chunk,
             self._mq_timeout,
             self._required_chunk_alignment,
             server_url,
         )
+        if recovered and self._engine_hints is not None:
+            self._send_engine_hints(server_url, req_client, self._engine_hints)
+        return recovered
+
+    def register_engine_hints(self, reusable_load_rule: ReusableLoadRule) -> bool:
+        """Register the engine's reusable-load rule with every server.
+
+        Returns:
+            True iff every server accepted the rule. A server that does not
+            advertise ``reusable_load_rule``, fails, or refuses it keeps its
+            default behaviour.
+        """
+        self._engine_hints = EngineHints(
+            model_name=self.model_name,
+            world_size=self.world_size,
+            engine_type=EngineType.VLLM.name.lower(),
+            reusable_load_rule=reusable_load_rule,
+        )
+        accepted = [
+            self._send_engine_hints(url, client, self._engine_hints)
+            for url, client in self.req_clients.items()
+        ]
+        return bool(accepted) and all(accepted)
+
+    def _send_engine_hints(
+        self, server_url: str, req_client: RequestClient, hints: EngineHints
+    ) -> bool:
+        try:
+            if REUSABLE_LOAD_RULE_FEATURE not in get_experimental(
+                req_client, timeout=self._mq_timeout
+            ):
+                ack = EngineHintsAck(reason="server does not support engine hints")
+            else:
+                response = req_client.server_module_call(
+                    ServerModuleCallRequest(
+                        method=ENGINE_HINTS_METHOD,
+                        payload=msgspec.msgpack.encode(hints),
+                    )
+                ).result(timeout=self._mq_timeout)
+                ack = (
+                    msgspec.msgpack.decode(response.payload, type=EngineHintsAck)
+                    if response.success
+                    else EngineHintsAck(reason=str(response.error))
+                )
+        except Exception as e:
+            ack = EngineHintsAck(reason="registration failed: %r" % e)
+        logger.info(
+            "LMCache server %s: reusable-load rule %s",
+            server_url,
+            "accepted" if ack.accepted else "not accepted (%s)" % ack.reason,
+        )
+        return ack.accepted
 
     @_lmcache_nvtx_annotate
     def maybe_submit_lookup_request(
