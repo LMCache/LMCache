@@ -12,7 +12,7 @@ each registered component to its metrics. See
 # Standard
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal
 import socket
 
 # Third Party
@@ -25,10 +25,6 @@ from lmcache.v1.mp_coordinator.background_loops import (
 )
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers.base import ControllerStatus
-from lmcache.v1.mp_coordinator.controllers.eviction_stats import (
-    EvictionStats,
-    EvictionTierStats,
-)
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.histogram import Histogram
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
@@ -62,14 +58,6 @@ if TYPE_CHECKING:
 
 # ``(value, attributes)`` per series, as one metric reports at a scrape.
 Points = list[tuple[float, dict[str, str]]]
-
-
-class _EvictionSource(Protocol):
-    """A metric source whose ``stats()`` is :class:`EvictionStats`."""
-
-    def stats(self) -> EvictionStats:
-        """Return what the eviction controller has done."""
-        ...
 
 
 _PREFIX = "lmcache_coordinator."
@@ -143,12 +131,7 @@ class _MetricSpec:
 
 
 def _specs_for(source: MetricSource) -> list[_MetricSpec]:
-    """Return the metrics of one registered source.
-
-    A coordinator component is matched by class. An eviction controller is
-    matched by what its ``stats()`` returns, so one shipped in another
-    package, which LMCache cannot name, gets the eviction metrics.
-    """
+    """Return the metrics of one registered source."""
     match source:
         case KeyDirectory():
             return _key_directory_specs(source)
@@ -174,8 +157,6 @@ def _specs_for(source: MetricSource) -> list[_MetricSpec]:
             return _metadata_specs(source)
         case PrefetchManager():
             return _prefetch_specs(source)
-    if isinstance(source.stats(), EvictionStats):
-        return _eviction_specs(cast("_EvictionSource", source))
     raise TypeError(f"no metrics are defined for {type(source).__name__}")
 
 
@@ -547,106 +528,6 @@ def _metadata_specs(persister: MetadataPersister) -> list[_MetricSpec]:
     ]
 
 
-def _eviction_specs(source: _EvictionSource) -> list[_MetricSpec]:
-    """Return the eviction, quota and pin metrics of an eviction controller."""
-    return [
-        _MetricSpec(
-            _PREFIX + "eviction.sweeps_run",
-            "counter",
-            "Eviction sweeps, by outcome: idle, planned, no_target (no server "
-            "to send the deletes to).",
-            lambda: _eviction_points(source, "outcome", lambda t: t.sweeps),
-        ),
-        _MetricSpec(
-            _PREFIX + "eviction.keys_selected",
-            "counter",
-            "Keys picked for eviction, by tenant (cache_salt; _other for every "
-            "tenant without an explicit quota).",
-            lambda: _eviction_points(source, "cache_salt", lambda t: t.keys_selected),
-        ),
-        _MetricSpec(
-            _PREFIX + "eviction.bytes_selected",
-            "counter",
-            "Bytes of the keys picked for eviction, by tenant.",
-            lambda: _eviction_points(source, "cache_salt", lambda t: t.bytes_selected),
-        ),
-        _MetricSpec(
-            _PREFIX + "eviction.keys_skipped",
-            "counter",
-            "Keys passed over for eviction, by reason: pinned, unreachable "
-            "(every copy on a server that left), stale (nothing holds it).",
-            lambda: _eviction_points(source, "reason", lambda t: t.keys_skipped),
-        ),
-        _MetricSpec(
-            _PREFIX + "eviction.delete_requests_sent",
-            "counter",
-            "Delete requests sent, by target (any_server for a shared pool, "
-            "owner for the server holding the copy) and result.",
-            lambda: [
-                (count, {"tier": tier, "target": target, "result": result})
-                for tier, tier_stats in source.stats().tiers.items()
-                for target, results in tier_stats.delete_requests_sent.items()
-                for result, count in results.items()
-            ],
-        ),
-        _MetricSpec(
-            _PREFIX + "eviction.delete_requests_skipped",
-            "counter",
-            "Delete requests not sent, by reason: owner_left, no_server.",
-            lambda: _eviction_points(
-                source, "reason", lambda t: t.delete_requests_skipped
-            ),
-        ),
-        _MetricSpec(
-            _PREFIX + "eviction.delete_requests_in_flight",
-            "gauge",
-            "Delete requests sent and not yet answered.",
-            lambda: [(source.stats().delete_requests_in_flight, {})],
-        ),
-        _MetricSpec(
-            _PREFIX + "eviction.lru_keys_tracked",
-            "gauge",
-            "Keys in each tier's eviction LRU.",
-            lambda: [
-                (tier_stats.lru_keys_tracked, {"tier": tier})
-                for tier, tier_stats in source.stats().tiers.items()
-            ],
-        ),
-        _MetricSpec(
-            _PREFIX + "eviction.tenants_over_watermark",
-            "gauge",
-            "Tenants due for eviction now.",
-            lambda: [
-                (tier_stats.tenants_over_watermark, {"tier": tier})
-                for tier, tier_stats in source.stats().tiers.items()
-            ],
-        ),
-        _MetricSpec(
-            _PREFIX + "quota.tenant_bytes_used",
-            "gauge",
-            "Bytes each tenant holds; _other sums every tenant without an "
-            "explicit quota.",
-            lambda: _eviction_points(
-                source, "cache_salt", lambda t: t.tenant_bytes_used
-            ),
-        ),
-        _MetricSpec(
-            _PREFIX + "quota.tenant_bytes_limit",
-            "gauge",
-            "Each tenant's quota; for _other, the default each such tenant gets.",
-            lambda: _eviction_points(
-                source, "cache_salt", lambda t: t.tenant_bytes_limit
-            ),
-        ),
-        _MetricSpec(
-            _PREFIX + "pins.keys_pinned",
-            "gauge",
-            "Keys pinned against eviction.",
-            lambda: [(source.stats().keys_pinned, {})],
-        ),
-    ]
-
-
 def _prefetch_specs(prefetch: PrefetchManager) -> list[_MetricSpec]:
     """Return the warm-prefetch relay's metrics."""
     return [
@@ -845,19 +726,6 @@ def _restore_points(monitor: CheckpointMonitor) -> Points:
     return [
         (int(candidate == outcome), {"outcome": candidate})
         for candidate in ("cold", "restored", "ignored")
-    ]
-
-
-def _eviction_points(
-    source: _EvictionSource,
-    label: str,
-    read_counts: Callable[[EvictionTierStats], dict[str, int]],
-) -> Points:
-    """Return one point per tier and ``label`` value."""
-    return [
-        (count, {"tier": tier, label: value})
-        for tier, tier_stats in source.stats().tiers.items()
-        for value, count in read_counts(tier_stats).items()
     ]
 
 

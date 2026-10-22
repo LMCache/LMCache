@@ -25,10 +25,6 @@ from lmcache.v1.mp_coordinator.background_loops import (
 )
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers.base import ControllerStatus
-from lmcache.v1.mp_coordinator.controllers.eviction_stats import (
-    EvictionStats,
-    EvictionTierStats,
-)
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
@@ -624,49 +620,6 @@ def test_metadata_metric_reports_saves_by_result() -> None:
     assert read_values(reader)["lmcache_coordinator.metadata_file.writes"] == {
         labels(result="ok"): 1,
         labels(result="error"): 0,
-    }
-
-
-class _PrivateEvictionController:
-    """An eviction controller LMCache does not know, as one shipped in
-    another package would be."""
-
-    def __init__(self) -> None:
-        register_metric_source(self)
-
-    def stats(self) -> EvictionStats:
-        return EvictionStats(
-            tiers={
-                "l1": EvictionTierStats(
-                    keys_skipped={"unreachable": 2},
-                    delete_requests_sent={"owner": {"ok": 3, "error": 0}},
-                    delete_requests_skipped={"owner_left": 1},
-                )
-            },
-            delete_requests_in_flight=4,
-            keys_pinned=0,
-        )
-
-
-def test_any_controller_reporting_eviction_stats_gets_the_eviction_metrics() -> None:
-    _PrivateEvictionController()
-    meter, reader = private_meter()
-
-    observability.register_coordinator_metrics(meter)
-
-    values = read_values(reader)
-    assert values["lmcache_coordinator.eviction.keys_skipped"] == {
-        labels(tier="l1", reason="unreachable"): 2
-    }
-    assert values["lmcache_coordinator.eviction.delete_requests_sent"] == {
-        labels(tier="l1", target="owner", result="ok"): 3,
-        labels(tier="l1", target="owner", result="error"): 0,
-    }
-    assert values["lmcache_coordinator.eviction.delete_requests_skipped"] == {
-        labels(tier="l1", reason="owner_left"): 1
-    }
-    assert values["lmcache_coordinator.eviction.delete_requests_in_flight"] == {
-        labels(): 4
     }
 
 
