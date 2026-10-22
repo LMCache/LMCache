@@ -369,8 +369,48 @@ def test_native_plan_falls_back_for_non_lazy_objects():
 
 
 @native_retrieve_plan_required
-def test_native_plan_falls_back_for_compressed_group():
-    """A compressed group (tokens != slots per block) disables the plan."""
+def test_native_plan_compressed_group_slot_math():
+    """A ratio-2 group scatters half as many slots per chunk at s = token // 2 and
+    declares pos_stride 2; the uncompressed group next to it is unchanged."""
+    # Third Party
+    import numpy as np
+
+    eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context()
+    gpu_context.kv_layer_groups_manager.kernel_groups[1].slots_per_block = 2
+
+    def pair(cur_st, cur_ed, old_st):
+        return (
+            SimpleNamespace(cur_st=cur_st, cur_ed=cur_ed, old_st=old_st),
+            (_lazy_memory_obj(obj_bytes, address=cur_st * 1000),),
+        )
+
+    runs = [[pair(0, 4, 100), pair(4, 8, 104)]]
+    cpu_block_tables = [
+        (np.array([10, 11, 12], dtype=np.int64), 4, 4),
+        (np.array([20, 21, 22], dtype=np.int64), 4, 2),
+    ]
+    plan = eng._build_cb_retrieve_plan_flat(
+        gpu_context, rope_state, cpu_block_tables, runs, max_batch=2
+    )
+    assert plan is not None
+    group_specs, (_staging, _ropes, scatters, _steps), keepalive = plan
+    dev = keepalive[0]
+    # Group 0: token slots 40..47. Group 1: slot positions 0..3 -> blocks
+    # 20, 20, 21, 21 of 2 slots -> 40, 41, 42, 43.
+    assert dev[0, :8].tolist() == [40, 41, 42, 43, 44, 45, 46, 47]
+    assert dev[1, :4].tolist() == [40, 41, 42, 43]
+    assert group_specs[0].slot_mapping_capacity == 8
+    assert group_specs[1].slot_mapping_capacity == 4
+    # block_size (slots) is not exposed by the binding; pos_stride is.
+    assert group_specs[0].pos_stride == 1 and group_specs[1].pos_stride == 2
+    # Scatter rows are chunk-major, group-minor: (offset, count) in SLOTS.
+    assert scatters[:, 2].tolist() == [0, 0, 4, 2]
+    assert scatters[:, 3].tolist() == [4, 2, 4, 2]
+
+
+@native_retrieve_plan_required
+def test_native_plan_declines_off_grid_match_for_compressed_group():
+    """Bounds off the token/slot ratio have no slot-wise placement: plan declined."""
     # Third Party
     import numpy as np
 
@@ -379,14 +419,14 @@ def test_native_plan_falls_back_for_compressed_group():
     runs = [
         [
             (
-                SimpleNamespace(cur_st=0, cur_ed=4, old_st=100),
+                SimpleNamespace(cur_st=1, cur_ed=5, old_st=100),
                 (_lazy_memory_obj(obj_bytes, address=0),),
             )
         ]
     ]
     cpu_block_tables = [
-        (np.array([10], dtype=np.int64), 4),
-        (np.array([20], dtype=np.int64), 4),
+        (np.array([10, 11], dtype=np.int64), 4, 4),
+        (np.array([20, 21], dtype=np.int64), 4, 2),
     ]
     assert (
         eng._build_cb_retrieve_plan_flat(
@@ -394,6 +434,29 @@ def test_native_plan_falls_back_for_compressed_group():
         )
         is None
     )
+
+
+def test_shift_align_from_registered_kernel_groups():
+    """Shift grid = largest tokens-per-slot ratio of the model's registered groups."""
+    # No spec: ``_transfer_module`` is an instance attribute of the module.
+    eng = MagicMock()
+    eng._cb_shift_align = BlendModule._cb_shift_align.__get__(eng)
+    groups = [
+        SimpleNamespace(tokens_per_block=64, slots_per_block=32),
+        SimpleNamespace(tokens_per_block=64, slots_per_block=64),
+    ]
+    eng._transfer_module.context_entries_snapshot.return_value = {
+        0: SimpleNamespace(
+            model_name="dsv41",
+            world_size=4,
+            cache_context=SimpleNamespace(
+                kv_layer_groups_manager=SimpleNamespace(kernel_groups=groups)
+            ),
+        )
+    }
+    assert eng._cb_shift_align(SimpleNamespace(model_name="dsv41", world_size=4)) == 2
+    assert eng._cb_shift_align(SimpleNamespace(model_name="dsv41", world_size=8)) == 1
+    assert eng._cb_shift_align(SimpleNamespace(model_name="llama", world_size=4)) == 1
 
 
 def test_reason_table():

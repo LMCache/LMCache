@@ -32,6 +32,10 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.multiprocess.modules.blend import _cb_group_rope_geometry
+from lmcache.v1.multiprocess.modules.blend.rope import (
+    RopeWindowDoesNotFit,
+    _CBRopeState,
+)
 import lmcache.lmcache_native as lmcache_native
 
 _CONTENT, _ROPE = 24, 8  # latent = [content | rope], hidden = 32
@@ -68,6 +72,50 @@ def test_declared_window_must_end_the_row():
 def test_declared_window_requires_single_plane():
     with pytest.raises(RuntimeError, match="kv_size=2"):
         _cb_group_rope_geometry(_group(), 2, 576, 64, 0, rot=(512, 64))
+
+
+def test_declared_view_window_fits_the_row():
+    """584-byte uint8 row viewed as 292 bf16 elements, 64 rope dims at element 224:
+    the 8 scale bytes trail the window, so it fits without ending the row."""
+    fused, per_head, n_heads, rot_offset = _cb_group_rope_geometry(
+        _group(), 1, 584, 64, 0, rot=(224, 64), row_elems=292
+    )
+    assert (fused, per_head, n_heads, rot_offset) == (False, 292, 1, 224)
+
+
+def test_view_window_past_the_row_is_a_side_plane():
+    """A 132-byte indexer row (66 bf16 elements) cannot hold the main-KV window:
+    a distinct error so the planner skips the plane instead of declining."""
+    with pytest.raises(RopeWindowDoesNotFit):
+        _cb_group_rope_geometry(_group(), 1, 132, 64, 0, rot=(224, 64), row_elems=66)
+
+
+def test_compressed_group_is_rotatable():
+    """Compressed groups are no longer refused (the kernel steps positions)."""
+    group = SimpleNamespace(
+        tokens_per_block=64, slots_per_block=32, engine_kv_format=None
+    )
+    assert _cb_group_rope_geometry(group, 1, 576, 64, 0, rot=(512, 64)) == (
+        False,
+        576,
+        1,
+        512,
+    )
+
+
+def test_rot_for_group_view_entry_rotates_uint8():
+    state = _CBRopeState(
+        head_size=584,
+        is_neox_style=False,
+        cos_sin_caches=[torch.zeros(8, 64)],
+        group_to_cache=[0, 0],
+        group_rot=[(224, 64, 15), (512, 64)],
+    )
+    assert state.rot_for_group(0, torch.uint8) == (224, 64)
+    assert state.view_scalar_for_group(0) == 15
+    assert state.rot_for_group(1, torch.uint8) is None  # no view: quantized skip
+    assert state.rot_for_group(1, torch.bfloat16) == (512, 64)
+    assert state.view_scalar_for_group(1) is None
 
 
 def test_legacy_inference_unchanged_and_offset_zero():
@@ -432,4 +480,148 @@ def test_native_plan_fp8_key_bf16_cache():
         # One e4m3 quantization step of slack for round-to-nearest-even ties.
         torch.testing.assert_close(
             got.to(torch.float32), ref.to(torch.float32), atol=0.07, rtol=0.07
+        )
+
+
+@_gpu
+def test_native_plan_view_window_with_stride():
+    """uint8 584-byte rows, bf16 rope dims at byte 448, one slot per two tokens: the
+    plan rotates the view at element 224 by positions st + 2*j, nothing else."""
+    cuda_ops = _cuda_ops()
+    if not hasattr(cuda_ops, "execute_cb_retrieve_plan_flat"):
+        pytest.skip("cuda_ops build lacks execute_cb_retrieve_plan_flat")
+    torch.manual_seed(2)
+    device = torch.device(torch_device_type)
+    nl, spc, max_pos = 2, 8, 4096
+    row, view_off, width, stride = 584, 224, _ROPE, 2
+    n_chunks = 2
+    cache_bf16, cache_f32 = _cos_sin_cache(max_pos, width, device)
+    host = [
+        torch.randint(0, 255, (1, nl, spc, row), dtype=torch.uint8).pin_memory()
+        for _ in range(n_chunks)
+    ]
+    # Make the viewed window finite bf16 values (random bytes may be NaN/Inf).
+    for h in host:
+        win = h[0].view(nl * spc, row)[:, 2 * view_off : 2 * (view_off + width)]
+        win.copy_(torch.randn(nl * spc, width).to(torch.bfloat16).view(torch.uint8))
+    slots = [
+        torch.zeros(1, nl, spc, row, dtype=torch.uint8, device=device)
+        for _ in range(n_chunks)
+    ]
+    old_sts, cur_sts = [128, 512], [640, 96]
+    try:
+        spec = cuda_ops.CBGroupSpec(
+            paged_kv_ptrs=0,
+            temp_buffer_ptrs=[s.data_ptr() for s in slots],
+            num_layers=nl,
+            slot_tokens=spc,
+            hidden_elems=row,
+            element_size=1,
+            engine_kv_format=lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
+            page_buffer_size=1,
+            block_size=1,
+            head_size=row,
+            slot_mapping_base=0,
+            slot_mapping_capacity=0,
+            cos_sin_cache=cache_bf16.data_ptr(),
+            rot_dim=width,
+            rope_num_kv_heads=1,
+            rope_head_stride=row // 2,  # 292 bf16 elements per row
+            key_scalar_type=15,  # the bf16 VIEW of the uint8 row
+            is_neox=False,
+            rope_base_offset=2 * view_off,
+            cache_scalar_type=15,
+            pos_stride=stride,
+        )
+    except TypeError:
+        pytest.skip("cuda_ops build predates CBGroupSpec.pos_stride")
+    chunk_bytes = nl * spc * row
+    staging = [
+        (slots[i].data_ptr(), host[i].data_ptr(), chunk_bytes, 0)
+        for i in range(n_chunks)
+    ]
+    ropes = [(0, i, old_sts[i], cur_sts[i]) for i in range(n_chunks)]
+    cuda_ops.execute_cb_retrieve_plan_flat(
+        device,
+        1 << 26,
+        [spec],
+        np.asarray(staging, dtype=np.int64),
+        np.asarray(ropes, dtype=np.int64),
+        np.zeros((0, 4), dtype=np.int64),
+        np.asarray([(len(staging), len(ropes), 0)], dtype=np.int64),
+    )
+    torch_dev.synchronize()
+    half = width // 2
+    for i in range(n_chunks):
+        before = host[i][0].view(nl * spc, row).to(device)
+        after = slots[i][0].view(nl * spc, row)
+        lo, hi = 2 * view_off, 2 * (view_off + width)
+        assert torch.equal(after[:, :lo], before[:, :lo]), (
+            f"chunk {i}: fp8 bytes changed"
+        )
+        assert torch.equal(after[:, hi:], before[:, hi:]), (
+            f"chunk {i}: trailing bytes changed"
+        )
+        win_before = (
+            before[:, lo:hi].contiguous().view(torch.bfloat16).to(torch.float32)
+        )
+        ramp = (torch.arange(spc, device=device) * stride).repeat(nl)
+        old_pos, new_pos = old_sts[i] + ramp, cur_sts[i] + ramp
+        x, y = win_before[:, 0::2], win_before[:, 1::2]
+        co, so = cache_f32[old_pos, :half], cache_f32[old_pos, half:]
+        cn, sn = cache_f32[new_pos, :half], cache_f32[new_pos, half:]
+        xr, yr = x * co + y * so, y * co - x * so
+        ref = torch.empty_like(win_before)
+        ref[:, 0::2] = xr * cn - yr * sn
+        ref[:, 1::2] = yr * cn + xr * sn
+        got = after[:, lo:hi].contiguous().view(torch.bfloat16).to(torch.float32)
+        torch.testing.assert_close(got, ref, atol=2e-2, rtol=2e-2)
+
+
+def test_register_rope_accepts_view_windows():
+    """(offset, width, at_scalar) registers as a view window, (offset, width) stays
+    plain, and a bad scalar fails at registration."""
+    # Standard
+    from unittest.mock import MagicMock
+
+    # First Party
+    from lmcache.v1.multiprocess.modules.blend.module import BlendModule
+
+    def _engine():
+        eng = MagicMock()
+        eng._cb_rope_state = {}
+        eng._transfer_module.get_and_touch_context_entry.return_value = SimpleNamespace(
+            cache_context=SimpleNamespace(
+                kv_layer_groups_manager=SimpleNamespace(
+                    kernel_groups=[SimpleNamespace(engine_group_idx=0)]
+                )
+            )
+        )
+        eng.cb_register_rope = BlendModule.cb_register_rope.__get__(eng)
+        return eng
+
+    cache = SimpleNamespace(to_tensor=lambda: torch.ones(16, 8))
+    eng = _engine()
+    eng.cb_register_rope(
+        instance_id=7,
+        cos_sin_caches_ipc=[cache],
+        head_size=584,
+        is_neox_style=False,
+        group_to_cache=[0],
+        group_rot=[[224, 64, 15], [512, 64], []],
+    )
+    state = eng._cb_rope_state[7]
+    assert state.group_rot == [(224, 64, 15), (512, 64), None]
+    assert state.view_scalar_for_group(0) == 15
+    assert state.rot_for_group(0, torch.uint8) == (224, 64)
+    assert state.rot_for_group(1, torch.uint8) is None
+
+    with pytest.raises(ValueError, match="view scalar"):
+        _engine().cb_register_rope(
+            instance_id=8,
+            cos_sin_caches_ipc=[cache],
+            head_size=584,
+            is_neox_style=False,
+            group_to_cache=[0],
+            group_rot=[[224, 64, 99]],
         )

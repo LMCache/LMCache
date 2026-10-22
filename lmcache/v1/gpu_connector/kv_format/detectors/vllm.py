@@ -20,6 +20,7 @@ from lmcache.v1.gpu_connector.kv_format.types import (
     KV_LAYOUT_NAMES,
     DiscoverableKVCache,
     LayoutHints,
+    is_blocked_scale_row,
 )
 import lmcache.lmcache_native as lmcache_native
 
@@ -43,10 +44,10 @@ def resolve_vllm_kv_layout(
     return kv_layout
 
 
-def _is_blocked_indexer_plane(t: torch.Tensor) -> bool:
-    """Whether a per-layer plane is the fp8 DSA indexer cache."""
-    # Row: 128 fp8 values + one fp32 scale.
-    return t.dtype == torch.uint8 and int(t.shape[-1]) == 132
+def _is_blocked_scale_plane(t: torch.Tensor) -> bool:
+    """Whether a per-layer uint8 plane is a blocked-scale page (DSA indexer K,
+    DeepSeek-V4 packed main KV; see ``BLOCKED_SCALE_ROWS``)."""
+    return t.dtype == torch.uint8 and is_blocked_scale_row(int(t.shape[-1]))
 
 
 class VLLM_Detector(EngineDetector):
@@ -76,14 +77,11 @@ class VLLM_Detector(EngineDetector):
             and isinstance(kv_caches[0], torch.Tensor)
             and kv_caches[0].dim() == 4
         ):
-            # vLLM >= 0.29 allocates the DSA indexer cache through the MLA
-            # spec, so its plane carries a singleton head axis. Squeeze it so
-            # the blocked page layout is addressed by its own format rather
-            # than as fused K/V rows.
-            head_axis = 1 if is_hnd else 2
-            if int(kv_caches[0].shape[head_axis]) == 1 and _is_blocked_indexer_plane(
-                kv_caches[0]
-            ):
+            # MLA planes (DSA indexer K, DeepSeek-V4 packed KV) are [B, H=1, N, C]
+            # under either layout hint: squeeze that axis so the page gets its format.
+            shape = kv_caches[0].shape
+            head_axis = 1 if int(shape[1]) == 1 else 2
+            if int(shape[head_axis]) == 1 and _is_blocked_scale_plane(kv_caches[0]):
                 return (
                     lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
                     [t.squeeze(head_axis) for t in kv_caches],
@@ -133,7 +131,7 @@ class VLLM_Detector(EngineDetector):
                     return lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS, kv_caches
                 return lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS, kv_caches
         if list_depth == 1 and tensor_ndim == 3:  # MLA (or DSA indexer cache)
-            if _is_blocked_indexer_plane(first_tensor):
+            if _is_blocked_scale_plane(first_tensor):
                 return lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS, kv_caches
             return lmcache_native.EngineKVFormat.NL_X_NB_BS_HS, kv_caches
         if list_depth == 2 and tensor_ndim == 4:

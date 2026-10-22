@@ -79,7 +79,7 @@ void execute_cb_retrieve_plan(const torch::Device& device,
               rope_old, rope_new, group.slot_tokens,
               static_cast<int64_t>(group.head_size), group.rope_head_stride,
               group.rope_num_kv_heads, group.cos_sin_cache, group.rot_dim,
-              group.is_neox);
+              group.is_neox, group.pos_stride);
           rope_keys.clear();
           rope_old.clear();
           rope_new.clear();

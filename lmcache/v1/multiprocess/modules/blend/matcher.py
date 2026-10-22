@@ -143,11 +143,15 @@ class BlendTokenRangeMatcher:
     def match_sub_sequence(
         self,
         token_ids: list[int],
+        shift_align: int = 1,
     ) -> list[CBMatchResult]:
         """Find every registered chunk reused anywhere in a query sequence.
 
         Vectorized direct-address probe over all token positions, then a
         full poly-hash verify that rejects bucket collisions. Thread-safe.
+
+        ``shift_align`` > 1 keeps only shifts ``cur_st - old_st`` that are multiples of
+        it (compressed caches); tested before the first-hit rule, so it hides no hit.
 
         Returns:
             One result per unique reused chunk (cur_st = first query
@@ -185,6 +189,8 @@ class BlendTokenRangeMatcher:
                 old_st = self._token_hash_to_start.get(th)
                 if old_st is None:
                     continue
+                if shift_align > 1 and (pos - old_st) % shift_align:
+                    continue  # off the compression grid for this model
                 seen_cids.add(cid)
                 results.append(
                     CBMatchResult(

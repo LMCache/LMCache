@@ -20,6 +20,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper
 from lmcache.v1.multiprocess.modules.blend.rope import (
+    _AT_SCALAR_ITEMSIZE,
     _FP8_FLAVOR_TO_AT_SCALAR,
     _CBRopeState,
 )
@@ -132,20 +133,35 @@ class RegistrationMixin:
                 f"{sorted(_FP8_FLAVOR_TO_AT_SCALAR)} or ''."
             )
 
-        # Normalize rope windows (wire turns tuples into lists); validate now
-        # so a bad registration fails loudly instead of mid-retrieve.
-        norm_rot: "list[tuple[int, int] | None]" = []
+        # Normalize rope windows (wire turns tuples into lists) and validate them now. A
+        # third element is the at::ScalarType view a uint8 row is rotated through.
+        norm_rot: "list[tuple[int, ...] | None]" = []
         for eg_idx, rot_entry in enumerate(group_rot or []):
             if rot_entry is None or len(rot_entry) == 0:
                 # None (direct call) / [] (wire encoding): skip this group.
                 norm_rot.append(None)
                 continue
-            if len(rot_entry) != 2 or int(rot_entry[0]) < 0 or int(rot_entry[1]) <= 0:
+            if (
+                len(rot_entry) not in (2, 3)
+                or int(rot_entry[0]) < 0
+                or int(rot_entry[1]) <= 0
+            ):
                 raise ValueError(
                     f"group_rot[{eg_idx}] = {rot_entry!r}: expected "
-                    "(offset >= 0, width > 0) or None."
+                    "(offset >= 0, width > 0[, view_at_scalar]) or None."
                 )
-            norm_rot.append((int(rot_entry[0]), int(rot_entry[1])))
+            if len(rot_entry) == 3:
+                if int(rot_entry[2]) not in _AT_SCALAR_ITEMSIZE:
+                    raise ValueError(
+                        f"group_rot[{eg_idx}] = {rot_entry!r}: view scalar type "
+                        f"must be one of {sorted(_AT_SCALAR_ITEMSIZE)} "
+                        "(at::ScalarType Half/Float/BFloat16)."
+                    )
+                norm_rot.append(
+                    (int(rot_entry[0]), int(rot_entry[1]), int(rot_entry[2]))
+                )
+            else:
+                norm_rot.append((int(rot_entry[0]), int(rot_entry[1])))
 
         cos_sin_caches: list[torch.Tensor] = []
         for cache_idx, cache_ipc in enumerate(cos_sin_caches_ipc):

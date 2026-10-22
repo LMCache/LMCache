@@ -15,9 +15,8 @@ if TYPE_CHECKING:
 
 __all__ = ["_blocked_scale_views", "_format_spec"]
 
-# Each token's scale in a blocked-scale page is one fp32 (vllm
-# ``indexer_k_quant_and_cache``); the rest of the row is its fp8 values.
-_BLOCKED_SCALE_BYTES = 4
+# First Party
+from lmcache.v1.gpu_connector.kv_format.types import transfer_word_bytes
 
 
 def _blocked_scale_views(
@@ -40,7 +39,11 @@ def _blocked_scale_views(
         ``[NB, BS, row - scale_units]`` and ``[NB, BS, scale_units]``.
     """
     num_blocks, block_size, row = blocks.shape
-    scale_units = _BLOCKED_SCALE_BYTES // blocks.element_size()
+    # The per-token scale is one transfer word (fp32 for the indexer, 8 B of UE8M0
+    # for the V4 main KV), the native kernels' contract.
+    scale_units = (
+        transfer_word_bytes(row * blocks.element_size()) // blocks.element_size()
+    )
     val_units = row - scale_units
     # ``view`` rather than ``flatten``: a copy would silently drop the writes.
     flat = blocks.view(num_blocks, block_size * row)
