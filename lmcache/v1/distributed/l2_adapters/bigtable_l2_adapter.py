@@ -685,6 +685,8 @@ class BigtableL2Adapter(L2AdapterInterface):
         """Internal coroutine to write a batch of keys and objects to Bigtable.
 
         Applies sharding if enabled and filters out oversized payloads.
+        Rejecting any payload fails the task, while valid writes still
+        contribute to usage accounting and stored-key notifications.
 
         Args:
             keys: The list of ObjectKeys to store.
@@ -720,6 +722,7 @@ class BigtableL2Adapter(L2AdapterInterface):
                 if sharding_enabled:
                     limit_bytes = 240 * 1024 * 1024
                     if size > limit_bytes:
+                        success = False
                         logger.warning(
                             "Skipping write to Bigtable for key %s "
                             "because total payload size %d bytes exceeds "
@@ -731,6 +734,7 @@ class BigtableL2Adapter(L2AdapterInterface):
                 else:
                     limit_bytes = int(self._config.max_chunk_size_mb * 1024 * 1024)
                     if size > limit_bytes:
+                        success = False
                         logger.warning(
                             "Skipping write to Bigtable for key %s "
                             "because payload size %d bytes exceeds the limit "
