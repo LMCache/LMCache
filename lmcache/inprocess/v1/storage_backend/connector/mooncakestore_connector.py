@@ -509,6 +509,31 @@ class MooncakestoreConnector(RemoteConnector):
             # Use optimized mode with local metadata
             return await self._batch_get_into(keys)
 
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: List[CacheEngineKey],
+    ) -> List[MemoryObj]:
+        """Non-blocking batched get through :meth:`batched_get`.
+
+        The base implementation gathers one :meth:`get` per key, which this
+        connector does not support, so every async load failed and recomputed.
+        Returns the consecutive prefix of hits and releases anything retrieved
+        after the first miss, as the base implementation does.
+        """
+        results = await self.batched_get(keys)
+        memory_objs: List[MemoryObj] = []
+        found_failure = False
+        for result in results:
+            if found_failure:
+                if isinstance(result, MemoryObj):
+                    result.ref_count_down()
+            elif isinstance(result, MemoryObj):
+                memory_objs.append(result)
+            else:
+                found_failure = True
+        return memory_objs
+
     def support_batched_async_contains(self) -> bool:
         return True
 
