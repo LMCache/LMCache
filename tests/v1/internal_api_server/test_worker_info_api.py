@@ -13,14 +13,16 @@ import pytest
 import zmq
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.cache_controller.controller_manager import LMCacheControllerManager
-from lmcache.v1.cache_controller.message import (
+from lmcache.inprocess.v1.cache_controller.controller_manager import (
+    LMCacheControllerManager,
+)
+from lmcache.inprocess.v1.cache_controller.message import (
     HeartbeatMsg,
     Msg,
     RegisterMsg,
     RegisterRetMsg,
 )
+from lmcache.logging import init_logger
 from lmcache.v1.internal_api_server.api_server import app
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 
