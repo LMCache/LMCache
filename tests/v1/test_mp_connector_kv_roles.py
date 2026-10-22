@@ -788,12 +788,14 @@ def test_prefix_replay_tokens_from_kv_cache_config() -> None:
     ]
     assert connector_mod.get_prefix_replay_tokens(None) == 0
     assert (
-        connector_mod.get_prefix_replay_tokens(SimpleNamespace(kv_cache_groups=groups))
+        connector_mod.get_prefix_replay_tokens(
+            cast(KVCacheConfig, SimpleNamespace(kv_cache_groups=groups))
+        )
         == 128
     )
     assert (
         connector_mod.get_prefix_replay_tokens(
-            SimpleNamespace(kv_cache_groups=groups[:1])
+            cast(KVCacheConfig, SimpleNamespace(kv_cache_groups=groups[:1]))
         )
         == 0
     )
@@ -821,6 +823,7 @@ def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
         request = _request()  # 12 prompt tokens, chunk 4
         mock_io.scheduler.check_lookup_result.return_value = 12
         need, async_load = scheduler.get_num_new_matched_tokens(request, 0)
+        assert need is not None  # the lookup result is ready
         tracker = scheduler.request_trackers[request.request_id]
         if replay:
             assert (need, async_load) == (8, True)
@@ -839,6 +842,7 @@ def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
             need,
         )
         metadata = scheduler.build_connector_meta(_schedule())
+        assert isinstance(metadata, LMCacheMPConnectorMetadata)
         assert len(metadata.requests) == 1
         meta = metadata.requests[0]
         assert meta.direction == "RETRIEVE"
