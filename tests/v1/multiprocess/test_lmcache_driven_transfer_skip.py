@@ -180,20 +180,19 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     transfer_calls: list[tuple[int, list]] = []
 
     def fake_transfer(
-        cache_context,
         block_ids,
         memory_objs,
+        *,
         object_group_id,
         batch_size,
         skip_first_n_tokens,
         direction,
-        *,
         transfer_key,
         block_ids_host=(),
     ):
         transfer_calls.append((object_group_id, list(memory_objs)))
 
-    monkeypatch.setattr(mod, "transfer_kv_per_object_group", fake_transfer)
+    cache_context.transfer_object_group.side_effect = fake_transfer
     monkeypatch.setattr(mod, "downsample_and_stage_block_ids", lambda cc, b: b)
     monkeypatch.setattr(mod, "submit_callback_to_stream", lambda *a, **k: None)
     monkeypatch.setattr(mod, "torch_dev", MagicMock())
@@ -211,7 +210,10 @@ def _make_checkpoint_module(
     context.kv_layer_groups_manager.get_attn_desc = lambda: SimpleNamespace(
         num_chunks_in_sw=[-1, 1], group_kinds=("attention", "recurrent")
     )
-    module.get_and_touch_context_entry(1).cache_context = context
+    entry = module.get_and_touch_context_entry(1)
+    # Keep recording the copies made through the replacement context.
+    context.transfer_object_group = entry.cache_context.transfer_object_group
+    entry.cache_context = context
     module.context.chunk_size = 2
     module.context.null_block_id = -1
     module.context.session_manager.get.return_value = None
@@ -339,10 +341,8 @@ def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
     module.context.storage_manager.prepare_read_completion.return_value = completion
     callback = MagicMock()
     monkeypatch.setattr(mod, "submit_callback_to_stream", callback)
-    monkeypatch.setattr(
-        mod,
-        "transfer_kv_per_object_group",
-        MagicMock(side_effect=RuntimeError("partly enqueued transfer")),
+    cache_context.transfer_object_group.side_effect = RuntimeError(
+        "partly enqueued transfer"
     )
     _, ok = module.retrieve(
         SimpleNamespace(request_id="req", cache_salt="salt"),

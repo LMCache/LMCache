@@ -27,6 +27,7 @@ import threading
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.utils import get_size_bytes
 from lmcache.v1.distributed.api import (
     FetchingPolicy,
     GroupedObjectKeys,
@@ -55,6 +56,7 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     L1ManagerDescriptor,
     L2AdapterDescriptor,
     MapState,
+    resolve_l1_affinity,
 )
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -92,6 +94,23 @@ def _get_prefetch_write_tag(request_id: PrefetchRequestId) -> str:
         do not contend for its L1 reservation.
     """
     return f"prefetch:{request_id}"
+
+
+def _get_max_load_bytes(key_groups: list[GroupedObjectKeys]) -> int:
+    """Return the L1 staging bytes a request needs if every cell is loaded
+    from L2.
+
+    Args:
+        key_groups: The request's rows.
+
+    Returns:
+        The summed object size of every key in every row.
+    """
+    return sum(
+        len(group.keys)
+        * get_size_bytes(group.layout_desc.shapes, group.layout_desc.dtypes)
+        for group in key_groups
+    )
 
 
 def _gather_keys(
@@ -370,6 +389,7 @@ class InFlightPrefetchRequest:
 
     # private fields
     _flattened_keys: list[ObjectKey] = field(init=False, repr=False)
+    _max_load_bytes: int = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         # Populate the flattened key list
@@ -379,10 +399,16 @@ class InFlightPrefetchRequest:
             )
         else:
             raise ValueError("key_groups must be provided and cannot be empty")
+        self._max_load_bytes = _get_max_load_bytes(self.key_groups)
 
     def get_flattened_keys(self) -> list[ObjectKey]:
         """Return a flattened list of all keys in the request"""
         return self._flattened_keys
+
+    def get_max_load_bytes(self) -> int:
+        """Return the L1 staging bytes the request needs if every cell is
+        loaded from L2."""
+        return self._max_load_bytes
 
     @property
     def phase(self) -> PrefetchPhase:
@@ -428,7 +454,9 @@ class PrefetchController(StorageControllerInterface):
         l2_adapters: List of L2 adapter instances.
         adapter_descriptors: Descriptors for each L2 adapter (same order).
         policy: The prefetch policy for load plan and retention decisions.
-        max_in_flight: Maximum number of concurrent prefetch requests.
+        inflight_watermark: Fraction of an L1 manager's capacity that
+            in-flight prefetch requests may stage before new requests wait,
+            in ``(0, 1]``.
     """
 
     # Singleton dispatch for the in-flight load gauges: tests may construct
@@ -445,7 +473,7 @@ class PrefetchController(StorageControllerInterface):
         l2_adapters: list[L2AdapterInterface],
         adapter_descriptors: list[L2AdapterDescriptor],
         policy: PrefetchPolicy,
-        max_in_flight: int = 8,
+        inflight_watermark: float = 0.5,
     ) -> None:
         self._l1_managers: dict[int, L1ManagerInterface] = {
             desc.index: mgr
@@ -463,13 +491,12 @@ class PrefetchController(StorageControllerInterface):
             desc.index: desc for desc in adapter_descriptors
         }
         self._policy = policy
-        by_tag = {d.config.tag: d.index for d in l1_manager_descriptors}
         self._l2_affinity = {
-            d.index: by_tag[d.config.affinity_tag] for d in adapter_descriptors
+            d.index: resolve_l1_affinity(d.config, self._l1_managers)
+            for d in adapter_descriptors
         }
 
-        # TODO: remove max_in_flight and make it dynamic
-        self._max_in_flight = max_in_flight
+        self._inflight_watermark = inflight_watermark
 
         # Adapters being removed: adapter id -> event set once detached.
         self._draining: dict[int, threading.Event] = {}
@@ -656,7 +683,7 @@ class PrefetchController(StorageControllerInterface):
         return {
             "is_healthy": is_healthy,
             "thread_alive": is_healthy,
-            "max_in_flight": self._max_in_flight,
+            "inflight_watermark": self._inflight_watermark,
             "submission_queue_size": submission_queue_size,
             "pending_queue_size": len(self._pending_queue),
             "in_flight_request_count": len(in_flight),
@@ -769,14 +796,13 @@ class PrefetchController(StorageControllerInterface):
                 equal ``adapter_id``).
 
         Raises:
+            ValueError: If no L1 manager has the memory tags the adapter
+                wants.
             RuntimeError: If the background loop did not apply the op in
                 time (e.g. the loop is not running).
         """
-        by_tag = {d.config.tag: d.index for d in self._l1_manager_descriptors.values()}
-        if descriptor.config.affinity_tag not in by_tag:
-            raise ValueError(
-                f"Unknown L1 affinity_tag: {descriptor.config.affinity_tag}"
-            )
+        # Raise on the caller's thread rather than in the loop thread.
+        resolve_l1_affinity(descriptor.config, self._l1_managers)
         op = AddAdapterOp(
             adapter_id=adapter_id,
             adapter=adapter,
@@ -925,10 +951,8 @@ class PrefetchController(StorageControllerInterface):
             self._pending_adapter_ops = []
         for op in ops:
             if isinstance(op, AddAdapterOp):
-                self._l2_affinity[op.adapter_id] = next(
-                    d.index
-                    for d in self._l1_manager_descriptors.values()
-                    if d.config.tag == op.descriptor.config.affinity_tag
+                self._l2_affinity[op.adapter_id] = resolve_l1_affinity(
+                    op.descriptor.config, self._l1_managers
                 )
                 self._l2_adapters[op.adapter_id] = op.adapter
                 self._adapter_descriptors[op.adapter_id] = op.descriptor
@@ -1003,10 +1027,10 @@ class PrefetchController(StorageControllerInterface):
         self._pending_queue.extend(items)
 
     def _start_pending_requests(self) -> None:
-        """Start pending requests up to the max in-flight limit."""
-        # TODO: implement the dynamic in flight request admission
-        while (
-            self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
+        """Start pending requests in arrival order while L1 can admit the
+        head of the queue (see ``_can_admit_new_prefetch``)."""
+        while self._pending_queue and self._can_admit_new_prefetch(
+            self._pending_queue[0][1]
         ):
             request_id, spec = self._pending_queue.popleft()
             try:
@@ -1016,6 +1040,47 @@ class PrefetchController(StorageControllerInterface):
                 request = self._in_flight_requests.get(request_id)
                 if request is not None:
                     self._abort_request(request)
+
+    def _can_admit_new_prefetch(self, spec: PrefetchTaskSpec) -> bool:
+        """Return whether the pending request ``spec`` may start now.
+
+        The request can be admitted when both of the following conditions
+        are met:
+
+        1. staging bytes + lookup bytes < ``inflight_watermark`` * capacity.
+        2. free bytes - lookup bytes >= request bytes.
+
+        With no request in flight, ``spec`` is admitted regardless, so a
+        request that can never fit does not block the queue.
+
+        Args:
+            spec: The request at the head of the pending queue.
+
+        Returns:
+            True if ``spec`` may start.
+        """
+        if not self._in_flight_requests:
+            return True
+        request_bytes = _get_max_load_bytes(spec.key_groups)
+        lookup_bytes = sum(
+            request.get_max_load_bytes()
+            for request in self._in_flight_requests.values()
+            if request.phase == PrefetchPhase.LOOKUP
+        )
+        target_l1_indices = {
+            self._l2_affinity[adapter_idx]
+            for adapter_idx in self._l2_adapters
+            if adapter_idx not in self._draining
+        }
+        for l1_idx in target_l1_indices:
+            l1_manager = self._l1_managers[l1_idx]
+            used_bytes, total_bytes = l1_manager.get_memory_usage()
+            staged_bytes = l1_manager.get_staging_memory_usage() + lookup_bytes
+            if staged_bytes >= self._inflight_watermark * total_bytes:
+                return False
+            if total_bytes - used_bytes - lookup_bytes < request_bytes:
+                return False
+        return True
 
     # =========================================================================
     # Lookup phase

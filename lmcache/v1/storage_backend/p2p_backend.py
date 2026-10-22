@@ -12,6 +12,11 @@ import zmq
 import zmq.asyncio
 
 # First Party
+from lmcache.inprocess.v1.transfer_channel import CreateTransferChannel
+from lmcache.inprocess.v1.transfer_channel.transfer_utils import (
+    P2PInitSideMsg,
+    P2PInitSideRetMsg,
+)
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
@@ -37,11 +42,6 @@ from lmcache.v1.rpc_utils import (
 )
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.v1.transfer_channel import CreateTransferChannel
-from lmcache.v1.transfer_channel.transfer_utils import (
-    P2PInitSideMsg,
-    P2PInitSideRetMsg,
-)
 
 if TYPE_CHECKING:
     # First Party

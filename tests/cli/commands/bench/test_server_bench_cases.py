@@ -12,7 +12,9 @@ import torch
 import zmq
 
 # First Party
+from lmcache.cli.commands.bench.server_bench import client as client_module
 from lmcache.cli.commands.bench.server_bench import helpers
+from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
 from lmcache.cli.commands.bench.server_bench.cases.base import BenchResult
 from lmcache.cli.commands.bench.server_bench.cases.baseline import (
     BaselineBenchCase,
@@ -27,6 +29,7 @@ from lmcache.cli.commands.bench.server_bench.client import (
     TransferResult,
 )
 from lmcache.cli.commands.bench.server_bench.config import BenchConfig
+from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
 from lmcache.v1.multiprocess import transfer_context
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.futures import MessagingFuture
@@ -86,21 +89,24 @@ def run_bench(
         mode: str = "engine_driven",
         fault: str = "none",
     ) -> tuple[BenchResult, list[str], MagicMock]:
-        allocated: list[list[torch.Tensor]] = []
+        allocated: list[KVCacheBuffers] = []
         stored: dict[int, dict[str, torch.Tensor]] = {}
         block_dim = 0 if mla else 1
-        shape = (8, 2, 4) if mla else (2, 8, 2, 1, 4)
         ready: MessagingFuture[bool] = MessagingFuture()
         ready.set_result(True)
 
-        def allocate(**_kwargs: object) -> list[torch.Tensor]:
+        def allocate(
+            *,
+            groups: list[KVLayerGroupInfo],
+            device: str | torch.device | None,
+            block_size: int,
+        ) -> KVCacheBuffers:
+            buffers = KVCacheBuffers(groups, device=device, block_size=block_size)
             rank = len(allocated)
-            tensors = [
-                torch.full(shape, 10 * rank + layer + 1, dtype=torch.float16)
-                for layer in range(2)
-            ]
-            allocated.append(tensors)
-            return tensors
+            for layer, tensor in enumerate(buffers.kv_caches.values()):
+                tensor.fill_(10 * rank + layer + 1)
+            allocated.append(buffers)
+            return buffers
 
         class MemoryTransferContext:
             def __init__(self, instance_id: int, *_args: object) -> None:
@@ -136,7 +142,7 @@ def run_bench(
                 event: object,
                 blocks_in_chunk: int,
                 *,
-                skip_first_n_tokens: int,
+                skip_first_n_tokens: int = 0,
             ) -> MessagingFuture[bool]:
                 assert key.worker_id is not None
                 if fault == "no_write" and self.rank == tp_size - 1:
@@ -163,19 +169,15 @@ def run_bench(
         ) -> list[str] | None:
             if fault == "unavailable" and instance_id == 1000 + tp_size - 1:
                 return None
-            return helpers._compute_client_checksums(
-                allocated[instance_id - 1000],
-                block_offset,
-                num_blocks,
-                block_size,
-                chunk_size,
+            return allocated[instance_id - 1000].checksums(
+                block_offset, num_blocks, chunk_size
             )
 
         checksum_query = MagicMock(side_effect=query_checksum)
         monkeypatch.setattr(zmq, "Context", MagicMock())
         monkeypatch.setattr(RequestClientFactory, "create", MagicMock())
         monkeypatch.setattr(helpers, "_get_chunk_size", lambda _client: 2)
-        monkeypatch.setattr(helpers, "_allocate_kv_cache", allocate)
+        monkeypatch.setattr(client_module, "KVCacheBuffers", allocate)
         monkeypatch.setattr(helpers, "_send_lookup", MagicMock(return_value=True))
         monkeypatch.setattr(
             helpers, "_poll_prefetch_status", MagicMock(side_effect=[0, 2])

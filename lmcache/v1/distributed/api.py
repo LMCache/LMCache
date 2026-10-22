@@ -95,6 +95,66 @@ class L1BackendType(str, enum.Enum):
     GDS = "gds"
 
 
+class MemorySegment(str, enum.Enum):
+    """The kind of memory or storage that holds an L1's or L2's bytes.
+
+    Note:
+        Only for prefetch target filtering and L1-L2 affinity. Any other
+        use needs agreement from @ApostaC first.
+    """
+
+    VRAM = "vram"
+    """GPU memory. Reserved for GDS/GDR L2 adapters; nothing reports it yet."""
+
+    DRAM = "dram"
+    """Host CPU memory."""
+
+    CXL = "cxl"
+    """CXL memory mapped through Device-DAX."""
+
+    GDS = "gds"
+    """NVMe storage accessed through GPUDirect Storage."""
+
+    STORAGE = "storage"
+    """Any other storage medium."""
+
+
+class MemoryResidency(str, enum.Enum):
+    """Where the bytes of an L1 or L2 reside relative to this host.
+
+    Note:
+        Only for prefetch target filtering and L1-L2 affinity. Any other
+        use needs agreement from @ApostaC first.
+    """
+
+    LOCAL = "local"
+    """The bytes reside on this host."""
+
+    REMOTE = "remote"
+    """The bytes reside elsewhere, or in a domain shared with other hosts."""
+
+    DUMMY = "dummy"
+    """No bytes reside anywhere: placeholder L1 memory objects. Reserved for
+    GDS/GDR L2 adapters; nothing reports it yet."""
+
+
+@dataclass(frozen=True)
+class MemoryTags:
+    """The intrinsic memory properties of an L1 manager or an L2 adapter.
+
+    Note:
+        Only for prefetch target filtering and L1-L2 affinity. Any other
+        use needs agreement from @ApostaC first. Tags are compared by exact
+        equality.
+    """
+
+    segment: MemorySegment
+    """The kind of memory or storage that holds the bytes."""
+
+    residency: MemoryResidency
+    """Where the bytes reside relative to this host."""
+
+
 @dataclass(frozen=True)
 class ObjectKey:
     """

@@ -214,8 +214,8 @@ class FleetEvictionController(Controller):
         )
 
     def get_routers(self) -> tuple[APIRouter, ...]:
-        """Return the ``/quota`` and ``/cache/pins`` endpoints, bound to this
-        controller.
+        """Return the ``/quota``, ``/cache/pins`` and ``/cache/delete``
+        endpoints, bound to this controller.
 
         They act on state only this controller holds, so they are built around
         it rather than resolving it per request -- and go away with it when an

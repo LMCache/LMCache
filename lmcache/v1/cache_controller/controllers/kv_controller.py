@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Any
 
 # First Party
+from lmcache.inprocess.v1.token_database import ChunkedTokenDatabase
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.controllers.full_sync_tracker import FullSyncTracker
 from lmcache.v1.cache_controller.message import (
@@ -34,7 +35,6 @@ from lmcache.v1.cache_controller.message import (
 )
 from lmcache.v1.cache_controller.observability import PrometheusLogger
 from lmcache.v1.cache_controller.utils import RegistryTree
-from lmcache.v1.token_database import ChunkedTokenDatabase
 
 if TYPE_CHECKING:
     # First Party

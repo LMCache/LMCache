@@ -46,7 +46,7 @@ dynamic = ["dependencies", "optional-dependencies", "version"]
 
 [project.scripts]
 lmcache="lmcache.cli.main:main"
-lmcache_controller="lmcache.v1.api_server.__main__:main"
+lmcache_controller="lmcache.inprocess.v1.api_server.__main__:main"
 
 [project.urls]
 homepage = "https://docs.lmcache.ai"
@@ -94,6 +94,8 @@ select = [
     "SLF",
     # pylint: logging call has more arguments than format placeholders
     "PLE1205",
+    # flake8-tidy-imports: banned API imports
+    "TID251",
 ]
 ignore = [
     # star imports
@@ -119,8 +121,9 @@ ignore = [
 # where every file below the directory still violates the rule.
 # Tracking issue: https://github.com/LMCache/LMCache/issues/5118
 "lmcache/storage_backend/serde/cachegen_basics.py" = ["G004"]
+"lmcache/storage_backend/**" = ["TID251"]
 "lmcache/v1/distributed/l2_adapters/bigtable_l2_adapter.py" = ["G004"]
-"tests/disagg/test_nixl_channel.py" = ["G004"]
+"tests/v1/platform/test_ipc_wire.py" = ["TID251"]
 
 [tool.ruff.lint.isort]
 # same as .isort.cfg
@@ -131,6 +134,9 @@ from-first = true
 # import-heading-thirdparty=Third Party
 # import-heading-firstparty=First Party
 # import-heading-localfolder=Local
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"pickle".msg = "Use a data-only serialization format instead."
 
 [tool.mypy]
 
