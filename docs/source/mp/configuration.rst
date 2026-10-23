@@ -235,8 +235,7 @@ Source: ``lmcache/v1/multiprocess/config.py``
        size, mamba/GDN) at KV-cache registration. Off by default; pass
        ``--separate-object-groups`` to enable it. **Required for Mamba /
        linear-attention hybrids** (it lets their recurrent state be cached
-       independently, and is what allows ``--max-num-batched-tokens`` to exceed
-       twice the block size). For a non-hybrid model it makes no difference —
+       independently). For a non-hybrid model it makes no difference —
        every layer resolves to one object group. See :doc:`/mp/hybrid_models`.
 
 Lookup Hash Logging
