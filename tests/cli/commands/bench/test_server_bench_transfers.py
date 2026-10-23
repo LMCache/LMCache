@@ -4,6 +4,7 @@
 # Standard
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextlib import nullcontext
 from queue import Queue
 from threading import Barrier, Event, Thread, current_thread
@@ -171,7 +172,7 @@ def test_uncertain_transfer_retains_buffers_until_close(
             with ThreadPoolExecutor(max_workers=1) as executor:
                 closing = executor.submit(client.close)
                 try:
-                    with pytest.raises(TimeoutError):
+                    with pytest.raises(FuturesTimeoutError):
                         closing.result(timeout=0.2)
                     assert buffers
                     for context in contexts:
