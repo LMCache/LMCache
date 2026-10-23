@@ -88,9 +88,9 @@ The **BUILD_HF3FS** environment variable controls compilation:
 - ``iov_size`` (int, default ``209715200`` (200 MB), range
   ``[104857600, 2147483648]``): Per-thread I/O buffer in bytes.
 - ``enable_key_buffer`` (bool, default ``True``): Enable the in-memory
-  key buffer for accelerated exists lookups.  When enabled, exist lookups
-  respond from a hash set instead of issuing remote 3FS metadata calls.
-  This dramatically reduces lookup latency.
+  key buffer for accelerated exists lookups.  When enabled, lookups of
+  known keys respond from a hash set instead of issuing remote 3FS metadata
+  calls.  This dramatically reduces lookup latency.
 
 **Configuration Example**
 
@@ -119,6 +119,11 @@ The **BUILD_HF3FS** environment variable controls compilation:
 When ``enable_key_buffer`` is ``True`` (the default), the connector maintains an
 in-memory cache of all key filenames. Lookup operations respond from the cache instead
 of issuing remote 3FS metadata calls. This dramatically reduces lookup latency.
+
+The cache is built by scanning ``base_paths`` at startup and grows with every
+store. A key that is not in the cache costs one 3FS metadata call, and is added
+to the cache if its file exists. This keeps chunks written by other LMCache
+instances that share the same ``base_paths`` visible after startup.
 
 - **Trade-offs**
    - **Enable** for workloads with many concurrent lookups (prefetch,batch exists). 

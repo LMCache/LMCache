@@ -946,6 +946,41 @@ class TestHf3fsNativeConnector:
         assert bytes(buf) == data
         new_client.close()
 
+    def test_exists_sees_keys_stored_by_another_client(
+        self, hf3fs_native_client: tuple["LMCacheHf3fsClient", str, str]
+    ) -> None:
+        """Keys stored by another instance after startup are found by lookup."""
+        reader, mount_point, base_paths = hf3fs_native_client
+        key = _object_key_to_string(create_object_key(401))
+        data = bytes(create_memory_obj(512).byte_array)
+
+        # First Party
+        from lmcache.lmcache_hf3fs import LMCacheHf3fsClient
+
+        # Created after ``reader`` scanned base_paths, like a peer node.
+        writer = LMCacheHf3fsClient(
+            mount_point=mount_point,
+            base_paths=base_paths,
+            num_workers=2,
+            ior_entries=128,
+            io_depth=0,
+            numa_id=-1,
+            iov_size=209715200,
+            time_out=200,
+            enable_key_buffer=True,
+        )
+        writer.submit_batch_set([key], [memoryview(data)])
+        assert _wait_for_completions(writer)[0][1]
+        writer.close()
+
+        reader.submit_batch_exists([key])
+        assert _wait_for_completions(reader)[0][3] == [True]
+
+        buf = bytearray(len(data))
+        reader.submit_batch_get([key], [memoryview(buf)])
+        assert _wait_for_completions(reader)[0][3] == [True]
+        assert bytes(buf) == data
+
     def test_key_buffer_scan_multipath_no_missing(self):
         """Regression: scan_and_build_buffer_ must scan every base_path even
         when there are more base_paths than worker threads.
