@@ -48,7 +48,7 @@ def test_missing_models_are_downloaded_and_a_failed_one_skips_its_pairs(
 
     def fetch(model: dict, hf_cache: str, image: str, container: dict, log: Path):
         fetched.append(model["repo"])
-        if model["repo"].startswith("Qwen/"):
+        if model["repo"].startswith("zai-org/"):
             raise RuntimeError("disk full")
         Path(model["done"]).parent.mkdir(parents=True, exist_ok=True)
         Path(model["done"]).touch()
@@ -75,7 +75,7 @@ def test_missing_models_are_downloaded_and_a_failed_one_skips_its_pairs(
     assert suite.suite("weekly", tmp_path / "s", deps) == suite.EXIT_SUITE_INVALID
     assert fetched == [
         "arcee-ai/Trinity-Large-Thinking-FP8-Block",
-        "Qwen/Qwen3.8-Flash-Next-FP8",
+        "zai-org/GLM-5.3-Flash",
     ]
     assert ran == ["vllm_simple"]
     rep = json.loads((tmp_path / "s" / "report.json").read_text())

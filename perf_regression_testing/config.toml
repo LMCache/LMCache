@@ -41,27 +41,28 @@ reasoning-parser = "deepseek_r1"
 enable-auto-tool-choice = true
 tool-call-parser = "qwen3_coder"
 
-# Hybrid linear: 36 Gated DeltaNet layers and 12 sparse GQA (QSA) layers with
-# 2 KV heads. Chosen over GLM-5.3-Flash, whose MLA layers TP replicates on every
-# rank: no current frontier hybrid has 8 or more KV heads.
-[models.qwen38]
-repo = "Qwen/Qwen3.8-Flash-Next-FP8"
-revision = "236dfdf285828023ca3bcd3f37366c58a3469b13"
-served_name = "qwen3p8"
-# Kept on the 4-GPU setup it was first measured on: its GPU KV cache (12.2M
-# tokens) was within 6% of Step-3.7-Flash's, so the same load.
-gpu_count = 4
+# Hybrid linear: 34 Kimi Delta Attention layers and 11 sparse MLA layers.
+[models.glm53]
+repo = "zai-org/GLM-5.3-Flash"
+revision = "46a050bec13002ad29ee795c16e61cf4fa3c4a9c"
+served_name = "glm-5.3-flash"
+# A first guess; the knee is still to be measured.
 aiperf_args = { concurrency = 230 }
 
-[models.qwen38.vllm_args]
-tensor-parallel-size = 4
-# The H200 TP4 default; unset, the API server initializes CUDA to look it up.
-compilation-config = '{"pass_config":{"fi_allreduce_fusion_max_size_mb":2}}'
-reasoning-parser = "qwen3"
-enable-auto-tool-choice = true
-tool-call-parser = "qwen3_coder"
-# The checkpoint has one MTP layer.
-speculative-config = '{"method":"mtp","num_speculative_tokens":1}'
+[models.glm53.vllm_args]
+# The recipe's DEP8: attention data parallel, so no rank duplicates the MLA
+# cache, as TP8 would. DCP also avoids that, but the indexer forces an
+# interleave of 4 and with it every MTP verify onto the prefill path.
+tensor-parallel-size = 1
+data-parallel-size = 8
+# The recipe: Hopper runs this model with BF16 KV.
+kv-cache-dtype = "auto"
+# vLLM's auto pick on SM90, FLASHINFER_MLA_SPARSE_SM90, is slower (vLLM #56564).
+attention-backend = "FLASH_ATTN_MLA_SPARSE"
+disable-flashinfer-autotune = true
+enable-ep-weight-filter = true
+reasoning-parser = "glm47"
+speculative-config = '{"method":"mtp","num_speculative_tokens":5}'
 
 [container]
 network = "host"           # services and AIPerf talk over 127.0.0.1
@@ -148,7 +149,9 @@ invalid_log_patterns = ["unhealthy"]
 # from the same image.
 # Service fields: `command` + `args` (a table value is passed as JSON), `env`,
 # `ready_url`, and `scratch` dirs that are mounted, checked for `min_free_gb`,
-# and wiped before and after the run.
+# and wiped before and after the run. `after_vllm = true` starts it once vLLM
+# is up instead (a router). A deployment's `aiperf_args` go on top of its
+# model's.
 
 [deployments.vllm_lmcache]
 model = "trinity"
@@ -194,12 +197,11 @@ max_capacity_gb = 6000
 eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 0.1 }
 
 [deployments.vllm_lmcache_ssm]
-# vllm_lmcache on the hybrid model, on 4 GPUs with the 4-GPU budget: 800 GiB
-# DRAM + 1500 GiB disk. With prefix caching vLLM caches Mamba state per block
-# (mamba_cache_mode "align") and LMCache needs chunk-size equal to that block
-# size: 1600 at TP4 with fp8 KV (vLLM's error message, build 28).
-model = "qwen38"
+# vllm_lmcache on the hybrid linear model, behind the recipe's router, which
+# pins a session (AIPerf's X-Correlation-ID) to one DP rank.
+model = "glm53"
 image_target = "lmcache"
+aiperf_args = { url = "http://127.0.0.1:18001" }
 
 [deployments.vllm_lmcache_ssm.vllm_args]
 kv-transfer-config = '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://localhost","lmcache.mp.port":16555,"lmcache.mp.mq_timeout":1500}}'
@@ -210,23 +212,26 @@ command = ["lmcache", "server"]
 ready_url = "http://127.0.0.1:18080/metrics"
 ready_timeout_s = 1800
 env = { LMCACHE_LOG_LEVEL = "WARNING" }
-scratch = [{ path = "<root>/l2", min_free_gb = 1500 }]
+scratch = [{ path = "<root>/l2", min_free_gb = 6000 }]
 
 [deployments.vllm_lmcache_ssm.services.args]
 host = "127.0.0.1"
 port = 16555
 http-port = 18080
-chunk-size = 1600
+# A multiple of vLLM's block, which the hybrid sizes to hold a KDA state:
+# 5760 estimated from the DCP run's 1152 (x8 state per rank, BF16 KV). The
+# connector rejects a mismatch and names the block.
+chunk-size = 5760
 separate-object-groups = true
-l1-size-gb = 800
+# Pinned lazily, as in vllm_lmcache.
+l1-size-gb = 1500
 eviction-policy = "LRU"
 disable-observability = true
 eviction-trigger-watermark = 0.95
 eviction-ratio = 0.05
 l2-prefetch-policy = "retain"
-# One GPU and one CPU worker by default: all 4 TP ranks' stores and loads queue
-# on a single thread.
-max-workers = 4
+# One worker per DP8 rank, as in vllm_lmcache.
+max-workers = 8
 
 [deployments.vllm_lmcache_ssm.services.args.l2-adapter]
 type = "fs_native"
@@ -234,8 +239,24 @@ base_path = "<root>/l2"
 # Bypass the page cache, which would serve L2 from RAM outside the L1 budget.
 use_odirect = true
 num_workers = 16
-max_capacity_gb = 1500
+max_capacity_gb = 6000
 eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 0.1 }
+
+[[deployments.vllm_lmcache_ssm.services]]
+name = "router"
+command = ["vllm-router"]
+after_vllm = true
+ready_url = "http://127.0.0.1:18001/readiness"
+ready_timeout_s = 300
+
+[deployments.vllm_lmcache_ssm.services.args]
+host = "127.0.0.1"
+port = 18001
+policy = "consistent_hash"
+intra-node-data-parallel-size = 8
+worker-urls = "http://127.0.0.1:18000"
+worker-startup-timeout-secs = 300
+prometheus-port = 18091
 
 [deployments.vllm_native]
 model = "trinity"

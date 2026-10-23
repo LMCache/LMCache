@@ -52,6 +52,8 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') \
     && apt-get install -y --no-install-recommends git \
         libcusparse-dev-${CUDA_VERSION_DASH} libcusolver-dev-${CUDA_VERSION_DASH} \
     && rm -rf /var/lib/apt/lists/*
+# The DP router of vLLM's recipes; its Python deps are already in the image.
+RUN uv pip install --system --no-deps vllm-router==0.1.16
 ARG MAX_JOBS=32
 ENV MAX_JOBS=${MAX_JOBS} TORCH_CUDA_ARCH_LIST="9.0"
 COPY --from=lmcache_src . /workspace/LMCache

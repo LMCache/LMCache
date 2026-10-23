@@ -11,7 +11,7 @@ suite.py --suite nightly|weekly            (one suite at a time: a lock file)
   -> images: vLLM nightly, pinned for a week; LMCache built FROM it
              (a failed build ends the night, exit 2)
   -> for each (workload, deployment) pair of the suite:
-       4 idle GPUs -> cache-layer services -> vLLM -> AIPerf (960 s window)
+       8 idle GPUs -> cache-layer services -> vLLM (-> router) -> AIPerf (960 s window)
        -> score, check validity
        -> test each metric against this pair's own history
   -> report.json + report.md
@@ -25,9 +25,9 @@ Workload `agentic`: a Claude Code session replay
 Each model is a frontier open-weight release on 8 x H200 (TP8 + EP, FP8 KV), served
 with its vLLM recipe's flags and replaced when a newer one appears:
 Trinity-Large-Thinking-FP8-Block (hybrid sliding-window, 8 KV heads) at 220 concurrent
-sessions; `vllm_lmcache_ssm` serves Qwen3.8-Flash-Next-FP8 (Gated DeltaNet +
-sparse GQA, MTP) instead, at 230 on 4 x H200 (TP4 + EP) with 800 GiB DRAM +
-1500 GiB disk. Every other deployment runs the same stock
+sessions; `vllm_lmcache_ssm` serves GLM-5.3-Flash (Kimi Delta Attention +
+sparse MLA, MTP; DEP8 behind vllm-router, BF16 KV, both from its recipe)
+instead, at 230. Every deployment runs the same stock
 vLLM image and the same budget, 1500 GiB DRAM + 6000 GiB disk (`vllm_simple`: the DRAM only;
 `vllm_simple_l2`: the disk, with the DRAM as page cache under a memory cap);
 only the cache layer differs:
@@ -80,8 +80,8 @@ HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
     arcee-ai/Trinity-Large-Thinking-FP8-Block \
     --revision 6412c1ad1588c664977b0f830b80a20273173318
 HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
-    Qwen/Qwen3.8-Flash-Next-FP8 \
-    --revision 236dfdf285828023ca3bcd3f37366c58a3469b13
+    zai-org/GLM-5.3-Flash \
+    --revision 46a050bec13002ad29ee795c16e61cf4fa3c4a9c
 
 # Trace, verified against the pinned sha256 and dir_digest.
 python3.11 perf_regression_testing/workloads/agentic/fetch_trace.py \
