@@ -10,6 +10,7 @@ the coordinator is unreachable.
 from unittest.mock import MagicMock
 import asyncio
 import contextlib
+import time
 
 # Third Party
 import httpx
@@ -179,6 +180,94 @@ def test_keep_registered_reregisters_on_404():
 
     asyncio.run(run())
     assert calls["register"] >= 2  # initial + at least one re-register after 404
+
+
+def test_keep_registered_reregisters_without_waiting_a_tick_after_404():
+    """A heartbeat answered 404 is followed by a registration at once.
+
+    A restarted coordinator knows no server until each re-registers; waiting
+    out another heartbeat interval first doubles how long it stays blind.
+    """
+    interval = 0.4
+    events: list[tuple[str, int, float]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        now = time.monotonic()
+        if request.method == "POST":
+            events.append(("register", 200, now))
+            return httpx.Response(
+                200, json={"instance_id": "i1", "re_registered": False}
+            )
+        if request.method == "PUT":
+            events.append(("heartbeat", 404, now))
+            return httpx.Response(404, json={"error": "unknown"})
+        return httpx.Response(204)
+
+    async def run():
+        async with _client(handler) as client:
+            task = asyncio.create_task(
+                keep_registered(
+                    client,
+                    _BASE,
+                    http_port=8080,
+                    advertise_ip="127.0.0.1",
+                    instance_id="i1",
+                    heartbeat_interval=interval,
+                    on_registered=lambda: None,
+                )
+            )
+            # Initial registration, one interval, the 404, the re-registration.
+            await asyncio.sleep(1.5 * interval)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+    kinds = [kind for kind, _, _ in events]
+    assert kinds[:3] == ["register", "heartbeat", "register"]
+    assert events[2][2] - events[1][2] < interval / 2
+
+
+def test_keep_registered_paces_reregistration_when_404s_repeat():
+    """Re-registering at once never turns into a tight loop.
+
+    A coordinator that keeps forgetting the server still sees at most one
+    registration per heartbeat interval.
+    """
+    interval = 0.05
+    window = 0.5
+    calls = {"register": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            calls["register"] += 1
+            return httpx.Response(
+                200, json={"instance_id": "i1", "re_registered": False}
+            )
+        if request.method == "PUT":
+            return httpx.Response(404, json={"error": "unknown"})
+        return httpx.Response(204)
+
+    async def run():
+        async with _client(handler) as client:
+            task = asyncio.create_task(
+                keep_registered(
+                    client,
+                    _BASE,
+                    http_port=8080,
+                    advertise_ip="127.0.0.1",
+                    instance_id="i1",
+                    heartbeat_interval=interval,
+                    on_registered=lambda: None,
+                )
+            )
+            await asyncio.sleep(window)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+    assert 2 <= calls["register"] <= window / interval + 1
 
 
 def test_keep_registered_keeps_id_on_transient_heartbeat_failure():

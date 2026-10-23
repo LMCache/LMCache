@@ -122,7 +122,9 @@ async def keep_registered(
     current identity is kept, so a down coordinator never stops the MP server
     and never spawns a duplicate registration. The identity is rebuilt only on
     an explicit ``404`` (the coordinator forgot us) or after a failed initial
-    registration.
+    registration. After a ``404`` the server re-registers at once, without
+    waiting for the next tick; every registration is still followed by a full
+    ``heartbeat_interval``, so repeated ``404`` responses cannot make it spin.
 
     Args:
         client: The HTTP client to send with.
@@ -172,12 +174,15 @@ async def keep_registered(
                         f"{base_url}/instances/{assigned_id}/heartbeat"
                     )
                     if response.status_code == 404:
-                        # Coordinator forgot us: drop id, re-register next tick.
+                        # Coordinator forgot us (it restarted). Re-register at
+                        # once: sleeping first would leave it unaware of this
+                        # server for up to two heartbeat intervals.
                         logger.info(
                             "Coordinator no longer knows %s; re-registering",
                             assigned_id,
                         )
                         assigned_id = None
+                        continue
                     else:
                         response.raise_for_status()
             except (httpx.HTTPError, ValueError, ValidationError) as e:
