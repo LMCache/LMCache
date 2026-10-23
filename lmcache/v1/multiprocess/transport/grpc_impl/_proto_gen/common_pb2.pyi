@@ -49,10 +49,10 @@ class BlockIdGroup(_message.Message):
     def __init__(self, block_ids: _Optional[_Iterable[int]] = ...) -> None: ...
 
 class DeviceIpcWrapper(_message.Message):
-    __slots__ = ("pickled_payload",)
-    PICKLED_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
-    pickled_payload: bytes
-    def __init__(self, pickled_payload: _Optional[bytes] = ...) -> None: ...
+    __slots__ = ("descriptor_payload",)
+    DESCRIPTOR_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
+    descriptor_payload: bytes
+    def __init__(self, descriptor_payload: _Optional[bytes] = ...) -> None: ...
 
 class EngineGroupInfo(_message.Message):
     __slots__ = ("engine_group_id", "layer_indices", "tokens_per_block", "sw_size_tokens", "extra_object_group_tag", "recurrent_state")
