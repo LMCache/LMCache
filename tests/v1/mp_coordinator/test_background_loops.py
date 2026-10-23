@@ -82,6 +82,28 @@ async def test_a_loop_name_can_be_started_once():
 
 
 @pytest.mark.asyncio
+async def test_a_pass_more_than_an_interval_late_is_counted_and_sees_its_lateness():
+    loops = BackgroundLoops()
+    seen: list[float] = []
+
+    async def recording_pass() -> None:
+        seen.append(loops.stats()["slow"].last_pass_late_seconds)
+
+    task = loops.start("slow", 0.1, recording_pass)
+    while len(seen) < 2:
+        await asyncio.sleep(0.005)
+    assert loops.stats()["slow"].late_passes == 0
+
+    time.sleep(0.4)  # holds the event loop past the next pass's due time
+    while len(seen) < 3:
+        await asyncio.sleep(0.005)
+    task.cancel()
+
+    assert seen[2] >= 0.2
+    assert loops.stats()["slow"].late_passes >= 1
+
+
+@pytest.mark.asyncio
 async def test_the_monitor_adds_up_time_the_loop_was_blocked():
     monitor = EventLoopMonitor()
     task = asyncio.create_task(monitor.run())

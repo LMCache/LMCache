@@ -58,6 +58,72 @@ def test_health_loop_keeps_instances_that_heartbeat():
         assert _instance_ids(client) == {"a"}
 
 
+def _freeze_coordinator(client: TestClient, seconds: float) -> None:
+    """Block the coordinator's event loop, as a GC pause or SIGSTOP would:
+    nothing it runs -- heartbeats, health passes -- gets a turn."""
+    assert client.portal is not None
+    client.portal.call(time.sleep, seconds)
+
+
+def _heartbeat_for(client: TestClient, instance_id: str, seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        client.put(f"/instances/{instance_id}/heartbeat")
+        time.sleep(0.05)
+
+
+def _heartbeat_until_gone(
+    client: TestClient, alive: str, dead: str, timeout: float = 10.0
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and dead in _instance_ids(client):
+        client.put(f"/instances/{alive}/heartbeat")
+        time.sleep(0.05)
+
+
+_STALL_CONFIG = MPCoordinatorConfig(
+    health_check_interval=0.05,
+    instance_timeout=0.5,
+    eviction_check_interval=0.0,
+)
+
+
+def test_a_coordinator_freeze_is_not_held_against_instances():
+    """Instances that had no chance to heartbeat while the coordinator was
+    frozen are not evicted by the first health passes after it resumes;
+    one that still does not heartbeat goes once the grace ends."""
+    with TestClient(create_app(_STALL_CONFIG)) as client:
+        _register(client, "alive")
+        _register(client, "dead")
+
+        _freeze_coordinator(client, 1.0)
+        time.sleep(0.15)  # several health passes, well inside the grace
+
+        assert _instance_ids(client) == {"alive", "dead"}
+
+        # The grace is only a chance to heartbeat; it does not last.
+        _heartbeat_until_gone(client, alive="alive", dead="dead")
+        assert _instance_ids(client) == {"alive"}
+
+
+def test_a_second_freeze_does_not_shield_an_instance_that_stopped():
+    """A grace does not carry over: an instance that has not heartbeat
+    since the first freeze is already out of time when the second one
+    starts, so recurring freezes cannot keep a dead instance registered."""
+    with TestClient(create_app(_STALL_CONFIG)) as client:
+        _register(client, "alive")
+        _register(client, "dead")
+        _freeze_coordinator(client, 1.0)
+        time.sleep(0.15)
+        assert _instance_ids(client) == {"alive", "dead"}
+
+        client.put("/instances/alive/heartbeat")
+        _freeze_coordinator(client, 1.0)
+        time.sleep(0.15)
+
+        assert _instance_ids(client) == {"alive"}
+
+
 def _store_batch(instance_id: str, seq: int, tier: str, backend: str, h: str) -> dict:
     return {
         "instance_id": instance_id,
@@ -228,4 +294,61 @@ def test_restored_instance_that_re_registers_keeps_its_l1(tmp_path):
         client.put("/instances/node-a/heartbeat")
         time.sleep(0.7)
 
+        assert _total_gb(client, "l1") > 0.0
+
+
+def test_a_freeze_leaves_restored_instances_their_full_window(tmp_path):
+    """A freeze right after a restore does not use up the restored
+    instances' time to register again: they get the full timeout from when
+    the coordinator runs again."""
+    config = MPCoordinatorConfig(
+        checkpoint_path=str(tmp_path / "checkpoint"),
+        checkpoint_interval=0.0,
+        health_check_interval=0.05,
+        instance_timeout=0.5,
+        eviction_check_interval=0.0,
+    )
+    with TestClient(create_app(config)) as client:
+        _register(client)
+        client.post(
+            "/events", json={"batches": [_store_batch("node-a", 1, "l1", "dram", "aa")]}
+        )
+
+    with TestClient(create_app(config)) as client:
+        _freeze_coordinator(client, 1.0)
+        time.sleep(0.15)
+        assert _total_gb(client, "l1") > 0.0
+
+        _register(client)
+        _heartbeat_for(client, "node-a", 0.7)  # past the grace
+        assert _total_gb(client, "l1") > 0.0
+
+
+def test_a_freeze_starting_inside_the_restore_window_extends_it(tmp_path):
+    """A freeze that begins before the restored instances' window to
+    register again ends still leaves them the timeout after it, even when
+    the health pass it delays was due only after that window ended."""
+    config = MPCoordinatorConfig(
+        checkpoint_path=str(tmp_path / "checkpoint"),
+        checkpoint_interval=0.0,
+        health_check_interval=0.2,
+        instance_timeout=0.5,
+        eviction_check_interval=0.0,
+    )
+    with TestClient(create_app(config)) as client:
+        _register(client)
+        client.post(
+            "/events", json={"batches": [_store_batch("node-a", 1, "l1", "dram", "aa")]}
+        )
+
+    started = time.monotonic()
+    with TestClient(create_app(config)) as client:
+        # Inside the 0.5 s window, but the pass after it is due beyond it.
+        time.sleep(max(0.0, started + 0.4 - time.monotonic()))
+        _freeze_coordinator(client, 1.0)
+        time.sleep(0.05)
+        assert _total_gb(client, "l1") > 0.0
+
+        _register(client)
+        _heartbeat_for(client, "node-a", 0.7)  # past the grace
         assert _total_gb(client, "l1") > 0.0

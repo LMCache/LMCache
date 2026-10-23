@@ -34,19 +34,29 @@ class BackgroundLoopStats:
             without raising; ``None`` before the first.
         passes_ok: Passes that finished without raising.
         passes_failed: Passes that raised; the loop kept running.
+        last_pass_late_seconds: How much later than due the latest pass
+            started. A pass is due one interval after the previous one
+            finished.
+        late_passes: Passes that started more than one interval late:
+            the coordinator was not running for at least that long
+            (event loop blocked, process stopped), so a whole pass was
+            missed.
     """
 
     interval_seconds: float
     last_success_timestamp: float | None = None
     passes_ok: int = 0
     passes_failed: int = 0
+    last_pass_late_seconds: float = 0.0
+    late_passes: int = 0
 
 
 class BackgroundLoops:
     """Runs the coordinator's periodic work and keeps each loop's stats.
 
-    Each loop sleeps its interval, then runs one pass. A pass that raises
-    is logged and counted, and the loop goes on; only cancellation stops
+    Each loop sleeps its interval, then runs one pass, recording how late
+    that pass started. A pass that raises is logged and counted, and the
+    loop goes on; only cancellation stops
     it. Used by the app for its own loops and handed to controllers through
     ``ControllerRuntime``.
     """
@@ -96,9 +106,14 @@ class BackgroundLoops:
         stats: BackgroundLoopStats,
         run_pass: Callable[[], Awaitable[object]],
     ) -> None:
-        """Sleep, run one pass, count it; until cancelled."""
+        """Sleep, time and run one pass, count it; until cancelled."""
         while True:
+            due = time.monotonic() + stats.interval_seconds
             await asyncio.sleep(stats.interval_seconds)
+            # Set before the pass runs, so the pass can read its own lateness.
+            stats.last_pass_late_seconds = time.monotonic() - due
+            if stats.last_pass_late_seconds > stats.interval_seconds:
+                stats.late_passes += 1
             try:
                 await run_pass()
             except Exception:

@@ -80,6 +80,96 @@ from lmcache.v1.utils.router_discovery import discover_api_routers
 logger = init_logger(__name__)
 
 
+class StallGrace:
+    """Keeps the coordinator's own stalls from timing out the mp servers.
+
+    Heartbeats are only read while the coordinator runs. When it does not
+    (event loop blocked, process stopped), what the servers send queues
+    unread, and the overdue health pass can run before it. A health pass
+    that started more than one interval late shows the coordinator was not
+    running from when that pass was due. For ``instance_timeout`` after
+    such a pass, liveness is judged as of that due time instead of now:
+    an instance already out of time then goes at once, the rest get
+    ``instance_timeout`` to heartbeat or register again.
+
+    A stall only shields instances that heartbeat within
+    ``instance_timeout`` before its missed pass was due, so recurring
+    stalls cannot keep a dead instance registered. See "Coordinator
+    stalls" in ``docs/design/v1/mp_coordinator/README.md`` for why one
+    interval is the threshold and what it covers.
+    """
+
+    def __init__(self, health_check_interval: float, instance_timeout: float) -> None:
+        """Create a grace tracker for one health loop.
+
+        Args:
+            health_check_interval: Seconds between health passes.
+            instance_timeout: Seconds without a heartbeat before an
+                instance is evicted; also how long a grace lasts.
+        """
+        self._interval = health_check_interval
+        self._timeout = instance_timeout
+        # When the pass the last stall made late was due, and until when
+        # liveness is judged as of that moment.
+        self._stalled_pass_due = 0.0
+        self._grace_until = 0.0
+
+    def observe_pass(self, now: float, late_seconds: float) -> None:
+        """Record how late the current health pass started.
+
+        A pass more than one interval late starts a grace of
+        ``instance_timeout`` from ``now``, replacing any earlier one, and
+        is logged as a WARNING.
+
+        Args:
+            now: ``time.monotonic()`` at the start of the pass.
+            late_seconds: How much later than due the pass started.
+        """
+        if late_seconds <= self._interval:
+            return
+        self._stalled_pass_due = now - late_seconds
+        self._grace_until = now + self._timeout
+        logger.warning(
+            "Coordinator was not running for at least %.1f s; judging "
+            "liveness as of then for the next %.1f s so servers can heartbeat",
+            late_seconds,
+            self._timeout,
+        )
+
+    def max_heartbeat_age(self, now: float) -> float:
+        """Return the heartbeat age past which an instance is evicted now.
+
+        Args:
+            now: ``time.monotonic()`` at the start of the pass.
+
+        Returns:
+            ``instance_timeout``, plus the time since the stalled pass was
+            due while a grace lasts.
+        """
+        if now < self._grace_until:
+            return self._timeout + now - self._stalled_pass_due
+        return self._timeout
+
+    def deadline_passed(self, now: float, deadline: float) -> bool:
+        """Return whether a ``time.monotonic()`` deadline has passed.
+
+        While a grace lasts, the deadline counts as passed only if the
+        stall surely began after it. The stall began no earlier than one
+        interval before the missed pass was due, since each pass is due
+        one interval after the previous one finished.
+
+        Args:
+            now: ``time.monotonic()`` at the start of the pass.
+            deadline: The deadline to check.
+
+        Returns:
+            True if the deadline has passed, not counting a stall.
+        """
+        if now < self._grace_until:
+            return self._stalled_pass_due - self._interval >= deadline
+        return now >= deadline
+
+
 def create_app(config: MPCoordinatorConfig) -> FastAPI:
     """Build the coordinator FastAPI app.
 
@@ -151,6 +241,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     controller_status = ControllerStatus(type(c).__name__ for c in controllers.all())
     restored_instances = set(event_gate.stats().streams)
     restored_deadline = time.monotonic() + config.instance_timeout
+    stall_grace = StallGrace(config.health_check_interval, config.instance_timeout)
     if config.metrics_enabled:
         # Every component with metrics registered itself as it was built.
         register_coordinator_metrics()
@@ -187,9 +278,16 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         only via ``DELETE`` events. Its capacity declaration goes too,
         as on ``DELETE /instances``; a server that was only slow
         redeclares when it re-registers.
+
+        Time the coordinator itself was not running is not held against
+        instances or restored ones (see :class:`StallGrace`).
         """
-        departed = _evict_stale(registry, config.instance_timeout)
-        if restored_instances and time.monotonic() >= restored_deadline:
+        now = time.monotonic()
+        stall_grace.observe_pass(
+            now, background_loops.stats()["health"].last_pass_late_seconds
+        )
+        departed = _evict_stale(registry, stall_grace.max_heartbeat_age(now))
+        if restored_instances and stall_grace.deadline_passed(now, restored_deadline):
             departed += _unreturned_instances(registry, restored_instances)
             restored_instances.clear()
         for instance_id in departed:
@@ -299,18 +397,18 @@ def _artifact_store(path: str) -> ArtifactStore:
     return LocalArtifactStore(Path(path)) if path else NullArtifactStore()
 
 
-def _evict_stale(registry: InstanceRegistry, instance_timeout: float) -> list[str]:
-    """Deregister every instance whose heartbeat is older than the timeout.
+def _evict_stale(registry: InstanceRegistry, max_age: float) -> list[str]:
+    """Deregister every instance whose heartbeat is older than ``max_age``.
 
     Args:
         registry: The shared instance registry.
-        instance_timeout: Max seconds since the last heartbeat before eviction.
+        max_age: Heartbeat age, in seconds, this sweep allows.
 
     Returns:
         The ids of instances evicted in this sweep.
     """
     evicted = []
-    for instance_id in registry.stale(instance_timeout):
+    for instance_id in registry.stale(max_age):
         if registry.deregister(instance_id) is not None:
             logger.warning("Instance %s timed out; evicted", instance_id)
             evicted.append(instance_id)

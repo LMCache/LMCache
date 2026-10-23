@@ -148,12 +148,20 @@ view-completeness gauge, not an alert.
 | `background_loop.last_success_timestamp_seconds` | gauge | `loop` = health, checkpoint, eviction | When each loop last finished a pass |
 | `background_loop.interval_seconds` | gauge | `loop` | Configured period, for alerts |
 | `background_loop.passes` | counter | `loop`, `result` = ok, failed | Passes that failed |
+| `background_loop.late_passes` | counter | `loop` | Passes that started more than one interval late: the coordinator was not running for at least that long (blocked loop, `SIGSTOP`) |
 | `controller.up` | gauge | `controller` | 1 up, 0 failed to start |
 | `event_loop.blocked_seconds` | counter | | Total time the request thread was stuck (ingest and checkpoints can stall heartbeats); its rate is the fraction of time the loop was stalled |
 
 Every loop runs on one runner (`BackgroundLoops`): a pass that raises is logged
 and counted, and the loop keeps going. Without that, a loop that raised died
 silently, and a metric alone would only report the death.
+
+Each late pass is counted per loop in `background_loop.late_passes`, so one
+long freeze shows up even where `event_loop.blocked_seconds` would average it
+away. A late health pass also logs a WARNING and judges heartbeats as of when
+it was due, so the stall is not held against the mp servers; see
+[Coordinator stalls](README.md#coordinator-stalls), which also says why the
+health loop uses its own lateness rather than `event_loop.blocked_seconds`.
 
 ### Views: what the coordinator holds
 

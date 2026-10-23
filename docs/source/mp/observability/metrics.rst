@@ -1031,6 +1031,12 @@ counted, and the loop keeps running.
    * - ``lmcache_coordinator.background_loop.passes``
      - ObservableCounter (attrs: ``loop``, ``result``)
      - Loop passes, ``ok`` or ``failed``.
+   * - ``lmcache_coordinator.background_loop.late_passes``
+     - ObservableCounter (attr: ``loop``)
+     - Passes that started more than one interval late: the coordinator was
+       not running for at least that long (event loop blocked, process
+       stopped).  A late ``health`` pass gives servers time to heartbeat
+       before any is dropped.
    * - ``lmcache_coordinator.controller.up``
      - ObservableGauge (attr: ``controller``)
      - ``1`` if the controller is running, ``0`` if it failed to start.

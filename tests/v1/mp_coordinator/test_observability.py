@@ -355,6 +355,7 @@ def test_background_loop_metrics_report_each_loop() -> None:
                 last_success_timestamp=1700000000.0,
                 passes_ok=5,
                 passes_failed=1,
+                late_passes=3,
             ),
             "eviction": BackgroundLoopStats(interval_seconds=5.0, passes_failed=2),
         }
@@ -378,6 +379,10 @@ def test_background_loop_metrics_report_each_loop() -> None:
         labels(loop="health", result="failed"): 1,
         labels(loop="eviction", result="ok"): 0,
         labels(loop="eviction", result="failed"): 2,
+    }
+    assert values[prefix + "late_passes"] == {
+        labels(loop="health"): 3,
+        labels(loop="eviction"): 0,
     }
 
 
