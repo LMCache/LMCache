@@ -40,6 +40,9 @@ class HitLimitLookupClient(LookupClientInterface):
     def lookup_cache(self, lookup_id: str) -> Optional[int]:
         return self.actual_lookup_client.lookup_cache(lookup_id)
 
+    def lookup_hidden_state_coverage(self, lookup_id: str) -> Optional[int]:
+        return self.actual_lookup_client.lookup_hidden_state_coverage(lookup_id)
+
     def lookup(
         self,
         token_ids: Union["torch.Tensor", list[int]],
