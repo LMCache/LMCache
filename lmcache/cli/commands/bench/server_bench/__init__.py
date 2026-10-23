@@ -10,9 +10,6 @@ import argparse
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.logging import init_logger
-
-logger = init_logger(__name__)
 
 
 class ServerBenchCommand(BaseCommand):
@@ -25,20 +22,17 @@ class ServerBenchCommand(BaseCommand):
         return "End-to-end test for LMCache MP cache server (GPU mode)."
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
-        """Register benchmark arguments when runtime dependencies are available."""
-        try:
-            # First Party
-            from lmcache.cli.commands.bench.server_bench.command import (
-                add_server_arguments,
-            )
+        """Register benchmark arguments even without the full runtime.
 
-            add_server_arguments(parser)
-        except ImportError as exc:
-            logger.warning(
-                "Unable to load 'lmcache bench server' arguments (%s); "
-                "install the full package with: pip install lmcache",
-                exc,
-            )
+        Args:
+            parser: The argument parser for the server benchmark subcommand.
+        """
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.arguments import (
+            add_server_arguments,
+        )
+
+        add_server_arguments(parser)
 
     def execute(self, args: argparse.Namespace) -> None:
         """Load and execute the benchmark, reporting runtime import failures."""
