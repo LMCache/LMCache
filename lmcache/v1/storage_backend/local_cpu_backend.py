@@ -11,11 +11,11 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.v1.cache_controller.message import OpType
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
-from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
@@ -34,7 +34,7 @@ from lmcache.v1.system_detection import NUMADetector, SystemMemoryDetector
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.cache_controller.worker import LMCacheWorker
+    from lmcache.inprocess.v1.cache_controller.worker import LMCacheWorker
 
 logger = init_logger(__name__)
 
