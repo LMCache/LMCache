@@ -11,7 +11,11 @@ message IpcCacheServerKey {
   string model_name = 1;
   int64 world_size = 2;
   optional int64 worker_id = 3;
-  repeated int64 token_ids = 4;
+  // Token ids as big-endian uint32, the bytes the blake3 chunk hash reads.
+  // Field 4 carried them as repeated int64 before.
+  reserved 4;
+  reserved "token_ids";
+  bytes token_bytes = 11;
   int64 start = 5;
   int64 end = 6;
   string request_id = 7;

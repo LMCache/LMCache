@@ -5,7 +5,7 @@ in the multiprocess cache server.
 """
 
 # Standard
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Optional, overload
 import threading
@@ -14,7 +14,11 @@ import time
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import (
+    TOKEN_ID_BYTES,
+    IPCCacheServerKey,
+    pack_token_ids,
+)
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
@@ -37,7 +41,8 @@ class Session:
 
     request_id: str
     hasher: TokenHasher
-    token_ids: list[int] = field(default_factory=list)
+    # Packed by ``pack_token_ids``; hashed without building Python ints.
+    token_bytes: bytes = b""
     chunk_hashes: list = field(default_factory=list)
     last_prefix_hash: Any = None
     num_chunks_processed: int = 0
@@ -54,14 +59,25 @@ class Session:
     )
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def set_tokens(self, full_token_ids: list[int]) -> None:
+    def set_tokens(self, full_token_ids: Sequence[int] | bytes) -> None:
         """Update the token sequence (idempotent, replaces not extends).
 
         Args:
-            full_token_ids: Complete token sequence.
+            full_token_ids: Complete token sequence, or the same ids packed by
+                ``pack_token_ids``.
         """
+        token_bytes = (
+            full_token_ids
+            if isinstance(full_token_ids, bytes)
+            else pack_token_ids(full_token_ids)
+        )
         with self._lock:
-            self.token_ids = full_token_ids
+            self.token_bytes = token_bytes
+
+    @property
+    def num_tokens(self) -> int:
+        """Number of tokens in the current sequence."""
+        return len(self.token_bytes) // TOKEN_ID_BYTES
 
     @overload
     def get_hashes(self, start: int, end: int) -> list: ...
@@ -100,17 +116,17 @@ class Session:
         start_chunk = start // chunk_size
 
         with self._lock:
-            if end is not None and end > len(self.token_ids):
+            if end is not None and end > self.num_tokens:
                 raise ValueError(
                     f"get_hashes end ({end}) exceeds the session's "
-                    f"{len(self.token_ids)} token(s); the session may have "
+                    f"{self.num_tokens} token(s); the session may have "
                     "been recreated after request cleanup"
                 )
             if end is None:
                 # No explicit end: use the last full-chunk boundary.
-                # Lock must be held here because `self.token_ids` may be
+                # Lock must be held here because `self.token_bytes` may be
                 # concurrently replaced by `set_tokens` from another thread.
-                end = len(self.token_ids) - (len(self.token_ids) % chunk_size)
+                end = self.num_tokens - (self.num_tokens % chunk_size)
             assert end % chunk_size == 0, (
                 f"end ({end}) must be a multiple of chunk_size ({chunk_size})"
             )
@@ -131,7 +147,7 @@ class Session:
         while self.num_chunks_processed < end_chunk:
             cs = self.num_chunks_processed * chunk_size
             ce = cs + chunk_size
-            chunk = self.token_ids[cs:ce]
+            chunk = self.token_bytes[cs * TOKEN_ID_BYTES : ce * TOKEN_ID_BYTES]
 
             prefix = (
                 self.last_prefix_hash

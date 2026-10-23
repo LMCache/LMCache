@@ -95,7 +95,7 @@ class StoreMixin:
             session = self._ctx.session_manager.get_or_create(key.request_id)
             # Request-end cleanup may have replaced the session; re-set tokens
             # (idempotent if it survived, corrective if not).
-            session.set_tokens(list(key.token_ids))
+            session.set_tokens(key.token_bytes)
             chunk_hashes = [
                 TokenHasher.hash_to_bytes(h)
                 for h in session.get_hashes(key.start, key.end)

@@ -39,7 +39,7 @@ try:
 
     # First Party
     from lmcache.v1.kv_layer_groups import DTYPE_MAP
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, pack_token_ids
     from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
     from lmcache.v1.multiprocess.transport.base import RequestClient
 except ImportError as _exc:
@@ -162,7 +162,7 @@ def _make_key(
         world_size=world_size,
         num_kv_readers=num_kv_readers,
         worker_id=worker_id,
-        token_ids=token_ids,
+        token_bytes=pack_token_ids(token_ids),
         start=start,
         end=end if end > 0 else len(token_ids),
         request_id=request_id,

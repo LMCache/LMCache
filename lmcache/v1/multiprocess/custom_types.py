@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable
+import array
+import sys
 
 # Third Party
 import msgspec
@@ -18,9 +21,48 @@ communications.
 
 Key Types:
 - IPCCacheServerKey: Token-based cache key
-  - Contains token_ids, start, end, request_id (all required)
+  - Contains token_bytes, start, end, request_id (all required)
   - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
 """
+
+# Token ids travel as big-endian uint32, the exact bytes the blake3 chunk hash
+# reads, so the server can hash them without building Python ints.
+TOKEN_ID_BYTES = 4
+assert array.array("I").itemsize == TOKEN_ID_BYTES
+
+
+def pack_token_ids(token_ids: Sequence[int]) -> bytes:
+    """Pack token ids as big-endian uint32.
+
+    Args:
+        token_ids: Token ids, each in ``[0, 2**32)``.
+
+    Returns:
+        ``4 * len(token_ids)`` bytes.
+
+    Raises:
+        OverflowError: If a token id does not fit in uint32.
+    """
+    packed = array.array("I", token_ids)
+    if sys.byteorder == "little":
+        packed.byteswap()
+    return packed.tobytes()
+
+
+def unpack_token_ids(token_bytes: bytes) -> list[int]:
+    """Unpack token ids packed by ``pack_token_ids``.
+
+    Args:
+        token_bytes: Big-endian uint32 token ids.
+
+    Returns:
+        The token ids as Python ints.
+    """
+    unpacked = array.array("I")
+    unpacked.frombytes(token_bytes)
+    if sys.byteorder == "little":
+        unpacked.byteswap()
+    return unpacked.tolist()
 
 
 @dataclass(order=True, frozen=True)
@@ -42,7 +84,9 @@ class IPCCacheServerKey:
     world_size: int
     worker_id: int | None
 
-    token_ids: tuple[int, ...]  # frozen tuple for hashability
+    # Big-endian uint32 token ids (see ``pack_token_ids``). Compares and hashes
+    # like the token tuple did: fixed-width big-endian bytes order the same way.
+    token_bytes: bytes
     start: int
     end: int
 
@@ -75,6 +119,13 @@ class IPCCacheServerKey:
     _SALT_MAX_LEN = 128
 
     def __post_init__(self) -> None:
+        # A client from before packed token ids sends no token_bytes (gRPC
+        # decodes it as empty), which would silently hash zero tokens.
+        if self.end > 0 and not self.token_bytes:
+            raise ValueError(
+                f"IPCCacheServerKey has end={self.end} but no token_bytes: the "
+                "client predates packed token ids. Upgrade the LMCache client."
+            )
         bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
         if bad:
             raise ValueError(
@@ -107,13 +158,23 @@ class IPCCacheServerKey:
             world_size=world_size,
             worker_id=worker_id,
             num_kv_readers=num_kv_readers,
-            token_ids=tuple(token_ids),
+            token_bytes=pack_token_ids(token_ids),
             start=start,
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
+
+    @property
+    def token_ids(self) -> tuple[int, ...]:
+        """Token ids as Python ints. Builds a new tuple on every access."""
+        return tuple(unpack_token_ids(self.token_bytes))
+
+    @property
+    def num_tokens(self) -> int:
+        """Number of token ids in the key."""
+        return len(self.token_bytes) // TOKEN_ID_BYTES
 
     def require_num_kv_readers(self) -> int:
         """Declared reader count; rejects keys from pre-field clients.
@@ -139,7 +200,7 @@ class IPCCacheServerKey:
             world_size=self.world_size,
             worker_id=None,
             num_kv_readers=self.num_kv_readers,
-            token_ids=self.token_ids,
+            token_bytes=self.token_bytes,
             start=self.start,
             end=self.end,
             request_id=self.request_id,

@@ -12,6 +12,7 @@ vLLM compatibility notes:
 """
 
 # Standard
+from collections.abc import Sequence
 from typing import Any, Callable
 import os
 
@@ -21,6 +22,7 @@ import numpy as np
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.custom_types import TOKEN_ID_BYTES, unpack_token_ids
 
 logger = init_logger(__name__)
 
@@ -44,8 +46,11 @@ def _make_blake3_hash_func() -> Callable:
             h.update(prefix_hash.to_bytes(8, byteorder="big", signed=True))
         else:
             h.update(bytes(prefix_hash))
-        # Serialize token IDs in one batch
-        h.update(struct.pack(f">{len(tokens)}I", *tokens))
+        # Packed token bytes are already in this format.
+        if isinstance(tokens, bytes):
+            h.update(tokens)
+        else:
+            h.update(struct.pack(f">{len(tokens)}I", *tokens))
         return h.digest()  # 32 bytes
 
     return blake3_hash
@@ -180,18 +185,31 @@ class TokenHasher:
         logger.info("Computed NONE_HASH=%s using hash function", none_hash)
         return none_hash
 
-    def hash_tokens(self, tokens: list[int], prefix_hash: Any = None) -> Any:
+    def hash_tokens(
+        self, tokens: Sequence[int] | bytes, prefix_hash: Any = None
+    ) -> Any:
         """Hash one chunk with rolling prefix.
 
-        Returns int or bytes depending on hash_func.
+        Args:
+            tokens: The chunk's token ids, or the same ids packed by
+                ``pack_token_ids``.
+            prefix_hash: Hash of the previous chunk (defaults to none_hash).
+
+        Returns:
+            int or bytes depending on hash_func. Packed and unpacked tokens
+            hash the same.
         """
         if prefix_hash is None:
             prefix_hash = self.none_hash
+        if isinstance(tokens, bytes):
+            if self.hash_algorithm_name == "blake3":
+                return self.hash_func((prefix_hash, tokens, None))
+            tokens = unpack_token_ids(tokens)
         return self.hash_func((prefix_hash, tuple(tokens), None))
 
     def compute_chunk_hashes(
         self,
-        token_ids: list[int],
+        token_ids: Sequence[int] | bytes,
         prefix_hash: Any = None,
         start: int = 0,
         end: int | None = None,
@@ -207,7 +225,8 @@ class TokenHasher:
         multiples of ``chunk_size``. Partial chunks are discarded.
 
         Args:
-            token_ids: Full token sequence.
+            token_ids: Full token sequence, or the same ids packed by
+                ``pack_token_ids``.
             prefix_hash: Optional initial prefix hash (defaults to none_hash).
             start: Token-level start index (must be chunk-aligned).
                 Chunks before this index are computed but not returned.
@@ -219,11 +238,14 @@ class TokenHasher:
         """
         hashes: list[bytes] = []
         prefix_hash = self.none_hash if prefix_hash is None else prefix_hash
-        effective_len = min(len(token_ids), end) if end is not None else len(token_ids)
+        # Slice packed tokens in bytes, so a chunk costs no int conversion.
+        width = TOKEN_ID_BYTES if isinstance(token_ids, bytes) else 1
+        num_tokens = len(token_ids) // width
+        effective_len = min(num_tokens, end) if end is not None else num_tokens
         num_complete = effective_len - effective_len % self.chunk_size
         for i in range(0, num_complete, self.chunk_size):
             prefix_hash = self.hash_tokens(
-                token_ids[i : i + self.chunk_size], prefix_hash
+                token_ids[i * width : (i + self.chunk_size) * width], prefix_hash
             )
             if i >= start:
                 hashes.append(self.hash_to_bytes(prefix_hash))

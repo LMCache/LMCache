@@ -23,6 +23,7 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
+    pack_token_ids,
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
@@ -605,7 +606,7 @@ def test_generated_grpc_services_communicate_end_to_end(
         model_name="model",
         world_size=2,
         worker_id=None,
-        token_ids=(1, 2, 3),
+        token_bytes=pack_token_ids((1, 2, 3)),
         start=0,
         end=3,
         request_id="request",

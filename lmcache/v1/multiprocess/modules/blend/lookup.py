@@ -360,7 +360,7 @@ class LookupMixin:
         read, layouts, attn_desc = resolved
         layout_desc = layouts[read.attn_gid]
 
-        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
+        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(key.token_bytes)
         if not chunk_hashes:
             return None, (), (), 0, False
 
@@ -375,7 +375,7 @@ class LookupMixin:
                         "chunk_hashes": chunk_hashes,
                         "model_name": model_name,
                         "chunk_size": self._ctx.chunk_size,
-                        "seq_len": len(key.token_ids),
+                        "seq_len": key.num_tokens,
                         "dtypes": [str(d) for d in layout_desc.dtypes],
                         "shapes": [list(s) for s in layout_desc.shapes],
                         "token_ids": key.token_ids,
@@ -395,7 +395,7 @@ class LookupMixin:
         )
         row_windows = tuple(row.sliding_window_size for row in spec.key_groups)
         session = self._ctx.session_manager.get_or_create(rid)
-        session.set_tokens(list(key.token_ids))
+        session.set_tokens(key.token_bytes)
         session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec,
@@ -488,7 +488,7 @@ class LookupMixin:
                 Event(
                     event_type=EventType.CB_LOOKUP_START,
                     session_id=rid,
-                    metadata={"num_tokens": len(key.token_ids)},
+                    metadata={"num_tokens": key.num_tokens},
                 )
             )
             # Segmented prefix is forced OFF for recurrent registrations:
@@ -527,7 +527,7 @@ class LookupMixin:
                 )
             job = _CBUnifiedJob(
                 matches=matches,
-                num_tokens=len(key.token_ids),
+                num_tokens=key.num_tokens,
                 prefix_handle=prefix_handle,
                 prefix_lock_gids=prefix_gids,
                 prefix_windows=prefix_windows,
@@ -676,9 +676,7 @@ class LookupMixin:
         # so the connector tags them ``prefix`` (pure load, no recompute).
         segmented_tail: list[CBMatchResult] = []
         if segmented and job.retained_chunks:
-            chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(
-                list(key.token_ids)
-            )
+            chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(key.token_bytes)
             for i in job.retained_chunks:
                 if i < prefix_chunks or i >= len(chunk_hashes):
                     continue  # leading run (already prefix) / sub-chunk tail

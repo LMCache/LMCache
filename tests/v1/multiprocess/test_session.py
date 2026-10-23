@@ -9,7 +9,7 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, pack_token_ids
 from lmcache.v1.multiprocess.session import Session, SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
@@ -36,9 +36,9 @@ def session_manager(hasher: TokenHasher) -> SessionManager:
 class TestSession:
     def test_set_tokens_replaces(self, session: Session) -> None:
         session.set_tokens([1, 2, 3])
-        assert session.token_ids == [1, 2, 3]
-        session.set_tokens([4, 5, 6])
-        assert session.token_ids == [4, 5, 6]
+        assert session.token_bytes == pack_token_ids([1, 2, 3])
+        session.set_tokens(pack_token_ids([4, 5, 6]))
+        assert session.token_bytes == pack_token_ids([4, 5, 6])
 
     def test_get_hashes_basic(self, session: Session) -> None:
         """8 tokens, chunk_size=4 produces 2 hashes."""

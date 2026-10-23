@@ -282,19 +282,22 @@ class TestIPCCacheServerKeyCacheSalt:
         assert k2.cache_salt == "alice"
 
     def test_wire_compat_old_payload_decodes(self):
-        """An old 7-field msgspec payload must decode cleanly on new code
-        with cache_salt defaulting to ""."""
+        """A payload from before cache_salt existed must decode cleanly on
+        new code with cache_salt defaulting to ""."""
         # Third Party
         import msgspec
 
         # First Party
-        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+        from lmcache.v1.multiprocess.custom_types import (
+            IPCCacheServerKey,
+            pack_token_ids,
+        )
 
         old_payload = {
             "model_name": "m",
             "world_size": 1,
             "worker_id": 0,
-            "token_ids": (1, 2),
+            "token_bytes": pack_token_ids((1, 2)),
             "start": 0,
             "end": 2,
             "request_id": "r1",

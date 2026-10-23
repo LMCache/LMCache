@@ -35,6 +35,7 @@ from lmcache.utils import (
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
+    pack_token_ids,
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
     BlockAllocationRecord,
@@ -1353,7 +1354,7 @@ class LMCacheMPSchedulerAdapter:
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
-            token_ids=tuple(token_ids),
+            token_bytes=pack_token_ids(token_ids),
             start=start,
             end=end,
             request_id=request_id,
@@ -2773,7 +2774,7 @@ class LMCacheMPWorkerAdapter:
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,
-            token_ids=tuple(token_ids),
+            token_bytes=pack_token_ids(token_ids),
             start=start,
             end=end,
             request_id=request_id,

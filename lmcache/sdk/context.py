@@ -26,7 +26,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_block_size,
     get_num_heads,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, pack_token_ids
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     create_transfer_context,
@@ -542,7 +542,7 @@ class LMCacheSDKContext:
             world_size=self._world_size,
             num_kv_readers=self._num_kv_readers,
             worker_id=worker_id,
-            token_ids=tuple(token_ids),
+            token_bytes=pack_token_ids(token_ids),
             start=start,
             end=end,
             request_id=request_id,

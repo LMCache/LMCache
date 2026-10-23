@@ -37,6 +37,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
+    pack_token_ids,
     IPCCacheServerKey,
     KVCache,
 )
@@ -124,7 +125,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
             # sharing in this adapter yet).
             num_kv_readers=1,
             worker_id=None,
-            token_ids=tuple(token_ids),
+            token_bytes=pack_token_ids(token_ids),
             start=start,
             end=end,
             request_id=str(request_id),
@@ -315,7 +316,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             world_size=self._world_size,
             num_kv_readers=1,
             worker_id=self._rank,
-            token_ids=tuple(token_ids),
+            token_bytes=pack_token_ids(token_ids),
             start=0,
             end=aligned_end,
             request_id=str(request_id),

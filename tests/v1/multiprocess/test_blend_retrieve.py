@@ -14,6 +14,7 @@ import pytest
 
 # First Party
 from lmcache import device_ops  # noqa: F401
+from lmcache.v1.multiprocess.custom_types import pack_token_ids
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
@@ -700,7 +701,7 @@ def _run_unretrieved_lookup(blend, request_id: str, num_kv_readers: int = 1):
         world_size=1,
         num_kv_readers=num_kv_readers,
         worker_id=None,
-        token_ids=tuple(query),
+        token_bytes=pack_token_ids(query),
         start=0,
         end=len(query),
         request_id=request_id,
@@ -867,7 +868,7 @@ def _classify_key(request_id: str = "req-classify", num_kv_readers: int = 1):
         world_size=1,
         num_kv_readers=num_kv_readers,
         worker_id=None,
-        token_ids=(1, 2, 3),
+        token_bytes=pack_token_ids((1, 2, 3)),
         start=0,
         end=3,
         request_id=request_id,

@@ -34,7 +34,7 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, pack_token_ids
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.server import run_cache_server
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -209,7 +209,7 @@ def test_native_alias_sparse_checkpoint_roundtrip(native_client: RequestClient) 
         model_name="native-alias-roundtrip",
         world_size=1,
         worker_id=0,
-        token_ids=tokens,
+        token_bytes=pack_token_ids(tokens),
         start=0,
         end=4 * CHUNK,
         request_id="native-save",
@@ -314,7 +314,7 @@ def test_state_ordinals_alias_the_page_allocation(native_client: RequestClient) 
         model_name="native-shared-page-pool",
         world_size=1,
         worker_id=0,
-        token_ids=tuple(range(2 * CHUNK)),
+        token_bytes=pack_token_ids(range(2 * CHUNK)),
         start=0,
         end=2 * CHUNK,
         request_id="same-pool-save",

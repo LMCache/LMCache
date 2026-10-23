@@ -7,14 +7,14 @@ from unittest.mock import MagicMock
 # First Party
 from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.mp_observability.event import EventType
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, pack_token_ids
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
 TOKEN_IDS = (11, 22, 33)
 
 
 def test_lookup_event_carries_key_token_ids():
-    """The handler attaches ``key.token_ids`` itself, by reference."""
+    """The handler attaches the key's token ids when a subscriber listens."""
     ctx = MagicMock()
     ctx.chunk_size = 256
     ctx.event_bus.has_subscribers.side_effect = (
@@ -30,7 +30,7 @@ def test_lookup_event_carries_key_token_ids():
         model_name="m",
         world_size=1,
         worker_id=None,
-        token_ids=TOKEN_IDS,
+        token_bytes=pack_token_ids(TOKEN_IDS),
         start=0,
         end=0,
         request_id="req-1",
@@ -44,4 +44,4 @@ def test_lookup_event_carries_key_token_ids():
         for call in ctx.event_bus.publish.call_args_list
         if call.args[0].event_type is EventType.MP_LOOKUP
     ]
-    assert event.metadata["token_ids"] is key.token_ids
+    assert event.metadata["token_ids"] == TOKEN_IDS

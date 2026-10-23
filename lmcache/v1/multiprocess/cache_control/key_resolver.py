@@ -26,7 +26,7 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, pack_token_ids
 
 if TYPE_CHECKING:
     # First Party
@@ -59,7 +59,7 @@ def _resolve_ipc_key_and_hashes(
         model_name=model_name,
         world_size=world_size,
         worker_id=None,
-        token_ids=tuple(token_ids),
+        token_bytes=pack_token_ids(token_ids),
         start=0,
         end=len(token_ids),
         request_id="",

@@ -29,7 +29,7 @@ from lmcache.v1.gpu_connector.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, pack_token_ids
 from lmcache.v1.multiprocess.engine_context import (
     LayoutDescRegistry,
     MPCacheServerContext,
@@ -163,7 +163,7 @@ def _key(world_size: int = 1, tokens: tuple[int, ...] = TOKENS) -> IPCCacheServe
         model_name="native-state",
         world_size=world_size,
         worker_id=None,
-        token_ids=tokens,
+        token_bytes=pack_token_ids(tokens),
         start=0,
         end=len(tokens),
         request_id="native-request",

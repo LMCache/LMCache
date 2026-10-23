@@ -607,7 +607,10 @@ class UnifiedLMCacheMPConnector:
         request_configs: Optional[dict[str, Any]] = None,
     ) -> Any:
         # First Party
-        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+        from lmcache.v1.multiprocess.custom_types import (
+            IPCCacheServerKey,
+            pack_token_ids,
+        )
 
         return IPCCacheServerKey(
             model_name=self.model_name,
@@ -617,7 +620,7 @@ class UnifiedLMCacheMPConnector:
             # TP ranks in a PP stage to one object, so lookup must reserve one
             # read lock for every rank that retrieves that object.
             num_kv_readers=self.num_kv_readers,
-            token_ids=tuple(operation.token_ids),
+            token_bytes=pack_token_ids(operation.token_ids),
             start=start,
             end=end,
             request_id=operation.request_id,

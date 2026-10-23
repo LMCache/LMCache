@@ -14,7 +14,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     ipc_key_to_object_keys,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, pack_token_ids
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
@@ -75,7 +75,7 @@ def _cache_key(
         model_name="test-model",
         world_size=world_size,
         worker_id=worker_id,
-        token_ids=(1, 2, 3, 4),
+        token_bytes=pack_token_ids((1, 2, 3, 4)),
         start=start,
         end=end,
         request_id=request_id,

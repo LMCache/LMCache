@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess.custom_types import pack_token_ids
 from lmcache.v1.multiprocess.token_hasher import (
     TokenHasher,
     chunk_hash_windows_numba,
@@ -21,6 +22,18 @@ from lmcache.v1.multiprocess.token_hasher import (
 def hasher() -> TokenHasher:
     """TokenHasher with small chunk_size for testing."""
     return TokenHasher(chunk_size=4, hash_algorithm="blake3")
+
+
+@pytest.mark.parametrize("algorithm", ["blake3", "builtin", "sha256_cbor"])
+def test_packed_tokens_hash_like_token_lists(algorithm: str) -> None:
+    """Packed token bytes give the same chunk hashes as the token list, so
+    caches stored before tokens were packed still hit."""
+    hasher = TokenHasher(chunk_size=4, hash_algorithm=algorithm)
+    tokens = [3, 2**32 - 1, 0, 7, 11, 13, 17, 19, 23]
+
+    assert hasher.compute_chunk_hashes(
+        pack_token_ids(tokens), start=4, end=8
+    ) == hasher.compute_chunk_hashes(tokens, start=4, end=8)
 
 
 class TestTokenHasher:

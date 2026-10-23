@@ -15,7 +15,7 @@ import pytest
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
 from lmcache.v1.mp_observability.event import EventType
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, pack_token_ids
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.rpc import get_rpc_spec
@@ -170,7 +170,7 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
         world_size=1,
         num_kv_readers=1,
         worker_id=None,
-        token_ids=tuple(range(num_tokens)),
+        token_bytes=pack_token_ids(range(num_tokens)),
         start=start,
         end=end,
         request_id="req-sw",
@@ -401,7 +401,7 @@ def test_server_free_lookup_locks_no_matching_chunks():
         world_size=1,
         num_kv_readers=1,
         worker_id=None,
-        token_ids=tuple(range(256)),
+        token_bytes=pack_token_ids(range(256)),
         start=0,
         end=0,
         request_id="req-empty",

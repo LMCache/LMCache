@@ -24,7 +24,7 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, pack_token_ids
 from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
 
 CHUNK_SIZE = 16
@@ -63,7 +63,7 @@ def _make_key(n_chunks: int, start_chunks: int = 0) -> IPCCacheServerKey:
         model_name="m",
         world_size=1,
         worker_id=None,
-        token_ids=tuple(range(n_tokens)),
+        token_bytes=pack_token_ids(range(n_tokens)),
         start=start_chunks * CHUNK_SIZE,
         end=n_tokens,
         request_id="r",

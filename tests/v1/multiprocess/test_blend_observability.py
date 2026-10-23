@@ -20,7 +20,7 @@ import time
 from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import EventType
-from lmcache.v1.multiprocess.custom_types import CBMatchResult
+from lmcache.v1.multiprocess.custom_types import CBMatchResult, pack_token_ids
 from lmcache.v1.multiprocess.modules.blend.lookup import _CBUnifiedJob
 from lmcache.v1.multiprocess.modules.blend.matcher import (
     BlendTokenRangeMatcher,
@@ -182,6 +182,7 @@ class TestPrefixLegNoGpuContext:
             model_name="m",
             world_size=2,
             token_ids=[1, 2, 3],
+            token_bytes=pack_token_ids([1, 2, 3]),
         )
 
     def test_missing_layout_reports_no_gpu_context(self):
@@ -296,6 +297,7 @@ class TestFingerprintJobTuple:
             request_id="req-store",
             worker_id=0,
             token_ids=list(range(512)),
+            token_bytes=pack_token_ids(list(range(512))),
             start=0,
             end=512,
         )
@@ -377,6 +379,7 @@ class TestLookupOnlyRequestEnds:
             model_name="m",
             world_size=2,
             token_ids=list(range(n_chunks * _CHUNK)),
+            token_bytes=pack_token_ids(list(range(n_chunks * _CHUNK))),
         )
 
     def test_prefix_only_lookup_ends_the_request(self):

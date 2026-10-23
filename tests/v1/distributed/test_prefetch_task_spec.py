@@ -19,7 +19,7 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, pack_token_ids
 
 LAYOUT = MemoryLayoutDesc(shapes=[torch.Size([2, 3])], dtypes=[torch.float16])
 
@@ -50,7 +50,7 @@ def _ipc_key(world_size: int, worker_id: int | None = None) -> IPCCacheServerKey
         model_name="m",
         world_size=world_size,
         worker_id=worker_id,
-        token_ids=(0,),
+        token_bytes=pack_token_ids((0,)),
         start=0,
         end=0,
         request_id="r",

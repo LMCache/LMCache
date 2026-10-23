@@ -21,7 +21,7 @@ from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     RuntimePluginConfig,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, pack_token_ids
 from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
 from lmcache.v1.multiprocess.kv_load_policy import KVLoadContext, KVLoadPolicy
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
@@ -76,7 +76,7 @@ def _key(
         model_name="m",
         world_size=1,
         worker_id=None,
-        token_ids=tuple(range(len(CHUNK_HASHES) * CHUNK_SIZE)),
+        token_bytes=pack_token_ids(range(len(CHUNK_HASHES) * CHUNK_SIZE)),
         start=start_chunks * CHUNK_SIZE,
         end=len(CHUNK_HASHES) * CHUNK_SIZE,
         request_id="req-1",

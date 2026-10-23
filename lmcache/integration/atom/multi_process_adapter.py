@@ -20,7 +20,7 @@ import zmq
 
 # First Party
 from lmcache.utils import EngineType, init_logger
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, pack_token_ids
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
@@ -297,7 +297,7 @@ class AtomMPSchedulerAdapter:
             # Each ATOM TP rank retrieves only its own rank-local object.
             num_kv_readers=1,
             worker_id=worker_id,
-            token_ids=tuple(token_ids),
+            token_bytes=pack_token_ids(token_ids),
             start=start,
             end=end,
             request_id=request_id,
@@ -817,7 +817,7 @@ class AtomMPWorkerAdapter:
             # Each ATOM TP rank retrieves only its own rank-local object.
             num_kv_readers=1,
             worker_id=self._parallel.worker_id,
-            token_ids=tuple(spec.token_ids),
+            token_bytes=pack_token_ids(spec.token_ids),
             start=spec.start,
             end=spec.end,
             request_id=request_id,

@@ -10,7 +10,7 @@ from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
     ipc_key_to_object_keys,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, pack_token_ids
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
 # ============================================================================
@@ -25,7 +25,7 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
         world_size=world_size,
         num_kv_readers=1,
         worker_id=None,
-        token_ids=(0,),
+        token_bytes=pack_token_ids((0,)),
         start=0,
         end=0,
         request_id="r",
@@ -121,7 +121,7 @@ def test_lookup_hashing_stops_at_key_end() -> None:
         world_size=1,
         num_kv_readers=1,
         worker_id=None,
-        token_ids=tuple(range(32)),
+        token_bytes=pack_token_ids(range(32)),
         start=0,
         end=16,
         request_id="r",
@@ -130,5 +130,5 @@ def test_lookup_hashing_stops_at_key_end() -> None:
     LookupModule(ctx).lookup(key, tp_size=1)
 
     ctx.token_hasher.compute_chunk_hashes.assert_called_once_with(
-        list(range(32)), end=16
+        pack_token_ids(range(32)), end=16
     )

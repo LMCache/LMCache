@@ -18,7 +18,7 @@ import pytest
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
 from lmcache.v1.mp_observability.event import EventType
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, pack_token_ids
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
 CHUNK_SIZE = 256
@@ -44,7 +44,7 @@ def _lookup_key(
         model_name="m",
         world_size=world_size,
         worker_id=None,
-        token_ids=tuple(range(prompt_tokens)),
+        token_bytes=pack_token_ids(range(prompt_tokens)),
         start=start_chunks * CHUNK_SIZE,
         end=0,
         request_id="req-1",

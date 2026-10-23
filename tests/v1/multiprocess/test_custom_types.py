@@ -49,6 +49,21 @@ def test_ipc_cache_engine_key_serialization():
     assert original_key == decoded_key, "IPCCacheServerKeys do not match!"
 
 
+def test_key_from_a_client_without_token_bytes_is_rejected():
+    """An older client sends no token_bytes, which would hash zero tokens and
+    miss silently; the key refuses it instead."""
+    with pytest.raises(ValueError, match="Upgrade the LMCache client"):
+        IPCCacheServerKey(
+            model_name="test_model",
+            world_size=1,
+            worker_id=None,
+            token_bytes=b"",
+            start=0,
+            end=256,
+            request_id="test_request",
+        )
+
+
 def test_ipc_cache_engine_key_serialization_with_cache_salt():
     """Roundtrip must carry ``cache_salt`` verbatim — it is part of
     cache identity so eq must hold after encode/decode."""

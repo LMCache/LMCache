@@ -22,6 +22,7 @@ from lmcache.integration.sglang.unified_lmcache_mp_connector import (
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import ipc_key_to_object_keys
 from lmcache.v1.gpu_connector.kv_format import detect_format
+from lmcache.v1.multiprocess.custom_types import pack_token_ids
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -1102,6 +1103,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         )
         custom_types = ModuleType("lmcache.v1.multiprocess.custom_types")
         custom_types.IPCCacheServerKey = _IPCCacheServerKey
+        custom_types.pack_token_ids = pack_token_ids
 
         with patch.dict(
             "sys.modules",
@@ -1124,6 +1126,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         )
         custom_types = ModuleType("lmcache.v1.multiprocess.custom_types")
         custom_types.IPCCacheServerKey = _IPCCacheServerKey
+        custom_types.pack_token_ids = pack_token_ids
 
         with patch.dict(
             "sys.modules",
