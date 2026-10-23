@@ -7,6 +7,7 @@ round trip needs TorchTPU and a TPU, and skips otherwise.
 
 # Standard
 from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock
 import sys
 
 # Third Party
@@ -16,7 +17,11 @@ import torch
 # First Party
 from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.platform import resolve_device_ops
-from lmcache.v1.platform._device_detect import get_device_spec
+from lmcache.v1.platform._device_detect import (
+    DEVICE_BACKEND_ENV_VAR,
+    get_device_spec,
+    get_torch_device,
+)
 from lmcache.v1.platform.devices.tpu import TpuDeviceSpec
 from lmcache.v1.platform.devices.tpu.device_ops import TpuDeviceOps
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
@@ -31,6 +36,36 @@ NHP, P, HS = 2, 2, 128
 DTYPE = torch.bfloat16
 # Out of order and non-consecutive, as vLLM hands them out.
 SCATTERED_BLOCKS = [13, 2, 9, 4, 0, 15, 6, 11, 3]
+# ``torch.tpu`` functions strict TorchTPU rejects from callers outside torch.
+INTERNAL_DEVICE_APIS = (
+    "is_available",
+    "device_count",
+    "synchronize",
+    "current_device",
+    "set_device",
+    "current_stream",
+)
+
+
+def _internal_api(*_args: object, **_kwargs: object) -> None:
+    raise RuntimeError("is internal to TorchTPU")
+
+
+def _strict_torch_tpu(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Install an importable ``torch_tpu``, a ``torch.tpu`` whose functions
+    raise like strict TorchTPU does for callers outside torch, and a
+    ``torch.accelerator`` whose current accelerator is a TPU.
+
+    Returns:
+        MagicMock: The fake ``torch.accelerator``.
+    """
+    accelerator = MagicMock(name="torch.accelerator")
+    accelerator.current_accelerator.return_value = SimpleNamespace(type="tpu")
+    tpu = SimpleNamespace(**{name: _internal_api for name in INTERNAL_DEVICE_APIS})
+    monkeypatch.setitem(sys.modules, "torch_tpu", ModuleType("torch_tpu"))
+    monkeypatch.setattr(torch, "tpu", tpu, raising=False)
+    monkeypatch.setattr(torch, "accelerator", accelerator)
+    return accelerator
 
 
 def _is_available_with(
@@ -42,19 +77,8 @@ def _is_available_with(
     ``torch.tpu`` raises like strict TorchTPU does for callers outside the
     framework, so a spec that consulted it would fail.
     """
-
-    def _internal_api(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError("is_available is internal to TorchTPU")
-
+    _strict_torch_tpu(monkeypatch).current_accelerator.return_value = accelerator
     monkeypatch.setitem(sys.modules, "torch_tpu", torch_tpu)
-    monkeypatch.setattr(
-        torch.accelerator,
-        "current_accelerator",
-        lambda check_available=False: accelerator,
-    )
-    monkeypatch.setattr(
-        torch, "tpu", SimpleNamespace(is_available=_internal_api), raising=False
-    )
     return TpuDeviceSpec().is_available()
 
 
@@ -108,6 +132,60 @@ def test_available_without_the_internal_torch_tpu_api(
 ) -> None:
     tpu = SimpleNamespace(type="tpu")
     assert _is_available_with(monkeypatch, tpu, ModuleType("torch_tpu")) is True
+
+
+# -- torch.tpu shims -------------------------------------------------------
+
+
+def test_detected_device_module_reaches_torch_accelerator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LMCache's generic ``torch_dev`` calls work against strict TorchTPU."""
+    accelerator = _strict_torch_tpu(monkeypatch)
+    accelerator.device_count.return_value = 4
+    monkeypatch.setenv(DEVICE_BACKEND_ENV_VAR, "tpu")
+    get_torch_device.cache_clear()
+    try:
+        torch_dev, device_type = get_torch_device()
+    finally:
+        get_torch_device.cache_clear()
+
+    assert device_type == "tpu"
+    torch_dev.synchronize(device=1)
+    accelerator.synchronize.assert_called_once_with(1)
+    assert torch_dev.device_count() == 4
+    assert torch_dev.current_stream() is accelerator.current_stream.return_value
+    accelerator.current_stream.assert_called_once_with(None)
+
+
+def test_installing_the_shims_twice_is_harmless(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accelerator = _strict_torch_tpu(monkeypatch)
+    spec = TpuDeviceSpec()
+    assert spec.is_available() is True
+    assert spec.is_available() is True
+
+    torch.tpu.is_available()
+    torch.tpu.current_device()
+    torch.tpu.set_device(1)
+    torch.tpu.synchronize()
+
+    accelerator.is_available.assert_called_once_with()
+    accelerator.current_device_index.assert_called_once_with()
+    accelerator.set_device_index.assert_called_once_with(1)
+    accelerator.synchronize.assert_called_once_with(None)
+
+
+def test_shims_are_not_installed_without_a_tpu_accelerator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accelerator = _strict_torch_tpu(monkeypatch)
+    accelerator.current_accelerator.return_value = SimpleNamespace(type="cuda")
+
+    assert TpuDeviceSpec().is_available() is False
+    with pytest.raises(RuntimeError, match="internal to TorchTPU"):
+        torch.tpu.synchronize()
 
 
 # -- Engine-driven only ----------------------------------------------------

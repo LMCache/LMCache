@@ -649,7 +649,7 @@ References
      - ``lmcache/v1/platform/devices/neuron/__init__.py``
    * - Reference ``DeviceOps`` (Neuron, torch baseline)
      - ``lmcache/v1/platform/devices/neuron/device_ops.py``
-   * - Reference ``DeviceSpec`` (Google TPU / TorchTPU, engine-driven only)
+   * - Reference ``DeviceSpec`` (Google TPU / TorchTPU, engine-driven only, ``torch.accelerator`` shims)
      - ``lmcache/v1/platform/devices/tpu/__init__.py``
    * - Reference ``DeviceOps`` (TorchTPU, block transfer through host memory)
      - ``lmcache/v1/platform/devices/tpu/device_ops.py``
