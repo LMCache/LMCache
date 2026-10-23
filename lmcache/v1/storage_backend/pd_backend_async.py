@@ -18,6 +18,9 @@ import zmq.asyncio
 
 # First Party
 from lmcache import torch_dev
+from lmcache.inprocess.v1.rpc_utils import get_zmq_context
+from lmcache.inprocess.v1.transfer_channel import CreateTransferChannel
+from lmcache.inprocess.v1.transfer_channel.transfer_utils import get_correct_device
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import (
@@ -34,10 +37,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.rpc_utils import get_zmq_context
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
-from lmcache.v1.transfer_channel import CreateTransferChannel
-from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
 logger = init_logger(__name__)
 
@@ -1059,8 +1059,14 @@ class PDBackendAsync(AllocatorBackendInterface):
         :param keys: Cache keys for this batch.
         :param memory_objs: Memory objects to transfer.
         :param transfer_spec: Transfer specification (carries req_id, etc.).
+            ``None`` for local requests, which are not transferred.
         :param on_complete_callback: Optional per-key completion callback.
         """
+        # Skip PD transfer for local requests (no transfer_spec), as PDBackend
+        # does. Requests without kv_transfer_params have no disagg_spec.
+        if transfer_spec is None:
+            return
+
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 

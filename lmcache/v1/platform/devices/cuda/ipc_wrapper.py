@@ -45,6 +45,7 @@ from lmcache.v1.platform.base.ipc_wire import (
 )
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.devices.cuda.utils import (
+    _bind_primary_context,
     _cuda,
     cuda_ipc_handle_from_bytes,
     cuda_ipc_handle_to_bytes,
@@ -236,50 +237,6 @@ class CudaIPCWrapper(DeviceIPCWrapper):
         return t
 
 
-def _bind_primary_context(device_index: int) -> None:
-    """Make the primary CUDA context of ``device_index`` current on the
-    calling thread if the thread has no current context yet.
-
-    The CUDA runtime binds the primary context lazily on a thread's first
-    runtime call; the driver API never does. The IPC wrappers below call
-    the driver API directly and are not only constructed on the worker's
-    main thread: the MP connector's heartbeat re-registers the KV caches
-    from its own thread after a server restart, and on that thread
-    ``cuMemGetAddressRange`` failed with ``CUDA_ERROR_INVALID_CONTEXT`` on
-    every retry, so the worker never recovered.
-
-    A thread that already has a current context is left untouched.
-
-    Args:
-        device_index: CUDA device ordinal whose primary context to bind.
-
-    Raises:
-        RuntimeError: If the driver cannot look up or bind the context.
-    """
-    err, ctx = _cuda.driver.cuCtxGetCurrent()
-    if err == _cuda.driver.CUresult.CUDA_SUCCESS and int(ctx) != 0:
-        return
-    err, device = _cuda.driver.cuDeviceGet(device_index)
-    if err != _cuda.driver.CUresult.CUDA_SUCCESS:
-        raise RuntimeError(f"cuDeviceGet({device_index}) failed: {err}")
-    # The primary context is already alive (torch owns the tensor). Retain
-    # only to obtain its handle, make it current, then drop the extra
-    # reference: the thread keeps the context as its current one and the
-    # runtime's own reference keeps it alive, so the process reference
-    # count is left exactly as it was.
-    err, ctx = _cuda.driver.cuDevicePrimaryCtxRetain(device)
-    if err != _cuda.driver.CUresult.CUDA_SUCCESS:
-        raise RuntimeError(f"cuDevicePrimaryCtxRetain({device_index}) failed: {err}")
-    (err,) = _cuda.driver.cuCtxSetCurrent(ctx)
-    (release_err,) = _cuda.driver.cuDevicePrimaryCtxRelease(device)
-    if err != _cuda.driver.CUresult.CUDA_SUCCESS:
-        raise RuntimeError(f"cuCtxSetCurrent failed: {err}")
-    if release_err != _cuda.driver.CUresult.CUDA_SUCCESS:
-        raise RuntimeError(
-            f"cuDevicePrimaryCtxRelease({device_index}) failed: {release_err}"
-        )
-
-
 class RawCudaIPCWrapper(DeviceIPCWrapper):
     """IPC wrapper that shares CUDA tensors through driver-level IPC only.
 
@@ -345,16 +302,10 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
 
         # Same layout normalization as CudaIPCWrapper: permute
         # non-contiguous views (e.g. vLLM's NHD-over-HND) into contiguous
-        # ones, metadata-only. The flat-bytes reconstruction below only
-        # supports contiguous tensors, so anything still non-contiguous
-        # is rejected rather than silently reordered.
+        # ones, metadata-only. Anything still non-contiguous is a validated
+        # dim-0-padded view (other layouts raise there), which to_tensor()
+        # rebuilds from the shipped strides.
         tensor = attempt_permute_to_contiguous_view(tensor)
-        if not tensor.is_contiguous():
-            raise ValueError(
-                "RawCudaIPCWrapper requires a tensor that is contiguous "
-                f"(possibly after permutation); got shape={tuple(tensor.shape)} "
-                f"stride={tuple(tensor.stride())}"
-            )
 
         data_ptr = tensor.data_ptr()
         _bind_primary_context(tensor.device.index)
@@ -381,7 +332,6 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
         self._alloc_offset = data_ptr - int(
             alloc_base
         )  # offset in bytes not the same as storage offset
-        self._nbytes = tensor.numel() * tensor.element_size()
 
         # DeviceIPCWrapper interface fields. ``handle`` is unused —
         # ``to_tensor`` is overridden to bypass it — but kept (None) so
@@ -401,6 +351,8 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
 
         device_index = tensor.device.index
         self.device_uuid = self._get_device_uuid(device_index)
+        # Byte range spans dim-0 padding too; equals numel bytes if contiguous.
+        self._nbytes = self.wire_metadata().byte_span()
 
     def to_wire(self) -> RawCudaIPCData:
         """Return the driver handle and tensor byte range."""
@@ -467,7 +419,7 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
             cp_flat = cupy.ndarray(self._nbytes, dtype=cupy.uint8, memptr=memptr)
 
         raw = torch.from_dlpack(cp_flat)
-        return raw.view(self.dtype).reshape(self.shape)
+        return raw.view(self.dtype).as_strided(self.shape, self.stride)
 
     def close(self) -> None:
         """Release this wrapper's references on the imported mapping.
@@ -555,20 +507,26 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
             attempt_permute_to_contiguous_view,
         )
 
-        # Same layout normalization + contiguity contract as
-        # RawCudaIPCWrapper: flat-bytes reconstruction supports only
-        # contiguous tensors.
+        # Permute non-contiguous views (e.g. vLLM's NHD-over-HND) into
+        # contiguous ones, metadata-only. Anything still non-contiguous is a
+        # validated dim-0-padded view (other layouts raise there), which
+        # to_tensor() rebuilds from the shipped strides.
         tensor = attempt_permute_to_contiguous_view(tensor)
-        if not tensor.is_contiguous():
-            raise ValueError(
-                "VmmCudaIPCWrapper requires a tensor that is contiguous "
-                f"(possibly after permutation); got shape={tuple(tensor.shape)} "
-                f"stride={tuple(tensor.stride())}"
-            )
 
         data_ptr = tensor.data_ptr()
         device_index = tensor.device.index
-        nbytes = tensor.numel() * tensor.element_size()
+
+        # DeviceIPCWrapper interface fields, set first so byte_span() can
+        # size the chunk check below. ``storage_offset`` is 0 because
+        # ``data_ptr`` (folded into ``_alloc_offset``) already points at
+        # the tensor's first element.
+        self.dtype = tensor.dtype
+        self.shape = tuple(tensor.shape)
+        self.stride = tuple(tensor.stride())
+        self.storage_offset = 0
+        self.device_uuid = self._get_device_uuid(device_index)
+        # Byte range spans dim-0 padding too; equals numel bytes if contiguous.
+        nbytes = self.wire_metadata().byte_span()
 
         kind: str = ""
         payload: object = None
@@ -642,17 +600,9 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
         self._alloc_offset = alloc_offset
         self._nbytes = nbytes
 
-        # DeviceIPCWrapper interface fields. ``handle`` carries the
-        # export id so the base-class equality check compares identity;
-        # ``to_tensor`` is overridden and never reads it.
-        # ``storage_offset`` is 0 because ``data_ptr`` (folded into
-        # ``_alloc_offset``) already points at the tensor's first element.
+        # ``handle`` carries the export id so the base-class equality check
+        # compares identity; ``to_tensor`` is overridden and never reads it.
         self.handle = self._export_id
-        self.dtype = tensor.dtype
-        self.shape = tuple(tensor.shape)
-        self.stride = tuple(tensor.stride())
-        self.storage_offset = 0
-        self.device_uuid = self._get_device_uuid(device_index)
 
         # References this wrapper holds on the imported-mapping registry;
         # producer-side wrappers never import, so receivers start at 0.
@@ -745,7 +695,7 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
             cp_flat = cupy.ndarray(self._nbytes, dtype=cupy.uint8, memptr=memptr)
 
         raw = torch.from_dlpack(cp_flat)
-        return raw.view(self.dtype).reshape(self.shape)
+        return raw.view(self.dtype).as_strided(self.shape, self.stride)
 
     def close(self) -> None:
         """Release everything this wrapper holds, on either side.

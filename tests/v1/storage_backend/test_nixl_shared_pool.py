@@ -364,8 +364,8 @@ class TestDynamicGpuMode:
         metadata = _make_metadata()
         fake_alloc = _make_paged_allocator(metadata)
         _stub_gpu_allocator(monkeypatch, fake_alloc)
-        monkeypatch.setattr(torch.cuda, "current_device", lambda: 0, raising=False)
-        monkeypatch.setattr(torch.cuda, "set_device", lambda x: None, raising=False)
+        monkeypatch.setattr(torch_dev, "current_device", lambda: 0, raising=False)
+        monkeypatch.setattr(torch_dev, "set_device", lambda x: None, raising=False)
 
         backend, loop = _build_dynamic(monkeypatch, metadata, _nixl_gpu_config())
         try:

@@ -16,7 +16,12 @@ import threading
 if TYPE_CHECKING:
     # First Party
     from lmcache.lmcache_native import Bitmap
-    from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
+    from lmcache.v1.distributed.api import (
+        KeyListPage,
+        MemoryLayoutDesc,
+        MemoryTags,
+        ObjectKey,
+    )
     from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
     from lmcache.v1.memory_management import MemoryObj
 
@@ -349,6 +354,22 @@ class L2AdapterInterface(ABC):
             Optional[Bitmap]: a bitmap indicating the success or failure of each
             key-object pair in the task. 1 means successful, and 0 means failed.
             None is returned when the load task is not completed.
+        """
+        pass
+
+    #####################
+    # Memory Tags Interface
+    #####################
+
+    @abstractmethod
+    def get_memory_tags(self) -> MemoryTags:
+        """
+        Return the memory tags of the medium this adapter stores bytes in.
+
+        Returns:
+            MemoryTags: the adapter's segment and residency. ``REMOTE`` when
+            the bytes live off this host or in a domain shared with other
+            hosts.
         """
         pass
 

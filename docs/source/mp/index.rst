@@ -165,13 +165,13 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - Handler Type
      - Description
    * - ``REGISTER_KV_CACHE``
-     - SYNC
+     - SERIALIZED
      - Register GPU KV cache tensors for a vLLM instance.
    * - ``UNREGISTER_KV_CACHE``
-     - SYNC
+     - SERIALIZED
      - Unregister KV cache tensors.
    * - ``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
-     - SYNC
+     - SERIALIZED
      - Register an engine-driven KV cache context (CPU/accelerator
        workers using the PREPARE/COMMIT transfer path). Loaded only when
        ``--supported-transfer-mode`` is ``engine_driven`` or ``auto``.
@@ -179,7 +179,7 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
        SHM segment name and pool size when the SHM path is in use
        (empty for the inline path).
    * - ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
-     - SYNC
+     - SERIALIZED
      - Unregister an engine-driven KV cache context.
    * - ``STORE``
      - BLOCKING
@@ -237,7 +237,7 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - Clear cached data. The optional ``force`` flag defaults to ``False``;
        when set, active locks may be ignored.
    * - ``GET_CHUNK_SIZE``
-     - SYNC
+     - SERIALIZED
      - Return the server's chunk size.
    * - ``PING``
      - BLOCKING
@@ -247,14 +247,14 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - Fire-and-forget channel for the vLLM scheduler to report GPU block
        allocation events to the observability subsystem.
    * - ``NOOP``
-     - SYNC
+     - SERIALIZED
      - Debug heartbeat -- returns a confirmation string.
    * - ``CB_REGISTER_ROPE``
-     - SYNC
+     - SERIALIZED
      - (Blend) Share the RoPE cos/sin cache onto a context already
        registered via ``REGISTER_KV_CACHE``.
    * - ``CB_UNREGISTER_ROPE``
-     - SYNC
+     - SERIALIZED
      - (Blend) Drop the RoPE state (paged KV cache lives on; use
        ``UNREGISTER_KV_CACHE`` to release that).
    * - ``CB_RETRIEVE_PRE_COMPUTED``
@@ -289,8 +289,8 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
 
 **Handler types:**
 
-- **SYNC** -- Serialized by the request transport (the ZMQ main loop or the
-  gRPC sync-handler lock) for fast, non-blocking work.
+- **SERIALIZED** -- Run one at a time by the request transport (the ZMQ main
+  loop or the gRPC serialized-handler lock) for fast, non-blocking work.
 - **BLOCKING** -- Dispatched to a normal or client-affinity thread pool (may
   involve GPU copies or I/O).
 
@@ -375,8 +375,8 @@ tiers selected at startup (all satisfy ``L1ManagerProtocol``):
 - ``DevDaxL1MemoryManager`` -- a Device-DAX-backed L1 slab when
   ``--l1-devdax-path`` is set. A pure Device-DAX configuration maps the DAX
   device as the full L1 arena; a hybrid configuration uses DRAM first and
-  spills overflow allocations into Device-DAX. See the *L1 Memory Manager*
-  section of :doc:`configuration` for the accepted knobs.
+  spills overflow allocations into Device-DAX. See :ref:`mp-devdax-l1` for
+  the deployment guide and accepted knobs.
 - ``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is set.
   The bytes live on disk; reads/writes DMA directly between the GPU staging
   buffer and the slab, driven by the process-global ``GDSContext``
@@ -590,7 +590,9 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/``
      - Build-time protobuf generator and generated Python package
    * - ``lmcache/v1/multiprocess/transport/grpc_impl/server.py``
-     - gRPC service binding, handler scheduling, and request-server construction
+     - gRPC service binding and handler scheduling
+   * - ``lmcache/v1/multiprocess/transport/grpc_impl/server_builder.py``
+     - gRPC request-server construction, choosing the sync or aio server
    * - ``lmcache/v1/multiprocess/modules/``
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
        ``management.py`` (``ManagementModule``), ``kv_events.py``
