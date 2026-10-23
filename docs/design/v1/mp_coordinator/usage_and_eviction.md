@@ -172,10 +172,14 @@ Quotas are set in GiB at the API and stored as bytes internally.
 Unregistered salts resolve through a configurable **default limit**
 (``set_default_limit_bytes`` / ``effective_limit_bytes``), which starts as ``None``:
 
-- ``None`` (boot default) — unregistered salts are **exempt** from coordinator
-  eviction. Quotas live in memory, so a restarted coordinator has an empty
-  table until the external quota controller re-syncs it; the exempt default
-  makes that window safe (an empty table cannot mass-evict unknown tenants).
+- ``None`` (unset: the boot default, or set back with
+  ``default_limit_gb: null``) — unregistered salts are **exempt** from
+  coordinator eviction. Without ``--metadata-path`` quotas live only in
+  memory, so a restarted coordinator has an empty table and no default until
+  the external quota controller re-syncs it; the exempt default makes that
+  window safe (an empty table cannot mass-evict unknown tenants). With it,
+  the ``quotas`` section — per-salt limits and the default — is reloaded at
+  startup, so the table survives the restart.
 - ``0`` — strict allowlist: all bytes under unregistered salts become
   evictable next cycle. The external controller sets this via
   ``PUT /quota/config`` **after** re-registering every per-salt quota — it is
@@ -299,7 +303,8 @@ Both also accept CLI flags (``--coordinator-event-reporting``,
 | Event | Effect | Handling |
 | --- | --- | --- |
 | Coordinator down | Events not delivered | Flush fails → batch dropped, logged; MP server unaffected |
-| Coordinator restart | Usage/LRU state lost | Rebuilt from the cache-event stream as events arrive; usage under-reports until it catches up |
+| Coordinator restart, no ``--checkpoint-path`` | Usage/LRU state lost | Rebuilt from the cache-event stream as events arrive (Kafka re-reads the topic from its oldest retained record); usage under-reports until it catches up |
+| Coordinator restart, ``--checkpoint-path`` set | Usage/LRU restored as of the last checkpoint write | Kafka resumes from the position saved in the same checkpoint, so nothing the topic still retains is missed; over HTTP, events posted after that write and before a crash are lost, detected as a sequence gap when that server's next batch arrives |
 | Flush timeout | One batch delayed | Next flush sends new batch; no retry of old batch |
 | Usage accounting drift | Quota enforcement imprecise | Self-correcting as new events arrive |
 

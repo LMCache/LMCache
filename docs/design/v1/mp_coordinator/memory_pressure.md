@@ -71,9 +71,12 @@ configurable, so a server with reporting off used to declare capacity whose
 usage never arrived, making every compartment read a confident `0.0`.
 
 Registration still *triggers* a declaration, through `keep_registered`'s
-`on_registered` hook. The coordinator holds declarations in memory only, so a
-restarted one has forgotten them, and re-registration (via the heartbeat
-`404`) is the only signal a server gets that its declaration may be gone.
+`on_registered` hook. A restarted coordinator has forgotten the declarations
+unless `--checkpoint-path` restored them (see [Lifecycle](#lifecycle)), and
+re-registration (via the heartbeat `404`) is the only signal a server gets
+that its declaration may be gone. The instance registry is never
+checkpointed, so every server re-registers after a coordinator restart and
+its fresh declaration supersedes any restored one.
 
 `config` is its own event type because capacity is configuration: it changes
 at boot and at reconfiguration, not per operation. It carries no `ObjectKey`,

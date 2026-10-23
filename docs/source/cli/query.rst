@@ -284,7 +284,7 @@ The default limit for salts with no explicit quota:
 ``none (exempt)`` means the default is unset, so unquota'd salts are exempt
 from eviction. That is distinct from a default of ``0.0``, which makes every
 byte under an unquota'd salt evictable. See :doc:`/mp/coordinator` for why a
-freshly restarted coordinator starts out exempt.
+coordinator restarted without ``--metadata-path`` starts out exempt.
 
 Key directory
 ~~~~~~~~~~~~~
