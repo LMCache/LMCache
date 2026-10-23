@@ -510,6 +510,8 @@ class TestStorageManagerBatchedPutRefCount:
         for backend in storage_manager.storage_backends.values():
             assert backend.put_calls == [(keys, objs)]
         assert [obj.ref_count for obj in objs] == [0, 0, 0]
+
+
 class TestStorageManagerClear:
     """StorageManager.clear() reaches LocalDiskBackend (issue #5835)."""
 
