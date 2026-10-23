@@ -719,6 +719,7 @@ def test_scanner_import_ignores_foreign_tools_package(
     (package / "__init__.py").write_text("FOREIGN_TOOLS = True\n", encoding="utf-8")
     script = (
         "import runpy, sys\n"
+        "sys.path.insert(0, sys.argv[3])\n"
         "if sys.argv[2] == 'True':\n"
         "    import tools\n"
         "    assert tools.FOREIGN_TOOLS\n"
@@ -728,7 +729,14 @@ def test_scanner_import_ignores_foreign_tools_package(
         "assert sys.modules.get('tools') is original\n"
     )
     result = subprocess.run(
-        [sys.executable, "-c", script, str(Path(__file__).resolve()), str(preloaded)],
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(Path(__file__).resolve()),
+            str(preloaded),
+            str(tmp_path),
+        ],
         cwd=tmp_path,
         text=True,
         capture_output=True,

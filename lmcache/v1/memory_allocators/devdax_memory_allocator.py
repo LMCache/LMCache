@@ -765,22 +765,31 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
-    def owns_device(self, device_path: str) -> bool:
-        """Return whether an arena maps the physical device at a path.
+    def owns_range(
+        self, device_path: str, offset_in_bytes: int, size_in_bytes: int
+    ) -> bool:
+        """Return whether an arena overlaps a byte range of a physical device.
 
         Args:
             device_path: Candidate device path or alias.
+            offset_in_bytes: Start of the candidate range on that device.
+            size_in_bytes: Length of the candidate range.
 
         Returns:
-            ``True`` if a retained arena's fd matches, regardless of its state.
-            Invalid, missing, or unsupported paths return ``False``.
+            ``True`` if a retained arena on the same physical device overlaps
+            the range, regardless of its state. Unidentifiable paths return
+            ``False``.
         """
         requested_identity = get_device_identity(device_path)
         if requested_identity is None:
             return False
         with self.host_mem_lock:
             for arena in self._arenas:
-                if get_device_identity(arena.fd) == requested_identity:
+                if get_device_identity(
+                    arena.fd
+                ) == requested_identity and arena.overlaps(
+                    offset_in_bytes, size_in_bytes
+                ):
                     return True
         return False
 

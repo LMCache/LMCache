@@ -112,8 +112,6 @@ def _parse_mp_storage_args(args: list[str]) -> StorageManagerConfig:
 
 
 class _FakeMooncakeL2Config:
-    affinity_tag = L2AdapterConfigBase.affinity_tag
-
     def __init__(self, setup_config: dict[str, str]) -> None:
         self.setup_config = setup_config
 
@@ -237,11 +235,8 @@ def test_devdax_config_validates_offset(tmp_path):
 @pytest.mark.parametrize(
     ("adapter_name", "adapter_config"),
     [
-        ("nixl_store", SimpleNamespace(affinity_tag=L2AdapterConfigBase.affinity_tag)),
-        (
-            "nixl_store_dynamic",
-            SimpleNamespace(affinity_tag=L2AdapterConfigBase.affinity_tag),
-        ),
+        ("nixl_store", SimpleNamespace()),
+        ("nixl_store_dynamic", SimpleNamespace()),
         ("mooncake_store", _FakeMooncakeL2Config({"protocol": "rdma"})),
     ],
 )
@@ -593,9 +588,9 @@ def test_storage_manager_rejects_l1_devdax_add_with_single_region_adapter(
 def test_storage_manager_rejects_l1_add_of_l2_dax_device_alias(
     tmp_path: Path,
 ) -> None:
-    """L1 cannot map a physical device already owned by DAX L2."""
+    """L1 cannot map a device range already owned by DAX L2, even via alias."""
     primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
-    l2_device = _make_mmap_file(tmp_path, size=4096, name="l2-device.bin")
+    l2_device = _make_mmap_file(tmp_path, size=3 * 4096, name="l2-device.bin")
     l1_alias = tmp_path / "l1-alias.bin"
     os.link(l2_device, l1_alias)
     dax_config = DaxL2AdapterConfig(
@@ -615,8 +610,74 @@ def test_storage_manager_rejects_l1_add_of_l2_dax_device_alias(
         assert "already mapped by L2" in str(conflict.value)
         statuses = storage_manager.get_l1_devdax_arena_statuses()
         assert [status.device_path for status in statuses] == [primary]
+
+        # A disjoint range of the same device is shareable between tiers.
+        added = storage_manager.add_l1_devdax_device(str(l1_alias), 4096, 2 * 4096)
+        assert (added.device_path, added.offset_in_bytes) == (str(l1_alias), 8192)
     finally:
         storage_manager.close()
+
+
+def test_storage_manager_rejects_l2_resize_into_l1_range(tmp_path: Path) -> None:
+    """A growing L2 resize is checked against L1 like an add."""
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    shared = _make_mmap_file(tmp_path, size=3 * 4096, name="shared.bin")
+    storage_manager = _pure_devdax_storage_manager(primary, [_dax_l2_config(shared)])
+    try:
+        storage_manager.add_l1_devdax_device(shared, 4096, 4096)
+        with pytest.raises(L2ReconfigureError) as grow:
+            storage_manager.reconfigure_l2_adapter(
+                0, "resize", {"device_path": shared, "size_bytes": 2 * 4096}
+            )
+        assert grow.value.status_code == 409
+        assert "L1" in str(grow.value)
+    finally:
+        storage_manager.close()
+
+
+def test_storage_manager_rejects_overlapping_static_l1_and_l2(tmp_path: Path):
+    """Startup config is range-checked like a runtime add."""
+    shared = _make_mmap_file(tmp_path, size=3 * 4096, name="shared.bin")
+    gib = 1024**3
+
+    def build(l1_offset: int, l2_offset: int, l2_size: int) -> StorageManager:
+        return StorageManager(
+            StorageManagerConfig(
+                l1_manager_config=L1ManagerConfig(
+                    memory_config=L1MemoryManagerConfig(
+                        size_in_bytes=4096,
+                        use_lazy=False,
+                        shm_name="",
+                        align_bytes=4096,
+                        devdax_path=shared,
+                        devdax_offset_in_bytes=l1_offset,
+                    )
+                ),
+                eviction_config=EvictionConfig(eviction_policy="LRU"),
+                l2_adapter_config=L2AdaptersConfig(
+                    adapters=[
+                        DaxL2AdapterConfig(
+                            devices=[
+                                DaxDeviceConfig(
+                                    shared, l2_size / gib, offset_gb=l2_offset / gib
+                                )
+                            ],
+                            slot_bytes=4096,
+                        )
+                    ]
+                ),
+            )
+        )
+
+    # L2 [0, 8192) overlaps L1 [4096, 8192) without sharing its offset, so the
+    # hybrid inference leaves it in L2 and the startup check must catch it.
+    with pytest.raises(ValueError, match="already mapped by L1"):
+        build(l1_offset=4096, l2_offset=0, l2_size=2 * 4096)
+    manager = build(l1_offset=0, l2_offset=4096, l2_size=4096)
+    try:
+        assert len(manager.l2_adapters()) == 1
+    finally:
+        manager.close()
 
 
 @pytest.mark.parametrize("route", ["hotplug", "registration"])
@@ -1455,7 +1516,7 @@ def test_remove_device_defers_unmap_while_external_views_alive(tmp_path):
 
     manager.remove_device(extra)
     # A draining arena remains owned while allocations are live.
-    assert manager.owns_device(extra)
+    assert manager.owns_range(extra, 0, 4096)
     manager.free(second)
     del second
     gc.collect()
@@ -1469,7 +1530,7 @@ def test_remove_device_defers_unmap_while_external_views_alive(tmp_path):
     ]
     assert statuses[1].active_allocations == 0
     # Ownership persists while an external view prevents unmapping.
-    assert manager.owns_device(extra)
+    assert manager.owns_range(extra, 0, 4096)
 
     # Once the view is gone, the next free retries and reaps the arena.
     del lingering_view
@@ -1479,7 +1540,7 @@ def test_remove_device_defers_unmap_while_external_views_alive(tmp_path):
     gc.collect()
     assert [status.device_path for status in manager.get_arena_statuses()] == [primary]
     # Ownership ends after the arena is actually unmapped.
-    assert not manager.owns_device(extra)
+    assert not manager.owns_range(extra, 0, 4096)
     manager.close()
 
 
@@ -1606,7 +1667,7 @@ def test_add_duplicate_device_rejected(tmp_path: Path, alias_kind: str) -> None:
 
 
 @pytest.mark.parametrize("same_device", [True, False])
-def test_owns_device_uses_character_device_number(
+def test_owns_range_uses_character_device_number(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, same_device: bool
 ) -> None:
     primary = _make_mmap_file(tmp_path, size=4096)
@@ -1631,8 +1692,10 @@ def test_owns_device_uses_character_device_number(
         with monkeypatch.context() as patch:
             patch.setattr(os, "stat", device_stat)
             patch.setattr(os, "fstat", device_fstat)
-            assert manager.owns_device("/dev/alias") is same_device
-            assert not manager.owns_device(str(tmp_path / "missing.bin"))
+            assert manager.owns_range("/dev/alias", 0, 4096) is same_device
+            # A disjoint range of the same device is not owned.
+            assert not manager.owns_range("/dev/alias", 4096, 4096)
+            assert not manager.owns_range(str(tmp_path / "missing.bin"), 0, 4096)
     finally:
         manager.close()
 

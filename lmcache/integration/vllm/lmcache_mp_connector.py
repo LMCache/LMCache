@@ -764,7 +764,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             local_server_url = server_urls[
                 parallel_strategy.vllm_worker_id // ranks_per_node
             ]
-            self.worker_adapter = LMCacheMPWorkerAdapter(
+            self.worker_adapter = self.create_lmcache_mp_worker_adapter(
                 server_url=local_server_url,
                 context=zmq_context,
                 model_name=cache_model_name,
@@ -850,6 +850,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # ==============================
     # Worker-side methods
     # ==============================
+
+    def create_lmcache_mp_worker_adapter(
+        self, **adapter_kwargs: Any
+    ) -> LMCacheMPWorkerAdapter:
+        """Build the worker adapter.
+
+        Subclasses override this to use their own adapter. The keyword
+        arguments are those of :class:`LMCacheMPWorkerAdapter`.
+        """
+        return LMCacheMPWorkerAdapter(**adapter_kwargs)
 
     def _get_connector_metadata(self) -> KVConnectorMetadata:
         """Get the connector metadata.
