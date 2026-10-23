@@ -22,7 +22,7 @@ exit 0 pass | 1 regressed (nightly only) | 2 invalid run / no images / host setu
 
 Workload `agentic`: a Claude Code session replay
 (`semianalysisai/cc-traces-weka-062126-256k`, pinned revision), closed loop.
-Each model is a frontier open-weight release on 8 x H200 (TP8 + EP, FP8 KV), served
+Each model is a frontier open-weight release on 8 x H200 (TP8 + EP, FP8 KV; BF16 on MiMo, whose fp8 path fails in vLLM), served
 with its vLLM recipe's flags and replaced when a newer one appears:
 MiMo-V2.6-Pro-MOPD (hybrid sliding-window, DFlash drafter) at 170 concurrent
 sessions; `vllm_lmcache_ssm` serves GLM-5.3-Flash (Kimi Delta Attention +

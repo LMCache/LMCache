@@ -33,6 +33,9 @@ served_name = "mimo-v2.6-pro"
 aiperf_args = { concurrency = 170 }
 
 [models.mimo26.vllm_args]
+# BF16 KV: its K/V head dims differ, so vLLM upgrades the backend to FA4 after
+# deciding to quantize Q for FA3, and FA4's SM90 fp8 path rejects an fp8 Q.
+kv-cache-dtype = "auto"
 # Matches LMCache's chunk-size; at the default 0 MooncakeStoreConnector never
 # hits. Here so every deployment keeps the same local prefix cache.
 prefix-cache-retention-interval = 1024
