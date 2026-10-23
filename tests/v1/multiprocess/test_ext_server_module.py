@@ -16,6 +16,7 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
     EngineModule,
@@ -32,6 +33,9 @@ from lmcache.v1.multiprocess.ext_server_module import (
 )
 from lmcache.v1.multiprocess.modules import lookup as lookup_mod
 from lmcache.v1.multiprocess.modules import management as management_mod
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    LMCacheDrivenTransferModule,
+)
 from lmcache.v1.multiprocess.protocols.server_module import ServerModuleCallRequest
 from lmcache.v1.multiprocess.request_handler import iter_request_handlers
 
@@ -107,6 +111,57 @@ class _FakePluginTransportServiceModule(_FakePluginModule):
 
     def register_zmq_services(self, server: object) -> None:
         self.zmq_server = server
+
+
+class _FakeTransferReplacement(LMCacheDrivenTransferModule):
+    last_created: ClassVar[_FakeTransferReplacement | None] = None
+
+    def __init__(self, ctx: MPCacheServerContext) -> None:
+        self._ctx = ctx
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        module = cls(build_ctx.engine_context)
+        cls.last_created = module
+        return module
+
+    @property
+    def context(self) -> MPCacheServerContext:
+        return self._ctx
+
+    def report_status(self) -> dict:
+        return {}
+
+    def close(self) -> None:
+        return None
+
+
+class _FakeTransferDependent(DiscoverableModule):
+    module_name = "fake_transfer_dependent"
+    module_dependencies = (LMCacheDrivenTransferModule,)
+    last_dependency: ClassVar[EngineModule | None] = None
+
+    def __init__(self, ctx: MPCacheServerContext) -> None:
+        self._ctx = ctx
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        cls.last_dependency = build_ctx.require(LMCacheDrivenTransferModule)
+        return cls(build_ctx.engine_context)
+
+    @property
+    def context(self) -> MPCacheServerContext:
+        return self._ctx
+
+    def report_status(self) -> dict:
+        return {}
+
+    def close(self) -> None:
+        return None
+
+
+class _FakeTransferNameCollision(_FakePluginModule):
+    module_name = LMCacheDrivenTransferModule.module_name
 
 
 def _install_fake_module(
@@ -199,8 +254,10 @@ def test_server_module_router_dispatches_extension_handlers() -> None:
     assert router is not None
 
     registered = iter_request_handlers(router)
-    assert len(registered) == 1
-    assert registered[0].operation == "server_module_call"
+    assert [handler.operation for handler in registered] == [
+        "server_module_affinity_call",
+        "server_module_call",
+    ]
 
     ok = router.server_module_call(
         ServerModuleCallRequest(method="fake.echo", payload=b"hello")
@@ -306,3 +363,57 @@ def test_build_modules_loads_plugin_and_registers_liveness_target(
         for m in modules
     )
     assert "fake_plugin(dependencies=[lookup])" in log_message
+
+
+def test_build_modules_prefers_same_named_external_subclass(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_module_resources,
+) -> None:
+    ctx = MagicMock(name="ctx")
+    replacement_module = _install_fake_module(
+        monkeypatch,
+        _FakeTransferReplacement,
+        module_name="fake_transfer_replacement",
+    )
+    dependent_module = _install_fake_module(
+        monkeypatch,
+        _FakeTransferDependent,
+        module_name="fake_transfer_dependent",
+    )
+
+    modules = server_mod._build_modules(
+        ctx,
+        MPServerConfig(
+            worker_reap_timeout_seconds=0,
+            server_modules=[
+                ExtServerModuleSpec(dependent_module),
+                ExtServerModuleSpec(replacement_module),
+            ],
+        ),
+        CoordinatorConfig(),
+    )
+
+    replacement = _FakeTransferReplacement.last_created
+    assert replacement is not None
+    assert replacement in modules
+    assert _FakeTransferDependent.last_dependency is replacement
+    stub_module_resources[LMCacheDrivenTransferModule].assert_not_called()
+    transfers = [m for m in modules if isinstance(m, LMCacheDrivenTransferModule)]
+    assert transfers == [replacement]
+
+
+def test_build_modules_rejects_same_named_external_non_subclass(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_module_resources,
+) -> None:
+    module_name = _install_fake_module(monkeypatch, _FakeTransferNameCollision)
+
+    with pytest.raises(ValueError, match="does not subclass"):
+        server_mod._build_modules(
+            MagicMock(name="ctx"),
+            MPServerConfig(
+                worker_reap_timeout_seconds=0,
+                server_modules=[ExtServerModuleSpec(module_name)],
+            ),
+            CoordinatorConfig(),
+        )

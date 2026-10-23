@@ -761,7 +761,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             local_server_url = server_urls[
                 parallel_strategy.vllm_worker_id // ranks_per_node
             ]
-            self.worker_adapter = LMCacheMPWorkerAdapter(
+            self.worker_adapter = self.create_lmcache_mp_worker_adapter(
                 server_url=local_server_url,
                 context=zmq_context,
                 model_name=cache_model_name,
@@ -847,6 +847,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # ==============================
     # Worker-side methods
     # ==============================
+
+    def create_lmcache_mp_worker_adapter(
+        self, **adapter_kwargs: Any
+    ) -> LMCacheMPWorkerAdapter:
+        """Build the worker adapter.
+
+        Subclasses override this to use their own adapter. The keyword
+        arguments are those of :class:`LMCacheMPWorkerAdapter`.
+        """
+        return LMCacheMPWorkerAdapter(**adapter_kwargs)
 
     def _get_connector_metadata(self) -> KVConnectorMetadata:
         """Get the connector metadata.
@@ -1796,6 +1806,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             num_new_tokens = scheduler_output.num_scheduled_tokens[new_request.req_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
+            request_tracker.update_num_engine_computed_tokens(
+                new_request.num_computed_tokens, num_new_tokens
+            )
 
             if not self._can_store:
                 continue
@@ -1835,6 +1848,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # stay consistent with _process_new_requests.
             num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
+            request_tracker.update_num_engine_computed_tokens(
+                cached_reqs.num_computed_tokens[idx], num_new_tokens
+            )
 
             if not self._can_store:
                 continue

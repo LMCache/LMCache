@@ -37,7 +37,7 @@ cuMemGetAllocationPropertiesFromHandle     .
   -> requestedHandleTypes                  .
 cuMemExportToShareableHandle               .
   -> fd  (POSIX_FILE_DESCRIPTOR)   --SCM_RIGHTS-->  cuMemImportFromShareableHandle
-  -> 64B blob (FABRIC)             --pickle----->   cuMemAddressReserve
+  -> 64B blob (FABRIC)          --descriptor--->   cuMemAddressReserve
 cuMemRelease(retained handle)              .        cuMemMap
                                            .        cuMemSetAccess
                                            .        tensor = base + offset (CuPy/DLPack)
@@ -59,7 +59,7 @@ Key driver facts the design leans on (all verified on H200 / driver
 - A POSIX fd is only meaningful inside its own process: the raw fd
   *number* fails to import elsewhere (`CUDA_ERROR_UNKNOWN`). It must be
   duplicated by the kernel — `SCM_RIGHTS` over an `AF_UNIX` socket —
-  which is why the fd never rides the pickled wrapper. The wrapper
+  which is why the fd never rides the serialized wrapper. The wrapper
   carries a 16-byte `export_id`; the fd travels out of band and the
   importer surfaces it through `set_vmm_fd_resolver`. A fabric blob is
   plain bytes and travels inline (requires IMEX channel access in both

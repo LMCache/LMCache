@@ -113,7 +113,9 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     test -f "${NIXL_PLUGIN_DIR}/libplugin_OBJ.so" && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
-    uv pip install ./dist_lmcache/*.whl --verbose
+    bash docker/build_raw_block_wheel.sh dist_lmcache && \
+    uv pip install ./dist_lmcache/*.whl --verbose && \
+    python3 -c 'import lmcache_rust_raw_block_io'
 
 WORKDIR /workspace
 USER lmcache
@@ -141,6 +143,11 @@ RUN . /opt/venv/bin/activate && \
     uv pip install "lmcache${VER:+==${VER}}" \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match --verbose && \
+    # The Rust module is published at lmcache's version; pin it to the lmcache
+    # actually installed, so the two match even when LMCACHE_VERSION is unset.
+    LMCACHE_INSTALLED=$(python3 -c 'import importlib.metadata as m; print(m.version("lmcache"))') && \
+    uv pip install "lmcache-rust-raw-block-io==${LMCACHE_INSTALLED}" && \
+    python3 -c 'import lmcache_rust_raw_block_io' && \
   
     uv pip install --reinstall-package nixl nixl
 
@@ -167,10 +174,11 @@ RUN . /opt/venv/bin/activate && \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
-    uv pip install lmcache==${VER} \
+    uv pip install lmcache==${VER} lmcache-rust-raw-block-io==${VER} \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu129 \
         --index-strategy unsafe-best-match --verbose && \
+    python3 -c 'import lmcache_rust_raw_block_io' && \
     
     uv pip install --reinstall-package nixl nixl
 
