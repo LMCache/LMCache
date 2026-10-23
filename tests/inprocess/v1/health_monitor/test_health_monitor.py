@@ -246,7 +246,7 @@ class TestRemoteBackendHealthCheck:
 
     def test_create_with_remote_backend(self):
         # First Party
-        from lmcache.v1.storage_backend.remote_backend import RemoteBackend
+        from lmcache.inprocess.v1.storage_backend.remote_backend import RemoteBackend
 
         mock_backend = MagicMock(spec=RemoteBackend)
         mock_backend.remote_url = "mock://100"
