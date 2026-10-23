@@ -195,7 +195,8 @@ def io_bytes(names: list[str]) -> dict[str, int]:
         ``rbytes`` and ``wbytes`` summed over the containers and devices.
 
     Raises:
-        subprocess.CalledProcessError: a container is not running.
+        subprocess.CalledProcessError: a container does not exist.
+        FileNotFoundError: a container has exited.
     """
     total = {"rbytes": 0, "wbytes": 0}
     for name in names:
@@ -579,7 +580,7 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
                 io1 = io_bytes(servers)
                 summary["disk_read_gb"] = (io1["rbytes"] - io0["rbytes"]) / 1e9
                 summary["disk_write_gb"] = (io1["wbytes"] - io0["wbytes"]) / 1e9
-            except subprocess.CalledProcessError:
+            except (subprocess.CalledProcessError, FileNotFoundError):
                 logger.exception("disk I/O not recorded: a server is gone")
         # Not invalid: the measurement is done; the next run fails to start instead.
         summary["containers_left"] = docker.remove(names, stop_s)

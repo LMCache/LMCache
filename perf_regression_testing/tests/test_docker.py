@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 import itertools
+import subprocess
 
 # Third Party
 import pytest
@@ -73,3 +74,14 @@ def test_remove_with_no_stop_time_kills_at_once(
     monkeypatch.setattr(docker, "status", lambda name: None)
     docker.remove(["a"], stop_s=0)
     assert calls[0] == ["docker", "stop", "-t", "0", "a"]
+
+
+def test_cgroup_dir_of_an_exited_container_raises_file_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, stdout="0\n")
+
+    monkeypatch.setattr(docker.subprocess, "run", fake)
+    with pytest.raises(FileNotFoundError):
+        docker.cgroup_dir("exited")

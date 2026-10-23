@@ -131,7 +131,8 @@ def cgroup_dir(name: str) -> Path:
         ``/sys/fs/cgroup/<path>`` of the container's init process.
 
     Raises:
-        subprocess.CalledProcessError: the container is not running.
+        subprocess.CalledProcessError: the container does not exist.
+        FileNotFoundError: the container has exited (docker reports pid 0).
     """
     pid = subprocess.run(
         ["docker", "inspect", "-f", "{{.State.Pid}}", name],
