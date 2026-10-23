@@ -7,6 +7,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextlib import nullcontext
 from dataclasses import dataclass
 from threading import Event
@@ -625,7 +626,7 @@ class ServerBenchClient:
                 worker_status = future.result(
                     timeout=max(0.0, deadline - time.monotonic())
                 )
-            except TimeoutError:
+            except (FuturesTimeoutError, TimeoutError):
                 future.cancel()
                 worker_status = "timeout"
             if worker_status == success_status:
