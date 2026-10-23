@@ -1106,7 +1106,7 @@ def test_scatter_unpinned_chunks_survive_back_to_back_groups() -> None:
     )
     from lmcache.v1.platform import resolve_device_ops
 
-    if not torch.cuda.is_available():
+    if not (torch_dev.is_available() and torch_device_type == "cuda"):
         _pytest.skip("needs CUDA and compiled block-transfer ops")
     # The capability is per transfer op now, so ask the ops this test uses.
     if _detect_block_transfer_accepts_tensor(
@@ -1149,7 +1149,7 @@ def test_scatter_unpinned_chunks_survive_back_to_back_groups() -> None:
 
     for g in range(num_groups):
         scatter_cpu_to_paged_kv(dests[g], id_lists[g], chunk_lists[g], bpc)
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     for g in range(num_groups):
         for name in sources[g]:

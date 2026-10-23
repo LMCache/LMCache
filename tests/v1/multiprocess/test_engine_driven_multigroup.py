@@ -7,7 +7,6 @@ Tests for engine-driven multi-group (uniform coverage) transfers.
 from contextlib import contextmanager
 from typing import Any
 from unittest.mock import MagicMock
-import pickle
 import threading
 
 # Third Party
@@ -16,6 +15,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.multiprocess.custom_types import (
     GroupLayout,
@@ -89,7 +89,7 @@ def test_shm_strategy_multigroup_store_and_retrieve_roundtrip() -> None:
     # Marked cuda so suites that deselect with -m "not cuda" (the XPU unit
     # lane) never collect this at all. The runtime check below still covers
     # plain CUDA-less runs, which do not filter by marker.
-    if not torch.cuda.is_available():
+    if not (torch_dev.is_available() and torch_device_type == "cuda"):
         pytest.skip("CUDA is not available")
 
     # First Party
@@ -789,7 +789,10 @@ def test_register_rejects_compressed_group() -> None:
             id="flat-envelope",
         ),
         pytest.param(
-            lambda shapes: pickle.dumps([[torch.zeros(shapes[0])]]),
+            # A legacy pickle payload (pickle.dumps([[1]]), protocol 4).
+            lambda shapes: (
+                b"\x80\x04\x95\t\x00\x00\x00\x00\x00\x00\x00]\x94]\x94K\x01aa."
+            ),
             id="pickle",
         ),
     ],

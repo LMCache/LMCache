@@ -167,9 +167,7 @@ def test_skip_spanning_launches_carries_into_later_launches() -> None:
     """A skip past the first launch's blocks continues into the next launch."""
     kernel = _RecordingKernel()
     paged, fmt, desc = _paged_kv(num_blocks=10)
-    chunks = cast(
-        list[torch.Tensor], [_host_chunk(0x1000 * (i + 1)) for i in range(5)]
-    )
+    chunks = cast(list[torch.Tensor], [_host_chunk(0x1000 * (i + 1)) for i in range(5)])
 
     transfer_with_address_kernel(
         kernel,
