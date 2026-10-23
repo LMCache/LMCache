@@ -1023,8 +1023,7 @@ server
 The ``lmcache bench server`` command is an end-to-end sanity test for the
 LMCache Multi-Process (MP) cache server. It connects to a running server
 over ZMQ and exercises the full KV-cache data path for a sequence of
-synthetic requests, then optionally verifies per-chunk checksums through
-the HTTP API.
+synthetic requests, then verifies per-chunk checksums in local worker buffers.
 
 .. code-block:: bash
 
@@ -1032,7 +1031,7 @@ the HTTP API.
 
 Unlike :ref:`lmcache bench engine <lmcache-bench-engine>`, this command does
 **not** require an inference engine. It only needs a running LMCache MP
-server (ZMQ + HTTP). GPU mode additionally requires a CUDA-capable device.
+server (ZMQ). GPU mode additionally requires a CUDA-capable device.
 It also requires the full ``lmcache`` install (not the lightweight
 ``lmcache-cli`` package).
 
@@ -1044,8 +1043,8 @@ For each sequence in ``[--start, --end)``, the tool runs two passes:
 
 1. **Cold pass** -- ``LOOKUP`` is expected to miss, so the generated KV
    tensors are ``STORE``\ d on the server.
-2. **Warm pass** -- ``LOOKUP`` is expected to hit; the tool issues
-   ``RETRIEVE`` and compares the retrieved KV chunks' checksums to the
+2. **Warm pass** -- ``LOOKUP`` is expected to hit; the tool clears destination
+   blocks, issues ``RETRIEVE`` and compares the retrieved KV chunks' checksums to the
    originals.
 
 The full RPC path exercised is::
@@ -1054,10 +1053,9 @@ The full RPC path exercised is::
      → QUERY_PREFETCH_STATUS → RETRIEVE → STORE
      → END_SESSION
 
-When ``--url`` points to the server's HTTP endpoint, per-chunk checksums
-are additionally cross-checked against the server-side computation, so a
-mismatch between producer and consumer surfaces as a loud
-``CHECKSUM MISMATCH`` log line.
+Both transfer modes verify local buffers. In handle mode, ``--url`` also enables
+server checksum comparisons before STORE and after RETRIEVE, reported separately.
+HTTP failures or mismatches fail this check; an empty ``--url`` disables it.
 
 
 Quick start
@@ -1099,8 +1097,8 @@ Options
      - ZMQ endpoint of the MP cache server.
    * - ``--url URL``
      - ``http://localhost:8080``
-     - HTTP base URL of the server's checksum API. Used to
-       verify per-chunk checksums end-to-end.
+     - HTTP endpoint for handle-mode checksum verification. Pass an empty
+       string to disable HTTP checks; local round-trip verification still runs.
    * - ``--mode {gpu,cpu}``
      - ``gpu``
      - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
@@ -1117,6 +1115,9 @@ Options
    * - ``--num-tokens N``
      - ``512``
      - Tokens per synthetic request.
+   * - ``--block-allocation {sequential,random}``
+     - ``sequential``
+     - Allocate the lowest free block IDs or sample from all free IDs.
    * - ``--num-blocks N``
      - ``1024``
      - Number of paged blocks allocated on the GPU.
@@ -1365,7 +1366,7 @@ metrics summary is printed. The summary includes:
 
 * **Configuration** -- RPC URL, mode, transfer mode, tokens per request,
   interval, concurrency.
-* **Results** -- total requests, checksum OK / FAIL counts, pass rate,
+* **Results** -- total requests, checksum OK / FAIL counts, checksum pass rate,
   elapsed time, requests per second.
 * **Latency sections** -- per-operation latency statistics (count, mean,
   min, max, p50, p99) for cold lookup, cold store, warm lookup, and warm
@@ -1387,7 +1388,7 @@ to save the summary to a file.
    Total requests:                   3
    Checksum OK:                      3
    Checksum FAIL:                    0
-   Pass rate (%):                    100.0
+   Checksum pass rate (%):           100.0
    -------------------- Cold Lookup (ms) ---------------
    count:                            3
    mean:                             1.647

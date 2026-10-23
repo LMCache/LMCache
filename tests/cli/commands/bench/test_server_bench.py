@@ -136,7 +136,11 @@ class TestCaseDelegation:
         case_result = BenchResult(
             case_name="baseline",
             completed_runs=2,
-            checks={"checksum_match": [True, False]},
+            checks={
+                "checksum_match": [True, False],
+                "cold.server_checksum_match": [True, False],
+                "warm.server_checksum_match": [True, True],
+            },
         )
         bench_case.run.return_value = case_result
         client_factory = MagicMock(return_value=client)
@@ -172,6 +176,7 @@ class TestCaseDelegation:
             sequence_id_offset=5,
             sequence_id_stride=1,
             interval_seconds=0.0,
+            num_tokens=512,
             stop=ANY,
         )
         client_factory.assert_called_once_with(ANY, ANY, client_index=0)
@@ -185,7 +190,9 @@ class TestCaseDelegation:
                 call("total_requests", "Total requests", 2),
                 call("checksum_ok", "Checksum OK", 1),
                 call("checksum_fail", "Checksum FAIL", 1),
-                call("pass_rate", "Pass rate (%)", 50.0),
+                call("server_checksum_ok", "Server checksum OK", 3),
+                call("server_checksum_fail", "Server checksum FAIL", 1),
+                call("pass_rate", "Checksum pass rate (%)", 50.0),
             ]
         )
         metrics.emit.assert_called_once_with()
@@ -248,6 +255,7 @@ class TestCaseDelegation:
                 sequence_id_offset=10,
                 sequence_id_stride=2,
                 interval_seconds=0.0,
+                num_tokens=512,
                 stop=ANY,
             ),
             call(
@@ -255,6 +263,7 @@ class TestCaseDelegation:
                 sequence_id_offset=11,
                 sequence_id_stride=2,
                 interval_seconds=0.0,
+                num_tokens=512,
                 stop=ANY,
             ),
         ]
@@ -493,7 +502,7 @@ class _ChecksumHandler(BaseHTTPRequestHandler):
         body = json.dumps(
             {
                 "status": "success",
-                "chunk_checksums": ["a" * 32, "b" * 32],
+                "chunk_checksums": {"layer_0": ["a" * 32, "b" * 32]},
             }
         ).encode()
         self.send_response(200)
@@ -527,29 +536,27 @@ class TestQueryChecksum:
         base = "http://127.0.0.1:%d" % self.port
         result = _query_checksum(
             base,
-            block_offset=0,
-            num_blocks=2,
-            block_size=2,
-            chunk_size=2,
+            block_ids=[3, 1],
+            blocks_per_chunk=1,
+            instance_id=1000,
         )
         assert result is not None
-        assert len(result) == 2
-        assert result[0] == "a" * 32
+        assert result == {"layer_0": ["a" * 32, "b" * 32]}
         # The POST body matches the MP /cache/checksums contract: block-native
-        # ids and a block-level chunk_size (token chunk_size 2 / block_size 2).
+        # ids in logical order and a block-level chunk_size.
         assert len(self.server.received_payloads) == 1
         sent = self.server.received_payloads[0]
-        assert sent["block_ids"] == [0, 1]
+        assert sent["block_ids"] == [3, 1]
         assert sent["chunk_size"] == 1
-        assert sent["layerwise"] is False
+        assert sent["layerwise"] is True
+        assert sent["instance_id"] == 1000
 
     def test_unreachable_returns_none(self):
         result = _query_checksum(
             "http://127.0.0.1:1",
-            block_offset=0,
-            num_blocks=2,
-            block_size=2,
-            chunk_size=2,
+            block_ids=[3, 1],
+            blocks_per_chunk=1,
+            instance_id=1000,
         )
         assert result is None
 
@@ -1168,7 +1175,9 @@ class TestClientMultiWorker:
         gc.collect()
         assert all(ref() is not None for ref in tensor_refs)
         try:
-            request = bench_client.create_request(0, "req-0-test", "test")
+            request = bench_client.create_request(
+                0, "req-0-test", "test", token_ids=tuple(range(32))
+            )
             assert request is not None
             lookup = bench_client.lookup(request)
             store = bench_client.store(
@@ -1181,7 +1190,7 @@ class TestClientMultiWorker:
                 start_token=0,
                 token_count=request.num_full_tokens,
             )
-            bench_client.end_session(request)
+            bench_client.release_request(request)
             result = (lookup, store, retrieve)
         finally:
             bench_client.close()
@@ -1321,6 +1330,7 @@ class TestClientMultiWorker:
             "LOOKUP should fire exactly once regardless of tp_size "
             "(is_mla=%s, tp=%d)" % (is_mla, tp)
         )
+        assert lookups[0][1][0].num_kv_readers == (tp if is_mla else 1)
         # Reader count comes from the key; tp_size is a legacy wire field.
         assert lookups[0][1][1] == tp, (
             "LOOKUP payload tp_size must equal simulated tp "
@@ -1426,7 +1436,9 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     )
     bench.start()
     try:
-        request = bench.create_request(0, "req-event", "test")
+        request = bench.create_request(
+            0, "req-event", "test", token_ids=tuple(range(4))
+        )
         assert request is not None
         result = getattr(bench, operation)(request, start_token=0, token_count=4)
         assert result is not None

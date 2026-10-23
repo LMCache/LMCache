@@ -226,72 +226,46 @@ def _send_end_session(
 
 def _query_checksum(
     http_base: str,
-    block_offset: int,
-    num_blocks: int,
-    block_size: int,
-    chunk_size: int,
-    instance_id: int = _INSTANCE_ID,
-) -> list[str] | None:
+    block_ids: list[int],
+    blocks_per_chunk: int,
+    instance_id: int,
+) -> dict[str, list[str]] | None:
     """Query KV cache checksums via the HTTP API.
 
-    Uses the MP-native ``block_ids`` + ``block_size`` addressing
-    scheme so the query matches the same block-level semantics
-    as ``STORE`` / ``RETRIEVE``. This CLI pins ``layerwise=false``
-    so the server always returns ``chunk_checksums`` as a flat
-    ``list[str]``. We still defensively validate the response
-    type — if a future endpoint variant returns a per-layer
-    ``dict`` we log and skip the comparison rather than letting
-    ``str.join`` crash.
+    ``block_ids`` supplies physical IDs in logical order; ``blocks_per_chunk``
+    counts blocks rather than tokens. ``layerwise=true`` returns a mapping
+    from registered tensor names to per-chunk digests. HTTP errors or invalid
+    responses return ``None``.
 
-    ``instance_id`` selects the GPU context to hash. TP > 1 registers
-    one context per rank so the caller must pass a real, registered
-    ``instance_id`` — the default of ``0`` only works for the single
-    legacy worker path.
+    ``instance_id`` selects the registered worker context to hash.
     """
-    blocks = list(range(block_offset, block_offset + num_blocks))
-    # The MP /cache/checksums endpoint is block-native: its chunk_size counts
-    # blocks per chunk, while our caller passes in the server-side token-level
-    # chunk_size. Convert here.
-    if chunk_size % block_size != 0:
-        print(
-            "  [WARNING] chunk_size %d not a multiple of block_size %d; "
-            "skipping checksum query" % (chunk_size, block_size)
-        )
-        return None
-    chunk_size_blocks = chunk_size // block_size
-    url = "%s/cache/checksums" % http_base
-    payload = json.dumps(
-        {
-            "block_ids": blocks,
-            "chunk_size": chunk_size_blocks,
-            "instance_id": instance_id,
-            "layerwise": False,
-        }
-    ).encode()
+    request = urllib.request.Request(
+        http_base.rstrip("/") + "/cache/checksums",
+        data=json.dumps(
+            dict(
+                block_ids=block_ids,
+                chunk_size=blocks_per_chunk,
+                instance_id=instance_id,
+                layerwise=True,
+            )
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
-            if data.get("status") != "success":
-                return None
-            checksums = data.get("chunk_checksums", [])
-            if not isinstance(checksums, list) or not all(
-                isinstance(c, str) for c in checksums
-            ):
-                print(
-                    "  [WARNING] unexpected chunk_checksums "
-                    "type=%s; expected list[str]" % type(checksums).__name__
-                )
-                return None
-            return checksums
-    except (urllib.error.URLError, OSError) as exc:
-        print("  [WARNING] Checksum query failed: %s" % exc)
-    return None
+        with urllib.request.urlopen(request, timeout=5) as response:
+            data = json.load(response)
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("status") != "success":
+        return None
+    checksums = data.get("chunk_checksums")
+    if not isinstance(checksums, dict) or not all(
+        isinstance(parts, list) and all(isinstance(part, str) for part in parts)
+        for parts in checksums.values()
+    ):
+        return None
+    return checksums
 
 
 # ------------------------------------------------------------------ #

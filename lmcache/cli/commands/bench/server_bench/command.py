@@ -12,7 +12,7 @@ The command exercises the full store / retrieve data path:
       2. QUERY_PREFETCH_STATUS — poll by request_id until done
       3. RETRIEVE — for the hit portion (if any)
       4. STORE    — for the miss portion
-      5. CHECKSUM — verify KV cache integrity via HTTP API
+      5. CHECKSUM — verify retrieved chunks in reader buffers
 
 Usage examples::
 
@@ -160,6 +160,12 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         help="Tokens per request (default: 512)",
     )
 
+    parser.add_argument(
+        "--block-allocation",
+        choices=["sequential", "random"],
+        default="sequential",
+        help="Block allocation order (default: sequential).",
+    )
     # -- KV cache shape --
     kv = parser.add_argument_group("KV cache shape")
     kv.add_argument(
@@ -231,7 +237,7 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--url",
         default="http://localhost:8080",
-        help=("HTTP base URL for checksum API (default: http://localhost:8080)"),
+        help="HTTP URL for handle-mode checksum verification; empty disables it",
     )
 
     prof = parser.add_argument_group(
@@ -389,6 +395,7 @@ def _build_cases(
             sequence_id_offset=args.start + index,
             sequence_id_stride=concurrency,
             interval_seconds=args.interval,
+            num_tokens=config.num_tokens,
             stop=stop,
         )
         for index in range(concurrency)
@@ -497,9 +504,21 @@ def _emit_server_bench_metrics(
     result_section.add("total_requests", "Total requests", result.completed_runs)
     result_section.add("checksum_ok", "Checksum OK", total_checksum_ok)
     result_section.add("checksum_fail", "Checksum FAIL", total_checksum_fail)
+    server_checks = [
+        check
+        for kind in ("cold", "warm")
+        for check in result.checks.get(f"{kind}.server_checksum_match", [])
+    ]
+    if server_checks:
+        result_section.add(
+            "server_checksum_ok", "Server checksum OK", sum(server_checks)
+        )
+        result_section.add(
+            "server_checksum_fail", "Server checksum FAIL", server_checks.count(False)
+        )
     if result.completed_runs > 0:
         pass_rate = total_checksum_ok / result.completed_runs * 100
-        result_section.add("pass_rate", "Pass rate (%)", round(pass_rate, 2))
+        result_section.add("pass_rate", "Checksum pass rate (%)", round(pass_rate, 2))
     if result.elapsed_seconds > 0:
         result_section.add("elapsed_s", "Elapsed (s)", round(result.elapsed_seconds, 3))
         result_section.add(
