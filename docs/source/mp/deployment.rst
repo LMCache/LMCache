@@ -312,6 +312,13 @@ override the CPU pool for lookup and other non-GPU operations.
 Allocate as much CPU memory as available after accounting for the OS and vLLM.
 A larger L1 cache means fewer L2 round-trips.
 
+**GPU memory headroom for the server process:**
+The ``lmcache server`` process holds GPU memory (CUDA contexts and streams) on
+every GPU, on top of the KV cache that vLLM sizes with
+``--gpu-memory-utilization``. If the first request fails with a CUDA
+out-of-memory error, lower vLLM's ``--gpu-memory-utilization`` to leave
+headroom for the LMCache server process.
+
 **Eviction tuning:**
 
 - ``--eviction-trigger-watermark 0.8`` (default) triggers eviction when L1 is

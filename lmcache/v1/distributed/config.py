@@ -240,7 +240,6 @@ def _check_hugepage_availability(size_in_bytes: int) -> None:
 def _infer_l1_devdax_overflow_from_dax_adapter(
     memory_config: "L1MemoryManagerConfig",
     l2_adapter_config: L2AdaptersConfig,
-    tag: str = "_default",
 ) -> None:
     if not memory_config.devdax_path or memory_config.devdax_size_in_bytes:
         return
@@ -249,10 +248,7 @@ def _infer_l1_devdax_overflow_from_dax_adapter(
     remaining_adapters: list[L2AdapterConfigBase] = []
     matched_dax_device: Any | None = None
     for adapter_config in l2_adapter_config.adapters:
-        if (
-            get_type_name_for_config(adapter_config) != "dax"
-            or adapter_config.affinity_tag != tag
-        ):
+        if get_type_name_for_config(adapter_config) != "dax":
             remaining_adapters.append(adapter_config)
             continue
 
@@ -262,6 +258,8 @@ def _infer_l1_devdax_overflow_from_dax_adapter(
             device
             for device in devices
             if getattr(device, "device_path", None) == l1_devdax_path
+            and getattr(device, "offset_bytes", 0)
+            == memory_config.devdax_offset_in_bytes
         ]
         if not matched_devices:
             remaining_adapters.append(adapter_config)
@@ -273,9 +271,7 @@ def _infer_l1_devdax_overflow_from_dax_adapter(
 
         matched_dax_device = matched_devices[0]
         remaining_devices = [
-            device
-            for device in devices
-            if getattr(device, "device_path", None) != l1_devdax_path
+            device for device in devices if device is not matched_dax_device
         ]
         if remaining_devices:
             remaining_dax_adapter = type(dax_adapter)(
@@ -289,7 +285,6 @@ def _infer_l1_devdax_overflow_from_dax_adapter(
             remaining_dax_adapter.eviction_config = dax_adapter.eviction_config
             remaining_dax_adapter.persist_config = dax_adapter.persist_config
             remaining_dax_adapter.serde_config = dax_adapter.serde_config
-            remaining_dax_adapter.affinity_tag = dax_adapter.affinity_tag
             remaining_adapters.append(remaining_dax_adapter)
 
     if matched_dax_device is None:
@@ -454,7 +449,7 @@ class L1ManagerConfig:
     """ Time to live for each object's read lock. Default is 300s (5 minutes). """
 
     tag: str = "_default"
-    """Unique L1 name used for static L2 affinity and reporting."""
+    """Unique L1 name used for reporting."""
 
     eviction: "EvictionConfig | None" = None
     """Per-L1 eviction settings; None inherits StorageManagerConfig defaults."""
@@ -689,8 +684,9 @@ class StorageManagerConfig:
     prefetch_policy: str = "default"
     """ The L2 prefetch policy name. """
 
-    prefetch_max_in_flight: int = 8
-    """ Maximum number of concurrent prefetch requests. """
+    prefetch_inflight_watermark: float = 0.5
+    """ Fraction of each L1's capacity that in-flight L2 prefetches may stage
+    before new prefetch requests wait, in (0, 1]. """
 
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
@@ -713,6 +709,11 @@ class StorageManagerConfig:
         for c in self.l1_manager_configs:
             if c.eviction is None:
                 c.eviction = self.eviction_config
+        if not 0 < self.prefetch_inflight_watermark <= 1:
+            raise ValueError(
+                "prefetch_inflight_watermark must be in (0, 1], got "
+                f"{self.prefetch_inflight_watermark}"
+            )
         normalize_storage_manager_config(self)
         validate_storage_manager_config(self)
 
@@ -740,7 +741,6 @@ def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
         _infer_l1_devdax_overflow_from_dax_adapter(
             config.l1_manager_config.memory_config,
             config.l2_adapter_config,
-            config.l1_manager_config.tag,
         )
 
 
@@ -773,17 +773,15 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     for l1 in by_tag.values():
         if l1.gds_l1_config is not None and l1.memory_config.devdax_path:
             raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
+    # A hybrid L1 only appears in single-L1 configs, so every adapter binds
+    # to it.
+    has_hybrid_l1 = any(
+        c.memory_config.devdax_path and c.memory_config.devdax_size_in_bytes
+        for c in by_tag.values()
+    )
     for adapter_config in config.l2_adapter_config.adapters:
-        if adapter_config.affinity_tag not in by_tag:
-            raise ValueError(
-                f"Unknown L1 affinity_tag: {adapter_config.affinity_tag!r}"
-            )
-        l1 = by_tag[adapter_config.affinity_tag]
-        if l1.gds_l1_config is not None:
-            raise ValueError("L2 affinity requires a host-backed DRAM or DEVDAX L1")
-        memory = l1.memory_config
         adapter_name = requires_single_l1_memory_region(adapter_config)
-        if memory.devdax_path and memory.devdax_size_in_bytes and adapter_name:
+        if has_hybrid_l1 and adapter_name:
             raise ValueError(
                 "Hybrid DRAM + Device-DAX L1 cannot be used with L2 adapters "
                 f"that register a single L1 memory region: {adapter_name}"
@@ -1033,10 +1031,20 @@ def add_storage_manager_args(
         "Default is 'default' (pick the first adapter by index).",
     )
     policy_group.add_argument(
+        "--l2-prefetch-inflight-watermark",
+        type=float,
+        default=0.5,
+        help="Fraction of L1 capacity, in (0, 1], that in-flight L2 prefetch "
+        "requests may stage before new prefetch requests wait. Default is 0.5.",
+    )
+    # Deprecated: released deployers (operator) still render this flag into
+    # server args, and rejecting it crashes the pod on startup.
+    policy_group.add_argument(
         "--l2-prefetch-max-in-flight",
         type=int,
-        default=8,
-        help="Maximum number of concurrent prefetch requests. Default is 8.",
+        default=None,
+        help="Deprecated and ignored; prefetch admission follows "
+        "--l2-prefetch-inflight-watermark.",
     )
     policy_group.add_argument(
         "--periodic-notifier-interval-ms",
@@ -1080,6 +1088,12 @@ def parse_args_to_config(
     Returns:
         StorageManagerConfig: The configuration object.
     """
+    if args.l2_prefetch_max_in_flight is not None:
+        logger.warning(
+            "--l2-prefetch-max-in-flight is deprecated and ignored; prefetch "
+            "admission follows --l2-prefetch-inflight-watermark (%s)",
+            args.l2_prefetch_inflight_watermark,
+        )
     defaults = (
         EvictionConfig(
             args.eviction_policy,
@@ -1136,7 +1150,7 @@ def parse_args_to_config(
             l2_adapter_config=parse_args_to_l2_adapters_config(args),
             store_policy=args.l2_store_policy,
             prefetch_policy=args.l2_prefetch_policy,
-            prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+            prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
             periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
         )
     if args.l1_size_gb is None or defaults is None:
@@ -1219,7 +1233,7 @@ def parse_args_to_config(
         l2_adapter_config=l2_adapter_config,
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
-        prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+        prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
     return config

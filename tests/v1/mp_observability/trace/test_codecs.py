@@ -11,6 +11,9 @@ from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     GroupedObjectKeys,
     MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
     ObjectKey,
     PrefetchHandle,
     PrefetchLockMode,
@@ -150,6 +153,28 @@ class TestPrefetchTaskSpec:
         assert out == spec
         assert out.fetching_policy == "full"
         assert out.lock_mode is PrefetchLockMode.NO_LOCK
+
+    @pytest.mark.parametrize(
+        "allowed",
+        [
+            None,
+            frozenset(),
+            frozenset(
+                {
+                    MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL),
+                    MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE),
+                }
+            ),
+        ],
+        ids=["all", "none", "some"],
+    )
+    def test_memory_tag_filters_roundtrip(self, allowed):
+        spec = PrefetchTaskSpec(
+            key_groups=[_grouped_object_keys(0)],
+            allowed_l1_memory_tags=allowed,
+            allowed_l2_memory_tags=allowed,
+        )
+        assert _roundtrip(spec) == spec
 
 
 class TestAttnWindowDesc:

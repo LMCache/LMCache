@@ -62,7 +62,7 @@ def parse_size_string(size: str) -> int:
         The size in bytes.
 
     Raises:
-        ValueError: If the string cannot be parsed or is not positive.
+        ValueError: If the string cannot be parsed.
     """
     text = size.strip()
     if not text or len(text) > _MAX_SIZE_STRING_LEN:
@@ -85,10 +85,7 @@ def parse_size_string(size: str) -> int:
     elif not value_text.isdigit():
         raise ValueError(SIZE_ERROR)
 
-    value = Decimal(value_text)
-    if value <= 0:
-        raise ValueError(SIZE_ERROR)
-    return int(value * _SIZE_UNITS[unit])
+    return int(Decimal(value_text) * _SIZE_UNITS[unit])
 
 
 def resolve_offset_bytes(offset: OffsetRequest) -> int:

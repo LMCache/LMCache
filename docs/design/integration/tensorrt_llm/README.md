@@ -5,10 +5,14 @@
 ```
 lmcache/integration/tensorrt_llm/
 ├── __init__.py             # Optional-import surface
-├── utils.py                # ENGINE_NAME, lmcache_get_config,
-│                           # create_trtllm_metadata
-├── tensorrt_adapter.py     # In-process — engine in TRT-LLM process
+├── tensorrt_adapter.py     # Compatibility exports for the lmcache preset
 └── tensorrt_mp_adapter.py  # Multi-process — engine in standalone server
+
+lmcache/inprocess/integration/tensorrt_llm/
+├── __init__.py
+├── utils.py               # ENGINE_NAME, lmcache_get_config,
+│                          # create_trtllm_metadata
+└── tensorrt_adapter.py    # In-process — engine in TRT-LLM process
 ```
 
 Both adapters subclass TRT-LLM's `KvCacheConnectorScheduler` and
@@ -25,6 +29,11 @@ maps:
 |---|---|---|---|
 | `lmcache` | `lmcache.integration.tensorrt_llm.tensorrt_adapter` | `LMCacheKvConnectorScheduler` | `LMCacheKvConnectorWorker` |
 | `lmcache-mp` | `lmcache.integration.tensorrt_llm.tensorrt_mp_adapter` | `LMCacheMPKvConnectorScheduler` | `LMCacheMPKvConnectorWorker` |
+
+The `lmcache` preset still uses the old module path in TensorRT-LLM's registry.
+That module re-exports the scheduler and worker from the canonical
+`lmcache.inprocess.integration.tensorrt_llm.tensorrt_adapter` module until
+upstream migrates its registry.
 
 ## Lifecycle
 
