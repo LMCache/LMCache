@@ -129,7 +129,8 @@ blend pipeline that enables non-prefix KV cache reuse (e.g. across
 document paragraphs) on the sparse-prefetch path. KV-cache registration
 rides the standard ``REGISTER_KV_CACHE``; the module adds only the CB RPCs
 (``CB_REGISTER_ROPE``, ``CB_UNREGISTER_ROPE``,
-``CB_RETRIEVE_PRE_COMPUTED``, ``CB_UNIFIED_LOOKUP``) and wraps
+``CB_RETRIEVE_PRE_COMPUTED``, ``CB_UNIFIED_LOOKUP``,
+``CB_REORDER_PLAN``, ``CB_PROTOCOL_HANDSHAKE``) and wraps
 ``STORE`` to register chunk fingerprints, reusing the existing
 ``LMCacheDrivenTransferModule`` and ``LookupModule``. Selected by passing
 ``--engine-type blend`` to ``lmcache server``; requires
@@ -267,6 +268,22 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
        match, reconciles, issues one sparse-coalesced prefetch, and
        classifies per-TP-rank. Returns ``CBUnifiedLookupResult`` (or
        ``None`` while the prefetch is still in flight).
+   * - ``CB_REORDER_PLAN``
+     - BLOCKING
+     - (Blend) Opt-in reorder planner: orders the prompt so it starts
+       with an exact copy of a cached prompt, keeping the first
+       ``keep_prefix`` tokens in place. Best-effort within a
+       ``budget_ms`` deadline; returns ``[]`` to keep the prompt (off,
+       no gain, budget exceeded, or any error). Loaded only when
+       ``--enable-blend-reorder`` is set and ignored when a coordinator
+       is configured, since a per-server plan sees only this server's
+       prompts.
+   * - ``CB_PROTOCOL_HANDSHAKE``
+     - SERIALIZED
+     - (Blend) Version-negotiation ping: given the client's protocol
+       version, returns the server's version and whether the two are
+       compatible. Client-gated and off by default on the worker side;
+       the server always answers.
    * - ``P2P_LOOKUP_AND_LOCK``
      - BLOCKING
      - (P2P) Look up the given keys and read-lock the locally cached
