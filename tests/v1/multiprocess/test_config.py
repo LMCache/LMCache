@@ -203,10 +203,43 @@ def test_transport_flag_is_parsed_without_starting_grpc():
     assert _parse_mp(["--transport", "grpc"]).transport == "grpc"
 
 
+def test_null_block_id_defaults_to_zero():
+    assert _parse_mp([]).null_block_id == 0
+    assert MPServerConfig().null_block_id == 0
+
+
+def test_null_block_id_flag_is_parsed():
+    assert _parse_mp(["--null-block-id", "-1"]).null_block_id == -1
+
+
 def test_grpc_server_workers_are_parsed():
     assert _parse_mp([]).grpc_server_workers == 32
     assert MPServerConfig().grpc_server_workers == 32
     assert _parse_mp(["--grpc-server-workers", "7"]).grpc_server_workers == 7
+
+
+def test_server_module_flags_are_parsed():
+    config = _parse_mp(
+        [
+            "--server-module",
+            ('{"module_path":"my_pkg.server_module","config":{"mode":"test"}}'),
+        ]
+    )
+
+    assert len(config.server_modules) == 1
+    spec = config.server_modules[0]
+    assert spec.module_path == "my_pkg.server_module"
+    assert spec.config == {"mode": "test"}
+
+
+def test_server_module_flag_rejects_invalid_json():
+    with pytest.raises(ValueError, match="--server-module must be valid JSON"):
+        _parse_mp(["--server-module", "{"])
+
+
+def test_mp_config_rejects_non_positive_chunk_size() -> None:
+    with pytest.raises(ValueError, match="chunk size must be positive"):
+        MPServerConfig(chunk_size=0)
 
 
 @pytest.mark.parametrize("workers", ["0", "-1"])
@@ -401,7 +434,7 @@ def test_deprecated_flags_log_warning():
     # lmcache's ``init_logger`` sets ``propagate = False``, so pytest's
     # ``caplog`` (root-logger based) cannot see the records. Attach a local
     # handler to the named logger instead (established pattern, see
-    # tests/v1/test_v1_adapter_state_desync.py).
+    # tests/inprocess/integration/vllm/test_v1_adapter_state_desync.py).
     records: list[logging.LogRecord] = []
 
     class _ListHandler(logging.Handler):
@@ -424,3 +457,18 @@ def test_deprecated_flags_log_warning():
 def test_deprecated_flush_interval_flag_rejects_nonpositive():
     with pytest.raises(ValueError):
         _parse(["--coordinator-l2-event-flush-interval", "0"])
+
+
+def test_session_ttl_seconds_default_and_flag():
+    """Session TTL defaults to 600 s and is settable for deep queueing."""
+    assert _parse_mp([]).session_ttl_seconds == 600.0
+    assert _parse_mp(["--session-ttl-seconds", "7200"]).session_ttl_seconds == 7200.0
+
+
+def test_kv_load_policy_default_and_flag():
+    """The KV load policy defaults to DEFAULT and accepts a module path."""
+    assert _parse_mp([]).kv_load_policy == "DEFAULT"
+    assert (
+        _parse_mp(["--kv-load-policy", "my_pkg.policies:Custom"]).kv_load_policy
+        == "my_pkg.policies:Custom"
+    )

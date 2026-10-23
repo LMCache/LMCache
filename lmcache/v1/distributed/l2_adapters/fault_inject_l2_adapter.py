@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import MemoryTags
 from lmcache.v1.distributed.l2_adapters.base import (
     AdapterUsage,
     L2AdapterInterface,
@@ -176,6 +177,10 @@ class FaultInjectL2AdapterConfig(L2AdapterConfigBase):
             "- gap_tail_ratios (list[float]): distance-from-tail / load-length "
             "in [0,1] (0=last, 0.5=middle, 1=first); workload-agnostic"
         )
+
+    def get_wanted_l1_memory_tags(self) -> tuple[MemoryTags, ...]:
+        """Return the wrapped adapter's wanted L1 memory tags."""
+        return self.inner_config.get_wanted_l1_memory_tags()
 
 
 # -----------------------------------------------------------------------------
@@ -416,6 +421,10 @@ class FaultInjectL2Adapter(L2AdapterInterface):
             "gap_tail_ratios": list(self._gap_tail_ratios),
         }
         return status
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the inner adapter's memory tags."""
+        return self._inner.get_memory_tags()
 
     def close(self) -> None:
         """Clear the per-task key map, then close the inner adapter."""

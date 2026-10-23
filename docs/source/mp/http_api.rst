@@ -48,11 +48,23 @@ Server Configuration
      - Default
      - Description
    * - ``--http-host``
-     - ``0.0.0.0``
+     - ``127.0.0.1``
      - Host to bind the HTTP server.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
+   * - ``--http-api-key-file``
+     - unset
+     - Read a bearer API key from a file. Repeat the option to accept multiple
+       keys during rotation. Authentication is disabled when no CLI or
+       environment key source is configured.
+
+The environment variables ``LMCACHE_HTTP_API_KEY_FILE`` and
+``LMCACHE_HTTP_API_KEY`` provide deployment-friendly alternatives for one key
+file or one key value. Environment sources and repeated
+``--http-api-key-file`` options are cumulative, so old and new keys can overlap
+during rotation. The ``/env`` endpoint redacts ``LMCACHE_HTTP_API_KEY`` while
+leaving the non-secret key-file path visible.
 
 Example:
 
@@ -60,10 +72,24 @@ Example:
 
     lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
-        --http-host 0.0.0.0 --http-port 8080
+        --http-host 0.0.0.0 --http-port 8080 \
+        --http-api-key-file /run/secrets/lmcache-http-api-key
 
 All examples below assume the server is reachable at
-``http://localhost:8080``.
+``http://localhost:8080``. When authentication is enabled, include the key as
+``Authorization: Bearer <api-key>``. The ``/`` and ``/healthcheck`` routes
+remain public for liveness and readiness probes; every other route requires a
+valid key. For example:
+
+.. code-block:: bash
+
+    curl -H "Authorization: Bearer $(cat /run/secrets/lmcache-http-api-key)" \
+        http://localhost:8080/status
+
+Use a high-entropy value such as ``openssl rand -hex 32`` and restrict the key
+file so only the LMCache server process can read it. API-key authentication
+does not encrypt traffic; use TLS at a trusted reverse proxy when requests
+cross an untrusted network.
 
 Endpoint Overview
 -----------------
@@ -199,13 +225,32 @@ compatibility with the vLLM-embedded API server.
      - Path
      - Purpose
    * - GET
-     - ``/reconfigure/{backend}/status``
+     - ``/reconfigure/{backend}/l2/status``
      - Report runtime-manageable L2 adapters for one backend type. (To discover
        reconfigurable backends, use ``GET /config/adapters`` and read the
        ``reconfigurable`` flag.)
    * - POST
-     - ``/reconfigure/{backend}/{operation}``
+     - ``/reconfigure/{backend}/l2/{operation}``
      - Apply one runtime reconfiguration operation to a backend adapter.
+
+**Runtime L1 reconfiguration (Device-DAX)**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 10 35 55
+
+   * - Method
+     - Path
+     - Purpose
+   * - GET
+     - ``/reconfigure/dax/l1/status``
+     - Report every Device-DAX L1 arena with usage and lifecycle state.
+   * - POST
+     - ``/reconfigure/dax/l1/add``
+     - Map an additional Device-DAX device.
+   * - POST
+     - ``/reconfigure/dax/l1/remove``
+     - Remove one mapped Device-DAX L1 device (currently drain mode only).
 
 **Observability**
 
@@ -253,6 +298,7 @@ compatibility with the vLLM-embedded API server.
    * - POST
      - ``/run_script``
      - Execute an uploaded Python script in a restricted sandbox.
+       Disabled by default; requires ``--run-script-api-enabled``.
 
 Liveness and Health
 -------------------
@@ -491,7 +537,7 @@ This is the single live adapter listing; it supersedes the old
 ``primary`` is ``true`` only on the first entry. ``reconfigurable`` is
 ``true`` for adapters that accept ``/reconfigure`` operations — pass that
 adapter's ``type_name`` as the ``{backend}`` path parameter to
-``GET /reconfigure/{backend}/status`` and the reconfigure operations. An
+``GET /reconfigure/{backend}/l2/status`` and the reconfigure operations. An
 engine that has no L2 backends returns ``{"adapters": []}`` (still ``200`` —
 the engine is initialized, it just has no L2 storage).
 
@@ -1269,6 +1315,11 @@ writable by the server. The endpoint routes ``backend``, ``operation``, and the
 JSON request body into the generic L2 adapter reconfiguration API, while
 backend-specific validation and migration semantics stay inside the adapter.
 
+**Changed:** L2 reconfiguration uses ``/reconfigure/{backend}/l2/status``
+and ``/reconfigure/{backend}/l2/{operation}``. The previous
+``/reconfigure/{backend}/status`` and ``/reconfigure/{backend}/{operation}``
+URLs are removed and return ``404``.
+
 ``backend`` and ``operation`` path segments are normalized (stripped and
 lower-cased). Within a request body, ``adapter_index`` (default ``0``) is
 **backend-local** — it indexes only the adapters of that backend, not the
@@ -1281,8 +1332,8 @@ string is still the configured L2 adapter type, not the serde wrapper type.
    ``GET /config/adapters``: each adapter whose ``reconfigurable`` flag is
    ``true`` can be addressed by its ``type_name``.
 
-``GET /reconfigure/{backend}/status``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``GET /reconfigure/{backend}/l2/status``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Report the runtime-manageable adapters for one backend type. Each adapter
 entry's ``adapter_index`` is rewritten to its **backend-local** 0-based index
@@ -1317,10 +1368,10 @@ An unknown or empty backend returns ``enabled=false``, ``num_adapters=0``,
 
 .. code-block:: bash
 
-    curl -s http://localhost:8080/reconfigure/dax/status | jq
+    curl -s http://localhost:8080/reconfigure/dax/l2/status | jq
 
-``POST /reconfigure/{backend}/{operation}``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``POST /reconfigure/{backend}/l2/{operation}``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Apply one reconfiguration operation to a backend adapter. The request body is
 a JSON object whose accepted fields depend on the backend and operation. The
@@ -1346,15 +1397,20 @@ paths contain slashes. The accepted operations and fields are:
      - Body fields
    * - ``add``
      - ``device_path`` (str, required), ``size`` (int byte count or string
-       such as ``"100GiB"``, required), ``adapter_index`` (default ``0``).
+       such as ``"100GiB"``, required), ``offset`` (int or string, default
+       ``0``), ``adapter_index`` (default ``0``).
    * - ``remove``
-     - ``device_path`` (str, required), ``mode`` (``migrate`` | ``evict`` |
-       ``drain``, default ``migrate``), ``force`` (bool, default ``false``),
-       ``adapter_index`` (default ``0``).
-   * - ``resize``
-     - ``device_path`` (str, required), ``size`` (int or string, required),
-       ``mode`` (``migrate`` | ``evict``, default ``migrate``), ``force``
+     - ``device_path`` (str, required), ``offset`` (default ``0``), ``mode``
+       (``migrate`` | ``evict`` | ``drain``, default ``migrate``), ``force``
        (bool, default ``false``), ``adapter_index`` (default ``0``).
+   * - ``resize``
+     - ``device_path`` (str, required), ``offset`` (default ``0``), ``size``
+       (int or string, required), ``mode`` (``migrate`` | ``evict``, default
+       ``migrate``), ``force`` (bool, default ``false``), ``adapter_index``
+       (default ``0``).
+
+``device_path`` and ``offset`` identify a mapped range as passed to ``add``.
+A range overlapping one this server already maps, in L1 or L2, returns ``409``.
 
 ``size`` accepts an integer byte count or a string with a base-1024 unit
 suffix (``b``, ``kib``, ``mib``, ``gib``, ``tib`` and the ``k``/``m``/``g``/``t``
@@ -1371,7 +1427,7 @@ dict). A successful DAX ``add`` looks like:
       "status": "ok",
       "operation": "add",
       "adapter_index": 0,
-      "device": {"device_path": "/dev/dax0.0", "state": "active", "size_bytes": 107374182400}
+      "device": {"device_path": "/dev/dax0.0", "offset_bytes": 0, "state": "active", "size_bytes": 107374182400}
     }
 
 **HTTP status codes:**
@@ -1388,12 +1444,108 @@ dict). A successful DAX ``add`` looks like:
 
 .. code-block:: bash
 
-    curl -s -X POST http://localhost:8080/reconfigure/dax/add \
+    curl -s -X POST http://localhost:8080/reconfigure/dax/l2/add \
         -H 'Content-Type: application/json' \
         -d '{"device_path": "/dev/dax0.0", "size": "100GiB"}'
 
 See :doc:`/kv_cache/storage_backends/dax` for detailed request examples,
 mode semantics, and validation guidance.
+
+Runtime L1 Reconfiguration (Device-DAX)
+---------------------------------------
+
+These routes manage the Device-DAX L1 arena pool configured with
+``--l1-devdax-path``. Devices must already be provisioned, and requests do not
+use ``adapter_index``. Every arena maps ``[offset, offset + size)`` of its
+device; the same device may be added more than once with disjoint ranges, and
+independent servers can share one device the same way.
+
+``GET /reconfigure/dax/l1/status``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "arenas": [
+        {
+          "device_path": "/dev/dax1.1",
+          "size_in_bytes": 17179869184,
+          "used_bytes": 4294967296,
+          "free_bytes": 12884901888,
+          "active_allocations": 2048,
+          "state": "active",
+          "is_primary": false,
+          "offset_in_bytes": 0
+        }
+      ]
+    }
+
+``POST /reconfigure/dax/l1/add``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Request body:** ``device_path`` (string), ``size`` (integer byte count or a
+string such as ``"16GiB"``), and optional ``offset`` (non-negative byte count
+or size string, default ``0``): where in the device the mapping starts. A
+range that overlaps one this pool already maps is rejected with ``409``.
+
+**Response** (``200 OK``): ``{"added": <arena>}``.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X POST http://localhost:8080/reconfigure/dax/l1/add \
+        -H 'Content-Type: application/json' \
+        -d '{"device_path": "/dev/dax1.2", "size": "16GiB", "offset": "512GiB"}'
+
+``POST /reconfigure/dax/l1/remove``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Only drain mode is supported. A draining arena accepts no new allocations and
+is unmapped after its live allocations are freed. The primary arena cannot be
+removed.
+``device_path`` and ``offset`` together identify the arena; pass the exact
+values used when adding it. ``offset`` defaults to ``0``, so omitting it
+addresses the arena at the start of the device.
+
+**Request body:** ``device_path`` (string), optional ``mode`` (``drain``;
+default ``drain``), and optional ``offset`` (byte count or size string,
+default ``0``).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "removed": {
+        "device_path": "/dev/dax1.2",
+        "arenas": [
+          {
+            "device_path": "/dev/dax1.2",
+            "state": "draining",
+            "active_allocations": 3,
+            "size_in_bytes": 17179869184,
+            "used_bytes": 6291456,
+            "free_bytes": 17173577728,
+            "is_primary": false
+          }
+        ]
+      }
+    }
+
+**HTTP status codes:**
+
+- ``200``: success.
+- ``400``: invalid ``size``.
+- ``404``: device is not mapped.
+- ``409``: incompatible L1 or device state, or mapping validation failure.
+- ``422``: invalid request body.
+- ``500``: synchronization or cleanup failure after draining starts.
+- ``503``: engine not initialized.
+
+See :doc:`coordinator` for capacity reporting.
 
 Observability
 -------------
@@ -1715,6 +1867,11 @@ piped directly to a terminal.
 ``POST /run_script``
 ~~~~~~~~~~~~~~~~~~~~
 
+.. note::
+
+   This endpoint is **disabled by default** (requests return ``404``).
+   Start the server with ``--run-script-api-enabled`` to enable it.
+
 Execute an uploaded Python script inside the server process. The script is
 uploaded as multipart form data under the field name ``script`` and is
 ``exec``'d with a restricted ``__builtins__`` (only ``print``, ``str``,
@@ -1742,6 +1899,7 @@ the script assigns one, otherwise ``Script executed successfully``.
 
 - ``200``: script executed.
 - ``400``: no ``script`` file provided.
+- ``404``: the endpoint is disabled (``--run-script-api-enabled`` not set).
 - ``500``: an exception was raised during import setup or execution
   (body: ``"Error executing script: <reason>"``).
 

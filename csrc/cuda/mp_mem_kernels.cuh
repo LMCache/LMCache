@@ -55,6 +55,70 @@ void execute_object_group_transfer(
     const std::vector<BatchStep>& batch_steps,
     bool phase_timing_enabled = false, const std::string& session_id = "");
 
+// ---------------------------------------------------------------------------
+// Direct copy-engine transfer (cudaMemcpyBatchAsync).
+//
+// Alternative to the staged plan above for layouts whose paged block is one
+// contiguous run identical to LMCache's [bs, nh*hs] rows: each (kv, block)
+// of an object is copied straight between the pinned host object and the
+// paged buffer -- as one 2-D copy over all layers when the layers sit at a
+// constant pitch, else one entry per layer -- so no staging buffer and no SM
+// kernel are involved. At most one cudaMemcpyBatchAsync and one
+// cudaMemcpy3DBatchAsync are issued per object, in stream order. Requires
+// CUDA runtime and driver >= 12.8, or HIP >= 7.15 (1-D entries only).
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether cudaMemcpyBatchAsync can be used in this process.
+ *
+ * True when the extension was compiled against CUDA >= 12.8 and both the
+ * runtime and the driver report >= 12.8. Cached after the first call.
+ */
+bool batch_memcpy_supported();
+
+/**
+ * Whether the direct copy path can address blocks of `engine_kv_format`.
+ *
+ * True for token-major formats whose paged block is one contiguous
+ * [bs, nh, hs] run (the affine formats of resolve_block_addressing). HND,
+ * blocked-scale and per-layer (K, V)-tuple layouts return false.
+ */
+bool direct_copy_format_supported(EngineKVFormat engine_kv_format);
+
+/**
+ * Execute one object group's transfer through the copy engine.
+ *
+ * For each object and group, every (kv plane, block >= skip) is copied for
+ * all layers at once. When the group's layer base pointers are evenly spaced
+ * (e.g. vLLM's block-outermost layouts, which pack a block's layers side by
+ * side), that is one 2-D copy per (kv plane, block): width = tight block
+ * bytes, height = layers, device pitch = layer spacing, host pitch = one
+ * layer's region of the object. Otherwise each (kv plane, layer, block) is a
+ * 1-D (host, device, tight block bytes) entry. Copies are split at
+ * `host_buffer_alignment` boundaries of the allocator's virtual offset (a
+ * copy may not span two cudaHostRegister regions). Per object, 1-D entries
+ * go to one cudaMemcpyBatchAsync and 2-D copies to one
+ * cudaMemcpy3DBatchAsync, both on the current stream of `device`.
+ *
+ * @param direction             H2D (retrieve) or D2H (store)
+ * @param device                CUDA device of the paged buffers
+ * @param host_buffer_alignment Pin-chunk granularity of the host allocator
+ *                              (power of two)
+ * @param group_specs           Per-kernel-group invariants
+ * @param objects               Memory objects to copy, in stream order
+ *
+ * @return Number of copy operations submitted (1-D entries plus 2-D copies,
+ *         after pin-boundary splits).
+ * @throws c10::Error if batch_memcpy_supported() is false, a format is not
+ *         eligible, a block id or host range is out of bounds, or the CUDA
+ *         call fails.
+ */
+size_t execute_direct_copy_transfer(
+    TransferDirection direction, const torch::Device& device,
+    size_t host_buffer_alignment,
+    const std::vector<DirectCopyGroupSpec>& group_specs,
+    const std::vector<DirectCopyObject>& objects);
+
 /**
  * Block-level multi-layer KV transfer between vLLM paged buffers and
  * LMCache contiguous memory objects.

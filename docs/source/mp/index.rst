@@ -5,6 +5,8 @@ Overview
    :hidden:
 
    request_transport
+   multi_l1
+   chunk_size_negotiation
 
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
 vLLM instances reach through a configurable ZMQ or gRPC request transport.
@@ -66,7 +68,7 @@ High-Level Architecture
 
 .. code-block:: text
 
-    vLLM Instance(s)
+    Engine Worker(s)
          |
          | RequestClient (URL scheme selects ZMQ or gRPC)
          v
@@ -76,9 +78,9 @@ High-Level Architecture
          v                                      v
     MessageQueueServer                  GrpcMultiprocessServer
     (transport/zmq_impl/mq.py)          (transport/grpc_impl/server.py)
-         |                                      |
-         +------------------+-------------------+
-                            | dispatch by RequestType
+          |                                      |
+          +------------------+-------------------+
+                            | dispatch by operation name
                             v
     EngineModule handlers owned by MPCacheServer (server.py)
          |
@@ -109,17 +111,18 @@ it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
 instances assembled by ``_build_modules()`` (in ``server.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
-**``server.py``** -- The transport-neutral server compositor. Creates an
-``MPCacheServer``, assembles the engine modules
-(``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
-and/or ``EngineDrivenTransferModule`` depending on
-``--supported-transfer-mode`` — ``lmcache_driven`` (default) or
-``engine_driven`` loads just one,
-``auto`` loads both — plus the blend module when
-``--engine-type blend`` is set). It calls ``create_request_server()`` to build
-the ZMQ or gRPC request server selected by ``--transport``, registers handlers
-for every ``RequestType`` exposed by the loaded modules, and blocks in a
-keep-alive loop.
+**``server.py``** -- The transport-neutral server compositor. It discovers
+``DiscoverableModule`` classes under the ``modules`` package, orders their
+class-referenced ``module_dependencies``, and calls ``create()`` with a shared
+``ModuleBuildContext``. Out-of-tree ``--server-module`` paths explicitly add
+classes to the same graph and lifecycle; their configuration comes from
+``ModuleBuildContext.config_for()``. This includes ``KVEventModule`` and the
+transfer, lookup, management, P2P, and blend modules; opt-in modules under
+``plugin_modules/`` (for example ``qstore``) join the same graph only when
+named by ``--server-module``. The
+compositor then creates the ZMQ or gRPC request server selected by
+``--transport``, registers module handlers and optional transport services,
+and blocks in a keep-alive loop.
 
 **``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
 blend pipeline that enables non-prefix KV cache reuse (e.g. across
@@ -142,15 +145,17 @@ for inspecting detailed internal state. The selected request server runs as
 part of the same process, and any configured runtime plugins are spawned by
 ``MPRuntimePluginLauncher`` during FastAPI startup.
 
-Request Protocol and Dispatch
------------------------------
+Request Operations
+------------------
+
+Workers call the same typed operations through either ZMQ (DEALER/ROUTER) or
+gRPC. The handler scheduling contract is transport-neutral.
 
 ZMQ encodes requests as msgspec multipart messages over DEALER/ROUTER sockets;
-gRPC encodes the same semantic operations with protobuf. Both transports map
-requests to the shared ``RequestType`` and annotated engine-module handlers.
-See :doc:`request_transport` for endpoint selection and wire-format details.
+gRPC encodes the same operations with protobuf. Both dispatch by operation
+name; see :doc:`request_transport` for endpoint selection and wire details.
 
-**RequestType enum** (defined in ``protocols/base.py``):
+**RPC operations** (declared by typed methods on ``RequestClient``):
 
 .. list-table::
    :header-rows: 1
@@ -160,21 +165,21 @@ See :doc:`request_transport` for endpoint selection and wire-format details.
      - Handler Type
      - Description
    * - ``REGISTER_KV_CACHE``
-     - SYNC
+     - SERIALIZED
      - Register GPU KV cache tensors for a vLLM instance.
    * - ``UNREGISTER_KV_CACHE``
-     - SYNC
+     - SERIALIZED
      - Unregister KV cache tensors.
    * - ``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
-     - SYNC
+     - SERIALIZED
      - Register an engine-driven KV cache context (CPU/accelerator
        workers using the PREPARE/COMMIT transfer path). Loaded only when
        ``--supported-transfer-mode`` is ``engine_driven`` or ``auto``.
        Returns a ``RegisterEngineDrivenContextResponse`` carrying the
        SHM segment name and pool size when the SHM path is in use
-       (empty for the pickle path).
+       (empty for the inline path).
    * - ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
-     - SYNC
+     - SERIALIZED
      - Unregister an engine-driven KV cache context.
    * - ``STORE``
      - BLOCKING
@@ -194,12 +199,12 @@ See :doc:`request_transport` for endpoint selection and wire-format details.
    * - ``COMMIT_STORE``
      - BLOCKING
      - (Engine-driven path) Worker commits the chunk's serialized bytes
-       (pickle path) or releases the prepared SHM slot (SHM path) so the
+       (typed inline path) or releases the prepared SHM slot (SHM path) so the
        server can persist into L1 storage.
    * - ``PREPARE_RETRIEVE``
      - BLOCKING
      - (Engine-driven path) Worker asks the server to prepare the
-       retrieval payload for a key. The pickle path returns the bytes
+       retrieval payload for a key. The typed inline path returns the bytes
        inline; the SHM path returns slot info so the worker can read
        from shared memory.
    * - ``COMMIT_RETRIEVE``
@@ -220,11 +225,6 @@ See :doc:`request_transport` for endpoint selection and wire-format details.
      - (SGLang only) Block until a prefetch job completes, then return its
        loaded chunk count, or ``None`` on timeout. The blocking alternative
        to polling ``QUERY_PREFETCH_STATUS``.
-   * - ``QUERY_PREFETCH_LOOKUP_HITS``
-     - BLOCKING
-     - Query the lookup-phase hit chunk count by request_id, before the
-       prefetch finishes. Returns ``None`` while the lookup is still
-       running.
    * - ``FREE_LOOKUP_LOCKS``
      - BLOCKING
      - Release read locks from a cancelled lookup without doing a full
@@ -237,7 +237,7 @@ See :doc:`request_transport` for endpoint selection and wire-format details.
      - Clear cached data. The optional ``force`` flag defaults to ``False``;
        when set, active locks may be ignored.
    * - ``GET_CHUNK_SIZE``
-     - SYNC
+     - SERIALIZED
      - Return the server's chunk size.
    * - ``PING``
      - BLOCKING
@@ -247,14 +247,14 @@ See :doc:`request_transport` for endpoint selection and wire-format details.
      - Fire-and-forget channel for the vLLM scheduler to report GPU block
        allocation events to the observability subsystem.
    * - ``NOOP``
-     - SYNC
+     - SERIALIZED
      - Debug heartbeat -- returns a confirmation string.
    * - ``CB_REGISTER_ROPE``
-     - SYNC
+     - SERIALIZED
      - (Blend) Share the RoPE cos/sin cache onto a context already
        registered via ``REGISTER_KV_CACHE``.
    * - ``CB_UNREGISTER_ROPE``
-     - SYNC
+     - SERIALIZED
      - (Blend) Drop the RoPE state (paged KV cache lives on; use
        ``UNREGISTER_KV_CACHE`` to release that).
    * - ``CB_RETRIEVE_PRE_COMPUTED``
@@ -289,8 +289,8 @@ See :doc:`request_transport` for endpoint selection and wire-format details.
 
 **Handler types:**
 
-- **SYNC** -- Serialized by the request transport (the ZMQ main loop or the
-  gRPC sync-handler lock) for fast, non-blocking work.
+- **SERIALIZED** -- Run one at a time by the request transport (the ZMQ main
+  loop or the gRPC serialized-handler lock) for fast, non-blocking work.
 - **BLOCKING** -- Dispatched to a normal or client-affinity thread pool (may
   involve GPU copies or I/O).
 
@@ -346,6 +346,9 @@ methods:
 - ``read_prefetched_results()`` / ``finish_read_prefetched()`` -- Read
   prefetched data from L1 with automatic lock management.
 
+See :doc:`multi_l1` for the internal write-overflow and ownership foundations.
+Normal serving still uses one L1.
+
 L1Manager
 ~~~~~~~~~
 
@@ -372,16 +375,17 @@ tiers selected at startup (all satisfy ``L1ManagerProtocol``):
 - ``DevDaxL1MemoryManager`` -- a Device-DAX-backed L1 slab when
   ``--l1-devdax-path`` is set. A pure Device-DAX configuration maps the DAX
   device as the full L1 arena; a hybrid configuration uses DRAM first and
-  spills overflow allocations into Device-DAX. See the *L1 Memory Manager*
-  section of :doc:`configuration` for the accepted knobs.
+  spills overflow allocations into Device-DAX. See :ref:`mp-devdax-l1` for
+  the deployment guide and accepted knobs.
 - ``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is set.
   The bytes live on disk; reads/writes DMA directly between the GPU staging
   buffer and the slab, driven by the process-global ``GDSContext``
   (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The DMA
-  backend is selected by platform via ``gpu_connector/_gds_async.py`` --
-  cuFile (``libcufile.so``) on NVIDIA and hipFile (``libhipfile.so``) on AMD
-  ROCm; see the *GDS L1 Tier* section of :doc:`configuration` for the
-  vendor-specific requirements. The CPU tier is disabled in this mode.
+  backend is selected by platform via ``gpu_connector/_gds_backends.py`` --
+  cuFile (``libcufile.so``) on NVIDIA, hipFile (``libhipfile.so``) on AMD
+  ROCm, and muFile (``libmufile.so``) on MUSA; see the *GDS L1 Tier* section
+  of :doc:`configuration` for the vendor-specific requirements. The CPU tier
+  is disabled in this mode.
 
 L2 Adapters
 ~~~~~~~~~~~
@@ -411,7 +415,7 @@ the ``StorePolicy``.
 
 **EvictionController** (``storage_controllers/eviction_controller.py``):
 Periodically checks L1 memory usage against the watermark threshold.  When
-triggered, evicts objects using the configured policy (``LRU``,
+triggered, evicts objects using the configured policy (``LRU``, ``ARC``,
 ``IsolatedLRU``, or ``noop``) until usage drops below the target.
 ``IsolatedLRU`` evicts per ``cache_salt`` against limits registered through
 the ``/quota`` HTTP endpoints; see :ref:`mp-http-quota-api`.
@@ -492,7 +496,8 @@ and are grouped by concern: ``metrics/`` (OTel counters and lifecycle
 histograms), ``logging/`` (Python logging handlers, lookup-hash JSONL),
 and ``tracing/`` (OTel spans built from START/END event pairs).
 ``init_observability()`` registers the set selected by CLI flags
-(``--disable-metrics``, ``--disable-logging``, ``--enable-tracing``).
+(``--disable-metrics``, ``--disable-grpc-metrics``,
+``--disable-logging``, ``--enable-tracing``).
 
 **OTel providers** are set up via ``otel_init.py`` before subscribers
 are constructed, so module-level ``get_meter()`` / ``get_tracer()``
@@ -544,22 +549,15 @@ Adding an observability subscriber
    concern (metrics / logging / tracing), gated on the corresponding
    CLI flag if needed.
 
-Adding a new request type
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Adding a new RPC
+~~~~~~~~~~~~~~~~
 
-1. Add a new member to ``RequestType`` in ``protocols/base.py``.
-2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
-   (``engine``, ``controller``, ``observability``, ``debug``, ``blend``,
-   or ``p2p``) and add the request name to that module's ``REQUEST_NAMES``.
-3. Implement the handler method on the appropriate ``EngineModule``
-   (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendModule``)
-   and decorate it with ``@request_handler``.
-4. Add the named method to the shared ``RequestClient`` contract and the ZMQ
-   client facade. Add the corresponding protobuf method for gRPC; register a
-   custom codec only when the structural codec cannot represent its types.
-5. ``create_request_server()`` selects the transport. Both implementations
-   discover the annotated handlers from the loaded modules, so business code
-   does not register handlers with either concrete server.
+1. Add a typed ``@rpc_method`` to ``RequestClient``.
+2. Add the gRPC protobuf request, response, and service method.
+3. Add a same-named ``@request_handler`` on the appropriate ``EngineModule``.
+
+Existing ZMQ operations retain their frozen numeric wire IDs. New operations
+use their string name and do not extend the legacy compatibility table.
 
 Key Source Files
 ----------------
@@ -578,6 +576,10 @@ Key Source Files
      - MPCacheServerContext (shared state passed to every EngineModule)
    * - ``lmcache/v1/multiprocess/engine_module.py``
      - Transport-neutral ``EngineModule`` protocol
+   * - ``lmcache/v1/multiprocess/rpc.py``
+     - RPC discovery and typed operation specifications
+   * - ``lmcache/v1/multiprocess/transport/base.py``
+     - Typed ``RequestClient`` and ``RequestServer`` contracts
    * - ``lmcache/v1/multiprocess/transport/server_factory.py``
      - Transport-neutral request-server construction boundary
    * - ``lmcache/v1/multiprocess/transport/zmq_impl/server.py``
@@ -588,10 +590,13 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/``
      - Build-time protobuf generator and generated Python package
    * - ``lmcache/v1/multiprocess/transport/grpc_impl/server.py``
-     - gRPC service binding, handler scheduling, and request-server construction
+     - gRPC service binding and handler scheduling
+   * - ``lmcache/v1/multiprocess/transport/grpc_impl/server_builder.py``
+     - gRPC request-server construction, choosing the sync or aio server
    * - ``lmcache/v1/multiprocess/modules/``
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
-       ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
+       ``management.py`` (``ManagementModule``), ``kv_events.py``
+       (``KVEventModule``, CPU event subscriptions), ``lmcache_driven_transfer.py``
        (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
        (``EngineDrivenTransferModule``), and ``blend.py``
        (``BlendModule``, the paged-aware blend pipeline selected by
@@ -606,8 +611,6 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/mp_runtime_plugin_launcher.py``
      - ``MPRuntimePluginLauncher`` that spawns runtime plugins with the
        full server config serialized into environment variables
-   * - ``lmcache/v1/multiprocess/protocols/base.py``
-     - RequestType, HandlerType, ProtocolDefinition
    * - ``lmcache/v1/distributed/storage_manager.py``
      - StorageManager (top-level manager)
    * - ``lmcache/v1/distributed/config.py``

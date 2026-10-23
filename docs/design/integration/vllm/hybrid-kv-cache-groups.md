@@ -138,8 +138,9 @@ into, corrupt the per-group block-id counts.)
 ### Scratch groups
 
 A scratch group is an engine group whose spec vLLM marks
-`prefix_cacheable = False`: vLLM never hashes its blocks and its own prefix
-cache never restores them, so they carry no token range LMCache could store.
+`prefix_cacheable = False` (or `participates_in_prefix_caching = False` on
+older vLLM forks): vLLM never hashes its blocks and its own prefix cache never
+restores them, so they carry no token range LMCache could store.
 The instances LMCache has validated are per-request rings. Every
 sparse-attention layer keeps one ring tensor, vLLM puts them in one engine
 group, and the group holds one block per request for the request's lifetime,
@@ -150,8 +151,10 @@ the compression group that is still open:
 - GLM-5.3-Flash's kpool tail (`KpoolTailSpec`, `block_size = index_kpool`).
 
 LMCache treats a scratch group as covering no tokens. `is_scratch_spec`
-(`kv_cache_groups.py`) reads `prefix_cacheable` (absent on older vLLM means
-prefix-cacheable) and the group's `tokens_per_block` is reported as `0`.
+(`kv_cache_groups.py`) reads `prefix_cacheable`, falling back to
+`participates_in_prefix_caching` only when the newer marker is absent. Specs
+with neither marker remain prefix-cacheable. A scratch group's
+`tokens_per_block` is reported as `0`.
 Everything downstream follows from that: the scheduler-side geometry
 (storable prefix, block-id slicing, hit alignment, chunk-size validation)
 ignores `0` spans, and registration skips format discovery for the group's
@@ -171,6 +174,8 @@ every chunk for every group (e.g. a caller bug), or a copy fails, the whole
 store is skipped and nothing is committed — a later retrieve simply misses and
 the engine recomputes. The non-GPU transfer path rejects multi-group transfers
 outright.
+
+**Failed retrieves:** on vLLM versions exposing `KVConnectorTransferResults`, multi-group receive failures are reported by request ID in both `finished_recving` and `failed_recving`, without flat block errors. This lets vLLM wait for all workers and apply its configured failure policy instead of rejecting an incompatible error report. Single-group models retain block-level reporting so a valid partial prefix can remain reusable; older vLLM versions retain the legacy completion and block-error hooks.
 
 ## Example
 
@@ -205,6 +210,25 @@ logical-block granularity. See
 limits (notably: edited groups are byte-opaque — no content-aware processing,
 no cross-backend cache sharing).
 
+### MTP and the last prompt block
+
+With MTP, vLLM's scheduler runs the prompt's last full block and its tail in
+one prefill step, so no Mamba state is ever written for that block's
+boundary. In vLLM's own block list that position becomes the null block
+(id 0), and the speculative block that used to sit there is moved to the
+end. The connector only receives the blocks added at the end, so the tracker
+would still show the moved block at its old position and store it as the
+chunk's Mamba state, which no kernel ever wrote.
+
+vLLM only moves blocks out of the last `num_speculative_tokens` positions, and
+a block is never listed twice for one request. So when a reported id is
+already in those last positions of the tracker's list, `append_block_ids` sets
+the old position to 0. Without align-mode Mamba and speculative decoding the
+window is 0 and ids are appended as-is.
+The server then sees an all-zero chunk for the Mamba group and skips it, and
+the next hit ends one chunk earlier. Needs `--separate-object-groups` and
+chunk size equal to the Mamba block size.
+
 ## Code map
 
 | Area | File |
@@ -215,4 +239,4 @@ no cross-backend cache sharing).
 | Group metadata edits (Mamba, sub-paged attention) | `lmcache/integration/vllm/kv_cache_group_edits.py` |
 | Register / store / retrieve | `lmcache/integration/vllm/{lmcache_mp_connector,vllm_multi_process_adapter}.py` |
 | Server GPU context / transfer | `lmcache/v1/multiprocess/{gpu_context,modules/lmcache_driven_transfer}.py` |
-| Request protocol | `lmcache/v1/multiprocess/protocols/engine.py` |
+| Request RPC contract | `lmcache/v1/multiprocess/transport/base.py` |

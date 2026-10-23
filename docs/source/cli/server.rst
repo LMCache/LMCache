@@ -54,11 +54,12 @@ Commonly used flags include:
    * - ``--port PORT``
      - Request-transport port.
    * - ``--chunk-size N``
-     - KV cache chunk size in tokens.
+     - Minimum KV cache chunk size in tokens. The vLLM MP connector may
+       negotiate it upward; see :doc:`/mp/chunk_size_negotiation`.
    * - ``--l1-size-gb GB``
      - L1 (CPU/DRAM) cache capacity in GB.
    * - ``--eviction-policy POLICY``
-     - L1 eviction policy (e.g. ``LRU``).
+     - L1 eviction policy (``LRU``, ``ARC``, ``IsolatedLRU``, or ``noop``).
    * - ``--eviction-trigger-watermark RATIO``
      - L1 fill ratio at which eviction begins.
    * - ``--eviction-ratio RATIO``
@@ -67,6 +68,9 @@ Commonly used flags include:
      - Base number of request worker threads.
    * - ``--grpc-server-workers N``
      - gRPC dispatch threads (used only with ``--transport grpc``).
+   * - ``--grpc-server-mode {sync,aio}``
+     - gRPC server implementation (used only with ``--transport grpc``).
+       Default is ``sync``.
    * - ``--coordinator-url URL``
      - Register with an MP coordinator at this base URL (e.g.
        ``http://coordinator:9300``). Opt-in; enables fleet registration. See
@@ -93,8 +97,8 @@ Commonly used flags include:
    * - ``--coordinator-kafka-topic TOPIC``
      - Kafka topic receiving cache events (default ``lmcache-cache-events``).
    * - ``--coordinator-kafka-delivery-timeout SECONDS``
-     - Seconds one flush waits for broker acknowledgement (``> 0``, default
-       ``10``).
+     - Seconds the producer retries a record before dropping it (``> 0``,
+       default ``300``).
    * - ``--p2p-advertise-url HOST:PORT``
      - Enable P2P KV cache sharing and advertise this server's
        transfer-channel endpoint to peers (e.g. ``10.0.0.1:8500``). Setting it
@@ -111,8 +115,13 @@ Commonly used flags include:
        (default ``30``).
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation for P2P reads (default ``nixl``).
-   * - ``--trace-level {storage}``
-     - Enable storage-level trace recording (see :doc:`trace`).
+   * - ``--server-module JSON``
+     - Import out-of-tree ``DiscoverableModule`` classes. Repeatable.
+       See :doc:`/developer_guide/extending_lmcache/server_modules`.
+   * - ``--trace-level {storage,events}``
+     - Enable trace recording: ``storage`` records StorageManager calls for
+       replay, ``events`` records the cache-event stream emitted for the
+       coordinator, with or without one configured (see :doc:`trace`).
    * - ``--trace-output PATH``
      - Destination for recorded ``.lct`` trace files.
 

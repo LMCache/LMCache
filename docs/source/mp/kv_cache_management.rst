@@ -36,4 +36,5 @@ Legacy management
 
 Operations that are not yet available on the MP HTTP surface, such as general
 ``move``, ``pin``, and ``compress``, remain documented in the
-:doc:`Legacy section <../legacy/index>`: :doc:`../kv_cache_management/index`.
+:doc:`Legacy KV Cache Management <../legacy/kv_cache_management/index>`.
+

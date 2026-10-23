@@ -23,7 +23,10 @@ if TYPE_CHECKING:
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.gds_context import get_gds_context
+from lmcache.v1.gpu_connector.gds_context import (
+    deregister_gds_gpu_buffer,
+    register_gds_gpu_buffer,
+)
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_device,
@@ -429,18 +432,21 @@ class GPUCacheContext(BaseCacheContext):
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []
+        self._group_kv_pointer_lists: list[list[int]] = []
         for idx, group in enumerate(self.kv_layer_groups_manager_.kernel_groups):
             ptrs = get_group_data_ptrs(
                 self.kv_caches_, self.get_engine_kv_format(idx), group.layer_indices
             )
+            self._group_kv_pointer_lists.append(list(ptrs))
             self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
 
         # Temporary GPU buffer for transfers — a single flat uint8 buffer
-        self._temp_buffer = _TempGPUBuffer(
+        self._temp_buffer = self._make_temp_buffer(
             kv_layer_groups_manager=self.kv_layer_groups_manager_,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             device=self.device_,
             max_batch_size=4,
+            full_sw_kv=full_sw_kv,
         )
 
         # GPU streams
@@ -449,7 +455,7 @@ class GPUCacheContext(BaseCacheContext):
         # Register the staging buffer with the GDS cuFile context on the
         # context's CUDA stream.
         with torch_dev.stream(self.cuda_stream_):
-            get_gds_context().register_gpu_buffer(self._temp_buffer.buffer)
+            register_gds_gpu_buffer(self._temp_buffer.buffer)
 
         # Third Party
         import cupy
@@ -466,6 +472,29 @@ class GPUCacheContext(BaseCacheContext):
             logger,
         )
 
+    def _make_temp_buffer(
+        self,
+        kv_layer_groups_manager: KVLayerGroupsManager,
+        lmcache_tokens_per_chunk: int,
+        device: torch.device,
+        max_batch_size: int,
+        full_sw_kv: bool,
+    ) -> _TempGPUBuffer:
+        """Builds the staging buffer for this context.
+
+        This class always produces the kernel-group-major layout; a
+        subclass overrides this to stage in a different layout without
+        re-implementing ``__init__``.  ``full_sw_kv`` is passed through so a
+        layout that cannot serve CacheBlend can refuse the combination while
+        it is still being built.
+        """
+        return _TempGPUBuffer(
+            kv_layer_groups_manager=kv_layer_groups_manager,
+            lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+            device=device,
+            max_batch_size=max_batch_size,
+        )
+
     def close(self) -> None:
         """Drain the context stream, deregister the GDS staging buffer and
         release the imported KV mappings (reverse of __init__).
@@ -480,7 +509,7 @@ class GPUCacheContext(BaseCacheContext):
         """
         self.cuda_stream_.synchronize()
         with torch_dev.stream(self.cuda_stream_):
-            get_gds_context().deregister_gpu_buffer(self._temp_buffer.buffer)
+            deregister_gds_gpu_buffer(self._temp_buffer.buffer)
         self._close_kv_wrappers()
 
     def _close_kv_wrappers(self) -> None:
@@ -508,6 +537,13 @@ class GPUCacheContext(BaseCacheContext):
         given kernel group index.
         """
         return self.group_kv_pointers_[kernel_group_idx]
+
+    def get_kernel_group_kv_pointer_list(self, kernel_group_idx: int) -> list[int]:
+        """Returns the host-side KV cache pointers of a kernel group, in the
+        same order as :meth:`get_kernel_group_kv_pointers`, without touching
+        the device.
+        """
+        return self._group_kv_pointer_lists[kernel_group_idx]
 
     def get_temp_kernel_group_buffer(
         self, batch_idx: int, kernel_group_idx: int
