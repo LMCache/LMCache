@@ -94,6 +94,22 @@ the aio event loop), and how the server starts and stops.
 `build_grpc_request_server` in `grpc_impl/server_builder.py` picks one of them
 from `grpc_server_mode` and returns it as a `GrpcMultiprocessServerBase`.
 
+### Wrong transport and port conflicts
+
+gRPC calls wait for the server to come up (`wait_for_ready`), which keeps them
+alive across a server start or restart. A ZMQ server on the same port would
+otherwise look like a gRPC server that never starts, so when the channel fails
+to connect the client opens the port once and reads the first bytes. A ZMQ
+socket greets every connection with a 10-byte ZMTP signature (`0xFF` ... `0x7F`).
+If it sees one, the client fails pending and new calls, streams included, with
+a `ConnectionError` that names the `tcp://` URL to use. A refused or silent
+port is treated as a server that is still starting.
+
+The server binds with `grpc.so_reuseport` off. gRPC enables `SO_REUSEPORT` by
+default, so a second server on the same port would otherwise start and split
+the clients between two caches. With it off, the second bind fails, as it does
+with ZMQ.
+
 ## Adding an RPC
 
 An ordinary RPC requires three changes:
