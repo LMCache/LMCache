@@ -27,10 +27,24 @@ class ListCommand(BaseCommand):
         )
 
     def execute(self, args: argparse.Namespace) -> None:
+        """Display registered quotas from an MP server or coordinator.
+
+        Args:
+            args: Parsed endpoint and output options.
+        """
         base_url = normalize_url(args.url)
 
         result = http_request("GET", f"{base_url}/quota")
         users = result.get("users", {})
+        if "by_cache_salt" in result:
+            users = {
+                info["cache_salt"]: {
+                    "limit_gb": info["quota_limit_gb"],
+                    "current_usage_gb": info["usage_gb"],
+                }
+                for info in result["by_cache_salt"]
+                if info["quota_exists"]
+            }
 
         metrics = self.create_metrics("Quota List", args, width=55)
 
