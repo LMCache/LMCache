@@ -119,6 +119,7 @@ def _request(request_id: str = "request") -> Request:
         SimpleNamespace(
             request_id=request_id,
             cache_salt="",
+            lora_request=None,
             all_token_ids=list(range(12)),
             num_prompt_tokens=12,
             status=RequestStatus.WAITING,

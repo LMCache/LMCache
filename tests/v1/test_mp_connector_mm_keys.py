@@ -71,6 +71,7 @@ class _FakeRequest:
         self.resumable = False
         self.status = RequestStatus.WAITING
         self.cache_salt = cache_salt
+        self.lora_request = None
         self.prompt_token_ids = list(prompt_token_ids)
         self.num_prompt_tokens = len(prompt_token_ids)
         self._live_token_ids = list(prompt_token_ids)

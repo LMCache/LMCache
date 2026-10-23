@@ -66,7 +66,9 @@ SDK) to carry per-chunk extra keys. The substitution approach achieves
 equivalent collision resistance with no interface changes and fixes all
 existing substitution call sites at once. `extra_keys` remains the right
 channel for request-scoped metadata that must NOT be baked into tokens
-(e.g. LoRA IDs).
+(e.g. LoRA IDs). Until that channel exists, the MP connector carries the LoRA
+adapter in `cache_salt` (`extract_cache_salt_from_request`), which every MP key
+already partitions on.
 
 ## TODO: migrate to an explicit `extra_keys` channel
 
@@ -80,7 +82,9 @@ into one producer of extra keys and can be retired.
 Do the migration when the first of these lands, not before:
 
 - **Modality LoRA support** (Phi-4-multimodal): the LoRA affects all KV and
-  has no placeholder span to substitute — identity MUST go out-of-band.
+  has no placeholder span to substitute — identity MUST go out-of-band. The MP
+  connector carries the adapter in `cache_salt` today (see Alternative
+  considered); the in-process connector still collides.
 - **`cache_salt` / request-scoped key partitioning**: same shape, same
   channel.
 - **A second engine integration wants shared keys with vLLM semantics**
