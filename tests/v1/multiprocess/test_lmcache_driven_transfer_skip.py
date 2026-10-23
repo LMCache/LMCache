@@ -454,10 +454,11 @@ def _make_unfull_store_module(monkeypatch, obj_keys):
     monkeypatch.setattr(
         mod,
         "transfer_unfull_chunk",
-        lambda cc, block_ids, skips, memory_obj, group, direction: (
+        lambda cc, block_ids, skips, leads, memory_obj, group, direction: (
             unfull_transfers.append((group, list(block_ids), list(skips)))
         ),
     )
+    monkeypatch.setattr(mod, "get_unfull_chunk_layout_desc", lambda *a: object())
     return module, reserved, unfull_transfers
 
 
@@ -508,13 +509,15 @@ def test_retrieve_of_only_an_unfull_chunk_skips_aux_groups(monkeypatch):
     )
     module.context.resolve_obj_keys.return_value = [["g0u"], ["g1u"], ["g2u"]]
     monkeypatch.setattr(
-        mod, "trim_and_stage_unfull_chunk_block_ids", lambda cc, b: (b, [0] * len(b))
+        mod,
+        "trim_and_stage_unfull_chunk_block_ids",
+        lambda cc, b, num_tokens: (b, [0] * len(b), [0] * len(b)),
     )
     unfull_transfers: list[int] = []
     monkeypatch.setattr(
         mod,
         "transfer_unfull_chunk",
-        lambda cc, block_ids, skips, memory_obj, group, direction: (
+        lambda cc, block_ids, skips, leads, memory_obj, group, direction: (
             unfull_transfers.append(group)
         ),
     )

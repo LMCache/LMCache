@@ -130,6 +130,11 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
         fake_layout_desc,
     )
     monkeypatch.setattr(
+        lmcache_driven_transfer_mod,
+        "get_unfull_chunk_layout_desc",
+        lambda gpu_context, object_group_id: layout_desc,
+    )
+    monkeypatch.setattr(
         lmcache_driven_transfer_mod.torch_dev,
         "empty_cache",
         lambda: None,

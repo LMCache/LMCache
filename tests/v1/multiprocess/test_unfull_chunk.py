@@ -7,6 +7,8 @@ bus are mocked.
 """
 
 # Standard
+from types import SimpleNamespace
+from typing import cast
 from unittest import mock
 
 # Third Party
@@ -29,13 +31,18 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.object_group_transfer import (
+    get_unfull_chunk_layout_desc,
     split_unfull_chunk_block_ids,
+    transfer_unfull_chunk,
+    trim_and_stage_unfull_chunk_block_ids,
 )
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.platform import torch_ops
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
 
 CHUNK_SIZE = 16
@@ -148,9 +155,122 @@ def test_right_aligned_unfull_blocks_round_trip_through_the_copy_op():
         assert not decode[layer][:, untouched].any()
 
 
+@pytest.mark.parametrize(
+    ("num_tokens", "expected_ids", "expected_skip", "expected_lead"),
+    [
+        # Window W=8 over blocks of T=4: the next token attends to
+        # [num_tokens - 7, num_tokens), which spans a third block when it
+        # starts in the block before the last two.
+        (9, [10, 11, 12], 0, 1),
+        (10, [10, 11, 12], 0, 1),
+        (11, [11, 12], 0, 0),
+        (12, [11, 12], 0, 0),
+        (13, [11, 12, 13], 0, 1),
+        (3, [10, 10], 1, 0),
+    ],
+)
+def test_unfull_chunk_keeps_a_lead_block_when_the_window_spans_one_more(
+    num_tokens: int, expected_ids: list[int], expected_skip: int, expected_lead: int
+) -> None:
+    context = _stub_context(windows=(8,))
+    block_ids = [list(range(10, 10 + -(-num_tokens // 4)))]
+
+    staged, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
+        context, block_ids, num_tokens
+    )
+
+    assert staged[0].tolist() == expected_ids
+    assert skip_blocks == [expected_skip]
+    assert lead_blocks == [expected_lead]
+
+
+def test_unfull_chunk_without_a_narrow_window_has_no_lead_block() -> None:
+    context = _stub_context(windows=(CHUNK_SIZE,))
+
+    staged, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
+        context, [[10, 11, 12]], 9
+    )
+
+    assert staged[0].tolist() == [10, 10, 11, 12]
+    assert (skip_blocks, lead_blocks) == ([1], [0])
+
+
+def test_unfull_layout_appends_one_block_per_narrow_window_group() -> None:
+    context = _stub_context(windows=(CHUNK_SIZE, 8))
+
+    layout = get_unfull_chunk_layout_desc(context, 0)
+
+    full_shapes = [
+        context.get_kernel_group_shape_dtype(CHUNK_SIZE, group)[0] for group in (0, 1)
+    ]
+    lead_shape = torch.Size((2, _NUM_LAYERS, _BLOCK_SIZE, _HIDDEN))
+    assert layout.shapes == [*full_shapes, lead_shape]
+    assert layout.dtypes == [torch.float32] * 3
+
+    no_lead = get_unfull_chunk_layout_desc(_stub_context(windows=(16, 16)), 0)
+    assert len(no_lead.shapes) == 2
+
+
+def test_unfull_chunk_round_trip_carries_the_window_lead_block(
+    storage_manager: StorageManager,
+) -> None:
+    """A 9-token unfull chunk under an 8-token window needs three blocks of
+    the sliding-window group; all three, and the full-attention group's
+    blocks, land in the decode-side blocks."""
+    stub = _StubCacheContext(windows=(CHUNK_SIZE, 8))
+    context = cast(BaseCacheContext, stub)
+    layout = get_unfull_chunk_layout_desc(context, 0)
+    key = _unfull_keys(TokenHasher(chunk_size=CHUNK_SIZE), list(range(9)), 9)[0]
+    memory_obj = storage_manager.reserve_write([key], layout)[key]
+    prefill = [_paged_layers(torch.randn) for _ in range(2)]
+    decode = [_paged_layers(torch.zeros) for _ in range(2)]
+
+    def copy(layers, block_ids, direction):
+        stub.paged_layers = layers
+        staged, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
+            context, block_ids, 9
+        )
+        transfer_unfull_chunk(
+            context, staged, skip_blocks, lead_blocks, memory_obj, 0, direction
+        )
+
+    copy(prefill, [[1, 2, 3], [5, 6, 7]], lmcache_native.TransferDirection.D2H)
+    copy(decode, [[0, 4, 6], [2, 3, 7]], lmcache_native.TransferDirection.H2D)
+    storage_manager.finish_write([key])
+
+    moved = {0: {0: 1, 4: 2, 6: 3}, 1: {2: 5, 3: 6, 7: 7}}
+    for group, block_map in moved.items():
+        for layer in range(_NUM_LAYERS):
+            for dst, src in block_map.items():
+                assert torch.equal(
+                    decode[group][layer][:, dst], prefill[group][layer][:, src]
+                )
+            untouched = [b for b in range(_NUM_BLOCKS) if b not in block_map]
+            assert not decode[group][layer][:, untouched].any()
+
+
+def test_registry_falls_back_to_full_layouts_for_unfull_chunks() -> None:
+    registry = LayoutDescRegistry()
+    registry.register("m", 1, LAYOUT, group_layout_descs={0: LAYOUT})
+    assert registry.find_unfull_group_layout_descs("m", 1) == {0: LAYOUT}
+
+    unfull = MemoryLayoutDesc(
+        shapes=[*LAYOUT.shapes, torch.Size([4, 1, 8])], dtypes=[torch.uint8] * 2
+    )
+    registry.register(
+        "m",
+        1,
+        LAYOUT,
+        group_layout_descs={0: LAYOUT},
+        unfull_group_layout_descs={0: unfull},
+    )
+    assert registry.find_unfull_group_layout_descs("m", 1) == {0: unfull}
+    assert registry.find_unfull_group_layout_descs("other", 1) is None
+
+
 @pytest.fixture
-def lookup_module():
-    storage_manager = StorageManager(
+def storage_manager():
+    manager = StorageManager(
         StorageManagerConfig(
             l1_manager_config=L1ManagerConfig(
                 memory_config=L1MemoryManagerConfig(
@@ -162,6 +282,12 @@ def lookup_module():
             l2_adapter_config=L2AdaptersConfig(adapters=[]),
         )
     )
+    yield manager
+    manager.close()
+
+
+@pytest.fixture
+def lookup_module(storage_manager):
     hasher = TokenHasher(chunk_size=CHUNK_SIZE)
     ctx = mock.Mock()
     ctx.chunk_size = CHUNK_SIZE
@@ -175,9 +301,8 @@ def lookup_module():
         num_chunks_in_sw=[-1]
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: LAYOUT}
-    module = LookupModule(ctx)
-    yield module, storage_manager, hasher
-    storage_manager.close()
+    ctx.layout_desc_registry.find_unfull_group_layout_descs.return_value = {0: LAYOUT}
+    return LookupModule(ctx), storage_manager, hasher
 
 
 def test_lookup_hits_the_unfull_chunk_and_free_deletes_a_temporary_one(
@@ -285,3 +410,76 @@ def _lookup(
     hits = module.wait_prefetch_status(request_id, timeout=5.0)
     assert hits is not None
     return hits
+
+
+_NUM_LAYERS, _NUM_BLOCKS, _BLOCK_SIZE, _NUM_HEADS, _HEAD_SIZE = 2, 8, 4, 2, 8
+_HIDDEN = _NUM_HEADS * _HEAD_SIZE
+
+
+class _StubCacheContext:
+    """CPU cache context double for unfull-chunk transfers: one object group
+    of one kernel group per window in ``windows``, every group with 4-token
+    blocks over its own paged layers (``paged_layers[group]``)."""
+
+    lmcache_tokens_per_chunk = CHUNK_SIZE
+    device = torch.device("cpu")
+
+    def __init__(self, windows: tuple[int, ...]) -> None:
+        self.windows = windows
+        self.paged_layers: list[list[torch.Tensor]] = []
+        self.kv_layer_groups_manager = SimpleNamespace(
+            num_kernel_groups=len(windows),
+            object_groups=[
+                SimpleNamespace(kernel_group_indices=tuple(range(len(windows))))
+            ],
+            kernel_groups=[
+                SimpleNamespace(
+                    tokens_per_block=_BLOCK_SIZE, slots_per_block=_BLOCK_SIZE
+                )
+                for _ in windows
+            ],
+            get_subchunk_sw_size_tokens=lambda group: min(CHUNK_SIZE, windows[group]),
+        )
+
+    def calculate_num_blocks(self, num_tokens: int, kernel_group_idx: int) -> int:
+        return num_tokens // _BLOCK_SIZE
+
+    def get_slots_per_chunk_in_sw(self, kernel_group_idx: int) -> int:
+        return min(CHUNK_SIZE, self.windows[kernel_group_idx])
+
+    def get_kernel_group_shape_dtype(
+        self, num_tokens: int, kernel_group_idx: int
+    ) -> tuple[torch.Size, torch.dtype]:
+        slots = self.get_slots_per_chunk_in_sw(kernel_group_idx)
+        return torch.Size((2, _NUM_LAYERS, slots, _HIDDEN)), torch.float32
+
+    def stage_block_ids(self, block_ids: list[list[int]]) -> list[torch.Tensor]:
+        return [torch.tensor(group_block_ids) for group_block_ids in block_ids]
+
+    def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> list[torch.Tensor]:
+        return self.paged_layers[kernel_group_idx]
+
+    def get_shape_desc(self, kernel_group_idx: int) -> torch_ops.PageBufferShapeDesc:
+        shape_desc = torch_ops.PageBufferShapeDesc()
+        shape_desc.nl = _NUM_LAYERS
+        shape_desc.nb = _NUM_BLOCKS
+        shape_desc.bs = _BLOCK_SIZE
+        shape_desc.nh = _NUM_HEADS
+        shape_desc.hs = _HEAD_SIZE
+        shape_desc.element_size = 4
+        shape_desc.kv_size = 2
+        return shape_desc
+
+    def get_engine_kv_format(self, kernel_group_idx: int) -> object:
+        return lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+
+
+def _stub_context(windows: tuple[int, ...]) -> BaseCacheContext:
+    return cast(BaseCacheContext, _StubCacheContext(windows))
+
+
+def _paged_layers(fill) -> list[torch.Tensor]:
+    return [
+        fill(2, _NUM_BLOCKS, _BLOCK_SIZE, _NUM_HEADS, _HEAD_SIZE)
+        for _ in range(_NUM_LAYERS)
+    ]

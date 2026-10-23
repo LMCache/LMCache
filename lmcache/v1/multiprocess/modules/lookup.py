@@ -784,8 +784,10 @@ class LookupModule(DiscoverableModule):
         Returns:
             True when the unfull chunk is read-locked for every reader.
         """
-        group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
-            key.model_name, key.world_size
+        group_layout_descs = (
+            self._ctx.layout_desc_registry.find_unfull_group_layout_descs(
+                key.model_name, key.world_size
+            )
         )
         # The model may have unregistered since the lookup was submitted.
         if not group_layout_descs:
