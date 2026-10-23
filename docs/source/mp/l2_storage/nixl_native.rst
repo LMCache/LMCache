@@ -22,14 +22,17 @@ checks those capabilities when it starts and rejects ambiguous plugins.
 Build and runtime requirements
 ------------------------------
 
-The connector is published as the ``lmcache-nixl`` package, at the same
-version as ``lmcache``. The ``lmcache/vllm-openai`` release and nightly images
-include it. Elsewhere, install the version matching the installed ``lmcache``:
+The ``lmcache/vllm-openai`` release and nightly images include the connector.
+Elsewhere, install LMCache with the ``nixl`` extra (Python 3.10 to 3.12):
 
 .. code-block:: bash
 
-   LMCACHE_VERSION=$(python -c 'import importlib.metadata as m; print(m.version("lmcache"))')
-   pip install "lmcache-nixl==${LMCACHE_VERSION}"
+   pip install "lmcache[nixl]"
+
+For a release, the extra installs the connector, published as the
+``lmcache-nixl`` package at the same version as ``lmcache``, and the ``nixl``
+runtime. To add it to an existing installation, pin the installed version:
+``pip install "lmcache[nixl]==<installed version>"``.
 
 ``lmcache-nixl`` is compiled against NIXL 1.3.1 and depends on ``nixl>=1.3.0``,
 which bundles ``libnixl`` and its plugins for CUDA 12 and CUDA 13; the adapter
@@ -287,7 +290,7 @@ Troubleshooting
 ---------------
 
 ``lmcache_nixl`` cannot be imported
-   Install ``lmcache-nixl`` at the installed ``lmcache`` version. For a source
+   Install ``lmcache[nixl]`` at the installed ``lmcache`` version. For a source
    build, rebuild with ``BUILD_WITH_NIXL=1`` and verify that
    ``NIXL_INCLUDE_DIR`` contains ``nixl.h`` and ``NIXL_LIBRARY_DIR`` contains
    ``libnixl.so``.

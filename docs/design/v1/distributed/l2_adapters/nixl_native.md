@@ -245,7 +245,13 @@ wheel depend on NIXL:
   and bundles nothing: `nixl` already ships `libnixl` and its plugins for each
   CUDA line (`nixl-cu12`, `nixl-cu13`), and bundling a second copy would load
   two NIXL runtimes in a process that also uses vLLM's NIXL connector. The C++
-  API is the same in both CUDA lines, so one wheel serves both. The nightly
+  API is the same in both CUDA lines, so one wheel serves both. Users get it
+  through the `lmcache[nixl]` extra: an extra cannot change what is compiled
+  into the `lmcache` wheel, only add packages, so the connector has to be its
+  own package. `setup.py` adds `lmcache-nixl==<version>` to the extra when it
+  builds a release version, so the lmcache publish job waits for
+  lmcache-nixl's; dev builds have no matching package and keep the extra to
+  `nixl`. The nightly
   image builds this wheel from the checkout (`docker/build_nixl_wheel.sh`)
   instead of the in-tree extension, so it loads the connector the same way
   the release images do.
@@ -254,8 +260,9 @@ The Python factory imports the connector only after `nixl_native` is selected:
 `lmcache.lmcache_nixl` first, then `import nixl` followed by `lmcache_nixl`.
 Importing `nixl` loads the `libnixl` matching torch's CUDA, and the dynamic
 loader resolves the wheel's SONAME dependency to that loaded copy. When both
-fail, the error names `pip install lmcache-nixl==<version>` and the source
-build settings, and includes both import errors.
+fail, the error names `pip install "lmcache[nixl]==<version>"` (release
+versions only) and the source build settings, and includes both import
+errors.
 
 Runtime status exposes only the backend name, inferred storage type, workers,
 FILE path, direct-I/O choice, and inferred strategy capabilities. The opaque

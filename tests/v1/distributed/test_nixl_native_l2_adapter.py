@@ -24,6 +24,7 @@ from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
 from lmcache.v1.distributed.l2_adapters.nixl_native_l2_adapter import (
     NixlNativeL2AdapterConfig,
 )
+import lmcache
 
 
 @pytest.mark.parametrize(
@@ -104,7 +105,8 @@ def test_factory_requires_l1_memory_desc() -> None:
 def test_factory_missing_extension_has_install_guidance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without either connector module, the error says how to get one."""
+    """Without either connector module, a release names the matching
+    lmcache[nixl] install; every build names the source-build settings."""
     config = NixlNativeL2AdapterConfig.from_dict(
         {
             "backend": "OBJ",
@@ -113,10 +115,16 @@ def test_factory_missing_extension_has_install_guidance(
     )
     monkeypatch.setitem(sys.modules, "lmcache.lmcache_nixl", None)
     monkeypatch.setitem(sys.modules, "lmcache_nixl", None)
+    monkeypatch.setattr(lmcache, "__version__", "0.5.8")
     with pytest.raises(RuntimeError) as excinfo:
         create_l2_adapter(config, L1MemoryDesc(4096, 8192, 4096))
+    assert 'pip install "lmcache[nixl]==0.5.8"' in str(excinfo.value)
+    assert "BUILD_WITH_NIXL=1" in str(excinfo.value)
 
-    assert "pip install lmcache-nixl" in str(excinfo.value)
+    monkeypatch.setattr(lmcache, "__version__", "0.5.9.dev3")
+    with pytest.raises(RuntimeError) as excinfo:
+        create_l2_adapter(config, L1MemoryDesc(4096, 8192, 4096))
+    assert "pip install" not in str(excinfo.value)
     assert "BUILD_WITH_NIXL=1" in str(excinfo.value)
 
 

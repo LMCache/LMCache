@@ -76,16 +76,19 @@ def load_nixl_client_class() -> Any:
             # First Party
             from lmcache import __version__
 
-            # Releases publish it at lmcache's version; dev builds have no
-            # matching package, so leave those unpinned.
-            is_release = re.fullmatch(r"\d+\.\d+\.\d+((a|b|rc)\d+)?", __version__)
-            pin = f"=={__version__}" if is_release else ""
+            # Only release versions have a matching lmcache-nixl on PyPI.
+            install = (
+                f'Install it with `pip install "lmcache[nixl]=={__version__}"`, '
+                "or build"
+                if re.fullmatch(r"\d+\.\d+\.\d+((a|b|rc)\d+)?", __version__)
+                else "Build"
+            )
             raise RuntimeError(
-                "nixl_native requires LMCache's NIXL connector. Install it with "
-                f"`pip install lmcache-nixl{pin}`, or build LMCache from source "
-                "with BUILD_WITH_NIXL=1, NIXL_INCLUDE_DIR, and NIXL_LIBRARY_DIR "
-                f"set. Importing lmcache.lmcache_nixl failed with: {source_exc}; "
-                f"importing nixl and lmcache_nixl failed with: {exc}"
+                f"nixl_native requires LMCache's NIXL connector. {install} "
+                "LMCache from source with BUILD_WITH_NIXL=1, NIXL_INCLUDE_DIR, "
+                "and NIXL_LIBRARY_DIR set. Importing lmcache.lmcache_nixl failed "
+                f"with: {source_exc}; importing nixl and lmcache_nixl failed "
+                f"with: {exc}"
             ) from exc
     return LMCacheNixlClient
 
