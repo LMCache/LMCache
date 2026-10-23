@@ -5,7 +5,10 @@
 import time
 
 # First Party
-from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstance
+from lmcache.v1.mp_coordinator.views.instance_registry import (
+    InstanceRegistry,
+    MPInstance,
+)
 
 
 def _instance(instance_id: str, heartbeat: float = 0.0) -> MPInstance:
@@ -106,3 +109,15 @@ def test_random_instance_samples_from_live_set():
     # (2/3)**50 ≈ 1.6e-9 — close enough to "covers the set" for
     # a sanity test with a fixed seed.
     assert seen == {"a", "b", "c"}
+
+
+def test_stats_report_each_server_s_heartbeat_age():
+    registry = InstanceRegistry()
+    registry.register(_instance("a", heartbeat=time.monotonic() - 7.0))
+    registry.register(_instance("b", heartbeat=time.monotonic()))
+    registry.deregister("b")
+
+    ages = registry.stats().seconds_since_heartbeat
+
+    assert set(ages) == {"a"}
+    assert 7.0 <= ages["a"] < 10.0

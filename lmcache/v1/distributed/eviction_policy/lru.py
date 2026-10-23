@@ -173,7 +173,8 @@ class LRUEvictionPolicy(EvictionPolicy):
         """Defer attempted keys so a failed LRU head cannot block progress.
 
         Args:
-            keys: Keys submitted to an eviction destination, in LRU order.
+            keys: Selected keys, before adapter deletion is attempted.
+                Their supplied order is preserved when moving them to MRU.
         """
         if not keys:
             return

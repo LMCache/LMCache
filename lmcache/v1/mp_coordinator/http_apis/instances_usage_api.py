@@ -18,14 +18,18 @@ from fastapi import APIRouter, HTTPException, Request, status
 
 # First Party
 from lmcache.v1.distributed.api import ModuleMemoryCapacity, Tier
-from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
 from lmcache.v1.mp_coordinator.schemas import (
     FleetMemoryResponse,
     InstanceMemoryStatus,
     ModuleMemoryStatus,
 )
-from lmcache.v1.mp_coordinator.server_config import UNDECLARED_CAPACITY
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.views.server_config import (
+    UNDECLARED_CAPACITY,
+    ServerConfigRegistry,
+)
+from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
 router = APIRouter()
 
@@ -157,9 +161,12 @@ async def fleet_usage(request: Request) -> FleetMemoryResponse:
         deregistered with L2 placements surviving is not dropped.
     """
     ctx = get_context(request)
-    declarations = ctx.server_config.get_all()
-    registered = {instance.instance_id for instance in ctx.registry.all_instances()}
-    by_owner = _usage_by_owner(ctx.usage_manager)
+    declarations = ctx.views.get(ServerConfigRegistry).get_all()
+    registered = {
+        instance.instance_id
+        for instance in ctx.views.get(InstanceRegistry).all_instances()
+    }
+    by_owner = _usage_by_owner(ctx.views.get(CacheUsageManager))
     owned = {owner for owner in by_owner if owner != _SHARED_OWNER}
 
     instances = [
@@ -205,9 +212,9 @@ async def instance_usage(instance_id: str, request: Request) -> InstanceMemorySt
             no bytes, and having declared nothing.
     """
     ctx = get_context(request)
-    declared = ctx.server_config.get(instance_id)
-    used = _usage_by_owner(ctx.usage_manager).get(instance_id, {})
-    registered = ctx.registry.contains(instance_id)
+    declared = ctx.views.get(ServerConfigRegistry).get(instance_id)
+    used = _usage_by_owner(ctx.views.get(CacheUsageManager)).get(instance_id, {})
+    registered = ctx.views.get(InstanceRegistry).contains(instance_id)
     if not registered and not declared and not used:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

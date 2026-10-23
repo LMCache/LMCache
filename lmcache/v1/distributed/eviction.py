@@ -100,6 +100,17 @@ class EvictionPolicy:
         """
         pass
 
+    def on_keys_reserved(self, keys: list[ObjectKey]) -> None:
+        """Notify the policy that keys have been reserved for creation.
+
+        The default behavior preserves policies that do not distinguish
+        reservation from admission.
+
+        Args:
+            keys: The keys reserved for creation.
+        """
+        self.on_keys_created(keys)
+
     def on_keys_created_with_sizes(
         self,
         keys: list[ObjectKey],
@@ -137,14 +148,15 @@ class EvictionPolicy:
         pass
 
     def on_eviction_attempted(self, keys: list[ObjectKey]) -> None:
-        """Notify the policy that keys were submitted for eviction.
+        """Notify the policy immediately before attempting adapter deletion.
 
         Policies may use this signal to keep an unremovable LRU head from
         blocking other candidates. The default implementation preserves
         compatibility for policies that do not track retry order.
 
         Args:
-            keys: Keys submitted to an eviction destination.
+            keys: Selected keys, possibly combined from several salt buckets.
+                No global LRU ordering or successful deletion is implied.
         """
 
     @abstractmethod
@@ -213,15 +225,12 @@ class L1EvictionPolicy(L1ManagerListener):
         # Recency comes from explicit touch_keys (on_l1_keys_accessed).
         pass
 
-    def on_l1_keys_reserved_write(self, keys: list[ObjectKey]):
-        # No-op
-        pass
+    def on_l1_keys_reserved_write(self, keys: list[ObjectKey]) -> None:
+        # Track keys from the moment they are reserved, so an abandoned
+        # reservation (expired write lock) is evicted like any unlocked key.
+        self._policy.on_keys_reserved(keys)
 
-    def on_l1_keys_write_finished(self, keys: list[ObjectKey]):
-        # TODO (ApostaC): we don't differentiate between the created keys and
-        # updated keys here. Probably need to fix that by introducing a new
-        # callback in L1ManagerListener or adding `mode` argument into
-        # on_keys_reserved_write.
+    def on_l1_keys_write_finished(self, keys: list[ObjectKey]) -> None:
         self._policy.on_keys_created(keys)
 
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):

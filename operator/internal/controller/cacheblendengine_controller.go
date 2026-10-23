@@ -31,7 +31,7 @@ import (
 )
 
 // CacheBlendEngineReconciler reconciles a CacheBlendEngine object. It mirrors
-// LMCacheEngineReconciler but targets the blend_v3 engine workload and carries
+// LMCacheEngineReconciler but targets the blend engine workload and carries
 // no finalizer of its own: a brand-new CRD has no legacy CRs to migrate, so
 // owner-reference garbage collection alone cascade-deletes the child DaemonSet,
 // Services, ConfigMap, and managed Secret when the CR is removed.
@@ -46,7 +46,7 @@ type CacheBlendEngineReconciler struct {
 
 // Reconcile reconciles the CacheBlendEngine CR. It applies defaults, validates
 // the spec, then converges the RESP auth Secret (only when RESP auth is
-// configured), the blend_v3 DaemonSet, the node-local lookup Service, the
+// configured), the blend engine DaemonSet, the node-local lookup Service, the
 // headless metrics Service, the <engine>-connection ConfigMap, and the optional
 // ServiceMonitor before updating status. Every child carries a controller
 // reference for cascade deletion.

@@ -52,7 +52,16 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
     def __init__(
         self,
         default_destination: EvictionDestination = EvictionDestination.DISCARD,
+        section_name: str = "lru_order",
     ):
+        """Args:
+        default_destination: Where victims go when no destination is
+            registered.
+        section_name: Name of this policy's section in a durable
+            checkpoint. A coordinator keeps one ordering per enforced
+            tier, and two sections cannot share a name.
+        """
+        self._section_name = section_name
         self._lock = threading.Lock()
         # cache_salt -> ordered {ObjectKey: size} (oldest first).
         self._per_salt_order: dict[str, OrderedDict[ObjectKey, int | None]] = {}
@@ -161,7 +170,8 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
         """Defer attempted keys within their salt buckets.
 
         Args:
-            keys: Keys submitted to an eviction destination, in LRU order.
+            keys: Selected keys, before adapter deletion is attempted.
+                May combine salt buckets; each bucket retains its own order.
         """
         if not keys:
             return
@@ -288,7 +298,7 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
     @property
     def name(self) -> str:
         """Name of this policy's section in a durable checkpoint."""
-        return "lru_order"
+        return self._section_name
 
     def capture(self) -> Mapping[str, object]:
         """Return each bucket's eviction order and optional byte weights.

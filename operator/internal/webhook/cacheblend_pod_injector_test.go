@@ -277,6 +277,147 @@ var _ = Describe("CacheBlendPodInjector", func() {
 		})
 	})
 
+	Describe("PD disaggregation", func() {
+		pdEngine := func() *lmcachev1alpha1.CacheBlendEngine {
+			sideChannelPort := int32(5557)
+			return newTestEngine(func(e *lmcachev1alpha1.CacheBlendEngine) {
+				e.Spec.PD = &lmcachev1alpha1.PDSpec{
+					NixlSideChannelPort: &sideChannelPort,
+				}
+			})
+		}
+
+		expectPDEnv := func(c *corev1.Container) {
+			var host, port *corev1.EnvVar
+			for i := range c.Env {
+				switch c.Env[i].Name {
+				case nixlSideChannelHostEnv:
+					host = &c.Env[i]
+				case nixlSideChannelPortEnv:
+					port = &c.Env[i]
+				}
+			}
+			Expect(host).NotTo(BeNil(), nixlSideChannelHostEnv)
+			Expect(host.ValueFrom).NotTo(BeNil())
+			Expect(host.ValueFrom.FieldRef.FieldPath).To(Equal("status.podIP"))
+			Expect(port).NotTo(BeNil(), nixlSideChannelPortEnv)
+			Expect(port.Value).To(Equal("5557"))
+		}
+
+		It("injects the prefiller MultiConnector config and NIXL env vars", func() {
+			engine := pdEngine()
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(func(p *corev1.Pod) {
+				p.Annotations[PDRoleAnnotationKey] = lmcachev1alpha1.PDRolePrefiller
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, "vllm")
+			Expect(c).NotTo(BeNil())
+
+			kv := argsFlagValue(c.Args, cbFlagKVTransferConfig)
+			Expect(kv).To(ContainSubstring("MultiConnector"))
+			Expect(kv).To(ContainSubstring("NixlConnector"))
+			Expect(kv).To(ContainSubstring("CBKVConnector"))
+			Expect(kv).To(ContainSubstring("kv_producer"))
+			expectPDEnv(c)
+		})
+
+		It("injects only the bare NixlConnector config and NIXL env vars for the decoder role", func() {
+			engine := pdEngine()
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(func(p *corev1.Pod) {
+				p.Annotations[PDRoleAnnotationKey] = lmcachev1alpha1.PDRoleDecoder
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, "vllm")
+			Expect(c).NotTo(BeNil())
+
+			By("the decoder does not blend: no MultiConnector, no CBKVConnector")
+			kv := argsFlagValue(c.Args, cbFlagKVTransferConfig)
+			Expect(kv).To(ContainSubstring("NixlConnector"))
+			Expect(kv).To(ContainSubstring("kv_consumer"))
+			Expect(kv).NotTo(ContainSubstring("MultiConnector"))
+			Expect(kv).NotTo(ContainSubstring("CBKVConnector"))
+			expectPDEnv(c)
+
+			By("no CacheBlend vLLM flags — --enforce-eager would disable CUDA graphs on the decode role")
+			Expect(argsHasFlag(c.Args, cbFlagNoChunkedPrefill)).To(BeFalse())
+			Expect(argsHasFlag(c.Args, cbFlagEnforceEager)).To(BeFalse())
+			Expect(argsHasFlag(c.Args, cbFlagPipelineParallelSize)).To(BeFalse())
+
+			By("no payload staging (M1–M4) or payload pull secrets (M7)")
+			Expect(out.Spec.InitContainers).To(BeEmpty())
+			Expect(findVolume(out, cbPluginVolumeName)).To(BeNil())
+			Expect(envValue(c, pythonPathEnvName)).To(BeEmpty())
+			Expect(pullSecretNames(out)).NotTo(ContainElement("cb-payload-pull"))
+
+			By("no engine /dev/shm wiring (M0) — the decoder has no CUDA IPC connection to the engine")
+			Expect(out.Spec.HostIPC).To(BeFalse())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
+
+			By("idempotency annotation stamped")
+			Expect(out.Annotations[AnnotationInjected]).To(Equal(valueTrue))
+		})
+
+		It("injects a decoder pod even when the payload image is unset", func() {
+			// A decoder never loads the CacheBlend plugin, so decoder-only
+			// engines need no payloadImage; the M2 fail-open gate must not
+			// apply to the decoder path.
+			engine := pdEngine()
+			engine.Spec.Injection.PayloadImage = nil
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(func(p *corev1.Pod) {
+				p.Annotations[PDRoleAnnotationKey] = lmcachev1alpha1.PDRoleDecoder
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, "vllm")
+			Expect(c).NotTo(BeNil())
+
+			Expect(argsFlagValue(c.Args, cbFlagKVTransferConfig)).To(ContainSubstring("kv_consumer"))
+			Expect(out.Annotations[AnnotationInjected]).To(Equal(valueTrue))
+			Expect(out.Annotations).NotTo(HaveKey(AnnotationSkipReason))
+		})
+
+		It("skips + stamps unknown-pd-role for an unrecognized annotation value", func() {
+			engine := pdEngine()
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(func(p *corev1.Pod) {
+				p.Annotations[PDRoleAnnotationKey] = "prefill" // typo
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			c := findContainer(out, "vllm")
+			Expect(c).NotTo(BeNil())
+			Expect(argsHasFlag(c.Args, cbFlagKVTransferConfig)).To(BeFalse(),
+				"no config may be injected for an unknown role")
+			Expect(out.Annotations[AnnotationSkipReason]).To(Equal(SkipReasonUnknownPDRole))
+		})
+
+		It("falls back to the bare CBKVConnector config without a pd-role annotation", func() {
+			engine := pdEngine()
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(nil)
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, "vllm")
+			Expect(c).NotTo(BeNil())
+
+			kv := argsFlagValue(c.Args, cbFlagKVTransferConfig)
+			Expect(kv).To(ContainSubstring("CBKVConnector"))
+			Expect(kv).NotTo(ContainSubstring("MultiConnector"))
+			Expect(kv).NotTo(ContainSubstring("NixlConnector"))
+		})
+	})
+
 	Describe("M7 image pull secrets", func() {
 		It("does not duplicate a secret the pod already lists", func() {
 			engine := newTestEngine(nil)

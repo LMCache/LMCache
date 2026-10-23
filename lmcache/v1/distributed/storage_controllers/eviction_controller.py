@@ -19,8 +19,8 @@ from lmcache.v1.distributed.eviction_policy import CreateEvictionPolicy
 from lmcache.v1.distributed.internal_api import (
     EvictionAction,
     EvictionDestination,
+    L1ManagerInterface,
 )
-from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     from lmcache.v1.distributed.quota_manager import QuotaManager
 
 logger = init_logger(__name__)
+
+L2_EVICTION_ERROR_LOG_INTERVAL_SECONDS = 60.0
 
 
 class EvictionController(StorageControllerInterface):
@@ -96,7 +98,7 @@ class L1EvictionController(EvictionController):
 
     def __init__(
         self,
-        l1_manager: L1Manager,
+        l1_manager: L1ManagerInterface,
         eviction_config: EvictionConfig,
     ):
         super().__init__()
@@ -238,6 +240,7 @@ class L2EvictionController(StorageControllerInterface):
     ):
         self._adapter_states = l2_adapter_states
         self._quota_manager = quota_manager
+        self._last_error_log: dict[int, float] = {}
         # Guards _adapter_states against concurrent runtime add/remove.
         self._states_lock = threading.Lock()
         self._stop_flag = threading.Event()
@@ -270,6 +273,7 @@ class L2EvictionController(StorageControllerInterface):
             self._adapter_states = [
                 s for s in self._adapter_states if s.adapter_id != adapter_id
             ]
+            self._last_error_log.pop(adapter_id, None)
 
     def report_status(self) -> dict:
         # NOTE: ``usage.bytes_by_cache_salt`` is intentionally NOT
@@ -314,11 +318,18 @@ class L2EvictionController(StorageControllerInterface):
                 try:
                     self._check_and_evict(state)
                 except Exception:
-                    logger.exception(
-                        "L2 eviction failed for adapter_id=%d; "
-                        "retrying on the next pass.",
-                        state.adapter_id,
-                    )
+                    now = time.monotonic()
+                    previous = self._last_error_log.get(state.adapter_id)
+                    if (
+                        previous is None
+                        or now - previous >= L2_EVICTION_ERROR_LOG_INTERVAL_SECONDS
+                    ):
+                        self._last_error_log[state.adapter_id] = now
+                        logger.exception(
+                            "L2 eviction failed for adapter_id=%d; retrying on "
+                            "the next pass (errors logged at most once per minute).",
+                            state.adapter_id,
+                        )
 
     def _check_and_evict(self, state: L2AdapterEvictionState):
         if state.eviction_policy.support_isolation and self._quota_manager is not None:

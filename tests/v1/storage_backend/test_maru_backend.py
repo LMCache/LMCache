@@ -11,10 +11,10 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.pin_monitor import PinMonitor
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, TensorMemoryObj
-from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from tests.v1.utils import (
     check_method_signatures,

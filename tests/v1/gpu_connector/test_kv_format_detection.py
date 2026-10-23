@@ -8,6 +8,9 @@ format -- covering the vLLM NHD/HND branch, the SGLang depth-1/depth-2
 branch, and the TRT-LLM cross-layer branch.
 """
 
+# Standard
+from unittest.mock import patch
+
 # Third Party
 import pytest
 import torch
@@ -16,6 +19,8 @@ import torch
 from lmcache import torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format import detect_format, extract_kv_cache_shapes
+from lmcache.v1.gpu_connector.kv_format.detectors import vllm as vllm_detector
+from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 import lmcache.lmcache_native as lmcache_native
 
 NB, NL, BS, NH, HS = 7, 5, 3, 2, 4
@@ -68,11 +73,25 @@ def test_vllm_rbln_native_singleton_axis(monkeypatch, hint):
     # layout, and the format is HND by definition).
     monkeypatch.setattr(_VLLM_DEV, "cuda")
     kv = [_t(2, NB, NH, 1, BS, HS) for _ in range(NL)]
-    fmt, out = detect_format(kv, EngineType.VLLM, hint)
+    with patch.object(vllm_detector.logger, "warning") as mock_warning:
+        fmt, out = detect_format(kv, EngineType.VLLM, hint)
     assert fmt == F.NL_X_TWO_NB_NH_ONE_BS_HS
+    mock_warning.assert_not_called()
     # Detection must not reshape it away: the singleton axis survives.
     assert tuple(out[0].shape) == (2, NB, NH, 1, BS, HS)
     assert out[0].data_ptr() == kv[0].data_ptr()
+
+
+def test_vllm_rbln_num_blocks_2_keeps_kv_first_reading(monkeypatch):
+    # [2, 2, NH, 1, BS, HS] fits both RBLN layouts; the K/V-first reading wins
+    # and the ambiguity is logged. LMCache loggers do not propagate, so the
+    # module logger is patched instead of using caplog.
+    monkeypatch.setattr(_VLLM_DEV, "cuda")
+    kv = [_t(2, 2, NH, 1, BS, HS) for _ in range(NL)]
+    with patch.object(vllm_detector.logger, "warning") as mock_warning:
+        fmt, _ = detect_format(kv, EngineType.VLLM, {})
+    assert fmt == F.NL_X_TWO_NB_NH_ONE_BS_HS
+    mock_warning.assert_called_once()
 
 
 def test_vllm_blocks_first_fused_num_heads_2(monkeypatch):
@@ -100,6 +119,28 @@ def test_sglang_mla_depth1():
     assert fmt == F.NL_X_NBBS_ONE_HS
 
 
+def test_sglang_unified_components_keep_explicit_block_geometry() -> None:
+    kv = [_t(NB, BS, NH, HS) for _ in range(2 * NL)]
+
+    fmt, out = detect_format(kv, EngineType.SGLANG, {"kv_list_layout": "unified"})
+
+    assert fmt == F.NL_X_NB_BS_NH_HS
+    assert isinstance(out, list)
+    assert isinstance(out[0], torch.Tensor)
+    assert tuple(out[0].shape) == (NB, BS, NH, HS)
+
+
+def test_sglang_unified_mla_keeps_single_latent_plane() -> None:
+    kv = [_t(NB, BS, HS) for _ in range(NL)]
+
+    fmt, out = detect_format(kv, EngineType.SGLANG, {"kv_list_layout": "unified"})
+
+    assert fmt == F.NL_X_NB_BS_HS
+    assert isinstance(out, list)
+    assert isinstance(out[0], torch.Tensor)
+    assert tuple(out[0].shape) == (NB, BS, HS)
+
+
 def test_sglang_mha_depth2_fused():
     kv = [[_t(NB * BS, NH, HS) for _ in range(NL)] for _ in range(2)]
     fmt, _ = detect_format(kv, EngineType.SGLANG, {})
@@ -107,16 +148,38 @@ def test_sglang_mha_depth2_fused():
 
 
 def test_sglang_mha_mp_reshape():
-    # MP path: flat list of 2*NL 3-D tensors + tokens_per_block hint;
-    # detection should un-flatten + reshape to the 4-D inner MP format.
+    # MP path: flat list of 2*NL 3-D tensors + explicit split-K/V and
+    # tokens-per-block hints; detection should un-flatten + reshape to the
+    # 4-D inner MP format.
     if not hasattr(F, "TWO_X_NL_X_NB_BS_NH_HS"):
         pytest.skip("extension lacks TWO_X_NL_X_NB_BS_NH_HS")
     flat = [_t(NB * BS, NH, HS) for _ in range(2 * NL)]
-    fmt, out = detect_format(flat, EngineType.SGLANG, {"tokens_per_block": BS})
+    hints = {"tokens_per_block": BS, "kv_list_layout": "k_v"}
+    fmt, out = detect_format(flat, EngineType.SGLANG, hints)
     assert fmt == F.TWO_X_NL_X_NB_BS_NH_HS
     # Canonical depth-2 [K_layers, V_layers], inner reshaped to 4-D.
     assert len(out) == 2 and len(out[0]) == NL
     assert tuple(out[0][0].shape) == (NB, BS, NH, HS)
+
+
+def test_sglang_mha_mp_single_head_is_not_mla() -> None:
+    """TP may reduce split K/V to one head without changing its MHA layout."""
+    flat = [_t(NB * BS, 1, HS) for _ in range(2 * NL)]
+    hints: LayoutHints = {"tokens_per_block": BS, "kv_list_layout": "k_v"}
+    fmt, out = detect_format(flat, EngineType.SGLANG, hints)
+    assert fmt == F.TWO_X_NL_X_NB_BS_NH_HS
+    assert isinstance(out, list)
+    assert isinstance(out[0], list)
+    assert isinstance(out[0][0], torch.Tensor)
+    assert tuple(out[0][0].shape) == (NB, BS, 1, HS)
+
+
+def test_sglang_mha_mp_rejects_non_divisible_page_buffer() -> None:
+    """Split K/V registration rejects invalid paged-buffer geometry."""
+    flat = [_t(NB * BS + 1, 1, HS) for _ in range(2 * NL)]
+    hints: LayoutHints = {"tokens_per_block": BS, "kv_list_layout": "k_v"}
+    with pytest.raises(ValueError, match="not divisible"):
+        detect_format(flat, EngineType.SGLANG, hints)
 
 
 def test_trtllm_cross_layer_6d():
@@ -148,3 +211,54 @@ def test_extract_kv_cache_shapes_mixed_nested():
         [_t(NB, BS, NH, HS)],
     ]
     assert extract_kv_cache_shapes(kv) == {(NB, BS, NH, HS), (NB, BS, HS)}
+
+
+def test_vllm_mla_tuple_unequal_widths():
+    # vLLM-Ascend MLA: per-layer (latent, rope) planes, single latent head,
+    # mutually unequal widths -> the flat summed-width MLA tuple format.
+    if not hasattr(F, "NL_X_NP_X_NB_BS_ONE_HS"):
+        pytest.skip("extension lacks NL_X_NP_X_NB_BS_ONE_HS")
+    kv = [(_t(NB, BS, 1, HS * 8), _t(NB, BS, 1, HS)) for _ in range(NL)]
+    fmt, out = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
+    assert fmt == F.NL_X_NP_X_NB_BS_ONE_HS
+    # Contiguous-view recovery may normalize tuples to lists; storage must be
+    # shared with the input planes.
+    assert [p.data_ptr() for p in out[0]] == [p.data_ptr() for p in kv[0]]
+
+
+def test_vllm_dsa_tuple_three_planes():
+    # vLLM-Ascend DSA: per-layer (latent, rope, dsa) 3-tuples.
+    if not hasattr(F, "NL_X_NP_X_NB_BS_ONE_HS"):
+        pytest.skip("extension lacks NL_X_NP_X_NB_BS_ONE_HS")
+    kv = [
+        (_t(NB, BS, 1, HS * 8), _t(NB, BS, 1, HS), _t(NB, BS, 1, HS * 2))
+        for _ in range(NL)
+    ]
+    fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
+    assert fmt == F.NL_X_NP_X_NB_BS_ONE_HS
+
+
+def test_vllm_arity_one_single_head_tuple_is_np_one():
+    # NP=1: a single-head 1-tuple registration is the plane-tuple format
+    # with one plane, not a fused rank-4 registration.
+    if not hasattr(F, "NL_X_NP_X_NB_BS_ONE_HS"):
+        pytest.skip("extension lacks NL_X_NP_X_NB_BS_ONE_HS")
+    kv = [(_t(NB, BS, 1, HS * 8),) for _ in range(NL)]
+    fmt, out = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
+    assert fmt == F.NL_X_NP_X_NB_BS_ONE_HS
+    assert [p.data_ptr() for p in out[0]] == [kv[0][0].data_ptr()]
+
+
+def test_vllm_arity_one_multi_head_tuple_rejected():
+    # Multi-head arity-1 tuples match no branch and must fail loudly.
+    kv = [(_t(NB, BS, NH, HS),) for _ in range(NL)]
+    with pytest.raises(ValueError):
+        detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
+
+
+def test_vllm_tuple_equal_widths_stays_kv_pair():
+    # Equal-width single-head pairs are indistinguishable from generic (K, V)
+    # and must keep the per-layer (K, V) tuple classification.
+    kv = [(_t(NB, BS, 1, HS), _t(NB, BS, 1, HS)) for _ in range(NL)]
+    fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
+    assert fmt == F.NL_X_TWO_X_NB_BS_NH_HS

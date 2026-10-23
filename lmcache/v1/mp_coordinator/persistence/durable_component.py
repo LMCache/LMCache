@@ -7,7 +7,7 @@ shape and nothing else.
 """
 
 # Standard
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
@@ -67,5 +67,27 @@ class DurableComponent(Protocol):
         Args:
             state: A :meth:`capture` value, as decoded from the artifact;
                 implementations know their own shape.
+        """
+        ...
+
+
+@runtime_checkable
+class Durability(Protocol):
+    """Something that has durable state -- its own, or another object's.
+
+    Structural rather than inherited: holding durable state is a property
+    of a class, not of the package it lives in, so a view or controller
+    that has none says nothing at all and a class outside both can still
+    be captured.
+    """
+
+    def get_durable_components(self) -> Sequence[DurableComponent]:
+        """Return the state that needs to outlive the process.
+
+        Usually the object itself. One that owns others -- a controller
+        with a quota table and an eviction policy -- returns them
+        alongside, so a caller collects state without knowing what
+        anything is made of. Each component carries the
+        ``persistence_type`` that decides which artifact it goes in.
         """
         ...
