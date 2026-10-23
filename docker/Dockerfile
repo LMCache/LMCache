@@ -98,7 +98,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
         VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
             "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" ; \
     fi && \
-    uv pip install --reinstall-package nixl "nixl==${NIXL_VERSION}" && \
+    uv pip install "nixl==${NIXL_VERSION}" && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
     bash docker/build_raw_block_wheel.sh dist_lmcache && \
@@ -131,7 +131,7 @@ RUN . /opt/venv/bin/activate && \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
     # The nixl extra adds the NIXL connector (lmcache-nixl) at lmcache's version.
-    uv pip install --reinstall-package nixl "lmcache[nixl]${VER:+==${VER}}" \
+    uv pip install "lmcache[nixl]${VER:+==${VER}}" \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match --verbose && \
     # The Rust module is published at lmcache's version; pin it to the lmcache
@@ -164,7 +164,7 @@ RUN . /opt/venv/bin/activate && \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
-    uv pip install --reinstall-package nixl "lmcache[nixl]==${VER}" \
+    uv pip install "lmcache[nixl]==${VER}" \
         lmcache-rust-raw-block-io==${VER} \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu129 \
