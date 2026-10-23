@@ -12,8 +12,8 @@ from lmcache.v1.compute.models.utils import VLLMModelTracker
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.inprocess.v1.cache_engine import LMCacheEngine
     from lmcache.inprocess.v1.gpu_connector import GPUConnectorInterface
-    from lmcache.v1.cache_engine import LMCacheEngine
     from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
