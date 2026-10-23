@@ -74,6 +74,13 @@ The **BUILD_HF3FS** environment variable controls compilation:
   Operations whose lane key is **not** present in the dict use the
   shared ``num_workers`` pool.  There is no requirement to set all
   keys — you can configure only the lanes that need dedicated pools.
+- ``max_capacity_gb`` (float, default ``0``): Declared L2 capacity in GiB
+  across all ``base_paths``, used for usage accounting.  ``0`` disables
+  capacity accounting.  A value ``> 0`` does **not** bound 3FS usage on
+  its own — watermark eviction runs only when the adapter spec also
+  carries an ``eviction`` block; see
+  :ref:`L2 Eviction <l2-eviction-adapter-support>` in the L2 storage
+  overview for the supported policies and configuration.
 
 **HF3FS Fields**
 
@@ -110,7 +117,8 @@ The **BUILD_HF3FS** environment variable controls compilation:
         "lookup": 2,
         "retrieve": 16,
         "store": 4
-      }
+      },
+      "max_capacity_gb": 1000
     }'
 
 
