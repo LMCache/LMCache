@@ -314,12 +314,15 @@ class P2PController(DiscoverableModule):
 
         key_groups = _group_keys_by_object_group(keys, group_layout_descs)
         if key_groups:
-            # NOTE: skip_l2=True -- only objects already resident in L1 are
-            # locked; "full" keeps every resident key, gaps allowed.
+            # NOTE: no L2 adapter is allowed -- only objects already resident
+            # in L1 are locked; "full" keeps every resident key, gaps allowed.
             handle = self._ctx.storage_manager.submit_prefetch_task(
-                PrefetchTaskSpec(key_groups=key_groups, fetching_policy="full"),
+                PrefetchTaskSpec(
+                    key_groups=key_groups,
+                    fetching_policy="full",
+                    allowed_l2_memory_tags=frozenset(),
+                ),
                 external_request_id=f"p2p-{task_id}",
-                skip_l2=True,
             )
         else:
             # Nothing to look up: an already-complete empty handle.
