@@ -239,6 +239,34 @@ All code must pass `pre-commit run --all-files` (mirrors CI: ruff lint/format,
 isort, mypy, codespell). C++/CUDA files use clang-format (Google style, 80-col).
 Rust code uses `cargo fmt` and `cargo clippy`.
 
+#### Direct torch device check
+
+The `ban-direct-torch-device` hook uses
+[`tools/check_direct_torch_device.py`](../tools/check_direct_torch_device.py).
+It checks executable Python syntax, including annotations and definition fields,
+while ignoring comments and strings. It recognizes direct backend references,
+import/assignment aliases, constant `getattr`, and literal list/tuple contents
+through indexing, unpacking and direct iteration. Function, class, lambda and
+comprehension bindings respect lexical scope.
+
+This is a bounded lint check, not a general Python data-flow analyzer:
+
+- Function bodies are inspected independently, not simulated at call sites.
+  Arguments, return values, escaping closures and call effects are not propagated.
+- Deferred function globals use a conservative union of module-level bindings.
+  An import after a definition is recognized, but exact call timing is not.
+- Mutable container writes and alias identity, dictionary contents, container
+  arithmetic/slices, wrapper iterators and generator consumption are not inferred.
+  Generator expressions are still inspected for direct references.
+- Branches conservatively join bindings. Loops flatten sequence shapes to keep
+  analysis finite; only simple match captures propagate their subject.
+
+These limits can produce both missed indirect references and conservative
+matches (for example, clearing a list after storing torch is not modeled).
+Do not use indirect access to bypass the rule; use platform abstractions instead.
+Keep regression tests for supported syntax and explicit boundary cases rather
+than adding Python execution machinery to cover unusual indirection.
+
 ### 7.4 Logging
 
 - Use the project's `init_logger(__name__)` from `lmcache.logging`, not bare `logging.getLogger()`.
