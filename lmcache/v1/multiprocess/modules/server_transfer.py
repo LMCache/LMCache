@@ -69,7 +69,7 @@ def create_transfer_strategy(
         positive pool size, otherwise the safe inline strategy.
     """
     if shm_name and pool_size > 0:
-        logger.info("Using shm non-GPU transfer strategy")
+        logger.info("Using shm engine-driven transfer strategy")
         return ShmTransferStrategy(
             storage_manager=storage_manager,
             pending_writes=pending_writes,
@@ -81,7 +81,7 @@ def create_transfer_strategy(
             ),
         )
 
-    logger.info("Using safe inline non-GPU transfer strategy")
+    logger.info("Using safe inline engine-driven transfer strategy")
     return InlineTransferStrategy(storage_manager, read_owner_resolver)
 
 

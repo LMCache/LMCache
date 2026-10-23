@@ -167,8 +167,8 @@ assert_engine_driven_transport() {
 
     local marker
     case "$ENGINE_DRIVEN_TRANSPORT" in
-        inline) marker="Using safe inline non-GPU transfer strategy" ;;
-        shm) marker="Using shm non-GPU transfer strategy" ;;
+        inline) marker="Using safe inline engine-driven transfer strategy" ;;
+        shm) marker="Using shm engine-driven transfer strategy" ;;
         *)
             echo "ERROR: ENGINE_DRIVEN_TRANSPORT must be inline or shm, got '$ENGINE_DRIVEN_TRANSPORT'."
             return 1
