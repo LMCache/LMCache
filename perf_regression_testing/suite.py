@@ -363,6 +363,13 @@ def main() -> None:
         if held is None:
             print(f"another suite still holds {root}/prt-suite.lock", file=sys.stderr)
             sys.exit(EXIT_LOCKED)
+        # With the lock held no other suite runs, so any PRT container is left
+        # by a suite killed before its teardown (a job lost after SIGTERM), and
+        # still holds GPUs and pinned memory.
+        stale = docker.prt_containers()
+        if stale:
+            logger.warning("removing containers of a dead suite: %s", stale)
+            docker.remove(stale, stop_s=0)
         out = a.out or root / "prt-suites" / time.strftime(
             f"{a.suite}_%Y%m%d-%H%M%S", time.gmtime()
         )

@@ -184,3 +184,22 @@ def test_a_deployment_outside_the_suite_is_a_usage_error(
     assert e.value.code == suite.EXIT_SUITE_INVALID
     err = capsys.readouterr().err
     assert "vllm_lmcache" in err and "vllm_native" in err
+
+
+def test_a_suite_first_removes_containers_a_dead_suite_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    removed: list[list[str]] = []
+
+    def remove(names: list[str], stop_s: int) -> list[str]:
+        removed.append(names)
+        return []
+
+    monkeypatch.setattr(suite.docker, "prt_containers", lambda: ["prt-old-lmcache"])
+    monkeypatch.setattr(suite.docker, "remove", remove)
+    monkeypatch.setattr(suite, "suite", lambda name, out, deployments: 0)
+    monkeypatch.setattr("sys.argv", ["suite", "--suite", "nightly"])
+    with pytest.raises(SystemExit) as e:
+        suite.main()
+    assert e.value.code == 0
+    assert removed == [["prt-old-lmcache"]]

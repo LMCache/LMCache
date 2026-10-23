@@ -249,6 +249,21 @@ def load(path: Path) -> None:
     subprocess.run(["docker", "load", "-i", str(path)], capture_output=True, check=True)
 
 
+def prt_containers() -> list[str]:
+    """Return the names of all PRT containers on the host, running or not.
+
+    Returns:
+        Names of the containers carrying the ``prt.run`` label.
+    """
+    out = subprocess.run(
+        ["docker", "ps", "-a", "--filter", "label=prt.run", "--format", "{{.Names}}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout.split()
+
+
 def remove(names: list[str], stop_s: int = STOP_S, timeout_s: float = 600) -> list[str]:
     """Stop and remove containers, retrying until they are gone.
 
