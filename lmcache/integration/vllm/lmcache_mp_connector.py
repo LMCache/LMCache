@@ -1316,6 +1316,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             into account.
         """
         tracker = self._get_or_create_request_tracker(request)
+        if tracker.token_drop_spec is not None:
+            return 0, False
 
         # A failed asynchronous load is bypassed until vLLM admits the request
         # for local computation via update_state_after_alloc().  The scheduler
@@ -1494,6 +1496,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         tracker = self._get_or_create_request_tracker(request)
+        if tracker.token_drop_spec is not None:
+            return
         if tracker.lookup_started_at is None:
             tracker.lookup_started_at = time.monotonic()
         self.scheduler_adapter.maybe_submit_lookup_request(
@@ -1697,6 +1701,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "num_lmcache_extra_cached_tokens": max(0, num_lmcache - num_vllm),
             }
 
+        tracker = self.request_trackers.get(request.request_id)
+        is_token_drop = tracker is not None and tracker.token_drop_spec is not None
+
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
 
@@ -1706,12 +1713,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.scheduler_adapter.cleanup_lookup_result(request.request_id)
 
         if self.lazy_offload:
+            # TD has no stores, but must settle the registry slot on ID reuse.
             # Blocks return to the free queue (False) and remain observable;
             # the manager ends the LMCache session after all deferred stores
             # have either completed or been dropped.
             actions = self._lazy_offload_manager.on_request_finished(request.request_id)
             for request_id in actions.sessions_to_end:
                 self.scheduler_adapter.end_session(request_id)
+            return False, (return_params or None)
+
+        if is_token_drop:
             return False, (return_params or None)
 
         # Notify LMCache to end the session for this request
@@ -1842,7 +1853,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 new_request.num_computed_tokens, num_new_tokens
             )
 
-            if not self._can_store:
+            if request_tracker.token_drop_spec is not None or not self._can_store:
                 continue
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
@@ -1884,7 +1895,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 cached_reqs.num_computed_tokens[idx], num_new_tokens
             )
 
-            if not self._can_store:
+            if request_tracker.token_drop_spec is not None or not self._can_store:
                 continue
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
@@ -1994,11 +2005,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     self._lazy_offload_manager.on_request_reset(request_id)
 
         if request_id not in self.request_trackers:
+            new_tracker = LMCacheMPRequestTracker(request)
             if self.lazy_offload:
+                # Clear a predecessor's buffered stores even when this request is TD.
                 actions = self._lazy_offload_manager.on_request_arrived(request_id)
                 for session_id in actions.sessions_to_end:
                     self.scheduler_adapter.end_session(session_id)
-            new_tracker = LMCacheMPRequestTracker(request)
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]
 
