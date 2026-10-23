@@ -200,11 +200,11 @@ class CacheGenGPUEncoderOutput:
             return pickle.load(f)
 
     def debug_print_device(self):
-        logger.debug(f"bytestream device: {self.data_chunks[0].bytestream.device}")
+        logger.debug("bytestream device: %s", self.data_chunks[0].bytestream.device)
         logger.debug(
-            f"bytestream_lengths device: "
-            f"{self.data_chunks[0].bytestream_lengths.device}"
+            "bytestream_lengths device: %s",
+            self.data_chunks[0].bytestream_lengths.device,
         )
-        logger.debug(f"cdf device: {self.cdf.device}")
-        logger.debug(f"max_tensors_key device: {self.max_tensors_key.device}")
-        logger.debug(f"max_tensors_value device: {self.max_tensors_value.device}")
+        logger.debug("cdf device: %s", self.cdf.device)
+        logger.debug("max_tensors_key device: %s", self.max_tensors_key.device)
+        logger.debug("max_tensors_value device: %s", self.max_tensors_value.device)

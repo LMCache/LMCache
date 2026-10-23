@@ -3,7 +3,8 @@
 
 # Standard
 from collections.abc import Generator
-from unittest.mock import MagicMock
+from typing import Literal
+from unittest.mock import MagicMock, call
 import hashlib
 
 # Third Party
@@ -12,8 +13,10 @@ import torch
 import zmq
 
 # First Party
-from lmcache import torch_dev
+from lmcache import torch_dev, torch_device_type
+from lmcache.cli.commands.bench.server_bench import client as client_module
 from lmcache.cli.commands.bench.server_bench import helpers
+from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
 from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
 from lmcache.cli.commands.bench.server_bench.config import BenchConfig
 from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
@@ -40,7 +43,8 @@ from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
         pytest.param(
             ("gpu", "auto", EngineDrivenTransferContext, "cuda"),
             marks=pytest.mark.skipif(
-                not torch.cuda.is_available(), reason="CUDA is not available"
+                not (torch_device_type == "cuda" and torch_dev.is_available()),
+                reason="CUDA is not available",
             ),
         ),
         pytest.param(
@@ -82,11 +86,16 @@ def verification_client(
     tensors: list[torch.Tensor] = []
 
     def allocate(
-        *, groups: list[KVLayerGroupInfo], device: str | None
-    ) -> list[torch.Tensor]:
-        tensor = torch.ones(2, 8, 2, 1, 4, dtype=torch.float16, device=tensor_device)
-        tensors.append(tensor)
-        return [tensor]
+        *,
+        groups: list[KVLayerGroupInfo],
+        device: str | torch.device | None,
+        block_size: int,
+    ) -> KVCacheBuffers:
+        buffers = KVCacheBuffers(groups, device=tensor_device, block_size=block_size)
+        for tensor in buffers.kv_caches.values():
+            tensor.fill_(len(tensors) + 1)
+            tensors.append(tensor)
+        return buffers
 
     def create_context(*args: object, **kwargs: object) -> MagicMock:
         return MagicMock(spec=context_type)
@@ -96,7 +105,7 @@ def verification_client(
     monkeypatch.setattr(zmq, "Context", MagicMock)
     monkeypatch.setattr(RequestClientFactory, "create", MagicMock())
     monkeypatch.setattr(helpers, "_get_chunk_size", lambda client: 2)
-    monkeypatch.setattr(helpers, "_allocate_kv_cache", allocate)
+    monkeypatch.setattr(client_module, "KVCacheBuffers", allocate)
     monkeypatch.setattr(helpers, "_query_checksum", query_checksum)
     monkeypatch.setattr(transfer_context, "create_transfer_context", create_context)
     monkeypatch.setattr(EngineDrivenTransferContext, "register", MagicMock())
@@ -137,32 +146,41 @@ def test_zero_destination_follows_transfer_context(
 
     bench.zero_destination(request, start_token=2, token_count=2)
 
-    for tensor in tensors:
-        expected = torch.ones_like(tensor)
+    for rank, tensor in enumerate(tensors):
+        expected = torch.full_like(tensor, rank + 1)
         if not uses_handles:
             expected[:, 3:4].zero_()
         torch.testing.assert_close(tensor, expected)
 
 
+@pytest.mark.parametrize("operation", ["store", "retrieve"])
 def test_checksums_follow_transfer_context(
     verification_client: tuple[ServerBenchClient, list[torch.Tensor], MagicMock, bool],
+    operation: Literal["store", "retrieve"],
 ) -> None:
     """Hash local bytes for engine-driven contexts and query HTTP for handles."""
     bench, tensors, query_checksum, uses_handles = verification_client
     request = bench.create_request(1, "verification-checksum", "cold")
     assert request is not None
 
-    checksums = bench.compute_checksums(request, start_token=2, token_count=2)
+    checksums = bench.compute_checksums(
+        request, start_token=2, token_count=2, operation=operation
+    )
 
     if uses_handles:
-        assert checksums == ["server-checksum"]
-        query_checksum.assert_called_once_with(
-            "http://localhost:8080", 3, 1, 2, 2, instance_id=1000
-        )
-    else:
-        expected = [
-            hashlib.md5(tensor[:, 3:4].contiguous().cpu().numpy().tobytes()).hexdigest()
-            for tensor in tensors
+        assert checksums == {0: ["server-checksum"], 1: ["server-checksum"]}
+        assert query_checksum.call_args_list == [
+            call("http://localhost:8080", 3, 1, 2, 2, instance_id=1000 + rank)
+            for rank in range(2)
         ]
+    else:
+        expected = {
+            rank: [
+                hashlib.md5(
+                    tensor[:, 3:4].contiguous().cpu().numpy().tobytes()
+                ).hexdigest()
+            ]
+            for rank, tensor in enumerate(tensors)
+        }
         assert checksums == expected
         query_checksum.assert_not_called()

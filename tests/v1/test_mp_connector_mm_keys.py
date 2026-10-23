@@ -231,6 +231,7 @@ def test_lookup_hint_carries_vllm_prefix_hit() -> None:
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = False
     connector.lazy_offload = False
+    connector._hit_alignment_tokens = 64
 
     assert connector.get_num_new_matched_tokens(request, 16) == (None, True)
     assert scheduler_adapter.maybe_submit_lookup_request.call_args.kwargs[
@@ -261,6 +262,7 @@ def test_recurrent_lookup_reserves_final_prompt_token() -> None:
         cache_salt="",
         request_configs={"lmcache.hint.engine_computed_tokens": 0},
         reserve_last_token=True,
+        start=0,
     )
     tracker = connector.request_trackers[request.request_id]
     assert tracker.num_lmcache_hit_tokens == 64
