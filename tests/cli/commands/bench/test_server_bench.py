@@ -172,6 +172,7 @@ class TestCaseDelegation:
             sequence_id_offset=5,
             sequence_id_stride=1,
             interval_seconds=0.0,
+            num_tokens=512,
             stop=ANY,
         )
         client_factory.assert_called_once_with(ANY, ANY, client_index=0)
@@ -185,7 +186,7 @@ class TestCaseDelegation:
                 call("total_requests", "Total requests", 2),
                 call("checksum_ok", "Checksum OK", 1),
                 call("checksum_fail", "Checksum FAIL", 1),
-                call("pass_rate", "Pass rate (%)", 50.0),
+                call("pass_rate", "Checksum pass rate (%)", 50.0),
             ]
         )
         metrics.emit.assert_called_once_with()
@@ -248,6 +249,7 @@ class TestCaseDelegation:
                 sequence_id_offset=10,
                 sequence_id_stride=2,
                 interval_seconds=0.0,
+                num_tokens=512,
                 stop=ANY,
             ),
             call(
@@ -255,6 +257,7 @@ class TestCaseDelegation:
                 sequence_id_offset=11,
                 sequence_id_stride=2,
                 interval_seconds=0.0,
+                num_tokens=512,
                 stop=ANY,
             ),
         ]
@@ -1168,7 +1171,9 @@ class TestClientMultiWorker:
         gc.collect()
         assert all(ref() is not None for ref in tensor_refs)
         try:
-            request = bench_client.create_request(0, "req-0-test", "test")
+            request = bench_client.create_request(
+                0, "req-0-test", "test", token_ids=tuple(range(32))
+            )
             assert request is not None
             lookup = bench_client.lookup(request)
             store = bench_client.store(
@@ -1181,7 +1186,7 @@ class TestClientMultiWorker:
                 start_token=0,
                 token_count=request.num_full_tokens,
             )
-            bench_client.end_session(request)
+            bench_client.release_request(request)
             result = (lookup, store, retrieve)
         finally:
             bench_client.close()
@@ -1321,6 +1326,7 @@ class TestClientMultiWorker:
             "LOOKUP should fire exactly once regardless of tp_size "
             "(is_mla=%s, tp=%d)" % (is_mla, tp)
         )
+        assert lookups[0][1][0].num_kv_readers == (tp if is_mla else 1)
         # Reader count comes from the key; tp_size is a legacy wire field.
         assert lookups[0][1][1] == tp, (
             "LOOKUP payload tp_size must equal simulated tp "
@@ -1426,7 +1432,9 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     )
     bench.start()
     try:
-        request = bench.create_request(0, "req-event", "test")
+        request = bench.create_request(
+            0, "req-event", "test", token_ids=tuple(range(4))
+        )
         assert request is not None
         result = getattr(bench, operation)(request, start_token=0, token_count=4)
         assert result is not None
