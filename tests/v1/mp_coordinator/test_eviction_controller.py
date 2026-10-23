@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.api import (
@@ -37,10 +38,9 @@ from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
 def _make_key(salt: str, model: str = "m", rank: int = 0, h: str = "aa") -> ObjectKey:
     return ObjectKey(
-        chunk_hash=bytes.fromhex(h),
-        model_name=model,
-        kv_rank=rank,
-        cache_salt=salt,
+        identity=ObjectKeyIdentity(
+            chunk_hash=bytes.fromhex(h), model_name=model, kv_rank=rank, cache_salt=salt
+        )
     )
 
 
@@ -941,7 +941,7 @@ async def test_the_controller_dispatches_to_the_shared_membership_view():
 
 
 def _in_group(key: ObjectKey, group: int) -> ObjectKey:
-    return replace(key, object_group_id=group)
+    return replace(key, identity=replace(key.identity, object_group_id=group))
 
 
 def test_a_pin_covers_its_chunk_in_every_object_group():

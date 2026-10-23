@@ -278,7 +278,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
         Returns:
             ``keys[g][c]`` is chunk ``c``'s key in group ``g``
-            (``ObjectKey.object_group_id == g``).
+            (``ObjectKey.identity.object_group_id == g``).
         """
         return self._ctx.resolve_obj_keys(key, list(range(num_groups)))
 

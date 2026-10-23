@@ -27,6 +27,7 @@ from typing import Any, Callable
 import torch
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     GroupedObjectKeys,
@@ -155,19 +156,21 @@ def decode_args(args: dict[str, Any]) -> dict[str, Any]:
 
 def _enc_object_key(k: ObjectKey) -> dict[str, Any]:
     return {
-        "chunk_hash": k.chunk_hash,
-        "model_name": k.model_name,
-        "kv_rank": k.kv_rank,
-        "object_group_id": k.object_group_id,
+        "chunk_hash": k.identity.chunk_hash,
+        "model_name": k.identity.model_name,
+        "kv_rank": k.identity.kv_rank,
+        "object_group_id": k.identity.object_group_id,
     }
 
 
 def _dec_object_key(d: dict[str, Any]) -> ObjectKey:
     return ObjectKey(
-        chunk_hash=d["chunk_hash"],
-        model_name=d["model_name"],
-        kv_rank=d["kv_rank"],
-        object_group_id=d.get("object_group_id", 0),
+        identity=ObjectKeyIdentity(
+            chunk_hash=d["chunk_hash"],
+            model_name=d["model_name"],
+            kv_rank=d["kv_rank"],
+            object_group_id=d.get("object_group_id", 0),
+        )
     )
 
 

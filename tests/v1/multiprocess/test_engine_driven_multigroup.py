@@ -16,6 +16,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.multiprocess.custom_types import (
     GroupLayout,
@@ -59,10 +60,12 @@ def _detected_block_size(kv_caches: dict[str, torch.Tensor]) -> int:
 
 def _obj_key(chunk_hash: int, group: int) -> ObjectKey:
     return ObjectKey(
-        chunk_hash=ObjectKey.IntHash2Bytes(chunk_hash),
-        model_name="m",
-        kv_rank=0,
-        object_group_id=group,
+        identity=ObjectKeyIdentity(
+            chunk_hash=ObjectKey.IntHash2Bytes(chunk_hash),
+            model_name="m",
+            kv_rank=0,
+            object_group_id=group,
+        )
     )
 
 
@@ -489,10 +492,10 @@ class _FakeStorageManager:
         self.read_owners: list[Any] = []
         self.deleted: list[ObjectKey] = []
 
-    def reserve_write(self, obj_keys, _layout):
+    def reserve_write(self, obj_keys: list[ObjectKey], _layout):
         reserved = {}
         for obj_key in obj_keys:
-            gid = obj_key.object_group_id
+            gid = obj_key.identity.object_group_id
             obj = _FakeMemoryObj(self._shapes[gid], l1_manager_id=gid)
             self.objs[obj_key] = obj
             reserved[obj_key] = obj
@@ -1092,10 +1095,10 @@ class _FakeShmStorageManager(_FakeStorageManager):
         super().__init__(shapes_by_group)
         self.reserved: list[ObjectKey] = []
 
-    def reserve_write(self, obj_keys, _layout):
+    def reserve_write(self, obj_keys: list[ObjectKey], _layout):
         reserved = {}
         for obj_key in obj_keys:
-            obj = _FakeShmMemoryObj(self._shapes[obj_key.object_group_id])
+            obj = _FakeShmMemoryObj(self._shapes[obj_key.identity.object_group_id])
             self.objs[obj_key] = obj
             reserved[obj_key] = obj
         self.reserved.extend(obj_keys)

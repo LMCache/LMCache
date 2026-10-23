@@ -8,6 +8,7 @@ Tests are written against the StorePolicy contract defined in store_policy.py.
 # Third Party
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.storage_controllers.store_policy import (
@@ -23,9 +24,11 @@ from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 def make_object_key(chunk_id: int) -> ObjectKey:
     """Create a test ObjectKey with the given chunk ID."""
     return ObjectKey(
-        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
-        model_name="test_model",
-        kv_rank=0,
+        identity=ObjectKeyIdentity(
+            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+            model_name="test_model",
+            kv_rank=0,
+        )
     )
 
 

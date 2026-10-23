@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     CapacitySnapshot,
     L1BackendType,
@@ -56,7 +57,11 @@ import lmcache.v1.mp_coordinator.cache_events as cache_events
 
 
 def _key(hash_byte: int) -> ObjectKey:
-    return ObjectKey(chunk_hash=bytes([hash_byte]) * 4, model_name="m", kv_rank=0)
+    return ObjectKey(
+        identity=ObjectKeyIdentity(
+            chunk_hash=bytes([hash_byte]) * 4, model_name="m", kv_rank=0
+        )
+    )
 
 
 # The namespace ``_key`` stores in; fragment queries must ask from it.
@@ -186,7 +191,7 @@ def test_tokens_stored_events_publish_no_batches():
         Event(
             event_type=EventType.MP_TOKENS,
             metadata={
-                "chunk_hashes": [_key(1).chunk_hash],
+                "chunk_hashes": [_key(1).identity.chunk_hash],
                 "token_chunks": [[1, 2]],
                 "token_offsets": [0],
             },
@@ -204,13 +209,17 @@ def test_tokens_event_stamps_store_entries():
     sink = _RecordingSink()
     subscriber = _subscriber(sink)
 
-    rank1_key = ObjectKey(chunk_hash=_key(1).chunk_hash, model_name="m", kv_rank=1)
+    rank1_key = ObjectKey(
+        identity=ObjectKeyIdentity(
+            chunk_hash=_key(1).identity.chunk_hash, model_name="m", kv_rank=1
+        )
+    )
     _dispatch(
         subscriber,
         Event(
             event_type=EventType.MP_TOKENS,
             metadata={
-                "chunk_hashes": [_key(1).chunk_hash],
+                "chunk_hashes": [_key(1).identity.chunk_hash],
                 "token_chunks": [[1, 2]],
                 "token_offsets": [0],
             },
@@ -259,7 +268,7 @@ def test_tokens_event_stamps_the_chunks_offset():
         Event(
             event_type=EventType.MP_TOKENS,
             metadata={
-                "chunk_hashes": [key.chunk_hash for key in keys],
+                "chunk_hashes": [key.identity.chunk_hash for key in keys],
                 "token_chunks": [[1, 2], [3, 4]],
                 "token_offsets": [256, 512],
             },
@@ -295,7 +304,7 @@ def test_token_binding_cache_evicts_oldest_down_to_half(monkeypatch):
         Event(
             event_type=EventType.MP_TOKENS,
             metadata={
-                "chunk_hashes": [key.chunk_hash for key in keys],
+                "chunk_hashes": [key.identity.chunk_hash for key in keys],
                 "token_chunks": [[1, 2], [3, 4], [5, 6]],
                 "token_offsets": [0, 256, 512],
             },
@@ -336,7 +345,7 @@ def test_token_binding_eviction_warns(monkeypatch):
         Event(
             event_type=EventType.MP_TOKENS,
             metadata={
-                "chunk_hashes": [_key(i).chunk_hash for i in (1, 2, 3)],
+                "chunk_hashes": [_key(i).identity.chunk_hash for i in (1, 2, 3)],
                 "token_chunks": [[1, 2], [3, 4], [5, 6]],
                 "token_offsets": [0, 256, 512],
             },
@@ -357,7 +366,10 @@ def test_mismatched_token_chunks_raise():
             Event(
                 event_type=EventType.MP_TOKENS,
                 metadata={
-                    "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
+                    "chunk_hashes": [
+                        _key(1).identity.chunk_hash,
+                        _key(2).identity.chunk_hash,
+                    ],
                     "token_chunks": [[1, 2]],
                     "token_offsets": [0, 256],
                 },
@@ -375,7 +387,10 @@ def test_mismatched_token_offsets_raise():
             Event(
                 event_type=EventType.MP_TOKENS,
                 metadata={
-                    "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
+                    "chunk_hashes": [
+                        _key(1).identity.chunk_hash,
+                        _key(2).identity.chunk_hash,
+                    ],
                     "token_chunks": [[1, 2], [3, 4]],
                     "token_offsets": [0],
                 },
@@ -843,7 +858,10 @@ def test_token_bindings_feed_the_key_directory_end_to_end():
         Event(
             event_type=EventType.MP_TOKENS,
             metadata={
-                "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
+                "chunk_hashes": [
+                    _key(1).identity.chunk_hash,
+                    _key(2).identity.chunk_hash,
+                ],
                 "token_chunks": [[1, 2], [3, 4]],
                 "token_offsets": [0, 256],
             },
@@ -856,7 +874,9 @@ def test_token_bindings_feed_the_key_directory_end_to_end():
     subscriber.flush()
 
     key_directory = app.state.ctx.views.get(KeyDirectory)
-    assert key_directory.get_token_ids([_key(1).chunk_hash, _key(2).chunk_hash]) == [
+    assert key_directory.get_token_ids(
+        [_key(1).identity.chunk_hash, _key(2).identity.chunk_hash]
+    ) == [
         (1, 2),
         (3, 4),
     ]

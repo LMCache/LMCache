@@ -16,6 +16,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
     FaultInjectL2Adapter,
@@ -39,9 +40,11 @@ N_KEYS = 8
 def _object_key(chunk_id: int) -> ObjectKey:
     """Build an ObjectKey from a chunk id (test fixture)."""
     return ObjectKey(
-        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
-        model_name="test_model",
-        kv_rank=0,
+        identity=ObjectKeyIdentity(
+            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+            model_name="test_model",
+            kv_rank=0,
+        )
     )
 
 

@@ -7,6 +7,7 @@ Unit tests for :class:`IsolatedLRUEvictionPolicy`.
 import pytest
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.eviction_policy.isolated_lru import (
     IsolatedLRUEvictionPolicy,
@@ -17,10 +18,12 @@ from lmcache.v1.mp_coordinator.utils.encoding import encode_key
 
 def _key(chunk_id: int, cache_salt: str = "") -> ObjectKey:
     return ObjectKey(
-        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
-        model_name="m",
-        kv_rank=0,
-        cache_salt=cache_salt,
+        identity=ObjectKeyIdentity(
+            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+            model_name="m",
+            kv_rank=0,
+            cache_salt=cache_salt,
+        )
     )
 
 
@@ -67,7 +70,8 @@ class TestPerSaltTracking:
         actions = p.get_eviction_actions(expected_ratio=0.5, cache_salt="alice")
         evicted = actions[0].keys
         assert evicted == [k1], (
-            f"k1 should be LRU after touching k2; got {[k.chunk_hash for k in evicted]}"
+            "k1 should be LRU after touching k2; "
+            f"got {[k.identity.chunk_hash for k in evicted]}"
         )
 
 
@@ -79,7 +83,7 @@ class TestScopedEviction:
         p.on_keys_created([_key(1, "alice"), _key(2, "bob"), _key(3, "alice")])
         actions = p.get_eviction_actions(expected_ratio=1.0, cache_salt="alice")
         assert len(actions) == 1
-        evicted_salts = {k.cache_salt for k in actions[0].keys}
+        evicted_salts = {k.identity.cache_salt for k in actions[0].keys}
         assert evicted_salts == {"alice"}
         assert len(actions[0].keys) == 2
 
@@ -157,7 +161,7 @@ class TestDurableState:
             encode_key(_key(3)),
         ]
         victims = restored.get_eviction_actions(expected_ratio=0.4, cache_salt="")
-        assert [key.chunk_hash for key in victims[0].keys] == [
+        assert [key.identity.chunk_hash for key in victims[0].keys] == [
             ObjectKey.IntHash2Bytes(2)
         ]
 
@@ -192,6 +196,6 @@ class TestSectionName:
 
         victims = policy.get_eviction_actions(expected_ratio=0.5, cache_salt="")
 
-        assert [key.chunk_hash for key in victims[0].keys] == [
+        assert [key.identity.chunk_hash for key in victims[0].keys] == [
             ObjectKey.IntHash2Bytes(2)
         ]

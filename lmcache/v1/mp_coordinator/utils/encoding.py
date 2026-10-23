@@ -10,6 +10,7 @@ the fields. Sharing the encoding keeps the sections agreeing on it.
 from typing import cast
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey
 
 EncodedKey = tuple[bytes, str, int, int, str]
@@ -18,13 +19,13 @@ object_group_id, cache_salt)``."""
 
 
 def encode_key(key: ObjectKey) -> EncodedKey:
-    """Flatten a key for a capture, fields in declaration order."""
+    """Flatten an identity into the stable capture field order."""
     return (
-        key.chunk_hash,
-        key.model_name,
-        key.kv_rank,
-        key.object_group_id,
-        key.cache_salt,
+        key.identity.chunk_hash,
+        key.identity.model_name,
+        key.identity.kv_rank,
+        key.identity.object_group_id,
+        key.identity.cache_salt,
     )
 
 
@@ -36,18 +37,20 @@ def decode_key(encoded: object) -> ObjectKey:
             artifact -- a sequence, not necessarily a tuple.
 
     Returns:
-        The key, validated by ``ObjectKey`` itself.
+        The key, validated by ``ObjectKeyIdentity``.
 
     Raises:
-        ValueError: If a field violates an ``ObjectKey`` invariant.
+        ValueError: If a field violates an ``ObjectKeyIdentity`` invariant.
     """
     chunk_hash, model_name, kv_rank, object_group_id, cache_salt = cast(
         "EncodedKey", encoded
     )
     return ObjectKey(
-        chunk_hash=chunk_hash,
-        model_name=model_name,
-        kv_rank=kv_rank,
-        object_group_id=object_group_id,
-        cache_salt=cache_salt,
+        identity=ObjectKeyIdentity(
+            chunk_hash=chunk_hash,
+            model_name=model_name,
+            kv_rank=kv_rank,
+            object_group_id=object_group_id,
+            cache_salt=cache_salt,
+        )
     )

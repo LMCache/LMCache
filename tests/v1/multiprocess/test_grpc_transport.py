@@ -19,6 +19,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -251,7 +252,7 @@ def grpc_client(
             keys: list[ObjectKey],
             group_layout_descs: dict[int, MemoryLayoutDesc],
         ) -> int:
-            assert keys[0].cache_salt == "tenant"
+            assert keys[0].identity.cache_salt == "tenant"
             assert group_layout_descs[0].shapes == [torch.Size([2, 4])]
             assert group_layout_descs[0].dtypes == [torch.float16]
             return 41
@@ -685,7 +686,16 @@ def test_generated_grpc_services_communicate_end_to_end(
     )
 
     task_id = client.p2p_lookup_and_lock(
-        [ObjectKey(b"chunk", "model", 0, cache_salt="tenant")],
+        [
+            ObjectKey(
+                identity=ObjectKeyIdentity(
+                    chunk_hash=b"chunk",
+                    model_name="model",
+                    kv_rank=0,
+                    cache_salt="tenant",
+                )
+            )
+        ],
         {0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])},
     ).result(5)
     assert task_id == 41

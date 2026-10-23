@@ -35,12 +35,12 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     Returns:
         A deterministic object name that is safe to use as a file name.
     """
-    safe_model_name = key.model_name.replace("/", "--")
-    chunk_hex = key.chunk_hash.hex()
-    salt_suffix = f"@{key.cache_salt}" if key.cache_salt else ""
+    safe_model_name = key.identity.model_name.replace("/", "--")
+    chunk_hex = key.identity.chunk_hash.hex()
+    salt_suffix = f"@{key.identity.cache_salt}" if key.identity.cache_salt else ""
     return (
-        f"{safe_model_name}_{key.kv_rank:08x}_"
-        f"{key.object_group_id:x}_{chunk_hex}{salt_suffix}.bin"
+        f"{safe_model_name}_{key.identity.kv_rank:08x}_"
+        f"{key.identity.object_group_id:x}_{chunk_hex}{salt_suffix}.bin"
     )
 
 
@@ -50,7 +50,7 @@ def _object_key_to_relpath(key: ObjectKey) -> str:
     The shard remains independent of ``cache_salt``; salted keys with the same
     chunk hash have distinct filenames inside the same shard.
     """
-    chunk_hex = key.chunk_hash.hex()
+    chunk_hex = key.identity.chunk_hash.hex()
     return os.path.join(chunk_hex[:2], chunk_hex[2:4], _object_key_to_filename(key))
 
 

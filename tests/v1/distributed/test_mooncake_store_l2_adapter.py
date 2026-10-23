@@ -19,6 +19,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l2_adapters import (
@@ -67,9 +68,11 @@ requires_mooncake = pytest.mark.skipif(
 
 def create_object_key(chunk_id: int, model_name: str = "test_model") -> ObjectKey:
     return ObjectKey(
-        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
-        model_name=model_name,
-        kv_rank=0,
+        identity=ObjectKeyIdentity(
+            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+            model_name=model_name,
+            kv_rank=0,
+        )
     )
 
 

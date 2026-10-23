@@ -11,6 +11,7 @@ import select
 import torch
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.memory_management import (
@@ -73,8 +74,8 @@ def make_object_keys(
 ) -> list[ObjectKey]:
     """Generate *num_keys* unique ``ObjectKey`` instances for benchmarking.
 
-    ``ObjectKey`` is a frozen dataclass with field order:
-    (chunk_hash, model_name, kv_rank).
+    ``ObjectKey`` wraps an immutable ``ObjectKeyIdentity`` containing the
+    chunk hash, model name and packed KV rank.
 
     Args:
         num_keys: Number of keys to generate.
@@ -88,9 +89,9 @@ def make_object_keys(
         chunk_hash = idx.to_bytes(16, "big")
         keys.append(
             ObjectKey(
-                chunk_hash=chunk_hash,
-                model_name=model_name,
-                kv_rank=idx,
+                identity=ObjectKeyIdentity(
+                    chunk_hash=chunk_hash, model_name=model_name, kv_rank=idx
+                )
             )
         )
     return keys

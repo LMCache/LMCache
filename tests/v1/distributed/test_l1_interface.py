@@ -9,6 +9,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
@@ -24,7 +25,13 @@ LAYOUT = MemoryLayoutDesc([torch.Size([1024])], [torch.float32])  # 4 KiB
 
 
 def key(index: int) -> ObjectKey:
-    return ObjectKey(ObjectKey.IntHash2Bytes(index), "conformance", 0)
+    return ObjectKey(
+        identity=ObjectKeyIdentity(
+            chunk_hash=ObjectKey.IntHash2Bytes(index),
+            model_name="conformance",
+            kv_rank=0,
+        )
+    )
 
 
 class RecordingListener(L1ManagerListener):

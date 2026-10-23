@@ -22,7 +22,7 @@ store. Check it again when working on any of the following:
   "sliding-window load-plan trimming" deferred in the hybrid design doc):
   its ``MooncakeStoreCoordinator.store_mask`` / ``load_mask`` derive masks
   from vLLM's own per-spec managers. Requires per-group objects in LMCache
-  (``ObjectKey.object_group_id``, LMCache #3608).
+  (``ObjectKey.identity.object_group_id``, LMCache #3608).
 - Hit-length computation for hybrid models: its ``ExternalCachedBlockPool``
   duck-types vLLM's ``BlockPool`` over a ``(group_id, hash)`` existence set
   and reuses ``KVCacheSpecRegistry`` manager classes, so promised hits are

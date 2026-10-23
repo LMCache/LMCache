@@ -6,12 +6,10 @@ syntax = "proto3";
 
 package lmcache.mp;
 
+import "common.proto";
+
 message ObjectKey {
-  bytes chunk_hash = 1;
-  string model_name = 2;
-  int64 kv_rank = 3;
-  int64 object_group_id = 4;
-  string cache_salt = 5;
+  ObjectKeyIdentity identity = 1;
 }
 
 message TensorShape {

@@ -74,11 +74,11 @@ def _object_key_to_string(key: ObjectKey) -> str:
         <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
     """
     base = (
-        f"{key.model_name}@{key.kv_rank:08x}"
-        f"@{key.object_group_id:x}@{key.chunk_hash.hex()}"
+        f"{key.identity.model_name}@{key.identity.kv_rank:08x}"
+        f"@{key.identity.object_group_id:x}@{key.identity.chunk_hash.hex()}"
     )
-    if key.cache_salt:
-        return f"{base}@{key.cache_salt}"
+    if key.identity.cache_salt:
+        return f"{base}@{key.identity.cache_salt}"
     return base
 
 

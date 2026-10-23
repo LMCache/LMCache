@@ -20,6 +20,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.raw_block import RawBlockCoreConfig
 from lmcache.v1.memory_management import (
@@ -107,10 +108,12 @@ def make_object_key(
         Object key with a stable hash, model name, and KV rank.
     """
     return ObjectKey(
-        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
-        model_name=model_name,
-        kv_rank=kv_rank,
-        cache_salt=cache_salt,
+        identity=ObjectKeyIdentity(
+            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+            model_name=model_name,
+            kv_rank=kv_rank,
+            cache_salt=cache_salt,
+        )
     )
 
 

@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ModuleMemoryCapacity, ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
@@ -143,10 +144,12 @@ def _ingest(
     """Push one STORE batch through the ingest gate."""
     seq = _take_seqs(client, instance_id, 1)
     key = ObjectKey(
-        chunk_hash=bytes([index]) * 32,
-        model_name="model",
-        kv_rank=0,
-        cache_salt="tenant",
+        identity=ObjectKeyIdentity(
+            chunk_hash=bytes([index]) * 32,
+            model_name="model",
+            kv_rank=0,
+            cache_salt="tenant",
+        )
     )
     _ctx(client).event_gate.ingest(
         CacheEventBatch(

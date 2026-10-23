@@ -269,14 +269,16 @@ def test_sparse_state_selects_latest_joint_endpoint(
     hit, storage, module, key = _lookup(endpoints, missing_page_chunk=missing_page)
     assert hit == expected
     state_keys = [
-        k for k, count in storage.locked.items() if count and k.object_group_id == 1
+        k
+        for k, count in storage.locked.items()
+        if count and k.identity.object_group_id == 1
     ]
     assert len(state_keys) == (len(endpoints) if expected else 0)
     if expected:
         expected_hash = module.context.token_hasher.compute_chunk_hashes(list(TOKENS))[
             expected - 1
         ]
-        assert {k.chunk_hash for k in state_keys} == {expected_hash}
+        assert {k.identity.chunk_hash for k in state_keys} == {expected_hash}
     module.free_lookup_locks(key, tp_size=len(endpoints))
     assert not +storage.locked
 

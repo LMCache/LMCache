@@ -307,7 +307,9 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
             keys: list[ObjectKey] = event.metadata["keys"]
             by_model: dict[str, dict[bytes, None]] = {}
             for key in keys:
-                by_model.setdefault(key.model_name, {})[key.chunk_hash] = None
+                by_model.setdefault(key.identity.model_name, {})[
+                    key.identity.chunk_hash
+                ] = None
             for model_name, hashes in by_model.items():
                 if event.event_type == EventType.L1_KEYS_EVICTED:
                     self._append_kv_event(

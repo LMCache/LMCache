@@ -1190,7 +1190,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # the session still holds it.
         parent_hashes: list[bytes | None] = [None] * len(obj_keys)
         for index in range(1, len(obj_keys)):
-            parent_hashes[index] = obj_keys[index - 1].chunk_hash
+            parent_hashes[index] = obj_keys[index - 1].identity.chunk_hash
         if key.start >= chunk_size:
             session = self._ctx.session_manager.get(key.request_id)
             if session is not None:
@@ -1202,7 +1202,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 event_type=EventType.MP_TOKENS,
                 session_id=key.request_id,
                 metadata={
-                    "chunk_hashes": [obj_key.chunk_hash for obj_key in obj_keys],
+                    "chunk_hashes": [
+                        obj_key.identity.chunk_hash for obj_key in obj_keys
+                    ],
                     "token_chunks": token_chunks,
                     "token_offsets": token_offsets,
                     "parent_hashes": parent_hashes,

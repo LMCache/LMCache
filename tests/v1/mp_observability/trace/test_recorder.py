@@ -17,6 +17,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
@@ -147,7 +148,13 @@ class TestRecordRoundtrip:
             publish_call_event(
                 "lmcache.X.method",
                 {
-                    "keys": [ObjectKey(chunk_hash=b"\x01", model_name="m", kv_rank=1)],
+                    "keys": [
+                        ObjectKey(
+                            identity=ObjectKeyIdentity(
+                                chunk_hash=b"\x01", model_name="m", kv_rank=1
+                            )
+                        )
+                    ],
                     "mode": "new",
                 },
             )

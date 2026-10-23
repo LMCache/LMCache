@@ -32,21 +32,21 @@ class BigtableL2KeyEncoder:
         """
         template = self.template
         # Strip @{salt} if salt is empty to prevent a trailing @
-        if not key.cache_salt and template.endswith("@{salt}"):
+        if not key.identity.cache_salt and template.endswith("@{salt}"):
             template = template[:-7]
 
-        model_name = key.model_name
+        model_name = key.identity.model_name
         if self.layer_group_size > 0:
             model_name = f"{model_name}@lg{self.layer_group_size}"
 
-        hash_hex = key.chunk_hash.hex()
+        hash_hex = key.identity.chunk_hash.hex()
         row_key_str = template.format(
             hash_prefix=hash_hex[:4],
             model=model_name,
-            rank=f"{key.kv_rank:08x}",
-            group=f"{key.object_group_id:x}",
+            rank=f"{key.identity.kv_rank:08x}",
+            group=f"{key.identity.object_group_id:x}",
             hash=hash_hex,
-            salt=key.cache_salt,
+            salt=key.identity.cache_salt,
         )
         if hasattr(key, "layer_id"):
             row_key_str += f"@layer_{key.layer_id}"

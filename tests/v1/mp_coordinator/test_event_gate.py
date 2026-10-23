@@ -7,6 +7,7 @@ registered consumers."""
 import time
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
@@ -37,7 +38,11 @@ class _RecordingConsumer:
 
 
 def _key(hash_byte: int) -> ObjectKey:
-    return ObjectKey(chunk_hash=bytes([hash_byte]) * 4, model_name="m", kv_rank=0)
+    return ObjectKey(
+        identity=ObjectKeyIdentity(
+            chunk_hash=bytes([hash_byte]) * 4, model_name="m", kv_rank=0
+        )
+    )
 
 
 def _batch(

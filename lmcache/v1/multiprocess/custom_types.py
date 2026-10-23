@@ -67,8 +67,8 @@ class IPCCacheServerKey:
     # choice — all defaulted fields must come after non-defaulted ones.
     #
     # Invariant: must not contain ``@``, ``/``, ``\``, or NUL, and
-    # must be <= 128 chars — same rationale as ObjectKey (see
-    # ObjectKey.cache_salt). Validated in __post_init__.
+    # must be <= 128 chars — same rationale as ObjectKeyIdentity (see
+    # ObjectKey.identity.cache_salt). Validated in __post_init__.
     cache_salt: str = ""
 
     # Request-scoped LMCache configuration passed across the IPC boundary.

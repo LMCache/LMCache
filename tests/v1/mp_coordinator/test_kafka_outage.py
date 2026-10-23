@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.cache_events import (
@@ -46,7 +47,9 @@ _WAIT_S = 5.0
 
 def _key(n: int) -> ObjectKey:
     """One object key, distinguished by ``n``."""
-    return ObjectKey(chunk_hash=bytes([n]) * 4, model_name="m", kv_rank=0)
+    return ObjectKey(
+        identity=ObjectKeyIdentity(chunk_hash=bytes([n]) * 4, model_name="m", kv_rank=0)
+    )
 
 
 def _store(subscriber: CacheEventSubscriber, n: int) -> None:

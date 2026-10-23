@@ -32,6 +32,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -115,9 +116,11 @@ _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 def create_object_key(chunk_id: int, model_name: str = "test_model") -> ObjectKey:
     """Create an ObjectKey using LMCache's IntHash2Bytes."""
     return ObjectKey(
-        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
-        model_name=model_name,
-        kv_rank=0,
+        identity=ObjectKeyIdentity(
+            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+            model_name=model_name,
+            kv_rank=0,
+        )
     )
 
 

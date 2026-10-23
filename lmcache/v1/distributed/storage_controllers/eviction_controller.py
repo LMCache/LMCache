@@ -420,7 +420,7 @@ class L2EvictionController(StorageControllerInterface):
                     metadata={
                         "key_count": len(action.keys),
                         "key_count_per_salt": Counter(
-                            k.cache_salt for k in action.keys
+                            k.identity.cache_salt for k in action.keys
                         ),
                     },
                 )

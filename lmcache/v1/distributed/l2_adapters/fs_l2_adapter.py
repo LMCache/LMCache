@@ -31,6 +31,7 @@ import aiofiles.os
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -56,7 +57,7 @@ logger = init_logger(__name__)
 
 _KEY_SEP = "@"
 # ``@`` in both ``model_name`` and ``cache_salt`` is rejected by
-# ObjectKey.__post_init__, so splitting on ``@`` is unambiguous.
+# ObjectKeyIdentity.__post_init__, so splitting on ``@`` is unambiguous.
 # Kept in sync with native_connector_l2_adapter.py and
 # csrc/storage_backends/fs/connector.cpp.
 _PATH_SLASH_REPLACEMENT = "-SEP-"
@@ -117,13 +118,13 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     of the bitmap ``(ws<<24)|(rank<<16)|(local_ws<<8)|local``
     is directly readable. ``object_group_id`` is written in plain hex.
     """
-    safe_model = key.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
+    safe_model = key.identity.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
     base = (
-        f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}"
-        f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
+        f"{safe_model}{_KEY_SEP}{key.identity.kv_rank:#010x}"
+        f"{_KEY_SEP}{key.identity.object_group_id:x}{_KEY_SEP}{key.identity.chunk_hash.hex()}"
     )
-    if key.cache_salt:
-        return f"{base}{_KEY_SEP}{key.cache_salt}{_FILE_EXT}"
+    if key.identity.cache_salt:
+        return f"{base}{_KEY_SEP}{key.identity.cache_salt}{_FILE_EXT}"
     return f"{base}{_FILE_EXT}"
 
 
@@ -154,17 +155,19 @@ def _filename_to_object_key(
         chunk_hash = bytes.fromhex(chunk_hash_hex)
         kv_rank = int(kv_rank_str, 16)
         object_group_id = int(object_group_str, 16)
-        # ObjectKey.__post_init__ raises ValueError when the decoded
+        # ObjectKeyIdentity.__post_init__ raises ValueError when the decoded
         # model_name / cache_salt violate the forbidden-char or length
         # invariants (e.g. a stray file from another tool on disk).
         # The contract here is to return None for anything unparsable,
         # so keep the constructor inside the try block.
         return ObjectKey(
-            chunk_hash=chunk_hash,
-            model_name=model_name,
-            kv_rank=kv_rank,
-            object_group_id=object_group_id,
-            cache_salt=cache_salt,
+            identity=ObjectKeyIdentity(
+                chunk_hash=chunk_hash,
+                model_name=model_name,
+                kv_rank=kv_rank,
+                object_group_id=object_group_id,
+                cache_salt=cache_salt,
+            )
         )
     except ValueError:
         return None

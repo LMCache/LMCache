@@ -232,9 +232,9 @@ def test_list_pins_shows_pinned_keys_with_counts():
         assert body["pins"] == [
             {
                 "key": {
-                    "chunk_hash_hex": k.chunk_hash.hex(),
+                    "chunk_hash_hex": k.identity.chunk_hash.hex(),
                     "model_name": "m",
-                    "kv_rank": k.kv_rank,
+                    "kv_rank": k.identity.kv_rank,
                     "object_group_id": 0,
                     "cache_salt": "alice",
                 },
@@ -279,7 +279,7 @@ def test_list_pins_pages_and_validates_bounds():
         bob = _resolve(ctx, "bob")
         client.post("/cache/pins", json=_pin_body("alice"))
         client.post("/cache/pins", json=_pin_body("bob"))
-        expected = [k.chunk_hash.hex() for k in alice + bob]
+        expected = [k.identity.chunk_hash.hex() for k in alice + bob]
 
         first = client.get("/cache/pins", params={"offset": 0, "limit": 1}).json()
         second = client.get("/cache/pins", params={"offset": 1, "limit": 10}).json()
@@ -523,7 +523,11 @@ OTHER = [11, 12, 13, 14, 15, 16, 17, 18]
 def _keys_in_groups(ctx, tokens=TOKENS, salt="alice", groups=GROUPS):
     """The keys a fleet with separate object groups stores for ``tokens``."""
     keys, _ = resolve_object_keys(ctx.token_hasher, "m", 1, tokens, salt)
-    return [replace(key, object_group_id=g) for g in groups for key in keys]
+    return [
+        replace(key, identity=replace(key.identity, object_group_id=g))
+        for g in groups
+        for key in keys
+    ]
 
 
 def _store(ctx, keys, tier=Tier.L2, first_seq=1):

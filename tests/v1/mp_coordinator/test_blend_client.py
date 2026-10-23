@@ -14,6 +14,7 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     BlendNamespace,
@@ -79,14 +80,16 @@ def _stored(directory: KeyDirectory, chunks: list[list[int]]) -> list[bytes]:
                 entries=[
                     CacheEventEntry(
                         key=ObjectKey(
-                            chunk_hash=chunk_hash,
-                            model_name=MODEL,
-                            kv_rank=ObjectKey.ComputeKVRank(
-                                world_size=WORLD_SIZE,
-                                global_rank=0,
-                                local_world_size=WORLD_SIZE,
-                                local_rank=0,
-                            ),
+                            identity=ObjectKeyIdentity(
+                                chunk_hash=chunk_hash,
+                                model_name=MODEL,
+                                kv_rank=ObjectKey.ComputeKVRank(
+                                    world_size=WORLD_SIZE,
+                                    global_rank=0,
+                                    local_world_size=WORLD_SIZE,
+                                    local_rank=0,
+                                ),
+                            )
                         ).to_encoded_object_key(),
                         size_bytes=100,
                         token_ids=tokens,

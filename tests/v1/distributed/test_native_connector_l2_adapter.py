@@ -19,6 +19,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -175,9 +176,11 @@ class MockNativeConnector:
 
 def create_object_key(chunk_id: int, model_name: str = "test_model") -> ObjectKey:
     return ObjectKey(
-        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
-        model_name=model_name,
-        kv_rank=0,
+        identity=ObjectKeyIdentity(
+            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+            model_name=model_name,
+            kv_rank=0,
+        )
     )
 
 
@@ -237,19 +240,21 @@ class TestObjectKeySerialization:
         """Unsalted keys use the 4-field shape with object_group_id
         embedded right after kv_rank."""
         key = ObjectKey(
-            chunk_hash=b"\x00\x01\x02\x03",
-            model_name="llama",
-            kv_rank=255,
+            identity=ObjectKeyIdentity(
+                chunk_hash=b"\x00\x01\x02\x03", model_name="llama", kv_rank=255
+            )
         )
         s = _object_key_to_string(key)
         assert s == "llama@000000ff@0@00010203"
 
     def test_object_group_id_embedded(self):
         key = ObjectKey(
-            chunk_hash=b"\x00\x01\x02\x03",
-            model_name="llama",
-            kv_rank=255,
-            object_group_id=5,
+            identity=ObjectKeyIdentity(
+                chunk_hash=b"\x00\x01\x02\x03",
+                model_name="llama",
+                kv_rank=255,
+                object_group_id=5,
+            )
         )
         s = _object_key_to_string(key)
         assert s == "llama@000000ff@5@00010203"
@@ -257,10 +262,12 @@ class TestObjectKeySerialization:
     def test_salted_serialization_format(self):
         """Salted keys append ``@<cache_salt>`` as a 5th field."""
         key = ObjectKey(
-            chunk_hash=b"\x00\x01\x02\x03",
-            model_name="llama",
-            kv_rank=255,
-            cache_salt="alice",
+            identity=ObjectKeyIdentity(
+                chunk_hash=b"\x00\x01\x02\x03",
+                model_name="llama",
+                kv_rank=255,
+                cache_salt="alice",
+            )
         )
         s = _object_key_to_string(key)
         assert s == "llama@000000ff@0@00010203@alice"
@@ -271,9 +278,9 @@ class TestObjectKeySerialization:
             "model_name": "llama",
             "kv_rank": 0,
         }
-        k_empty = ObjectKey(**base)
-        k_alice = ObjectKey(**base, cache_salt="alice")
-        k_bob = ObjectKey(**base, cache_salt="bob")
+        k_empty = ObjectKey(identity=ObjectKeyIdentity(**base))
+        k_alice = ObjectKey(identity=ObjectKeyIdentity(**base, cache_salt="alice"))
+        k_bob = ObjectKey(identity=ObjectKeyIdentity(**base, cache_salt="bob"))
         s_empty = _object_key_to_string(k_empty)
         s_alice = _object_key_to_string(k_alice)
         s_bob = _object_key_to_string(k_bob)
@@ -292,20 +299,20 @@ class TestObjectKeyModelNameValidation:
     def test_reject_at_in_model_name(self):
         with pytest.raises(ValueError, match="model_name"):
             ObjectKey(
-                chunk_hash=b"\x00",
-                model_name="ns@model",
-                kv_rank=0,
+                identity=ObjectKeyIdentity(
+                    chunk_hash=b"\x00", model_name="ns@model", kv_rank=0
+                )
             )
 
     def test_slash_in_model_name_is_accepted(self):
         # '/' is sanitized to '-SEP-' by the FS adapter; the invariant
         # is only about '@'.
         key = ObjectKey(
-            chunk_hash=b"\x00",
-            model_name="meta-llama/Llama-3",
-            kv_rank=0,
+            identity=ObjectKeyIdentity(
+                chunk_hash=b"\x00", model_name="meta-llama/Llama-3", kv_rank=0
+            )
         )
-        assert key.model_name == "meta-llama/Llama-3"
+        assert key.identity.model_name == "meta-llama/Llama-3"
 
 
 class TestObjectKeyCacheSaltValidation:
@@ -316,80 +323,89 @@ class TestObjectKeyCacheSaltValidation:
     def test_reject_at_in_salt(self):
         with pytest.raises(ValueError, match="cache_salt"):
             ObjectKey(
-                chunk_hash=b"\x00",
-                model_name="m",
-                kv_rank=0,
-                cache_salt="alice@bob",
+                identity=ObjectKeyIdentity(
+                    chunk_hash=b"\x00",
+                    model_name="m",
+                    kv_rank=0,
+                    cache_salt="alice@bob",
+                )
             )
 
     def test_reject_leading_at_in_salt(self):
         with pytest.raises(ValueError, match="cache_salt"):
             ObjectKey(
-                chunk_hash=b"\x00",
-                model_name="m",
-                kv_rank=0,
-                cache_salt="@user",
+                identity=ObjectKeyIdentity(
+                    chunk_hash=b"\x00", model_name="m", kv_rank=0, cache_salt="@user"
+                )
             )
 
     def test_reject_slash_in_salt(self):
         with pytest.raises(ValueError, match="cache_salt"):
             ObjectKey(
-                chunk_hash=b"\x00",
-                model_name="m",
-                kv_rank=0,
-                cache_salt="tenant/alice",
+                identity=ObjectKeyIdentity(
+                    chunk_hash=b"\x00",
+                    model_name="m",
+                    kv_rank=0,
+                    cache_salt="tenant/alice",
+                )
             )
 
     def test_reject_backslash_in_salt(self):
         with pytest.raises(ValueError, match="cache_salt"):
             ObjectKey(
-                chunk_hash=b"\x00",
-                model_name="m",
-                kv_rank=0,
-                cache_salt="tenant\\alice",
+                identity=ObjectKeyIdentity(
+                    chunk_hash=b"\x00",
+                    model_name="m",
+                    kv_rank=0,
+                    cache_salt="tenant\\alice",
+                )
             )
 
     def test_reject_nul_in_salt(self):
         with pytest.raises(ValueError, match="cache_salt"):
             ObjectKey(
-                chunk_hash=b"\x00",
-                model_name="m",
-                kv_rank=0,
-                cache_salt="bad\x00salt",
+                identity=ObjectKeyIdentity(
+                    chunk_hash=b"\x00",
+                    model_name="m",
+                    kv_rank=0,
+                    cache_salt="bad\x00salt",
+                )
             )
 
     def test_reject_too_long_salt(self):
         with pytest.raises(ValueError, match="max length"):
             ObjectKey(
-                chunk_hash=b"\x00",
-                model_name="m",
-                kv_rank=0,
-                cache_salt="x" * 129,
+                identity=ObjectKeyIdentity(
+                    chunk_hash=b"\x00", model_name="m", kv_rank=0, cache_salt="x" * 129
+                )
             )
 
     def test_max_length_salt_accepted(self):
         key = ObjectKey(
-            chunk_hash=b"\x00",
-            model_name="m",
-            kv_rank=0,
-            cache_salt="x" * 128,
+            identity=ObjectKeyIdentity(
+                chunk_hash=b"\x00", model_name="m", kv_rank=0, cache_salt="x" * 128
+            )
         )
-        assert len(key.cache_salt) == 128
+        assert len(key.identity.cache_salt) == 128
 
     def test_empty_salt_is_accepted(self):
         # Default (unsalted) path.
-        key = ObjectKey(chunk_hash=b"\x00", model_name="m", kv_rank=0)
-        assert key.cache_salt == ""
+        key = ObjectKey(
+            identity=ObjectKeyIdentity(chunk_hash=b"\x00", model_name="m", kv_rank=0)
+        )
+        assert key.identity.cache_salt == ""
 
     def test_non_salt_chars_are_accepted(self):
         # Common identifier chars are fine.
         key = ObjectKey(
-            chunk_hash=b"\x00",
-            model_name="m",
-            kv_rank=0,
-            cache_salt="user-abc_123.xyz:42",
+            identity=ObjectKeyIdentity(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="user-abc_123.xyz:42",
+            )
         )
-        assert key.cache_salt == "user-abc_123.xyz:42"
+        assert key.identity.cache_salt == "user-abc_123.xyz:42"
 
 
 class TestObjectKeyIsolation:
@@ -398,21 +414,21 @@ class TestObjectKeyIsolation:
 
     def test_different_salts_are_unequal(self):
         base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
-        a = ObjectKey(**base, cache_salt="alice")
-        b = ObjectKey(**base, cache_salt="bob")
+        a = ObjectKey(identity=ObjectKeyIdentity(**base, cache_salt="alice"))
+        b = ObjectKey(identity=ObjectKeyIdentity(**base, cache_salt="bob"))
         assert a != b
         assert hash(a) != hash(b)
 
     def test_empty_salt_is_unequal_to_any_salted(self):
         base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
-        unsalted = ObjectKey(**base)
-        salted = ObjectKey(**base, cache_salt="alice")
+        unsalted = ObjectKey(identity=ObjectKeyIdentity(**base))
+        salted = ObjectKey(identity=ObjectKeyIdentity(**base, cache_salt="alice"))
         assert unsalted != salted
 
     def test_same_salt_are_equal(self):
         base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
-        a = ObjectKey(**base, cache_salt="alice")
-        b = ObjectKey(**base, cache_salt="alice")
+        a = ObjectKey(identity=ObjectKeyIdentity(**base, cache_salt="alice"))
+        b = ObjectKey(identity=ObjectKeyIdentity(**base, cache_salt="alice"))
         assert a == b
         assert hash(a) == hash(b)
 

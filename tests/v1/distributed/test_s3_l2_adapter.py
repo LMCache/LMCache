@@ -17,6 +17,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l2_adapters import s3_l2_adapter as s3mod
@@ -330,9 +331,11 @@ def patch_s3_request(monkeypatch):
 
 def create_object_key(chunk_id: int, model_name: str = "test_model") -> ObjectKey:
     return ObjectKey(
-        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
-        model_name=model_name,
-        kv_rank=0,
+        identity=ObjectKeyIdentity(
+            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+            model_name=model_name,
+            kv_rank=0,
+        )
     )
 
 
@@ -405,18 +408,20 @@ class _RecordingListener(L2AdapterListener):
 class TestObjectKeySerialization:
     def test_format(self):
         key = ObjectKey(
-            chunk_hash=b"\x00\x01\x02\x03",
-            model_name="llama",
-            kv_rank=255,
+            identity=ObjectKeyIdentity(
+                chunk_hash=b"\x00\x01\x02\x03", model_name="llama", kv_rank=255
+            )
         )
         assert _object_key_to_string(key) == "llama@000000ff@0@00010203"
 
     def test_object_group_id_embedded(self):
         key = ObjectKey(
-            chunk_hash=b"\x00\x01\x02\x03",
-            model_name="llama",
-            kv_rank=255,
-            object_group_id=5,
+            identity=ObjectKeyIdentity(
+                chunk_hash=b"\x00\x01\x02\x03",
+                model_name="llama",
+                kv_rank=255,
+                object_group_id=5,
+            )
         )
         assert _object_key_to_string(key) == "llama@000000ff@5@00010203"
 
@@ -425,15 +430,17 @@ class TestObjectKeySerialization:
         two users with the same model/rank/chunk map to distinct objects.
         """
         base_key = ObjectKey(
-            chunk_hash=b"\x00\x01\x02\x03",
-            model_name="llama",
-            kv_rank=255,
+            identity=ObjectKeyIdentity(
+                chunk_hash=b"\x00\x01\x02\x03", model_name="llama", kv_rank=255
+            )
         )
         salted = ObjectKey(
-            chunk_hash=b"\x00\x01\x02\x03",
-            model_name="llama",
-            kv_rank=255,
-            cache_salt="user-42",
+            identity=ObjectKeyIdentity(
+                chunk_hash=b"\x00\x01\x02\x03",
+                model_name="llama",
+                kv_rank=255,
+                cache_salt="user-42",
+            )
         )
         assert _object_key_to_string(base_key) == "llama@000000ff@0@00010203"
         assert _object_key_to_string(salted) == "llama@000000ff@0@00010203@user-42"
@@ -819,22 +826,32 @@ class TestS3L2AdapterListKeys:
         assert page.next_page_token is None
 
     def test_model_name_pushed_down_as_prefix(self, adapter):
-        llama = ObjectKey(chunk_hash=b"\x00" * 4, model_name="llama", kv_rank=0)
-        mistral = ObjectKey(chunk_hash=b"\x00" * 4, model_name="mistral", kv_rank=0)
+        llama = ObjectKey(
+            identity=ObjectKeyIdentity(
+                chunk_hash=b"\x00" * 4, model_name="llama", kv_rank=0
+            )
+        )
+        mistral = ObjectKey(
+            identity=ObjectKeyIdentity(
+                chunk_hash=b"\x00" * 4, model_name="mistral", kv_rank=0
+            )
+        )
         _put_object(llama, size=1)
         _put_object(mistral, size=1)
 
         page = adapter.list_l2_keys(model_name="llama", page_size=10)
         assert [e.key for e in page.entries] == [llama.to_encoded_object_key()]
 
-    def test_model_name_with_slash_round_trips(self, adapter):
+    def test_model_name_with_slash_round_trips(self, adapter: S3L2Adapter) -> None:
         # Real HF model ids contain ``/``. The adapter stores the
         # literal object name on S3 (no path-flattening) and the
         # listing decodes it back unchanged.
         original = ObjectKey(
-            chunk_hash=b"\xde\xad\xbe\xef",
-            model_name="meta-llama/Llama-3.1-8B",
-            kv_rank=7,
+            identity=ObjectKeyIdentity(
+                chunk_hash=b"\xde\xad\xbe\xef",
+                model_name="meta-llama/Llama-3.1-8B",
+                kv_rank=7,
+            )
         )
         encoded = original.to_encoded_object_key()
         _put_object(original, size=128)

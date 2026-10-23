@@ -16,6 +16,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l2_adapters.config import get_type_name_for_config
@@ -133,11 +134,13 @@ def _memory_obj(elements: int = 16, fill: float = 1.0) -> TensorMemoryObj:
 
 def _key(value: int = 1, cache_salt: str = "") -> ObjectKey:
     return ObjectKey(
-        chunk_hash=ObjectKey.IntHash2Bytes(value),
-        model_name="test/model",
-        kv_rank=1,
-        object_group_id=2,
-        cache_salt=cache_salt,
+        identity=ObjectKeyIdentity(
+            chunk_hash=ObjectKey.IntHash2Bytes(value),
+            model_name="test/model",
+            kv_rank=1,
+            object_group_id=2,
+            cache_salt=cache_salt,
+        )
     )
 
 

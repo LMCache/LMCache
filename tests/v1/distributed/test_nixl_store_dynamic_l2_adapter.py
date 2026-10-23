@@ -22,6 +22,7 @@ nixl = pytest.importorskip("nixl")
 
 # First Party
 from lmcache import torch_device_type  # noqa: E402
+from lmcache.v1.cache_identity import ObjectKeyIdentity  # noqa: E402
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey  # noqa: E402
 from lmcache.v1.distributed.internal_api import (  # noqa: E402
     L1MemoryDesc,
@@ -144,10 +145,12 @@ def create_object_key(
 ) -> ObjectKey:
     """Create a test ObjectKey with the given chunk ID."""
     return ObjectKey(
-        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
-        model_name=model_name,
-        kv_rank=0,
-        cache_salt=cache_salt,
+        identity=ObjectKeyIdentity(
+            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+            model_name=model_name,
+            kv_rank=0,
+            cache_salt=cache_salt,
+        )
     )
 
 
@@ -1289,7 +1292,7 @@ class TestPersistAndSecondaryLookup:
 def test_relpath_is_hex_hash_prefix():
     """Path = <hex[:2]>/<hex[2:4]>/filename, using the chunk-hash hex."""
     key = create_object_key(0x834EBC79)
-    h = key.chunk_hash.hex()  # "834ebc79"
+    h = key.identity.chunk_hash.hex()  # "834ebc79"
     parts = _object_key_to_relpath(key).split(os.sep)
     assert len(parts) == 3
     assert parts[0] == h[:2]  # "83"
@@ -1301,7 +1304,7 @@ def test_relpath_subdir_matches_filename_hash_prefix():
     """The two subdir levels are the first four hex chars of the filename hash."""
     for n in (0x834EBC79, 0xABCD1234, 0x00FF10A2):
         key = create_object_key(n)
-        h = key.chunk_hash.hex()
+        h = key.identity.chunk_hash.hex()
         parts = _object_key_to_relpath(key).split(os.sep)
         assert parts[0] == h[:2]
         assert parts[1] == h[2:4]

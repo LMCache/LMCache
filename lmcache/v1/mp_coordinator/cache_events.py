@@ -743,7 +743,7 @@ class CacheEventSubscriber(EventSubscriber):
     def _store_entry(self, key: ObjectKey, size_bytes: int) -> CacheEventEntry:
         """Build a STORE entry, stamping the chunk's token content when the
         token-binding cache knows the chunk."""
-        binding = self._token_bindings.get(key.chunk_hash, _NO_BINDING)
+        binding = self._token_bindings.get(key.identity.chunk_hash, _NO_BINDING)
         return CacheEventEntry(
             key=key.to_encoded_object_key(),
             size_bytes=size_bytes,

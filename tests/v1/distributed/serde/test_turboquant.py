@@ -17,6 +17,7 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -251,9 +252,11 @@ def test_estimate_serialized_size_rejects_bad_head_dim() -> None:
 
 def _make_turboquant_object_key(chunk_id: int) -> ObjectKey:
     return ObjectKey(
-        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
-        model_name="turboquant_test_model",
-        kv_rank=0,
+        identity=ObjectKeyIdentity(
+            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+            model_name="turboquant_test_model",
+            kv_rank=0,
+        )
     )
 
 
