@@ -56,6 +56,9 @@ aiperf_args = { concurrency = 230 }
 kv-cache-dtype = "fp8_ds_mla"
 # Without DCP every rank holds the whole MLA cache; DCP splits it by token.
 decode-context-parallel-size = 8
+# The sparse indexer compresses 4 tokens into one state, and a state must sit on
+# one rank (vLLM's indexer.py rejects an interleave that is not a multiple).
+cp-kv-cache-interleave-size = 4
 disable-flashinfer-autotune = true
 enable-ep-weight-filter = true
 reasoning-parser = "glm47"
