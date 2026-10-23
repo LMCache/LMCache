@@ -459,14 +459,7 @@ class TestBigtableL2Adapter:
         class LayerwiseObjectKey(ObjectKey):
             layer_id: int = 0
 
-        key_layerwise = LayerwiseObjectKey(
-            chunk_hash=b"\x01\x02\x03\x04\x05\x06\x07\x08",
-            model_name="my-model",
-            kv_rank=15,
-            object_group_id=3,
-            cache_salt="user-salt",
-            layer_id=5,
-        )
+        key_layerwise = LayerwiseObjectKey(identity=key.identity, layer_id=5)
         row_key_layerwise = encoder.encode_row_key(key_layerwise)
         assert (
             row_key_layerwise
