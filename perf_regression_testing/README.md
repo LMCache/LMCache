@@ -27,7 +27,7 @@ with its vLLM recipe's flags and replaced when a newer one appears:
 MiMo-V2.6-Pro-MOPD (hybrid sliding-window, DFlash drafter) at 170 concurrent
 sessions; `vllm_lmcache_ssm` serves GLM-5.3-Flash (Kimi Delta Attention +
 sparse MLA, MTP, DCP 8) instead, at 230. Every deployment runs the same stock
-vLLM image and the same budget, 1500 GiB DRAM + 4000 GiB disk (`vllm_simple`: the DRAM only;
+vLLM image and the same budget, 1500 GiB DRAM + 6000 GiB disk (`vllm_simple`: the DRAM only;
 `vllm_simple_l2`: the disk, with the DRAM as page cache under a memory cap);
 only the cache layer differs:
 
@@ -67,7 +67,7 @@ Host paths come from the environment:
 
 | variable | what |
 |---|---|
-| `PRT_ROOT` | required: PRT state, history, caches, 4 TB of L2 scratch |
+| `PRT_ROOT` | required: PRT state, history, caches, 6 TB of L2 scratch |
 | `PRT_HF_CACHE` | an `HF_HOME` holding the model, default `/root/.cache/huggingface` |
 | `PRT_RDMA_DEVICES` | comma-separated RDMA devices, needed by the weekly Mooncake |
 

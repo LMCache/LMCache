@@ -7,7 +7,7 @@
 # Images are built from docker/.
 #
 # Placeholders filled by runner/config.py from the environment:
-#   <root>          $PRT_ROOT (required): PRT state, caches, 4 TB L2 scratch
+#   <root>          $PRT_ROOT (required): PRT state, caches, 6 TB L2 scratch
 #   <hf_cache>      $PRT_HF_CACHE, default /root/.cache/huggingface (an HF_HOME)
 #   <model_path>    <hf_cache>/hub/models--<repo>/snapshots/<rev> of the
 #                   deployment's model; <model_repo>, <model_revision> likewise
@@ -164,7 +164,7 @@ command = ["lmcache", "server"]
 ready_url = "http://127.0.0.1:18080/metrics"
 ready_timeout_s = 1800
 env = { LMCACHE_LOG_LEVEL = "WARNING" }
-scratch = [{ path = "<root>/l2", min_free_gb = 4000 }]
+scratch = [{ path = "<root>/l2", min_free_gb = 6000 }]
 
 [deployments.vllm_lmcache.services.args]
 host = "127.0.0.1"
@@ -191,7 +191,7 @@ base_path = "<root>/l2"
 # Bypass the page cache, which would serve L2 from RAM outside the L1 budget.
 use_odirect = true
 num_workers = 16
-max_capacity_gb = 4000
+max_capacity_gb = 6000
 eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 0.1 }
 
 [deployments.vllm_lmcache_ssm]
@@ -209,7 +209,7 @@ command = ["lmcache", "server"]
 ready_url = "http://127.0.0.1:18080/metrics"
 ready_timeout_s = 1800
 env = { LMCACHE_LOG_LEVEL = "WARNING" }
-scratch = [{ path = "<root>/l2", min_free_gb = 4000 }]
+scratch = [{ path = "<root>/l2", min_free_gb = 6000 }]
 
 [deployments.vllm_lmcache_ssm.services.args]
 host = "127.0.0.1"
@@ -236,18 +236,18 @@ base_path = "<root>/l2"
 # Bypass the page cache, which would serve L2 from RAM outside the L1 budget.
 use_odirect = true
 num_workers = 16
-max_capacity_gb = 4000
+max_capacity_gb = 6000
 eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 0.1 }
 
 [deployments.vllm_native]
 model = "mimo26"
 # Both tiers live in the vLLM workers. CPU tier 1500 GiB total over the TP
 # ranks. vLLM's fs tier has no capacity limit, so cap_gb freezes the dir at
-# 4000 GiB (runner/disk_cap.py): full means no new entries, not eviction.
+# 6000 GiB (runner/disk_cap.py): full means no new entries, not eviction.
 # block_size 1024 matches LMCache's chunk-size; the retention interval must
 # be a multiple of it.
 image_target = "serving"
-vllm_scratch = [{ path = "<root>/l2", min_free_gb = 4000, cap_gb = 4000 }]
+vllm_scratch = [{ path = "<root>/l2", min_free_gb = 6000, cap_gb = 6000 }]
 
 [deployments.vllm_native.vllm_args]
 # Per-rank fs dirs are <root_dir>_r<rank>, so root_dir sits inside the scratch.
@@ -264,21 +264,21 @@ kv-transfer-config = '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_
 
 [deployments.vllm_simple_l2]
 model = "mimo26"
-# SimpleCPUOffloadConnector's disk backend, 4000 GiB (500 GiB per TP rank),
+# SimpleCPUOffloadConnector's disk backend, 6000 GiB (750 GiB per TP rank),
 # read through the page cache. That cache is the DRAM tier: vllm_memory_gb
 # caps the container's memory, page cache included, at 1500 GiB plus the
 # headroom vLLM itself needs (summary vllm_mem_peak_gb.anon measures it).
 image_target = "serving"
-vllm_scratch = [{ path = "<root>/l2", min_free_gb = 4000 }]
+vllm_scratch = [{ path = "<root>/l2", min_free_gb = 6000 }]
 vllm_memory_gb = 1532
 
 [deployments.vllm_simple_l2.vllm_args]
-kv-transfer-config = '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"kv_offload_backend":"disk","disk_path":"<root>/l2/simple","disk_capacity_bytes":536870912000,"use_page_cache":true}}'
+kv-transfer-config = '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"kv_offload_backend":"disk","disk_path":"<root>/l2/simple","disk_capacity_bytes":805306368000,"use_page_cache":true}}'
 
 [deployments.vllm_mooncake]
 model = "mimo26"
 # Tuned through Mooncake's own config only. Standalone-store layout:
-# mooncake_client owns the CPU pool and SSD tier. Budget 1500 GiB pool, 4000
+# mooncake_client owns the CPU pool and SSD tier. Budget 1500 GiB pool, 6000
 # GiB disk, split over four clients since one client writes SSD from a single
 # thread. SYS_NICE lets Mooncake mbind its segments under docker's seccomp.
 image_target = "mooncake"
@@ -330,18 +330,18 @@ command = ["mooncake_client"]
 # Not Mooncake's default 19300, which may be taken on a shared host.
 ready_url = "http://127.0.0.1:<19301+i>/health"
 ready_timeout_s = 600
-scratch = [{ path = "<root>/l2/c<i>", min_free_gb = 4000 }]
+scratch = [{ path = "<root>/l2/c<i>", min_free_gb = 6000 }]
 # Docker's default profile blocks io_uring_setup, needed for SSD reads.
 seccomp = "unconfined"
 
 [deployments.vllm_mooncake.services.env]
 MOONCAKE_OFFLOAD_FILE_STORAGE_PATH = "<root>/l2/c<i>"
 MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR = "bucket_storage_backend"
-MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE = "1073741824000"
+MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE = "1610612736000"
 # Partial buckets are dropped each heartbeat; lower lets the writer fall
 # behind, above IOV_MAX (1024) every SSD write fails.
 MOONCAKE_OFFLOAD_BUCKET_KEYS_LIMIT = "16"
-MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES = "1073741824000"
+MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES = "1610612736000"
 # The client drains the master's offload queue once per heartbeat.
 MOONCAKE_OFFLOAD_HEARTBEAT_INTERVAL_SECONDS = "1"
 MOONCAKE_OFFLOAD_DISK_EVICTION_HIGH_WATERMARK_RATIO = "0.98"  # use the quota
