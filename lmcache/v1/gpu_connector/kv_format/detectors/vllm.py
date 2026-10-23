@@ -61,6 +61,12 @@ class VLLM_Detector(EngineDetector):
             layout_hints, cpu_attention_backend=torch_device_type == "cpu"
         )
         is_hnd = kv_layout in ("HND", "BLHNC")
+        subpaged_dsa_opaque = layout_hints.get("subpaged_dsa_opaque", False)
+        if not isinstance(subpaged_dsa_opaque, bool):
+            raise ValueError(
+                "subpaged_dsa_opaque layout hint must be a bool, got "
+                f"{type(subpaged_dsa_opaque).__name__}"
+            )
 
         # Fused K/V is the only rank-4 vLLM layout, so its raw rank
         # identifies it unambiguously (a 5-D split would collide with
@@ -76,17 +82,31 @@ class VLLM_Detector(EngineDetector):
             and isinstance(kv_caches[0], torch.Tensor)
             and kv_caches[0].dim() == 4
         ):
-            # vLLM >= 0.29 allocates the DSA indexer cache through the MLA
-            # spec, so its plane carries a singleton head axis. Squeeze it so
-            # the blocked page layout is addressed by its own format rather
-            # than as fused K/V rows.
-            head_axis = 1 if is_hnd else 2
-            if int(kv_caches[0].shape[head_axis]) == 1 and _is_blocked_indexer_plane(
-                kv_caches[0]
-            ):
+            # vLLM >= 0.29 allocates the fp8 DSA indexer cache through the
+            # MLA spec, so its plane carries a singleton head axis --
+            # ``[NB, BS, 1, 132]`` on NHD, ``[NB, 1, BS, 132]`` on HND.
+            # Squeeze it so the blocked page layout is addressed by its own
+            # format rather than as fused K/V rows. The singleton axis is
+            # located by shape, because a stale ``kv_layout`` hint can
+            # disagree with the raw tensor's axis order; only confirmed
+            # uint8 width-132 planes reach this branch.
+            if (
+                int(kv_caches[0].shape[1]) == 1 or int(kv_caches[0].shape[2]) == 1
+            ) and _is_blocked_indexer_plane(kv_caches[0]):
+                squeeze_axis = 1 if int(kv_caches[0].shape[1]) == 1 else 2
+                squeezed = [t.squeeze(squeeze_axis) for t in kv_caches]
+                if subpaged_dsa_opaque:
+                    # A manager-logical re-view of kernel-paged DSA planes:
+                    # the bytes are k scale blocks joined into one page,
+                    # not one native logical DSA page, so transfer them
+                    # opaquely with the generic MLA kernels.
+                    return (
+                        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
+                        squeezed,
+                    )
                 return (
                     lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
-                    [t.squeeze(head_axis) for t in kv_caches],
+                    squeezed,
                 )
             if is_hnd:
                 return lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS, kv_caches
@@ -134,6 +154,9 @@ class VLLM_Detector(EngineDetector):
                 return lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS, kv_caches
         if list_depth == 1 and tensor_ndim == 3:  # MLA (or DSA indexer cache)
             if _is_blocked_indexer_plane(first_tensor):
+                if subpaged_dsa_opaque:
+                    # Opaque subpaged DSA plane: raw contiguous bytes.
+                    return lmcache_native.EngineKVFormat.NL_X_NB_BS_HS, kv_caches
                 return lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS, kv_caches
             return lmcache_native.EngineKVFormat.NL_X_NB_BS_HS, kv_caches
         if list_depth == 2 and tensor_ndim == 4:
