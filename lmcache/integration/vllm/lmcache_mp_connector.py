@@ -84,6 +84,7 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.utils import CacheRemoveEvent
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.multiprocess.custom_types import RequestSnapshotEntry
 
 try:
     # First Party
@@ -572,6 +573,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       heartbeat pings.
     - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request
       enters vLLM's waiting queue. Disabled by default.
+    - lmcache.mp.request_snapshot: report observed active requests once per
+      scheduling step for best-effort policy hints. Disabled by default.
     - lmcache.mp.save_decode_cache: also store chunks containing generated
       tokens. Defaults to False; only complete prompt chunks are stored.
     """
@@ -594,8 +597,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             kv_cache_config: Resolved cache groups, if supplied by vLLM.
 
         Raises:
-            ValueError: If cache geometry or auto-start configuration is invalid,
-                including auto-start with multiple server endpoints.
+            ValueError: If cache geometry, auto-start, or snapshot configuration
+                is invalid, including auto-start with multiple server endpoints.
             ConnectionError: If the configured MP server cannot be reached.
         """
         # Older supported vLLM releases allow connectors to omit this value,
@@ -644,6 +647,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "lmcache.mp.eager_prefetch", False
             )
         )
+        self._request_snapshot_enabled: bool = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.request_snapshot", False
+            )
+        )
+        if not isinstance(self._request_snapshot_enabled, bool):
+            raise ValueError("lmcache.mp.request_snapshot must be a boolean")
 
         # Multi-server: prefer lmcache.mp.server_urls (list or comma-separated
         # string) over the single-server lmcache.mp.host / lmcache.mp.port.
@@ -760,6 +770,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 required_chunk_alignment=scheduler_block_size,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
+            # Scheduler-thread-only references, removed on finish or shutdown.
+            # Transfer trackers do not cover requests still waiting for lookup.
+            self._observed_requests: dict[str, Request] = {}
             # Worker events aggregated per step, awaiting take_events().
             self._kv_cache_events: list[KVCacheEvent] = []
 
@@ -1243,6 +1256,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if hasattr(self, "worker_adapter"):
             self.worker_adapter.shutdown()
         if hasattr(self, "scheduler_adapter"):
+            self._observed_requests.clear()
             if self.lazy_offload:
                 self._lazy_offload_manager.log_final_stats()
             self.scheduler_adapter.shutdown()
@@ -1483,13 +1497,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         return need_to_load, need_to_load > 0
 
     def on_new_request(self, request: "Request") -> None:
-        """Submit an LMCache lookup when a request enters the waiting queue.
+        """Observe a new request and optionally submit an eager LMCache lookup.
 
         Args:
             request (Request): The request object.
         """
         if self.role != KVConnectorRole.SCHEDULER:
             return
+        if self._request_snapshot_enabled:
+            self._observed_requests[request.request_id] = request
         if not self._eager_prefetch or request.resumable:
             return
 
@@ -1606,6 +1622,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         This function should NOT modify fields in the scheduler_output.
         Also, calling this function will reset the state of the connector.
+        Report request snapshots, if enabled, without waiting for a response.
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
@@ -1629,6 +1646,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Report block allocation deltas to LMCache for observability
         self._report_block_allocation_deltas(scheduler_output)
+
+        if self._request_snapshot_enabled:
+            # The transport may serialize later; copy while the scheduler owns
+            # these live requests so each payload describes this step only.
+            requests = tuple(
+                RequestSnapshotEntry(
+                    request_id=request.request_id,
+                    token_ids=tuple(request.all_token_ids),
+                    priority=request.priority,
+                    arrival_time=request.arrival_time,
+                    status=request.status.name,
+                )
+                for request in self._observed_requests.values()
+            )
+            self.scheduler_adapter.report_request_snapshot(
+                requests, self._vllm_config.scheduler_config.policy
+            )
 
         return metadata
 
@@ -1672,6 +1706,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         The connector may assumes responsibility for freeing the blocks
         asynchronously by returning True.
 
+        Remove completed or cancelled requests from the next snapshot.
+
         Returns:
             True if the request is being saved/sent asynchronously and blocks
             should not be freed until the request_id is returned from
@@ -1679,6 +1715,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
+
+        if self._request_snapshot_enabled:
+            self._observed_requests.pop(request.request_id, None)
 
         params: dict[str, Any] | None = getattr(request, "kv_transfer_params", None)
         return_params: dict[str, Any] | None = {} if params is not None else None

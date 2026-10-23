@@ -20,6 +20,7 @@ from lmcache.v1.multiprocess.custom_types import (
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
+    RequestSnapshot,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -176,6 +177,20 @@ class RequestClient(Protocol):
         model_name: str,
         records: list[BlockAllocationRecord],
     ) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def report_request_snapshot(
+        self, snapshot: RequestSnapshot
+    ) -> MessagingFuture[None]:
+        """Publish observed requests to the server's best-effort event bus.
+
+        Args:
+            snapshot: Immutable scheduler observations, including empty updates.
+
+        Returns:
+            A future for handler completion, not subscriber delivery.
+        """
+        ...
 
     @rpc_method
     def noop(self) -> MessagingFuture[str]: ...

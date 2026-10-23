@@ -194,6 +194,7 @@ def test_eager_prefetch_forwards_request_configs():
     connector = SimpleNamespace(
         role=KVConnectorRole.SCHEDULER,
         _eager_prefetch=True,
+        _request_snapshot_enabled=False,
         _reserve_last_token_for_lookup=False,
         scheduler_adapter=scheduler_adapter,
         _get_or_create_request_tracker=MagicMock(return_value=tracker),
