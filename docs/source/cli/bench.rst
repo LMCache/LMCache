@@ -357,6 +357,13 @@ documents. Each request concatenates all context documents in a different order:
 A single dummy warmup request is sent before the benchmark phase. Requests are
 dispatched with semaphore-controlled concurrency.
 
+This workload preserves its historical seeded prompts, distinct permutations,
+and request IDs. Use it when comparing against earlier permutation benchmarks.
+Setting ``--ktp-pool-size`` equal to ``--ktp-docs-per-request`` in
+``kv-tier-pressure`` also puts every document in each request, but its
+independent sampling can repeat requests and its warmup sweeps the document
+pool. Those runs therefore start from different cache states.
+
 .. list-table::
    :header-rows: 1
    :widths: 35 10 55

@@ -67,7 +67,8 @@ lmcache/cli/commands/bench/
     └── workloads/
         ├── __init__.py            # create_workload() factory
         ├── base.py                # BaseWorkload (ABC + run loop), MetricSection
-        ├── long_doc_permutator.py
+        ├── kv_tier_pressure.py    # Shared document generation and dispatch
+        ├── long_doc_permutator.py # Compatibility config and report wrapper
         ├── long_doc_qa.py
         ├── multi_round_chat.py
         ├── prefix_suffix_tuner.py
@@ -75,8 +76,32 @@ lmcache/cli/commands/bench/
         └── random_prefill.py
 ```
 
-All concrete workloads depend on `BaseWorkload`, `RequestSender`,
-`StatsCollector`, and `ProgressMonitor` — never on each other.
+Concrete workloads use `BaseWorkload`, `RequestSender`, `StatsCollector`, and
+`ProgressMonitor`. `LongDocPermutatorWorkload` is a compatibility subclass of
+`KVTierPressureWorkload`, sharing its document construction and dispatch path.
+
+`DocumentWorkloadMode` selects the two existing contracts without changing CLI
+flags or defaults:
+
+| Contract | `SAMPLED` (`kv-tier-pressure`) | `PERMUTATIONS` (`long-doc-permutator`) |
+|----------|-------------------------------|---------------------------------------|
+| Documents per request | Sampled subset | Entire pool |
+| Repeated requests | Allowed | Distinct, capped at `N!` |
+| Text RNG | Repeated `choice()` | Historical `choices()` |
+| System-prompt seed | `seed + 2` | `seed` |
+| Document seeds | `seed + 1 + i` | `seed + 1 + i` |
+| Warm-up | Full pool sweep | One unrelated dummy request |
+| Request IDs | `sample<i>` | `perm<i>_req<i>` |
+| Extra report section | `kv_tier_pressure` | None |
+
+The wrapper adapts `LongDocPermutatorConfig` to a full-pool
+`KVTierPressureConfig` and retains the legacy report. The common engine exposes
+`num_requests` and `tokens_per_request` so the wrapper does not inspect its
+internal request lists. Request generation, message construction, semaphore
+handling, and task cleanup have one implementation. Keeping both RNG algorithms
+is necessary: `choices()` and repeated `choice()` consume a seed differently.
+Regression tests fingerprint the pre-consolidation IDs, payloads, order, warm-up,
+and output limits for both modes, including small pools and the `N!` cap.
 
 ---
 
@@ -325,9 +350,9 @@ into a `set` when `N!` far exceeds `num_permutations * 10`.
 
 **Dispatch:** semaphore-controlled, as in 4.1. **Warmup:** one dummy request.
 
-**`run()` override:** closes `RequestSender`'s HTTP client inside the same
-`asyncio.run()` as the loop, so `asyncio.run()` cannot orphan open `httpx`
-connections. The orchestrator's later `close()` then finds nothing to do.
+**Client lifecycle:** inherits `BaseWorkload.run()`, which closes
+`RequestSender`'s HTTP client inside the same `asyncio.run()` as the loop.
+The orchestrator's later `close()` then finds nothing to do.
 
 ### 4.5 `kv-tier-pressure`
 
@@ -513,13 +538,10 @@ chunk-level cache lookup and eviction.
 - **Termination:** Returns `-1.0` when the request list is exhausted and all
   pending tasks have completed.
 
-**`run()` override:** Unlike the other workloads, `LongDocPermutatorWorkload`
-overrides `BaseWorkload.run()` to close `RequestSender`'s async HTTP client
-inside the same `asyncio.run()` call as the benchmark loop. `asyncio.run()`
-closes the loop on exit, which would orphan any open `httpx` connections;
-closing the client here ensures clean teardown. The orchestrator's subsequent
-`asyncio.run(request_sender.close())` then finds nothing to close and
-completes without error.
+**Client lifecycle:** `LongDocPermutatorWorkload` inherits
+`BaseWorkload.run()` through the common document engine. The HTTP client closes
+inside the benchmark's event loop, so the orchestrator's subsequent close finds
+nothing to do.
 
 ### 4.7 `prefix-suffix-tuner` — Tiered KV-Cache Demonstrator
 

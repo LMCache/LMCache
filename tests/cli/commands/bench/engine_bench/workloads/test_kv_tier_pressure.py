@@ -4,6 +4,8 @@
 # Standard
 from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
+import hashlib
+import json
 import math
 import time
 
@@ -17,6 +19,7 @@ from lmcache.cli.commands.bench.engine_bench.workloads import (
     long_doc_permutator as ldp_mod,
 )
 from lmcache.cli.commands.bench.engine_bench.workloads.kv_tier_pressure import (
+    DocumentWorkloadMode,
     KVTierPressureConfig,
     KVTierPressureWorkload,
     sample_requests,
@@ -303,6 +306,22 @@ def _make_workload(
 
 
 class TestWorkloadConstruction:
+    @pytest.mark.parametrize("pool,docs,skew", [(5, 3, 0.0), (5, 5, 1.0)])
+    def test_permutation_mode_requires_full_pool_and_uniform_access(
+        self, pool: int, docs: int, skew: float
+    ) -> None:
+        config = KVTierPressureConfig(
+            pool_size=pool, docs_per_request=docs, access_skew=skew
+        )
+        with pytest.raises(ValueError, match="full pool and uniform access"):
+            KVTierPressureWorkload(
+                config,
+                _make_mock_sender(),
+                MagicMock(),
+                MagicMock(),
+                mode=DocumentWorkloadMode.PERMUTATIONS,
+            )
+
     def test_generates_whole_pool(self) -> None:
         w, *_ = _make_workload(_make_config(pool_size=9, docs_per_request=3))
         assert len(w._documents) == 9
@@ -351,6 +370,62 @@ class TestWorkloadConstruction:
 
 
 class TestWorkloadBehaviour:
+    @pytest.mark.parametrize(
+        "pool,docs,requests,skew,expected",
+        [
+            (
+                5,
+                5,
+                100,
+                0.0,
+                "c11143b569e3da14dd002ea4569d4463ff1948042c11349858250e84094da8bb",
+            ),
+            (
+                9,
+                3,
+                12,
+                0.0,
+                "0d85c4699d774bcbd4032cbe1f78ae088869922e3646d5d1807d7f4b4fa160b9",
+            ),
+            (
+                7,
+                3,
+                12,
+                1.5,
+                "f3002e84a50d546c5cefdc3678ca3e0dc6c0fc73407ed2c5a06e8c45415e57ba",
+            ),
+        ],
+    )
+    def test_preserves_seeded_request_stream(
+        self, pool: int, docs: int, requests: int, skew: float, expected: str
+    ) -> None:
+        """Default sampling and the pool sweep keep their historical payloads."""
+        config = KVTierPressureConfig(
+            pool_size=pool,
+            docs_per_request=docs,
+            context_length=20,
+            system_prompt_length=10,
+            num_requests=requests,
+            access_skew=skew,
+            vocab_size=100,
+            num_inflight_requests=1,
+            max_output_length=128,
+        )
+        workload, sender, _, _ = _make_workload(config, seed=42)
+        workload.run()
+        records = [
+            (phase, call.args, call.kwargs)
+            for phase, calls in [
+                ("warmup", sender.send_warmup_request.call_args_list),
+                ("measured", sender.send_request.call_args_list),
+            ]
+            for call in calls
+        ]
+        assert (
+            hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
+            == expected
+        )
+
     def test_warmup_sends_one_request_per_sweep_group(self) -> None:
         cfg = _make_config(pool_size=12, docs_per_request=3)
         w, sender, _, _ = _make_workload(cfg)
@@ -426,13 +501,7 @@ class TestDecoupling:
 
 
 class TestPermutatorEquivalence:
-    """At pool_size == docs_per_request the sampler reproduces the permutator.
-
-    The permutator is the degenerate case of this workload: when every
-    document in the pool goes into every request, sampling K of D with K == D
-    yields a permutation of the whole corpus.  These tests pin that down so
-    the sampler can stand in for the older workload.
-    """
+    """Both names share an engine while retaining their warm-up contracts."""
 
     N = 16
     CTX = 40
@@ -441,9 +510,11 @@ class TestPermutatorEquivalence:
 
     def _pair(
         self,
-    ) -> tuple[KVTierPressureWorkload, ldp_mod.LongDocPermutatorWorkload]:
+    ) -> tuple[
+        KVTierPressureWorkload, ldp_mod.LongDocPermutatorWorkload, MagicMock, MagicMock
+    ]:
         tokenizer = make_fake_tokenizer()
-        sampler, *_ = _make_workload(
+        sampler, sampler_sender, _, _ = _make_workload(
             KVTierPressureConfig(
                 pool_size=self.N,
                 docs_per_request=self.N,
@@ -456,7 +527,8 @@ class TestPermutatorEquivalence:
             ),
             tokenizer=tokenizer,
         )
-        with patch.object(ldp_mod, "try_load_tokenizer", return_value=tokenizer):
+        permutator_sender = _make_mock_sender()
+        with patch.object(ktp, "try_load_tokenizer", return_value=tokenizer):
             permutator = ldp_mod.LongDocPermutatorWorkload(
                 ldp_mod.LongDocPermutatorConfig(
                     num_contexts=self.N,
@@ -467,54 +539,75 @@ class TestPermutatorEquivalence:
                     num_inflight_requests=8,
                     max_output_length=1,
                 ),
-                _make_mock_sender(),
+                permutator_sender,
                 MagicMock(),
                 MagicMock(),
                 seed=42,
                 model_name="fake-model",
             )
-        return sampler, permutator
+        return sampler, permutator, sampler_sender, permutator_sender
 
     def test_same_corpus_size(self) -> None:
-        sampler, permutator = self._pair()
-        assert len(sampler._documents) == len(permutator._contexts) == self.N
+        sampler, permutator, sampler_sender, permutator_sender = self._pair()
+        for workload, sender in [
+            (sampler, sampler_sender),
+            (permutator, permutator_sender),
+        ]:
+            workload.run()
+            docs = (
+                sender.send_request.call_args_list[0]
+                .args[1][-1]["content"]
+                .split("\n\n")
+            )
+            assert len(set(docs)) == self.N
 
     def test_same_request_count(self) -> None:
-        sampler, permutator = self._pair()
-        assert len(sampler._measured_groups) == len(permutator._request_list)
+        sampler, permutator, _, _ = self._pair()
+        assert sampler.num_requests == permutator.num_requests == self.REQ
 
     def test_same_tokens_per_request(self) -> None:
-        """The operating point must match, or TTFT is not comparable."""
-        sampler, permutator = self._pair()
-        assert sampler._tokens_per_request == permutator._tokens_per_request
+        sampler, permutator, _, _ = self._pair()
+        assert sampler.tokens_per_request == permutator.tokens_per_request
 
     def test_same_message_shape(self) -> None:
-        sampler, permutator = self._pair()
-        s_msgs = sampler._build_messages(sampler._measured_groups[0])
-        p_msgs = permutator._request_list[0][0]
-        assert [m["role"] for m in s_msgs] == [m["role"] for m in p_msgs]
-        assert s_msgs[-1]["content"].count("\n\n") == p_msgs[-1]["content"].count(
-            "\n\n"
-        )
+        sampler, permutator, sampler_sender, permutator_sender = self._pair()
+        for workload, sender in [
+            (sampler, sampler_sender),
+            (permutator, permutator_sender),
+        ]:
+            workload.run()
+            for call in sender.send_request.call_args_list:
+                messages = call.args[1]
+                assert [m["role"] for m in messages] == ["system", "user"]
+                assert messages[-1]["content"].count("\n\n") == self.N - 1
 
     def test_same_working_set(self) -> None:
-        sampler, _ = self._pair()
-        assert sampler.working_set_tokens == self.N * self.CTX
+        sampler, permutator, _, _ = self._pair()
+        assert (
+            sampler.working_set_tokens
+            == permutator.working_set_tokens
+            == self.N * self.CTX
+        )
 
     def test_every_request_is_a_full_permutation(self) -> None:
         groups = sample_requests(self.N, self.N, self.REQ, 0.0, seed=42)
         assert all(sorted(g) == list(range(self.N)) for g in groups)
 
     def test_permutations_are_distinct_at_this_scale(self) -> None:
-        """16! is astronomically larger than the request count, so repeats
-        do not occur in practice -- unlike a small pool, where they would."""
         groups = sample_requests(self.N, self.N, self.REQ, 0.0, seed=42)
         assert len(set(groups)) == self.REQ
 
-    def test_warmup_primes_the_whole_corpus_in_one_request(self) -> None:
-        sampler, _ = self._pair()
-        assert len(sampler._sweep_groups) == 1
-        assert sorted(sampler._sweep_groups[0]) == list(range(self.N))
+    def test_preserves_different_warmup_contracts(self) -> None:
+        sampler, permutator, sampler_sender, permutator_sender = self._pair()
+        asyncio.run(sampler.warmup())
+        asyncio.run(permutator.warmup())
+        assert sampler_sender.send_warmup_request.await_count == 1
+        assert permutator_sender.send_warmup_request.await_count == 1
+        sampler_call = sampler_sender.send_warmup_request.await_args
+        permutator_call = permutator_sender.send_warmup_request.await_args
+        assert len(sampler_call.args[1][-1]["content"].split("\n\n")) == self.N
+        assert permutator_call.args[0] == "warmup_0"
+        assert permutator_call.args[1][-1]["content"] == " ".join(["warmup"] * 500)
 
 
 class TestScrapeLookupTokens:
