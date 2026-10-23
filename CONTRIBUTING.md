@@ -170,6 +170,13 @@ Please do follow up if your PR goes quiet: a PR with no activity for 60 days is 
 
 We recommend using [uv](https://docs.astral.sh/uv/) to manage Python environments and dependencies:
 
+GPU-free development on Linux and macOS is supported. For the CPU-only source
+installation and standalone server benchmark, follow the
+[CPU-only development guide](https://docs.lmcache.ai/developer_guide/contributing.html#cpu-only-development-linux-and-macos).
+It builds the common C++ extensions with `NO_GPU_EXT=1` and does not require vLLM.
+
+For accelerator development, install the matching serving engine and toolchain:
+
 ```bash
 # Create and activate a virtual environment
 uv venv --python 3.12
