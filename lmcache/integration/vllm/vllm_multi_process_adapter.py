@@ -800,8 +800,8 @@ class LMCacheMPSchedulerAdapter:
         self._lookup_params: dict[
             str, tuple[list[int], str, dict[str, Any] | None]
         ] = {}
-        # Unaligned end of each lookup that also asks for the unfull chunk.
-        self._unfull_lookup_ends: dict[str, int] = {}
+        # Lookups that also ask for an unfull chunk; answered in tokens.
+        self._unfull_lookups: set[str] = set()
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -942,10 +942,10 @@ class LMCacheMPSchedulerAdapter:
                 the IPC key.
             reserve_last_token: Whether to exclude the final token before
                 aligning the lookup range.
-            include_unfull_chunk: Whether the hit may also cover the unfull
-                chunk ending at the lookup range's unaligned end, so
-                ``check_lookup_result`` can return a count that is not a
-                multiple of the chunk size.
+            include_unfull_chunk: Whether the hit may also end with an unfull
+                chunk after the hit prefix, at or before the lookup range's
+                unaligned end, so ``check_lookup_result`` can return a count
+                that is not a multiple of the chunk size.
             start: Chunk-aligned start token index of the lookup; tokens
                 below it are covered by the engine's prefix cache, so the
                 server touches but does not lock or prefetch them. A start
@@ -976,10 +976,9 @@ class LMCacheMPSchedulerAdapter:
         aligned_end = (
             lookup_tokens // self.lmcache_tokens_per_chunk
         ) * self.lmcache_tokens_per_chunk
-        end = aligned_end
-        if include_unfull_chunk and lookup_tokens != aligned_end:
-            end = lookup_tokens
-            self._unfull_lookup_ends[request_id] = lookup_tokens
+        end = lookup_tokens if include_unfull_chunk else aligned_end
+        if include_unfull_chunk:
+            self._unfull_lookups.add(request_id)
 
         key = self._create_key(
             token_ids,
@@ -988,7 +987,7 @@ class LMCacheMPSchedulerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
-            include_unfull_chunk=end != aligned_end,
+            include_unfull_chunk=include_unfull_chunk,
         ).no_worker_id_version()
 
         futures: dict[str, MessagingFuture[None]] = {
@@ -1009,38 +1008,36 @@ class LMCacheMPSchedulerAdapter:
     def _free_inconsistent_lookup_locks(
         self,
         request_id: str,
-        per_server: dict[str, int],
-        min_chunks: int,
+        hit_tokens: dict[str, int],
+        common_tokens: int,
     ) -> None:
-        """Release over-hit tail locks on servers that reported more than min.
+        """Release over-hit tail locks on servers that hit more than the rest.
 
-        When servers disagree on hit chunk counts, servers reporting more
-        than min_chunks have locked chunks in the range
-        [min_chunks * tokens_per_chunk, hit_chunks * tokens_per_chunk)
-        that will never be retrieved. This method frees those tail locks.
+        When servers disagree on hits, a server that hit ``[0, end)`` with
+        ``end > common_tokens`` locked ``[common_tokens, end)`` -- its full
+        chunks there and the unfull chunk ending at ``end``, if any -- that
+        will never be retrieved. This method frees those tail locks.
 
         Args:
             request_id: The lookup request ID.
-            per_server: Per-server hit chunk counts.
-            min_chunks: Minimum hit chunk count across all servers.
+            hit_tokens: Per-server hit token counts.
+            common_tokens: The chunk-aligned hit every server serves.
         """
         token_ids_l, cs, request_configs = self._lookup_params.pop(
             request_id, (None, None, None)
         )
         if token_ids_l is not None:
-            lookup_end = self._unfull_lookup_ends.get(request_id, len(token_ids_l))
-            for url, hit_chunks in per_server.items():
-                if hit_chunks <= min_chunks:
+            for url, end in hit_tokens.items():
+                if end <= common_tokens:
                     continue
-                tail_end = min(hit_chunks * self.lmcache_tokens_per_chunk, lookup_end)
                 tail_key = self._create_key(
                     token_ids=token_ids_l,
-                    start=min_chunks * self.lmcache_tokens_per_chunk,
-                    end=tail_end,
+                    start=common_tokens,
+                    end=end,
                     request_id=request_id,
                     cache_salt=cs or "",
                     request_configs=request_configs,
-                    include_unfull_chunk=request_id in self._unfull_lookup_ends,
+                    include_unfull_chunk=request_id in self._unfull_lookups,
                 ).no_worker_id_version()
                 self.req_clients[url].free_lookup_locks(tail_key, self.tp_size)
 
@@ -1144,25 +1141,27 @@ class LMCacheMPSchedulerAdapter:
         if len(per_server) < len(self._server_urls):
             return None
 
-        min_chunks = min(per_server.values())
-        max_chunks = max(per_server.values())
-        if min_chunks != max_chunks:
-            logger.warning(
-                "[req=%s] LMCache hit mismatch across servers: %s → take min=%d",
-                request_id,
-                dict(per_server),
-                min_chunks,
-            )
-            self._free_inconsistent_lookup_locks(request_id, per_server, min_chunks)
-
-        # One count past the full chunks is the unfull chunk, which ends at
-        # the lookup's unaligned end.
-        token_count = min(
-            min_chunks * self.lmcache_tokens_per_chunk,
-            self._unfull_lookup_ends.get(
-                request_id, min_chunks * self.lmcache_tokens_per_chunk
-            ),
+        # A lookup that asked for an unfull chunk is answered in tokens.
+        hit_tokens = (
+            dict(per_server)
+            if request_id in self._unfull_lookups
+            else {
+                url: chunks * self.lmcache_tokens_per_chunk
+                for url, chunks in per_server.items()
+            }
         )
+        token_count = min(hit_tokens.values())
+        if token_count != max(hit_tokens.values()):
+            # Servers that hit different unfull chunks share only the full
+            # chunks below them.
+            token_count -= token_count % self.lmcache_tokens_per_chunk
+            logger.warning(
+                "[req=%s] LMCache hit mismatch across servers: %s → take %d tokens",
+                request_id,
+                hit_tokens,
+                token_count,
+            )
+            self._free_inconsistent_lookup_locks(request_id, hit_tokens, token_count)
 
         self._finished_lookup_results[request_id] = token_count
         return token_count
@@ -1186,7 +1185,7 @@ class LMCacheMPSchedulerAdapter:
         self._finished_lookup_results.pop(request_id, None)
         self._per_server_hits.pop(request_id, None)
         self._lookup_params.pop(request_id, None)
-        self._unfull_lookup_ends.pop(request_id, None)
+        self._unfull_lookups.discard(request_id)
 
     def reset_cache(self) -> bool:
         """Ask every backing LMCache server to best-effort clear idle cache.

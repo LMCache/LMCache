@@ -315,13 +315,14 @@ def test_lookup_hits_the_unfull_chunk_and_free_deletes_a_temporary_one(
     unfull_keys = _unfull_keys(hasher, tokens, lookup_end)
     _write(storage_manager, unfull_keys, is_temporary=True)
 
-    assert _lookup(module, tokens, lookup_end, request_id="r1") == 3
+    # A lookup that asks for the unfull chunk is answered in tokens.
+    assert _lookup(module, tokens, lookup_end, request_id="r1") == lookup_end
 
     module.free_lookup_locks(
         _key(tokens, 0, lookup_end, request_id="r1", include=True), tp_size=1
     )
     # Read once: releasing the lookup's last lock deleted the object.
-    assert _lookup(module, tokens, lookup_end, request_id="r2") == 2
+    assert _lookup(module, tokens, lookup_end, request_id="r2") == 2 * CHUNK_SIZE
 
 
 def test_lookup_ignores_the_unfull_chunk_without_the_flag(lookup_module):
@@ -332,29 +333,101 @@ def test_lookup_ignores_the_unfull_chunk_without_the_flag(lookup_module):
         storage_manager, _unfull_keys(hasher, tokens, len(tokens)), is_temporary=True
     )
 
+    # Without the flag the lookup is answered in chunks.
     assert _lookup(module, tokens, len(tokens), request_id="r1", include=False) == 1
     # Never locked, so still there for a lookup that asks for it.
-    assert _lookup(module, tokens, len(tokens), request_id="r2") == 2
+    assert _lookup(module, tokens, len(tokens), request_id="r2") == len(tokens)
 
 
-def test_unfull_chunk_needs_every_full_chunk_and_the_exact_end(lookup_module):
+def test_unfull_chunk_extends_only_the_hit_prefix(lookup_module):
     module, storage_manager, hasher = lookup_module
     tokens = list(range(2 * CHUNK_SIZE + 5))
-    # Chunk 0 only: the unfull chunk cannot extend a broken prefix.
+    # Chunk 0 only: an unfull chunk inside chunk 2 cannot extend the hit.
     _write(storage_manager, _chunk_keys(hasher, tokens, 1), is_temporary=False)
     _write(
         storage_manager, _unfull_keys(hasher, tokens, len(tokens)), is_temporary=False
     )
-    assert _lookup(module, tokens, len(tokens), request_id="r1") == 1
+    assert _lookup(module, tokens, len(tokens), request_id="r1") == CHUNK_SIZE
 
     _write(storage_manager, _chunk_keys(hasher, tokens, 2)[1:], is_temporary=False)
-    # A different end addresses a different unfull chunk.
-    assert _lookup(module, tokens, len(tokens) - 1, request_id="r2") == 2
-    assert _lookup(module, tokens, len(tokens), request_id="r3") == 3
+    # Without a grid only the lookup's own end is probed.
+    assert _lookup(module, tokens, len(tokens) - 1, request_id="r2") == 2 * CHUNK_SIZE
+    assert _lookup(module, tokens, len(tokens), request_id="r3") == len(tokens)
+
+
+def test_grid_lookup_hits_the_longest_unfull_chunk_up_to_its_end(lookup_module):
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(3 * CHUNK_SIZE))
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+    for end in (2 * CHUNK_SIZE + 4, 2 * CHUNK_SIZE + 8):
+        _write(storage_manager, _unfull_keys(hasher, tokens, end), is_temporary=False)
+
+    assert _lookup(module, tokens, 2 * CHUNK_SIZE + 11, "r1", grid=4) == (
+        2 * CHUNK_SIZE + 8
+    )
+    assert _lookup(module, tokens, 2 * CHUNK_SIZE + 7, "r2", grid=4) == (
+        2 * CHUNK_SIZE + 4
+    )
+
+
+def test_identical_prompt_resuming_before_its_last_token_hits_its_tail(
+    lookup_module,
+):
+    """A prompt of P tokens stores its tail at floor((P - 1) / g) * g, and the
+    same prompt's lookup stops at P - 1 (the engine recomputes the last
+    token): the grid makes the two meet."""
+    module, storage_manager, hasher = lookup_module
+    num_prompt_tokens, grid = 2 * CHUNK_SIZE + 9, 4
+    tokens = list(range(num_prompt_tokens))
+    tail_end = (num_prompt_tokens - 1) // grid * grid
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+    _write(storage_manager, _unfull_keys(hasher, tokens, tail_end), is_temporary=False)
+
+    hit = _lookup(module, tokens, num_prompt_tokens - 1, "r1", grid=grid)
+
+    assert hit == tail_end
+
+
+def test_next_round_hits_the_previous_rounds_tail(lookup_module):
+    """Round 2 extends round 1's prompt: its full-chunk hit stops at round 1's
+    last chunk boundary, and the tail stored there extends it."""
+    module, storage_manager, hasher = lookup_module
+    round_2 = list(range(4 * CHUNK_SIZE))
+    round_1_tail = CHUNK_SIZE + 8
+    _write(storage_manager, _chunk_keys(hasher, round_2, 1), is_temporary=False)
+    _write(
+        storage_manager, _unfull_keys(hasher, round_2, round_1_tail), is_temporary=False
+    )
+
+    assert _lookup(module, round_2, len(round_2) - 1, "r1", grid=4) == round_1_tail
+
+
+def test_free_releases_the_unfull_chunk_at_the_hit_end(lookup_module):
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 9))
+    hit = 2 * CHUNK_SIZE + 8
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+    _write(storage_manager, _unfull_keys(hasher, tokens, hit), is_temporary=True)
+    assert _lookup(module, tokens, len(tokens), "r1", grid=4) == hit
+
+    # A free ending past the hit releases the full chunks only.
+    module.free_lookup_locks(_key(tokens, 0, len(tokens), "r1", True), tp_size=1)
+    assert _lookup(module, tokens, len(tokens), "r2", grid=4) == hit
+
+    # Ending at the hit releases the unfull chunk; with both lookups' locks
+    # gone the read-once object is deleted.
+    module.free_lookup_locks(_key(tokens, 2 * CHUNK_SIZE, hit, "r1", True), tp_size=1)
+    module.free_lookup_locks(_key(tokens, 0, hit, "r2", True), tp_size=1)
+    assert _lookup(module, tokens, len(tokens), "r3", grid=4) == 2 * CHUNK_SIZE
 
 
 def _key(
-    tokens: list[int], start: int, end: int, request_id: str, include: bool
+    tokens: list[int],
+    start: int,
+    end: int,
+    request_id: str,
+    include: bool,
+    grid: int = 0,
 ) -> IPCCacheServerKey:
     return IPCCacheServerKey(
         model_name=MODEL,
@@ -365,6 +438,7 @@ def _key(
         end=end,
         request_id=request_id,
         num_kv_readers=1,
+        request_configs={"lmcache.hint.unfull_chunk_grid": grid} if grid else None,
         include_unfull_chunk=include,
     )
 
@@ -405,8 +479,9 @@ def _lookup(
     end: int,
     request_id: str,
     include: bool = True,
+    grid: int = 0,
 ) -> int:
-    module.lookup(_key(tokens, 0, end, request_id, include), tp_size=1)
+    module.lookup(_key(tokens, 0, end, request_id, include, grid), tp_size=1)
     hits = module.wait_prefetch_status(request_id, timeout=5.0)
     assert hits is not None
     return hits

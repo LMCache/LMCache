@@ -97,6 +97,27 @@ def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
     return block_size
 
 
+def is_align_mode_mamba_spec(spec: Any) -> bool:
+    """Return whether the spec is a Mamba/linear-attention spec in align mode.
+
+    Align mode keeps state snapshots only at chosen boundaries and may move
+    them between blocks, so a block-table position does not identify one;
+    vLLM hands each snapshot's block to connectors instead
+    (``SchedulerOutput.kv_connector_block_state.boundary_state_offloads``).
+    Checked by class name so this module stays importable without vLLM.
+
+    Args:
+        spec: A vLLM KV cache spec.
+
+    Returns:
+        True for a ``MambaSpec`` with ``mamba_cache_mode == "align"``.
+    """
+    return (
+        any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__)
+        and getattr(spec, "mamba_cache_mode", "none") == "align"
+    )
+
+
 def _is_sliding_window_spec(spec: Any) -> bool:
     """Return whether the KV cache spec is a vLLM sliding-window spec.
 
