@@ -195,8 +195,8 @@ max_capacity_gb = 6000
 eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 0.1 }
 
 [deployments.vllm_lmcache_ssm]
-# vllm_lmcache on the hybrid linear model. The connector rounds chunk-size up
-# to a multiple of every KV group's block span, DCP included.
+# vllm_lmcache on the hybrid linear model. chunk-size must be a multiple of
+# vLLM's block span: 1152-token blocks x DCP 8 (the connector rejects others).
 model = "glm53"
 image_target = "lmcache"
 
@@ -215,7 +215,7 @@ scratch = [{ path = "<root>/l2", min_free_gb = 6000 }]
 host = "127.0.0.1"
 port = 16555
 http-port = 18080
-chunk-size = 256
+chunk-size = 9216
 separate-object-groups = true
 l1-size-gb = 1500
 # Pinned up front: pinning lazily while vLLM registers its KV caches can stall
