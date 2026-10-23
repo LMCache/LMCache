@@ -124,14 +124,19 @@ OnFinishedCallback = Callable[[RequestResult, str], None]
 
 class RequestSender:
     def __init__(self, engine_url, model, completions_mode=False,
-                 on_finished=[], ignore_eos=False, extra_body={})
+                 on_finished=[], ignore_eos=False, extra_body={}, max_retries=0)
     async def send_request(self, request_id, messages, max_tokens=128) -> RequestResult
     async def send_warmup_request(self, request_id, messages, max_tokens=1) -> RequestResult
     async def close(self) -> None
 ```
 
-Streams via `AsyncOpenAI` with SDK retries disabled so each scheduled request
-has one attempt and engine failures are not hidden by retries. Measures
+Streams via `AsyncOpenAI` with SDK retries disabled by default so each scheduled
+request has one attempt. `--max-retries N` (non-negative, default 0) configures
+`EngineBenchConfig.max_retries` and is passed through to the SDK, including for
+warmup. Interactive settings and saved/exported JSON configs preserve this value;
+an explicit CLI zero overrides a positive saved value. Positive values benchmark
+retry behavior and include extra HTTP traffic and backoff in the measurements.
+The resolved retry setting is included in configuration metrics. Measures
 TTFT / decode speed / latency, reads token
 counts from server usage reports, then invokes every `on_finished` callback
 with `(RequestResult, response_text)`. Each call is a self-contained

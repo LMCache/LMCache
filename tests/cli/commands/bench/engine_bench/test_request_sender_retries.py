@@ -4,6 +4,7 @@
 # Standard
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import partial
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from unittest.mock import Mock
@@ -49,19 +50,29 @@ def _error_server(status: int) -> Iterator[tuple[str, list[str]]]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [408, 409, 429, 500, 503])
 @pytest.mark.parametrize("completions_mode", [False, True])
-async def test_retryable_error_is_attempted_once(
-    status: int, completions_mode: bool, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("max_retries", [None, 0, 1, 2])
+async def test_retryable_error_uses_configured_budget(
+    status: int,
+    completions_mode: bool,
+    max_retries: int | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A scheduled request must produce one HTTP attempt and one failed result."""
+    """Default to one attempt and honor an explicit SDK retry budget."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("NO_PROXY", "127.0.0.1")
     callback = Mock()
     with _error_server(status) as (url, attempts):
-        sender = RequestSender(
+        make_sender = partial(
+            RequestSender,
             url,
             "test-model",
             completions_mode=completions_mode,
             on_finished=[callback],
+        )
+        sender = (
+            make_sender()
+            if max_retries is None
+            else make_sender(max_retries=max_retries)
         )
         try:
             result = await sender.send_request(
@@ -71,7 +82,13 @@ async def test_retryable_error_is_attempted_once(
             await sender.close()
 
     endpoint = "/v1/completions" if completions_mode else "/v1/chat/completions"
-    assert attempts == [endpoint]
+    assert attempts == [endpoint] * (1 + (max_retries or 0))
     assert not result.successful
     assert str(status) in result.error
     callback.assert_called_once_with(result, "")
+
+
+def test_negative_retry_budget_is_rejected() -> None:
+    """Reject invalid retry budgets at the sender's public boundary."""
+    with pytest.raises(ValueError, match="max_retries must be non-negative"):
+        RequestSender("http://localhost:8000", "test-model", max_retries=-1)

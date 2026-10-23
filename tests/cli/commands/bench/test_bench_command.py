@@ -2,6 +2,7 @@
 """Tests for the BenchCommand CLI wiring and orchestrator."""
 
 # Standard
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 import argparse
 import io
@@ -143,6 +144,61 @@ def _make_result(request_id: str = "req_0") -> RequestResult:
 
 
 class TestBenchCommandRegistration:
+    @pytest.mark.parametrize("max_retries", [0, 2])
+    def test_retry_config_round_trip_and_cli_override(
+        self, tmp_path: Path, max_retries: int
+    ) -> None:
+        """Preserve retry settings in exports and honor explicit zero overrides."""
+        parser = argparse.ArgumentParser()
+        BenchCommand().register(parser.add_subparsers())
+        export_path = str(tmp_path / "retry-config.json")
+        args = parser.parse_args(
+            [
+                "bench",
+                "engine",
+                "--engine-url",
+                "http://localhost:8000",
+                "--model",
+                "test-model",
+                "--workload",
+                "long-doc-qa",
+                "--tokens-per-gb-kvcache",
+                "50000",
+                "--max-retries",
+                str(max_retries),
+                "--export-config",
+                export_path,
+            ]
+        )
+        run_engine_bench(BenchCommand(), args)
+        with open(export_path) as f:
+            data = json.load(f)
+        assert data["max_retries"] == max_retries
+        replay = parser.parse_args(
+            [
+                "bench",
+                "engine",
+                "--engine-url",
+                "http://localhost:8000",
+                "--config",
+                export_path,
+            ]
+        )
+        assert _resolve_args(replay).max_retries == max_retries
+        override = parser.parse_args(
+            [
+                "bench",
+                "engine",
+                "--engine-url",
+                "http://localhost:8000",
+                "--config",
+                export_path,
+                "--max-retries",
+                "0",
+            ]
+        )
+        assert _resolve_args(override).max_retries == 0
+
     def test_bench_in_all_commands(self) -> None:
         # First Party
         from lmcache.cli.commands import ALL_COMMANDS

@@ -192,6 +192,18 @@ ALL_ITEMS: list[ConfigItem] = [
     ),
     # ── Phase 2: General ──────────────────────────────────────────────
     ConfigItem(
+        key="max_retries",
+        display_name="Maximum SDK retries",
+        description=(
+            "Maximum retries per engine request, including warmup. "
+            "Keep zero for accurate offered load; positive values also "
+            "include retry traffic and backoff in the benchmark."
+        ),
+        input_type="int",
+        default=0,
+        phase=PHASE_GENERAL,
+    ),
+    ConfigItem(
         key="model",
         display_name="Model name",
         description=(

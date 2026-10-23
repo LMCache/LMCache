@@ -50,6 +50,9 @@ class EngineBenchConfig:
     Contains only general benchmark parameters. Workload-specific configs
     (e.g., ``LongDocQAConfig``) live in their respective workload modules
     and are resolved by the workload factory.
+
+    ``max_retries`` limits SDK retries per engine request (including warmup)
+    and defaults to zero so benchmark traffic is not silently amplified.
     """
 
     engine_url: str
@@ -64,8 +67,11 @@ class EngineBenchConfig:
     quiet: bool
     ignore_eos: bool = False
     warmup_policy: WarmupPolicy = WarmupPolicy.RUN
+    max_retries: int = 0
 
     def __post_init__(self) -> None:
+        if self.max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
         if not self.engine_url:
             raise ValueError("engine_url must be non-empty")
         if self.kv_cache_volume_gb <= 0:
@@ -279,6 +285,7 @@ def parse_args_to_config(args: argparse.Namespace) -> EngineBenchConfig:
         export_json=args.json,
         quiet=args.quiet,
         ignore_eos=args.ignore_eos,
+        max_retries=getattr(args, "max_retries", None) or 0,
         warmup_policy=(
             WarmupPolicy.SKIP if getattr(args, "no_warmup", False) else WarmupPolicy.RUN
         ),

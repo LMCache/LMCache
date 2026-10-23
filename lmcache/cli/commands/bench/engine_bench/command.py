@@ -86,6 +86,12 @@ def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
 
     # --- General args ---
     parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=None,
+        help="Maximum SDK retries per request, including warmup (default: 0).",
+    )
+    parser.add_argument(
         "--engine-url",
         default=None,
         help=(
@@ -520,6 +526,7 @@ def _export_config(
     state.set("kv_cache_volume", config.kv_cache_volume_gb)
     state.set("tokens_per_gb_kvcache", config.tokens_per_gb_kvcache)
     state.set("ignore_eos", config.ignore_eos)
+    state.set("max_retries", config.max_retries)
     state.set("no_warmup", config.warmup_policy is WarmupPolicy.SKIP)
 
     # Workload-specific args from namespace
@@ -587,6 +594,7 @@ def _emit_final_metrics(
     cfg_section.add("engine_url", "Engine URL", config.engine_url)
     cfg_section.add("model", "Model", config.model)
     cfg_section.add("workload", "Workload", config.workload)
+    cfg_section.add("max_retries", "Max retries", config.max_retries)
 
     results = metrics.add_section("results", "Results")
     results.add(
@@ -697,6 +705,7 @@ def run_engine_bench(command: "BaseCommand", args: argparse.Namespace) -> None:
         config.engine_url,
         config.model,
         ignore_eos=config.ignore_eos,
+        max_retries=config.max_retries,
         extra_body=_resolve_extra_body(args),
     )
 
