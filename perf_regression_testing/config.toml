@@ -62,6 +62,9 @@ decode-context-parallel-size = 8
 # The sparse indexer compresses 4 tokens into one state, and a state must sit on
 # one rank (vLLM's indexer.py rejects an interleave that is not a multiple).
 cp-kv-cache-interleave-size = 4
+# Under DCP a prefill chunk runs the fp8 sparse decode kernel, whose ~2 GiB
+# workspace vLLM's memory profile misses; at 0.95 it OOMs on the first long prompt.
+gpu-memory-utilization = 0.90
 disable-flashinfer-autotune = true
 enable-ep-weight-filter = true
 reasoning-parser = "glm47"
