@@ -13,8 +13,8 @@ import torch
 
 # First Party
 from lmcache import torch_device_type
+from lmcache.inprocess.v1.cache_controller.message import OpType
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
-from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import _parse_local_disk
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
