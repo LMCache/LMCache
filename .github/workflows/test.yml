@@ -3,10 +3,6 @@ name: Test
 on:
   workflow_call:
   workflow_dispatch:
-  pull_request:
-    branches:
-      - "dev"
-      - "release-**"
 
 env:
   LC_ALL: en_US.UTF-8
@@ -31,6 +27,7 @@ jobs:
     permissions:
       pull-requests: read
     outputs:
+      ci: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.ci == 'true' }}
       lmcache: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.lmcache == 'true' }}
       raw_block: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.raw_block == 'true' }}
     steps:
@@ -44,6 +41,10 @@ jobs:
         id: filter
         with:
           filters: |
+            ci:
+              - '.buildkite/k3_tests/common_scripts/**'
+              - '.github/workflows/*.yml'
+              - 'tests/ci/test_required_checks.py'
             lmcache:
               - '**.py'
               - 'pyproject.toml'
@@ -59,6 +60,23 @@ jobs:
               - 'tests/v1/storage_backend/raw_block_test_utils.py'
               - 'tests/v1/multiprocess/test_raw_block_l2_adapter.py'
               - '.github/workflows/test.yml'
+
+  ci-gate-tests:
+    name: CI admission regression tests
+    needs: changes
+    if: needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pytest PyYAML
+      # Match the glob engine used by dorny/paths-filter@v3.
+      - run: npm install --prefix "$RUNNER_TEMP/ci-tests" --ignore-scripts --no-package-lock picomatch@2.3.1
+      - run: python -m pytest -q --confcutdir=tests/ci tests/ci/test_required_checks.py
+        env:
+          CI_PICOMATCH_PATH: ${{ runner.temp }}/ci-tests/node_modules/picomatch
 
   test:
     needs: changes

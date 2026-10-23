@@ -8,14 +8,7 @@ on:
       - '.github/actions/*.ya?ml'
       - '.github/workflows/*.ya?ml'
       - '.github/workflows/actionlint.*' # This workflow
-  pull_request:
-    branches:
-      - "dev"
-      - "release-**"
-    paths:
-      - '.github/actions/*.ya?ml'
-      - '.github/workflows/*.ya?ml'
-      - '.github/workflows/actionlint.*' # This workflow
+  workflow_call:
 
 env:
   LC_ALL: en_US.UTF-8

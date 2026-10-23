@@ -20,13 +20,9 @@ on:
         description: Hugging Face token used to download gated test models.
         required: false
   workflow_dispatch:
-  pull_request:
-    branches:
-      - "dev"
-      - "release-**"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: cpu-device-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

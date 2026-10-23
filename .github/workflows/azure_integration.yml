@@ -16,15 +16,7 @@ on:
       - "tests/v1/storage_backend/test_azure_connector.py"
       - "tests/v1/storage_backend/test_azure_connector_azurite.py"
       - ".github/workflows/azure_integration.yml"
-  pull_request:
-    branches:
-      - "dev"
-      - "release-**"
-    paths:
-      - "lmcache/v1/storage_backend/connector/azure_connector.py"
-      - "tests/v1/storage_backend/test_azure_connector.py"
-      - "tests/v1/storage_backend/test_azure_connector_azurite.py"
-      - ".github/workflows/azure_integration.yml"
+  workflow_call:
   workflow_dispatch:
 
 defaults:
