@@ -47,6 +47,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
 )
 from lmcache.v1.distributed.internal_api import L2StoreResult
+from lmcache.v1.distributed.key_codec import decode_storage_key, encode_storage_key
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -69,54 +70,8 @@ logger = init_logger(__name__)
 
 
 def _string_to_object_key(name: str) -> ObjectKey:
-    """Reverse of :func:`_object_key_to_string`.
-
-    Expects
-    ``<model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>[@<cache_salt>]``.
-
-    Raises:
-        ValueError: ``name`` does not match the expected format.
-    """
-    parts = name.split("@")
-    if len(parts) == 4:
-        model_name, kv_rank_hex, object_group_id_hex, chunk_hash_hex = parts
-        cache_salt = ""
-    elif len(parts) == 5:
-        (
-            model_name,
-            kv_rank_hex,
-            object_group_id_hex,
-            chunk_hash_hex,
-            cache_salt,
-        ) = parts
-    else:
-        raise ValueError(f"unparsable S3 object name {name!r}: wrong field count")
-    try:
-        kv_rank = int(kv_rank_hex, 16)
-    except ValueError as exc:
-        raise ValueError(
-            f"unparsable S3 object name {name!r}: bad kv_rank {kv_rank_hex!r}"
-        ) from exc
-    try:
-        object_group_id = int(object_group_id_hex, 16)
-    except ValueError as exc:
-        raise ValueError(
-            f"unparsable S3 object name {name!r}: "
-            f"bad object_group_id {object_group_id_hex!r}"
-        ) from exc
-    try:
-        chunk_hash = bytes.fromhex(chunk_hash_hex)
-    except ValueError as exc:
-        raise ValueError(
-            f"unparsable S3 object name {name!r}: bad chunk_hash {chunk_hash_hex!r}"
-        ) from exc
-    return ObjectKey(
-        chunk_hash=chunk_hash,
-        model_name=model_name,
-        kv_rank=kv_rank,
-        object_group_id=object_group_id,
-        cache_salt=cache_salt,
-    )
+    """Recover an ObjectKey from its L2 storage name."""
+    return decode_storage_key(name)
 
 
 def _parse_list_response_xml(
@@ -173,26 +128,8 @@ def _parse_list_response_xml(
 
 
 def _object_key_to_string(key: ObjectKey) -> str:
-    """Serialize an ObjectKey to a deterministic S3 object name.
-
-    Unsalted::
-
-        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>
-
-    Salted (trailing ``cache_salt``)::
-
-        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
-
-    ``@`` in ``model_name`` and ``cache_salt`` is rejected by
-    ``ObjectKey.__post_init__``, so the format is unambiguous.
-    """
-    base = (
-        f"{key.model_name}@{key.kv_rank:08x}"
-        f"@{key.object_group_id:x}@{key.chunk_hash.hex()}"
-    )
-    if key.cache_salt:
-        return f"{base}@{key.cache_salt}"
-    return base
+    """Return the shared L2 storage key."""
+    return encode_storage_key(key)
 
 
 def _format_safe_path(key_str: str) -> str:
