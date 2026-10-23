@@ -40,6 +40,54 @@ def is_false(value: str) -> bool:
     return value.lower() in ("false", "0", "no", "n", "off")
 
 
+def is_rswa_model(
+    vllm_config: "VllmConfig",
+    kv_cache_config: Any | None = None,
+) -> bool:
+    """Return whether vLLM configured Reference Sliding Window Attention.
+
+    The resolved KV-cache groups are the authoritative signal. The model
+    config is also checked because vLLM can merge compatible attention specs
+    before a connector sees them, and older connector entry points may not
+    receive a resolved ``KVCacheConfig`` at all. Class names are inspected
+    instead of importing ``RSWASpec`` so LMCache remains importable with vLLM
+    releases that predate that spec.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+        kv_cache_config: The optional resolved vLLM KV-cache configuration.
+
+    Returns:
+        True when either a resolved R-SWA spec or an R-SWA model-config value
+        is present.
+    """
+    groups = getattr(kv_cache_config, "kv_cache_groups", ()) or ()
+    for group in groups:
+        group_spec = getattr(group, "kv_cache_spec", None)
+        per_layer_specs = getattr(group_spec, "kv_cache_specs", None)
+        specs = (
+            per_layer_specs.values()
+            if isinstance(per_layer_specs, Mapping)
+            else (group_spec,)
+        )
+        if any(
+            spec is not None
+            and any(cls.__name__ == "RSWASpec" for cls in type(spec).__mro__)
+            for spec in specs
+        ):
+            return True
+
+    model_config = getattr(vllm_config, "model_config", None)
+    if getattr(model_config, "rswa_window", None) is not None:
+        return True
+
+    hf_config = getattr(model_config, "hf_config", None)
+    if getattr(hf_config, "rswa_window", None) is not None:
+        return True
+    text_config = getattr(hf_config, "text_config", None)
+    return getattr(text_config, "rswa_window", None) is not None
+
+
 def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
     """Build layout_hints dict by querying vLLM at runtime."""
     hints: dict[str, str] = {}

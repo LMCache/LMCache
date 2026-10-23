@@ -79,6 +79,7 @@ from lmcache.integration.vllm.mp_server_launcher import (
     is_mp_server_autostart_enabled,
 )
 from lmcache.integration.vllm.utils import (
+    is_rswa_model,
     mla_only,
     vllm_layout_hints,
 )
@@ -133,6 +134,7 @@ if TYPE_CHECKING:
 logger = lmcache_init_logger(__name__)
 
 _DCP_LAYOUT_NAMESPACE = "##lmcache-dcp-layout-v1-"
+_RSWA_PROMPT_CACHE_NAMESPACE = "##lmcache-rswa-prompt-v1"
 _MAX_LCM_EXPANSION_FACTOR = 4
 
 
@@ -188,6 +190,30 @@ class LMCacheMPKVEvents(KVConnectorKVEvents):
 
 
 # Helper functions
+def _uses_request_scoped_mm_ids(vllm_config: "VllmConfig") -> bool:
+    """Return whether vLLM can assign restart-unsafe multimodal IDs.
+
+    With vLLM prefix caching and multimodal processor caching both disabled,
+    vLLM replaces even user-provided media UUIDs with a renderer-local counter.
+    The counter repeats after a renderer restart and across replicas, so it is
+    not safe as an external cache key.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+
+    Returns:
+        True when multimodal identifiers are scoped to a renderer process.
+    """
+    model_config = getattr(vllm_config, "model_config", None)
+    multimodal_config = getattr(model_config, "multimodal_config", None)
+    cache_config = getattr(vllm_config, "cache_config", None)
+    return (
+        multimodal_config is not None
+        and getattr(multimodal_config, "mm_processor_cache_gb", None) == 0
+        and getattr(cache_config, "enable_prefix_caching", None) is False
+    )
+
+
 def _has_preemption_reqs(scheduler_output: SchedulerOutput) -> bool:
     """Return whether the scheduler output contains preemption-related requests.
 
@@ -338,6 +364,30 @@ def get_dcp_decorated_model_name(
     if dcp_size <= 1 or interleave == 1:
         return model_name
     return f"{model_name}{_DCP_LAYOUT_NAMESPACE}d{dcp_size}-interleave{interleave}"
+
+
+def get_cache_model_name(
+    vllm_config: VllmConfig,
+    kv_cache_config: "KVCacheConfig | None" = None,
+) -> str:
+    """Return the model namespace used by the MP cache protocol.
+
+    R-SWA entries use a new prompt-only namespace. This prevents a safe
+    deployment from reading decode chunks written by an older LMCache version
+    that treated R-SWA's sparse block table as an append-only prefix.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+        kv_cache_config: vLLM's resolved KV-cache group configuration.
+
+    Returns:
+        The cache model name including any physical-layout and cache-policy
+        namespaces.
+    """
+    model_name = get_dcp_decorated_model_name(vllm_config, kv_cache_config)
+    if is_rswa_model(vllm_config, kv_cache_config):
+        return f"{model_name}{_RSWA_PROMPT_CACHE_NAMESPACE}"
+    return model_name
 
 
 def get_resolved_attention_block_sizes(
@@ -573,10 +623,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             kv_cache_config: Resolved cache groups, if supplied by vLLM.
 
         Raises:
-            ValueError: If cache geometry or auto-start configuration is invalid,
-                including auto-start with multiple server endpoints.
+            ValueError: If R-SWA multimodal cache identity, cache geometry or
+                auto-start configuration is invalid, including multiple endpoints.
             ConnectionError: If the configured MP server cannot be reached.
         """
+        prompt_only_cache = is_rswa_model(vllm_config, kv_cache_config)
+        if prompt_only_cache and _uses_request_scoped_mm_ids(vllm_config):
+            raise ValueError(
+                "R-SWA prompt caching requires stable multimodal identifiers, "
+                "but vLLM prefix caching and multimodal processor caching are "
+                "both disabled. Keep --no-enable-prefix-caching for R-SWA and "
+                "set --mm-processor-cache-gb to a value greater than 0."
+            )
+
         # Older supported vLLM releases allow connectors to omit this value,
         # while current vLLM's type declaration requires it.
         super().__init__(vllm_config, role, kv_cache_config)  # type: ignore[arg-type]
@@ -602,7 +661,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         scheduler_block_size = get_vllm_scheduler_block_size(
             vllm_config, kv_cache_config
         )
-        cache_model_name = get_dcp_decorated_model_name(vllm_config, kv_cache_config)
+        self._prompt_only_cache = prompt_only_cache
+        cache_model_name = get_cache_model_name(vllm_config, kv_cache_config)
 
         assert vllm_config.kv_transfer_config is not None
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
@@ -666,10 +726,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         logger.info(
             "Resolved LMCache MP geometry: group_tokens_per_block=%s, "
-            "scheduler_block_size=%d, cache_model_name=%s",
+            "scheduler_block_size=%d, cache_model_name=%s, prompt_only=%s",
             group_tokens_per_block,
             scheduler_block_size,
             cache_model_name,
+            self._prompt_only_cache,
         )
 
         assert vllm_config.parallel_config.world_size % n_servers == 0, (
@@ -1295,6 +1356,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         tracker = self._get_or_create_request_tracker(request)
 
+        if tracker.num_cache_tokens == 0:
+            return 0, False
+
         # A failed asynchronous load is bypassed until vLLM admits the request
         # for local computation via update_state_after_alloc().  The scheduler
         # may poll this method repeatedly before that admission; do not submit
@@ -1350,7 +1414,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.lookup_started_at = time.monotonic()
         submitted = self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
-            token_ids=tracker.get_token_ids(),
+            token_ids=tracker.get_cache_token_ids(),
             cache_salt=tracker.cache_salt,
             # vLLM's prefix-cache hit, for the server's KV load policy.
             request_configs={
@@ -1408,7 +1472,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.num_lmcache_hit_tokens = 0
             if self.scheduler_adapter.maybe_submit_lookup_request(
                 request.request_id,
-                token_ids=tracker.get_token_ids(),
+                token_ids=tracker.get_cache_token_ids(),
                 cache_salt=tracker.cache_salt,
                 request_configs={
                     **(tracker.request_configs or {}),
@@ -1442,7 +1506,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # Without this, num_computed_tokens would equal request.num_tokens,
         # causing num_new_tokens to be 0 and triggering the
         # `assert num_new_tokens > 0` in the scheduler.
-        if ret == len(request.all_token_ids):
+        if ret == tracker.num_cache_tokens:
             need_to_load = max(0, need_to_load - 1)
 
         logger.debug(
@@ -1462,11 +1526,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         tracker = self._get_or_create_request_tracker(request)
+        if tracker.num_cache_tokens == 0:
+            return
         if tracker.lookup_started_at is None:
             tracker.lookup_started_at = time.monotonic()
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
-            token_ids=tracker.get_token_ids(),
+            token_ids=tracker.get_cache_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
             reserve_last_token=self._reserve_last_token_for_lookup,
@@ -1551,7 +1617,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             if free_end > 0 or tracker.pending_free_ranges:
                 self.scheduler_adapter.free_lookup_locks(
-                    token_ids=tracker.get_token_ids(),
+                    token_ids=tracker.get_cache_token_ids(),
                     start=0,
                     end=free_end,
                     request_id=request.request_id,
@@ -1650,13 +1716,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         params: dict[str, Any] | None = getattr(request, "kv_transfer_params", None)
         return_params: dict[str, Any] | None = {} if params is not None else None
+        request_tracker = self.request_trackers.get(request.request_id)
+        bypasses_cache = (
+            request_tracker is not None and request_tracker.num_cache_tokens == 0
+        )
 
         if (
             params is not None
             and return_params is not None
             and "cached_token_stats" in params
         ):
-            request_tracker = self._get_request_tracker(request.request_id)
+            assert request_tracker is not None
             num_vllm = request_tracker.num_vllm_hit_tokens
             num_lmcache = request_tracker.num_lmcache_hit_tokens
             return_params["cached_token_stats"] = {
@@ -1676,14 +1746,21 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if self.lazy_offload:
             # Blocks return to the free queue (False) and remain observable;
             # the manager ends the LMCache session after all deferred stores
-            # have either completed or been dropped.
-            actions = self._lazy_offload_manager.on_request_finished(request.request_id)
-            for request_id in actions.sessions_to_end:
-                self.scheduler_adapter.end_session(request_id)
+            # have either completed or been dropped. A zero-cap request never
+            # enters the manager or opens a session; a predecessor reusing its
+            # id is allowed to settle through its own store receipts.
+            if not bypasses_cache:
+                actions = self._lazy_offload_manager.on_request_finished(
+                    request.request_id
+                )
+                for request_id in actions.sessions_to_end:
+                    self.scheduler_adapter.end_session(request_id)
             return False, (return_params or None)
 
-        # Notify LMCache to end the session for this request
-        self.scheduler_adapter.end_session(request.request_id)
+        # A zero-cap request never opens a lookup session or reports block
+        # allocations. Other requests still need session/L0 ownership cleanup.
+        if not bypasses_cache:
+            self.scheduler_adapter.end_session(request.request_id)
         return self._can_store, (return_params or None)
 
     def request_finished_all_groups(
@@ -1886,7 +1963,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # actual token content (not just the newly-scheduled slice).
         for new_request in scheduler_output.scheduled_new_reqs:
             tracker = self.request_trackers.get(new_request.req_id)
-            if tracker is None:
+            if tracker is None or tracker.num_cache_tokens == 0:
                 continue
             primary_block_ids = tracker.allocated_block_ids.get(0, [])
             num_blocks = len(primary_block_ids)
@@ -1911,7 +1988,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if not new_block_ids:
                 continue
             tracker = self.request_trackers.get(request_id)
-            if tracker is None:
+            if tracker is None or tracker.num_cache_tokens == 0:
                 continue
             # The new blocks sit at the end of the request's block list.
             # Compute the token range they cover.
@@ -1956,17 +2033,22 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # state, i.e., PREFETCHING
             if tracker.state != LMCacheMPRequestState.PREFETCHING:
                 self.request_trackers.pop(request_id)
-                if self.lazy_offload:
+                if self.lazy_offload and tracker.num_cache_tokens > 0:
                     # The recreated tracker restarts at token zero, so its
                     # manager discards overlapping buffered metadata.
                     self._lazy_offload_manager.on_request_reset(request_id)
 
         if request_id not in self.request_trackers:
-            if self.lazy_offload:
+            new_tracker = LMCacheMPRequestTracker(
+                request,
+                prompt_only=self._prompt_only_cache,
+            )
+            # Cache bypasses must not create a manager slot or take over an
+            # older generation's deferred session under a reused request id.
+            if self.lazy_offload and new_tracker.num_cache_tokens > 0:
                 actions = self._lazy_offload_manager.on_request_arrived(request_id)
                 for session_id in actions.sessions_to_end:
                     self.scheduler_adapter.end_session(session_id)
-            new_tracker = LMCacheMPRequestTracker(request)
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]
 

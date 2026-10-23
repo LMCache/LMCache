@@ -141,6 +141,18 @@ def test_decode_tokens_appended_unchanged():
     assert tracker.get_token_ids() == [1, 2, *v, 3, 500, 501]
 
 
+def test_prompt_only_keys_keep_mm_substitution_and_drop_decode_tokens():
+    prompt = [1, 2] + [IMAGE_PLACEHOLDER_ID] * 2 + [3]
+    request = _make_mm_request(prompt, identifier="0xabcd", offset=2, length=2)
+    tracker = LMCacheMPRequestTracker(request, prompt_only=True)
+    request.append_decode_token(500)
+    request.append_decode_token(501)
+
+    v = list(mm_hash_to_token_values("0xabcd", 2))
+    assert tracker.get_token_ids() == [1, 2, *v, 3, 500, 501]
+    assert tracker.get_cache_token_ids() == [1, 2, *v, 3]
+
+
 def test_tracker_extracts_request_configs():
     tracker = LMCacheMPRequestTracker(
         _FakeRequest(
@@ -230,6 +242,7 @@ def test_lookup_hint_carries_vllm_prefix_hit() -> None:
     connector.request_trackers = {}
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = False
+    connector._prompt_only_cache = False
     connector.lazy_offload = False
     connector._hit_alignment_tokens = 64
 
@@ -249,6 +262,7 @@ def test_recurrent_lookup_reserves_final_prompt_token() -> None:
     connector.request_trackers = {}
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = True
+    connector._prompt_only_cache = False
     connector._hit_alignment_tokens = 64
     connector._connector_stats = MagicMock()
     connector.lazy_offload = False
