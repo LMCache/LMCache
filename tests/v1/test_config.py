@@ -15,6 +15,21 @@ from lmcache.v1.config_base import apply_remote_configs, validate_and_set_config
 BASE_DIR = Path(__file__).parent
 
 
+@pytest.mark.parametrize("cache_name", ["cache", "中文缓存", "café", "缓存🚀"])
+def test_load_utf8_config_file(tmp_path: Path, cache_name: str) -> None:
+    """UTF-8 YAML values must not depend on the host's locale encoding."""
+    config_path = tmp_path / "lmcache.yaml"
+    config_path.write_text(
+        f"chunk_size: 512\nextra_config:\n  cache_name: '{cache_name}'\n",
+        encoding="utf-8",
+    )
+
+    config = LMCacheEngineConfig.from_file(config_path)
+
+    assert config.chunk_size == 512
+    assert config.extra_config == {"cache_name": cache_name}
+
+
 def test_get_extra_config_from_file():
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/test_config.yaml")
     check_extra_config(config)
