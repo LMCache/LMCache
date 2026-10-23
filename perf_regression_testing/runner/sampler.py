@@ -18,7 +18,14 @@ import urllib.error
 import urllib.request
 
 # The counters runner/score.py reads, besides the prompt tokens by source.
-METRICS = frozenset({"vllm:num_preemptions_total", "vllm:generation_tokens_total"})
+METRICS = frozenset(
+    {
+        "vllm:num_preemptions_total",
+        "vllm:generation_tokens_total",
+        "vllm:spec_decode_num_drafts_total",
+        "vllm:spec_decode_num_accepted_tokens_total",
+    }
+)
 BY_SOURCE = ("vllm:prompt_tokens_by_source", "vllm:prompt_tokens_by_source_total")
 _LINE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+(\S+)")
 

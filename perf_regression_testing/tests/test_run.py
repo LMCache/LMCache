@@ -137,7 +137,7 @@ def test_heartbeat_counts_a_fixed_duration_phase_across_midnight(
 
 
 @pytest.mark.parametrize(
-    ("deployment", "limit"), [("vllm_simple_l2", ["832g"]), ("vllm_lmcache", [])]
+    ("deployment", "limit"), [("vllm_simple_l2", ["1532g"]), ("vllm_lmcache", [])]
 )
 def test_only_a_deployment_with_a_memory_cap_gets_one(
     tmp_path: Path, deployment: str, limit: list[str]
@@ -147,3 +147,16 @@ def test_only_a_deployment_with_a_memory_cap_gets_one(
     assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--memory"] == limit
     # Swap counts toward the cap, so the page cache cannot spill past it.
     assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--memory-swap"] == limit
+
+
+def test_io_bytes_sums_reads_and_writes_over_containers_and_devices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name, stat in [
+        ("a", "8:0 rbytes=10 wbytes=20 rios=1 wios=2\n259:0 rbytes=1 wbytes=2\n"),
+        ("b", "259:1 rbytes=100 wbytes=200 dbytes=7\n"),
+    ]:
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "io.stat").write_text(stat)
+    monkeypatch.setattr(run.docker, "cgroup_dir", lambda name: tmp_path / name)
+    assert run.io_bytes(["a", "b"]) == {"rbytes": 111, "wbytes": 222}

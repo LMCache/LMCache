@@ -58,6 +58,7 @@ AIPERF_PHASE = re.compile(
     r"(\d\d):(\d\d):(\d\d)\.\d+ +[A-Z]+ +"
     r"Phase (\S+) (?:\(\S+\) )?([^(\r\n]+?) \(\w+\.py:\d+\)"
 )
+KV_TOKENS = re.compile(r"GPU KV cache size: ([\d,]+) tokens")
 AIPERF_DURATION = re.compile(r"target: ([\d.]+)s duration")
 
 
@@ -117,6 +118,53 @@ def pick_gpus(count: int, wait_s: float) -> list[int] | None:
         if time.time() > deadline:
             return None
         time.sleep(10)
+
+
+def host_resources(spec: RunSpec) -> dict[str, float]:
+    """Return the host's memory and the scratch file system's free space, in GB.
+
+    Args:
+        spec: Resolved run settings.
+
+    Returns:
+        ``mem_total_gb`` and ``mem_available_gb`` from ``/proc/meminfo``, and
+        ``scratch_free_gb``, the least free space over the scratch dirs (0 when
+        the pair has none).
+    """
+    mem: dict[str, int] = {}
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        key, value = line.split(":", 1)
+        mem[key] = int(value.split()[0]) * 1024
+    free = [shutil.disk_usage(d["path"]).free for d in _scratch_dirs(spec)]
+    return {
+        "mem_total_gb": mem["MemTotal"] / 1e9,
+        "mem_available_gb": mem["MemAvailable"] / 1e9,
+        "scratch_free_gb": min(free, default=0) / 1e9,
+    }
+
+
+def io_bytes(names: list[str]) -> dict[str, int]:
+    """Sum the block I/O of running containers from their cgroup v2 ``io.stat``.
+
+    Page-cache hits are not block I/O, so a read served from RAM counts nothing.
+
+    Args:
+        names: Container names.
+
+    Returns:
+        ``rbytes`` and ``wbytes`` summed over the containers and devices.
+
+    Raises:
+        subprocess.CalledProcessError: a container is not running.
+    """
+    total = {"rbytes": 0, "wbytes": 0}
+    for name in names:
+        for line in (docker.cgroup_dir(name) / "io.stat").read_text().splitlines():
+            for field in line.split()[1:]:
+                key, value = field.split("=")
+                if key in total:
+                    total[key] += int(value)
+    return total
 
 
 def _trace_ok(spec: RunSpec) -> str | None:
@@ -386,6 +434,7 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
     summary: dict[str, Any] = {
         "workload": spec.workload,
         "deployment": spec.deployment,
+        "model": spec.served_name,
         "invalid": [],
     }
 
@@ -409,6 +458,7 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
     if reason:
         summary["invalid"].append(reason)
         return finish(EXIT_INPUT)
+    summary["host"] = host_resources(spec)
 
     cmds = build_commands(spec, gpus, run_id, out, image, aiperf_image)
     # Created here so they belong to the host user, not to the container.
@@ -430,6 +480,8 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
     summary["vllm_commit"] = meta["vllm_commit"]
     summary["lmcache_commit"] = meta["lmcache_commit"]
     names = [f"prt-{run_id}-{r}" for r in cmds]
+    servers = [f"prt-{run_id}-{r}" for r in cmds if r != "aiperf"]
+    io0 = None
     sampler = None
     caps = {
         d["path"]: DiskCap(Path(d["path"]), int(d["cap_gb"] * 2**30))
@@ -453,6 +505,7 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
             else None,
         )
         sampler.start()
+        io0 = io_bytes(servers)
         logger.info("AIPerf running (log: %s)", out / "aiperf.log")
         aiperf = docker.start(cmds["aiperf"], out / "aiperf.log")
         t0 = time.monotonic()
@@ -477,6 +530,15 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
     finally:
         if sampler is not None:
             sampler.stop()
+        if io0 is not None:
+            # Block I/O of the servers while AIPerf ran: the cache tiers' disk
+            # traffic, without the model load before it.
+            try:
+                io1 = io_bytes(servers)
+                summary["disk_read_gb"] = (io1["rbytes"] - io0["rbytes"]) / 1e9
+                summary["disk_write_gb"] = (io1["wbytes"] - io0["wbytes"]) / 1e9
+            except subprocess.CalledProcessError:
+                logger.exception("disk I/O not recorded: a server is gone")
         # Not invalid: the measurement is done; the next run fails to start instead.
         summary["containers_left"] = docker.remove(names, stop_s)
         remove_shm_regions(out)
@@ -494,6 +556,8 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
 
     logger.info("%s: torn down", run_id)
     log = (out / "vllm.log").read_text(errors="replace")
+    kv = KV_TOKENS.search(log)
+    summary["kv_cache_tokens"] = int(kv.group(1).replace(",", "")) if kv else None
     for pat in spec.invalid_log_patterns:
         if pat in log:
             summary["invalid"].append(f"vllm.log contains {pat!r}")

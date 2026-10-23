@@ -22,10 +22,12 @@ exit 0 pass | 1 regressed (nightly only) | 2 invalid run / no images / host setu
 
 Workload `agentic`: a Claude Code session replay
 (`semianalysisai/cc-traces-weka-062126-256k`, pinned revision), closed loop.
-Model Step-3.7-Flash-FP8 on 4 x H200 (TP4 + EP, FP8 KV, MTP), 230 concurrent
-sessions; `vllm_lmcache_ssm` serves the hybrid Qwen3.8-Flash-Next-FP8
-(Gated DeltaNet + attention) instead, also at 230. Every deployment runs the same stock vLLM image and
-the same budget, 800 GiB DRAM + 1500 GiB disk (`vllm_simple`: the DRAM only;
+Each model is a frontier open-weight release on 8 x H200 (TP8 + EP, FP8 KV), served
+with its vLLM recipe's flags and replaced when a newer one appears:
+MiMo-V2.6-Pro-MOPD (hybrid sliding-window, DFlash drafter) at 170 concurrent
+sessions; `vllm_lmcache_ssm` serves GLM-5.3-Flash (Kimi Delta Attention +
+sparse MLA, MTP, DCP 8) instead, at 230. Every deployment runs the same stock
+vLLM image and the same budget, 1500 GiB DRAM + 4000 GiB disk (`vllm_simple`: the DRAM only;
 `vllm_simple_l2`: the disk, with the DRAM as page cache under a memory cap);
 only the cache layer differs:
 
@@ -36,14 +38,16 @@ only the cache layer differs:
 | `vllm_simple` | weekly | vLLM `SimpleCPUOffloadConnector`, CPU only (one tier by design) |
 | `vllm_simple_l2` | weekly | the same connector's disk backend, page cache as the DRAM tier (container memory capped) |
 | `vllm_mooncake` | weekly | Mooncake store, 4 clients, CPU pool + SSD offload |
-| `vllm_lmcache_ssm` | weekly | as `vllm_lmcache`, on the hybrid model |
+| `vllm_lmcache_ssm` | weekly | as `vllm_lmcache`, on the hybrid linear-attention model |
 
 Tested metrics: decode p10/p50 (tok/s per request) and TTFT p50/p95.
 Recorded only: request count, errors, preemptions, prompt tokens by source
 (and the cache layer's share), cache hit share (prompt tokens not computed)
 against the ideal one (what an unbounded prefix cache would serve the same
 prompts, to the token), input and output token throughput (tok/s over
-the window, from vLLM's counters), L2 disk used.
+the window, from vLLM's counters), spec decode accept length, L2 disk used,
+the servers' block I/O during the run, the GPU KV cache size in tokens, and
+the host's memory and scratch free space.
 
 ## How a regression is decided
 
@@ -63,7 +67,7 @@ Host paths come from the environment:
 
 | variable | what |
 |---|---|
-| `PRT_ROOT` | required: PRT state, history, caches, 1.5 TB of L2 scratch |
+| `PRT_ROOT` | required: PRT state, history, caches, 4 TB of L2 scratch |
 | `PRT_HF_CACHE` | an `HF_HOME` holding the model, default `/root/.cache/huggingface` |
 | `PRT_RDMA_DEVICES` | comma-separated RDMA devices, needed by the weekly Mooncake |
 
@@ -71,11 +75,11 @@ Host paths come from the environment:
 # Models, at their [models] revisions. Runs are offline; a suite downloads a
 # missing one first (runner/hf.py), so this only saves that time.
 HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
-    stepfun-ai/Step-3.7-Flash-FP8 \
-    --revision b3d7916fccac844cca050d7520f2aaa513f9a84f
+    XiaomiMiMo/MiMo-V2.6-Pro-MOPD \
+    --revision 6a7f202e8dbd0e57b3fe1da03917d08d75abc4b8
 HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
-    Qwen/Qwen3.8-Flash-Next-FP8 \
-    --revision 236dfdf285828023ca3bcd3f37366c58a3469b13
+    zai-org/GLM-5.3-Flash \
+    --revision 46a050bec13002ad29ee795c16e61cf4fa3c4a9c
 
 # Trace, verified against the pinned sha256 and dir_digest.
 python3.11 perf_regression_testing/workloads/agentic/fetch_trace.py \

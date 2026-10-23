@@ -54,10 +54,14 @@ REPORT_COLS = [
     ("decode_p10", "decode p10 tok/s"),
     ("ttft_p95", "TTFT p95 s"),
     ("preemptions", "preemptions"),
+    ("spec_accept_len", "spec decode accept length"),
     ("external_token_share", "cache-layer token share"),
     ("cache_hit_share", "cache hit share"),
     ("ideal_hit_share", "ideal hit share"),
     ("l2_disk_used_gb", "L2 disk used GB"),
+    ("disk_write_gb", "disk written GB"),
+    ("disk_read_gb", "disk read GB"),
+    ("kv_cache_tokens", "GPU KV cache tokens"),
 ]
 
 

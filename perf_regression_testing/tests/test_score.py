@@ -99,3 +99,22 @@ def test_ideal_hit_share_is_the_token_prefix_shared_with_any_earlier_prompt(
     )
     s = score(tmp_path, window_s=100.0)
     assert s["ideal_hit_share"] == (128 + 0 + 158 + 49) / (202 + 100 + 159 + 50)
+
+
+def test_spec_accept_len_counts_the_target_token_and_accepted_drafts(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "aiperf").mkdir()
+    (tmp_path / "aiperf" / "profile_export.jsonl").write_text(
+        json.dumps(_request(100.0, 104.0)) + "\n"
+    )
+    samples = [_counters(t, 0, 0) for t in (50, 250)]
+    plain = tmp_path / "samples.jsonl"
+    plain.write_text("".join(json.dumps(s) + "\n" for s in samples))
+    assert score(tmp_path, window_s=100.0)["spec_accept_len"] is None
+
+    for s, drafts in zip(samples, (0, 400), strict=True):
+        s["vllm:spec_decode_num_drafts_total"] = drafts
+        s["vllm:spec_decode_num_accepted_tokens_total"] = drafts * 2.5
+    plain.write_text("".join(json.dumps(s) + "\n" for s in samples))
+    assert score(tmp_path, window_s=100.0)["spec_accept_len"] == 3.5

@@ -206,6 +206,11 @@ def score(run_dir: Path, window_s: float) -> dict[str, Any]:
     src = {k: delta(f"vllm:prompt_tokens_by_source/{k}") for k in _SOURCES}
     mem = [s for s in samples if ws <= s["t"] <= we and "mem_anon" in s]
     total = sum(src.values())
+    drafts = (
+        delta("vllm:spec_decode_num_drafts_total")
+        if any("vllm:spec_decode_num_drafts_total" in s for s in samples)
+        else 0
+    )
     return {
         "window_start": ws,
         "window_s": we - ws,
@@ -226,6 +231,11 @@ def score(run_dir: Path, window_s: float) -> dict[str, Any]:
         "input_tok_s": total / (we - ws),
         "output_tok_s": delta("vllm:generation_tokens_total") / (we - ws),
         "preemptions": delta("vllm:num_preemptions_total"),
+        # Tokens per verification step: the target's token plus accepted drafts.
+        "spec_accept_len": 1
+        + delta("vllm:spec_decode_num_accepted_tokens_total") / drafts
+        if drafts
+        else None,
         # Peak over the window of the vLLM container's own memory and of the
         # page cache charged to it (a [deployments] vllm_memory_gb caps both).
         "vllm_mem_peak_gb": {

@@ -17,7 +17,7 @@ def test_fetch_marks_only_a_finished_download_and_always_removes_its_container(
     rc: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cfg = load()
-    m = cfg["models"]["qwen38"]
+    m = cfg["models"]["glm53"]
     cache = cfg["host"]["hf_cache"]
     calls: list[list[str]] = []
     removed: list[str] = []
@@ -36,7 +36,7 @@ def test_fetch_marks_only_a_finished_download_and_always_removes_its_container(
     monkeypatch.setattr(hf.docker, "remove", remove)
     log = tmp_path / "d.log"
     if rc:
-        with pytest.raises(RuntimeError, match="Qwen3.8.*d.log"):
+        with pytest.raises(RuntimeError, match="GLM-5.3.*d.log"):
             hf.fetch(m, cache, "prt-serving:x", cfg["container"], log)
     else:
         hf.fetch(m, cache, "prt-serving:x", cfg["container"], log)
