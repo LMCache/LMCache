@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``transfer_with_address_kernel`` lowers tensor operands to an address kernel.
+"""CUDA, XPU and Ascend serve tensor block transfers on an address kernel.
 
-CPU tests pass a recording kernel and check the operands each launch gets.
-CUDA tests run the compiled ``lmcache.cuda_ops`` kernel end to end.
+CPU tests install fake extension modules for the real CUDA, XPU and Ascend ops
+classes and record what reaches the kernel. CUDA tests exercise the compiled
+kernel end to end.
 """
 
 # Standard
-from collections.abc import Callable
 from dataclasses import dataclass
+from types import ModuleType
 from typing import cast
 from unittest.mock import MagicMock
+import sys
 
 # Third Party
 import pytest
@@ -22,8 +24,15 @@ from lmcache.v1.gpu_connector.utils import (
     make_page_buffer_shape_desc,
     normalize_kv_and_discover_format,
 )
-from lmcache.v1.platform import native_block_transfer
-from lmcache.v1.platform.native_block_transfer import transfer_with_address_kernel
+from lmcache.v1.platform import native_block_transfer, resolve_device_ops
+from lmcache.v1.platform.base.device_ops import DeviceOps
+from lmcache.v1.platform.base.device_spec import DeviceSpec
+from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
+from lmcache.v1.platform.devices.cuda.device_ops import CudaDeviceOps
+from lmcache.v1.platform.devices.npu import NpuDeviceSpec
+from lmcache.v1.platform.devices.npu.device_ops import NpuDeviceOps
+from lmcache.v1.platform.devices.xpu import XpuDeviceSpec
+from lmcache.v1.platform.devices.xpu.device_ops import XpuDeviceOps
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
@@ -33,6 +42,19 @@ CPU = torch.device("cpu")
 _BLOCK_SIZE = 4
 _BLOCKS_PER_CHUNK = 2
 _CHUNK_TOKENS = _BLOCK_SIZE * _BLOCKS_PER_CHUNK
+
+_NATIVE_BACKENDS = [
+    pytest.param(CudaDeviceOps, "lmcache.cuda_ops", id="cuda"),
+    pytest.param(XpuDeviceOps, "lmcache.xpu_ops", id="xpu"),
+    pytest.param(NpuDeviceOps, "lmcache_ascend.ops", id="npu"),
+]
+_NATIVE_SPECS = [
+    pytest.param(CudaDeviceSpec, "lmcache.cuda_ops", id="cuda"),
+    pytest.param(XpuDeviceSpec, "lmcache.xpu_ops", id="xpu"),
+    pytest.param(NpuDeviceSpec, "lmcache_ascend.ops", id="npu"),
+]
+# NPU requires its plugin; only CUDA and XPU run on the baseline without one.
+_OPTIONAL_EXTENSION_BACKENDS = _NATIVE_BACKENDS[:2]
 
 
 @dataclass
@@ -65,6 +87,31 @@ class _RecordingKernel:
         skip: int,
     ) -> None:
         self.launches.append(_Launch(paged, list(chunks), block_ids, direction, skip))
+
+
+def _install_native(
+    monkeypatch: pytest.MonkeyPatch, module_name: str, **symbols: object
+) -> None:
+    """Make ``import <module_name>`` load a fake module exporting ``symbols``."""
+    parent_name, _, child_name = module_name.rpartition(".")
+    module = ModuleType(module_name)
+    for name, value in symbols.items():
+        setattr(module, name, value)
+    parent = sys.modules.get(parent_name) or ModuleType(parent_name)
+    monkeypatch.setitem(sys.modules, parent_name, parent)
+    monkeypatch.setattr(parent, child_name, module, raising=False)
+    monkeypatch.setitem(sys.modules, module_name, module)
+
+
+def _native_ops(
+    monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
+) -> tuple[DeviceOps, _RecordingKernel]:
+    """Return ``ops_cls`` bound to a recording kernel."""
+    kernel = _RecordingKernel()
+    _install_native(monkeypatch, module_name, multi_layer_block_kv_transfer=kernel)
+    ops = ops_cls()
+    ops.ensure_native()
+    return ops, kernel
 
 
 def _paged_kv(
@@ -112,37 +159,99 @@ def _expected_chunk(paged: DiscoverableKVCache, blocks: list[int]) -> torch.Tens
 
 
 def _host_chunk(address: int, pinned: bool = True) -> MagicMock:
-    """Host chunk stand-in; real pinning needs an accelerator."""
+    """Host chunk stand-in; real pinning needs an accelerator.
+
+    ``spec=torch.Tensor`` makes ``isinstance(chunk, torch.Tensor)`` true, so the
+    op takes its tensor path rather than the legacy address path.
+    """
     chunk = MagicMock(spec=torch.Tensor)
     chunk.is_pinned.return_value = pinned
     chunk.data_ptr.return_value = address
     return chunk
 
 
-# -- CPU: recording kernel -------------------------------------------------
+# -- CPU: fake extension modules -------------------------------------------
 
 
+@pytest.mark.parametrize(("ops_cls", "module_name"), _NATIVE_BACKENDS)
+def test_extension_without_kernel_fails_initialization(
+    monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
+) -> None:
+    """An installed extension lacking the block kernel is a broken install.
+
+    It must not quietly serve the torch baseline, and a second attempt must
+    fail the same way instead of returning as already initialized.
+    """
+    _install_native(monkeypatch, module_name, calculate_cdf=lambda *_: None)
+    ops = ops_cls()
+
+    for _ in range(2):
+        with pytest.raises(AttributeError, match="multi_layer_block_kv_transfer"):
+            ops.ensure_native()
+
+
+@pytest.mark.parametrize(("spec_cls", "module_name"), _NATIVE_SPECS)
+def test_failed_initialization_is_not_cached(
+    monkeypatch: pytest.MonkeyPatch, spec_cls: type[DeviceSpec], module_name: str
+) -> None:
+    """Resolving a spec over a broken extension fails on every call."""
+    _install_native(monkeypatch, module_name, calculate_cdf=lambda *_: None)
+    spec = spec_cls()
+
+    for _ in range(2):
+        with pytest.raises(AttributeError, match="multi_layer_block_kv_transfer"):
+            spec.get_ops()
+
+
+@pytest.mark.parametrize(("ops_cls", "module_name"), _OPTIONAL_EXTENSION_BACKENDS)
+def test_missing_extension_tensor_transfer_uses_baseline(
+    monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
+) -> None:
+    """Without the CUDA or XPU extension, the torch baseline serves, byte-exact."""
+    monkeypatch.setitem(sys.modules, module_name, None)
+    ops = ops_cls()
+    ops.ensure_native()
+    paged, fmt, desc = _paged_kv(num_blocks=6)
+    chunk = torch.zeros(2, 2, _CHUNK_TOKENS, 16)
+
+    ops.multi_layer_block_kv_transfer(
+        paged, [chunk], [1, 3], CPU, D2H, desc, _CHUNK_TOKENS, fmt, 0
+    )
+
+    assert torch.equal(chunk, _expected_chunk(paged, [1, 3]))
+
+
+@pytest.mark.parametrize(("ops_cls", "module_name"), _OPTIONAL_EXTENSION_BACKENDS)
+def test_missing_extension_output_allocation_is_plain(
+    monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
+) -> None:
+    """Without the extension, block-transfer output is an ordinary CPU tensor."""
+    monkeypatch.setitem(sys.modules, module_name, None)
+    ops = ops_cls()
+    ops.ensure_native()
+
+    out = ops.allocate_block_transfer_output((2, 3), torch.float16)
+
+    assert (out.shape, out.dtype, out.device) == ((2, 3), torch.float16, CPU)
+    assert not out.is_pinned()
+
+
+@pytest.mark.parametrize(("ops_cls", "module_name"), _NATIVE_BACKENDS)
 @pytest.mark.parametrize("direction", [D2H, H2D])
 def test_tensor_operands_lower_to_kernel_launches(
+    monkeypatch: pytest.MonkeyPatch,
+    ops_cls: type[DeviceOps],
+    module_name: str,
     direction: lmcache_native.TransferDirection,
 ) -> None:
-    """Five chunks become a 4-chunk and a 1-chunk launch with kernel operands."""
-    kernel = _RecordingKernel()
+    """The public op keeps its tensor API after binding and lowers to the kernel."""
+    ops, kernel = _native_ops(monkeypatch, ops_cls, module_name)
     paged, fmt, desc = _paged_kv(num_blocks=10)
     addresses = [0x1000 * (i + 1) for i in range(5)]
     chunks = cast(list[torch.Tensor], [_host_chunk(a) for a in addresses])
 
-    transfer_with_address_kernel(
-        kernel,
-        paged,
-        chunks,
-        list(range(10)),
-        CPU,
-        direction,
-        desc,
-        _CHUNK_TOKENS,
-        fmt,
-        1,
+    ops.multi_layer_block_kv_transfer(
+        paged, chunks, list(range(10)), CPU, direction, desc, _CHUNK_TOKENS, fmt, 1
     )
 
     layer_addresses = [layer.data_ptr() for layer in _layers(paged)]
@@ -154,7 +263,6 @@ def test_tensor_operands_lower_to_kernel_launches(
         list(range(8)),
         [8, 9],
     ]
-    # The skip applies to the first launch only, as before the move.
     assert [launch.skip for launch in kernel.launches] == [1, 0]
     for launch in kernel.launches:
         assert launch.paged.dtype == torch.int64
@@ -163,40 +271,38 @@ def test_tensor_operands_lower_to_kernel_launches(
         assert launch.direction == direction
 
 
-def test_pinned_chunks_keep_the_async_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Already pinned chunks are passed as-is and nothing synchronizes."""
-    kernel = _RecordingKernel()
-    syncs: list[torch.device] = []
-    monkeypatch.setattr(native_block_transfer, "synchronize_device", syncs.append)
-    paged, fmt, desc = _paged_kv(num_blocks=2)
+@pytest.mark.parametrize(("ops_cls", "module_name"), _NATIVE_BACKENDS)
+def test_legacy_address_operands_are_forwarded_unchanged(
+    monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
+) -> None:
+    """LMCache-driven callers' address form reaches the kernel as passed."""
+    ops, kernel = _native_ops(monkeypatch, ops_cls, module_name)
+    _, fmt, desc = _paged_kv(num_blocks=8)
+    paged_addresses = torch.tensor([11, 22], dtype=torch.int64)
+    block_ids = torch.arange(8)
 
-    transfer_with_address_kernel(
-        kernel,
-        paged,
-        cast(list[torch.Tensor], [_host_chunk(0x3000)]),
-        [0, 1],
-        CPU,
-        H2D,
-        desc,
-        _CHUNK_TOKENS,
-        fmt,
-        0,
+    # These callers already batch to the kernel's limit; nothing is re-split.
+    ops.multi_layer_block_kv_transfer(
+        paged_addresses, [1, 2, 3, 4], block_ids, CPU, H2D, desc, _CHUNK_TOKENS, fmt, 3
     )
 
-    assert [launch.chunks for launch in kernel.launches] == [[0x3000]]
-    assert syncs == []
+    (launch,) = kernel.launches
+    assert launch.paged is paged_addresses
+    assert launch.chunks == [1, 2, 3, 4]
+    assert launch.block_ids is block_ids
+    assert launch.skip == 3
 
 
 def test_unpinned_h2d_chunks_sync_after_launch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Chunks pinned into temporaries are synchronized before returning.
+    """Chunks pinned into temporaries are synchronized before the op returns.
 
     The kernel reads the temporaries through raw addresses that torch's stream
     tracking cannot see, so returning without a sync would let the caching
     host allocator recycle them while the copy is still in flight.
     """
-    kernel = _RecordingKernel()
+    ops, kernel = _native_ops(monkeypatch, CudaDeviceOps, "lmcache.cuda_ops")
     syncs: list[int] = []
     monkeypatch.setattr(
         native_block_transfer,
@@ -207,8 +313,7 @@ def test_unpinned_h2d_chunks_sync_after_launch(
     unpinned.pin_memory.return_value = _host_chunk(0x2000)
     paged, fmt, desc = _paged_kv(num_blocks=2)
 
-    transfer_with_address_kernel(
-        kernel,
+    ops.multi_layer_block_kv_transfer(
         paged,
         cast(list[torch.Tensor], [unpinned]),
         [0, 1],
@@ -224,32 +329,81 @@ def test_unpinned_h2d_chunks_sync_after_launch(
     assert syncs == [1], "expected exactly one sync, after the launch"
 
 
+@pytest.mark.parametrize(("ops_cls", "module_name"), _NATIVE_BACKENDS)
+def test_pinned_chunks_keep_the_async_path(
+    monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
+) -> None:
+    """Already pinned chunks are passed as-is and nothing synchronizes."""
+    ops, kernel = _native_ops(monkeypatch, ops_cls, module_name)
+    syncs: list[torch.device] = []
+    monkeypatch.setattr(native_block_transfer, "synchronize_device", syncs.append)
+    paged, fmt, desc = _paged_kv(num_blocks=2)
+
+    ops.multi_layer_block_kv_transfer(
+        paged,
+        cast(list[torch.Tensor], [_host_chunk(0x3000)]),
+        [0, 1],
+        CPU,
+        H2D,
+        desc,
+        _CHUNK_TOKENS,
+        fmt,
+        0,
+    )
+
+    assert [launch.chunks for launch in kernel.launches] == [[0x3000]]
+    assert syncs == []
+
+
+def test_binding_one_instance_leaves_others_on_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The kernel is bound per instance; a fresh instance uses the baseline."""
+    _, kernel = _native_ops(monkeypatch, CudaDeviceOps, "lmcache.cuda_ops")
+    paged, fmt, desc = _paged_kv(num_blocks=6)
+    chunk = torch.zeros(2, 2, _CHUNK_TOKENS, 16)
+
+    CudaDeviceOps().multi_layer_block_kv_transfer(
+        paged, [chunk], [1, 3], CPU, D2H, desc, _CHUNK_TOKENS, fmt, 0
+    )
+
+    assert kernel.launches == []
+    assert torch.equal(chunk, _expected_chunk(paged, [1, 3]))
+
+
 # -- CUDA: the compiled kernel ---------------------------------------------
 
 
 @pytest.fixture
-def cuda_kernel() -> object:
-    """The compiled CUDA block kernel, skipping without CUDA or the extension."""
+def cuda_ops() -> DeviceOps:
+    """The resolved CUDA ops, skipping unless the compiled kernel is present."""
     if not torch.cuda.is_available():
         pytest.skip("requires a CUDA device")
-    native = pytest.importorskip("lmcache.cuda_ops")
-    return native.multi_layer_block_kv_transfer
+    pytest.importorskip("lmcache.cuda_ops")
+    return resolve_device_ops("cuda")
 
 
 @pytest.mark.cuda
-def test_cuda_tensor_round_trip_across_launches(cuda_kernel: object) -> None:
+def test_cuda_output_allocation_is_pinned(cuda_ops: DeviceOps) -> None:
+    out = cuda_ops.allocate_block_transfer_output((2, 3), torch.float16)
+    assert out.device == CPU
+    assert out.is_pinned()
+
+
+@pytest.mark.cuda
+def test_cuda_tensor_round_trip_across_launches(cuda_ops: DeviceOps) -> None:
     """Five chunks (two launches) gather and scatter back byte-exact."""
-    kernel = cast(Callable[..., None], cuda_kernel)
     device = torch.device("cuda")
     paged, fmt, desc = _paged_kv(num_blocks=10, device="cuda", dtype=torch.float16)
+    chunk_shape = (2, 2, _CHUNK_TOKENS, 16)
     chunks = [
-        torch.empty(2, 2, _CHUNK_TOKENS, 16, dtype=torch.float16, pin_memory=True)
+        cuda_ops.allocate_block_transfer_output(chunk_shape, torch.float16)
         for _ in range(5)
     ]
     block_ids = list(range(10))
 
-    transfer_with_address_kernel(
-        kernel, paged, chunks, block_ids, device, D2H, desc, _CHUNK_TOKENS, fmt, 0
+    cuda_ops.multi_layer_block_kv_transfer(
+        paged, chunks, block_ids, device, D2H, desc, _CHUNK_TOKENS, fmt, 0
     )
     torch.cuda.synchronize()
     for i, chunk in enumerate(chunks):
@@ -258,8 +412,8 @@ def test_cuda_tensor_round_trip_across_launches(cuda_kernel: object) -> None:
     restored, _, _ = _paged_kv(num_blocks=10, device="cuda", dtype=torch.float16)
     for layer in _layers(restored):
         layer.zero_()
-    transfer_with_address_kernel(
-        kernel, restored, chunks, block_ids, device, H2D, desc, _CHUNK_TOKENS, fmt, 0
+    cuda_ops.multi_layer_block_kv_transfer(
+        restored, chunks, block_ids, device, H2D, desc, _CHUNK_TOKENS, fmt, 0
     )
     torch.cuda.synchronize()
     for source, target in zip(_layers(paged), _layers(restored), strict=True):
@@ -267,25 +421,44 @@ def test_cuda_tensor_round_trip_across_launches(cuda_kernel: object) -> None:
 
 
 @pytest.mark.cuda
-def test_cuda_unpinned_output_is_staged_in_place(cuda_kernel: object) -> None:
+def test_cuda_unpinned_output_is_staged_in_place(cuda_ops: DeviceOps) -> None:
     """An unpinned output is filled in place through pinned staging."""
-    kernel = cast(Callable[..., None], cuda_kernel)
     paged, fmt, desc = _paged_kv(num_blocks=6, device="cuda", dtype=torch.float16)
     out = torch.zeros(2, 2, _CHUNK_TOKENS, 16, dtype=torch.float16).share_memory_()
     assert not out.is_pinned()
 
-    transfer_with_address_kernel(
-        kernel,
-        paged,
-        [out],
-        [1, 3],
-        torch.device("cuda"),
+    cuda_ops.multi_layer_block_kv_transfer(
+        paged, [out], [1, 3], torch.device("cuda"), D2H, desc, _CHUNK_TOKENS, fmt, 0
+    )
+
+    # Staging synchronizes before copying back, so no extra sync is needed.
+    assert torch.equal(out, _expected_chunk(paged, [1, 3]))
+
+
+@pytest.mark.cuda
+def test_cuda_legacy_address_form_still_transfers(cuda_ops: DeviceOps) -> None:
+    """The LMCache-driven address form reaches the kernel unchanged."""
+    device = torch.device("cuda")
+    paged, fmt, desc = _paged_kv(num_blocks=6, device="cuda", dtype=torch.float16)
+    chunk = cuda_ops.allocate_block_transfer_output(
+        (2, 2, _CHUNK_TOKENS, 16), torch.float16
+    )
+    paged_addresses = torch.tensor(
+        [layer.data_ptr() for layer in _layers(paged)], dtype=torch.int64, device=device
+    )
+    block_ids = torch.tensor([1, 3], dtype=torch.int64, device=device)
+
+    cuda_ops.multi_layer_block_kv_transfer(
+        paged_addresses,
+        [chunk.data_ptr()],
+        block_ids,
+        device,
         D2H,
         desc,
         _CHUNK_TOKENS,
         fmt,
         0,
     )
+    torch.cuda.synchronize()
 
-    # Staging synchronizes before copying back, so no extra sync is needed.
-    assert torch.equal(out, _expected_chunk(paged, [1, 3]))
+    assert torch.equal(chunk, _expected_chunk(paged, [1, 3]))

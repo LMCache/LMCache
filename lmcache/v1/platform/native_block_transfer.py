@@ -6,9 +6,9 @@ CUDA/ROCm (``lmcache.cuda_ops``), XPU (``lmcache.xpu_ops``) and Ascend
 takes a device tensor of per-layer base addresses, chunk addresses as
 ``list[int]`` and a device block-ID tensor. Its GPU threads read host chunks
 directly, so they must be pinned, and one launch addresses at most four chunks.
-Engine-driven gather and scatter keep their operands as tensors and call
-:func:`transfer_with_address_kernel` when the resolved block kernel takes
-addresses; it builds the kernel's operands and splits the launches.
+Those backends override :meth:`DeviceOps.multi_layer_block_kv_transfer` and
+call :func:`transfer_with_address_kernel` to serve its tensor contract on that
+kernel.
 """
 
 # Future
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 # Third Party
 import numpy as np
@@ -69,11 +69,27 @@ def _paged_pointer_table(
     return torch.from_numpy(as_int64).to(device=device)
 
 
+def allocate_pinned_chunk(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+    """Allocate a host chunk an address-taking kernel can read and write.
+
+    The kernel's GPU threads dereference host chunk addresses directly, which
+    only works for page-locked memory.
+
+    Args:
+        shape: Canonical chunk shape.
+        dtype: KV element dtype.
+
+    Returns:
+        An uninitialized pinned CPU tensor of ``shape`` and ``dtype``.
+    """
+    return torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True)
+
+
 def transfer_with_address_kernel(
     kernel: Callable[..., None],
-    paged_kv: DiscoverableKVCache,
-    chunks: list[torch.Tensor],
-    block_ids: list[int],
+    paged_buffer_ptrs_tensor: torch.Tensor | list,
+    lmcache_objects_ptrs: list[int] | list[torch.Tensor],
+    block_ids: torch.Tensor | list[int],
     device: torch.device | str,
     direction: lmcache_native.TransferDirection,
     shape_desc: PageBufferShapeDesc,
@@ -81,20 +97,21 @@ def transfer_with_address_kernel(
     engine_kv_format: lmcache_native.EngineKVFormat,
     skip_prefix_n_blocks: int,
 ) -> None:
-    """Run a tensor block transfer on an address-taking compiled kernel.
+    """Serve :meth:`DeviceOps.multi_layer_block_kv_transfer` on an address kernel.
 
-    Operands follow ``multi_layer_block_kv_transfer``. The kernel receives the
-    per-layer address table, chunk addresses and a device block-ID tensor, in
-    launches of at most :data:`MAX_CHUNKS_PER_LAUNCH` chunks. Unpinned host
-    chunks are staged through pinned buffers for ``D2H`` and pinned into
-    temporaries for ``H2D``; both cases synchronize ``device`` before
-    returning, because the kernel reaches them through raw addresses that
-    torch cannot track. Pinned chunks keep the asynchronous path.
+    Operands follow :meth:`DeviceOps.multi_layer_block_kv_transfer`. Tensor
+    operands are lowered to the kernel's address form, in launches of at most
+    :data:`MAX_CHUNKS_PER_LAUNCH` chunks. Unpinned host chunks are staged
+    through pinned buffers for ``D2H`` and pinned into temporaries for
+    ``H2D``; both cases synchronize ``device`` before returning, because the
+    kernel reaches them through raw addresses that torch cannot track. Pinned
+    chunks keep the asynchronous path. The legacy address form is forwarded
+    to the kernel unchanged.
 
     Args:
         kernel: The compiled ``multi_layer_block_kv_transfer``.
-        paged_kv: Normalized paged KV tensors on ``device``.
-        chunks: Host chunk tensors, filled in place for ``D2H``.
+        paged_buffer_ptrs_tensor: Normalized paged KV tensors on ``device``.
+        lmcache_objects_ptrs: Host chunk tensors.
         block_ids: Paged-block IDs in chunk order.
         device: Device that owns the paged KV tensors.
         direction: ``D2H`` or ``H2D``.
@@ -104,6 +121,24 @@ def transfer_with_address_kernel(
         skip_prefix_n_blocks: Leading blocks to skip, applied to the first
             kernel launch.
     """
+    if not all(isinstance(chunk, torch.Tensor) for chunk in lmcache_objects_ptrs):
+        # LMCache-driven callers still pass addresses they batched
+        # themselves; forward them untouched until #4465 step 3.10.
+        kernel(
+            paged_buffer_ptrs_tensor,
+            lmcache_objects_ptrs,
+            block_ids,
+            device,
+            direction,
+            shape_desc,
+            lmcache_chunk_size,
+            engine_kv_format,
+            skip_prefix_n_blocks,
+        )
+        return
+
+    paged_kv = cast("DiscoverableKVCache", paged_buffer_ptrs_tensor)
+    chunks = cast("list[torch.Tensor]", lmcache_objects_ptrs)
     device = torch.device(device)
     is_d2h = int(direction) == int(lmcache_native.TransferDirection.D2H)
     unpinned = not all(chunk.is_pinned() for chunk in chunks)

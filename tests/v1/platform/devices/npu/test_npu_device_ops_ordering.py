@@ -15,10 +15,20 @@ from lmcache.v1.platform.devices.npu.device_ops import NpuDeviceOps
 pytestmark = pytest.mark.no_shared_allocator
 
 
+def _unexpected_block_kernel(*_args: object) -> None:
+    raise AssertionError("block kernel must not run in this test")
+
+
 def _install_fake_c_ops(monkeypatch: pytest.MonkeyPatch, **symbols: object) -> None:
+    """Install a fake plugin exporting ``symbols`` plus the required block kernel.
+
+    Pass ``multi_layer_block_kv_transfer=None`` to leave the kernel out.
+    """
+    symbols.setdefault("multi_layer_block_kv_transfer", _unexpected_block_kernel)
     fake_c_ops = types.ModuleType("lmcache_ascend.c_ops")
     for name, value in symbols.items():
-        setattr(fake_c_ops, name, value)
+        if value is not None:
+            setattr(fake_c_ops, name, value)
     fake_pkg = types.ModuleType("lmcache_ascend")
     # The fake stands in for both the compiled module and the curated
     # binding surface ensure_native imports.
@@ -137,5 +147,19 @@ def test_ensure_native_raises_without_plugin(
     monkeypatch.setitem(sys.modules, "lmcache_ascend", None)
     monkeypatch.setitem(sys.modules, "lmcache_ascend.ops", None)
     ops = NpuDeviceOps()
-    with pytest.raises(ImportError, match="LMCache-Ascend"):
-        ops.ensure_native()
+    # A failed attempt must not leave the instance marked as initialized.
+    for _ in range(2):
+        with pytest.raises(ImportError, match="LMCache-Ascend"):
+            ops.ensure_native()
+
+
+def test_ensure_native_raises_when_plugin_lacks_block_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plugin without the block kernel is incompatible, not a fallback."""
+    _install_fake_c_ops(monkeypatch, multi_layer_block_kv_transfer=None)
+    ops = NpuDeviceOps()
+
+    for _ in range(2):
+        with pytest.raises(AttributeError, match="multi_layer_block_kv_transfer"):
+            ops.ensure_native()
