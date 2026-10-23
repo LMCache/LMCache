@@ -623,7 +623,7 @@ class TestP2PBackendWithController:
             with mock_controller_context(peer_mappings) as controller_url:
                 with MockLMCacheWorker(controller_url) as mock_worker:
                     with patch(
-                        "lmcache.v1.rpc_utils.get_zmq_socket_with_timeout"
+                        "lmcache.v1.storage_backend.p2p_backend.get_zmq_socket_with_timeout"
                     ) as mock_get_socket:
                         mock_get_socket.return_value = MagicMock()
 
