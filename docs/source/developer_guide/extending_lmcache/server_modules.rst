@@ -121,6 +121,29 @@ Handlers are registered in construction order, so a dependent module can
 override its dependency's handler. Modules close in reverse construction order;
 ``ManagementModule`` stops its reaper before liveness targets release their state.
 
+Replacing a built-in module
+---------------------------
+
+A configured external module can replace a built-in module by subclassing it
+and retaining the same ``module_name``. The built-in class is not constructed,
+and dependencies declared with that built-in class resolve to the external
+instance:
+
+.. code-block:: python
+
+   from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+       LMCacheDrivenTransferModule,
+   )
+
+
+   class MyTransferModule(LMCacheDrivenTransferModule):
+       # Inherits module_name = "lmcache_driven_transfer".
+       ...
+
+Only explicitly configured external modules can replace built-ins. Startup
+fails if an external module uses a built-in name without subclassing that
+built-in class, or if multiple configured modules use the same name.
+
 Plugin modules can also expose extension protocol methods with
 ``@server_module_handler``:
 

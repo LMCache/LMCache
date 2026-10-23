@@ -19,7 +19,13 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
     _obj_to_memoryview,
@@ -32,6 +38,8 @@ from lmcache.v1.memory_management import (
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd, create_event_notifier
+
+_MEMORY_TAGS = MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -203,7 +211,7 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
 @pytest.fixture
 def adapter():
     mock_client = MockNativeConnector()
-    adp = NativeConnectorL2Adapter(mock_client)
+    adp = NativeConnectorL2Adapter(mock_client, _MEMORY_TAGS)
     yield adp
     adp.close()
 
@@ -747,12 +755,12 @@ class TestEndToEndWorkflow:
 class TestClose:
     def test_close_does_not_raise(self):
         mock_client = MockNativeConnector()
-        adp = NativeConnectorL2Adapter(mock_client)
+        adp = NativeConnectorL2Adapter(mock_client, _MEMORY_TAGS)
         adp.close()
 
     def test_close_after_operations(self):
         mock_client = MockNativeConnector()
-        adp = NativeConnectorL2Adapter(mock_client)
+        adp = NativeConnectorL2Adapter(mock_client, _MEMORY_TAGS)
 
         key = create_object_key(1)
         obj = create_memory_obj()
@@ -1180,6 +1188,10 @@ class TestFSNativeL2AdapterConfig:
             def event_fd(self) -> int:
                 return self.read_fd
 
+            def read_budget_bytes(self) -> int:
+                """Report what the real client does with no read pool."""
+                return 0
+
             def close(self) -> None:
                 os.close(self.read_fd)
                 os.close(self.write_fd)
@@ -1304,7 +1316,7 @@ class TestDeleteBackwardCompatibility:
                     self._efd.close()
 
         client = NoDeleteConnector()
-        adp = NativeConnectorL2Adapter(client)
+        adp = NativeConnectorL2Adapter(client, _MEMORY_TAGS)
         try:
             key = create_object_key(1)
             adp.delete([key])  # should not raise, just no-op
@@ -1322,7 +1334,9 @@ def adapter_with_capacity():
     """Adapter with max_capacity_gb set for usage tracking tests."""
     mock_client = MockNativeConnector()
     # 100 floats * 4 bytes = 400 bytes per obj; capacity = 2000 bytes = 2000/1024^3 GB
-    adp = NativeConnectorL2Adapter(mock_client, max_capacity_gb=2000 / (1024**3))
+    adp = NativeConnectorL2Adapter(
+        mock_client, _MEMORY_TAGS, max_capacity_gb=2000 / (1024**3)
+    )
     yield adp
     adp.close()
 
@@ -1474,7 +1488,7 @@ def create_unaligned_memory_obj(
 def recording_adapter():
     """Adapter with padding disabled (the default) over a recording mock."""
     mock_client = RecordingNativeConnector()
-    adp = NativeConnectorL2Adapter(mock_client)
+    adp = NativeConnectorL2Adapter(mock_client, _MEMORY_TAGS)
     yield adp, mock_client
     adp.close()
 
@@ -1483,7 +1497,9 @@ def recording_adapter():
 def padded_adapter():
     """Adapter with pad_buffers_to_alignment enabled over a recording mock."""
     mock_client = RecordingNativeConnector()
-    adp = NativeConnectorL2Adapter(mock_client, pad_buffers_to_alignment=True)
+    adp = NativeConnectorL2Adapter(
+        mock_client, _MEMORY_TAGS, pad_buffers_to_alignment=True
+    )
     yield adp, mock_client
     adp.close()
 
@@ -1604,7 +1620,7 @@ class TestPadBuffersToAlignment:
         # Flag on: the padded physical size is charged.
         mock_client = RecordingNativeConnector()
         adp_padded = NativeConnectorL2Adapter(
-            mock_client, pad_buffers_to_alignment=True
+            mock_client, _MEMORY_TAGS, pad_buffers_to_alignment=True
         )
         try:
             obj2, _ = create_unaligned_memory_obj()
