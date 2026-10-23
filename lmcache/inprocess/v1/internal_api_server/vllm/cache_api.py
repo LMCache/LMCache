@@ -13,12 +13,12 @@ from starlette.responses import PlainTextResponse
 import torch
 
 # First Party
+from lmcache.inprocess.v1.cache_engine import LMCacheEngine
 from lmcache.logging import init_logger
 from lmcache.utils import (
     compress_slot_mapping,
     parse_mixed_slot_mapping,
 )
-from lmcache.v1.cache_engine import LMCacheEngine
 
 logger = init_logger(__name__)
 

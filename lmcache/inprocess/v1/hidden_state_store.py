@@ -2,8 +2,9 @@
 """HiddenStateStore: per-chunk hidden-state cache on a separate pinned pool.
 
 This module owns hidden-state caching as a logically separate component from
-the KV cache. It is constructed by :class:`~lmcache.v1.cache_engine.LMCacheEngine`
-when ``config.enable_hidden_state_cache`` is True and exposed as
+the KV cache. It is constructed by
+:class:`~lmcache.inprocess.v1.cache_engine.LMCacheEngine` when
+``config.enable_hidden_state_cache`` is True and exposed as
 ``engine.hidden_state_store``. See ``docs/design/v1/hidden_state_store.md``.
 """
 
