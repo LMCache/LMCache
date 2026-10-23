@@ -12,10 +12,11 @@ MODEL="${MODEL:-moonshotai/Kimi-Linear-48B-A3B-Instruct}"
 
 export INFERENCE_ENGINE="${INFERENCE_ENGINE:-sglang}"
 source "${SCRIPT_DIR}/../helpers.sh"
-source "${SCRIPT_DIR}/../verification/kimi-linear-tp-verification.sh"
+source "${SCRIPT_DIR}/../verification/l1-round-trip-verification.sh"
 
 LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 SGLANG_PORT="${SGLANG_PORT:-8000}"
+ENGINE_PORT="$SGLANG_PORT"
 BUILD_ID="${BUILD_ID:-local_$$}"
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 LMCACHE_LOG="/tmp/build_${BUILD_ID}_lmcache.log"
@@ -110,26 +111,9 @@ echo "$LMCACHE_PID" >> "$PID_FILE"
 echo "LMCache MP server started (PID=$LMCACHE_PID)"
 sleep 10
 
-kimi_linear_build_prompt "$PROMPT_FILE"
+l1_round_trip_build_prompt \
+    "$PROMPT_FILE" \
+    $'\n\nSummarize the manual page text above:'
 
 launch_sglang "/tmp/build_${BUILD_ID}_sglang.log"
-kimi_linear_send_completion \
-    "$SGLANG_PORT" "$MODEL" "$PROMPT_FILE" "$MAX_TOKENS" "$OUT_A" \
-    "SGLang run"
-
-echo "Waiting ${STORE_DRAIN_SECONDS}s for LMCache stores to drain..."
-sleep "$STORE_DRAIN_SECONDS"
-retrieves_before=$(kimi_linear_count_retrieves "$LMCACHE_LOG")
-
-echo "=== Clearing SGLang local radix cache (LMCache preserved) ==="
-engine_clear_local_cache "$SGLANG_PORT"
-echo "Local radix cache cleared."
-echo ""
-
-kimi_linear_send_completion \
-    "$SGLANG_PORT" "$MODEL" "$PROMPT_FILE" "$MAX_TOKENS" "$OUT_B" \
-    "LMCache retrieve run"
-retrieves_after=$(kimi_linear_count_retrieves "$LMCACHE_LOG")
-
-kimi_linear_verify_outputs \
-    "$OUT_A" "$OUT_B" "$retrieves_before" "$retrieves_after" "SGLang"
+l1_round_trip_run "Kimi-Linear cross-TP-rank KV"

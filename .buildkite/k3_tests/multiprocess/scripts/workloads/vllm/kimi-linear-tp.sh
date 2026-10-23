@@ -35,15 +35,16 @@ set -e
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../../.." && pwd)"
+MODEL="${MODEL:-moonshotai/Kimi-Linear-48B-A3B-Instruct}"
 
-source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
-source "${SCRIPT_DIR}/../verification/kimi-linear-tp-verification.sh"
+export INFERENCE_ENGINE="${INFERENCE_ENGINE:-vllm}"
+source "${SCRIPT_DIR}/../helpers.sh"
+source "${SCRIPT_DIR}/../verification/l1-round-trip-verification.sh"
 
 # ── Configuration ───────────────────────────────────────────
-MODEL="${MODEL:-moonshotai/Kimi-Linear-48B-A3B-Instruct}"
 LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 VLLM_PORT="${VLLM_PORT:-8000}"
+ENGINE_PORT="$VLLM_PORT"
 BUILD_ID="${BUILD_ID:-local_$$}"
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 LMCACHE_LOG="/tmp/build_${BUILD_ID}_lmcache.log"
@@ -115,7 +116,7 @@ launch_vllm() {
         --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS" \
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --port "$saved_port" \
-        --block-size 944 \
+        --block-size "$CHUNK_SIZE" \
         --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 120}}" \
         > "$log_file" 2>&1 &
     VLLM_PID=$!
@@ -127,14 +128,6 @@ launch_vllm() {
         echo "vLLM failed to start."
         return 1
     fi
-    echo ""
-}
-
-clear_vllm_prefix_cache() {
-    echo "=== Clearing vLLM local prefix cache (LMCache preserved) ==="
-    curl --noproxy '*' -fsS --max-time 60 -X POST \
-        "http://127.0.0.1:${VLLM_PORT}/reset_prefix_cache" > /dev/null
-    echo "Local prefix cache cleared."
     echo ""
 }
 
@@ -158,26 +151,12 @@ sleep 10
 # ── 2. Build a long, deterministic prompt, then ask for a summary ──
 # A ~7-8k word document is long enough to store multiple recurrent-state
 # checkpoints. The shared helper keeps both engines on byte-identical input.
-kimi_linear_build_prompt "$PROMPT_FILE"
+l1_round_trip_build_prompt \
+    "$PROMPT_FILE" \
+    $'\n\nSummarize the manual page text above:'
 
 # ── 3. vLLM run: compute from scratch, populating LMCache ───
 launch_vllm "/tmp/build_${BUILD_ID}_vllm.log"
-kimi_linear_send_completion \
-    "$VLLM_PORT" "$MODEL" "$PROMPT_FILE" "$MAX_TOKENS" "$OUT_A" "vLLM run"
 
-echo "Waiting ${STORE_DRAIN_SECONDS}s for LMCache stores to drain..."
-sleep "$STORE_DRAIN_SECONDS"
-retrieves_before=$(kimi_linear_count_retrieves "$LMCACHE_LOG")
-
-# ── 4. Clear local APC so the prefix must come from LMCache ──
-clear_vllm_prefix_cache
-
-# ── 5. Retrieve run: local APC is empty -> LMCache serves the KV ─
-kimi_linear_send_completion \
-    "$VLLM_PORT" "$MODEL" "$PROMPT_FILE" "$MAX_TOKENS" "$OUT_B" \
-    "LMCache retrieve run"
-retrieves_after=$(kimi_linear_count_retrieves "$LMCACHE_LOG")
-
-# ── 6. Compare outputs and verify LMCache was actually used ──
-kimi_linear_verify_outputs \
-    "$OUT_A" "$OUT_B" "$retrieves_before" "$retrieves_after" "vLLM"
+# ── 4-6. Clear local APC, retrieve from LMCache, and verify ──
+l1_round_trip_run "Kimi-Linear cross-TP-rank KV"
