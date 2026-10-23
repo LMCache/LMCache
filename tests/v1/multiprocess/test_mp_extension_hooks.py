@@ -102,7 +102,9 @@ def test_retrieve_copies_only_through_the_cache_context(monkeypatch):
 
 
 def test_store_copies_only_through_the_cache_context(monkeypatch):
-    module, cache_context, _reads, _copied = _make_checkpoint_module(monkeypatch)
+    module, cache_context, _reads, _copied = _make_checkpoint_module(
+        monkeypatch, merged=False
+    )
 
     _handle, ok = module.store(
         SimpleNamespace(request_id="req", worker_id=1),
