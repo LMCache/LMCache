@@ -63,6 +63,13 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
     This class is only instantiated by the factory when the device is
     async-capable, so the constructor creates async resources unconditionally;
     there is no ``self._async_capable`` flag.
+
+    Multi-group (hybrid model) stores are not made async: ``submit_store``
+    delegates them to the synchronous base-class implementation, which
+    gathers and commits on the calling thread. Hybrid stores only transfer
+    the trailing window of chunks, so the forward-thread stall is small; this
+    avoids a second per-group gather/commit pipeline alongside the
+    single-group one below.
     """
 
     def __init__(
@@ -200,6 +207,9 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
             _event: Synchronization event; ``wait()`` is called in background.
             blocks_in_chunk: Number of engine blocks per LMCache chunk.
 
+        Multi-group (hybrid model) stores skip this pipeline entirely and run
+        on the synchronous base-class path; see the class docstring.
+
         Returns:
             An unresolved :class:`MessagingFuture` that resolves to ``True``
             on success, ``False`` on failure.
@@ -211,6 +221,10 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
             raise RuntimeError(
                 "Engine-driven transfer context is not registered. "
                 "Call register() before submit_store()."
+            )
+        if self._group_layout is not None:
+            return super().submit_store(
+                _request_id, key, kv_caches, block_ids, _event, blocks_in_chunk
             )
         if _event is None:
             raise RuntimeError(

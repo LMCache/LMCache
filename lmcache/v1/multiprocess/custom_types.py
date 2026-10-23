@@ -8,6 +8,9 @@ import msgspec
 import torch
 
 # First Party
+from lmcache.utils import EngineType
+from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.platform.base.ipc_wrapper import (  # noqa: E402,F401
     DeviceIPCWrapper,
 )
@@ -152,6 +155,20 @@ class IPCCacheServerKey:
 KVCache = list[DeviceIPCWrapper]
 
 
+class KVTensorSpec(msgspec.Struct, frozen=True):
+    """Geometry of one registered KV tensor, without its data.
+
+    Attributes:
+        shape: Tensor shape.
+        stride: Tensor strides, in elements.
+        dtype_str: Torch dtype name (e.g. ``"bfloat16"``).
+    """
+
+    shape: tuple[int, ...]
+    stride: tuple[int, ...]
+    dtype_str: str
+
+
 class RegisterEngineDrivenContextPayload(msgspec.Struct):
     """Payload for the REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT protocol message.
 
@@ -167,6 +184,17 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         num_physical_slots: Number of physical KV slots gathered into one
             LMCache chunk. ``None`` accepts the legacy protocol, where the
             server assumed one physical slot per logical token.
+        kv_tensor_specs: Shape, stride and dtype of every registered KV
+            tensor, in layer order. Non-empty selects multi-group
+            registration: the server rebuilds the object groups from these
+            specs and ``engine_group_infos`` instead of the scalar layout
+            fields above.
+        engine_group_infos: One entry per kernel group, in protocol order.
+            Only read for multi-group registration.
+        engine_type: Serving engine that produced the KV tensors. Required
+            for multi-group registration, which reads it; ``None`` otherwise.
+        layout_hints: Engine layout hints for KV format detection. Only read
+            for multi-group registration.
     """
 
     instance_id: int
@@ -178,14 +206,36 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     dtype_str: str
     use_mla: bool
     num_physical_slots: int | None = None
+    kv_tensor_specs: list[KVTensorSpec] = msgspec.field(default_factory=list)
+    engine_group_infos: list[EngineGroupInfo] = msgspec.field(default_factory=list)
+    engine_type: EngineType | None = None
+    layout_hints: LayoutHints = msgspec.field(default_factory=dict)  # type: ignore[assignment]
 
 
 @dataclass
 class RegisterEngineDrivenContextResponse:
-    """Shared response for engine-driven context registration."""
+    """Shared response for engine-driven context registration.
+
+    Attributes:
+        shm_name: Shared-memory pool name; empty selects inline transfer.
+        pool_size: Shared-memory pool size in bytes.
+        num_object_groups: Object groups the server registered for a
+            multi-group registration; ``0`` for single-group registrations
+            and for servers without multi-group support.
+        separate_object_groups: Server ``--separate-object-groups`` flag,
+            which the worker needs to rebuild the same object groups.
+        full_sw_kv: Server ``--full-sw-kv`` flag, for the same reason.
+        null_block_id: Engine block ID that marks absent data.
+        chunk_size: Server LMCache chunk size in tokens.
+    """
 
     shm_name: str = ""
     pool_size: int = 0
+    num_object_groups: int = 0
+    separate_object_groups: bool = False
+    full_sw_kv: bool = False
+    null_block_id: int = 0
+    chunk_size: int = 0
 
 
 @dataclass

@@ -478,7 +478,7 @@ def test_auto_npu_context_routes_to_lmcache_driven(
     monkeypatch.setattr(
         worker_transfer,
         "resolve_kv_wrapper_factory",
-        lambda _dt: (lambda tensor: tensor),
+        lambda _dt: lambda tensor: tensor,
     )
 
     context = worker_transfer.create_transfer_context(
@@ -975,20 +975,24 @@ def test_engine_driven_register_sends_num_physical_slots(
     req_client.unregister_kv_cache_engine_driven_context.assert_called_once_with(1)
 
 
-def test_engine_driven_register_rejects_multiple_transfer_groups() -> None:
-    """Engine-driven registration fails before any server RPC for multiple groups."""
+def test_engine_driven_register_requires_server_multi_group_support() -> None:
+    """A multi-group registration fails unless the server confirms its groups."""
     # First Party
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
     from lmcache.v1.multiprocess.transfer_context import EngineDrivenTransferContext
 
     req_client = MagicMock()
+    # A server without multi-group support answers with no object groups.
+    req_client.register_kv_cache_engine_driven_context.return_value.result.return_value = (  # noqa: E501
+        RegisterEngineDrivenContextResponse()
+    )
     context = EngineDrivenTransferContext(1, req_client)
     groups = [
         EngineGroupInfo(engine_group_id=0, layer_indices=(0,)),
         EngineGroupInfo(engine_group_id=1, layer_indices=(1,)),
     ]
 
-    with pytest.raises(ValueError, match="does not support multiple KV transfer"):
+    with pytest.raises(RuntimeError, match="does not support multi-group"):
         context.register(
             kv_caches=_make_kv_caches(),
             model_name="m",
@@ -998,7 +1002,11 @@ def test_engine_driven_register_rejects_multiple_transfer_groups() -> None:
             engine_group_infos=groups,
         )
 
-    req_client.register_kv_cache_engine_driven_context.assert_not_called()
+    payload = req_client.register_kv_cache_engine_driven_context.call_args.args[0]
+    assert [spec.shape for spec in payload.kv_tensor_specs] == [
+        tuple(t.shape) for t in _make_kv_caches().values()
+    ]
+    assert payload.engine_group_infos == groups
 
 
 def test_engine_driven_context_unregister_lifecycle(
