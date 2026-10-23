@@ -273,7 +273,7 @@ Length-prefixed frames keep the reader simple and let truncated tails
 | `magic` | `bytes` (`LMCT`) | Sanity check; reader rejects non-matching files |
 | `format_version` | `int` (1) | Bumped on incompatible **framing** layout changes (length prefix, struct shape). Reader rejects unknown versions |
 | `level` | `str` (`storage` or `events`) | Trace level discriminator; replay drivers dispatch on it. Future `mq` / `gpu` levels will share this format |
-| `trace_schema_version` | `int` (1) | Bumped on incompatible changes to the captured API surface (e.g. a traced method's args change, a codec wire form changes). Owned by the trace subsystem, not tied to `lmcache.__version__`; reader rejects mismatches |
+| `trace_schema_version` | `int` (2) | Bumped on incompatible changes to the captured API surface (e.g. a traced method's args change, a codec wire form changes). Owned by the trace subsystem, not tied to `lmcache.__version__`; reader rejects mismatches |
 | `t_mono_start` | `float` | `time.monotonic()` at recorder construction; record `t_mono` is relative to this |
 | `t_wall_start` | `float` | `time.time()` at construction, for absolute correlation with external logs |
 | `sm_config_json` | `str` | JSON dump of `StorageManagerConfig` at record time, or empty string if attach was skipped |

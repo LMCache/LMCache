@@ -25,6 +25,26 @@ lmcache_mp_lookup_hit_tokens_total / lmcache_mp_lookup_requested_tokens_total
 Fraction of chunk-aligned tokens that came back from cache anywhere.
 Reported per `(model_name, cache_salt)`.
 
+Both sides cover only the range LMCache actually looked up. The prefix the
+engine's own prefix cache already held (skipped via the lookup key's
+`start`, see
+[apc_covered_lookup.md](../multiprocess/modules/apc_covered_lookup.md)) is
+out of both sides, so this ratio is LMCache's own hit rate on what the
+engine asked it for. For LMCache's share of the whole prompt divide by
+`lmcache_mp_lookup_prompt_tokens_total` instead, as the example dashboard
+does.
+
+## Request-level hit rate (engine prefix cache + LMCache, whole prompt)
+
+```
+lmcache_mp_lookup_request_hit_tokens_total / lmcache_mp_lookup_prompt_tokens_total
+```
+
+Share of each request's prompt that *either* cache served, with the whole
+prompt (sub-chunk tail included) as the denominator.
+Per lookup, not per request: bypassed requests are absent, re-looked-up
+requests count twice, and the engine hit is the submit-time value.
+
 ## L1-only / L2-only hit rate
 
 `MP_LOOKUP_PREFETCH_END` attributes each lookup's hit prefix by tier

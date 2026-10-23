@@ -6,6 +6,8 @@ The SGLang unified radix cache integration connects SGLang's
 `UnifiedRadixCache` to a standalone LMCache multiprocess (MP) server. It keeps
 SGLang responsible for GPU-resident prefix metadata and GPU page allocation,
 while LMCache independently manages CPU and remote cache tiers.
+This is the only supported SGLang integration; legacy in-process and
+pre-unified MP connectors are not supported.
 
 The integration consists of two cooperating components:
 

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 import asyncio
 import os
@@ -23,7 +23,7 @@ from nixl._api import (
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, MemoryTags, ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -32,6 +32,9 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
+)
+from lmcache.v1.distributed.l2_adapters.nixl_native_l2_adapter import (
+    nixl_backend_memory_tags,
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
@@ -46,6 +49,9 @@ class NixlStoreObj:
     """
     The object stored in Nixl L2 cache.
     Can be used for both file and object.
+
+    ``pin_count`` is adapter-shared state: every read and transition
+    holds the owning adapter's ``_lock``.
     """
 
     page_indices: list[int]
@@ -55,23 +61,20 @@ class NixlStoreObj:
     layout: Optional[MemoryLayoutDesc] = None
 
     pin_count: int = 0
-    _lock: threading.Lock = field(
-        default_factory=threading.Lock, repr=False, compare=False
-    )
 
-    def increase_pin_count(self):
-        with self._lock:
-            self.pin_count += 1
+    def increase_pin_count(self) -> None:
+        """Increment the pin count (caller holds the adapter lock)."""
+        self.pin_count += 1
 
-    def decrease_pin_count(self):
-        with self._lock:
-            if self.pin_count > 0:
-                self.pin_count -= 1
-            else:
-                logger.warning(
-                    "Trying to decrease pin count of object at page indices %s below 0",
-                    self.page_indices,
-                )
+    def decrease_pin_count(self) -> None:
+        """Decrement the pin count, floored at zero (caller holds the adapter lock)."""
+        if self.pin_count > 0:
+            self.pin_count -= 1
+        else:
+            logger.warning(
+                "Trying to decrease pin count of object at page indices %s below 0",
+                self.page_indices,
+            )
 
 
 class NixlObjPool:
@@ -561,12 +564,11 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         def _unlock_keys(keys: list[ObjectKey]) -> None:
-            """
-            Unlock keys in the event loop thread.
-            """
-            for key in keys:
-                if (obj := self._memory_objects.get(key)) is not None:
-                    obj.decrease_pin_count()
+            """Unlock keys on the event loop thread under the adapter lock."""
+            with self._lock:
+                for key in keys:
+                    if (obj := self._memory_objects.get(key)) is not None:
+                        obj.decrease_pin_count()
 
         # Schedule the unlock operation in the event loop thread
         self._loop.call_soon_threadsafe(_unlock_keys, keys)
@@ -593,6 +595,10 @@ class NixlStoreL2Adapter(L2AdapterInterface):
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
         with self._lock:
             return self._completed_load_tasks.pop(task_id, None)
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this adapter's NIXL backend."""
+        return nixl_backend_memory_tags(self._config.backend, self._config.shared)
 
     def close(self) -> None:
         """Close the adapter and release its event-loop and NIXL resources."""

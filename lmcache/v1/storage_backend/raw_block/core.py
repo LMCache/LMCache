@@ -508,9 +508,16 @@ class RawBlockCore:
                 # Third Party
                 from lmcache_rust_raw_block_io import RawBlockDevice  # type: ignore
             except Exception as e:
+                # First Party
+                from lmcache import __version__
+
+                # Releases publish it at lmcache's version; dev builds have
+                # no matching package, so leave those unpinned.
+                is_release = re.fullmatch(r"\d+\.\d+\.\d+((a|b|rc)\d+)?", __version__)
+                pin = f"=={__version__}" if is_release else ""
                 raise RuntimeError(
-                    "Rust raw-block extension is not installed. "
-                    "Install / build `rust_raw_block_io` and retry."
+                    "Rust raw-block extension is not installed. Install it with "
+                    f"`pip install lmcache-rust-raw-block-io{pin}` and retry."
                 ) from e
             self._raw = RawBlockDevice(
                 self.device_path,

@@ -116,7 +116,10 @@ class RequestClient(Protocol):
 
     @rpc_method
     def free_lookup_locks(
-        self, key: IPCCacheServerKey, tp_size: int
+        self,
+        key: IPCCacheServerKey,
+        tp_size: int,
+        extra_ranges: tuple[tuple[int, int], ...] = (),
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
@@ -246,6 +249,11 @@ class RequestClient(Protocol):
 
     @rpc_method
     def server_module_call(
+        self, request: ServerModuleCallRequest
+    ) -> MessagingFuture[ServerModuleCallResponse]: ...
+
+    @rpc_method
+    def server_module_affinity_call(
         self, request: ServerModuleCallRequest
     ) -> MessagingFuture[ServerModuleCallResponse]: ...
 
