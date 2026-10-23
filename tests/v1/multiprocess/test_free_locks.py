@@ -6,7 +6,6 @@ server handler, and client-side adapter API.
 
 # Standard
 from unittest.mock import MagicMock, patch
-import threading
 
 # Third Party
 import pytest
@@ -19,10 +18,13 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.rpc import get_rpc_spec
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 # Test helpers
+from tests.v1.mp_scheduler_adapter_test_utils import (
+    make_request_client,
+    make_scheduler_adapter,
+)
 from tests.v1.multiprocess.test_mq import (
     create_cache_key,
 )
@@ -426,34 +428,16 @@ def test_server_handler_registered():
 # ============================================================================
 
 
-def test_adapter_free_lookup_locks_sends_request():
+def test_adapter_free_lookup_locks_sends_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """LMCacheMPSchedulerAdapter.free_lookup_locks should send a FREE_LOOKUP_LOCKS
     request with the correct key payload and extra ranges."""
-    # First Party
-    from lmcache.integration.vllm.vllm_multi_process_adapter import (
-        LMCacheMPSchedulerAdapter,
-        ParallelStrategy,
-    )
+    client = make_request_client(chunk_size=256)
+    adapter = make_scheduler_adapter(monkeypatch, {"tcp://test:0": client}, 16)
 
-    adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
-    adapter.model_name = "test_model"
-    adapter.lmcache_tokens_per_chunk = 256
-    adapter.blocks_in_chunk = 16
-    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1, 1)
-    adapter._health_events = {"tcp://test:0": threading.Event()}
-    adapter._health_events["tcp://test:0"].set()
-    adapter._server_urls = ["tcp://test:0"]
-    adapter._mq_timeout = 30.0
-
-    mock_client = MagicMock(spec=RequestClient)
-    mock_future = MagicMock()
-    mock_client.free_lookup_locks.return_value = mock_future
-    adapter.req_clients = {"tcp://test:0": mock_client}
-    adapter._pending_lookups = set()
-
-    token_ids = list(range(512))
     adapter.free_lookup_locks(
-        token_ids=token_ids,
+        token_ids=list(range(512)),
         start=0,
         end=512,
         request_id="req-1",
@@ -461,8 +445,8 @@ def test_adapter_free_lookup_locks_sends_request():
         extra_ranges=((256, 512),),
     )
 
-    mock_client.free_lookup_locks.assert_called_once()
-    key, tp_size, extra_ranges = mock_client.free_lookup_locks.call_args.args
+    client.free_lookup_locks.assert_called_once()
+    key, tp_size, extra_ranges = client.free_lookup_locks.call_args.args
     assert isinstance(key, IPCCacheServerKey)
     assert key.worker_id is None
     assert key.model_name == "test_model"
@@ -472,62 +456,28 @@ def test_adapter_free_lookup_locks_sends_request():
     assert extra_ranges == ((256, 512),)
 
 
-def test_adapter_free_lookup_locks_key_matches_lookup():
+def test_adapter_free_lookup_locks_key_matches_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The key created by free_lookup_locks should match the key created by
     maybe_submit_lookup_request (no_worker_id_version, same start/end)."""
-    # First Party
-    from lmcache.integration.vllm.vllm_multi_process_adapter import (
-        LMCacheMPSchedulerAdapter,
-        ParallelStrategy,
-    )
-
-    adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
-    adapter.model_name = "test_model"
-    adapter.lmcache_tokens_per_chunk = 256
-    adapter.blocks_in_chunk = 16
-    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1, 1)
-    adapter._server_urls = ["tcp://test:0"]
-    adapter._health_events = {"tcp://test:0": threading.Event()}
-    adapter._health_events["tcp://test:0"].set()
-    adapter._mq_timeout = 30.0
-    adapter._heartbeats: dict[str, object] = {}
-    adapter._heartbeat_lock = threading.Lock()
-    adapter._heartbeat_interval = 5.0
-
-    mock_client = MagicMock(spec=RequestClient)
-    mock_future = MagicMock()
-    mock_future.result.return_value = None  # LOOKUP returns None
-    mock_client.lookup.return_value = mock_future
-    mock_client.free_lookup_locks.return_value = mock_future
-    adapter.req_clients = {"tcp://test:0": mock_client}
-    adapter._pending_lookups = set()
-    adapter._unacked_lookups = {}
-    adapter._lookup_params = {}
-
+    client = make_request_client(chunk_size=256)
+    adapter = make_scheduler_adapter(monkeypatch, {"tcp://test:0": client}, 16)
     token_ids = list(range(512))
 
-    # Submit lookup – patch heartbeat to avoid spawning a real thread
-    with patch.object(adapter, "_ensure_heartbeat_started"):
-        adapter.maybe_submit_lookup_request(
-            "req-1",
-            token_ids,
-            request_configs={"lmcache.skip_save": True},
-        )
-    lookup_key = mock_client.lookup.call_args.args[0]
+    assert adapter.maybe_submit_lookup_request(
+        "req-1", token_ids, request_configs={"lmcache.skip_save": True}
+    )
+    lookup_key = client.lookup.call_args.args[0]
 
-    mock_client.reset_mock()
-
-    # Submit free_lookup_locks with aligned end
-    tokens_per_chunk = adapter.lmcache_tokens_per_chunk
-    aligned_end = (len(token_ids) // tokens_per_chunk) * tokens_per_chunk
     adapter.free_lookup_locks(
         token_ids=token_ids,
         start=0,
-        end=aligned_end,
+        end=512,
         request_id="req-1",
         request_configs={"lmcache.skip_save": True},
     )
-    free_key, tp_size, extra_ranges = mock_client.free_lookup_locks.call_args.args
+    free_key, tp_size, extra_ranges = client.free_lookup_locks.call_args.args
     assert tp_size == 1
     assert extra_ranges == ()
 

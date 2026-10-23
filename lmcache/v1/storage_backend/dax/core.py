@@ -17,7 +17,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import DiskCacheMetadata
+from lmcache.utils import DiskCacheMetadata, check_dax_range
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 
 logger = init_logger(__name__)
@@ -93,6 +93,7 @@ class DaxCore(Generic[KeyT]):
         device_path: str,
         max_dax_size_bytes: int,
         slot_bytes: int,
+        offset_bytes: int = 0,
     ) -> None:
         """Open and map a DAX arena.
 
@@ -100,16 +101,19 @@ class DaxCore(Generic[KeyT]):
             device_path: Path to the mmap-able DAX device or file.
             max_dax_size_bytes: Number of bytes to map from the device.
             slot_bytes: Fixed slot size used for each stored object.
+            offset_bytes: Page-aligned byte offset where the mapping starts.
 
         Raises:
             ValueError: If the path is empty, sizes are non-positive, or the
                 arena cannot fit at least one slot.
-            RuntimeError: If the device cannot be opened or mapped, or if
-                ``max_dax_size_bytes`` exceeds the reported device capacity.
+            RuntimeError: If the device cannot be opened or mapped, the range
+                exceeds the device capacity or alignment, or the capacity
+                cannot be determined.
         """
         self._device_path = device_path
         self._arena_bytes = max_dax_size_bytes
         self._slot_bytes = slot_bytes
+        self._offset_bytes = offset_bytes
 
         if not self._device_path:
             raise ValueError("device_path must be a non-empty string")
@@ -153,6 +157,11 @@ class DaxCore(Generic[KeyT]):
     def arena_bytes(self) -> int:
         """Return the mapped arena size in bytes."""
         return self._arena_bytes
+
+    @property
+    def offset_bytes(self) -> int:
+        """Return the device offset where the mapping starts."""
+        return self._offset_bytes
 
     @property
     def slot_bytes(self) -> int:
@@ -834,6 +843,7 @@ class DaxCore(Generic[KeyT]):
             return {
                 "is_healthy": not self._closed and self._mmap_obj is not None,
                 "device_path": self._device_path,
+                "offset_bytes": self._offset_bytes,
                 "max_dax_size_bytes": self._arena_bytes,
                 "slot_bytes": self._slot_bytes,
                 "max_slots": self._max_slots,
@@ -1035,24 +1045,15 @@ class DaxCore(Generic[KeyT]):
             ) from exc
 
         try:
-            try:
-                capacity_bytes = os.fstat(fd).st_size
-                if capacity_bytes > 0 and self._arena_bytes > capacity_bytes:
-                    raise RuntimeError(
-                        f"max_dax_size_bytes ({self._arena_bytes} bytes) exceeds "
-                        f"device capacity ({capacity_bytes} bytes)"
-                    )
-            except OSError:
-                logger.warning(
-                    "Could not determine DAX device capacity via fstat; "
-                    "skipping max_dax_size_bytes validation"
-                )
-
+            check_dax_range(
+                self._device_path, fd, self._offset_bytes, self._arena_bytes
+            )
             mmap_obj = mmap.mmap(
                 fd,
                 self._arena_bytes,
                 flags=mmap.MAP_SHARED,
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
+                offset=self._offset_bytes,
             )
             base_ptr = ctypes.addressof(ctypes.c_char.from_buffer(mmap_obj))
             arena_view = memoryview(mmap_obj)
