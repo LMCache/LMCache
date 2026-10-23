@@ -5,7 +5,7 @@ in the multiprocess cache server.
 """
 
 # Standard
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Optional, overload
 import threading
@@ -14,11 +14,7 @@ import time
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.custom_types import (
-    TOKEN_ID_BYTES,
-    IPCCacheServerKey,
-    pack_token_ids,
-)
+from lmcache.v1.multiprocess.custom_types import TOKEN_ID_BYTES, IPCCacheServerKey
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
@@ -59,18 +55,12 @@ class Session:
     )
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def set_tokens(self, full_token_ids: Sequence[int] | bytes) -> None:
+    def set_tokens(self, token_bytes: bytes) -> None:
         """Update the token sequence (idempotent, replaces not extends).
 
         Args:
-            full_token_ids: Complete token sequence, or the same ids packed by
-                ``pack_token_ids``.
+            token_bytes: Complete token sequence packed by ``pack_token_ids``.
         """
-        token_bytes = (
-            full_token_ids
-            if isinstance(full_token_ids, bytes)
-            else pack_token_ids(full_token_ids)
-        )
         with self._lock:
             self.token_bytes = token_bytes
 
@@ -208,7 +198,7 @@ class Session:
             same_lookup = (
                 key.model_name == lookup_key.model_name
                 and key.world_size == lookup_key.world_size
-                and key.token_ids == lookup_key.token_ids
+                and key.token_bytes == lookup_key.token_bytes
                 and key.cache_salt == lookup_key.cache_salt
                 and key.start >= lookup_key.start
                 and key.end <= lookup_key.end
@@ -253,7 +243,7 @@ class Session:
             same_lookup = (
                 key.model_name == lookup_key.model_name
                 and key.world_size == lookup_key.world_size
-                and key.token_ids == lookup_key.token_ids
+                and key.token_bytes == lookup_key.token_bytes
                 and key.cache_salt == lookup_key.cache_salt
                 and key.start >= lookup_key.start
                 and key.end <= lookup_key.end

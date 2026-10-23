@@ -28,7 +28,8 @@ Key Types:
 # Token ids travel as big-endian uint32, the exact bytes the blake3 chunk hash
 # reads, so the server can hash them without building Python ints.
 TOKEN_ID_BYTES = 4
-assert array.array("I").itemsize == TOKEN_ID_BYTES
+if array.array("I").itemsize != TOKEN_ID_BYTES:
+    raise ImportError("packed token ids need a 4-byte C unsigned int")
 
 
 def pack_token_ids(token_ids: Sequence[int]) -> bytes:
