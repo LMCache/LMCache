@@ -18,12 +18,12 @@ import torch
 # First Party
 from lmcache.inprocess.integration.base_service_factory import BaseServiceFactory
 from lmcache.inprocess.v1.health_monitor.base import HealthMonitor
+from lmcache.inprocess.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.inprocess.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.inprocess.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
@@ -250,19 +250,19 @@ class LMCacheManager:
             """Helper to close a resource with timeout protection."""
             try:
                 logger.info("Closing %s...", name)
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(close_fn)
-                    try:
-                        future.result(timeout=timeout)
-                        logger.info("%s closed successfully", name)
-                    except TimeoutError:
-                        logger.error(
-                            "%s close operation timed out after %ss. "
-                            "Continuing with shutdown...",
-                            name,
-                            timeout,
-                        )
-                        errors.append((name, "Timeout"))
+                executor = ThreadPoolExecutor(max_workers=1)
+                future = executor.submit(close_fn)
+                executor.shutdown(wait=False)
+                future.result(timeout=timeout)
+                logger.info("%s closed successfully", name)
+            except TimeoutError:
+                logger.error(
+                    "%s close operation timed out after %ss. "
+                    "Continuing with shutdown...",
+                    name,
+                    timeout,
+                )
+                errors.append((name, "Timeout"))
             except Exception as e:
                 logger.error("Error closing %s: %s", name, e)
                 errors.append((name, e))
@@ -298,20 +298,11 @@ class LMCacheManager:
         # Destroy cache engine
         try:
             engine_instance_id = self._service_factory.get_engine_instance_id()
-            logger.info("Destroying LMCache engine: %s", engine_instance_id)
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(
-                    LMCacheEngineBuilder.destroy, engine_instance_id
-                )
-                try:
-                    future.result(timeout=15.0)
-                    logger.info("LMCache engine destroyed successfully")
-                except TimeoutError:
-                    logger.error(
-                        "Cache engine destroy timed out after 15s. "
-                        "Continuing with shutdown..."
-                    )
-                    errors.append(("cache_engine", "Timeout"))
+            _safe_close(
+                "cache_engine",
+                lambda: LMCacheEngineBuilder.destroy(engine_instance_id),
+                timeout=15.0,
+            )
         except Exception as e:
             logger.error("Error destroying cache engine: %s", e)
             errors.append(("cache_engine", e))

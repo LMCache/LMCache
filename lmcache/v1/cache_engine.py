@@ -141,7 +141,7 @@ class LMCacheEngine:
 
         # avoid circular import
         # First Party
-        from lmcache.v1.cache_controller import LMCacheWorker
+        from lmcache.inprocess.v1.cache_controller import LMCacheWorker
 
         self.lmcache_worker: Optional[LMCacheWorker] = None
         lmcache_worker_ids = config.get_lmcache_worker_ids(
