@@ -46,6 +46,50 @@ def nixl_backend_memory_tags(backend: str, shared: bool) -> MemoryTags:
     return MemoryTags(MemorySegment.STORAGE, MemoryResidency.LOCAL)
 
 
+def load_nixl_client_class() -> Any:
+    """Import ``LMCacheNixlClient`` from the native NIXL connector.
+
+    Returns:
+        The client class from the source build (``lmcache.lmcache_nixl``) or,
+        failing that, from the ``lmcache-nixl`` wheel (``lmcache_nixl``).
+
+    Raises:
+        RuntimeError: If neither module loads; the message says how to install
+            the connector and includes both import errors.
+    """
+    # A source build (BUILD_WITH_NIXL=1) has lmcache.lmcache_nixl, linked to
+    # its NIXL SDK through a RUNPATH. The lmcache-nixl wheel's lmcache_nixl has
+    # no RUNPATH: it links libnixl by SONAME, so import nixl first, which loads
+    # the libnixl matching torch's CUDA, and the loader reuses that copy.
+    try:
+        # First Party
+        from lmcache.lmcache_nixl import LMCacheNixlClient
+    except ImportError as source_exc:
+        try:
+            # Third Party
+            import nixl  # noqa: F401
+
+            # isort: split
+            # Third Party
+            from lmcache_nixl import LMCacheNixlClient
+        except ImportError as exc:
+            # First Party
+            from lmcache import __version__
+
+            # Releases publish it at lmcache's version; dev builds have no
+            # matching package, so leave those unpinned.
+            is_release = re.fullmatch(r"\d+\.\d+\.\d+((a|b|rc)\d+)?", __version__)
+            pin = f"=={__version__}" if is_release else ""
+            raise RuntimeError(
+                "nixl_native requires LMCache's NIXL connector. Install it with "
+                f"`pip install lmcache-nixl{pin}`, or build LMCache from source "
+                "with BUILD_WITH_NIXL=1, NIXL_INCLUDE_DIR, and NIXL_LIBRARY_DIR "
+                f"set. Importing lmcache.lmcache_nixl failed with: {source_exc}; "
+                f"importing nixl and lmcache_nixl failed with: {exc}"
+            ) from exc
+    return LMCacheNixlClient
+
+
 class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
     """Configure the built-in native NIXL connector.
 
@@ -162,36 +206,7 @@ def _create_nixl_native_l2_adapter(
     if l1_memory_desc.align_bytes <= 0:
         raise ValueError("nixl_native requires a positive L1 alignment")
 
-    # A source build (BUILD_WITH_NIXL=1) has lmcache.lmcache_nixl, linked to
-    # its NIXL SDK through a RUNPATH. The lmcache-nixl wheel's lmcache_nixl has
-    # no RUNPATH: it links libnixl by SONAME, so import nixl first, which loads
-    # the libnixl matching torch's CUDA, and the loader reuses that copy.
-    try:
-        # First Party
-        from lmcache.lmcache_nixl import LMCacheNixlClient
-    except ImportError as source_exc:
-        try:
-            # Third Party
-            import nixl  # noqa: F401
-
-            # isort: split
-            # Third Party
-            from lmcache_nixl import LMCacheNixlClient
-        except ImportError as exc:
-            # First Party
-            from lmcache import __version__
-
-            # Releases publish it at lmcache's version; dev builds have no
-            # matching package, so leave those unpinned.
-            is_release = re.fullmatch(r"\d+\.\d+\.\d+((a|b|rc)\d+)?", __version__)
-            pin = f"=={__version__}" if is_release else ""
-            raise RuntimeError(
-                "nixl_native requires LMCache's NIXL connector. Install it with "
-                f"`pip install lmcache-nixl{pin}`, or build LMCache from source "
-                "with BUILD_WITH_NIXL=1, NIXL_INCLUDE_DIR, and NIXL_LIBRARY_DIR "
-                f"set. Importing lmcache.lmcache_nixl failed with: {source_exc}; "
-                f"importing nixl and lmcache_nixl failed with: {exc}"
-            ) from exc
+    client_class = load_nixl_client_class()
 
     # First Party
     from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
@@ -200,7 +215,7 @@ def _create_nixl_native_l2_adapter(
 
     if not isinstance(config, NixlNativeL2AdapterConfig):
         raise TypeError("config must be NixlNativeL2AdapterConfig")
-    native_client = LMCacheNixlClient(
+    native_client = client_class(
         backend=config.backend,
         backend_params=config.backend_params,
         num_workers=config.num_workers,

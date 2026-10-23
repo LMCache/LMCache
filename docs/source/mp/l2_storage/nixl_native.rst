@@ -23,8 +23,8 @@ Build and runtime requirements
 ------------------------------
 
 The connector is published as the ``lmcache-nixl`` package, at the same
-version as ``lmcache``. The ``lmcache/vllm-openai`` release images include it.
-Elsewhere, install the version matching the installed ``lmcache``:
+version as ``lmcache``. The ``lmcache/vllm-openai`` release and nightly images
+include it. Elsewhere, install the version matching the installed ``lmcache``:
 
 .. code-block:: bash
 

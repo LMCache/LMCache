@@ -245,7 +245,10 @@ wheel depend on NIXL:
   and bundles nothing: `nixl` already ships `libnixl` and its plugins for each
   CUDA line (`nixl-cu12`, `nixl-cu13`), and bundling a second copy would load
   two NIXL runtimes in a process that also uses vLLM's NIXL connector. The C++
-  API is the same in both CUDA lines, so one wheel serves both.
+  API is the same in both CUDA lines, so one wheel serves both. The nightly
+  image builds this wheel from the checkout (`docker/build_nixl_wheel.sh`)
+  instead of the in-tree extension, so it loads the connector the same way
+  the release images do.
 
 The Python factory imports the connector only after `nixl_native` is selected:
 `lmcache.lmcache_nixl` first, then `import nixl` followed by `lmcache_nixl`.

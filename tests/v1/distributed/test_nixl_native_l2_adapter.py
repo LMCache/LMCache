@@ -183,7 +183,10 @@ class _ImportScenario(importlib.abc.MetaPathFinder, importlib.abc.Loader):
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Route the connector and nixl imports through this scenario."""
         for name in self._NAMES:
-            monkeypatch.delitem(sys.modules, name, raising=False)
+            # setitem records the real entry (or its absence), so the fake
+            # modules imported during the test are dropped on teardown.
+            monkeypatch.setitem(sys.modules, name, None)
+            monkeypatch.delitem(sys.modules, name)
         monkeypatch.setattr(sys, "meta_path", [self, *sys.meta_path])
 
 
