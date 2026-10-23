@@ -46,15 +46,23 @@ class LRUCacheFast:
         """Mark an existing entry as most-recently used. O(1)."""
         self._cache.move_to_end(key)
 
-    def insert(self, key: Any) -> None:
-        """Insert a new entry, or refresh if already present. O(1)."""
+    def insert(self, key: Any) -> Any | None:
+        """Insert a new entry, or refresh if already present. O(1).
+
+        Returns:
+            The key evicted to make room, or ``None`` when nothing was
+            evicted. Callers that mirror the cache's contents elsewhere
+            (e.g. a fingerprint index) use it to drop the same entry.
+        """
         if key in self._cache:
             self._cache.move_to_end(key)
-            return
+            return None
+        evicted = None
         if len(self._cache) >= self.capacity:
-            self._cache.popitem(last=False)
+            evicted, _ = self._cache.popitem(last=False)
             self.eviction_count += 1
         self._cache[key] = None
+        return evicted
 
     def __len__(self) -> int:
         return len(self._cache)
