@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # First Party
-from lmcache.v1.storage_backend.raw_block.core import (
+from lmcache.v1.distributed.l2_adapters.raw_block.core import (
     DEFAULT_IOURING_QUEUE_DEPTH,
     RAW_BLOCK_IO_ENGINES,
     RawBlockCore,
@@ -12,7 +12,7 @@ from lmcache.v1.storage_backend.raw_block.core import (
     round_up,
     validate_raw_block_io_options,
 )
-from lmcache.v1.storage_backend.raw_block.key_codec import (
+from lmcache.v1.distributed.l2_adapters.raw_block.key_codec import (
     RawBlockKeyNamespace,
     RawBlockKeySpec,
     decode_legacy_key,

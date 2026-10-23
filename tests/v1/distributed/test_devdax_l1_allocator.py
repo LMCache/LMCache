@@ -44,6 +44,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     get_type_name_for_config,
 )
+from lmcache.v1.distributed.l2_adapters.dax.core import DaxCore
 from lmcache.v1.distributed.l2_adapters.dax_l2_adapter import (
     DaxDeviceConfig,
     DaxL2Adapter,
@@ -65,7 +66,6 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
 )
 from lmcache.v1.multiprocess.config import add_mp_server_args
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.storage_backend.dax.core import DaxCore
 import lmcache.utils as lmcache_utils
 import lmcache.v1.memory_management as memory_management
 
