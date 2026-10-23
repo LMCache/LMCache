@@ -45,6 +45,13 @@ from lmcache.v1.platform.ipc_policy import (
     set_use_vmm_api,
 )
 
+# Test helpers
+from tests.v1.mp_scheduler_adapter_test_utils import (
+    make_request_client,
+    make_scheduler_adapter,
+    ready_future,
+)
+
 
 class FakeMQClient:
     """MessageQueueClient double that records close calls."""
@@ -414,18 +421,8 @@ def fake_adapter(monkeypatch):
 def test_scheduler_reset_cache_clears_every_server_without_force(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reset sends non-forced CLEAR and preserves local lookup state."""
+    """Reset sends non-forced CLEAR to every server within one budget."""
     adapter, clients = _make_scheduler_adapter(["server-a", "server-b"])
-    lookup_state = {
-        "_pending_lookups": {"req-1"},
-        "_unacked_lookups": {"req-1": MagicMock()},
-        "_lookup_status": {"req-1": {}},
-        "_finished_lookup_results": {"req-1": 256},
-        "_per_server_hits": {"req-1": {"server-a": 1}},
-        "_lookup_params": {"req-1": ([1, 2, 3, 4], "", None)},
-    }
-    for name, value in lookup_state.items():
-        setattr(adapter, name, value)
     futures = {server: MagicMock(name=f"future[{server}]") for server in clients}
     for server, client in clients.items():
         client.clear.return_value = futures[server]
@@ -440,8 +437,21 @@ def test_scheduler_reset_cache_clears_every_server_without_force(
         futures[server].result.assert_called_once_with(
             timeout=expected_timeouts[server]
         )
-    for name, value in lookup_state.items():
-        assert getattr(adapter, name) is value
+
+
+def test_scheduler_reset_cache_keeps_lookups_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lookup submitted before a reset still resolves after it."""
+    client = make_request_client(chunk_size=256)
+    adapter = make_scheduler_adapter(monkeypatch, {"server-a": client}, 16)
+    assert adapter.maybe_submit_lookup_request("req-1", list(range(512)))
+
+    assert adapter.reset_cache() is True
+
+    client.query_prefetch_status.return_value = ready_future(2)
+    client.lookup.return_value.set_result(None)
+    assert adapter.check_lookup_result("req-1") == 512
 
 
 @pytest.mark.parametrize(

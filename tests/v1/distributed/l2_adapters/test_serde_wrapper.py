@@ -22,7 +22,14 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    KeyListPage,
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
@@ -239,6 +246,9 @@ class FakeInnerAdapter(L2AdapterInterface):
 
     def report_status(self) -> dict[str, object]:
         return {"is_healthy": True, "adapter": "fake-inner"}
+
+    def get_memory_tags(self) -> MemoryTags:
+        return MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
 
     def close(self) -> None:
         self._store_notifier.close()
@@ -628,6 +638,9 @@ def test_non_serde_operations_pass_through_to_inner(
     # come from the inner adapter.
     assert wrapper.supports_global_eviction
     assert wrapper.get_usage().total_capacity_bytes == INNER_CAPACITY_BYTES
+    assert wrapper.get_memory_tags() == MemoryTags(
+        MemorySegment.STORAGE, MemoryResidency.REMOTE
+    )
     assert wrapper.report_status() == {
         "is_healthy": True,
         "adapter": "fake-inner",
