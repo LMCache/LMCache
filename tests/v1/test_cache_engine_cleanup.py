@@ -19,9 +19,9 @@ import logging
 import pytest
 
 # First Party
+from lmcache.inprocess.v1.cache_engine import LMCacheEngine
 from lmcache.inprocess.v1.event_manager import EventStatus
 from lmcache.inprocess.v1.pin_monitor import PinMonitor
-from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 
 # Local

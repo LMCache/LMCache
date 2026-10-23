@@ -498,7 +498,7 @@ class TestLMCacheEngineInitFailure:
     def test_lookup_returns_zero_when_init_failed(self):
         """Test that lookup returns 0 when engine is marked as init failed."""
         # First Party
-        from lmcache.v1.cache_engine import LMCacheEngine
+        from lmcache.inprocess.v1.cache_engine import LMCacheEngine
 
         engine = MagicMock(spec=LMCacheEngine)
         engine._init_failed = False
@@ -517,7 +517,7 @@ class TestLMCacheEngineInitFailure:
     def test_retrieve_returns_empty_mask_when_init_failed(self):
         """Test retrieve returns all-False mask when engine init failed."""
         # First Party
-        from lmcache.v1.cache_engine import LMCacheEngine
+        from lmcache.inprocess.v1.cache_engine import LMCacheEngine
 
         engine = MagicMock(spec=LMCacheEngine)
         engine._init_failed = False
@@ -537,7 +537,7 @@ class TestLMCacheEngineInitFailure:
     def test_mark_init_failed_makes_engine_unhealthy(self):
         """Test that mark_init_failed makes engine report unhealthy."""
         # First Party
-        from lmcache.v1.cache_engine import LMCacheEngine
+        from lmcache.inprocess.v1.cache_engine import LMCacheEngine
 
         engine = MagicMock(spec=LMCacheEngine)
         engine._init_failed = False

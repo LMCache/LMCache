@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
-from lmcache.v1.internal_api_server.common.env_api import router
+from lmcache.v1.multiprocess.http_apis.common.env_api import router
 
 
 def test_http_authentication_environment_is_redacted(

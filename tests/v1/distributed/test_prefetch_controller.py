@@ -27,6 +27,9 @@ from lmcache.v1.distributed.api import (
     FetchingPolicy,
     GroupedObjectKeys,
     MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
     ObjectKey,
     PrefetchLockMode,
     PrefetchResult,
@@ -114,6 +117,8 @@ def make_spec(
     num_kv_readers: int = 1,
     fetching_policy: FetchingPolicy = "prefix",
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK,
+    allowed_l1_memory_tags: frozenset[MemoryTags] | None = None,
+    allowed_l2_memory_tags: frozenset[MemoryTags] | None = None,
 ) -> PrefetchTaskSpec:
     """Build a request over the given rows."""
     return PrefetchTaskSpec(
@@ -121,6 +126,8 @@ def make_spec(
         num_kv_readers=num_kv_readers,
         fetching_policy=fetching_policy,
         lock_mode=lock_mode,
+        allowed_l1_memory_tags=allowed_l1_memory_tags,
+        allowed_l2_memory_tags=allowed_l2_memory_tags,
     )
 
 
@@ -659,8 +666,8 @@ class TestNoHitsAndFastPath:
         assert_read_locked(l1_manager, keys[:2])
         l1_manager.finish_read(keys[:2])
 
-    def test_skip_l2_ignores_l2_and_answers_synchronously(self, l1_manager):
-        """skip_l2 serves the L1 prefix without touching L2."""
+    def test_no_allowed_l2_ignores_l2_and_answers_synchronously(self, l1_manager):
+        """An empty allowed L2 set serves the L1 prefix without touching L2."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(4)]
@@ -669,7 +676,9 @@ class TestNoHitsAndFastPath:
         ctrl = make_controller(l1_manager, [adapter])
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(single_row_spec(keys), skip_l2=True)
+        req_id = ctrl.submit_prefetch_request(
+            single_row_spec(keys, allowed_l2_memory_tags=frozenset())
+        )
         result = ctrl.query_prefetch_result(req_id)
 
         assert row_bits(result) == [0, 1]
@@ -679,14 +688,16 @@ class TestNoHitsAndFastPath:
         ctrl.stop()
         adapter.close()
 
-    def test_skip_l2_releases_out_of_prefix_l1_hits(self, l1_manager):
+    def test_no_allowed_l2_releases_out_of_prefix_l1_hits(self, l1_manager):
         """L1 holds {0,2}: only {0} is a prefix hit; {2} is released."""
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
         write_keys_to_l1(l1_manager, [keys[0], keys[2]], layout)
         ctrl = make_controller(l1_manager, [])
 
-        req_id = ctrl.submit_prefetch_request(single_row_spec(keys), skip_l2=True)
+        req_id = ctrl.submit_prefetch_request(
+            single_row_spec(keys, allowed_l2_memory_tags=frozenset())
+        )
         result = ctrl.query_prefetch_result(req_id)
 
         assert row_bits(result) == [0]
@@ -1702,6 +1713,188 @@ class TestRuntimeAdapters:
         assert ctrl.request_remove_adapter(0).wait(timeout=5.0)
         ctrl.stop()
         adapter.close()
+
+
+# =============================================================================
+# Memory tag filtering
+# =============================================================================
+
+DRAM_TAGS = MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)
+CXL_TAGS = MemoryTags(MemorySegment.CXL, MemoryResidency.LOCAL)
+LOCAL_STORAGE_TAGS = MemoryTags(MemorySegment.STORAGE, MemoryResidency.LOCAL)
+REMOTE_STORAGE_TAGS = MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
+
+
+class RetaggedL1Manager:
+    """L1Manager wrapper that reports different memory tags."""
+
+    def __init__(self, inner: L1Manager, tags: MemoryTags) -> None:
+        self._inner = inner
+        self._tags = tags
+
+    def get_memory_tags(self) -> MemoryTags:
+        return self._tags
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+
+class RemoteMockL2Adapter(MockL2Adapter):
+    """Mock adapter that reports remote storage tags."""
+
+    def get_memory_tags(self) -> MemoryTags:
+        return REMOTE_STORAGE_TAGS
+
+
+def make_dram_cxl_controller(
+    dram_l1: L1Manager, cxl_inner: L1Manager, adapters: list
+) -> PrefetchController:
+    """Build a controller over a DRAM L1 (index 0) and a CXL-tagged L1
+    (index 1); mock adapters bind to the DRAM L1."""
+    return PrefetchController(
+        l1_managers=[dram_l1, RetaggedL1Manager(cxl_inner, CXL_TAGS)],  # type: ignore[list-item]
+        l1_manager_descriptors=[
+            L1ManagerDescriptor(index=0, config=make_l1_config()),
+            L1ManagerDescriptor(index=1, config=make_l1_config()),
+        ],
+        l2_adapters=adapters,
+        adapter_descriptors=[make_descriptor(i) for i in range(len(adapters))],
+        policy=DefaultPrefetchPolicy(),
+    )
+
+
+class TestMemoryTagFiltering:
+    def test_disallowed_l1_hits_are_misses_and_stay_unlocked(self, l1_manager):
+        """Only allowed L1 managers contribute hits; the others keep no lock."""
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(2)]
+        cxl_inner = L1Manager(make_l1_config())
+        write_keys_to_l1(l1_manager, keys[:1], layout)
+        write_keys_to_l1(cxl_inner, keys[1:], layout)
+        ctrl = make_dram_cxl_controller(l1_manager, cxl_inner, [])
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            single_row_spec(
+                keys,
+                fetching_policy="full",
+                allowed_l1_memory_tags=frozenset({DRAM_TAGS}),
+            )
+        )
+        result = wait_for_result(ctrl, req_id)
+
+        assert row_bits(result) == [0]
+        assert hit_counts(result) == (1, 0)
+        assert cxl_inner.is_key_evictable(keys[1])
+        l1_manager.finish_read(keys[:1])
+        ctrl.stop()
+        cxl_inner.close()
+
+    def test_only_allowed_l2_adapters_are_loaded_from(self, l1_manager):
+        """A key held only by a disallowed adapter is a miss."""
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(2)]
+        local = make_adapter()
+        remote = RemoteMockL2Adapter(
+            MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
+        )
+        store_keys_in_l2(local, keys[:1], layout)
+        store_keys_in_l2(remote, keys[1:], layout)
+        ctrl = make_controller(l1_manager, [local, remote])
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            single_row_spec(
+                keys,
+                fetching_policy="full",
+                allowed_l2_memory_tags=frozenset({LOCAL_STORAGE_TAGS}),
+            )
+        )
+        result = wait_for_result(ctrl, req_id)
+
+        assert row_bits(result) == [0]
+        assert hit_counts(result) == (0, 1)
+        assert_absent(l1_manager, keys[1:])
+        assert_l2_unlocked(remote)
+        l1_manager.finish_read(keys[:1])
+        ctrl.stop()
+        local.close()
+        remote.close()
+
+    def test_filter_matching_no_adapter_serves_from_l1(self, l1_manager):
+        """A non-empty L2 filter that matches no adapter serves L1 only."""
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(2)]
+        adapter = make_adapter()
+        write_keys_to_l1(l1_manager, keys[:1], layout)
+        store_keys_in_l2(adapter, keys[1:], layout)
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            single_row_spec(
+                keys, allowed_l2_memory_tags=frozenset({REMOTE_STORAGE_TAGS})
+            )
+        )
+        result = wait_for_result(ctrl, req_id)
+
+        assert row_bits(result) == [0]
+        assert hit_counts(result) == (1, 0)
+        assert_absent(l1_manager, keys[1:])
+        l1_manager.finish_read(keys[:1])
+        ctrl.stop()
+        adapter.close()
+
+    def test_allowed_l2_loads_into_disallowed_affinity_l1(self, l1_manager):
+        """L2 loads land in the adapter's affinity L1 even when that L1's
+        tags are not allowed."""
+        layout = make_layout()
+        keys = [make_object_key(0)]
+        cxl_inner = L1Manager(make_l1_config())
+        adapter = make_adapter()
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = make_dram_cxl_controller(l1_manager, cxl_inner, [adapter])
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            single_row_spec(keys, allowed_l1_memory_tags=frozenset({CXL_TAGS}))
+        )
+        result = wait_for_result(ctrl, req_id)
+
+        assert row_bits(result) == [0]
+        assert hit_counts(result) == (0, 1)
+        assert result is not None
+        assert result.l1_owners == {keys[0]: l1_manager.l1_manager_id}
+        assert_read_locked(l1_manager, keys)
+        assert_absent(cxl_inner, keys)
+        l1_manager.finish_read(keys)
+        ctrl.stop()
+        adapter.close()
+        cxl_inner.close()
+
+    def test_key_resident_in_disallowed_affinity_l1_is_a_miss(self, l1_manager):
+        """A key already resident in a disallowed affinity L1 cannot be
+        loaded there again, so it is reported as a miss."""
+        layout = make_layout()
+        keys = [make_object_key(0)]
+        cxl_inner = L1Manager(make_l1_config())
+        adapter = make_adapter()
+        write_keys_to_l1(l1_manager, keys, layout)
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = make_dram_cxl_controller(l1_manager, cxl_inner, [adapter])
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            single_row_spec(keys, allowed_l1_memory_tags=frozenset({CXL_TAGS}))
+        )
+        result = wait_for_result(ctrl, req_id)
+
+        assert row_bits(result) == []
+        assert l1_manager.is_key_evictable(keys[0])
+        assert_l2_unlocked(adapter)
+        ctrl.stop()
+        adapter.close()
+        cxl_inner.close()
 
 
 # =============================================================================

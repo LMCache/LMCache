@@ -9,8 +9,8 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
+from lmcache.inprocess.v1.internal_api_server.api_server import app
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.internal_api_server.api_server import app
 
 
 def _get_test_scripts_static():
