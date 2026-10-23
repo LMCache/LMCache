@@ -109,7 +109,17 @@ type CacheBlendEngineSpec struct {
 	// +kubebuilder:validation:Enum=nvidia;amd
 	GPUVendor *string `json:"gpuVendor,omitempty"`
 
-	// image defines the container image to use for the blend_v3 engine. This
+	// runtimeClassName overrides the RuntimeClass for the engine pods. When unset,
+	// it is derived from gpuVendor: "nvidia" uses the NVIDIA GPU Operator's
+	// "nvidia" RuntimeClass, "amd" uses none (the default container runtime). An
+	// empty string omits runtimeClassName so pods use the default container
+	// runtime. On GPU Operator NRI/CDI clusters, combine an empty string with
+	// spec.podAnnotations nvidia.cdi.k8s.io/container.lmcache:
+	// management.nvidia.com/gpu=all.
+	// +optional
+	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
+
+	// image defines the container image to use for the blend engine. This
 	// may be a PRIVATE image; use imagePullSecrets to pull it.
 	// +optional
 	Image *ImageSpec `json:"image,omitempty"`
@@ -204,6 +214,22 @@ type CacheBlendEngineSpec struct {
 	// +optional
 	PriorityClassName string `json:"priorityClassName,omitempty"`
 
+	// hostIPC runs the pod in the host's IPC namespace. Cross-pod CUDA IPC does
+	// not require it on NVIDIA stacks: the operator instead mounts the host's
+	// /dev/shm into the engine pod (hostPath), which is the requirement —
+	// PyTorch's CUDA IPC handles reference a shared-memory ref-counter file in
+	// /dev/shm that both processes must open by name. It therefore defaults to
+	// false. Set it to true only where the hostPath /dev/shm mount is
+	// unavailable (e.g. blocked by an admission policy) or where the GPU stack
+	// still needs a shared IPC namespace; the AMD (ROCm) HIP IPC path is
+	// unverified without hostIPC, so gpuVendor "amd" deployments should set it
+	// to true. When true, the /dev/shm hostPath mount is omitted (the shared
+	// namespace already exposes the host's /dev/shm). The injection webhook
+	// mirrors this setting on opted-in vLLM pods. Default: false.
+	// +optional
+	// +kubebuilder:default=false
+	HostIPC *bool `json:"hostIPC,omitempty"`
+
 	// privileged runs the engine container in privileged mode. On some clusters
 	// this is required for the engine to see all node GPUs (for CUDA IPC) without
 	// claiming any via the nvidia.com/gpu device plugin; on many clusters
@@ -218,6 +244,14 @@ type CacheBlendEngineSpec struct {
 	// They are appended last and can override any auto-generated flag.
 	// +optional
 	ExtraArgs []string `json:"extraArgs,omitempty"`
+
+	// pd enables PD (Prefill-Decode) disaggregation. The prefiller config
+	// pairs the CacheBlend connector with NIXL in a MultiConnector; the
+	// decoder config is a bare NixlConnector (kv_consumer). The webhook
+	// selects the config by the lmcache.ai/pd-role pod annotation and
+	// injects the NIXL side-channel env vars.
+	// +optional
+	PD *PDSpec `json:"pd,omitempty"`
 }
 
 // CacheBlendEngineStatus defines the observed state of CacheBlendEngine.

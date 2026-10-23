@@ -25,7 +25,20 @@ HIPIFY_OUT_DIR = os.path.join(ROOT_DIR, "csrc_hip", "cuda")
 
 
 def _hipify_wrapper(source_names: list[str]) -> list[str]:
-    """Hipify ``csrc/cuda`` and return paths for requested source files."""
+    """Hipify ``csrc/cuda`` and return paths for the requested source files.
+
+    Args:
+        source_names: Base names of the CUDA sources to hipify, relative to
+            ``csrc/cuda`` (e.g. ``"ac_dec.cu"``).
+
+    Returns:
+        One path per entry in ``source_names``, in the same order, pointing at
+        the hipified file under ``csrc_hip/cuda``.  Paths are ``/``-separated
+        and relative to the project root (the ``setup.py`` directory).
+
+    Raises:
+        RuntimeError: If hipify did not yield a path for every requested source.
+    """
     # Third Party
     from torch.utils.hipify.hipify_python import hipify
 
@@ -46,6 +59,28 @@ def _hipify_wrapper(source_names: list[str]) -> list[str]:
         is_pytorch_extension=True,
         hipify_extra_files_only=True,
     )
+    # torch's bundled hipify map predates the batched-copy API (CUDA 12.8),
+    # so it leaves these tokens untranslated. ROCm 7.x (HIP 7.15) provides
+    # hipMemcpyBatchAsync with the identical signature, so patch the hipified
+    # output directly for the tokens torch's map does not cover.
+    extra_hip_map = {
+        "cudaMemcpyBatchAsync": "hipMemcpyBatchAsync",
+        "cudaMemcpyAttributes": "hipMemcpyAttributes",
+        "cudaMemcpySrcAccessOrderStream": "hipMemcpySrcAccessOrderStream",
+        "cudaStreamPerThread": "hipStreamPerThread",
+    }
+    for patch_root, _patch_dirs, patch_files in os.walk(HIPIFY_OUT_DIR):
+        for patch_name in patch_files:
+            patch_path = Path(patch_root) / patch_name
+            try:
+                original = patch_path.read_text()
+            except (UnicodeDecodeError, OSError):
+                continue
+            patched = original
+            for cuda_token, hip_token in extra_hip_map.items():
+                patched = patched.replace(cuda_token, hip_token)
+            if patched != original:
+                patch_path.write_text(patched)
     hipified_sources: list[str] = []
     for source_name in source_names:
         s_abs = os.path.abspath(os.path.join(HIPIFY_OUT_DIR, source_name))
@@ -57,7 +92,9 @@ def _hipify_wrapper(source_names: list[str]) -> list[str]:
             )
             else s_abs
         )
-        hipified_sources.append(hipified_s_abs)
+        hipified_sources.append(
+            os.path.relpath(hipified_s_abs, ROOT_DIR).replace(os.sep, "/")
+        )
 
     if len(hipified_sources) != len(source_names):
         raise RuntimeError(
@@ -91,6 +128,7 @@ class RocmProfile(BuildProfile):
                 "pybind.cpp",
                 "mem_kernels.cu",
                 "mp_mem_kernels.cu",
+                "phase_timing_recorder.cu",
                 "blend_kernels.cu",
                 "cal_cdf.cu",
                 "ac_enc.cu",
@@ -108,10 +146,7 @@ class RocmProfile(BuildProfile):
                 "lmcache.cuda_ops",
                 sources=hip_sources,
                 extra_compile_args={
-                    "cxx": [
-                        "-O3",
-                        "-std=c++17",
-                    ],
+                    "cxx": ["-O3"],
                 },
                 include_dirs=[
                     CSRC_DIR,

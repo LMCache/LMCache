@@ -10,20 +10,21 @@ handlers fetch it via :func:`get_outbound_client`.
 """
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import threading
 
 # Third Party
 from fastapi import Request
 import httpx
 
 # First Party
-from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
-    FleetEvictionController,
-)
-from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
+from lmcache.v1.mp_coordinator.controllers.base import Controller
+from lmcache.v1.mp_coordinator.discovery import Registry
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
-from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
-from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.ingest.event_source import CacheEventSource
+from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
+from lmcache.v1.mp_coordinator.views.base import View
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 
@@ -32,25 +33,78 @@ class CoordinatorContext:
     """Shared collaborators the coordinator's HTTP handlers operate on.
 
     Attributes:
-        registry: Fleet membership (``MPInstance`` by ``instance_id``).
-        eviction_controller: The fleet L2 eviction control loop. Owns the
-            quota registry (``.quota``), the usage view (``.usage``), and
-            the L2 pin set.
-        prefetch_manager: Warm-prefetch proxy to MP servers.
+        controllers: The coordinator's controllers, addressed by type --
+            ``controllers.get(FleetEvictionController)`` for the fleet L2
+            eviction loop (which owns the quota registry and the L2 pin
+            set, enforced against the ``l2`` half of the usage view), and
+            ``PrefetchManager`` for warm prefetch. Addressing by type only
+            works for a class the coordinator imports, so a controller
+            shipped out of tree registers its own routes instead (see
+            ``HttpRoutes``) rather than being resolved here.
         token_hasher: Resolves a pin request's ``token_ids`` to object keys
             (configured to match the fleet's ``chunk_size`` / ``hash_algorithm``).
-        key_directory: Fleet-wide key → placements directory built from
-            MP-server cache events (eventually consistent).
-        event_gate: Ingest entry point for the fleet cache-event stream
-            (``POST /events``).
+        views: The fleet's read models, addressed by type --
+            ``views.get(KeyDirectory)`` for key → placements,
+            ``CacheUsageManager`` for per-tier byte usage,
+            ``InstanceRegistry`` for fleet membership, and
+            ``ServerConfigRegistry`` for the declared capacities a usage
+            ratio divides by.
+        event_gate: Admission authority after a source delivers cache events.
+        event_source: The one source adapter delivering cache events to the
+            gate, per ``MPCoordinatorConfig.event_source_config``: the HTTP
+            push source behind ``POST /events``, or the Kafka pull source
+            (in which case ``POST /events`` answers 404).
+        metadata_persister: Durable store for operator intent. Every
+            handler that changes a pin or a quota must ``save`` so the
+            change survives a restart.
     """
 
-    registry: InstanceRegistry
-    eviction_controller: FleetEvictionController
-    prefetch_manager: PrefetchManager
+    controllers: Registry[Controller]
     token_hasher: TokenHasher
-    key_directory: KeyDirectory
+    views: Registry[View]
     event_gate: EventGate
+    event_source: CacheEventSource
+    metadata_persister: MetadataPersister
+    _configured_chunk_size: int = field(init=False, repr=False)
+    _hash_algorithm: str = field(init=False, repr=False)
+    _chunk_size_finalized: bool = field(default=False, init=False, repr=False)
+    _chunk_size_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        self._configured_chunk_size = self.token_hasher.chunk_size
+        self._hash_algorithm = self.token_hasher.hash_algorithm_name
+
+    def bind_chunk_size(self, chunk_size: int) -> int:
+        """Bind all chunk-size-dependent coordinator components once.
+
+        Repeating the same binding is idempotent. A different size is rejected
+        because one coordinator's hashing and blend index cannot safely describe
+        fleets using different chunk boundaries.
+        """
+        with self._chunk_size_lock:
+            if self._chunk_size_finalized:
+                if chunk_size == self.token_hasher.chunk_size:
+                    return chunk_size
+                raise ValueError(
+                    f"Coordinator is already bound to chunk size "
+                    f"{self.token_hasher.chunk_size}; use a separate coordinator "
+                    f"for a fleet requiring chunk size {chunk_size}"
+                )
+            if chunk_size < self._configured_chunk_size:
+                raise ValueError(
+                    f"Chunk size {chunk_size} is smaller than the coordinator's "
+                    f"configured minimum {self._configured_chunk_size}"
+                )
+
+            token_hasher = TokenHasher(
+                chunk_size=chunk_size, hash_algorithm=self._hash_algorithm
+            )
+            self.views.get(KeyDirectory).bind_chunk_size(chunk_size)
+            self.token_hasher = token_hasher
+            self._chunk_size_finalized = True
+            return chunk_size
 
 
 def get_context(request: Request) -> CoordinatorContext:

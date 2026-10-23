@@ -38,7 +38,13 @@ def _build(name: str):
         "NL_X_TWO_NB_BS_NH_HS": lambda: [_t(2, NB, BS, NH, HS) for _ in range(NL)],
         "NL_X_NB_TWO_BS_NH_HS": lambda: [_t(NB, 2, BS, NH, HS) for _ in range(NL)],
         "NL_X_TWO_NB_NH_BS_HS": lambda: [_t(2, NB, NH, BS, HS) for _ in range(NL)],
+        "NL_X_TWO_NB_NH_ONE_BS_HS": lambda: [
+            _t(2, NB, NH, 1, BS, HS) for _ in range(NL)
+        ],
         "NL_X_NB_TWO_NH_BS_HS": lambda: [_t(NB, 2, NH, BS, HS) for _ in range(NL)],
+        "NL_X_NB_TWO_NH_ONE_BS_HS": lambda: [
+            _t(NB, 2, NH, 1, BS, HS) for _ in range(NL)
+        ],
         "NL_X_NB_BS_HS": lambda: [_t(NB, BS, HS) for _ in range(NL)],
         "TWO_X_NL_X_NBBS_NH_HS": lambda: [
             [_t(PBS, NH, HS) for _ in range(NL)] for _ in range(2)
@@ -51,6 +57,7 @@ def _build(name: str):
         "NL_X_NB_BS_NH_TWO_HS": lambda: [_t(NB, BS, NH, 2, HS) for _ in range(NL)],
         "NL_X_NB_NH_BS_CS": lambda: [_t(NB, NH, BS, 2 * HS) for _ in range(NL)],
         "NL_X_NB_BS_NH_CS": lambda: [_t(NB, BS, NH, 2 * HS) for _ in range(NL)],
+        "NL_X_NB_BS_NH_HS": lambda: [_t(NB, BS, NH, HS) for _ in range(NL)],
     }
     return builders[name]()
 
@@ -124,6 +131,19 @@ GOLDEN = {
         elements_per_layer=NB * NH * BS * HS * 2,
         concrete="5 x [2, 7, 2, 3, 4]",
     ),
+    "NL_X_TWO_NB_NH_ONE_BS_HS": dict(
+        shape_desc="NL x [2, NB, NH, 1, BS, HS]",
+        num_layers=NL,
+        num_blocks=NB,
+        block_size=BS,
+        page_buffer_size=PBS,
+        num_heads=NH,
+        hidden_dim=NH * HS,
+        head_size=HS,
+        tokens_per_layer=PBS,
+        elements_per_layer=NB * NH * BS * HS * 2,
+        concrete="5 x [2, 7, 2, 1, 3, 4]",
+    ),
     "NL_X_NB_TWO_NH_BS_HS": dict(
         shape_desc="NL x [NB, 2, NH, BS, HS]",
         num_layers=NL,
@@ -136,6 +156,19 @@ GOLDEN = {
         tokens_per_layer=PBS,
         elements_per_layer=NB * NH * BS * HS * 2,
         concrete="5 x [7, 2, 2, 3, 4]",
+    ),
+    "NL_X_NB_TWO_NH_ONE_BS_HS": dict(
+        shape_desc="NL x [NB, 2, NH, 1, BS, HS]",
+        num_layers=NL,
+        num_blocks=NB,
+        block_size=BS,
+        page_buffer_size=PBS,
+        num_heads=NH,
+        hidden_dim=NH * HS,
+        head_size=HS,
+        tokens_per_layer=PBS,
+        elements_per_layer=NB * NH * BS * HS * 2,
+        concrete="5 x [7, 2, 2, 1, 3, 4]",
     ),
     "NL_X_NB_BS_HS": dict(
         shape_desc="NL x [NB, BS, HS]",
@@ -242,6 +275,19 @@ GOLDEN = {
         tokens_per_layer=PBS,
         elements_per_layer=NB * BS * NH * HS * 2,
         concrete="5 x [7, 3, 2, 8]",
+    ),
+    "NL_X_NB_BS_NH_HS": dict(
+        shape_desc="NL x [NB, BS, NH, HS]",
+        num_layers=NL,
+        num_blocks=NB,
+        block_size=BS,
+        page_buffer_size=PBS,
+        num_heads=NH,
+        hidden_dim=NH * HS,
+        head_size=HS,
+        tokens_per_layer=PBS,
+        elements_per_layer=NB * BS * NH * HS,
+        concrete="5 x [7, 3, 2, 4]",
     ),
 }
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """E2E test for LMCache CacheBlend on ROCm with Triton sparse attention.
 
-Based on examples/blend_kv_v1/blend.py but adapted for ROCm:
+Based on examples/blend_in_process/blend.py but adapted for ROCm:
 - Uses FlashAttention backend (not FlashInfer)
 - enable_sparse routes to LMCTritonSparseBackend automatically
 """
@@ -25,8 +25,8 @@ from vllm.config import KVTransferConfig  # noqa: E402
 from vllm.engine.arg_utils import EngineArgs  # noqa: E402
 
 # First Party
+from lmcache.inprocess.v1.cache_engine import LMCacheEngineBuilder  # noqa: E402
 from lmcache.integration.vllm.utils import ENGINE_NAME  # noqa: E402
-from lmcache.v1.cache_engine import LMCacheEngineBuilder  # noqa: E402
 
 
 def setup_env():

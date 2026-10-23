@@ -4,11 +4,11 @@
 # to CacheBlend dependency injection via the mutating webhook. The webhook
 # appends the CacheBlend vLLM flags (--kv-transfer-config <engine>,
 # --pipeline-parallel-size 1, --no-enable-chunked-prefill, --enforce-eager), the
-# cb-plugin init container + emptyDir + PYTHONPATH, hostIPC=true, and the
-# engine's payload imagePullSecrets.
+# cb-plugin init container + emptyDir + PYTHONPATH, the /dev/shm hostPath mount,
+# and the engine's payload imagePullSecrets.
 #
 # Placeholders substituted by the spec (substituteVLLMPlaceholders):
-#   __NAMESPACE__    — engine namespace (PSS-privileged; webhook injects hostIPC)
+#   __NAMESPACE__    — engine namespace (PSS-privileged; webhook injects a hostPath volume)
 #   __ENGINE_NAME__  — CacheBlendEngine metadata.name (bound via annotation)
 #   __MODEL__        — Hugging Face model id
 #   __VLLM_IMAGE__   — container image (default lmcache/vllm-openai:latest)
@@ -45,8 +45,8 @@ spec:
       runtimeClassName: nvidia
       nodeSelector:
         nvidia.com/gpu.present: "true"
-      # NOTE: do NOT set hostIPC here or mount an emptyDir at /dev/shm — the
-      # webhook injects hostIPC=true (shared host /dev/shm for CUDA IPC); an
+      # NOTE: do NOT mount an emptyDir at /dev/shm — the webhook injects a
+      # hostPath mount of the host's /dev/shm (for CUDA IPC); an
       # emptyDir would shadow it and break cudaIpcOpenMemHandle.
       containers:
         - name: vllm

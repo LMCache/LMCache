@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for experimental-feature gating and dispatch.
 Both connector-side dispatcher (feature construction, hook fan-out,
-re-registration failure handling) and the server-side --enable gating.
+re-registration failure handling) and the gating on the server's advertised
+experimental features.
 """
 
 # Standard
@@ -18,7 +19,7 @@ from lmcache.integration.vllm.experimental.dispatcher import (
     dispatch,
     init_dispatcher,
 )
-from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
+from lmcache.v1.multiprocess.custom_types import TRANSFER_QUERY
 
 MODEL = "org/model"
 HOOKS = tuple(
@@ -34,9 +35,7 @@ def _feature_context(advertised: set[str] | None = None) -> FeatureContext:
     adapter = MagicMock(name="worker_adapter")
     adapter.model_name = MODEL
     adapter.experimental = {TRANSFER_QUERY} if advertised is None else advertised
-    return FeatureContext(
-        worker_adapter=adapter, send_lmcache_request=MagicMock(name="send")
-    )
+    return FeatureContext(worker_adapter=adapter)
 
 
 def test_query_cache_uses_the_suffixed_model_name() -> None:

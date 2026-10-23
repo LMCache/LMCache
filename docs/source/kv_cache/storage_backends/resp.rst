@@ -272,8 +272,9 @@ under ``extra_config`` (see `Environment Variable Configuration`_ above).
 MP Mode (Multiprocess)
 -----------------------
 
-In MP mode, LMCache runs as a separate server process communicating with vLLM over
-ZMQ. The RESP connector serves as an L2 adapter with variable-size chunk support.
+In MP mode, LMCache runs as a separate server process communicating with vLLM
+over the configured ZMQ or gRPC request transport. The RESP connector serves as
+an L2 adapter with variable-size chunk support.
 
 **Step 1: Start Redis** (see `Redis Server Setup`_ above)
 
@@ -305,6 +306,10 @@ ZMQ. The RESP connector serves as an L2 adapter with variable-size chunk support
         --no-enable-prefix-caching \
         --port $PORT \
         --load-format dummy
+
+The example uses the default ZMQ transport. For gRPC, add ``--transport grpc``
+to ``lmcache server`` and change ``lmcache.mp.host`` to
+``grpc://localhost``.
 
 
 L2 Adapter Configuration
@@ -444,7 +449,7 @@ Best Practices
 
 - Use localhost or loopback for single-machine deployments
 - For cross-machine setups, ensure low-latency networking (ideally <100 us RTT)
-- The RESP connector uses TCP; RDMA is not currently supported (consider :doc:`Mooncake <./mooncake>` for RDMA)
+- The RESP connector uses TCP; RDMA is not currently supported (consider :doc:`Mooncake </legacy/kv_cache/storage_backends/mooncake>` for RDMA)
 
 
 Additional Resources

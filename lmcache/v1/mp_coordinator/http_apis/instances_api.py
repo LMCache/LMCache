@@ -13,17 +13,23 @@ import time
 import uuid
 
 # Third Party
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
-from lmcache.v1.mp_coordinator.registry import MPInstance
 from lmcache.v1.mp_coordinator.schemas import (
     HeartbeatResponse,
     RegisterRequest,
     RegisterResponse,
+)
+from lmcache.v1.mp_coordinator.views.instance_registry import (
+    InstanceRegistry,
+    MPInstance,
+)
+from lmcache.v1.mp_coordinator.views.server_config import (
+    ServerConfigRegistry,
 )
 
 logger = init_logger(__name__)
@@ -45,11 +51,19 @@ async def register_instance(
         A :class:`RegisterResponse` carrying the (possibly generated) id.
     """
     instance_id = body.instance_id or f"mp-{uuid.uuid4().hex}"
+    ctx = get_context(request)
+    if body.chunk_size is not None:
+        try:
+            ctx.bind_chunk_size(body.chunk_size)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # Capacity is not taken here: it arrives as a report on the cache-event
+    # stream, fenced by (incarnation, revision).
     # Wall-clock registration_time for display; monotonic last_heartbeat_time for
     # NTP-safe stale detection (see registry.stale). register() does the
     # exists-check and write under one lock, so the re_registered flag is correct
     # even under concurrent registrations of the same id.
-    re_registered = get_context(request).registry.register(
+    re_registered = ctx.views.get(InstanceRegistry).register(
         MPInstance(
             instance_id=instance_id,
             ip=body.ip,
@@ -61,6 +75,7 @@ async def register_instance(
             mq_port=body.mq_port,
         )
     )
+    ctx.event_gate.readmit_instance(instance_id)
     logger.info("Registered instance %s at %s:%s", instance_id, body.ip, body.http_port)
     return RegisterResponse(instance_id=instance_id, re_registered=re_registered)
 
@@ -74,7 +89,11 @@ async def heartbeat(instance_id: str, request: Request) -> Any:
         instance is unknown (the caller should re-register via ``POST
         /instances``).
     """
-    if get_context(request).registry.update_heartbeat(instance_id, time.monotonic()):
+    if (
+        get_context(request)
+        .views.get(InstanceRegistry)
+        .update_heartbeat(instance_id, time.monotonic())
+    ):
         return HeartbeatResponse(instance_id=instance_id)
     return JSONResponse(
         status_code=404,
@@ -91,10 +110,19 @@ async def deregister_instance(instance_id: str, request: Request) -> Response:
     Returns:
         An empty 204 response.
     """
-    if get_context(request).registry.deregister(instance_id) is not None:
+    ctx = get_context(request)
+    if ctx.views.get(InstanceRegistry).deregister(instance_id) is not None:
         logger.info("Deregistered instance %s", instance_id)
     else:
         logger.info("Instance %s not registered, skipping deregistration", instance_id)
+    # A departing process takes its L1 pool with it, so its reported L1
+    # bytes are void. Only the stale-eviction loop fenced them before, and
+    # it never sees an instance that left cleanly -- deregistration already
+    # removed it from the registry, so its bytes lingered for good.
+    ctx.event_gate.drop_instance(instance_id)
+    # Dropped with the membership, or declarations grow without bound
+    # across a churning fleet. Surviving L2 bytes lose their ratio.
+    ctx.views.get(ServerConfigRegistry).forget(instance_id)
     return Response(status_code=204)
 
 
@@ -115,6 +143,6 @@ async def list_instances(request: Request) -> Any:
             "p2p_advertised_url": instance.p2p_advertised_url,
             "mq_port": instance.mq_port,
         }
-        for instance in get_context(request).registry.all_instances()
+        for instance in get_context(request).views.get(InstanceRegistry).all_instances()
     ]
     return {"instances": instances}

@@ -22,7 +22,9 @@ class TRTLLM_Detector(EngineDetector):
     engine_type = EngineType.TRTLLM
 
     def discover(
-        self, kv_caches: DiscoverableKVCache, layout_hints: LayoutHints
+        self,
+        kv_caches: DiscoverableKVCache,
+        layout_hints: LayoutHints,
     ) -> "tuple[Optional[lmcache_native.EngineKVFormat], DiscoverableKVCache]":
         # TRT-LLM hands a 4-D pool tensor (maybe wrapped in a 1-element list);
         # reshape its fused trailing dim into the canonical 6-D cross-layer form

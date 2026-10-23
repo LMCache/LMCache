@@ -47,7 +47,7 @@ def _public_callables(module):
         and callable(obj)
         and not inspect.isclass(obj)  # classes tested by descriptor/enum tests
         and not hasattr(obj, "__members__")  # exclude pybind11 enums
-        and getattr(obj, "__module__", None) == getattr(module, "__name__", None)
+        and getattr(obj, "__module__", "").startswith(module.__name__)
     }
 
 
@@ -216,18 +216,21 @@ def _has_real_names(params):
 _EXCLUDED_FUNCS: set[str] = {
     "execute_object_group_transfer",
     "execute_cb_retrieve_plan_flat",
+    "pop_completed_phase_timings",
+    "execute_direct_copy_transfer",
+    "batch_memcpy_supported",
+    "direct_copy_format_supported",
 }
 
-# Plan types (StagingCopy, LaunchVar, BatchStep, KernelGroupSpec)
-# are native-only with no torch fallback — auto-discovered by bind_native.
-# NOTE: these previously had signature-only stubs (raised NotImplementedError
-# unconditionally) — not real fallbacks.
+# CUDA-only plan descriptors intentionally remain native-only. Descriptor
+# parity here only concerns portable/shared types with a torch-side surface.
 _EXCLUDED_DESCS: set[str] = {
     "StagingCopy",
     "LaunchVar",
     "BatchStep",
-    "KernelGroupSpec",
     "CBGroupSpec",
+    "DirectCopyGroupSpec",
+    "DirectCopyObject",
 }
 
 _fallback_callables = _public_callables(fallback)

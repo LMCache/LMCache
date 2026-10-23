@@ -2,64 +2,15 @@
 
 #pragma once
 
-#include "mem_kernels.cuh"  // TransferDirection, EngineKVFormat
-
 #include <c10/cuda/CUDAGuard.h>
 #include <cstdint>
+#include <string>
+#include <tuple>
 #include <vector>
 
-struct PageBufferShapeDesc {
-  int kv_size;       // 1 or 2
-  int nl;            // num layers
-  int nb;            // num blocks
-  int bs;            // block size
-  int nh;            // num heads
-  int hs;            // head size
-  int element_size;  // bytes (1 or 2)
-  // Physical per-block stride in source-dtype element units, used by
-  // formats whose dim-0 is the block axis to step over padding bytes
-  // (e.g. DeepSeek V4 compressor / indexer caches sharing a vLLM KV
-  // pool with larger attn groups, whose rows are padded up to the
-  // pool's max row width). 0 means "unset — fall back to the
-  // format-specific tight stride".
-  //
-  // CONTRACT: pass ``tensor.stride(0)`` verbatim. PyTorch stride
-  // semantics already absorb every inner-dim extent (including
-  // ``kv_size``), so DO NOT pre-multiply by any inner dim.
-  //
-  // Honoured today only by NL_X_NB_BS_HS (per-layer [NB, BS, HS],
-  // MLA). NL_X_NB_TWO_BS_NH_HS is restricted to the tight form
-  // upstream and leaves this field at 0; all other formats either
-  // pack non-block info into dim-0 or do not support dim-0 padding,
-  // and ignore this field.
-  int block_stride_elems;
-
-  template <typename ScalarType>
-  __host__ __device__ inline size_t scalars_per_head() const {
-    return hs * element_size / sizeof(ScalarType);
-  }
-
-  template <typename ScalarType>
-  __host__ __device__ inline size_t scalars_per_token() const {
-    return nh * hs * element_size / sizeof(ScalarType);
-  }
-
-  // Per (K or V) block step along dim-0, expressed in ``ScalarType``
-  // element units (the kernel's working dtype, e.g. uint4 / uint32_t /
-  // uint16_t). Returns the tight ``bs * nh * hs`` by default, or the
-  // physical ``block_stride_elems`` when dim-0 carries padding (today
-  // only NL_X_NB_BS_HS, see ``block_stride_elems`` above). Every
-  // ``calculate_engine_global_offset`` branch uses this as the dim-0
-  // step, so honouring padding here propagates to all formats without
-  // per-branch changes.
-  template <typename ScalarType>
-  __host__ __device__ inline size_t scalars_per_block() const {
-    const size_t elems = block_stride_elems > 0
-                             ? static_cast<size_t>(block_stride_elems)
-                             : static_cast<size_t>(bs) * nh * hs;
-    return elems * element_size / sizeof(ScalarType);
-  }
-};
+#include "kv_transfer_plan_types.h"
+#include "mem_kernels.cuh"
+#include "transfer_plan_types.cuh"
 
 template <typename ScalarType>
 struct MemoryObj4 {
@@ -77,44 +28,6 @@ struct MemoryObj4 {
 // docs/design/v1/multiprocess/modules/ and lmcache_driven_transfer.py.
 // ---------------------------------------------------------------------------
 
-// One asynchronous host<->device copy. `host_offset` is the host-side virtual
-// offset in the lmcache allocator (source for H2D, destination for D2H).
-struct StagingCopy {
-  uintptr_t dest;
-  uintptr_t src;
-  size_t nbytes;
-  size_t host_offset;
-};
-
-// One kernel launch within a batch step. The batch-invariant arguments live in
-// the referenced KernelGroupSpec; only these vary per (batch, kernel group).
-struct LaunchVar {
-  int group_idx;             // index into the plan's kernel_group_specs
-  int64_t block_ids_offset;  // element offset into the group's block_ids_base
-  int total_blocks;          // number of block ids for this launch
-  int num_objects;           // chunks in this batch (1-4)
-  int skip_prefix_n_blocks;
-};
-
-// One batch: its staging copies and kernel launches. For H2D the staging runs
-// before the launches, for D2H after; the executor preserves this ordering.
-struct BatchStep {
-  std::vector<StagingCopy> staging;
-  std::vector<LaunchVar> launches;
-};
-
-// Per-kernel-group invariants, resolved once on the Python side.
-struct KernelGroupSpec {
-  uintptr_t paged_buffer_ptrs;                // device ptr-array base address
-  std::vector<int64_t> lmcache_objects_ptrs;  // temp GPU buffer ptr per slot
-  PageBufferShapeDesc shape_desc;
-  int lmcache_chunk_size;
-  EngineKVFormat engine_kv_format;
-  uintptr_t block_ids_base;  // device int64* base; sliced via block_ids_offset
-  int64_t block_ids_capacity;  // total int64 elements behind block_ids_base;
-                               // bounds-checks each slice in the executor
-};
-
 /**
  * Execute one object group's transfer plan on the current CUDA stream.
  *
@@ -129,12 +42,82 @@ struct KernelGroupSpec {
  *                              (power of two)
  * @param kernel_group_specs   Per-kernel-group invariants
  * @param batch_steps          Ordered per-batch staging + launch work
+ * @param phase_timing_enabled Record gather/DMA CUDA event pairs for
+ *                             pop_completed_phase_timings(); the caller passes
+ *                             true only when observability consumes the samples
+ * @param session_id           Request the transfer serves; carried on every
+ *                             sample so tracing can attach it to the request
  */
 void execute_object_group_transfer(
     TransferDirection direction, const torch::Device& device,
     size_t host_buffer_alignment,
     const std::vector<KernelGroupSpec>& kernel_group_specs,
-    const std::vector<BatchStep>& batch_steps);
+    const std::vector<BatchStep>& batch_steps,
+    bool phase_timing_enabled = false, const std::string& session_id = "");
+
+// ---------------------------------------------------------------------------
+// Direct copy-engine transfer (cudaMemcpyBatchAsync).
+//
+// Alternative to the staged plan above for layouts whose paged block is one
+// contiguous run identical to LMCache's [bs, nh*hs] rows: each (kv, block)
+// of an object is copied straight between the pinned host object and the
+// paged buffer -- as one 2-D copy over all layers when the layers sit at a
+// constant pitch, else one entry per layer -- so no staging buffer and no SM
+// kernel are involved. At most one cudaMemcpyBatchAsync and one
+// cudaMemcpy3DBatchAsync are issued per object, in stream order. Requires
+// CUDA runtime and driver >= 12.8, or HIP >= 7.15 (1-D entries only).
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether cudaMemcpyBatchAsync can be used in this process.
+ *
+ * True when the extension was compiled against CUDA >= 12.8 and both the
+ * runtime and the driver report >= 12.8. Cached after the first call.
+ */
+bool batch_memcpy_supported();
+
+/**
+ * Whether the direct copy path can address blocks of `engine_kv_format`.
+ *
+ * True for token-major formats whose paged block is one contiguous
+ * [bs, nh, hs] run (the affine formats of resolve_block_addressing). HND,
+ * blocked-scale and per-layer (K, V)-tuple layouts return false.
+ */
+bool direct_copy_format_supported(EngineKVFormat engine_kv_format);
+
+/**
+ * Execute one object group's transfer through the copy engine.
+ *
+ * For each object and group, every (kv plane, block >= skip) is copied for
+ * all layers at once. When the group's layer base pointers are evenly spaced
+ * (e.g. vLLM's block-outermost layouts, which pack a block's layers side by
+ * side), that is one 2-D copy per (kv plane, block): width = tight block
+ * bytes, height = layers, device pitch = layer spacing, host pitch = one
+ * layer's region of the object. Otherwise each (kv plane, layer, block) is a
+ * 1-D (host, device, tight block bytes) entry. Copies are split at
+ * `host_buffer_alignment` boundaries of the allocator's virtual offset (a
+ * copy may not span two cudaHostRegister regions). Per object, 1-D entries
+ * go to one cudaMemcpyBatchAsync and 2-D copies to one
+ * cudaMemcpy3DBatchAsync, both on the current stream of `device`.
+ *
+ * @param direction             H2D (retrieve) or D2H (store)
+ * @param device                CUDA device of the paged buffers
+ * @param host_buffer_alignment Pin-chunk granularity of the host allocator
+ *                              (power of two)
+ * @param group_specs           Per-kernel-group invariants
+ * @param objects               Memory objects to copy, in stream order
+ *
+ * @return Number of copy operations submitted (1-D entries plus 2-D copies,
+ *         after pin-boundary splits).
+ * @throws c10::Error if batch_memcpy_supported() is false, a format is not
+ *         eligible, a block id or host range is out of bounds, or the CUDA
+ *         call fails.
+ */
+size_t execute_direct_copy_transfer(
+    TransferDirection direction, const torch::Device& device,
+    size_t host_buffer_alignment,
+    const std::vector<DirectCopyGroupSpec>& group_specs,
+    const std::vector<DirectCopyObject>& objects);
 
 /**
  * Block-level multi-layer KV transfer between vLLM paged buffers and

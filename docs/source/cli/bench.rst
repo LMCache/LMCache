@@ -35,7 +35,10 @@ engine
 The ``lmcache bench engine`` command runs sustained performance benchmarks
 against an inference engine (e.g., vLLM). It supports multiple workload types
 that exercise different caching patterns and reports TTFT, decoding speed, and
-throughput metrics.
+throughput metrics. TTFT starts at the first non-empty content or reasoning
+text, including streams with an empty ``content`` field. One workload,
+:ref:`rag-qa-quality <bench-rag-qa-quality>`, measures answer *correctness*
+instead of speed.
 
 .. code-block:: bash
 
@@ -146,8 +149,8 @@ General Options
    * - ``--workload TYPE``
      - Yes
      - Workload type: ``long-doc-qa``, ``multi-round-chat``,
-       ``long-doc-permutator``, ``prefix-suffix-tuner``, or
-       ``random-prefill``.
+       ``long-doc-permutator``, ``kv-tier-pressure``,
+       ``prefix-suffix-tuner``, ``rag-qa-quality``, or ``random-prefill``.
    * - ``--tokens-per-gb-kvcache N``
      - \*
      - Tokens per GB of KV cache. Required unless ``--lmcache-url`` is set.
@@ -177,6 +180,10 @@ General Options
    * - ``-q`` / ``--quiet``
      - No
      - Suppress the real-time progress display.
+   * - ``--no-warmup``
+     - No
+     - Skip the warmup phase and start measuring immediately.
+       See :ref:`bench-warmup`.
 
 
 .. _bench-tokens-per-gb:
@@ -198,6 +205,54 @@ startup log:
 Then compute::
 
    tokens_per_gb = 567890 / 12.34 = 46,020
+
+
+.. _bench-warmup:
+
+Warmup Phase
+~~~~~~~~~~~~
+
+Most workloads run a warmup phase before the measured run. What it sends is
+workload-specific -- ``long-doc-qa`` prefills each document, ``rag-qa-quality``
+prefills each document behind the system block, ``prefix-suffix-tuner`` sends a
+full pass over its prefix pool, ``multi-round-chat`` primes each session, and
+``long-doc-permutator`` sends a single dummy request, and ``kv-tier-pressure``
+sweeps its whole document pool once. ``random-prefill`` has no warmup at all.
+Warmup requests are sent with ``max_tokens=1`` and their stats are discarded,
+so they never appear in the reported numbers.
+
+Warmup serves two purposes: it absorbs the engine's one-time first-request cost
+(``torch.compile``, CUDA-graph capture, weight paging), and -- for the workloads
+that prefill their data -- it puts the KV cache in the state the measured run is
+designed to exercise.
+
+``--no-warmup`` skips the phase entirely and starts measuring immediately:
+
+.. code-block:: bash
+
+   lmcache bench engine \
+       --engine-url http://localhost:8000 \
+       --workload long-doc-qa \
+       --lmcache-url http://localhost:8080 \
+       --no-warmup
+
+Use it to measure a cold start -- what the first requests against a fresh
+engine and an empty cache actually cost -- or to shorten a smoke test where the
+absolute numbers do not matter.
+
+.. warning::
+
+   Do not compare a ``--no-warmup`` run against a warmed run: the numbers
+   measure different things. Without warmup, the first requests pay the
+   engine's first-request cost and read from a cold cache, which inflates TTFT
+   and depresses cache hit rate.
+
+   For workloads whose warmup populates the data they then measure reuse of
+   (``long-doc-qa``, ``rag-qa-quality``, ``prefix-suffix-tuner``,
+   ``multi-round-chat``), skipping it removes the reuse the workload was built
+   to measure. ``prefix-suffix-tuner`` in particular reports pass-2 results
+   against a cache that pass 1 was supposed to fill, so its output is not
+   meaningful with ``--no-warmup``.
 
 
 Workloads
@@ -325,6 +380,11 @@ dispatched with semaphore-controlled concurrency.
    * - ``--ldp-num-inflight-requests``
      - 1
      - Maximum concurrent in-flight requests.
+   * - ``--ldp-max-output-length``
+     - 128
+     - Maximum tokens to generate per permutation request. Use ``1`` to
+       measure prefill alone; combine larger values with ``--ignore-eos``
+       for a reproducible decode phase.
 
 **Example:**
 
@@ -338,6 +398,134 @@ dispatched with semaphore-controlled concurrency.
        --ldp-context-length 8000 \
        --ldp-num-permutations 24 \
        --ldp-num-inflight-requests 2
+
+
+kv-tier-pressure
+^^^^^^^^^^^^^^^^
+
+Exercises the **L2 storage tier**. Where ``long-doc-permutator`` puts every
+document in every request -- so the distinct working set equals one prompt and
+can never overflow L1 -- this workload keeps a document *pool* larger than the
+cache and samples a subset into each request:
+
+.. code-block:: text
+
+   [System Prompt] + [Doc_a] + [Doc_b] + ... + [Doc_k]   (k of D, k << D)
+
+.. important::
+
+   This workload assumes **CacheBlend** (``enable_blending``). Each request
+   concatenates a random subset of the pool in random order, so without
+   blending a document is reused only when everything before it in the prompt
+   also matches — which these prompts almost never satisfy. Such a run writes
+   a great deal to storage and reads very little back, while the *share* of
+   reads served by storage still looks healthy.
+
+   Watch **cache-hit tokens per request**, reported whenever ``--lmcache-url``
+   is given, rather than the storage read share — the share is a ratio between
+   tiers and cannot tell the two cases apart.
+
+   Without blending, use ``--ktp-docs-per-request 1``. Each prompt is then
+   ``[system prompt][document]``, which is prefix-stable and reuses normally.
+   When ``--lmcache-url`` is given the workload verifies this for you. After
+   the warm-up sweep it checks which lookup counter family moved: the blend
+   counters move only when the server runs the blend module *and* vLLM drives
+   it through ``CBKVConnector``. If a multi-document run was not blended it
+   stops there, rather than producing a result that looks reasonable and
+   means nothing.
+
+``--ktp-pool-size`` is what decides whether the storage tier is reached: the
+working set is ``pool_size x --ktp-context-length`` tokens, and only what
+exceeds cache capacity can be evicted and read back. Omit it and the pool is
+sized automatically from the capacity the LMCache server reports via
+``--lmcache-url``, multiplied by ``--ktp-overflow-factor``. To size it by hand
+against a cache of ``V`` GB with a factor of ``F``:
+
+.. code-block:: text
+
+   pool_size = ceil(F * V * tokens_per_gb_kvcache / context_length)
+
+``tokens_per_gb_kvcache`` comes from the engine's KV layout and is resolved
+automatically from ``--lmcache-url`` (see :ref:`bench-tokens-per-gb`). An
+``F`` of 2 means half the working set cannot be resident, so roughly half of
+all cache reads must come from L2.
+
+Treat that only as a dial. The idealised share ``1 - 1 / F`` assumes pure LRU
+over uniformly-drawn whole documents and ignores prefetch re-admission and
+chunk-level sharing: 45% was measured at ``F = 1`` on one stack and 36% at
+``F = 2`` on another. Size the pool with it, then read the share that actually
+occurred from the cache's tier counters.
+
+Warmup is a deterministic sweep: the pool is partitioned into
+``ceil(pool_size / docs_per_request)`` non-overlapping groups and each is sent
+once, so every document is cached exactly once before measurement. This matters
+because until L1 fills there is no eviction and therefore no L2 read -- a share
+measured across a cold start describes run length, not the system.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 10 55
+
+   * - Flag
+     - Default
+     - Description
+   * - ``--ktp-pool-size``
+     - derived
+     - Total documents in the corpus. Sets the working set, and therefore
+       whether the storage tier is reached. Derived from the server's cache
+       capacity and ``--ktp-overflow-factor`` when omitted.
+   * - ``--ktp-overflow-factor``
+     - 2.0
+     - Working set as a multiple of the server's cache capacity. Used only
+       when ``--ktp-pool-size`` is omitted. Above 1.0 forces eviction to
+       storage.
+   * - ``--ktp-docs-per-request``
+     - 16
+     - Documents sampled into each request. Bounded by the engine's context
+       limit, not by the pool size.
+   * - ``--ktp-context-length``
+     - 2560
+     - Token length of each document (10 whole 256-token chunks).
+   * - ``--ktp-system-prompt-length``
+     - 256
+     - Token length of the shared system prompt. Use ``0`` for none.
+   * - ``--ktp-num-requests``
+     - 200
+     - Number of measured requests. The warmup sweep is separate and sized
+       automatically from the pool.
+   * - ``--ktp-access-skew``
+     - 0.0
+     - Zipf exponent for document popularity. ``0.0`` is uniform; larger
+       values concentrate reads on a hot subset, raising the L1 hit rate and
+       lowering the L2 share.
+   * - ``--ktp-num-inflight-requests``
+     - 8
+     - Maximum concurrent in-flight requests.
+   * - ``--ktp-max-output-length``
+     - 1
+     - Maximum tokens to generate per request. The default isolates prefill,
+       the phase the cache tier affects; larger values add decode time that
+       dilutes the measurement.
+
+The run reports a **Document pool** section alongside the standard metrics,
+giving the resolved pool size, working set, access skew and sweep size. These are inputs: the share of reads actually served by L2 comes
+from the cache's own tier counters, not from this workload.
+
+**Example** -- target ~50% of cache reads from L2 against a 100 GB L1:
+
+.. code-block:: bash
+
+   lmcache bench engine \
+       --engine-url http://localhost:8000 \
+       --workload kv-tier-pressure \
+       --lmcache-url http://localhost:8080 \
+       --ktp-pool-size 910 \
+       --ktp-docs-per-request 16 \
+       --ktp-context-length 2560 \
+       --ktp-num-requests 200
+
+Raise ``--ktp-pool-size`` for a larger share of reads from storage, and keep
+it pinned when reproducing an earlier run so the corpus is identical.
 
 
 prefix-suffix-tuner
@@ -447,6 +635,116 @@ by ``--psf-thrash``.
    any eviction fires.
 
 
+.. _bench-rag-qa-quality:
+
+rag-qa-quality
+^^^^^^^^^^^^^^
+
+Measures **answer quality** rather than speed: every other workload reports an
+unchanged number if the cache returns subtly wrong KV. Answers are scored
+against gold answers from a real QA dataset.
+
+Each document is prefilled on its own during warmup; the measured request then
+composes them::
+
+   [system prompt][doc_a][doc_b]...[doc_n][question]
+
+so every document is reused at a position it was never cached at -- the RAG
+serving pattern, with no artificial perturbation.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 10 55
+
+   * - Flag
+     - Default
+     - Description
+   * - ``--rag-dataset``
+     - *required*
+     - A known dataset name (``musique``, ``hotpotqa``) or a path to a local
+       ``.json``, ``.jsonl``, or ``.parquet`` QA file.
+   * - ``--rag-num-samples``
+     - 50
+     - Questions to measure, taken in dataset order.
+   * - ``--rag-max-output-length``
+     - 1024
+     - Token budget per answer. Must fit a reasoning model's thinking block
+       as well as the answer tags.
+   * - ``--rag-template-kwargs``
+     - *(unset)*
+     - Chat-template variables as ``KEY=VALUE``, repeatable. Unset, the
+       model's own template default applies.
+   * - ``--rag-output``
+     - ``<output-dir>/rag_qa_quality.json``
+     - Per-sample results file.
+
+``--kv-cache-volume`` is unused, but ``--tokens-per-gb-kvcache`` (or
+``--lmcache-url``) is still required. A tokenizer is required too, for chunk
+alignment: pass ``--model``, or let it auto-detect from ``/v1/models``.
+
+**Datasets** are not vendored. Named ones download from the HuggingFace Hub on
+first use and cache under ``HF_HOME``; any other value is a local path.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 15 30 55
+
+   * - Name
+     - Source
+     - Notes
+   * - ``musique``
+     - ``dgslibisey/MuSiQue``
+     - JSONL, 20 passages per question, ~2.1k tokens.
+   * - ``hotpotqa``
+     - ``hotpotqa/hotpot_qa``
+     - Parquet (distractor/validation); requires ``pyarrow``.
+
+Local files load unchanged if their records carry passages, a question, and
+gold answers -- ``ctxs[].{title,text}``, ``paragraphs[].paragraph_text``,
+``context``, or the RAGAS hand-off fields ``retrieved_contexts``,
+``user_input`` and ``reference``. Records missing any of the three are
+skipped.
+
+**Comparing two stacks.** The workload reports one arm; run it twice and diff
+the files by ``sample_id``:
+
+.. code-block:: bash
+
+   ARGS="--workload rag-qa-quality --tokens-per-gb-kvcache 6000 \
+         --rag-dataset musique --rag-num-samples 20"
+
+   lmcache bench engine --engine-url http://localhost:8000 $ARGS --rag-output a.json
+   lmcache bench engine --engine-url http://localhost:8001 $ARGS --rag-output b.json
+
+The files are comparable **only when their ``run_fingerprint`` values match**.
+It covers the selected samples' ids, rendered prompts and gold answers,
+along with the dataset path, budget, template kwargs, model, seed and chunk
+alignment. Editing a selected question, document or reference at the same
+dataset path changes the fingerprint; output paths and unmeasured records
+do not. Fingerprints from older versions that covered only sample ids are
+not comparable with these content-based fingerprints.
+
+.. note::
+
+   Start each run from a clean cache -- restart the server, or
+   ``lmcache kvcache clear --url <mp-url>`` -- or the second run hits the
+   first run's cached composites instead of measuring per-document reuse.
+
+.. note::
+
+   No cache-hit metrics are reported; quality is measured from the responses
+   alone. To tell "quality unchanged" apart from "LMCache never engaged",
+   check the engine's own counters around a run::
+
+      curl -s http://localhost:8080/metrics | grep lookup_.*_tokens_total
+
+**Reasoning models.** ``--rag-template-kwargs`` has no default: disabling
+thinking can lower multi-hop QA quality, and the right setting is
+model-specific (``enable_thinking=true``, ``reasoning_effort=high``). Too
+small a budget cuts generation off before the closing tag, so the sample
+does not parse and drops out of the score -- watch ``Parse rate``.
+
+
 random-prefill
 ^^^^^^^^^^^^^^
 
@@ -518,6 +816,7 @@ text and number prompts accept typed input with defaults shown in brackets.
        multi-round-chat       Multi-turn chat with stateful sessions
        long-doc-permutator    Permutations of context documents
        prefix-suffix-tuner    Two-pass tiered KV-cache demonstrator
+       rag-qa-quality         Answer quality (F1) on real QA data
        random-prefill         Prefill-only requests fired simultaneously
 
    LMCache Server
@@ -629,6 +928,41 @@ After completion, a summary table is printed:
    P99 decode (tok/s):               38.55
    ======================================================
 
+A workload may append sections of its own after the shared ones.
+``rag-qa-quality`` adds **Answer Quality**:
+
+.. code-block:: text
+
+   -------------------- Answer Quality --------------------
+   Samples measured:                                     20
+   Samples scored:                                       20
+   Parse rate:                                         1.00
+   Mean F1 (scored only):                              0.31
+   Run fingerprint:                        61709aae928fdba8
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Field
+     - Meaning
+   * - ``Samples measured``
+     - Questions sent.
+   * - ``Samples scored``
+     - Of those, how many produced a complete ``<final_answer>`` region.
+   * - ``Parse rate``
+     - ``scored / measured``. A low value means the output budget is too
+       small or the model is ignoring the answer tags -- fix that before
+       reading the F1.
+   * - ``Mean F1 (scored only)``
+     - SQuAD-normalized token-overlap F1, best over the gold answers,
+       averaged over **scored samples only**. Always read it together with
+       the parse rate: a high F1 over a third of the samples is a different
+       result from the same F1 over all of them.
+   * - ``Run fingerprint``
+     - Digest of everything determining the prompts. Two runs are comparable
+       only when these match.
+
 CSV and JSON
 ^^^^^^^^^^^^
 
@@ -638,6 +972,32 @@ CSV and JSON
   metadata. Opt-in with ``--json``.
 
 Both files are written to ``--output-dir`` (default: current directory).
+
+Per-sample quality results
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``rag-qa-quality`` additionally writes its own file to ``--rag-output``:
+
+.. code-block:: json
+
+   {
+     "run_fingerprint": "61709aae928fdba8",
+     "model": "meta-llama/Llama-3.1-8B-Instruct",
+     "config": {"dataset": "musique", "num_samples": 20, "max_output_length": 256,
+                "template_kwargs": {}, "output_path": "a.json"},
+     "summary": {"num_samples": 20, "num_parsed": 20, "parse_rate": 1.0,
+                 "f1_mean": 0.3144},
+     "per_sample": [
+       {"sample_id": "2hop__481349_302087", "f1": 0.6667, "parsed": true,
+        "answer": "Bombardier Aerospace", "ttft": 0.1624, "num_output_tokens": 26},
+       {"sample_id": "2hop__697790_864352", "f1": null, "parsed": false,
+        "answer": "", "ttft": 0.1701, "num_output_tokens": 256}
+     ]
+   }
+
+An unparsed sample's ``f1`` is ``null``, **not** ``0.0`` -- so a cross-run
+diff can pair by ``sample_id`` and skip what either run failed to score,
+rather than averaging a parsing failure in as a wrong answer.
 
 
 Exit Codes
@@ -744,8 +1104,8 @@ Options
    * - ``--mode {gpu,cpu}``
      - ``gpu``
      - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
-       (lmcache-driven handle path). ``cpu`` allocates POSIX-SHM-backed tensors
-       and uses the engine-driven (worker-side gather/scatter) path by default.
+       (lmcache-driven handle path). ``cpu`` allocates regular CPU tensors and
+       uses the engine-driven (worker-side gather/scatter) path by default.
    * - ``--transfer-mode {auto,engine_driven,lmcache_driven}``
      - ``auto``
      - Transport routing for STORE/RETRIEVE. ``lmcache_driven`` forces the
@@ -773,6 +1133,9 @@ Options
    * - ``--interval SECS``
      - ``0.5``
      - Delay between successive sub-passes.
+   * - ``--concurrency N``
+     - ``1``
+     - Number of clients sending requests at the same time (see below).
    * - ``--kvcache-shape-spec SPEC``
      - ``(2,1024,16,8,128):float16:32``
      - KV cache shape spec (see below).
@@ -795,12 +1158,18 @@ CPU mode (no GPU)
 ~~~~~~~~~~~~~~~~~
 
 ``--mode cpu`` runs the same end-to-end path without a GPU. The server
-runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates
-POSIX-SHM-backed KV tensors and exercises the full RPC path.
+runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates regular
+CPU KV tensors and exercises the full RPC path through ``TransferContext``.
+The engine-driven context uses server-owned SHM staging when available and
+falls back to typed inline tensor transport. In ``lmcache_driven`` mode, the CPU wrapper
+migrates the tensors to POSIX SHM during registration.
 
 By default ``--mode cpu`` uses the engine-driven gather/scatter path
-(``auto`` → ``cpu→engine_driven``). To use the zero-copy SHM
-handle path instead, pass ``--transfer-mode lmcache_driven``:
+(``auto`` → ``cpu→engine_driven``); that path requires the server to
+be started with ``--supported-transfer-mode engine_driven`` or
+``auto``, since the server's default ``lmcache_driven`` does not load
+it. To use the zero-copy SHM handle path instead, pass
+``--transfer-mode lmcache_driven``:
 
 .. code-block:: bash
 
@@ -879,18 +1248,16 @@ Both transfer modes support MLA:
   ``use_mla`` from the registered tensor shapes -- the bench's rank-3
   MLA client tensors trip this automatically.
 * ``engine_driven`` (CPU default): the bench derives ``use_mla`` from
-  ``kv_size`` in the spec and sends it on the register payload, so the
-  server sizes its SHM chunks correctly.
+  the tensor layout through ``TransferContext``, so the server sizes its SHM
+  chunks correctly.
 
 .. note::
 
    Heterogeneous specs that mix ``kv_size=1`` and ``kv_size=2`` groups
-   are fully supported in ``lmcache_driven`` mode -- each layer's
-   rank (3 vs. 5) tells the detector which per-group KV format to
-   use. In ``engine_driven`` mode the server registers a *single*
-   SHM chunk shape per context, so a mixed spec falls back to the
-   classical (non-MLA) layout; use ``lmcache_driven`` when you need
-   true per-group MLA.
+   are supported in ``lmcache_driven`` mode -- each layer's rank (3 vs. 5)
+   tells the detector which per-group KV format to use. ``engine_driven``
+   currently supports one KV group per context; use ``lmcache_driven`` for
+   heterogeneous or hybrid KV groups.
 
 Tensor Parallel (TP > 1)
 ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -921,14 +1288,38 @@ Example: MLA + TP=2, exercising rank 0 STORE + both-rank RETRIEVE:
        --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:8" \
        --tp-size 2
 
-The bench's client-side checksum aggregates writer-rank bytes only,
-so a cold-vs-warm mismatch pinpoints the exact rank whose round trip
-went wrong -- useful for verifying that a new server-side change
-handles per-rank ``instance_id`` routing correctly.
+The bench verifies retrieved data on every rank and reports the rank and
+chunk for checksum mismatches.
 
 See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
 for the authoritative parsing rules and validation errors.
 
+
+Concurrent clients
+~~~~~~~~~~~~~~~~~~
+
+With the default ``--concurrency 1`` a single client sends one request at a
+time, so the run measures per-request latency but never queues work on the
+server. ``--concurrency N`` runs ``N`` clients in parallel, each with its own
+connection and KV tensors, and its Workers registered under their own
+``instance_id`` block. Sequences are dealt round-robin (client ``k`` runs
+``start + k``, ``start + k + N``, ...), so no two clients touch the same
+keys and the cold/warm checks stay valid.
+
+.. code-block:: bash
+
+   lmcache bench server \
+       --rpc-url tcp://localhost:5555 --mode cpu \
+       --start 0 --end 400 --interval 0 --concurrency 8
+
+The summary adds ``Concurrency``, ``Elapsed (s)``, and ``Requests / s``.
+Use ``--interval 0`` when comparing throughput, otherwise the delay
+dominates. ``Requests / s`` counts cold/warm sequence pairs, matching
+``Total requests``.
+
+Size the server's L1 to hold the whole run. If stores arrive faster than
+the eviction controller frees memory, the server drops them, and the
+affected warm lookups miss and fail their checks.
 
 Profiling the server
 ~~~~~~~~~~~~~~~~~~~~~
@@ -973,8 +1364,9 @@ After the run completes (or is interrupted with ``Ctrl-C``), a structured
 metrics summary is printed. The summary includes:
 
 * **Configuration** -- RPC URL, mode, transfer mode, tokens per request,
-  interval.
-* **Results** -- total requests, checksum OK / FAIL counts, pass rate.
+  interval, concurrency.
+* **Results** -- total requests, checksum OK / FAIL counts, pass rate,
+  elapsed time, requests per second.
 * **Latency sections** -- per-operation latency statistics (count, mean,
   min, max, p50, p99) for cold lookup, cold store, warm lookup, and warm
   retrieve.
@@ -1142,6 +1534,12 @@ support a clean store -> load round-trip.
    set that alignment, commonly ``4096`` for local block devices. The
    payload size (``--data-size-kb * 1024``) must be a multiple of the
    selected alignment.
+
+   To benchmark against a hugepage-backed L1 tier, pass
+   ``--l1-use-hugepages``. The buffer is then allocated from the 2 MiB
+   hugepage pool. Pre-allocate enough pages with ``sysctl vm.nr_hugepages``;
+   the buffer needs ``ceil(2 * in_flight * num_keys * data_size / 2 MiB)``
+   pages.
 
 
 Quick start
@@ -1377,6 +1775,7 @@ Final summary (one section per exercised operation):
    --------------------------- Store -----------------------
    Operation:                        Store
    Rounds:                           1
+   Rounds timed out:                 0
    Keys / round:                     96
    Total keys:                       96
    Total success:                    96
@@ -1395,6 +1794,15 @@ Each operation section reports per-round duration statistics
 (avg / min / max / p50 / p99 / std), aggregate throughput
 (``avg_throughput_mbps`` -- 0 for ``Lookup`` since it has no payload),
 average key-rate (``avg_ops_per_sec``), and a per-key latency.
+
+``Rounds`` counts every round that was issued, and ``Rounds timed out``
+counts the subset that hit the wait timeout. A round that times out has
+no meaningful duration, so it is excluded from all duration and
+throughput statistics; the keys it issued still count toward
+``Total keys``, and the keys that did succeed before the timeout still
+count toward ``Total success``. When ``Rounds timed out`` is non-zero,
+read the duration and throughput figures as describing the rounds that
+completed.
 
 For ``Lookup``, three additional fields are reported when
 ``--lookup-max-hit-rate`` is non-zero or some keys were found:

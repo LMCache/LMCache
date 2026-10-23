@@ -2,6 +2,7 @@
 """Tests for bench engine request sender."""
 
 # Standard
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 import os
 
@@ -75,6 +76,16 @@ async def _fake_stream(chunks):
     """Async generator yielding chunks."""
     for chunk in chunks:
         yield chunk
+
+
+async def _timed_stream(
+    chunks: list[ChatCompletionChunk], clock: MagicMock
+) -> AsyncIterator[ChatCompletionChunk]:
+    """Yield chunks one second apart, then end the response a second later."""
+    for index, chunk in enumerate(chunks, start=1):
+        clock.return_value = 10.0 + index
+        yield chunk
+    clock.return_value = 11.0 + len(chunks)
 
 
 async def _error_stream(chunks, error_after: int = 1):
@@ -178,6 +189,14 @@ class TestRequestSenderInit:
         _, kwargs = mock_openai_cls.call_args
         assert kwargs["base_url"] == "http://localhost:8000/v1"
 
+    @patch(
+        "lmcache.cli.commands.bench.engine_bench.request_sender.AsyncOpenAI",
+        None,
+    )
+    def test_missing_openai_is_actionable(self) -> None:
+        with pytest.raises(RuntimeError, match="pip install openai"):
+            RequestSender("http://localhost:8000", "test-model")
+
 
 # ---------------------------------------------------------------------------
 # RequestSender — send_request (chat mode)
@@ -214,6 +233,61 @@ class TestRequestSenderSendRequest:
         assert result.submit_time < result.first_token_time < result.finish_time
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "delta",
+        [
+            {"content": "", "reasoning_content": "Thinking"},
+            {"content": None, "reasoning_content": "Thinking"},
+            {"content": "", "reasoning": "Thinking"},
+            {"content": None, "reasoning": "Thinking"},
+            {"content": None, "reasoning_content": "", "reasoning": "Thinking"},
+        ],
+    )
+    @patch("lmcache.cli.commands.bench.engine_bench.request_sender.time.time")
+    @patch("lmcache.cli.commands.bench.engine_bench.request_sender.AsyncOpenAI")
+    async def test_reasoning_starts_ttft_and_reaches_callback(
+        self,
+        mock_openai_cls: MagicMock,
+        clock: MagicMock,
+        delta: dict[str, str | None],
+    ) -> None:
+        """Reasoning is generated output even when delta.content is empty."""
+        chunks = [
+            ChatCompletionChunk(
+                id="c1",
+                choices=[Choice(delta=ChoiceDelta(role="assistant"), index=0)],
+                created=0,
+                model="m",
+                object="chat.completion.chunk",
+            ),
+            ChatCompletionChunk(
+                id="c1",
+                choices=[Choice(delta=ChoiceDelta(**delta), index=0)],
+                created=0,
+                model="m",
+                object="chat.completion.chunk",
+            ),
+            _make_chat_chunk(content="Answer"),
+            _make_chat_chunk(usage=_usage(prompt=10, completion=2)),
+        ]
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=_timed_stream(chunks, clock)
+        )
+        callback = MagicMock()
+        sender = RequestSender("http://localhost:8000", "m", on_finished=[callback])
+        clock.return_value = 10.0
+
+        result = await sender.send_request("r1", [{"role": "user", "content": "Hi"}])
+
+        assert result.successful is True
+        assert result.first_token_time == 12.0
+        assert result.ttft == 2.0
+        assert result.num_output_tokens == 2
+        callback.assert_called_once_with(result, "ThinkingAnswer")
+
+    @pytest.mark.asyncio
     @patch(
         "lmcache.cli.commands.bench.engine_bench.request_sender.AsyncOpenAI",
     )
@@ -248,6 +322,78 @@ class TestRequestSenderSendRequest:
 
         _, kwargs = mock_client.chat.completions.create.call_args
         assert "extra_body" not in kwargs
+
+    @pytest.mark.asyncio
+    @patch(
+        "lmcache.cli.commands.bench.engine_bench.request_sender.AsyncOpenAI",
+    )
+    async def test_extra_body_is_forwarded(self, mock_openai_cls) -> None:
+        """Chat-template variables have no OpenAI client parameter."""
+        chunks = [_make_chat_chunk(usage=_usage(prompt=10, completion=1))]
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=_fake_stream(chunks)
+        )
+
+        sender = RequestSender(
+            "http://localhost:8000",
+            "test-model",
+            extra_body={"chat_template_kwargs": {"reasoning_effort": "high"}},
+        )
+        await sender.send_request("req_0", [{"role": "user", "content": "Hi"}])
+
+        _, kwargs = mock_client.chat.completions.create.call_args
+        assert kwargs["extra_body"] == {
+            "chat_template_kwargs": {"reasoning_effort": "high"}
+        }
+
+    @pytest.mark.asyncio
+    @patch(
+        "lmcache.cli.commands.bench.engine_bench.request_sender.AsyncOpenAI",
+    )
+    async def test_extra_body_merges_with_ignore_eos(self, mock_openai_cls) -> None:
+        chunks = [_make_chat_chunk(usage=_usage(prompt=10, completion=1))]
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=_fake_stream(chunks)
+        )
+
+        sender = RequestSender(
+            "http://localhost:8000",
+            "test-model",
+            ignore_eos=True,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        await sender.send_request("req_0", [{"role": "user", "content": "Hi"}])
+
+        _, kwargs = mock_client.chat.completions.create.call_args
+        assert kwargs["extra_body"] == {
+            "chat_template_kwargs": {"enable_thinking": False},
+            "ignore_eos": True,
+        }
+
+    @pytest.mark.asyncio
+    @patch(
+        "lmcache.cli.commands.bench.engine_bench.request_sender.AsyncOpenAI",
+    )
+    async def test_extra_body_is_copied_at_construction(self, mock_openai_cls) -> None:
+        """A later mutation of the caller's dict must not change requests."""
+        chunks = [_make_chat_chunk(usage=_usage(prompt=10, completion=1))]
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=_fake_stream(chunks)
+        )
+
+        body: dict[str, object] = {"a": 1}
+        sender = RequestSender("http://localhost:8000", "test-model", extra_body=body)
+        body["b"] = 2
+        await sender.send_request("req_0", [{"role": "user", "content": "Hi"}])
+
+        _, kwargs = mock_client.chat.completions.create.call_args
+        assert kwargs["extra_body"] == {"a": 1}
 
     @pytest.mark.asyncio
     @patch(

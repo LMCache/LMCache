@@ -28,6 +28,8 @@ from lmcache.v1.mp_observability.trace.format import (
     FORMAT_VERSION,
     MAGIC,
     TRACE_SCHEMA_VERSION,
+    Header,
+    encode_header,
 )
 from lmcache.v1.mp_observability.trace.reader import TraceReader
 from lmcache.v1.mp_observability.trace.recorder import StorageTraceRecorder
@@ -130,7 +132,7 @@ class TestRecordRoundtrip:
             )
             publish_call_event(
                 "lmcache.X.method2",
-                {"extra_count": 7},
+                {"num_kv_readers": 7},
             )
             _flush(bus)
         finally:
@@ -144,7 +146,7 @@ class TestRecordRoundtrip:
         # the replay driver (PR2). We assert structure only.
         assert "keys" in records[0].args
         assert records[0].args["mode"] == "new"
-        assert records[1].args["extra_count"] == 7
+        assert records[1].args["num_kv_readers"] == 7
         assert records[0].t_mono >= 0
         assert records[1].t_mono >= records[0].t_mono
 
@@ -228,6 +230,25 @@ class TestReaderRobustness:
         with open(trace_path, "wb") as fh:
             fh.write(len(frame).to_bytes(4, "big") + frame)
         with pytest.raises(ValueError, match="bad magic"):
+            TraceReader(trace_path)
+
+    def test_older_trace_schema_rejected(self, trace_path):
+        """A trace recorded under schema 1 (whose prefetch calls carry
+        ``skip_l2``) is refused with a clear version error."""
+        old = Header(
+            magic=MAGIC,
+            format_version=FORMAT_VERSION,
+            level="storage",
+            trace_schema_version=1,
+            t_mono_start=0.0,
+            t_wall_start=0.0,
+            sm_config_json="",
+            sm_config_digest="",
+        )
+        frame = encode_header(old)
+        with open(trace_path, "wb") as fh:
+            fh.write(len(frame).to_bytes(4, "big") + frame)
+        with pytest.raises(ValueError, match="unsupported trace_schema_version 1"):
             TraceReader(trace_path)
 
 

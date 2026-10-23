@@ -45,7 +45,7 @@ var _ = Describe("CacheBlendPodInjector webhook (envtest)", Ordered, func() {
 		Expect(k8sClient.Create(envtestCtx, resources.BuildCBConnectionConfigMap(engine))).To(Succeed())
 	})
 
-	It("injects the plugin, flags, hostIPC, and private-image pull secret into an annotated pod", func() {
+	It("injects the plugin, flags, /dev/shm sharing, and private-image pull secret into an annotated pod", func() {
 		pod := vllmPod(func(p *corev1.Pod) {
 			p.Name = "vllm-injected"
 			if p.Labels == nil {
@@ -62,8 +62,9 @@ var _ = Describe("CacheBlendPodInjector webhook (envtest)", Ordered, func() {
 		By("the idempotency annotation is stamped")
 		Expect(got.Annotations).To(HaveKeyWithValue(AnnotationInjected, valueTrue))
 
-		By("M0: hostIPC is set on the pod")
-		Expect(got.Spec.HostIPC).To(BeTrue())
+		By("M0: the host's /dev/shm is shared via hostPath (no hostIPC by default)")
+		Expect(got.Spec.HostIPC).To(BeFalse())
+		Expect(findVolume(got, testDevShmVolumeName)).NotTo(BeNil())
 
 		By("M1/M2: the cb-plugin emptyDir volume and payload init container are present")
 		Expect(hasPluginVolume(got)).To(BeTrue())
@@ -146,7 +147,7 @@ var _ = Describe("CacheBlendPodInjector webhook (envtest)", Ordered, func() {
 
 		By("the pod is injected using the engine + ConfigMap from the engine's namespace")
 		Expect(got.Annotations).To(HaveKeyWithValue(AnnotationInjected, valueTrue))
-		Expect(got.Spec.HostIPC).To(BeTrue())
+		Expect(findVolume(got, testDevShmVolumeName)).NotTo(BeNil())
 		Expect(hasPluginVolume(got)).To(BeTrue())
 		Expect(got.Spec.InitContainers).NotTo(BeEmpty())
 		c := findContainer(got, "vllm")

@@ -47,7 +47,7 @@ import (
 //  2. A vLLM Deployment opts in to CacheBlend injection (label + engine
 //     annotation). The mutating webhook injects the CacheBlend vLLM flags
 //     (--kv-transfer-config <engine>, etc.), the cb-plugin init container,
-//     hostIPC, and the private payload's pull secret.
+//     the /dev/shm hostPath mount, and the private payload's pull secret.
 //  3. vLLM comes up on the CUSTOM attention backend (asserted on its own
 //     startup banner), starts, and serves /v1/models.
 //  4. A completion request drives a forward pass, which makes vLLM's connector
@@ -202,7 +202,7 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 		Expect(postCompletion(ctx, vllmBaseURL, model, buildLongPrompt())).To(Succeed())
 
 		By("verifying the engine logged 'Registered CB rope state for instance N'")
-		// The forward pass drives vLLM's connector to send CB_REGISTER_ROPE_V3,
+		// The forward pass drives vLLM's connector to send CB_REGISTER_ROPE,
 		// which the engine handles and logs. kubectl log streaming buffers a
 		// beat behind, so poll.
 		Eventually(func() int {
@@ -222,8 +222,8 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 var cbServerListeningLine = regexp.MustCompile(`LMCache ZMQ cache server is running`)
 
 // cbRopeRegisteredLine matches the engine-side log emitted by
-// BlendV3.cb_register_rope on every CB_REGISTER_ROPE_V3 message
-// (modules/blend_v3.py). Its presence proves the vLLM connector negotiated
+// BlendModule.cb_register_rope on every CB_REGISTER_ROPE message
+// (modules/blend.py). Its presence proves the vLLM connector negotiated
 // the CacheBlend rope handshake with the engine.
 var cbRopeRegisteredLine = regexp.MustCompile(`Registered CB rope state for instance \d+`)
 

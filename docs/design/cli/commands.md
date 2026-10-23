@@ -12,7 +12,7 @@ LMCache functionality.
 
 ```
 lmcache
-├── server                          # Launch LMCache server (ZMQ + HTTP)
+├── server                          # Launch LMCache server (request RPC + HTTP)
 ├── coordinator                     # Launch the mp coordinator (HTTP)
 ├── describe {kvcache,engine}       # Rich status view of a running endpoint
 ├── ping     {kvcache,engine}       # Pure liveness check (OK/FAIL)
@@ -40,7 +40,7 @@ All client commands use a `--url` flag pointing to the **LMCache HTTP server**
 
 Replaces `python3 -m lmcache.v1.multiprocess.http_server`. Runs in foreground,
 Ctrl-C to stop. HTTP frontend is enabled by default; use `--no-http` to run
-ZMQ-only.
+the request server without the HTTP frontend.
 
 ```bash
 lmcache server \
@@ -67,10 +67,9 @@ lmcache coordinator \
     --health-check-interval 10
 ```
 
-Config resolves from `MPCoordinatorConfig.from_env()` (the
-`LMCACHE_MP_COORDINATOR_*` environment variables); any CLI flag that is supplied
-overrides the corresponding field. Each flag defaults to unset so env-only
-deployments keep working. See
+Config comes from the flags alone: `execute` builds an `MPCoordinatorConfig`
+from every flag that was supplied, and each flag defaults to unset so the
+dataclass default stands. The coordinator reads no environment variables. See
 [../v1/mp_coordinator/README.md](../v1/mp_coordinator/README.md).
 
 ### `lmcache describe`
@@ -184,8 +183,8 @@ Checksum:                                OK
 **`bench server`** -- end-to-end sanity test for a running LMCache MP cache
 server (ZMQ + HTTP). For each sequence in ``[--start, --end)`` the tool runs a
 cold pass (``LOOKUP`` miss → ``STORE``) and a warm pass (``LOOKUP`` hit →
-``RETRIEVE``), then cross-checks per-chunk checksums against the server's HTTP
-API. Exercises the full RPC path
+``RETRIEVE``), then verifies the retrieved data using per-chunk checksums.
+Exercises the full RPC path
 (``REGISTER_KV_CACHE → GET_CHUNK_SIZE → LOOKUP → QUERY_PREFETCH_STATUS →
 RETRIEVE → STORE → END_SESSION``).
 
@@ -193,9 +192,11 @@ Supports two run modes via ``--mode``:
 
 - **``gpu``** (default) -- allocates real CUDA tensors and uses CUDA IPC
   (LMCache-driven handle transfer path).
-- **``cpu``** -- allocates POSIX-SHM-backed tensors; the server maps the same
-  physical pages for zero-copy STORE/RETRIEVE (engine-driven transfer path by
-  default). To use the zero-copy SHM handle path, add
+- **``cpu``** -- allocates regular CPU tensors and uses the engine-driven
+  worker-side gather/scatter path by default. Its ``TransferContext`` uses
+  server-owned SHM staging when available and falls back to typed inline
+  tensor transport.
+  To migrate the tensors to POSIX SHM for the handle path, add
   ``--transfer-mode lmcache_driven``.
 
 The transfer path can be overridden explicitly with ``--transfer-mode
@@ -337,7 +338,7 @@ lmcache/cli/
 ├── main.py              # main() entry point
 ├── metrics/             # Metrics system (see framework-and-metrics.md)
 ├── commands/
-│   ├── __init__.py      # Auto-discovers ALL_COMMANDS (no manual edits)
+│   ├── __init__.py      # Directed registration; ALL_COMMANDS is a lazy shim
 │   ├── base.py          # BaseCommand ABC + CompositeCommand
 │   ├── mock.py          # lmcache mock  (example/test command)
 │   ├── server.py        # lmcache server
@@ -399,5 +400,3 @@ lmcache/cli/
 | **1** | **`server`** (done), `ping kvcache`, `kvcache clear`, `kvcache end-session`, `describe kvcache` |
 | **2** | `ping engine`, `query engine`, `query kvcache`, `bench engine`, `bench server`, `bench l2`, `describe engine`, corpora |
 | **3** | `kvcache evict` (future) |
-
-Existing `lmcache_server` entry point kept as a deprecated alias for 2 minor releases.
