@@ -1979,8 +1979,11 @@ only this from each request, in order of importance:
 * **token ids**, as the engine prefilled them with the chat template
   applied. The replay works on nothing else.
 * **a timestamp**, which fixes the replay order.
-* **a request id**, so repeat lookups of one request (for example after
-  preemption) count once. A format without one counts every record.
+* **a request id**, to collapse a request that was recorded more than
+  once. The LMCache server emits one span per lookup rather than per
+  request, and the engine looks a request up again after preemption, so
+  that format needs it. A producer that records each request once can use
+  any unique value.
 * **a model name**, only for ``--model``; it may be empty.
 
 How those are packaged is the producer's choice: OTLP spans, OTLP logs or

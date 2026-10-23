@@ -61,9 +61,11 @@ class TraceRecord:
         input_ids: Prompt token ids as the engine prefilled them, chat
             template included. The replay works on nothing else.
         timestamp_ns: Request time in nanoseconds; fixes the replay order.
-        request_id: Collapses repeat lookups of one request (for example
-            after preemption) to its earliest record. A format without a
-            request id can use a per-line value, and then every line counts.
+        request_id: Collapses a request recorded more than once to its
+            earliest record. The LMCache server emits one span per lookup,
+            and the engine looks a request up again after preemption, so
+            that format needs it; a producer that records each request once
+            can use any unique value.
         model: Model name, only for the ``--model`` filter; may be empty.
     """
 
