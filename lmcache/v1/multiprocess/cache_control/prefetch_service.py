@@ -9,6 +9,7 @@ status codes. It owns the node's :class:`WarmPrefetchJobs` table.
 """
 
 # Standard
+from collections.abc import Mapping
 from typing import Any
 
 # First Party
@@ -51,8 +52,19 @@ class PrefetchService:
         cache_salt: str,
         source_tier: Tier,
         target_tier: Tier,
+        *,
+        tags: Mapping[str, str] | None = None,
     ) -> dict[str, object]:
         """Submit a warm prefetch of a token sequence's chunks from L2 into L1.
+
+        Args:
+            model_name: Model whose registered layout selects the object groups.
+            world_size: Parallel world size selecting the rank fan-out.
+            token_ids: Complete prompt tokens to hash from position zero.
+            cache_salt: Isolation salt used when the objects were stored.
+            source_tier: Source tier; currently only L2 is supported.
+            target_tier: Target tier; currently only L1 is supported.
+            tags: Matching tags used when the objects were stored.
 
         Returns:
             ``{"request_id", "chunks", "status": "submitted"}``, or
@@ -98,6 +110,7 @@ class PrefetchService:
                 cache_salt,
                 group_layout_descs,
                 attn_desc,
+                tags=tags,
             )
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None

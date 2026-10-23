@@ -4,6 +4,7 @@ Serde helper utilities for the distributed storage controllers.
 """
 
 # Standard
+from dataclasses import replace
 import os
 
 # Third Party
@@ -46,10 +47,9 @@ def make_temp_key(original_key: ObjectKey) -> ObjectKey:
     Args:
         original_key: The original ObjectKey to derive from.
     """
-    return ObjectKey(
-        chunk_hash=original_key.chunk_hash + os.urandom(16),
-        model_name=original_key.model_name,
-        kv_rank=original_key.kv_rank,
-        object_group_id=original_key.object_group_id,
-        cache_salt=original_key.cache_salt,
+    return replace(
+        original_key,
+        identity=replace(
+            original_key.identity, chunk_hash=original_key.chunk_hash + os.urandom(16)
+        ),
     )

@@ -11,6 +11,7 @@ belong to the ``cache_control`` services. ``Tier`` is imported from the domain
 from dataclasses import dataclass, field
 
 # First Party
+from lmcache.v1.cache_identity import normalize_identity
 from lmcache.v1.distributed.api import EncodedObjectKey, Tier
 
 
@@ -47,6 +48,10 @@ class PrefetchRequest:
     cache_salt: str = ""
     source_tier: Tier = Tier.L2
     target_tier: Tier = Tier.L1
+    tags: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tags", dict(normalize_identity("", "", self.tags)))
 
 
 @dataclass(frozen=True)

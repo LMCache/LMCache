@@ -2,6 +2,7 @@
 # Standard
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, PropertyMock, patch
@@ -1840,6 +1841,12 @@ def test_server_prepare_store_includes_chunk_indices(
     assert len(response_context.get("slots", [])) == 1
     # chunk_indices should be [1] (position of obj2 in [obj1, obj2])
     assert response_context.get("chunk_indices") == [1]
+
+    other = replace(key, request_configs={"lmcache.tag.tenant": "other"})
+    assert other == key
+    module.prepare_store(other, 10)
+    assert module.commit_store(key, 10, b"") is True
+    assert module.commit_store(other, 10, b"") is True
 
 
 class _CompletedFuture:

@@ -17,3 +17,4 @@ commands, and HTTP endpoints.
    extending_lmcache/musa_aiter_integration
    cli
    extending_http_api
+   cache_identity

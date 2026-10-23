@@ -7,8 +7,9 @@ Could be implemented by native code in the future
 """
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 import enum
 
 # Third Party
@@ -16,7 +17,12 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.cache_identity import ObjectKeyIdentity
+from lmcache.v1.cache_identity import (
+    ObjectKeyIdentity,
+    get_request_tags,
+    get_request_xattrs,
+    normalize_identity,
+)
 
 if TYPE_CHECKING:
     # First Party
@@ -163,6 +169,7 @@ class ObjectKey:
     """
 
     identity: ObjectKeyIdentity
+    xattrs: dict[str, Any] = field(default_factory=dict, compare=False)
 
     def __init__(
         self,
@@ -173,6 +180,8 @@ class ObjectKey:
         cache_salt: str | None = None,
         *,
         identity: ObjectKeyIdentity | None = None,
+        tags: Mapping[str, str] | None = None,
+        xattrs: Mapping[str, Any] | None = None,
     ) -> None:
         """Build a key from its identity or the existing flat constructor.
 
@@ -187,6 +196,8 @@ class ObjectKey:
             object_group_id: Object group; defaults to 0 without an identity.
             cache_salt: Isolation salt; defaults to empty without an identity.
             identity: Immutable identity providing fields not supplied explicitly.
+            tags: Additional matching dimensions for the flat constructor.
+            xattrs: Per-object mutable metadata, copied on construction.
 
         Raises:
             TypeError: A required flat field is missing without ``identity``.
@@ -201,6 +212,7 @@ class ObjectKey:
                 kv_rank=kv_rank,
                 object_group_id=object_group_id if object_group_id is not None else 0,
                 cache_salt=cache_salt if cache_salt is not None else "",
+                tags=tags if tags is not None else {},
             )
         elif (
             chunk_hash is not None
@@ -208,6 +220,7 @@ class ObjectKey:
             or kv_rank is not None
             or object_group_id is not None
             or cache_salt is not None
+            or tags is not None
         ):
             identity = replace(
                 identity,
@@ -226,8 +239,13 @@ class ObjectKey:
                 cache_salt=cache_salt
                 if cache_salt is not None
                 else identity.cache_salt,
+                tags=tags if tags is not None else identity.tags,
             )
         object.__setattr__(self, "identity", identity)
+        object.__setattr__(self, "xattrs", dict(xattrs) if xattrs is not None else {})
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "xattrs", dict(self.xattrs))
 
     @property
     def chunk_hash(self) -> bytes:
@@ -255,13 +273,14 @@ class ObjectKey:
         return self.identity.object_group_id
 
     def to_encoded_object_key(self) -> "EncodedObjectKey":
-        """Return the JSON-safe :class:`EncodedObjectKey` projection."""
+        """Return the JSON-safe :class:`EncodedObjectKey` identity projection."""
         return EncodedObjectKey(
-            chunk_hash_hex=self.chunk_hash.hex(),
             model_name=self.model_name,
+            cache_salt=self.cache_salt,
+            tags=self.identity.tags,
+            chunk_hash_hex=self.chunk_hash.hex(),
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
-            cache_salt=self.cache_salt,
         )
 
     @staticmethod
@@ -342,34 +361,46 @@ class ObjectKey:
 
 @dataclass(frozen=True)
 class EncodedObjectKey:
-    """JSON-safe wire form of :class:`ObjectKey` — ``chunk_hash`` is
-    hex-encoded; other fields are preserved verbatim."""
+    """JSON-safe object identity for control-plane addressing."""
 
     chunk_hash_hex: str
-    """Hex-encoded ``ObjectKey.chunk_hash``."""
-
     model_name: str
     kv_rank: int
-
     object_group_id: int = 0
-    """Defaults to ``0`` so pre-``object_group_id`` wire payloads still
-    deserialize."""
-
     cache_salt: str = ""
+    tags: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tags", normalize_identity("", "", self.tags))
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.chunk_hash_hex,
+                self.model_name,
+                self.kv_rank,
+                self.object_group_id,
+                self.cache_salt,
+                tuple(self.tags.items()),
+            )
+        )
 
     def to_object_key(self) -> ObjectKey:
-        """Recover the corresponding :class:`ObjectKey`.
+        """Recover an identity-equivalent :class:`ObjectKey`.
 
         Raises:
             ValueError: ``chunk_hash_hex`` is not valid hex, or one of
                 :class:`ObjectKey`'s field invariants is violated.
         """
         return ObjectKey(
-            chunk_hash=bytes.fromhex(self.chunk_hash_hex),
-            model_name=self.model_name,
-            kv_rank=self.kv_rank,
-            object_group_id=self.object_group_id,
-            cache_salt=self.cache_salt,
+            identity=ObjectKeyIdentity(
+                chunk_hash=bytes.fromhex(self.chunk_hash_hex),
+                kv_rank=self.kv_rank,
+                object_group_id=self.object_group_id,
+                model_name=self.model_name,
+                cache_salt=self.cache_salt,
+                tags=self.tags,
+            )
         )
 
 
@@ -728,20 +759,24 @@ def ipc_key_to_object_keys(
         list[list[ObjectKey]]: The i-th element is the list of ObjectKeys
         for ``object_group_ids[i]``.
     """
-    cache_salt = ipc_key.cache_salt
-
     # The (chunk_hash, kv_rank) expansion is independent of the object group,
     # so compute it once and reuse it for every group.
+    tags = get_request_tags(ipc_key.request_configs)
+    xattrs = get_request_xattrs(ipc_key.request_configs)
     kv_ranks = _lookup_kv_ranks(ipc_key)
 
     return [
         [
             ObjectKey(
-                chunk_hash=chunk_hash,
-                model_name=ipc_key.model_name,
-                kv_rank=kv_rank,
-                object_group_id=object_group_id,
-                cache_salt=cache_salt,
+                identity=ObjectKeyIdentity(
+                    model_name=ipc_key.model_name,
+                    cache_salt=ipc_key.cache_salt,
+                    tags=tags,
+                    chunk_hash=chunk_hash,
+                    kv_rank=kv_rank,
+                    object_group_id=object_group_id,
+                ),
+                xattrs=xattrs,
             )
             for chunk_hash in chunk_hashes
             for kv_rank in kv_ranks
@@ -786,6 +821,8 @@ def ipc_key_to_grouped_object_keys(
         size; a worker-specific key yields that rank only. ``cache_salt`` is
         taken from ``ipc_key``.
     """
+    tags = get_request_tags(ipc_key.request_configs)
+    xattrs = get_request_xattrs(ipc_key.request_configs)
     kv_ranks = _lookup_kv_ranks(ipc_key)
     rows: list[GroupedObjectKeys] = []
     for object_group_id in object_group_ids:
@@ -806,11 +843,15 @@ def ipc_key_to_grouped_object_keys(
                 GroupedObjectKeys(
                     keys=[
                         ObjectKey(
-                            chunk_hash=chunk_hash,
-                            model_name=ipc_key.model_name,
-                            kv_rank=kv_rank,
-                            object_group_id=object_group_id,
-                            cache_salt=ipc_key.cache_salt,
+                            identity=ObjectKeyIdentity(
+                                model_name=ipc_key.model_name,
+                                cache_salt=ipc_key.cache_salt,
+                                tags=tags,
+                                chunk_hash=chunk_hash,
+                                kv_rank=kv_rank,
+                                object_group_id=object_group_id,
+                            ),
+                            xattrs=xattrs,
                         )
                         for chunk_hash in chunk_hashes
                     ],

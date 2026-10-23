@@ -1842,3 +1842,23 @@ including its router from a group module under ``http_apis/`` (as
 When adding a new endpoint, please also add a matching section to this
 page documenting the endpoint's purpose, request/response schema, and
 an example ``curl`` invocation.
+
+Matching tags in cache keys
+===================================
+
+``POST /cache/prefetches`` accepts an optional ``tags`` map alongside
+``model_name``, ``world_size``, ``token_ids`` and ``cache_salt``. The map must
+match the ``lmcache.tag.*`` values used when storing the content, without
+that prefix. Empty tags select untagged content rather than every namespace.
+
+``EncodedObjectKey`` retains its flat JSON shape and adds the same optional
+map for listing and key-addressed deletion:
+
+.. code-block:: json
+
+   {"chunk_hash_hex": "aa", "model_name": "model", "kv_rank": 0,
+    "object_group_id": 0, "cache_salt": "",
+    "tags": {"adapter_revision": "abc123"}}
+
+Tags require nonempty string names and string values. Xattrs are operational
+metadata and are excluded from control-plane key addresses.

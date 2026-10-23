@@ -220,3 +220,10 @@ canonical standard; this file intentionally does not duplicate it.
 
 When asked to review a PR, use the `pr-review` skill; before creating a PR,
 self-check with the `pre-pr-check` skill (both under `.claude/skills/`).
+
+### macOS DAX range validation
+
+On macOS with a 16 KiB mmap allocation granularity,
+`test_dax_one_device_backs_disjoint_ranges` uses a 4 KiB arena offset that
+`mmap` rejects with `EINVAL`. Validate that test on Linux; a macOS CPU run
+excluding it does not establish DAX device/range correctness.

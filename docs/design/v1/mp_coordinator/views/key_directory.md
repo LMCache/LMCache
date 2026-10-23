@@ -102,7 +102,7 @@ The lookups this serves:
   binding's keys give the placements. Discovery uses blend's cheap
   polynomial hash family; the index itself never needs a
   content-addressed key because every hit is token-verified. The query
-  carries the caller's `model_name`/`cache_salt`/`world_size` as the
+  carries the caller's `model_name`/`cache_salt`/`world_size`/`tags` as the
   namespace to scope matches to, so a match names a chunk the caller's
   own key expansion can reach. Implemented as a derived view over these
   bindings — see

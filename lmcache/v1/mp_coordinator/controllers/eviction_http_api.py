@@ -324,6 +324,7 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
                 body.world_size,
                 body.token_ids,
                 body.cache_salt,
+                tags=body.tags,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
@@ -360,6 +361,7 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
                 body.world_size,
                 body.token_ids,
                 body.cache_salt,
+                tags=body.tags,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
@@ -447,6 +449,7 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
                 body.world_size,
                 body.token_ids,
                 body.cache_salt,
+                tags=body.tags,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
