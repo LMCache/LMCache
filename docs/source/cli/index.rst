@@ -104,6 +104,7 @@ See :doc:`/developer_guide/cli` for details.
    ping
    query
    bench
+   multi_turn_kv
    kvcache
    quota
    trace
