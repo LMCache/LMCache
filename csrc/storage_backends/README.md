@@ -43,6 +43,27 @@ Therefore the framework enforces:
 3. eventfd-based non-polling completions (the kernel wakes up Python)
 4. Non-blocking submission (submission queue / completion queue architecture)
 
+## Error handling in batch operations
+
+A batch is split into tiles that run on different workers, so one key's
+failure must not discard the results of the others. The table describes the
+default `do_batch_*` implementations in `ConnectorBase`; connectors that
+override them (Mooncake, NIXL, HF3FS) define their own error handling.
+
+| Op | A key whose `do_single_*` throws | Reported as |
+|----|----------------------------------|-------------|
+| GET, EXISTS, DELETE | logged to stderr, batch continues | `0` in `per_key_results` |
+| SET | not caught, the tile fails | `ok=False` for the whole batch |
+
+A failed check is reported as a miss because a false miss only costs a
+recompute or a re-fetch, while a false hit would make the caller use data
+that is not there. Prefix consumers stop at the failed key; the MP
+`NativeConnectorL2Adapter` leaves its bit unset in the lookup bitmap.
+SET has no per-key result, so catching its exception would hide a lost write.
+Example: an over-long key makes `std::filesystem::exists` throw
+`File name too long`; EXISTS reports that key as `0` and still answers the
+other keys.
+
 ## Files
 
 | File | Purpose |
