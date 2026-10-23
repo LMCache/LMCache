@@ -255,6 +255,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector.model_name = "test-model"
         connector.kv_world_size = 2
         connector.blocks_in_chunk = 4
+        connector.chunk_size = 256
         connector._mq_timeout = 5.0
         connector._mp_transfer_mode = "engine_driven"
         transfer_ctx = Mock()
@@ -280,6 +281,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             layout_hints={"kv_list_layout": "unified"},
             engine_group_infos=[],
             engine_type=EngineType.SGLANG,
+            lmcache_chunk_tokens=256,
         )
         self.assertIs(connector._transfer_ctx, transfer_ctx)
         self.assertTrue(connector._registered)

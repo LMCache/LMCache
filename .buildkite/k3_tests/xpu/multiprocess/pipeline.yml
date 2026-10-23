@@ -72,6 +72,36 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
+      # Engine-driven multi-group (hybrid KV) coverage: a GDN + full-attention
+      # hybrid at TP1 on one XPU, over both transports. Inline keeps L1 lazy;
+      # SHM disables it so the server maps its SHM pool. vLLM's XPU platform
+      # rounds a GDN model's block size up to a multiple of 64 (544 -> 576), so
+      # the LMCache chunk and the 'align' scheduler step follow it.
+      - label: ":xpu: hma_lm_eval_qwen3_5 / engine_driven / {{matrix.transport}}"
+        command: |
+          export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+          export ENGINE_DRIVEN_TRANSPORT="{{matrix.transport}}"
+          case "{{matrix.transport}}" in
+            inline) export L1_USE_LAZY="true" ;;
+            shm) export L1_USE_LAZY="false" ;;
+          esac
+          export ENFORCE_EAGER="1"
+          export VLLM_USE_STANDALONE_COMPILE="0"
+          export CPU_BUFFER_SIZE="80"
+          export CHUNK_SIZE="576"
+          export MAX_NUM_BATCHED_TOKENS="576"
+          .buildkite/k3_tests/xpu/multiprocess/run.sh hma_lm_eval_qwen3_5
+        matrix:
+          setup:
+            transport:
+              - "inline"
+              - "shm"
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
       - label: ":xpu: vllm_bench"
         command: |
           export LMCACHE_MP_TRANSFER_MODE="engine_driven"

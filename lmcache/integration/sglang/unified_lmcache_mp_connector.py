@@ -554,6 +554,7 @@ class UnifiedLMCacheMPConnector:
                 layout_hints={"kv_list_layout": "unified"},
                 engine_group_infos=engine_group_infos,
                 engine_type=EngineType.SGLANG,
+                lmcache_chunk_tokens=self.chunk_size,
             )
         except Exception:
             try:

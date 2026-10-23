@@ -1425,6 +1425,7 @@ class LMCacheMPWorkerAdapter:
                 f"of {vllm_block_size}."
             )
         self.blocks_in_chunk = lmcache_tokens_per_chunk // vllm_block_size
+        self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
 
         # Experimental intermediate tensor transfer
         self.experimental: set[str] = get_experimental(
@@ -1596,6 +1597,7 @@ class LMCacheMPWorkerAdapter:
                 layout_hints=layout_hints,
                 engine_group_infos=self.engine_group_infos,
                 engine_type=EngineType.VLLM,
+                lmcache_chunk_tokens=self.lmcache_tokens_per_chunk,
             )
         except TimeoutError:
             raise ConnectionError(

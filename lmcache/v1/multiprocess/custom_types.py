@@ -152,6 +152,44 @@ class IPCCacheServerKey:
 KVCache = list[DeviceIPCWrapper]
 
 
+class GroupLayout(msgspec.Struct):
+    """Per-LMCache-group layout for multi-group engine-driven registration.
+
+    Attributes:
+        num_layers: Number of KV layers in this group.
+        hidden_dim_size: Flattened hidden dimension per token for this group.
+        dtype_str: Torch dtype name for this group's KV tensors.
+        tokens_per_block: Tokens covered by one paged block of this group
+            (``EngineGroupInfo.tokens_per_block``; falls back to the engine
+            ``block_size`` when the engine reported ``0``).
+        window_tokens: Tokens stored per LMCache chunk for this group. Equals
+            the full chunk token count for full-attention groups; for a
+            sliding-window group it is ``min(chunk_tokens, sw_size_tokens)`` so
+            the server sizes each per-chunk object to the window. ``0`` means
+            "full chunk" (legacy workers that predate SW support).
+        kv_size: Object planes for this group: ``2`` for separate K/V, ``1``
+            for single-plane formats (MLA, fused K/V, indexer caches). Groups
+            of one model can differ, so the server must not size them from the
+            top-level ``use_mla``. ``0`` means "unreported" (legacy workers)
+            and falls back to the top-level ``use_mla``.
+        window_chunks: Trailing LMCache chunks this group needs for a cache
+            hit (its attention window, rounded up to whole chunks). ``0``
+            means full attention, the whole prefix, which is also what
+            workers that predate windows send.
+        recurrent: Whether the group's pages hold recurrent state snapshots
+            (Mamba/GDN/linear attention) rather than per-token attention KV.
+    """
+
+    num_layers: int
+    hidden_dim_size: int
+    dtype_str: str
+    tokens_per_block: int
+    window_tokens: int = 0
+    kv_size: int = 0
+    window_chunks: int = 0
+    recurrent: bool = False
+
+
 class RegisterEngineDrivenContextPayload(msgspec.Struct):
     """Payload for the REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT protocol message.
 
@@ -167,6 +205,10 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         num_physical_slots: Number of physical KV slots gathered into one
             LMCache chunk. ``None`` accepts the legacy protocol, where the
             server assumed one physical slot per logical token.
+        group_layouts: Per-group layouts for multi-group (hybrid-KV) workers,
+            in protocol group order. Empty means legacy single-group; the
+            top-level ``num_layers``/``hidden_dim_size``/``dtype_str`` then
+            describe the sole group.
     """
 
     instance_id: int
@@ -178,14 +220,23 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     dtype_str: str
     use_mla: bool
     num_physical_slots: int | None = None
+    group_layouts: list[GroupLayout] = []
 
 
 @dataclass
 class RegisterEngineDrivenContextResponse:
-    """Shared response for engine-driven context registration."""
+    """Shared response for engine-driven context registration.
+
+    Attributes:
+        shm_name: Name of the server's SHM-backed L1 pool, or ``""``.
+        pool_size: Size of that pool in bytes.
+        null_block_id: Engine block ID the server treats as absent KV data.
+            Workers skip storing chunks whose blocks are all this ID.
+    """
 
     shm_name: str = ""
     pool_size: int = 0
+    null_block_id: int = 0
 
 
 @dataclass
