@@ -176,6 +176,16 @@ def test_fs_adapter_is_remote_only_when_shared(
         assert adapter.get_memory_tags() == expected
 
 
+def test_fault_inject_adapter_reports_shared_inner_as_remote(tmp_path: Path) -> None:
+    """A shared inner adapter stays remote behind the fault-inject wrapper."""
+    spec = {
+        "type": "fault_inject",
+        "inner": {"type": "fs", "base_path": str(tmp_path), "shared": True},
+    }
+    with _adapter(spec) as adapter:
+        assert adapter.get_memory_tags() == REMOTE_STORAGE
+
+
 def test_fault_inject_adapter_forwards_inner_tags() -> None:
     spec = {
         "type": "fault_inject",

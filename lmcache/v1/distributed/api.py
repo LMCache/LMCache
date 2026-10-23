@@ -544,17 +544,29 @@ class PrefetchTaskSpec:
             reader that will retrieve it. Ignored under ``NO_LOCK``.
         fetching_policy: See :data:`FetchingPolicy`.
         lock_mode: See :class:`PrefetchLockMode`.
+        allowed_l1_memory_tags: Memory tags of the L1 managers whose resident
+            objects count as hits. ``None`` allows every L1 manager; an empty
+            set allows none.
+        allowed_l2_memory_tags: Memory tags of the L2 adapters to look up and
+            load from. ``None`` allows every L2 adapter; an empty set allows
+            none.
 
     Note:
         Every key group holds the same number of keys (``group_size``). The
         groups may be listed in any order; the prefetch result is reported
         per group, in the same order as ``key_groups``.
+
+        Objects loaded from an L2 adapter land in that adapter's affinity L1
+        manager even when its tags are not in ``allowed_l1_memory_tags``. A
+        key already resident there cannot be loaded again and is a miss.
     """
 
     key_groups: list[GroupedObjectKeys]
     num_kv_readers: int = 1
     fetching_policy: FetchingPolicy = "prefix"
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
+    allowed_l1_memory_tags: frozenset[MemoryTags] | None = None
+    allowed_l2_memory_tags: frozenset[MemoryTags] | None = None
 
     def __post_init__(self) -> None:
         if not self.key_groups:
