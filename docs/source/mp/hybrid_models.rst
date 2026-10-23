@@ -35,9 +35,12 @@ Recipe pages for the validated hybrid-attention architectures:
    * - gpt-oss
      - Sliding-window + full
      - :doc:`/recipes/gpt_oss`
-   * - Qwen3.5 / Qwen3.6 series
+   * - Qwen3.5 / Qwen3.6 / Qwen3.8 series
      - Mamba / GDN + full
      - :doc:`/recipes/qwen3_5`
+   * - Qwen3.8-Flash-Next
+     - GDN linear-attention + QSA sparse full (scratch ring)
+     - :doc:`/recipes/qwen3_8_flash_next`
    * - Kimi-Linear
      - KDA linear-attention + MLA full
      - :doc:`/recipes/kimi_linear`
@@ -47,9 +50,15 @@ Recipe pages for the validated hybrid-attention architectures:
    * - DeepSeek-V4-Flash
      - Sparse-MLA (multiple KV groups)
      - :doc:`/recipes/deepseek_v4_flash`
+   * - DeepSeek-V4.1-Flash
+     - Sparse-MLA + per-layer sliding window (9 KV groups, scratch ring)
+     - :doc:`/recipes/deepseek_v41_flash`
    * - GLM 5.1/5.2
      - Dynamic Sparse Attention (multiple KV groups)
      - :doc:`/recipes/glm5_2`
+   * - GLM-5.3
+     - Dynamic Sparse Attention (single KV group)
+     - :doc:`/recipes/glm5_3`
    * - MiniMax-M3
      - Sparse attention + lightning indexer (mixed KV formats in one group)
      - :doc:`/recipes/minimax_m3`
@@ -62,10 +71,13 @@ Recipe pages for the validated hybrid-attention architectures:
    /recipes/gemma4
    /recipes/gpt_oss
    /recipes/qwen3_5
+   /recipes/qwen3_8_flash_next
    /recipes/kimi_linear
    /recipes/kimi_k3
    /recipes/deepseek_v4_flash
+   /recipes/deepseek_v41_flash
    /recipes/glm5_2
+   /recipes/glm5_3
    /recipes/minimax_m3
 
 What Works
@@ -97,6 +109,10 @@ configuration. Examples:
 
 Just point vLLM at the LMCache server as usual (see :doc:`/getting_started/quickstart`); LMCache
 detects the model's KV cache groups automatically at registration time.
+
+Per-request scratch groups are excluded from caching, including on older vLLM
+forks that mark them with ``participates_in_prefix_caching=False`` instead of
+``prefix_cacheable=False``.
 
 .. note::
 
@@ -134,8 +150,9 @@ Mamba / Linear-Attention Hybrids
 --------------------------------
 
 Models that interleave **Mamba / Gated-DeltaNet (GDN) linear-attention layers**
-with full attention — the Qwen3.5 and Qwen3.6 series (``Qwen/Qwen3.5-0.8B``,
-``Qwen/Qwen3.6-27B``, …), Qwen3-Next, Kimi-Linear
+with full attention — the Qwen3.5, Qwen3.6 and Qwen3.8 series
+(``Qwen/Qwen3.5-0.8B``, ``Qwen/Qwen3.6-27B``, ``Qwen/Qwen3.8-27B``, …),
+Qwen3-Next, Kimi-Linear
 (``moonshotai/Kimi-Linear-48B-A3B-Instruct``), Kimi K3
 (``moonshotai/Kimi-K3``), and other GDN hybrids — are supported.
 Unlike a paged key/value cache, their linear-attention layers keep a recurrent
@@ -152,9 +169,9 @@ is identical across models.
 Step 1 — find the model's unified block size ``N``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-``N`` is the **single number** that drives every other setting: the LMCache
-server's ``--chunk-size`` and vLLM's ``--max-num-batched-tokens`` are both
-derived from it (step 2). Get it wrong and LMCache raises at engine startup.
+``N`` is the **single number** that drives every other setting: LMCache uses it
+to negotiate a compatible chunk size, and vLLM's
+``--max-num-batched-tokens`` is derived from it (step 2).
 
 For a Mamba / GDN hybrid, vLLM forces **one** block size across all KV cache
 groups, chosen large enough that an attention page is at least as big as a
@@ -201,6 +218,9 @@ example:
    * - ``Qwen/Qwen3.6-27B``
      - 784
      - 1
+   * - ``Qwen/Qwen3.8-27B``
+     - 784
+     - 1
    * - ``Qwen/Qwen3.5-0.8B``
      - 544
      - 1
@@ -214,15 +234,18 @@ example:
 Step 2 — derive the required flags from ``N``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-#. **LMCache server** ``--chunk-size`` **= N** (or any multiple of ``N``) **and**
-   ``--separate-object-groups``. The chunk-size rule is enforced by the
-   connector (it must be a multiple of vLLM's unified block size, or
-   registration fails); ``--separate-object-groups`` gives the
-   linear-attention layers their own cache objects and is required for these
-   hybrids::
+#. **LMCache server** uses ``--chunk-size`` as a minimum and requires
+   ``--separate-object-groups``. The connector automatically negotiates the
+   smallest multiple of ``N`` that is at least the configured minimum;
+   ``--separate-object-groups`` gives the linear-attention layers their own
+   cache objects and is required for these hybrids::
 
-       lmcache server --chunk-size 784 --separate-object-groups \
+       lmcache server --chunk-size 256 --separate-object-groups \
            --l1-size-gb 100 --eviction-policy LRU
+
+   For example, ``N = 784`` resolves this minimum to 784, while ``N = 544``
+   resolves it to 544. See :doc:`chunk_size_negotiation` for the full
+   lifecycle and mixed-model constraints.
 
 #. **vLLM** ``--max-num-batched-tokens`` **≥ N** — a scheduler step must advance
    at least one whole block (``align`` snapshots the Mamba state only at the
@@ -243,9 +266,10 @@ Step 2 — derive the required flags from ``N``
            --kv-transfer-config \
            '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
-So for a freshly-probed model the whole derivation is: read ``N`` (step 1), then
-pass ``--chunk-size N --separate-object-groups`` to the server and
-``--max-num-batched-tokens N`` to vLLM.
+So for a freshly-probed model the whole derivation is: read ``N`` (step 1),
+pass ``--separate-object-groups`` to the server, and use
+``--max-num-batched-tokens N`` for the simplest vLLM configuration. The
+server's configured chunk-size minimum can stay at its default.
 
 No ``--no-disable-hybrid-kv-cache-manager`` or attention-backend flag is needed;
 ``LMCacheMPConnector`` advertises hybrid support and vLLM auto-selects the GDN
@@ -266,8 +290,8 @@ Caveats
   is not validated.
 - vLLM's Mamba prefix caching in ``align`` mode is marked experimental upstream.
 
-See the :doc:`Qwen3.5 / Qwen3.6 recipe <../recipes/qwen3_5>` for the validated
-end-to-end commands and the per-model block sizes.
+See the :doc:`Qwen3.5 / Qwen3.6 / Qwen3.8 recipe <../recipes/qwen3_5>` for the
+validated end-to-end commands and the per-model block sizes.
 
 Verifying Correctness
 ---------------------

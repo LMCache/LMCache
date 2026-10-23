@@ -5,6 +5,7 @@ checkpoint costs."""
 # Standard
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 import time
 
@@ -33,6 +34,7 @@ from lmcache.v1.mp_coordinator.persistence.durable_component import (
 )
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 from lmcache.v1.mp_coordinator.persistence.store import LocalArtifactStore
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
@@ -43,7 +45,9 @@ class _Coordinator:
     def __init__(self) -> None:
         self.directory = KeyDirectory()
         self.usage = CacheUsageManager()
-        self.controller = FleetEvictionController(usage_manager=self.usage)
+        self.controller = FleetEvictionController(
+            usage_manager=self.usage, registry=InstanceRegistry()
+        )
         broadcaster = CacheEventBroadcaster()
         broadcaster.register_consumer(self.directory)
         broadcaster.register_consumer(self.usage)
@@ -107,6 +111,20 @@ class TestRoundTrip:
         assert restarted.directory.stats().num_keys == 3
         assert restarted.usage.get_salt_bytes(Tier.L2, "") == 2048
         assert _capture(restarted) == _capture(live)
+
+    def test_a_restart_keeps_measuring_dropped_events(self, tmp_path: Path):
+        """The last dropped_events count survives the msgpack round trip, so
+        the first report after a restart counts only what is new."""
+        store = LocalArtifactStore(tmp_path / "checkpoint")
+        live = _Coordinator()
+        live.gate.ingest(replace(_store(seq=1, keys=[_key(1)]), dropped_events=6))
+        save_checkpoint(store, live.quiesce, live.components)
+
+        restarted = _Coordinator()
+        load_checkpoint(store, restarted.components)
+        restarted.gate.ingest(replace(_store(seq=2, keys=[_key(2)]), dropped_events=9))
+
+        assert restarted.gate.stats().streams["node-a"].events_dropped == 3
 
     def test_restored_cursors_fence_a_restarted_emitter(self, tmp_path: Path):
         """Placements are only fenceable if the cursor dating them comes

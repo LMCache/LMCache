@@ -7,9 +7,10 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.cache_controller.message import BatchedKVOperationMsg, OpType
+from lmcache.inprocess.v1.pin_monitor import PinMonitor
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.cache_controller.message import BatchedKVOperationMsg, OpType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_management import (
@@ -17,7 +18,6 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from tests.v1.utils import create_test_memory_obj
 import lmcache.v1.storage_backend.local_cpu_backend as local_cpu_backend_module
@@ -416,6 +416,32 @@ class TestLocalCPUBackend:
 
         local_cpu_backend.memory_allocator.close()
 
+    def test_allocate_zero_size_does_not_evict(self, local_cpu_backend):
+        """A zero-byte request must fail without evicting cached objects.
+
+        ``allocate()`` treats a failed allocation as memory pressure: it starts
+        evicting hot-cache objects, and with ``busy_loop=True`` it keeps
+        retrying instead of returning. A zero-byte request is a caller bug, so it
+        has to be rejected before that path is entered.
+        """
+        keys = [create_test_key(f"key_{i}") for i in range(3)]
+        memory_objs = [create_test_memory_obj() for _ in keys]
+        for key, memory_obj in zip(keys, memory_objs, strict=True):
+            local_cpu_backend.submit_put_task(key, memory_obj)
+        assert len(local_cpu_backend.hot_cache) == 3
+
+        with pytest.raises(ValueError, match="size must be greater than 0"):
+            local_cpu_backend.allocate(torch.Size([0]), torch.bfloat16)
+
+        assert len(local_cpu_backend.hot_cache) == 3
+
+        # Release the backend's reference and the one held by this test.
+        for key, memory_obj in zip(keys, memory_objs, strict=True):
+            local_cpu_backend.remove(key)
+            memory_obj.ref_count_down()
+
+        local_cpu_backend.memory_allocator.close()
+
     def test_allocate_with_layerwise_config(self, memory_allocator):
         """Test allocate() with layerwise configuration."""
         config = create_test_config(use_layerwise=True, enable_blending=True)
@@ -548,6 +574,63 @@ class TestLocalCPUBackend:
 
 
 @pytest.mark.no_shared_allocator
+class TestLocalCPUBackendClear:
+    """Contract tests for LocalCPUBackend.clear()."""
+
+    def test_clear_removes_evictable_entries_and_returns_token_count(
+        self, local_cpu_backend
+    ):
+        keys = [create_test_key(f"clear_{i}") for i in range(3)]
+        for key in keys:
+            memory_obj = create_test_memory_obj()  # 16 tokens (KV_T2D, dim 1)
+            local_cpu_backend.submit_put_task(key, memory_obj)
+            memory_obj.ref_count_down()  # drop the creator's reference
+
+        assert local_cpu_backend.clear() == 3 * 16
+        assert not any(local_cpu_backend.contains(key) for key in keys)
+        local_cpu_backend.memory_allocator.close()
+
+    def test_clear_keeps_pinned_entries(self, local_cpu_backend):
+        pinned_key = create_test_key("clear_pinned")
+        free_key = create_test_key("clear_free")
+        for key in (pinned_key, free_key):
+            memory_obj = create_test_memory_obj()
+            local_cpu_backend.submit_put_task(key, memory_obj)
+            memory_obj.ref_count_down()
+        assert local_cpu_backend.pin(pinned_key)
+
+        assert local_cpu_backend.clear() == 16
+        assert local_cpu_backend.contains(pinned_key)
+        assert not local_cpu_backend.contains(free_key)
+
+        assert local_cpu_backend.unpin(pinned_key)
+        local_cpu_backend.clear()
+        local_cpu_backend.memory_allocator.close()
+
+    def test_clear_keeps_entries_still_referenced(self, local_cpu_backend):
+        key = create_test_key("clear_referenced")
+        memory_obj = create_test_memory_obj()
+        local_cpu_backend.submit_put_task(key, memory_obj)
+        # The creator's reference is still held, so the entry is not evictable.
+
+        assert local_cpu_backend.clear() == 0
+        assert local_cpu_backend.contains(key)
+
+        memory_obj.ref_count_down()
+        assert local_cpu_backend.clear() == 16
+        local_cpu_backend.memory_allocator.close()
+
+    def test_clear_empty_cache_returns_zero(self, local_cpu_backend):
+        assert local_cpu_backend.clear() == 0
+        local_cpu_backend.memory_allocator.close()
+
+    def test_clear_returns_zero_when_hot_cache_disabled(
+        self, local_cpu_backend_disabled
+    ):
+        assert local_cpu_backend_disabled.clear() == 0
+        local_cpu_backend_disabled.memory_allocator.close()
+
+
 class TestLocalCPUBackendAllocatorRecovery:
     def teardown_method(self, method):
         LMCStatsMonitor.unregister_all_metrics()

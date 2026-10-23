@@ -5,10 +5,14 @@
 ```
 lmcache/integration/tensorrt_llm/
 ├── __init__.py             # Optional-import surface
-├── utils.py                # ENGINE_NAME, lmcache_get_config,
-│                           # create_trtllm_metadata
-├── tensorrt_adapter.py     # In-process — engine in TRT-LLM process
+├── tensorrt_adapter.py     # Compatibility exports for the lmcache preset
 └── tensorrt_mp_adapter.py  # Multi-process — engine in standalone server
+
+lmcache/inprocess/integration/tensorrt_llm/
+├── __init__.py
+├── utils.py               # ENGINE_NAME, lmcache_get_config,
+│                          # create_trtllm_metadata
+└── tensorrt_adapter.py    # In-process — engine in TRT-LLM process
 ```
 
 Both adapters subclass TRT-LLM's `KvCacheConnectorScheduler` and
@@ -26,6 +30,11 @@ maps:
 | `lmcache` | `lmcache.integration.tensorrt_llm.tensorrt_adapter` | `LMCacheKvConnectorScheduler` | `LMCacheKvConnectorWorker` |
 | `lmcache-mp` | `lmcache.integration.tensorrt_llm.tensorrt_mp_adapter` | `LMCacheMPKvConnectorScheduler` | `LMCacheMPKvConnectorWorker` |
 
+The `lmcache` preset still uses the old module path in TensorRT-LLM's registry.
+That module re-exports the scheduler and worker from the canonical
+`lmcache.inprocess.integration.tensorrt_llm.tensorrt_adapter` module until
+upstream migrates its registry.
+
 ## Lifecycle
 
 | Stage | TRT-LLM hook | LMCache call |
@@ -42,7 +51,7 @@ The two modes share the lifecycle but differ in where state lives.
 
 | Aspect | In-process (`lmcache`) | Multi-process (`lmcache-mp`) |
 |---|---|---|
-| LMCache engine | Singleton inside the TRT-LLM process | Standalone ZMQ server |
+| LMCache engine | Singleton inside the TRT-LLM process | Standalone request server (ZMQ or gRPC) |
 | Tensor sharing | Direct (same process) | `RawCudaIPCWrapper` (cudaIpc + cupy DLPack) |
 | Lookup | `engine.lookup(tokens)` returns chunk count | `LOOKUP` enqueues prefetch; `QUERY_PREFETCH_STATUS` reads result keyed by `request_id` |
 | Configuration | `LMCACHE_CONFIG_FILE` env var | Same; plus `server_url` in connector config (or `LMCACHE_SERVER_URL` env) |
@@ -66,7 +75,7 @@ V3's transfer path is wrong for TRT-LLM:
 implementation. It also exposes a bespoke
 `register_kv_caches(kv_cache_tensor)` method called by the worker once
 at init — separate from `to_gpu`/`from_gpu`. The factory in
-`lmcache/v1/gpu_connector/__init__.py` constructs it from
+`lmcache/inprocess/v1/gpu_connector/__init__.py` constructs it from
 `LMCacheMetadata` plus the device, and the adapter wires the pool
 tensor in afterwards.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Resolve the vLLM nightly version that this build should install.
+# Resolve the pinned vLLM wheel version and XPU runtime image for this build.
 #
 # Resolution order (first non-empty wins):
 #   1. PINNED_VLLM_VERSION env var  -- explicit per-build override.
@@ -35,6 +35,9 @@
 #
 # The script never fails the build: a missing/unreachable pin file just
 # falls through to the unpinned path, mirroring the previous behaviour.
+#
+# XPU image resolution selects the latest Buildkite-verified digest. Without
+# one, it uses the configured stable XPU release image.
 
 # Allow re-sourcing without "unbound variable" complaints under set -u.
 PINNED_VLLM_VERSION="${PINNED_VLLM_VERSION:-}"
@@ -81,20 +84,6 @@ if [[ -z "${PINNED_VLLM_VERSION}" && "${USE_PINNED_VLLM}" == "true" ]]; then
     fi
 fi
 
-# The 0.28.1rc1 nightlies break DeepSeek-V4-Flash sparse decode on SM120
-# ("eidx must be contiguous", flashinfer _sparse_mla_sm120) at engine start.
-# The canary verifies nightlies with vllm_bench only, so it green-lit that
-# range and dsv4_flash_tp went red from the re-pin onward -- it was green on
-# 0.27.1 the same morning with everything else equal, and the same stack
-# passes on SM90. Clamp back to the last good release until a nightly passes
-# dsv4 again. TODO: drop the clamp and have the canary verify dsv4_flash_tp.
-if [[ "${PINNED_VLLM_VERSION}" == 0.28.1rc1.* ]]; then
-    echo "[resolve-pinned-vllm] pin ${PINNED_VLLM_VERSION} is in the"          "known-bad 0.28.1rc1 range for dsv4_flash_tp; clamping to 0.27.1" >&2
-    PINNED_VLLM_VERSION="0.27.1"
-    PINNED_VLLM_ARCHIVE_INDEX_URL=""
-    PINNED_VLLM_FULL_SHA=""
-fi
-
 export PINNED_VLLM_VERSION
 export PINNED_VLLM_ARCHIVE_INDEX_URL
 export PINNED_VLLM_FULL_SHA
@@ -108,3 +97,44 @@ if [[ -n "${PINNED_VLLM_VERSION}" ]]; then
 else
     echo "[resolve-pinned-vllm] No pinned vLLM; will install latest nightly" >&2
 fi
+
+# XPU runtime image pin. Kept in this resolver so wheel and image runtime
+# coordinates share one loader and one append-only history source.
+PINNED_XPU_IMAGE="${PINNED_XPU_IMAGE:-}"
+USE_PINNED_XPU_RUNTIME="${USE_PINNED_XPU_RUNTIME:-true}"
+LMCACHE_XPU_RUNTIME_HISTORY_URL="${LMCACHE_XPU_RUNTIME_HISTORY_URL:-https://raw.githubusercontent.com/LMCache/LMCache/buildkite_latest_tested_vllm/tested_runtimes.jsonl}"
+XPU_RELEASE_IMAGE="${XPU_RELEASE_IMAGE:-vllm/vllm-openai-xpu:v0.26.0}"
+
+latest_xpu_image_from_history() {
+    local history="$1"
+
+    printf '%s\n' "${history}" | awk '
+        /"backend": "xpu"/ &&
+        /"runtime_id": "linux-intel-xpu"/ &&
+        /"installation_form": "image"/ &&
+        /"status": "tested"/ &&
+        /"validator": "buildkite"/ &&
+        /"image_ref": ".*@sha256:/ {
+            image_ref = $0
+            sub(/^.*"image_ref": "/, "", image_ref)
+            sub(/".*$/, "", image_ref)
+            latest = image_ref
+        }
+        END { print latest }
+    '
+}
+
+if [[ -z "${PINNED_XPU_IMAGE}" && "${USE_PINNED_XPU_RUNTIME}" == "true" ]]; then
+    history="$(curl -fsSL --connect-timeout 5 --max-time 15 "${LMCACHE_XPU_RUNTIME_HISTORY_URL}" 2>/dev/null || true)"
+    if [[ -n "${history}" ]]; then
+        PINNED_XPU_IMAGE="$(latest_xpu_image_from_history "${history}")"
+    fi
+fi
+
+if [[ -z "${PINNED_XPU_IMAGE}" ]]; then
+    PINNED_XPU_IMAGE="${XPU_RELEASE_IMAGE}"
+    echo "[resolve-pinned-vllm] No verified XPU nightly image; using XPU release ${PINNED_XPU_IMAGE}" >&2
+else
+    echo "[resolve-pinned-vllm] Using pinned XPU image: ${PINNED_XPU_IMAGE}" >&2
+fi
+export PINNED_XPU_IMAGE

@@ -8,6 +8,10 @@ format, format-aware accessors in ``gpu_connector/utils.py``, the
 TensorRT-LLM to be installed.
 """
 
+# Standard
+from typing import cast
+from unittest.mock import Mock, patch
+
 # Third Party
 import pytest
 import torch
@@ -15,6 +19,7 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
+from lmcache.v1.memory_management import MemoryObj
 import lmcache.lmcache_native as lmcache_native
 
 # TRT-LLM connector path is CUDA-only.
@@ -279,7 +284,7 @@ class TestAccessorsTRTLLM:
 class TestTRTLLMGPUConnector:
     def test_construct(self) -> None:
         # First Party
-        from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
+        from lmcache.inprocess.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
         device = torch.device(f"{torch_device_type}:0")
         c = TRTLLMGPUConnector(
@@ -297,7 +302,7 @@ class TestTRTLLMGPUConnector:
 
     def test_get_shape(self) -> None:
         # First Party
-        from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
+        from lmcache.inprocess.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
         device = torch.device(f"{torch_device_type}:0")
         c = TRTLLMGPUConnector(
@@ -314,7 +319,7 @@ class TestTRTLLMGPUConnector:
 
     def test_register_kv_caches_with_4d_tensor(self) -> None:
         # First Party
-        from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
+        from lmcache.inprocess.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
         device = torch.device(f"{torch_device_type}:0")
         nh, bs, hs = 2, 16, 64
@@ -342,6 +347,51 @@ class TestTRTLLMGPUConnector:
         assert c.shape_desc.nh == nh
         assert c.shape_desc.hs == hs
 
+    def test_batched_store_respects_kernel_object_limit(self) -> None:
+        # First Party
+        from lmcache.inprocess.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
+
+        device = torch.device(f"{torch_device_type}:0")
+        num_chunks = 5
+        chunk_size = 16
+        c = TRTLLMGPUConnector(
+            num_kv_heads=1,
+            head_dim=16,
+            hidden_dim_size=16,
+            num_layers=1,
+            chunk_size=chunk_size,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        kv_cache = torch.zeros(
+            num_chunks,
+            1,
+            2,
+            chunk_size * 16,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        c.register_kv_caches(kv_cache)
+
+        memory_objs = [
+            cast(MemoryObj, Mock(tensor=torch.empty(1))) for _ in range(num_chunks)
+        ]
+        starts = [i * chunk_size for i in range(num_chunks)]
+        ends = [(i + 1) * chunk_size for i in range(num_chunks)]
+
+        with patch(
+            "lmcache.inprocess.v1.gpu_connector.gpu_connectors."
+            "device_ops.multi_layer_block_kv_transfer"
+        ) as transfer:
+            c.batched_from_gpu(
+                memory_objs,
+                starts,
+                ends,
+                block_ids=list(range(num_chunks)),
+            )
+
+        assert [len(call.args[1]) for call in transfer.call_args_list] == [4, 1]
+
 
 class TestRawCudaIPCWrapperType:
     """Subclass relationship — without invoking CUDA IPC syscalls."""
@@ -351,7 +401,7 @@ class TestRawCudaIPCWrapperType:
         from lmcache.v1.multiprocess.custom_types import (
             DeviceIPCWrapper,
         )
-        from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
+        from lmcache.v1.platform.devices.cuda.ipc_wrapper import RawCudaIPCWrapper
 
         assert issubclass(RawCudaIPCWrapper, DeviceIPCWrapper)
 
@@ -364,7 +414,7 @@ class TestRawCudaIPCWrapperType:
             DeviceIPCWrapper,
             KVCache,
         )
-        from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
+        from lmcache.v1.platform.devices.cuda.ipc_wrapper import RawCudaIPCWrapper
 
         assert KVCache == list[DeviceIPCWrapper]
         # Static check substitute: a concrete wrapper fits the list type.

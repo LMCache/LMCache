@@ -60,6 +60,10 @@ class IPCCacheServerKey:
     # ObjectKey.cache_salt). Validated in __post_init__.
     cache_salt: str = ""
 
+    # Request-scoped LMCache configuration passed across the IPC boundary.
+    # It is metadata, not part of cache identity.
+    request_configs: dict[str, Any] | None = field(default=None, compare=False)
+
     # Number of workers that retrieve this key's object; the server reserves
     # that many read locks (see ``require_num_kv_readers``). 0 = not sent;
     # lookups reject it.
@@ -95,6 +99,7 @@ class IPCCacheServerKey:
         request_id: str = "",
         cache_salt: str = "",
         num_kv_readers: int = 1,
+        request_configs: dict[str, Any] | None = None,
     ) -> "IPCCacheServerKey":
         """Create a key from token ids. Only used by the tests."""
         return cls(
@@ -107,6 +112,7 @@ class IPCCacheServerKey:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            request_configs=request_configs,
         )
 
     def require_num_kv_readers(self) -> int:
@@ -138,6 +144,7 @@ class IPCCacheServerKey:
             end=self.end,
             request_id=self.request_id,
             cache_salt=self.cache_salt,
+            request_configs=self.request_configs,
         )
 
 
@@ -157,6 +164,9 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         hidden_dim_size: Flattened hidden dimension per token.
         dtype_str: Torch dtype name (e.g. ``"float16"``).
         use_mla: Whether the worker KV format is MLA.
+        num_physical_slots: Number of physical KV slots gathered into one
+            LMCache chunk. ``None`` accepts the legacy protocol, where the
+            server assumed one physical slot per logical token.
     """
 
     instance_id: int
@@ -167,6 +177,31 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     hidden_dim_size: int
     dtype_str: str
     use_mla: bool
+    num_physical_slots: int | None = None
+
+
+@dataclass
+class RegisterEngineDrivenContextResponse:
+    """Shared response for engine-driven context registration."""
+
+    shm_name: str = ""
+    pool_size: int = 0
+
+
+@dataclass
+class PrepareStoreResponse:
+    """Shared response for an engine-driven store preparation."""
+
+    context: dict = field(default_factory=dict)
+
+
+@dataclass
+class PrepareRetrieveResponse:
+    """Shared response for an engine-driven retrieve preparation."""
+
+    success: bool
+    data: bytes = b""
+    context: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -278,3 +313,38 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
         )
 
     return msgspec.msgpack.Decoder(ext_hook=ext_hook, dec_hook=dec_hook, type=type)
+
+
+# Experimental feature advertised through GET_EXPERIMENTAL by the opt-in qstore
+# server module (lmcache.v1.multiprocess.plugin_modules.qstore); the vLLM
+# connector requests it for ``lmcache.mp.transfer_intermediate_tensors``.
+TRANSFER_QUERY = "transfer_query"
+KV_EVENT_KIND_STORED = "stored"
+KV_EVENT_KIND_REMOVED = "removed"
+KV_EVENT_MEDIUM_CPU = "CPU"
+
+
+@dataclass
+class KVEventRecord:
+    """Sequenced CPU cache change; stores carry one chunk's tokens and parent."""
+
+    seq: int
+    kind: str
+    medium: str
+    model_name: str
+    block_hashes: list[bytes]
+    parent_block_hash: bytes | None
+    token_ids: list[int]
+
+
+@dataclass
+class KVEventBatch:
+    """One ordered batch. Incarnation changes or lost=True require withdrawal
+    of earlier announcements; enabled=False ends the stream. Resume at next_cursor.
+    """
+
+    enabled: bool
+    incarnation: int
+    next_cursor: int
+    lost: bool
+    events: list[KVEventRecord]

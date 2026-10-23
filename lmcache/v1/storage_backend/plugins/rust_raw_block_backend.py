@@ -411,10 +411,31 @@ class RustRawBlockBackend(StoragePluginInterface):
         transfer_spec: Any = None,  # noqa: ARG002
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> list[Future] | None:
+        """Schedule writes unless the native io_uring worker has failed.
+
+        Args:
+            keys: Cache keys corresponding to ``objs``.
+            objs: Memory objects retained until their writes finish.
+            transfer_spec: Unused transfer metadata.
+            on_complete_callback: Callback for each successfully stored key.
+
+        Returns:
+            Scheduled futures, or None when no writes are needed or the native
+            worker has failed. Worker failure skips writes without retaining
+            objects or raising to the caller.
+
+        Raises:
+            RuntimeError: If no event loop exists.
+        """
         del transfer_spec
         loop = self.loop
         if loop is None:
             raise RuntimeError("RustRawBlockBackend requires an asyncio event loop")
+        try:
+            self._core.raise_if_failed()
+        except RuntimeError:
+            logger.exception("Skipping raw-block store after native worker failure")
+            return None
 
         pending: list[tuple[CacheEngineKey, RawBlockKeySpec, MemoryObj]] = []
         for key, obj in zip(keys, objs, strict=False):
@@ -606,7 +627,6 @@ class RustRawBlockBackend(StoragePluginInterface):
             load_results = self._core.load_many_into(
                 [spec.encoded for spec in load_specs],
                 allocated,
-                raise_on_error=True,
             )
             loaded_count = 0
             for ok in load_results:
@@ -645,7 +665,6 @@ class RustRawBlockBackend(StoragePluginInterface):
 
         Raises:
             RuntimeError: If the local CPU allocator backend is unavailable.
-            Exception: Propagates raw-device load failures from the core.
         """
         if not keys:
             return []
@@ -694,7 +713,6 @@ class RustRawBlockBackend(StoragePluginInterface):
 
         Raises:
             RuntimeError: If the local CPU allocator backend is unavailable.
-            Exception: Propagates raw-device load failures from the core.
         """
         del lookup_id, transfer_spec
         return await asyncio.to_thread(self._batched_get_prefix, keys)

@@ -56,6 +56,7 @@ enum class EngineKVFormat : int {
   /*
   used by:
   - vLLM MLA
+  - SGLang MLA via MP daemon
   */
 
   TWO_X_NL_X_NBBS_NH_HS = 4,
@@ -153,6 +154,32 @@ enum class EngineKVFormat : int {
   One list entry per layer; each entry is a (K, V) pair of paged tensors.
   */
   NL_X_TWO_X_NB_BS_NH_HS = 16,
+
+  /*
+  used by:
+  - vLLM-Ascend per-layer MLA / DSA plane tuples (DeepSeek-V2/V3 MLA, V3.2 DSA)
+  One list entry per layer; each entry is a tuple of NP planes -- 1 latent-only,
+  2 MLA (latent, rope) or 3 DSA (latent, rope, dsa) -- of paged tensors
+  [num_blocks, block_size, 1, width_i]: one latent KV head, width_i per plane.
+  */
+  NL_X_NP_X_NB_BS_ONE_HS = 17,
+
+  /*
+  used by:
+  - SGLang unified MP independently allocated K/V components
+  physical shape per entry: [num_blocks, block_size, num_heads, head_size]
+  Each entry is one component plane; K and V are separate list entries.
+  */
+  NL_X_NB_BS_NH_HS = 18,
+
+  /*
+  used by:
+  - vLLM-RBLN default attention kernels (HND layout), blocks-first
+  physical shape per layer: [num_blocks, 2, num_heads, 1, block_size, head_size]
+  Axis 3 is always 1 (an RBLN attention-backend requirement), so the bytes and
+  strides are those of NL_X_NB_TWO_NH_BS_HS one axis short.
+  */
+  NL_X_NB_TWO_NH_ONE_BS_HS = 19,
 };
 
 // __host__ __device__ under CUDA/HIP so the kernels can call these; the guard
@@ -268,6 +295,18 @@ LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
     case EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS:
       facts.is_layer_list = true;
       facts.is_kv_second_tuple = true;
+      break;
+    case EngineKVFormat::NL_X_NP_X_NB_BS_ONE_HS:
+      facts.is_layer_list = true;
+      facts.is_mla = true;
+      facts.is_kv_second_tuple = true;
+      break;
+    case EngineKVFormat::NL_X_NB_BS_NH_HS:
+      facts.is_layer_list = true;
+      break;
+    case EngineKVFormat::NL_X_NB_TWO_NH_ONE_BS_HS:
+      facts.is_layer_list = true;
+      facts.is_hnd = true;
       break;
     default:
       unsupported_engine_kv_format();

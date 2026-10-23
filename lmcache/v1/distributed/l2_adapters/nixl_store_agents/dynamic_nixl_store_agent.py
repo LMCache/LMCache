@@ -25,6 +25,10 @@ from lmcache.v1.distributed.internal_api import L1MemoryDesc
 def _object_key_to_filename(key: ObjectKey) -> str:
     """Derive a deterministic storage object name from an object key.
 
+    A non-empty ``cache_salt`` is appended as a trailing ``@``-delimited
+    field, matching the S3 and filesystem L2 adapters. An empty salt retains
+    the exact legacy filename.
+
     Args:
         key: Key identifying the stored cache object.
 
@@ -33,22 +37,21 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     """
     safe_model_name = key.model_name.replace("/", "--")
     chunk_hex = key.chunk_hash.hex()
+    salt_suffix = f"@{key.cache_salt}" if key.cache_salt else ""
     return (
-        f"{safe_model_name}_{key.kv_rank:08x}_{key.object_group_id:x}_{chunk_hex}.bin"
+        f"{safe_model_name}_{key.kv_rank:08x}_"
+        f"{key.object_group_id:x}_{chunk_hex}{salt_suffix}.bin"
     )
 
 
 def _object_key_to_relpath(key: ObjectKey) -> str:
-    """Relative path ``<hex[:2]>/<hex[2:4]>/filename`` — a 2-level hash-prefix
-    subdir tree (GDS-style) keyed on the chunk-hash hex.
+    """Return a two-level chunk-hash-sharded path for ``key``.
 
-    ``hex`` is ``chunk_hash.hex()``, the same value embedded in the filename, so
-    the two subdir levels are the first four hex chars of the hash and match the
-    filename's hash prefix (e.g. ``834e...`` -> ``83/4e/``). Spreads files
-    across up to 256*256 subdirectories instead of one flat directory.
+    The shard remains independent of ``cache_salt``; salted keys with the same
+    chunk hash have distinct filenames inside the same shard.
     """
-    h = key.chunk_hash.hex()
-    return os.path.join(h[:2], h[2:4], _object_key_to_filename(key))
+    chunk_hex = key.chunk_hash.hex()
+    return os.path.join(chunk_hex[:2], chunk_hex[2:4], _object_key_to_filename(key))
 
 
 class DynamicNixlStorageAgent(ABC):
@@ -179,14 +182,34 @@ class DynamicNixlStorageAgent(ABC):
             self.nixl_agent.release_xfer_handle(handle)
 
     async def _post_non_blocking(self, handle: NixlXferHandle) -> None:
-        """Await a nixl transfer until done."""
+        """Await a NIXL transfer until done.
+
+        Spin-checks up to 20 times without yielding before falling back to a
+        1 ms cooperative sleep. ``io_uring``-backed backends (IBM_SCALE, GDS)
+        typically complete in <1 ms and will be "DONE" during the spin,
+        eliminating the 10 ms floor that the old unconditional sleep imposed.
+
+        The sleep is placed *before* ``check_xfer_state`` in the back-off
+        loop so that a transfer completing on the first check exits
+        immediately without paying an extra sleep on the way out.
+        """
         state = self.nixl_agent.transfer(handle)
+        # Fast path: spin-check without yielding for io_uring-backed backends.
+        if state != "DONE" and state != "ERR":
+            for _ in range(20):
+                try:
+                    state = self.nixl_agent.check_xfer_state(handle)
+                except nixlBind.nixlBackendError:
+                    raise
+                if state == "DONE" or state == "ERR":
+                    break
+        # Back-off: sleep *before* each check so a transfer completing on
+        # the first poll exits immediately without paying an extra sleep.
         while state != "DONE" and state != "ERR":
+            await asyncio.sleep(0.001)
             try:
                 state = self.nixl_agent.check_xfer_state(handle)
             except nixlBind.nixlBackendError:
                 raise
-            if state != "DONE" and state != "ERR":
-                await asyncio.sleep(0.01)
         if state == "ERR":
             raise RuntimeError("NIXL transfer failed")

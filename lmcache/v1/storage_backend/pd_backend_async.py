@@ -18,6 +18,9 @@ import zmq.asyncio
 
 # First Party
 from lmcache import torch_dev
+from lmcache.inprocess.v1.rpc_utils import get_zmq_context
+from lmcache.inprocess.v1.transfer_channel import CreateTransferChannel
+from lmcache.inprocess.v1.transfer_channel.transfer_utils import get_correct_device
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import (
@@ -34,10 +37,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.rpc_utils import get_zmq_context
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
-from lmcache.v1.transfer_channel import CreateTransferChannel
-from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
 logger = init_logger(__name__)
 
@@ -442,7 +442,7 @@ class PDBackendAsync(AllocatorBackendInterface):
         self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> PagedCpuGpuMemoryAllocator:
         if self.corrected_device != "cpu":
-            logger.info(f"Setting cuda device to {self.corrected_device} ")
+            logger.info("Setting cuda device to %s ", self.corrected_device)
             torch_dev.set_device(self.corrected_device)
 
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
@@ -470,10 +470,14 @@ class PDBackendAsync(AllocatorBackendInterface):
 
         if aligned_buffer_size != origin_buffer_size:
             logger.info(
-                f"Auto align pd_buffer_size, origin: {origin_buffer_size}, "
-                f"aligned: {aligned_buffer_size}, chunk size: {chunk_size_bytes}. "
-                f"The remaining {origin_buffer_size - aligned_buffer_size} bytes "
-                f"will not be allocated."
+                "Auto align pd_buffer_size, origin: %s, "
+                "aligned: %s, chunk size: %s. "
+                "The remaining %s bytes "
+                "will not be allocated.",
+                origin_buffer_size,
+                aligned_buffer_size,
+                chunk_size_bytes,
+                origin_buffer_size - aligned_buffer_size,
             )
 
         self._chunk_size_bytes = chunk_size_bytes
@@ -1055,8 +1059,14 @@ class PDBackendAsync(AllocatorBackendInterface):
         :param keys: Cache keys for this batch.
         :param memory_objs: Memory objects to transfer.
         :param transfer_spec: Transfer specification (carries req_id, etc.).
+            ``None`` for local requests, which are not transferred.
         :param on_complete_callback: Optional per-key completion callback.
         """
+        # Skip PD transfer for local requests (no transfer_spec), as PDBackend
+        # does. Requests without kv_transfer_params have no disagg_spec.
+        if transfer_spec is None:
+            return
+
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
@@ -1184,7 +1194,7 @@ class PDBackendAsync(AllocatorBackendInterface):
         socket = async_ctx.socket(zmq.ROUTER)
         alloc_port = self.pd_config.peer_alloc_port
         socket.bind(f"tcp://*:{alloc_port}")
-        logger.info(f"Async mem alloc server listening on port {alloc_port}")
+        logger.info("Async mem alloc server listening on port %s", alloc_port)
         try:
             while self.running:
                 try:

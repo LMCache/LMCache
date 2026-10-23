@@ -7,6 +7,10 @@ to know what the fleet has cached. It holds no policy and drives nothing.
 
 Views may depend on other views, and nothing else -- ``from_config``
 cannot reach a controller, so the direction cannot invert by accident.
+
+In-tree only: which views exist is the coordinator's contract, not
+something an operator adds at startup. An out-of-tree controller reads
+these; what it needs beyond them is its own state.
 """
 
 # Standard
