@@ -11,10 +11,12 @@ hex validity) belong to the HTTP envelopes in :mod:`schemas`.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
 # First Party
+from lmcache.v1.cache_identity import normalize_identity
 from lmcache.v1.distributed.api import EncodedObjectKey, ObjectKey, Tier
 
 # ``token_offset`` value meaning "the emitter did not report a position".
@@ -60,11 +62,30 @@ class BlendNamespace:
         cache_salt: Per-tenant isolation salt applied to the keys.
         world_size: Parallel world size (TP x PP) selecting the rank
             fan-out.
+        tags: Opaque matching tags, snapshotted in canonical order.
     """
 
     model_name: str
     cache_salt: str = ""
     world_size: int = 1
+    tags: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "tags",
+            normalize_identity(self.model_name, self.cache_salt, self.tags),
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.model_name,
+                self.cache_salt,
+                self.world_size,
+                tuple(self.tags.items()),
+            )
+        )
 
     @classmethod
     def from_object_key(cls, key: "ObjectKey") -> "BlendNamespace":
@@ -80,6 +101,7 @@ class BlendNamespace:
             model_name=key.model_name,
             cache_salt=key.cache_salt,
             world_size=ObjectKey.WorldSizeFromKVRank(key.kv_rank),
+            tags=key.identity.tags,
         )
 
 

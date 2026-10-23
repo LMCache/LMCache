@@ -11,6 +11,7 @@ from collections.abc import Callable
 import time
 
 # Third Party
+from fastapi.testclient import TestClient
 import pytest
 
 # First Party
@@ -21,10 +22,12 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
+from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.blend_client import (
     PENDING,
     BlendCoordinatorClient,
 )
+from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.schemas import decode_tokens, encode_tokens
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
@@ -45,6 +48,7 @@ def _directory_request(
                 model_name=payload["model_name"],
                 cache_salt=payload["cache_salt"],
                 world_size=payload["world_size"],
+                tags=payload["tags"],
             )
             matches = directory.blend_match(
                 decode_tokens(payload["tokens_b64"]), namespace
@@ -218,7 +222,7 @@ def test_pending_sentinel_distinct():
 
 
 def test_match_carries_the_namespace_to_the_coordinator():
-    """The server's model, salt, and world size travel with the query."""
+    """The server's complete retrieval namespace travels with the query."""
     sent: list[dict] = []
 
     def capture(method: str, path: str, payload: dict) -> dict:
@@ -228,7 +232,10 @@ def test_match_carries_the_namespace_to_the_coordinator():
     client = BlendCoordinatorClient(request_fn=capture)
     try:
         namespace = BlendNamespace(
-            model_name="llama", cache_salt="tenant-a", world_size=4
+            model_name="llama",
+            cache_salt="tenant-a",
+            world_size=4,
+            tags={"adapter": "a"},
         )
         client.submit_match("r1", [1, 2, 3], namespace)
         _wait_match(client, "r1")
@@ -238,6 +245,7 @@ def test_match_carries_the_namespace_to_the_coordinator():
                 "model_name": "llama",
                 "cache_salt": "tenant-a",
                 "world_size": 4,
+                "tags": {"adapter": "a"},
             }
         ]
     finally:
@@ -253,3 +261,70 @@ def test_another_namespace_gets_no_match_for_the_same_content():
         assert _wait_match(client, "r1") == []
     finally:
         client.close()
+
+
+def test_tagged_match_roundtrip_uses_the_requesters_available_hash() -> None:
+    """Exercise event ingestion and the client/schema/router matching path."""
+    config = MPCoordinatorConfig(
+        health_check_interval=0.0,
+        eviction_check_interval=0.0,
+        enable_blend_lookup=True,
+    )
+    content = list(range(config.chunk_size))
+    with TestClient(create_app(config)) as http:
+        for seq, adapter, chunk_hash in [(1, "a", "aa"), (2, "b", "bb")]:
+            response = http.post(
+                "/events",
+                json={
+                    "batches": [
+                        {
+                            "instance_id": "node-a",
+                            "incarnation": 1,
+                            "seq": seq,
+                            "event_type": "store",
+                            "tier": "l1",
+                            "backend": "dram",
+                            "entries": [
+                                {
+                                    "key": {
+                                        "model_name": MODEL,
+                                        "chunk_hash_hex": chunk_hash,
+                                        "kv_rank": ObjectKey.ComputeKVRank(1, 0, 1, 0),
+                                        "tags": {"adapter": adapter},
+                                    },
+                                    "size_bytes": 100,
+                                    "token_ids": content,
+                                    "token_offset": seq * config.chunk_size,
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+            assert response.status_code == 200, response.text
+
+        def request(
+            method: str, path: str, payload: dict[str, object]
+        ) -> dict[str, object]:
+            """Run the client's request through the coordinator HTTP surface."""
+            response = http.request(method, path, json=payload)
+            response.raise_for_status()
+            body: dict[str, object] = response.json()
+            return body
+
+        client = BlendCoordinatorClient(request_fn=request)
+        try:
+            client.submit_match(
+                "adapter-b",
+                content,
+                BlendNamespace(model_name=MODEL, tags={"adapter": "b"}),
+            )
+            matches = _wait_match(client, "adapter-b")
+            assert isinstance(matches, list)
+            assert [(match.chunk_hash, match.old_st) for match in matches] == [
+                (b"\xbb", 2 * config.chunk_size)
+            ]
+            client.submit_match("untagged", content, NS)
+            assert _wait_match(client, "untagged") == []
+        finally:
+            client.close()

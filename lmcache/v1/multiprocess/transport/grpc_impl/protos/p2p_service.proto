@@ -10,6 +10,7 @@ import "common.proto";
 
 message ObjectKey {
   ObjectKeyIdentity identity = 1;
+  bytes encoded_xattrs = 2;
 }
 
 message TensorShape {

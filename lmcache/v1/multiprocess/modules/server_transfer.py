@@ -29,6 +29,8 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.distributed.storage_manager import StorageManager
 
+TransferKey = tuple[int, IPCCacheServerKey, tuple[tuple[str, str], ...]]
+
 logger = init_logger(__name__)
 
 
@@ -43,12 +45,10 @@ def create_transfer_strategy(
     read_owner_resolver: Callable[[str], dict[ObjectKey, int] | None] | None = None,
     shm_name: str,
     pool_size: int,
-    pending_writes: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
-    pending_reads: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
+    pending_writes: dict[TransferKey, list[ObjectKey]],
+    pending_reads: dict[TransferKey, list[ObjectKey]],
     pending_lock: LockType,
-    transfer_key_factory: Callable[
-        [IPCCacheServerKey, int], tuple[int, IPCCacheServerKey]
-    ],
+    transfer_key_factory: Callable[[IPCCacheServerKey, int], TransferKey],
 ) -> "TransferStrategy":
     """Create the non-GPU transfer strategy for a registered context.
 
@@ -59,7 +59,7 @@ def create_transfer_strategy(
         pending_writes: Map of pending SHM write reservations keyed by transfer key.
         pending_reads: Map of pending SHM read reservations keyed by transfer key.
         pending_lock: Lock guarding shared pending SHM reservation state.
-        transfer_key_factory: Factory that builds the `(instance_id, key)` lookup key
+        transfer_key_factory: Factory for `(instance_id, key, tags)` lookup keys
             used in the pending SHM reservation maps.
 
     Returns:
@@ -344,12 +344,10 @@ class ShmTransferStrategy(TransferStrategy):
     def __init__(
         self,
         storage_manager: "StorageManager",
-        pending_writes: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
-        pending_reads: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
+        pending_writes: dict[TransferKey, list[ObjectKey]],
+        pending_reads: dict[TransferKey, list[ObjectKey]],
         pending_lock: LockType,
-        transfer_key_factory: Callable[
-            [IPCCacheServerKey, int], tuple[int, IPCCacheServerKey]
-        ],
+        transfer_key_factory: Callable[[IPCCacheServerKey, int], TransferKey],
         fallback_strategy: InlineTransferStrategy,
     ) -> None:
         """Initialize SHM transfer strategy.
@@ -359,7 +357,7 @@ class ShmTransferStrategy(TransferStrategy):
             pending_writes: Shared pending SHM write reservations map.
             pending_reads: Shared pending SHM read reservations map.
             pending_lock: Lock guarding shared pending SHM maps.
-            transfer_key_factory: Factory to build `(instance_id, key)` transfer keys.
+            transfer_key_factory: Factory for `(instance_id, key, tags)` transfers.
             fallback_strategy: Safe inline fallback for non-empty ``cpu_data``
                 payloads.
         """

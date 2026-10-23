@@ -17,6 +17,7 @@ import contextlib
 
 # Third Party
 import httpx
+import msgspec
 
 # First Party
 from lmcache.logging import init_logger
@@ -499,13 +500,7 @@ def _decode_pin(entry: Mapping[str, object]) -> tuple[ObjectKey, int]:
         The key and its pin count.
     """
     fields = cast("Mapping[str, object]", entry["key"])
-    encoded = EncodedObjectKey(
-        chunk_hash_hex=str(fields["chunk_hash_hex"]),
-        model_name=str(fields["model_name"]),
-        kv_rank=cast(int, fields["kv_rank"]),
-        object_group_id=cast(int, fields["object_group_id"]),
-        cache_salt=str(fields["cache_salt"]),
-    )
+    encoded = msgspec.convert(fields, type=EncodedObjectKey)
     return encoded.to_object_key(), cast(int, entry["count"])
 
 

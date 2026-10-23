@@ -75,6 +75,7 @@ async def lookup_placements(
                 world_size=body.world_size,
                 token_ids=body.token_ids,
                 cache_salt=body.cache_salt,
+                tags=body.tags,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -125,6 +126,7 @@ async def blend_lookup(
         model_name=body.model_name,
         cache_salt=body.cache_salt,
         world_size=body.world_size,
+        tags=body.tags,
     )
 
     def _match() -> BlendLookupResponse:

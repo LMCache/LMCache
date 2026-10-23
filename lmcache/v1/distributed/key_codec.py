@@ -6,6 +6,7 @@ from collections.abc import Callable
 import urllib.parse
 
 # First Party
+from lmcache.v1.cache_identity import ObjectKeyIdentity, decode_tags
 from lmcache.v1.distributed.api import ObjectKey
 
 
@@ -22,24 +23,28 @@ def format_storage_key(
     rank_format: str = "08x",
     model_suffix: str = "",
 ) -> str:
-    """Format an adapter's existing key template without changing its names.
+    """Format an adapter's existing key template and append matching tags.
 
     Args:
-        key: Object whose identity determines the name.
+        key: Object whose identity determines the name; xattrs are ignored.
         template: Format string accepting ``model``, ``quoted_model``, ``rank``,
             ``group``, ``hash``, ``hash_prefix``, ``salt`` and ``suffix``.
-            ``suffix`` includes the salt when nonempty. An empty trailing
-            ``@{salt}`` is omitted to preserve existing storage names.
+            ``suffix`` includes the salt and tags; templates without it receive
+            a trailing tags token. Empty trailing ``@{salt}`` is omitted only
+            for untagged keys, preserving their existing storage names.
         model_separator: Replacement for slashes in ``model``.
         rank_format: Python integer format for ``rank``.
         model_suffix: Adapter-specific suffix applied to ``model``.
 
     Returns:
-        The formatted storage name.
+        The formatted storage name. Tag order does not affect the result.
     """
-    if not key.cache_salt and template.endswith("@{salt}"):
+    token = key.identity.tags_token()
+    if not key.cache_salt and not token and template.endswith("@{salt}"):
         template = template[:-7]
     suffix = f"@{key.cache_salt}" if key.cache_salt else ""
+    if token:
+        suffix = f"@{key.cache_salt}@{token}"
     chunk_hex = key.chunk_hash.hex()
     result = template.format(
         model=key.model_name.replace("/", model_separator) + model_suffix,
@@ -51,6 +56,8 @@ def format_storage_key(
         salt=key.cache_salt,
         suffix=suffix,
     )
+    if "{suffix}" not in template and token:
+        result += f"@{token}"
     return result
 
 
@@ -61,43 +68,53 @@ def storage_shard(key: ObjectKey) -> tuple[str, str]:
 
 
 def encode_fs_filename(key: ObjectKey) -> str:
-    """Return the filename shared by Python and native filesystem adapters."""
+    """Return the Python/native FS filename, preserving legacy untagged names.
+
+    Raises:
+        ValueError: A tagged name exceeds NAME_MAX (255 UTF-8 bytes).
+    """
     filename = format_storage_key(
         key,
         "{model}@{rank}@{group}@{hash}{suffix}.data",
         model_separator="-SEP-",
         rank_format="#010x",
     )
+    if key.identity.tags and len(filename.encode("utf-8")) > 255:
+        raise ValueError("ObjectKey filename exceeds NAME_MAX (255 bytes)")
     return filename
 
 
 def decode_storage_key(
     encoded: str, *, model_decoder: Callable[[str], str] = str
 ) -> ObjectKey:
-    """Recover an L2 key from its storage name.
+    """Recover an L2 key from a legacy or tagged storage name.
 
     Args:
-        encoded: ``model@rank@group@hash[@salt]``.
+        encoded: ``model@rank@group@hash[@salt[@tags_token]]``.
         model_decoder: Decoder for backend-specific model escaping.
 
     Returns:
-        An identity-equivalent key.
+        An identity-equivalent key with no xattrs.
 
     Raises:
-        ValueError: The field count or hexadecimal fields are malformed.
+        ValueError: Fields or the versioned tags token are malformed.
     """
     parts = encoded.split("@")
+    token = parts.pop() if len(parts) == 6 else ""
     if len(parts) == 4:
         parts.append("")
     if len(parts) != 5:
-        raise ValueError("invalid ObjectKey encoding: expected 4 or 5 fields")
+        raise ValueError("invalid ObjectKey encoding: expected 4, 5 or 6 fields")
     model, rank, group, chunk_hash, salt = parts
     return ObjectKey(
-        chunk_hash=bytes.fromhex(chunk_hash),
-        kv_rank=int(rank, 16),
-        object_group_id=int(group, 16),
-        model_name=model_decoder(model),
-        cache_salt=salt,
+        identity=ObjectKeyIdentity(
+            chunk_hash=bytes.fromhex(chunk_hash),
+            kv_rank=int(rank, 16),
+            object_group_id=int(group, 16),
+            model_name=model_decoder(model),
+            cache_salt=salt,
+            tags=decode_tags(token),
+        )
     )
 
 

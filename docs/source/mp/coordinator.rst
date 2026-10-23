@@ -1564,3 +1564,22 @@ match rather than one that misses at prefetch.
   ``uint32`` tokens, or it is supplied without ``model_name``.
 
 Index counts are reported under the ``blend`` key of ``GET /directory/stats``.
+
+Matching tags in cache operations
+=========================================
+
+Token-addressed ``POST /directory/lookup``, ``POST /directory/blend-lookup``,
+``POST /cache/pins``, ``DELETE /cache/pins``, ``POST /cache/delete`` and
+``POST /cache/prefetches`` accept an optional ``tags`` map. Supply the exact
+``lmcache.tag.*`` values used when storing the content, without that prefix:
+
+.. code-block:: json
+
+   {"model_name": "model", "world_size": 1, "token_ids": [1, 2, 3, 4],
+    "cache_salt": "", "tags": {"adapter_revision": "abc123"}}
+
+The map defaults to ``{}``, selecting untagged content. Names must be nonempty
+strings and values must be strings. Flat encoded object keys also carry this
+map; other key fields retain their existing positions. Coordinator prefetch
+forwards matching tags to the target node. CacheBlend returns candidates only
+from the caller's complete namespace, including tags.

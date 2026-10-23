@@ -76,6 +76,7 @@ class TestRoundTrip:
             cache_salt="x",
         )
         assert asdict(ck) == {
+            "tags": {},
             "chunk_hash_hex": "aa",
             "model_name": "m",
             "kv_rank": 0,
