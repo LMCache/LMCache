@@ -15,6 +15,7 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.server import ServerCommand
+import lmcache
 
 
 @pytest.fixture
@@ -42,13 +43,15 @@ def test_server_help_with_incompatible_bigtable(tmp_path: Path) -> None:
     bigtable_package.joinpath("__init__.py").write_text(
         'raise TypeError("Descriptors cannot be created directly")\n'
     )
-    repo_root = Path(__file__).resolve().parents[3]
+    import_root = Path(lmcache.__file__).resolve().parents[1]
     result = subprocess.run(
         [sys.executable, "-m", "lmcache.cli.main", "server", "--help"],
-        cwd=repo_root,
+        cwd=tmp_path,
         env={
             **os.environ,
-            "PYTHONPATH": os.pathsep.join((str(tmp_path), str(repo_root))),
+            "PYTHONPATH": os.pathsep.join(
+                (str(tmp_path), str(import_root), os.environ.get("PYTHONPATH", ""))
+            ),
             "LMCACHE_TRACK_USAGE": "false",
             "LMCACHE_DISABLE_BANNER": "1",
         },
