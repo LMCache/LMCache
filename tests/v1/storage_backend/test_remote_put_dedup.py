@@ -138,6 +138,17 @@ def test_concurrent_put_of_same_key_submits_once(mock_stream):
     for t in threads:
         t.join(timeout=10)
 
+    # `submit_put_task` only schedules the put on the event loop, so joining the
+    # threads says nothing about whether the connector has been called yet. Wait
+    # for the put to START: it increments the count and then blocks on `release`,
+    # so the marker below is still pending. Reading the count straight after the
+    # join raced the event loop and saw 0 on the slower CI runners.
+    started = threading.Event()
+    for _ in range(100):
+        if connector.put_count >= 1:
+            break
+        started.wait(0.05)
+
     # Exactly one store is in flight, and the key is still marked pending.
     assert connector.put_count == 1
     assert original_exists(key)
