@@ -382,6 +382,7 @@ def gather_paged_kv_to_cpu(
         get_num_layers,
         make_page_buffer_shape_desc,
         normalize_kv_and_discover_format,
+        resolve_block_stride_and_log_layout,
     )
 
     tensors = list(kv_caches.values())
@@ -417,6 +418,9 @@ def gather_paged_kv_to_cpu(
         num_layers_in_group=num_layers,
         num_blocks=num_blocks,
         block_size=block_size,
+        block_stride_elems=resolve_block_stride_and_log_layout(
+            normalized, engine_kv_format, layer_idx=0, group_idx=0
+        ),
     )
 
     iter_indices = (
@@ -565,6 +569,7 @@ def scatter_cpu_to_paged_kv(
         get_num_layers,
         make_page_buffer_shape_desc,
         normalize_kv_and_discover_format,
+        resolve_block_stride_and_log_layout,
     )
 
     # Local like the rest: object_group_transfer pulls in the GPU connector and
@@ -631,6 +636,9 @@ def scatter_cpu_to_paged_kv(
         num_layers_in_group=num_layers,
         num_blocks=num_blocks,
         block_size=block_size,
+        block_stride_elems=resolve_block_stride_and_log_layout(
+            normalized, engine_kv_format, layer_idx=0, group_idx=0
+        ),
     )
 
     selected_block_ids: list[int] = []
