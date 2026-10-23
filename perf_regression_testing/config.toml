@@ -16,7 +16,7 @@
 [host]
 # Each run takes the first gpu_count GPUs with no compute process.
 gpu_count = 8
-gpu_busy_wait_s = 240        # wait this long for enough free GPUs, then give up
+gpu_busy_wait_s = 900        # wait this long for enough free GPUs, then give up
 # A full disk breaks LMCache inside the container and looks like a code bug.
 min_docker_free_gb = 10
 

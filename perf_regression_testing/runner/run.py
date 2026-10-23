@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 EXIT_VALID, EXIT_INVALID, EXIT_GPU_BUSY, EXIT_NOT_UP, EXIT_INPUT = 0, 2, 3, 4, 5
 SHM_DIR = Path("/dev/shm")
+PROC = Path("/proc")
 # AIPerf runs for up to hours; log that it is alive this often.
 _HEARTBEAT_S = 300.0
 SHM_REGION = re.compile(r"Created mmap file /dev/shm/(vllm_offload_[0-9a-f-]+\.mmap)")
@@ -93,6 +94,45 @@ def _idle_gpus() -> list[int]:
         if uuid.strip() not in busy:
             idle.append(int(index))
     return sorted(idle)
+
+
+def gpu_holders() -> list[str]:
+    """Describe the compute processes on the GPUs, for a run that found none free.
+
+    Returns:
+        One ``uuid, pid, process, memory`` row per process from nvidia-smi,
+        with ``container=<name>`` appended when the pid is in a docker
+        container on this host.
+    """
+    rows = subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
+            "--format=csv,noheader",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    ps = subprocess.run(
+        ["docker", "ps", "-a", "--no-trunc", "--format", "{{.ID}} {{.Names}}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    names = dict(zip(ps[::2], ps[1::2], strict=True))
+    out = []
+    for row in rows:
+        pid = row.split(",")[1].strip()
+        try:
+            cgroup = (PROC / pid / "cgroup").read_text()
+        except FileNotFoundError:
+            # A pid of another pid namespace (PRT itself in a container).
+            out.append(row)
+            continue
+        hit = [n for i, n in names.items() if i in cgroup]
+        out.append(f"{row}, container={hit[0]}" if hit else row)
+    return out
 
 
 def pick_gpus(count: int, wait_s: float) -> list[int] | None:
@@ -448,6 +488,8 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
     if gpus is None:
         # Without a reason the suite would record a run that never ran.
         summary["invalid"].append(f"GPUs busy: fewer than {spec.gpu_count} free")
+        summary["gpu_holders"] = gpu_holders()
+        logger.warning("GPU holders: %s", summary["gpu_holders"])
         return finish(EXIT_GPU_BUSY)
     summary["gpus"] = gpus
     reason = _trace_ok(spec)
@@ -553,6 +595,9 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
             sum(allocated_bytes(Path(d["path"])) for d in dirs) / 1e9 if dirs else None
         )
         wipe_scratch(spec)
+        if "exit_code" in summary:
+            # A return inside the try wrote summary.json before this teardown.
+            finish(summary["exit_code"])
 
     logger.info("%s: torn down", run_id)
     log = (out / "vllm.log").read_text(errors="replace")

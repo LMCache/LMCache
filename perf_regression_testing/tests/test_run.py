@@ -160,3 +160,23 @@ def test_io_bytes_sums_reads_and_writes_over_containers_and_devices(
         (tmp_path / name / "io.stat").write_text(stat)
     monkeypatch.setattr(run.docker, "cgroup_dir", lambda name: tmp_path / name)
     assert run.io_bytes(["a", "b"]) == {"rbytes": 111, "wbytes": 222}
+
+
+def test_gpu_holders_names_the_container_of_each_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+        if cmd[0] == "nvidia-smi":
+            out = "GPU-0, 11, python3, 9000 MiB\nGPU-1, 22, python3, 10 MiB\n"
+        else:
+            out = "abc123 prt-old-lmcache\ndef456 other\n"
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    monkeypatch.setattr(run.subprocess, "run", fake)
+    monkeypatch.setattr(run, "PROC", tmp_path)
+    (tmp_path / "11").mkdir()
+    (tmp_path / "11" / "cgroup").write_text("0::/system.slice/docker-abc123.scope\n")
+    assert run.gpu_holders() == [
+        "GPU-0, 11, python3, 9000 MiB, container=prt-old-lmcache",
+        "GPU-1, 22, python3, 10 MiB",
+    ]
