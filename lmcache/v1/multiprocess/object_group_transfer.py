@@ -16,7 +16,7 @@ through a GPU temp buffer and scatters it with the block transfer kernel. See
 """
 
 # Standard
-from itertools import islice
+from itertools import accumulate, islice
 from typing import Any, Generator, Sequence
 
 # Third Party
@@ -25,6 +25,7 @@ import torch
 # First Party
 from lmcache import device_ops
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.gpu_ops import (
     build_staging_copies,
     lmcache_memcpy_async_d2h,
@@ -775,10 +776,81 @@ def transfer_kv_per_object_group(
                 )
 
 
+def has_unfull_chunk_lead_block(
+    cache_context: BaseCacheContext, kernel_group_id: int
+) -> bool:
+    """Whether a kernel group's unfull-chunk objects carry a window lead block.
+
+    A sliding window narrower than a chunk keeps the last window of blocks of
+    each chunk. A full chunk ends on a block boundary, so its window fits in
+    those blocks; an unfull chunk can end inside a block, and the window of
+    the token after it then also needs the block before them, the lead block
+    (``cdiv(W, T) + 1`` blocks, as NIXL keeps for P/D). Unfull objects reserve
+    room for it so full-chunk objects keep their layout.
+
+    Args:
+        cache_context: The cache context containing the KV cache information.
+        kernel_group_id: Index of the kernel group.
+
+    Returns:
+        True for a sliding-window group whose window is narrower than a chunk.
+    """
+    return (
+        cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(
+            kernel_group_id
+        )
+        < cache_context.lmcache_tokens_per_chunk
+    )
+
+
+def get_unfull_chunk_layout_desc(
+    cache_context: BaseCacheContext, object_group_id: int
+) -> MemoryLayoutDesc:
+    """Get the memory layout of an object group's unfull-chunk objects.
+
+    The full-chunk layout of the object group, followed by one single-block
+    entry per kernel group that has a lead block (see
+    :func:`has_unfull_chunk_lead_block`). Appending keeps every kernel
+    group's regular region at its full-chunk offset.
+
+    Args:
+        cache_context: The cache context containing the KV cache information.
+        object_group_id: Index of the object group whose layout to build.
+
+    Returns:
+        The unfull-chunk layout; equal to the full-chunk layout when no kernel
+        group of the object group has a lead block.
+    """
+    kv_groups_manager = cache_context.kv_layer_groups_manager
+    kernel_group_ids = kv_groups_manager.object_groups[
+        object_group_id
+    ].kernel_group_indices
+    shapes: list[torch.Size] = []
+    dtypes: list[torch.dtype] = []
+    for kernel_group_id in kernel_group_ids:
+        shape, dtype = cache_context.get_kernel_group_shape_dtype(
+            cache_context.lmcache_tokens_per_chunk, kernel_group_id
+        )
+        shapes.append(shape)
+        dtypes.append(dtype)
+    for index, kernel_group_id in enumerate(kernel_group_ids):
+        if has_unfull_chunk_lead_block(cache_context, kernel_group_id):
+            slots_per_block = kv_groups_manager.kernel_groups[
+                kernel_group_id
+            ].slots_per_block
+            # The slot dimension is second to last in every object layout.
+            shapes.append(
+                torch.Size((*shapes[index][:-2], slots_per_block, shapes[index][-1]))
+            )
+            dtypes.append(dtypes[index])
+    return MemoryLayoutDesc(shapes=shapes, dtypes=dtypes)
+
+
 def trim_and_stage_unfull_chunk_block_ids(
     cache_context: BaseCacheContext,
     block_ids: list[list[int]],
-) -> tuple[list[torch.Tensor], list[int]]:
+    num_tokens: int,
+) -> tuple[list[torch.Tensor], list[int], list[int]]:
     """Fit an unfull chunk's block id lists to the chunk layout and stage them.
 
     An unfull chunk covers fewer tokens than a chunk, so each kernel group
@@ -792,39 +864,59 @@ def trim_and_stage_unfull_chunk_block_ids(
     in the last object slots; store and retrieve fit alike, so block ``i``
     maps to the same object offset on both sides.
 
+    When the window of the token after the unfull chunk spans ``keep + 1``
+    blocks, the list also keeps the block before them, the lead block, first.
+    Both sides derive it from ``num_tokens``, so they agree.
+
     Args:
         cache_context: The cache context containing the KV cache information.
         block_ids: One block id list per kernel group, covering only the
             unfull chunk. Fitted in place.
+        num_tokens: Tokens in the unfull chunk.
 
     Returns:
-        The fitted block id lists staged on GPU, and the number of leading
-        padding blocks to skip, both indexed by kernel group.
+        The fitted block id lists staged on GPU, the number of leading
+        padding blocks to skip, and the number of lead blocks (0 or 1), all
+        indexed by kernel group.
 
     Raises:
         ValueError: If a kernel group has no block id.
     """
     kv_groups_manager = cache_context.kv_layer_groups_manager
     skip_blocks: list[int] = []
+    lead_blocks: list[int] = []
     for kernel_group_id in range(kv_groups_manager.num_kernel_groups):
         if not block_ids[kernel_group_id]:
             raise ValueError(f"unfull chunk has no block for group {kernel_group_id}")
-        tokens_per_window = min(
-            cache_context.lmcache_tokens_per_chunk,
-            kv_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
+        window_tokens = kv_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id)
+        keep = cache_context.calculate_num_blocks(
+            min(cache_context.lmcache_tokens_per_chunk, window_tokens),
+            kernel_group_id,
         )
-        keep = cache_context.calculate_num_blocks(tokens_per_window, kernel_group_id)
-        kept = block_ids[kernel_group_id][-keep:]
-        padding = keep - len(kept)
+        lead = 0
+        if has_unfull_chunk_lead_block(cache_context, kernel_group_id):
+            tokens_per_block = kv_groups_manager.kernel_groups[
+                kernel_group_id
+            ].tokens_per_block
+            # The next token attends to [num_tokens - W + 1, num_tokens).
+            window_blocks = (
+                -(-num_tokens // tokens_per_block)
+                - max(0, num_tokens - window_tokens + 1) // tokens_per_block
+            )
+            lead = int(window_blocks > keep)
+        kept = block_ids[kernel_group_id][-(keep + lead) :]
+        padding = keep + lead - len(kept)
         block_ids[kernel_group_id] = kept[:1] * padding + kept
         skip_blocks.append(padding)
-    return cache_context.stage_block_ids(block_ids), skip_blocks
+        lead_blocks.append(lead)
+    return cache_context.stage_block_ids(block_ids), skip_blocks, lead_blocks
 
 
 def transfer_unfull_chunk(
     cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
     skip_blocks: list[int],
+    lead_blocks: list[int],
     memory_obj: MemoryObj,
     object_group_id: int,
     direction: "lmcache_native.TransferDirection",
@@ -833,28 +925,87 @@ def transfer_unfull_chunk(
 
     Unlike :func:`transfer_kv_per_object_group`, each kernel group copies only
     the real blocks of the unfull chunk: the leading ``skip_blocks`` padding
-    of each list is skipped. Always uses the staging kernel path.
+    of each list is skipped, and a lead block goes to its own region after
+    the regular ones (see :func:`get_unfull_chunk_layout_desc`). Always uses
+    the staging kernel path. An object group with lead-block regions does not
+    fit the shared staging buffer, so it stages through a buffer of its own
+    allocated on the current stream.
 
     Args:
         cache_context: The GPU cache context containing the KV cache information.
         block_ids_gpu: Block ids from :func:`trim_and_stage_unfull_chunk_block_ids`.
         skip_blocks: Leading padding blocks per kernel group, from the same call.
+        lead_blocks: Lead blocks per kernel group, from the same call.
         memory_obj: The unfull chunk's object for this object group.
         object_group_id: Index of the object group being copied.
         direction: H2D (retrieve) or D2H (store).
     """
-    kv_groups_manager = cache_context.kv_layer_groups_manager
-    object_group = kv_groups_manager.object_groups[object_group_id]
+    kernel_group_ids = cache_context.kv_layer_groups_manager.object_groups[
+        object_group_id
+    ].kernel_group_indices
     is_h2d = direction == lmcache_native.TransferDirection.H2D
-    object_buffer = cache_context.get_temp_object_group_buffer(0, object_group_id)
+    lead_group_ids = [
+        kernel_group_id
+        for kernel_group_id in kernel_group_ids
+        if has_unfull_chunk_lead_block(cache_context, kernel_group_id)
+    ]
+    if lead_group_ids:
+        layout = get_unfull_chunk_layout_desc(cache_context, object_group_id)
+        offsets = list(
+            accumulate(
+                (
+                    shape.numel() * dtype.itemsize
+                    for shape, dtype in zip(layout.shapes, layout.dtypes, strict=True)
+                ),
+                initial=0,
+            )
+        )
+        object_buffer = torch.empty(
+            offsets[-1], dtype=torch.uint8, device=cache_context.device
+        )
+        regular_ptrs = [
+            object_buffer.data_ptr() + offset
+            for offset in offsets[: len(kernel_group_ids)]
+        ]
+        lead_ptrs = {
+            kernel_group_id: object_buffer.data_ptr() + offset
+            for kernel_group_id, offset in zip(
+                lead_group_ids, offsets[len(kernel_group_ids) : -1], strict=True
+            )
+        }
+    else:
+        object_buffer = cache_context.get_temp_object_group_buffer(0, object_group_id)
+        regular_ptrs = [
+            cache_context.get_temp_kernel_group_buffer(0, kernel_group_id).data_ptr()
+            for kernel_group_id in kernel_group_ids
+        ]
+        lead_ptrs = {}
 
     if is_h2d:
         lmcache_memcpy_async_h2d(memory_obj, object_buffer)
-    for kernel_group_id in object_group.kernel_group_indices:
+    for kernel_group_id, regular_ptr in zip(
+        kernel_group_ids, regular_ptrs, strict=True
+    ):
+        group_block_ids = block_ids_gpu[kernel_group_id]
+        lead = lead_blocks[kernel_group_id]
+        if lead:
+            device_ops.multi_layer_block_kv_transfer(
+                cache_context.get_kernel_group_kv_pointers(kernel_group_id),
+                [lead_ptrs[kernel_group_id]],
+                group_block_ids[:lead],
+                cache_context.device,
+                direction,
+                cache_context.get_shape_desc(kernel_group_id),
+                cache_context.kv_layer_groups_manager.kernel_groups[
+                    kernel_group_id
+                ].slots_per_block,
+                cache_context.get_engine_kv_format(kernel_group_id),
+                0,
+            )
         device_ops.multi_layer_block_kv_transfer(
             cache_context.get_kernel_group_kv_pointers(kernel_group_id),
-            [cache_context.get_temp_kernel_group_buffer(0, kernel_group_id).data_ptr()],
-            block_ids_gpu[kernel_group_id],
+            [regular_ptr],
+            group_block_ids[lead:],
             cache_context.device,
             direction,
             cache_context.get_shape_desc(kernel_group_id),

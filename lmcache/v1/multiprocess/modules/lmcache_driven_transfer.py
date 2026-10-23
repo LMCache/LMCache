@@ -42,6 +42,8 @@ from lmcache.v1.multiprocess.native_completion import (
 )
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
+    get_unfull_chunk_layout_desc,
+    has_unfull_chunk_lead_block,
     split_unfull_chunk_block_ids,
     transfer_kv_per_object_group,
     transfer_unfull_chunk,
@@ -522,6 +524,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             )
             for gid in range(num_object_groups)
         }
+        unfull_group_layout_descs = {
+            gid: get_unfull_chunk_layout_desc(cache_context, gid)
+            for gid in range(num_object_groups)
+        }
         attn_desc = kv_groups_manager.get_attn_desc()
         self._ctx.layout_desc_registry.register(
             model_name,
@@ -529,6 +535,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             layout_desc,
             attn_desc,
             group_layout_descs=group_layout_descs,
+            unfull_group_layout_descs=unfull_group_layout_descs,
         )
 
         with self._lock:
@@ -1268,6 +1275,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         event was waited on. The objects are temporary when
         ``key.request_configs`` sets ``lmcache.temporary_unfull_chunk``. An
         object group whose blocks are all null (no real state) stores nothing.
+        Neither does a model with window lead blocks on a GDS-backed L1: those
+        objects stage through a buffer GDS has not registered.
 
         Args:
             cache_context: The worker's cache context.
@@ -1282,8 +1291,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ValueError: If a kernel group has no block for the unfull chunk.
         """
         manager = cache_context.kv_layer_groups_manager
-        block_ids_gpu, skip_blocks = trim_and_stage_unfull_chunk_block_ids(
-            cache_context, block_ids
+        if self._ctx.storage_manager.has_gds_l1 and any(
+            has_unfull_chunk_lead_block(cache_context, kernel_group_id)
+            for kernel_group_id in range(manager.num_kernel_groups)
+        ):
+            return {}
+        block_ids_gpu, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
+            cache_context, block_ids, key.end % self._ctx.chunk_size
         )
         null_groups = all_null_chunk_masks(
             block_ids,
@@ -1302,7 +1316,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             reserved.update(
                 self._ctx.storage_manager.reserve_write(
                     [obj_key],
-                    get_layout_desc(cache_context, self._ctx.chunk_size, obj_group_id),
+                    get_unfull_chunk_layout_desc(cache_context, obj_group_id),
                     is_temporary=is_temporary,
                 )
             )
@@ -1314,6 +1328,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 cache_context,
                 block_ids_gpu,
                 skip_blocks,
+                lead_blocks,
                 memory_obj,
                 obj_group_id,
                 lmcache_native.TransferDirection.D2H,
@@ -1348,8 +1363,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ValueError: If an object is missing or a kernel group has no block
                 for the unfull chunk.
         """
-        block_ids_gpu, skip_blocks = trim_and_stage_unfull_chunk_block_ids(
-            cache_context, block_ids
+        block_ids_gpu, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
+            cache_context, block_ids, key.end % self._ctx.chunk_size
         )
         found_keys, memory_objs = self._ctx.storage_manager.unsafe_read(
             obj_keys, l1_owners=self._ctx.get_read_owners(key.request_id)
@@ -1363,6 +1378,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 cache_context,
                 block_ids_gpu,
                 skip_blocks,
+                lead_blocks,
                 memory_obj,
                 obj_group_id,
                 lmcache_native.TransferDirection.H2D,

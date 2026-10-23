@@ -31,8 +31,9 @@ that ring is a follow-up.
 
 - **Unfull chunk**: the token range `[kC, P)` with `kC = floor(P / C) * C`
   and `0 < P - kC < C`, where `C` is the LMCache chunk size. It is stored as
-  one object per object group with the regular chunk layout; only the blocks
-  that cover `[kC, P)` are copied.
+  one object per object group with the regular chunk layout, plus one block
+  per narrow sliding-window group (see below); only the blocks that cover
+  `[kC, P)` are copied.
 - **Temporary object**: an L1 object deleted when its last read lock is
   released (`L1ObjectState.is_temporary`), i.e. read once.
 
@@ -108,6 +109,45 @@ prefix (chunk `k-1`), so the full-chunk retrieve restores the earlier part
 and the unfull retrieve the rest. Mamba state needs only the block holding
 the state at `P`, which is the last block of the unfull range.
 
+### Window lead block
+
+A sliding window of `W` tokens narrower than a chunk (`W < C`) keeps
+`keep = W / T` blocks per chunk (`T` tokens per block). The token after `P`
+attends to `[P - W + 1, P)`; a full chunk ends on a block boundary, so that
+range fits in `keep` blocks, but an unfull chunk can end inside a block and
+the range then spans `keep + 1` blocks. Example with `T = 4`, `W = 8`,
+`keep = 2`, unfull chunk of `n` tokens:
+
+```text
+n = 9   window [2, 9)   blocks 0 1 2   -> keep + 1, lead block 0
+n = 11  window [4, 11)  blocks 1 2     -> keep
+n = 13  window [6, 13)  blocks 1 2 3   -> keep + 1, lead block 1
+```
+
+This is the overlap NIXL covers with `cdiv(W, T) + 1` window blocks for P/D;
+vLLM's own prefix cache never needs it because its sliding-window hits end
+on block boundaries. The block before the last `keep`, the *lead block*, is
+kept in the list when needed; both sides derive that from `P mod C`, so it
+needs no metadata. Like the full-chunk window, this assumes `W` is a multiple of `T`
+(`keep` rounds down).
+
+The unfull object reserves room for it with its own layout
+(`get_unfull_chunk_layout_desc`): the full-chunk layout of the object group,
+followed by one single-block entry per sliding-window group with `W < C`.
+Appending keeps every regular region at its full-chunk offset, and the
+full-chunk layout (and everything already stored with it) is unchanged.
+The server registers these layouts next to the full-chunk ones
+(`LayoutDescRegistry.find_unfull_group_layout_descs`, falling back to the
+full-chunk layouts) for the lookup's L1 probe.
+
+The copy kernel is unchanged: the lead block is a second launch with one
+block and `lmcache_chunk_size` equal to one block's slots, into the appended
+region; the regular launch is as before. Such an object does not fit the
+shared staging buffer, so it stages through a buffer allocated on the
+transfer stream (stream-ordered reuse makes freeing it after the async copy
+safe). On the decode side the lead block is the first block vLLM keeps
+(`get_num_skipped_tokens = P - W + 1`), so it is allocated, not null.
+
 ## Temporary objects
 
 `request_configs["lmcache.temporary_unfull_chunk"] = True` stores the
@@ -170,6 +210,10 @@ separately from the chunk prefetch result:
   re-lookup (`apc_covered_lookup.md`), leaves the unfull chunk's read locks
   (and a temporary object) to the read-lock TTL: those releases resolve full
   chunks only.
+- A model with a sliding window narrower than a chunk stores no unfull
+  chunk when an L1 is GDS-backed: GDS copies only through its registered
+  staging buffer, and the lead-block layout does not fit it. Supporting it
+  means a registered unfull staging region per platform.
 - Only the prompt-end tail is stored. Finding the tail of an earlier round
   (multi-round chat) needs a separate lookup policy; resuming a decode
   instance at the exact prompt end (PD) additionally needs the prefill side
