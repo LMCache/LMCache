@@ -25,8 +25,8 @@ Workload `agentic`: a Claude Code session replay
 Each model is a frontier open-weight release on 8 x H200 (TP8 + EP, FP8 KV; BF16 on MiMo, whose fp8 path fails in vLLM), served
 with its vLLM recipe's flags and replaced when a newer one appears:
 MiMo-V2.6-Pro-MOPD (hybrid sliding-window, DFlash drafter) at 170 concurrent
-sessions; `vllm_lmcache_ssm` serves GLM-5.3-Flash (Kimi Delta Attention +
-sparse MLA, MTP, DCP 8) instead, at 230. Every deployment runs the same stock
+sessions; `vllm_lmcache_ssm` serves Qwen3.8-Flash-Next-FP8 (Gated DeltaNet +
+sparse GQA, MTP) instead, at 230. Every deployment runs the same stock
 vLLM image and the same budget, 1500 GiB DRAM + 6000 GiB disk (`vllm_simple`: the DRAM only;
 `vllm_simple_l2`: the disk, with the DRAM as page cache under a memory cap);
 only the cache layer differs:
@@ -78,8 +78,8 @@ HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
     XiaomiMiMo/MiMo-V2.6-Pro-MOPD \
     --revision 6a7f202e8dbd0e57b3fe1da03917d08d75abc4b8
 HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
-    zai-org/GLM-5.3-Flash \
-    --revision 46a050bec13002ad29ee795c16e61cf4fa3c4a9c
+    Qwen/Qwen3.8-Flash-Next-FP8 \
+    --revision 236dfdf285828023ca3bcd3f37366c58a3469b13
 
 # Trace, verified against the pinned sha256 and dir_digest.
 python3.11 perf_regression_testing/workloads/agentic/fetch_trace.py \

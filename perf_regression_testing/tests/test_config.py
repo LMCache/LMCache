@@ -68,27 +68,27 @@ def _fetch(cfg: dict[str, Any], model: str) -> None:
 def test_missing_models_names_each_absent_model_once() -> None:
     cfg = load()
     deps = ["vllm_lmcache", "vllm_lmcache_ssm", "vllm_native"]
-    assert missing_models(cfg, deps) == ["mimo26", "glm53"]
+    assert missing_models(cfg, deps) == ["mimo26", "qwen38"]
     _fetch(cfg, "mimo26")
-    assert missing_models(cfg, deps) == ["glm53"]
-    _fetch(cfg, "glm53")
+    assert missing_models(cfg, deps) == ["qwen38"]
+    _fetch(cfg, "qwen38")
     assert missing_models(cfg, deps) == []
 
 
 def test_a_snapshot_without_its_done_marker_is_still_missing() -> None:
     # An interrupted download leaves config.json but not every weight.
     cfg = load()
-    path = Path(cfg["models"]["glm53"]["path"])
+    path = Path(cfg["models"]["qwen38"]["path"])
     path.mkdir(parents=True)
     (path / "config.json").write_text("{}")
-    assert missing_models(cfg, ["vllm_lmcache_ssm"]) == ["glm53"]
+    assert missing_models(cfg, ["vllm_lmcache_ssm"]) == ["qwen38"]
 
 
 def test_a_deployment_runs_its_own_model() -> None:
     cfg = load()
     for d, model, served in [
         ("vllm_lmcache", "mimo26", "mimo-v2.6-pro"),
-        ("vllm_lmcache_ssm", "glm53", "glm-5.3-flash"),
+        ("vllm_lmcache_ssm", "qwen38", "qwen3p8"),
     ]:
         spec = resolve(cfg, "agentic", d)
         m = cfg["models"][model]
