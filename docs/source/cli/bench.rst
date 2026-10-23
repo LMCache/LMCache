@@ -3,8 +3,9 @@
 lmcache bench
 =============
 
-The ``lmcache bench`` command runs sustained performance benchmarks. It has
-three sub-commands, each targeting a different layer of the stack:
+The ``lmcache bench`` command runs sustained performance benchmarks and
+offline cache analyses. It has four sub-commands, each targeting a different
+layer of the stack:
 
 .. list-table::
    :header-rows: 1
@@ -21,10 +22,14 @@ three sub-commands, each targeting a different layer of the stack:
    * - ``l2``
      - Throughput / latency benchmark against an L2 cache adapter
        (store / lookup / load).
+   * - ``trace-analyze``
+     - Offline replay of a recorded request trace through a simulated
+       cache: prefix and CacheBlend hit tokens over a capacity and
+       chunk-size grid, as an HTML report.
 
 .. code-block:: bash
 
-   lmcache bench {engine,server,l2} [options]
+   lmcache bench {engine,server,l2,trace-analyze} [options]
 
 
 .. _lmcache-bench-engine:
@@ -1891,3 +1896,226 @@ Exit codes
        env var was missing or could not be parsed, an option value was
        invalid, or ``--flamegraph on`` was requested but the profiling
        toolchain is unavailable.
+
+
+.. _lmcache-bench-trace-analyze:
+
+trace-analyze
+-------------
+
+The ``lmcache bench trace-analyze`` command answers "what hit rate would
+this workload get at cache size X with chunk size Y?" from a recorded
+request trace, without a GPU or a running server. It requires the full
+``lmcache`` install (the replay uses the server's token hasher and
+CacheBlend matcher).
+
+.. code-block:: bash
+
+   lmcache bench trace-analyze --input FILE [FILE ...] [options]
+
+
+Collecting a trace
+~~~~~~~~~~~~~~~~~~
+
+Start the MP server with ``--enable-token-trace``. Each lookup then
+emits a zero-duration ``mp.request.trace`` span under the request's root
+span, carrying ``lmcache.model``, ``lmcache.input_ids`` (the prompt token
+ids) and ``session_id``; the span's start time is the lookup timestamp.
+A request the engine looks up again (for example after preemption) emits
+one span per lookup; the analyzer keeps only its earliest span.
+
+This is the ``lmcache`` trace format, the default value of
+``--trace-format``; its contract is in :ref:`trace-analyze-formats`.
+When no span matches, the tool reports what the files did hold.
+
+Persist the spans with the Collector's ``file`` exporter. Starting from
+``examples/observability``, add the exporter to the traces pipeline in
+``otel-collector.yml``:
+
+.. code-block:: yaml
+
+   exporters:
+     file/traces:
+       path: /var/log/otel/lmcache-traces.jsonl
+
+   service:
+     pipelines:
+       traces:
+         receivers: [otlp]
+         exporters: [otlp/tempo, file/traces]
+
+The collector image has no writable directory of its own and runs as
+user ``10001``, so the exporter cannot create that path until a host
+directory is mounted there. Create one the collector can write to and
+mount it in ``docker-compose.yml``:
+
+.. code-block:: bash
+
+   mkdir -p otel-data && chmod a+w otel-data
+
+.. code-block:: yaml
+
+   services:
+     otel-collector:
+       volumes:
+         - ./otel-collector.yml:/etc/otel-collector.yml:ro
+         - ./otel-data:/var/log/otel
+
+The file then appears as ``otel-data/lmcache-traces.jsonl`` on the host.
+It holds OTLP JSON, one export batch per line. Prompt token ids are
+only exported when ``--enable-token-trace`` is set; treat the file as
+sensitive.
+
+
+.. _trace-analyze-formats:
+
+Trace formats
+~~~~~~~~~~~~~
+
+``--trace-format`` names the producer whose records the input holds.
+Whatever the producer and its collector pipeline emit, the analyzer needs
+only this from each request, in order of importance:
+
+* **token ids**, as the engine prefilled them with the chat template
+  applied. The replay works on nothing else.
+* **a timestamp**, which fixes the replay order.
+* **a request id**, to collapse a request that was recorded more than
+  once. The LMCache server emits one span per lookup rather than per
+  request, and the engine looks a request up again after preemption, so
+  that format needs it. A producer that records each request once can use
+  any unique value.
+* **a model name**, only for ``--model``; it may be empty.
+
+How those are packaged is the producer's choice: OTLP spans, OTLP logs or
+flat JSON lines all work, as long as the file is one JSON value per
+line. Each format is a small adapter that turns a parsed line into
+records, kept honest by a sample file under
+``tests/tools/data/trace_formats/`` that the test suite replays. A new
+format adds the adapter, its sample file and an entry here.
+
+lmcache
+^^^^^^^
+
+The MP server's token-trace span, as the Collector's ``file`` exporter
+writes it with no processing. Sample:
+``tests/tools/data/trace_formats/lmcache.jsonl``.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 26 18 56
+
+   * - Field
+     - Type
+     - Meaning
+   * - span ``name``
+     - string
+     - ``mp.request.trace``. Spans with any other name are ignored.
+   * - ``startTimeUnixNano``
+     - int64
+     - Lookup time; sets the replay order.
+   * - ``session_id``
+     - string
+     - Request id. A request looked up more than once keeps its earliest
+       span.
+   * - ``lmcache.model``
+     - string
+     - Model name as the engine reports it; ``--model`` filters on it.
+   * - ``lmcache.input_ids``
+     - int64 array, or string
+     - Prompt token ids after the chat template, as the engine prefilled
+       them: the OTLP integer array as emitted, or one JSON string of the
+       same integers as a collector ``transform`` may write it.
+
+Everything else on a line (the resource block, the span's trace, span
+and parent ids, kind, flags and status) is OTLP packaging and is ignored.
+One line of the sample, pretty-printed with the token array shortened:
+
+.. code-block:: json
+
+   {"resourceSpans": [{
+     "resource": {"attributes": [
+       {"key": "service.name", "value": {"stringValue": "lmcache"}}]},
+     "scopeSpans": [{
+       "scope": {"name": "lmcache_mp.server"},
+       "spans": [{
+         "name": "mp.request.trace",
+         "startTimeUnixNano": "1792617070080115968",
+         "endTimeUnixNano": "1792617070080115968",
+         "attributes": [
+           {"key": "session_id",
+            "value": {"stringValue": "chatcmpl-ab53be3e1411e41a-81c1fd35"}},
+           {"key": "lmcache.model",
+            "value": {"stringValue": "Qwen/Qwen3-1.7B"}},
+           {"key": "lmcache.input_ids",
+            "value": {"arrayValue": {"values": [
+              {"intValue": "151644"}, {"intValue": "872"}, {"intValue": "198"}]}}}
+         ]}]}]}]}
+
+
+What it does
+~~~~~~~~~~~~
+
+Requests are sorted by timestamp and replayed, for every ``(chunk size,
+capacity)`` pair in the grid, through one LRU cache keyed by chained chunk
+hashes (the trailing partial chunk is never cached):
+
+* **Prefix hit tokens** -- the leading run of chunks already in the cache,
+  as the prefix lookup counts them. Hits are touched, every chunk of the
+  request is inserted, and the least recently used chunks are evicted
+  over capacity.
+* **Non-prefix (CacheBlend) hit tokens** -- each stored request is also
+  registered with the real ``BlendTokenRangeMatcher``; each lookup probes
+  it and the matches are reconciled like the blend lookup: matches inside
+  the prefix are dropped, then a non-overlapping subset of the rest is
+  kept. Evicted chunks are removed from the matcher. Only matched tokens
+  are reported; CacheBlend's recompute is not modelled.
+
+Capacity is a token budget, since the trace carries no KV shape.
+
+
+Quick start
+~~~~~~~~~~~
+
+.. code-block:: bash
+
+   lmcache bench trace-analyze \
+     --input /var/log/otel/lmcache-traces.jsonl \
+     --chunk-size 256 512 \
+     --capacity 64k 256k 1M \
+     --html trace_analysis.html
+
+The HTML report is self-contained: two sliders (token budget, chunk
+size) select a precomputed grid cell and show its prefix and non-prefix
+hit rates with their token counts, request count and token totals, plus
+a table of every budget at the selected chunk size. Each cell is a full
+replay, so the slider steps over the capacities given; pass more for a
+smoother sweep. A plain-text summary with the same
+grid goes to stdout (``--format json`` for machine-readable output).
+
+
+Options
+~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Option
+     - Description
+   * - ``-i``, ``--input FILE [FILE ...]``
+     - OTLP JSON file(s) written by the Collector's ``file`` exporter.
+       Required.
+   * - ``--html FILE``
+     - Where to write the HTML report (default ``trace_analysis.html``).
+   * - ``--chunk-size TOKENS [TOKENS ...]``
+     - Chunk size(s) to simulate (default ``256``).
+   * - ``--capacity TOKENS [TOKENS ...]``
+     - Cache token budgets to simulate. ``K`` and ``M`` suffixes are
+       binary (``64k``, ``1M``). Default: half-octave steps from 4096
+       tokens up to the trace size.
+   * - ``--trace-format {lmcache}``
+     - Producer format of the input spans. ``lmcache`` is the MP
+       server's ``mp.request.trace`` span (default).
+   * - ``--model NAME``
+     - Only analyze requests for this model name. Use it when one trace
+       mixes models, since the simulated cache is shared.
