@@ -42,7 +42,7 @@ def transfer_case(request: pytest.FixtureRequest) -> tuple[torch.device, bool]:
 
 @pytest.mark.parametrize("fmt", FORMATS, ids=["nhd", "hnd", "mla"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("skip", [0, 1, 4])
+@pytest.mark.parametrize("skip", [0, 1, 3, 4])
 def test_store_reload_preserves_layout_and_skipped_blocks(
     transfer_case: tuple[torch.device, bool],
     fmt: EngineKVFormat,
@@ -60,6 +60,19 @@ def test_store_reload_preserves_layout_and_skipped_blocks(
         (torch.arange(math.prod(shape)).reshape(shape) % 97 + i).to(dtype)
         for i in range(nl)
     ]
+    for layer in layers:
+        layer.flatten()[:6] = torch.tensor(
+            [
+                -0.0,
+                0.0,
+                torch.finfo(dtype).tiny / 4,
+                -torch.finfo(dtype).tiny / 4,
+                0.375,
+                -0.625,
+            ],
+            dtype=dtype,
+        )
+    bit_dtype = torch.int16 if dtype.itemsize == 2 else torch.int32
     canonical = [layer.clone() for layer in layers]
     if is_hnd:
         layers = [layer.permute(0, 1, 3, 2, 4).contiguous() for layer in layers]
@@ -107,7 +120,7 @@ def test_store_reload_preserves_layout_and_skipped_blocks(
             torch.mlu.synchronize()
         if direction == TransferDirection.D2H:
             for actual, reference in zip(chunks, expected, strict=True):
-                assert torch.equal(actual, reference)
+                assert torch.equal(actual.view(bit_dtype), reference.view(bit_dtype))
 
     for actual, original in zip(target, layers, strict=True):
         reference = torch.full_like(original, -2)
@@ -115,7 +128,74 @@ def test_store_reload_preserves_layout_and_skipped_blocks(
             reference[ids[skip:]] = original[ids[skip:]]
         else:
             reference[:, ids[skip:]] = original[:, ids[skip:]]
-        assert torch.equal(actual.cpu(), reference)
+        assert torch.equal(actual.cpu().view(bit_dtype), reference.view(bit_dtype))
+
+
+@pytest.mark.parametrize("fmt", FORMATS, ids=["nhd", "hnd", "mla"])
+def test_d2h_temporary_memory_is_bounded(fmt: EngineKVFormat) -> None:
+    """Multi-chunk D2H preserves bits without retaining full per-layer gathers."""
+    if not MluDeviceSpec().is_available():
+        pytest.skip("requires torch_mlu and an MLU device")
+    nl, nb, bs, nh, hs, chunk_tokens = 16, 64, 16, 8, 64, 512
+    is_mla = fmt == EngineKVFormat.NL_X_NB_BS_HS
+    is_hnd = fmt == EngineKVFormat.NL_X_TWO_NB_NH_BS_HS
+    shape = (nb, bs, hs) if is_mla else (2, nb, bs, nh, hs)
+    host_layers = [
+        ((torch.arange(math.prod(shape)).reshape(shape) + i) % 2048 - 1024)
+        .to(torch.float16)
+        .div_(1024)
+        for i in range(nl)
+    ]
+    source = [
+        (layer.permute(0, 1, 3, 2, 4).contiguous() if is_hnd else layer).to("mlu")
+        for layer in host_layers
+    ]
+    chunk_shape = (nl, chunk_tokens, hs) if is_mla else (2, nl, chunk_tokens, nh * hs)
+    chunks = [
+        torch.empty(chunk_shape, dtype=torch.float16, pin_memory=True) for _ in range(2)
+    ]
+    ids = list(reversed(range(nb)))
+    desc = PageBufferShapeDesc()
+    desc.nl, desc.nb, desc.bs = nl, nb, bs
+    desc.nh, desc.hs, desc.kv_size = (1 if is_mla else nh), hs, (1 if is_mla else 2)
+    desc.element_size, desc.dtype = 2, torch.float16
+    ops = MluDeviceOps()
+
+    def store() -> None:
+        ops.multi_layer_block_kv_transfer(
+            source,
+            chunks,
+            ids,
+            "mlu",
+            TransferDirection.D2H,
+            desc,
+            chunk_tokens,
+            fmt,
+            0,
+        )
+        torch.mlu.synchronize()
+
+    store()
+    allocated = torch.mlu.memory_allocated()
+    torch.mlu.reset_peak_memory_stats()
+    store()
+    temporary_peak = torch.mlu.max_memory_allocated() - allocated
+    # Allow scratch/allocator overhead, but not another full chunk of live
+    # per-layer results or a previous chunk retained into the next allocation.
+    assert temporary_peak < 2 * chunks[0].nbytes
+    blocks_per_chunk = chunk_tokens // bs
+    for index, chunk in enumerate(chunks):
+        selected = ids[index * blocks_per_chunk : (index + 1) * blocks_per_chunk]
+        expected = torch.stack(
+            [
+                layer[selected].reshape(chunk_tokens, hs)
+                if is_mla
+                else layer[:, selected].reshape(2, chunk_tokens, nh * hs)
+                for layer in host_layers
+            ],
+            dim=0 if is_mla else 1,
+        )
+        assert torch.equal(chunk.view(torch.int16), expected.view(torch.int16))
 
 
 @pytest.mark.parametrize("fmt", FORMATS, ids=["nhd", "hnd", "mla"])

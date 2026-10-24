@@ -43,7 +43,8 @@ class MluDeviceOps(DeviceOps):
 
         Supports rank-five K/V-first NHD and HND, and rank-three MLA,
         selected through KVFormatSpec layout facts. Transfers use the
-        current stream. D2H into a strided host slice blocks: torch_mlu
+        current stream. D2H fills one chunk a layer at a time to bound
+        temporary device memory. D2H into a strided host slice blocks: torch_mlu
         1.26.1 does not correctly complete that copy with non_blocking=True.
         Callers must synchronize before consuming other host chunks or
         releasing input storage.
@@ -124,6 +125,10 @@ class MluDeviceOps(DeviceOps):
         ids = torch.as_tensor(block_ids, dtype=torch.long, device=device)
         is_mla = format_spec.is_mla
         is_hnd = format_spec.is_hnd
+        first_layer = paged_buffer_ptrs_tensor[0]
+        hidden_size = first_layer.shape[-1]
+        if not is_mla:
+            hidden_size *= first_layer.shape[2 if is_hnd else 3]
         chunks = cast(list[torch.Tensor], lmcache_objects_ptrs)
         for chunk_idx, chunk in enumerate(chunks):
             begin = max(chunk_idx * blocks_per_chunk, skip_prefix_n_blocks)
@@ -132,17 +137,23 @@ class MluDeviceOps(DeviceOps):
                 continue
             offset = (begin - chunk_idx * blocks_per_chunk) * block_size
             tokens = (end - begin) * block_size
-            pieces: list[torch.Tensor] = []
-            for layer in paged_buffer_ptrs_tensor:
+            chunk_shape: tuple[int, ...] = (
+                len(paged_buffer_ptrs_tensor),
+                tokens,
+                hidden_size,
+            )
+            if not is_mla:
+                chunk_shape = (2, *chunk_shape)
+            gathered = first_layer.new_empty(chunk_shape)
+            for layer_idx, layer in enumerate(paged_buffer_ptrs_tensor):
                 selected = layer.index_select(0 if is_mla else 1, ids[begin:end])
                 if is_hnd:
                     selected = selected.permute(0, 1, 3, 2, 4)
-                pieces.append(
-                    selected.reshape(tokens, -1)
-                    if is_mla
-                    else selected.reshape(2, tokens, -1)
-                )
-            gathered = torch.stack(pieces, dim=0 if is_mla else 1)
+                if is_mla:
+                    gathered[layer_idx].copy_(selected.reshape(tokens, -1))
+                else:
+                    gathered[:, layer_idx].copy_(selected.reshape(2, tokens, -1))
+                del selected
             target = (
                 chunk[:, offset : offset + tokens]
                 if is_mla
@@ -155,6 +166,9 @@ class MluDeviceOps(DeviceOps):
                 gathered,
                 non_blocking=target.device.type != "cpu" or target.is_contiguous(),
             )
+            # Same-stream allocator reuse preserves the queued copy's lifetime
+            # without retaining this chunk during the next chunk's allocation.
+            del gathered
 
     def lmcache_memcpy_async(
         self,

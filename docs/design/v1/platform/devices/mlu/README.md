@@ -17,8 +17,10 @@ remote-allocation methods invoked by Cambricon's vLLM-MLU connector.
 
 The backend accepts per-layer K/V-first NHD (`[2, NB, BS, NH, HS]`),
 K/V-first HND (`[2, NB, NH, BS, HS]`), and MLA (`[NB, BS, HS]`). H2D reuses
-the shared torch block-transfer implementation. D2H gathers blocks on MLU,
-stacks the per-layer results, then copies them to the host. Stored chunks retain the
+the shared torch block-transfer implementation. D2H fills one chunk on MLU
+a layer at a time, then copies it to the host. Temporary tensors are released
+on the transfer stream before allocating the next chunk, limiting device
+workspace to one chunk and per-layer scratch. Stored chunks retain the
 canonical token-major layout: `[2, NL, T, NH * HS]` or `[NL, T, HS]` for MLA.
 The serving adapter must supply the actual `kv_layout` hint for HND; tensor
 shape alone cannot distinguish the block-size and head-count dimensions.
