@@ -10,9 +10,6 @@ from dataclasses import dataclass
 from typing import Any, Optional
 import ctypes
 import json
-import os
-import re
-import stat
 import struct
 import threading
 import time
@@ -29,6 +26,17 @@ from lmcache.utils import (
     DiskCacheMetadata,
 )
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.storage_backend.raw_block.io_engine import (
+    DEFAULT_IOURING_QUEUE_DEPTH,
+    PlacementId,
+    RawBlockIoEngine,
+    RawBlockIoEngineConfig,
+    IoUringIoEngineConfig,
+    PosixIoEngineConfig,
+    make_raw_block_io_engine,
+    normalize_raw_block_io_engine,
+    normalize_raw_block_placement_ids,
+)
 from lmcache.v1.storage_backend.raw_block.key_codec import (
     RawBlockKeyNamespace,
     RawBlockKeySpec,
@@ -42,21 +50,8 @@ logger = init_logger(__name__)
 _DEFAULT_META_MAGIC = b"LMCIDX01"
 _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
-RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
-DEFAULT_IOURING_QUEUE_DEPTH = 256
 _MAX_PUT_MANY_IO_URING_BATCH_KEYS = 64
 _MAX_FIXED_BUFFER_REGION_BYTES = 1 << 30
-_MAX_FDP_PLACEMENT_ID = 0xFFFF
-
-# FDP placement ID semantics are shared by design across raw-block write paths.
-# None omits the directive. Explicit identifiers must be positive because
-# default writes already use the RUH mapping associated with Placement
-# Identifier 0. RawBlockCore rejects explicit identifier 0 so KV data never sends
-# an FDP directive for the default placement identifier. Non-zero identifiers are
-# encoded as 16-bit NVMe directive-specific values.
-# Metadata checkpoint placement is optional. ``None`` keeps the historical
-# default NVMe write behavior; a positive identifier emits an FDP directive.
-PlacementId = int | None
 
 # Slot-header validation issues many small pread calls during POSIX restart
 # recovery. Use a conservative reader count to expose device parallelism without
@@ -75,110 +70,6 @@ def round_up(x: int, align: int) -> int:
         ``x`` rounded up to a multiple of ``align``.
     """
     return ((x + align - 1) // align) * align
-
-
-def normalize_raw_block_io_engine(
-    io_engine: Any = None,
-    *,
-    use_iouring: Any = None,
-    use_uring: Any = None,
-) -> str:
-    """Normalize raw-block I/O engine config with legacy compatibility.
-
-    Args:
-        io_engine: Explicit engine string. Valid values are ``"posix"``,
-            and ``"io_uring"``.
-        use_iouring: Legacy boolean knob. Used only when ``io_engine`` is not
-            set.
-        use_uring: Legacy boolean alias. Used only when ``io_engine`` is not
-            set.
-
-    Returns:
-        The normalized engine string.
-
-    Raises:
-        ValueError: If ``io_engine`` names an unsupported engine.
-    """
-    if io_engine is None or io_engine == "":
-        if bool(use_iouring) or bool(use_uring):
-            return "io_uring"
-        return "posix"
-    normalized = str(io_engine).lower()
-    if normalized not in RAW_BLOCK_IO_ENGINES:
-        allowed = ", ".join(sorted(RAW_BLOCK_IO_ENGINES))
-        raise ValueError(f"io_engine must be one of: {allowed}")
-    return normalized
-
-
-def normalize_raw_block_placement_ids(
-    placement_ids: Sequence[PlacementId] | None,
-    expected_len: int,
-    *,
-    field_name: str = "placement_ids",
-    allow_none: bool = True,
-) -> list[PlacementId]:
-    """Validate FDP placement identifiers and preserve omitted directives."""
-    if placement_ids is None:
-        return [None] * expected_len
-    if len(placement_ids) != expected_len:
-        raise ValueError(f"{field_name} must have length {expected_len}")
-
-    normalized: list[PlacementId] = []
-    for placement_id in placement_ids:
-        if placement_id is None:
-            if not allow_none:
-                raise ValueError(f"{field_name} must contain integers")
-            normalized.append(None)
-            continue
-        if not isinstance(placement_id, int) or isinstance(placement_id, bool):
-            raise ValueError(f"{field_name} must contain integers or None")
-        if placement_id == 0:
-            raise ValueError(f"{field_name} must not contain placement identifier 0")
-        if placement_id < 0:
-            raise ValueError(f"{field_name} must contain positive integers or None")
-        if placement_id > _MAX_FDP_PLACEMENT_ID:
-            raise ValueError(
-                f"{field_name} must contain placement identifiers in range "
-                f"1..={_MAX_FDP_PLACEMENT_ID}"
-                f"{' or None' if allow_none else ''}"
-            )
-        normalized.append(int(placement_id))
-    return normalized
-
-
-def validate_raw_block_io_options(
-    *,
-    iouring_queue_depth: int,
-) -> None:
-    """Validate numeric raw-block I/O engine options.
-
-    Args:
-        iouring_queue_depth: Queue depth for the Rust io_uring path.
-
-    Raises:
-        ValueError: If any numeric option is not positive.
-    """
-    if int(iouring_queue_depth) <= 0:
-        raise ValueError("iouring_queue_depth must be > 0")
-
-
-def _resolve_sysfs_queue_dir(device_path: str) -> Optional[str]:
-    """Resolve sysfs queue directory for NVMe character device paths."""
-    base_name = os.path.basename(device_path)
-    match = re.fullmatch(r"ng(\d+)n(\d+)", base_name)
-    if match:
-        ctrl, nsid = match.groups()
-        return f"/sys/block/nvme{ctrl}n{nsid}/queue"
-    return None
-
-
-def _read_sysfs_int(path: str) -> Optional[int]:
-    """Read an integer value from sysfs and return None on failure."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return int(f.read().strip())
-    except Exception:
-        return None
 
 
 @dataclass(frozen=True)
@@ -293,12 +184,6 @@ class RawBlockCore:
                 "io_engine='io_uring' and use_uring_cmd=true"
             )
         self._recovery_read_threads = DEFAULT_RECOVERY_READ_THREADS
-        if self.use_uring_cmd and self.use_odirect:
-            logger.warning(
-                "RawBlockCore: use_odirect is ignored for NVMe namespace "
-                "character devices when use_uring_cmd=true"
-            )
-            self.use_odirect = False
         self.key_namespace = key_namespace
 
         if not self.device_path:
@@ -323,41 +208,6 @@ class RawBlockCore:
             raise ValueError("meta_magic must be exactly 8 bytes")
         if self.meta_version <= 0:
             raise ValueError("meta_version must be > 0")
-        validate_raw_block_io_options(
-            iouring_queue_depth=self.iouring_queue_depth,
-        )
-        if self.use_uring_cmd and self.io_engine != "io_uring":
-            raise ValueError("use_uring_cmd requires io_uring as io_engine")
-        if self.use_uring_cmd:
-            try:
-                mode = os.stat(self.device_path).st_mode
-            except OSError as e:
-                raise ValueError(
-                    "use_uring_cmd requires an existing NVMe namespace "
-                    f"character device path, got {self.device_path!r}"
-                ) from e
-            if not stat.S_ISCHR(mode):
-                raise ValueError(
-                    "use_uring_cmd requires an NVMe namespace character device "
-                    f"(for example /dev/ng0n1), got {self.device_path!r}"
-                )
-            # Validate NVMe generic namespace naming pattern (ng<ctrl>n<ns>)
-            basename = os.path.basename(self.device_path)
-            if not re.match(r"^ng\d+n\d+$", basename):
-                raise ValueError(
-                    "use_uring_cmd requires an NVMe generic namespace character device "
-                    f"with naming pattern ng<ctrl>n<ns> (for example /dev/ng0n1), "
-                    f"got {self.device_path!r}"
-                )
-
-        # Maximum data transfer size for a single I/O request.
-        # Default is 0 (no splitting).
-        # > 0 : explicit manual split size
-        # <= 0: opt-in auto-detect from device queue limits
-        if self.use_uring_cmd:
-            self.max_data_transfer_size = self._resolve_max_data_transfer_size(
-                config.max_data_transfer_size
-            )
 
         try:
             self.meta_magic_text = self.meta_magic.decode("ascii")
@@ -388,7 +238,7 @@ class RawBlockCore:
         self._effective_capacity_bytes: int = 0
         self._data_base_offset: int = 0
 
-        self._raw = None
+        self._io_engine: Optional[RawBlockIoEngine] = None
         self._closed = False
 
         self._meta_seq: int = 0
@@ -398,6 +248,12 @@ class RawBlockCore:
         self._last_io_ts: float = time.monotonic()
         self._meta_stop_evt = threading.Event()
         self._meta_thread: Optional[threading.Thread] = None
+
+        self._io_engine = make_raw_block_io_engine(
+            self._build_io_engine_config(config),
+        )
+        self.use_odirect = self._io_engine.use_odirect
+        self.max_data_transfer_size = self._io_engine.max_data_transfer_size
 
         try:
             self._ensure_capacity_and_layout()
@@ -417,6 +273,32 @@ class RawBlockCore:
             self._cleanup_after_init_failure()
             raise
 
+    def _build_io_engine_config(self, config: RawBlockCoreConfig) -> RawBlockIoEngineConfig:
+        """Assemble the normalized config for the configured I/O engine.
+
+        Args:
+            config: The raw-block core configuration whose I/O fields describe
+                the target engine.
+
+        Returns:
+            A ``PosixIoEngineConfig`` for ``io_engine='posix'`` or an
+            ``IoUringIoEngineConfig`` otherwise.
+        """
+        common = dict(
+            device_path=self.device_path,
+            block_align=self.block_align,
+            io_engine=self.io_engine,
+            use_odirect=self.use_odirect,
+        )
+        if self.io_engine == "posix":
+            return PosixIoEngineConfig(**common)
+        return IoUringIoEngineConfig(
+            **common,
+            use_uring_cmd=self.use_uring_cmd,
+            iouring_queue_depth=self.iouring_queue_depth,
+            max_data_transfer_size=config.max_data_transfer_size,
+        )
+
     @property
     def _requires_transfer_alignment(self) -> bool:
         """Return whether I/O transfers require block alignment.
@@ -426,121 +308,6 @@ class RawBlockCore:
             This is required for O_DIRECT I/O and for io_uring_cmd operations.
         """
         return self.use_odirect or self.use_uring_cmd
-
-    def _resolve_max_data_transfer_size(self, configured_size: int) -> int:
-        """Resolve transfer split size from config or NVMe sysfs queue limits.
-
-        When auto-detecting, the size is bounded by both the device's
-        ``max_hw_sectors_kb`` (total transfer size) and its ``max_segments``
-        scatter-gather limit. The NVMe ``io_uring_cmd`` passthrough path builds
-        one iovec segment per page, so a single transfer can consume up to
-        ``ceil(len / page_size)`` segments. Exceeding ``max_segments`` makes the
-        kernel reject the command with ``EINVAL``, so the resolved size is
-        capped at ``max_segments * page_size``.
-
-        Args:
-            configured_size: Explicitly configured max data transfer size in bytes.
-                If > 0, this value is used directly. If <= 0, the size is
-                auto-detected from device queue limits.
-
-        Returns:
-            The resolved max data transfer size in bytes, guaranteed to be
-            a multiple of ``self.block_align``.
-
-        Raises:
-            ValueError: If ``configured_size`` is > 0 but not a multiple of
-                ``self.block_align``.
-            RuntimeError: If sysfs queue limits cannot be resolved during
-                auto-detection.
-        """
-        if configured_size > 0:
-            if configured_size % self.block_align != 0:
-                raise ValueError(
-                    f"max_data_transfer_size ({configured_size}) must be a "
-                    f"multiple of block_align ({self.block_align})"
-                )
-            return configured_size
-
-        queue_dir = _resolve_sysfs_queue_dir(self.device_path)
-        if queue_dir is None:
-            raise RuntimeError(
-                "RustRawBlockBackend: unable to derive NVMe sysfs queue path from "
-                "NVMe character device path "
-                f"{self.device_path} for auto max_data_transfer_size"
-            )
-
-        max_hw_sectors_kb = _read_sysfs_int(f"{queue_dir}/max_hw_sectors_kb")
-        if max_hw_sectors_kb is None or max_hw_sectors_kb <= 0:
-            raise RuntimeError(
-                "RustRawBlockBackend: failed to read max_hw_sectors_kb from "
-                f"{queue_dir} for auto max_data_transfer_size"
-            )
-
-        resolved_bytes = max_hw_sectors_kb * 1024
-
-        # The io_uring_cmd passthrough path builds one iovec segment per page,
-        # so cap the transfer at the device's scatter-gather segment limit.
-        max_segments = _read_sysfs_int(f"{queue_dir}/max_segments")
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        if max_segments is not None and max_segments > 0:
-            segment_limit_bytes = max_segments * page_size
-            resolved_bytes = min(resolved_bytes, segment_limit_bytes)
-
-        aligned_bytes = (resolved_bytes // self.block_align) * self.block_align
-        if aligned_bytes <= 0:
-            aligned_bytes = self.block_align
-
-        logger.info(
-            "RustRawBlockBackend: auto max_data_transfer_size=%d bytes "
-            "(device=%s, max_hw_sectors_kb=%s, max_segments=%s, page_size=%d)",
-            aligned_bytes,
-            self.device_path,
-            max_hw_sectors_kb,
-            max_segments,
-            page_size,
-        )
-        return aligned_bytes
-
-    def _rawdev(self) -> Any:
-        """Return the lazily opened Rust raw-block device binding."""
-        if self._raw is None:
-            try:
-                # Third Party
-                from lmcache_rust_raw_block_io import RawBlockDevice  # type: ignore
-            except Exception as e:
-                # First Party
-                from lmcache import __version__
-
-                # Releases publish it at lmcache's version; dev builds have
-                # no matching package, so leave those unpinned.
-                is_release = re.fullmatch(r"\d+\.\d+\.\d+((a|b|rc)\d+)?", __version__)
-                pin = f"=={__version__}" if is_release else ""
-                raise RuntimeError(
-                    "Rust raw-block extension is not installed. Install it with "
-                    f"`pip install lmcache-rust-raw-block-io{pin}` and retry."
-                ) from e
-            self._raw = RawBlockDevice(
-                self.device_path,
-                writable=True,
-                use_odirect=self.use_odirect,
-                alignment=self.block_align,
-                io_engine=self.io_engine,
-                iouring_queue_depth=self.iouring_queue_depth,
-                use_uring_cmd=self.use_uring_cmd,
-            )
-        self.raise_if_failed()
-        return self._raw
-
-    def raw_device(self) -> Any:
-        """Return the lazily opened Rust raw-block device.
-
-        Returns:
-            The underlying Rust ``RawBlockDevice`` object.
-
-        Raises:
-            Exception: Propagates raw-device open errors from the Rust binding.
-        """
-        return self._rawdev()
 
     def fetch_fdp_status(self) -> list[tuple[int, int]]:
         """Fetch NVMe FDP placement/RUH status from the raw device.
@@ -552,9 +319,8 @@ class RawBlockCore:
             RuntimeError: If the raw device binding or target device cannot
                 provide FDP status.
         """
-        return [
-            (int(pid), int(ruhid)) for pid, ruhid in self._rawdev().fetch_fdp_status()
-        ]
+        assert self._io_engine is not None
+        return self._io_engine.fetch_fdp_status()
 
     def set_raw_device_for_testing(self, raw_device: Any) -> None:
         """Replace the raw device handle used by this core.
@@ -562,10 +328,11 @@ class RawBlockCore:
         Args:
             raw_device: Object implementing the Rust raw-device methods.
         """
-        self._raw = raw_device
+        assert self._io_engine is not None
+        self._io_engine.set_device(raw_device)
 
-    def register_fixed_buffers_from_allocator(self, memory_allocator: Any) -> None:
-        """Register allocator pages with io_uring when the allocator exposes them.
+    def register_io_buffers_from_allocator(self, memory_allocator: Any) -> None:
+        """Register allocator pages for zero-copy I/O when the allocator exposes them.
 
         Args:
             memory_allocator: Local CPU allocator that may expose
@@ -574,32 +341,33 @@ class RawBlockCore:
         Raises:
             Exception: Propagates Rust registration errors after logging.
         """
-        if self.io_engine != "io_uring":
+        assert self._io_engine is not None
+        if not self._io_engine.supports_io_buffers():
             return
         paged_buffers = getattr(memory_allocator, "get_paged_buffers", None)
         if not callable(paged_buffers):
             logger.warning(
                 "RawBlockCore: allocator does not expose paged buffers; "
-                "io_uring fixed-buffer zero-copy is disabled"
+                "zero-copy I/O is disabled"
             )
             return
         buffers = paged_buffers()
         if not buffers:
             logger.warning(
                 "RawBlockCore: allocator returned no paged buffers; "
-                "io_uring fixed-buffer zero-copy is disabled"
+                "zero-copy I/O is disabled"
             )
             return
         buffer_ptrs = [buf.data_ptr() for buf in buffers]
         buffer_sizes = [buf.numel() * buf.element_size() for buf in buffers]
-        self._rawdev().register_fixed_buffers(buffer_ptrs, buffer_sizes)
+        self._io_engine.register_io_buffers(buffer_ptrs, buffer_sizes)
         logger.info(
-            "RawBlockCore: registered %d paged buffers for io_uring fixed I/O",
+            "RawBlockCore: registered %d paged buffers for zero-copy I/O",
             len(buffers),
         )
 
-    def register_fixed_buffer_range(self, ptr: int, size: int) -> None:
-        """Register one stable memory range for io_uring fixed-buffer I/O.
+    def register_io_buffer_range(self, ptr: int, size: int) -> None:
+        """Register one stable memory range for zero-copy I/O.
 
         Args:
             ptr: Base address of the stable memory range.
@@ -611,9 +379,10 @@ class RawBlockCore:
 
         Notes:
             The range is divided into regions no larger than 1 GiB, which is
-            the maximum size supported for one io_uring registered buffer.
+            the maximum size supported for one registered buffer.
         """
-        if self.io_engine != "io_uring":
+        assert self._io_engine is not None
+        if not self._io_engine.supports_io_buffers():
             return
 
         ptr = int(ptr)
@@ -634,10 +403,9 @@ class RawBlockCore:
             next_ptr += region_size
             remaining -= region_size
 
-        self._rawdev().register_fixed_buffers(buffer_ptrs, buffer_sizes)
+        self._io_engine.register_io_buffers(buffer_ptrs, buffer_sizes)
         logger.info(
-            "RawBlockCore: registered %d regions covering %d bytes for "
-            "io_uring fixed I/O",
+            "RawBlockCore: registered %d regions covering %d bytes for zero-copy I/O",
             len(buffer_ptrs),
             size,
         )
@@ -1117,9 +885,8 @@ class RawBlockCore:
                 submission errors and ordinary per-request I/O failures do not
                 mark the worker as failed.
         """
-        worker_error = self._worker_error()
-        if worker_error is not None:
-            raise RuntimeError(worker_error)
+        assert self._io_engine is not None
+        self._io_engine.raise_if_failed()
 
     def report_status(self) -> dict:
         """Return health, registration, layout, and in-flight status.
@@ -1131,12 +898,10 @@ class RawBlockCore:
             registration. Inspecting status never opens a new native device.
         """
         with self._lock:
+            assert self._io_engine is not None
             worker_error = self._worker_error()
-            raw_device = self._raw
             fixed_buffers_registered, fixed_buffer_registered_bytes = (
-                raw_device.fixed_buffer_status()
-                if raw_device is not None
-                else (False, 0)
+                self._io_engine.fixed_buffer_status()
             )
             return {
                 "is_healthy": not self._closed and worker_error is None,
@@ -1192,21 +957,14 @@ class RawBlockCore:
         except Exception as e:
             logger.warning("RawBlockCore final checkpoint failed: %s", e)
 
-        if self._raw is not None:
-            try:
-                self._raw.close()
-            except Exception as e:
-                logger.warning(
-                    "Failed to close raw block device %s: %s", self.device_path, e
-                )
-            finally:
-                self._raw = None
+        assert self._io_engine is not None
+        self._io_engine.close()
 
     def _worker_error(self) -> str | None:
-        if self._raw is None or self._closed:
+        if self._closed:
             return None
-        get_worker_error = getattr(self._raw, "worker_error", None)
-        return get_worker_error() if get_worker_error is not None else None
+        assert self._io_engine is not None
+        return self._io_engine.worker_error()
 
     def _cleanup_after_init_failure(self) -> None:
         """Close resources that may have been opened before init failed."""
@@ -1214,71 +972,9 @@ class RawBlockCore:
         if self._meta_thread is not None:
             self._meta_thread.join(timeout=5)
             self._meta_thread = None
-        if self._raw is not None:
-            try:
-                self._raw.close()
-            except Exception as e:
-                logger.warning(
-                    "Failed to close raw block device %s: %s", self.device_path, e
-                )
-            finally:
-                self._raw = None
+        assert self._io_engine is not None
+        self._io_engine.close()
         self._closed = True
-
-    def _byte_view(self, buf: Any) -> memoryview:
-        """Return a byte-addressable memoryview over a Python buffer.
-
-        Args:
-            buf: Object implementing the Python buffer protocol.
-
-        Returns:
-            A memoryview with one-byte elements.
-
-        Raises:
-            TypeError: If ``buf`` does not expose a compatible contiguous buffer.
-        """
-        view = buf if isinstance(buf, memoryview) else memoryview(buf)
-        if view.itemsize == 1 and view.format in ("B", "b", "c"):
-            return view
-        return view.cast("B")
-
-    def _is_buffer_aligned(self, buf: Any) -> bool:
-        """Check if a buffer is aligned to the block alignment boundary.
-
-        Args:
-            buf: Object implementing the Python buffer protocol.
-
-        Returns:
-            True if the buffer is aligned, False otherwise.
-        """
-        if not self.use_odirect:
-            return True
-        view = self._byte_view(buf)
-        # Check if the buffer pointer is aligned
-        ptr = ctypes.addressof((ctypes.c_byte * 1).from_buffer(view))
-        return ptr % self.block_align == 0
-
-    def _allocate_aligned_buffer(self, length: int) -> memoryview:
-        """Allocate a writable byte buffer aligned to ``self.block_align``.
-
-        Args:
-            length: Number of bytes to expose through the returned memoryview.
-
-        Returns:
-            A memoryview whose starting address is aligned to ``self.block_align``.
-
-        Raises:
-            ValueError: If ``length`` is negative.
-        """
-        if length < 0:
-            raise ValueError("length must be >= 0")
-        if length == 0:
-            return memoryview(bytearray())
-
-        backing = bytearray(length + self.block_align - 1)
-        ptr = ctypes.addressof((ctypes.c_byte * 1).from_buffer(backing))
-        offset = (-ptr) % self.block_align
-        return memoryview(backing)[offset : offset + length]
 
     def _build_direct_odirect_view(
         self,
@@ -1389,212 +1085,6 @@ class RawBlockCore:
                 buf = direct_view
         return buf, payload_len, total_len
 
-    def _validate_uring_cmd_chunk(self, offset: int, total_len: int) -> None:
-        """Validate one NVMe raw-command transfer range.
-
-        Args:
-            offset: Device byte offset for the transfer.
-            total_len: Transfer size in bytes.
-
-        Raises:
-            ValueError: If either value is not block aligned.
-        """
-        if offset % self.block_align != 0:
-            raise ValueError("io_uring_cmd requires aligned offsets")
-        if total_len % self.block_align != 0:
-            raise ValueError("io_uring_cmd requires aligned transfer lengths")
-
-    def _write_uring_cmd_buffers(
-        self,
-        offsets: Sequence[int],
-        buffers: Sequence[Any],
-        payload_lens: Sequence[int],
-        total_lens: Sequence[int],
-        placement_ids: Sequence[PlacementId] | None = None,
-    ) -> None:
-        """Write buffers as bounded NVMe raw-command chunks.
-
-        Args:
-            offsets: Device offsets for each logical write.
-            buffers: Source buffers.
-            payload_lens: Logical source byte counts.
-            total_lens: Physical transfer sizes, including padding.
-            placement_ids: Optional FDP placement identifiers for each logical
-                write. ``None`` omits the directive; explicit identifier 0 is
-                rejected.
-
-        Raises:
-            ValueError: If lengths are inconsistent or unaligned.
-            Exception: Propagates Rust raw-device write errors.
-        """
-        raw_dev = self._rawdev()
-        chunk_offsets: list[int] = []
-        chunk_buffers: list[memoryview] = []
-        chunk_lens: list[int] = []
-        chunk_placement_ids: list[PlacementId] = []
-        keepalive: list[memoryview] = []
-        per_write_placement_ids = normalize_raw_block_placement_ids(
-            placement_ids,
-            len(offsets),
-            field_name="placement_ids",
-        )
-
-        for offset, buf, payload_len, total_len, placement_id in zip(
-            offsets,
-            buffers,
-            payload_lens,
-            total_lens,
-            per_write_placement_ids,
-            strict=True,
-        ):
-            offset = int(offset)
-            payload_len = int(payload_len)
-            total_len = int(total_len)
-            self._validate_uring_cmd_chunk(offset, total_len)
-
-            view = self._byte_view(buf)
-            if len(view) < total_len:
-                if len(view) < payload_len:
-                    raise ValueError("input buffer shorter than payload_len")
-                padded = self._allocate_aligned_buffer(total_len)
-                padded[:payload_len] = view[:payload_len]
-                view = padded
-            else:
-                view = view[:total_len]
-            keepalive.append(view)
-
-            cursor = 0
-            while cursor < total_len:
-                chunk_len = min(self.max_data_transfer_size, total_len - cursor)
-                self._validate_uring_cmd_chunk(offset + cursor, chunk_len)
-                chunk_offsets.append(offset + cursor)
-                chunk_buffers.append(view[cursor : cursor + chunk_len])
-                chunk_lens.append(chunk_len)
-                chunk_placement_ids.append(placement_id)
-                cursor += chunk_len
-
-        if not chunk_offsets:
-            return
-        batch_id = raw_dev.batched_write(
-            chunk_offsets,
-            chunk_buffers,
-            chunk_lens,
-            chunk_placement_ids,
-        )
-        if not all(
-            self._wait_iouring_results(
-                raw_dev,
-                batch_id,
-                len(chunk_offsets),
-                "io_uring_cmd write",
-            )
-        ):
-            raise RuntimeError("raw-block io_uring_cmd write failed")
-        keepalive.clear()
-
-    def _read_uring_cmd_buffers(
-        self,
-        offsets: Sequence[int],
-        buffers: Sequence[Any],
-        payload_lens: Sequence[int],
-        total_lens: Sequence[int],
-    ) -> list[bool]:
-        """Read buffers as bounded NVMe raw-command chunks.
-
-        Args:
-            offsets: Device offsets for each logical read.
-            buffers: Destination buffers.
-            payload_lens: Logical bytes to expose to callers.
-            total_lens: Physical transfer sizes, including padding.
-
-        Returns:
-            A list of per-logical-read success booleans aligned with
-            ``offsets``. If a submitted batch returns too few or too many
-            completions, all submitted logical reads are reported as false.
-        """
-        raw_dev = self._rawdev()
-        results = [False] * len(offsets)
-        chunk_offsets: list[int] = []
-        chunk_buffers: list[memoryview] = []
-        chunk_lens: list[int] = []
-        chunk_logical_indices: list[int] = []
-        chunk_statuses: list[list[bool]] = [[] for _ in offsets]
-        copy_back_targets: dict[int, tuple[memoryview, memoryview, int]] = {}
-        keepalive: list[Any] = []
-
-        for logical_idx, (offset, buf, payload_len, total_len) in enumerate(
-            zip(offsets, buffers, payload_lens, total_lens, strict=True)
-        ):
-            try:
-                offset = int(offset)
-                payload_len = int(payload_len)
-                total_len = int(total_len)
-                self._validate_uring_cmd_chunk(offset, total_len)
-
-                dst = self._byte_view(buf)
-                if len(dst) < total_len:
-                    if len(dst) < payload_len:
-                        raise ValueError("output buffer shorter than payload_len")
-                    target = self._allocate_aligned_buffer(total_len)
-                    copy_back = True
-                else:
-                    target = dst[:total_len]
-                    copy_back = False
-                keepalive.append(target)
-
-                cursor = 0
-                max_chunk_len = (
-                    self.max_data_transfer_size
-                    if self.max_data_transfer_size > 0
-                    else total_len
-                )
-                while cursor < total_len:
-                    chunk_len = min(max_chunk_len, total_len - cursor)
-                    self._validate_uring_cmd_chunk(offset + cursor, chunk_len)
-                    chunk_offsets.append(offset + cursor)
-                    chunk_buffers.append(target[cursor : cursor + chunk_len])
-                    chunk_lens.append(chunk_len)
-                    chunk_logical_indices.append(logical_idx)
-                    cursor += chunk_len
-
-                if copy_back:
-                    copy_back_targets[logical_idx] = (dst, target, payload_len)
-            except Exception:
-                continue
-
-        if not chunk_offsets:
-            return results
-
-        try:
-            batch_id = raw_dev.batched_read(
-                chunk_offsets,
-                chunk_buffers,
-                chunk_lens,
-            )
-            chunk_results = self._wait_iouring_results(
-                raw_dev,
-                batch_id,
-                len(chunk_offsets),
-                "io_uring_cmd read",
-            )
-        except Exception:
-            return results
-
-        for chunk_idx, logical_idx in enumerate(chunk_logical_indices):
-            ok = chunk_idx < len(chunk_results) and bool(chunk_results[chunk_idx])
-            chunk_statuses[logical_idx].append(ok)
-
-        for logical_idx, statuses in enumerate(chunk_statuses):
-            if not statuses or not all(statuses):
-                continue
-            if logical_idx in copy_back_targets:
-                dst, target, payload_len = copy_back_targets[logical_idx]
-                dst[:payload_len] = target[:payload_len]
-            results[logical_idx] = True
-
-        keepalive.clear()
-        return results
-
     def _write_buffers(
         self,
         offsets: Sequence[int],
@@ -1617,49 +1107,10 @@ class RawBlockCore:
             RuntimeError: If the requested io_uring mode is unavailable.
             Exception: Propagates Rust raw-device write errors.
         """
-        raw_dev = self._rawdev()
-        per_write_placement_ids = normalize_raw_block_placement_ids(
-            placement_ids,
-            len(offsets),
-            field_name="placement_ids",
+        assert self._io_engine is not None
+        self._io_engine.write_buffers(
+            offsets, buffers, payload_lens, total_lens, placement_ids
         )
-
-        if self.io_engine != "io_uring":
-            for offset, buf, payload_len, total_len in zip(
-                offsets, buffers, payload_lens, total_lens, strict=True
-            ):
-                raw_dev.pwrite_from_buffer(offset, buf, payload_len, total_len)
-            return
-
-        if self.use_uring_cmd:
-            self._write_uring_cmd_buffers(
-                offsets,
-                buffers,
-                payload_lens,
-                total_lens,
-                per_write_placement_ids,
-            )
-            return
-
-        # batched_write takes payload_lens and total_lens separately, so it
-        # handles O_DIRECT padding (payload_len < total_len) by bouncing and
-        # zero-filling internally. All io_uring writes go through one batch.
-        batch_id = raw_dev.batched_write(
-            [int(offset) for offset in offsets],
-            list(buffers),
-            [int(total_len) for total_len in total_lens],
-            per_write_placement_ids,
-            [int(payload_len) for payload_len in payload_lens],
-        )
-        if not all(
-            self._wait_iouring_results(
-                raw_dev,
-                batch_id,
-                len(offsets),
-                "io_uring write",
-            )
-        ):
-            raise RuntimeError("raw-block io_uring write failed")
 
     def _read_buffers(
         self,
@@ -1685,71 +1136,8 @@ class RawBlockCore:
             RuntimeError: If the requested io_uring mode is unavailable before
                 reads are submitted.
         """
-        raw_dev = self._rawdev()
-        if self.io_engine != "io_uring":
-            results: list[bool] = []
-            for offset, buf, payload_len, total_len in zip(
-                offsets, buffers, payload_lens, total_lens, strict=True
-            ):
-                try:
-                    raw_dev.pread_into(offset, buf, payload_len, total_len)
-                    results.append(True)
-                except Exception:
-                    results.append(False)
-            return results
-
-        if self.use_uring_cmd:
-            return self._read_uring_cmd_buffers(
-                offsets,
-                buffers,
-                payload_lens,
-                total_lens,
-            )
-
-        batch_id = raw_dev.batched_read(
-            [int(offset) for offset in offsets],
-            list(buffers),
-            [int(total_len) for total_len in total_lens],
-        )
-        return self._wait_iouring_results(
-            raw_dev,
-            batch_id,
-            len(offsets),
-            "io_uring read",
-        )
-
-    def _wait_iouring_results(
-        self,
-        raw_dev: Any,
-        batch_id: int,
-        expected_count: int,
-        operation: str,
-    ) -> list[bool]:
-        """Wait for an io_uring batch, log failures, and return its bitmap.
-
-        ``expected_count`` is the number of individual I/O entries submitted
-        in the Rust batch. For io_uring_cmd, this is the post-splitting chunk
-        count, not the number of logical reads or writes.
-        """
-        results, completion_errors = raw_dev.wait_iouring(batch_id)
-        results = list(results)
-        for operation_index, error in completion_errors:
-            logger.error(
-                "RawBlockCore %s batch %d operation %d failed: %s",
-                operation,
-                batch_id,
-                operation_index,
-                error,
-            )
-        if len(results) != expected_count:
-            logger.error(
-                "RawBlockCore %s completion count mismatch: expected %d, got %d",
-                operation,
-                expected_count,
-                len(results),
-            )
-            return [False] * expected_count
-        return [bool(result) for result in results]
+        assert self._io_engine is not None
+        return self._io_engine.read_buffers(offsets, buffers, payload_lens, total_lens)
 
     def _write_one(
         self,
@@ -1771,32 +1159,29 @@ class RawBlockCore:
         Returns:
             True when both header and payload writes complete; false otherwise.
         """
+        assert self._io_engine is not None
+        header_buf: Any = None
         try:
-            header = self._encode_header(key.slot_identity, len(memory_obj.byte_array))
+            header_buf = self._io_engine.acquire_buffer(self.header_bytes)
+            self._encode_header_into_buffer(
+                header_buf, key.slot_identity, len(memory_obj.byte_array)
+            )
             buf, payload_len, total_len = self._prepare_write_payload(memory_obj)
+            hdr_total = (
+                round_up(self.header_bytes, self.block_align)
+                if self._requires_transfer_alignment
+                else self.header_bytes
+            )
 
             with self._lock:
                 self._inflight_io_count += 1
             try:
-                hdr_total = (
-                    round_up(len(header), self.block_align)
-                    if self._requires_transfer_alignment
-                    else len(header)
-                )
-                header_buf: Any = header
-                if self.io_engine != "io_uring" and len(header) < hdr_total:
-                    padded_header = bytearray(header)
-                    padded_header.extend(b"\x00" * (hdr_total - len(header)))
-                    header_buf = padded_header
                 # Keep each slot header on the same placement identifier as its
                 # payload; future policy can split them if needed.
                 self._write_buffers(
                     [offset, offset + self.header_bytes],
                     [header_buf, buf],
-                    [
-                        hdr_total if self.io_engine == "io_uring" else len(header),
-                        payload_len,
-                    ],
+                    [hdr_total, payload_len],
                     [hdr_total, total_len],
                     [placement_id, placement_id],
                 )
@@ -1808,6 +1193,9 @@ class RawBlockCore:
         except Exception as e:
             logger.error("RawBlockCore write failed for %s: %s", key.encoded, e)
             return False
+        finally:
+            if header_buf is not None:
+                self._io_engine.release_buffer(header_buf)
 
     def _put_many_batch_io(
         self,
@@ -1970,23 +1358,31 @@ class RawBlockCore:
 
         # Build header/payload write entries outside the lock. Preparation
         # failures happen before device submission and are isolated per key.
+        assert self._io_engine is not None
         offsets: list[int] = []
         buffers: list[Any] = []
         payload_lens: list[int] = []
         total_lens: list[int] = []
         write_placement_ids: list[PlacementId] = []
         prepared_plan: list[tuple[int, RawBlockKeySpec, MemoryObj, int]] = []
+        header_bufs: list[Any] = []
         write_succeeded = True
         for i, key, obj, offset, placement_id in write_plan:
+            header_buf: Any = None
             try:
-                header = self._encode_header(key.slot_identity, len(obj.byte_array))
+                header_buf = self._io_engine.acquire_buffer(self.header_bytes)
+                self._encode_header_into_buffer(
+                    header_buf, key.slot_identity, len(obj.byte_array)
+                )
                 hdr_total = (
-                    round_up(len(header), self.block_align)
+                    round_up(self.header_bytes, self.block_align)
                     if self._requires_transfer_alignment
-                    else len(header)
+                    else self.header_bytes
                 )
                 buf, payload_len, total_len = self._prepare_write_payload(obj)
             except Exception as e:
+                if header_buf is not None:
+                    self._io_engine.release_buffer(header_buf)
                 logger.error(
                     "RawBlockCore batch buffer preparation failed for %s: %s",
                     key.encoded,
@@ -2005,11 +1401,12 @@ class RawBlockCore:
             # failed key never leaves a header behind for a slot that the
             # rollback above just returned to the free list.
             offsets.extend((offset, offset + self.header_bytes))
-            buffers.extend((header, buf))
+            buffers.extend((header_buf, buf))
             payload_lens.extend((hdr_total, payload_len))
             total_lens.extend((hdr_total, total_len))
             write_placement_ids.extend((placement_id, placement_id))
             prepared_plan.append((i, key, obj, offset))
+            header_bufs.append(header_buf)
 
         if prepared_plan:
             with self._lock:
@@ -2029,6 +1426,9 @@ class RawBlockCore:
                 with self._lock:
                     self._inflight_io_count -= len(prepared_plan)
                     self._last_io_ts = time.monotonic()
+                for released in header_bufs:
+                    self._io_engine.release_buffer(released)
+                header_bufs.clear()
 
         # Commit successful writes, or roll back submitted keys if the device
         # write failed.
@@ -2056,17 +1456,23 @@ class RawBlockCore:
 
         return RawBlockPutManyResult(results=results, stored_keys=stored_keys)
 
-    def _encode_header(self, slot_identity: int, payload_len: int) -> bytes:
-        """Encode a fixed-size raw-block slot header."""
-        hdr = bytearray(self.header_bytes)
-        hdr[0:8] = b"LMCBLK01"
-        hdr[8:16] = int(slot_identity & ((1 << 64) - 1)).to_bytes(
+    def _encode_header_into_buffer(
+        self, buf: Any, slot_identity: int, payload_len: int
+    ) -> None:
+        """Encode a fixed-size raw-block slot header into ``buf`` in place.
+
+        Args:
+            buf: Writable buffer of at least ``header_bytes`` bytes.
+            slot_identity: Encoded slot identity to store.
+            payload_len: Logical payload length to store.
+        """
+        buf[0:8] = b"LMCBLK01"
+        buf[8:16] = int(slot_identity & ((1 << 64) - 1)).to_bytes(
             8,
             "little",
             signed=False,
         )
-        hdr[16:24] = int(payload_len).to_bytes(8, "little", signed=False)
-        return bytes(hdr)
+        buf[16:24] = int(payload_len).to_bytes(8, "little", signed=False)
 
     def _decode_slot_header(self, hdr: bytes) -> Optional[tuple[int, int]]:
         """Decode a raw-block slot header into identity and payload length."""
@@ -2078,33 +1484,37 @@ class RawBlockCore:
 
     def _read_slot_header(self, offset: int) -> Optional[tuple[int, int]]:
         """Read and decode the slot header at a raw-device offset."""
-        buf = bytearray(self.header_bytes)
+        assert self._io_engine is not None
+        buf = self._io_engine.acquire_buffer(self.header_bytes)
         try:
             with self._lock:
                 self._inflight_io_count += 1
-            if not all(
-                self._read_buffers(
-                    [offset],
-                    [buf],
-                    [self.header_bytes],
-                    [self.header_bytes],
-                )
-            ):
+            try:
+                if not all(
+                    self._read_buffers(
+                        [offset],
+                        [buf],
+                        [self.header_bytes],
+                        [self.header_bytes],
+                    )
+                ):
+                    return None
+                return self._decode_slot_header(bytes(buf))
+            except Exception:
                 return None
-            return self._decode_slot_header(buf)
-        except Exception:
-            return None
         finally:
             with self._lock:
                 self._inflight_io_count -= 1
                 self._last_io_ts = time.monotonic()
+            self._io_engine.release_buffer(buf)
 
     def _ensure_capacity_and_layout(self) -> None:
-        """Open the device if needed and compute metadata/data layout."""
+        """Compute metadata/data layout from the configured raw device."""
         if self._effective_capacity_bytes > 0 and self._max_slots > 0:
             return
 
-        device_size = int(self._rawdev().size_bytes())
+        assert self._io_engine is not None
+        device_size = self._io_engine.device_size()
         requested = self.capacity_bytes if self.capacity_bytes > 0 else device_size
         self._effective_capacity_bytes = min(requested, device_size)
         self.capacity_bytes = self._effective_capacity_bytes
@@ -2215,54 +1625,67 @@ class RawBlockCore:
 
     def _read_meta_header(self, container_offset: int) -> Optional[dict[str, int]]:
         """Read and validate a metadata checkpoint header."""
-        buf = bytearray(self.block_align)
+        assert self._io_engine is not None
+        buf = self._io_engine.acquire_buffer(self.block_align)
         try:
-            if not all(
-                self._read_buffers(
-                    [container_offset],
-                    [buf],
-                    [self.block_align],
-                    [self.block_align],
-                )
-            ):
+            try:
+                if not all(
+                    self._read_buffers(
+                        [container_offset],
+                        [buf],
+                        [self.block_align],
+                        [self.block_align],
+                    )
+                ):
+                    return None
+            except Exception:
                 return None
-        except Exception:
-            return None
 
-        hdr = bytes(buf[: _META_HEADER_STRUCT.size])
-        magic, version, seq, payload_len, crc = _META_HEADER_STRUCT.unpack(hdr)
-        if magic != self.meta_magic or version != self.meta_version:
-            return None
+            hdr = bytes(buf[: _META_HEADER_STRUCT.size])
+            magic, version, seq, payload_len, crc = _META_HEADER_STRUCT.unpack(hdr)
+            if magic != self.meta_magic or version != self.meta_version:
+                return None
 
-        payload_cap = self._meta_payload_capacity()
-        if payload_len <= 0 or payload_len > payload_cap:
-            return None
-        return {
-            "seq": int(seq),
-            "payload_len": int(payload_len),
-            "crc": int(crc),
-            "container_offset": int(container_offset),
-        }
+            payload_cap = self._meta_payload_capacity()
+            if payload_len <= 0 or payload_len > payload_cap:
+                return None
+            return {
+                "seq": int(seq),
+                "payload_len": int(payload_len),
+                "crc": int(crc),
+                "container_offset": int(container_offset),
+            }
+        finally:
+            self._io_engine.release_buffer(buf)
 
     def _load_meta_payload(self, header: dict[str, int]) -> Optional[bytes]:
         """Load and CRC-validate a checkpoint payload for a metadata header."""
         payload_len = int(header["payload_len"])
         payload_off = int(header["container_offset"]) + self.block_align
         total_len = round_up(payload_len, self.block_align)
-        buf = bytearray(total_len)
+        assert self._io_engine is not None
+        buf = self._io_engine.acquire_buffer(total_len)
         try:
-            if not all(
-                self._read_buffers([payload_off], [buf], [payload_len], [total_len])
-            ):
+            try:
+                if not all(
+                    self._read_buffers(
+                        [payload_off],
+                        [buf],
+                        [payload_len],
+                        [total_len],
+                    )
+                ):
+                    return None
+            except Exception:
                 return None
-        except Exception:
-            return None
 
-        payload = bytes(buf[:payload_len])
-        crc = zlib.crc32(payload) & 0xFFFFFFFF
-        if crc != int(header["crc"]):
-            return None
-        return payload
+            payload = bytes(buf[:payload_len])
+            crc = zlib.crc32(payload) & 0xFFFFFFFF
+            if crc != int(header["crc"]):
+                return None
+            return payload
+        finally:
+            self._io_engine.release_buffer(buf)
 
     def _select_latest_checkpoint(
         self,
@@ -2361,28 +1784,39 @@ class RawBlockCore:
         payload_off = target + self.block_align
         crc = zlib.crc32(payload) & 0xFFFFFFFF
 
-        header_block = bytearray(self.block_align)
-        header_block[: _META_HEADER_STRUCT.size] = _META_HEADER_STRUCT.pack(
-            self.meta_magic,
-            self.meta_version,
-            int(next_seq),
-            int(payload_len),
-            int(crc),
-        )
+        assert self._io_engine is not None
+        header_block = self._io_engine.acquire_buffer(self.block_align)
+        payload_buf = None
+        try:
+            header_block[: _META_HEADER_STRUCT.size] = _META_HEADER_STRUCT.pack(
+                self.meta_magic,
+                self.meta_version,
+                int(next_seq),
+                int(payload_len),
+                int(crc),
+            )
+            payload_buf = self._io_engine.acquire_buffer(payload_total_len)
+            payload_buf[:payload_len] = payload
 
-        placement_id = self.meta_checkpoint_placement_id
-        self._write_buffers(
-            [payload_off, target],
-            [payload, header_block],
-            [payload_len, self.block_align],
-            [payload_total_len, self.block_align],
-            [placement_id, placement_id],
-        )
+            placement_id = self.meta_checkpoint_placement_id
+            self._write_buffers(
+                [payload_off, target],
+                [payload_buf, header_block],
+                [payload_len, self.block_align],
+                [payload_total_len, self.block_align],
+                [placement_id, placement_id],
+            )
 
-        with self._lock:
-            self._meta_seq = int(next_seq)
-            self._meta_persisted = max(self._meta_persisted, int(dirty_total_snapshot))
-        return True
+            with self._lock:
+                self._meta_seq = int(next_seq)
+                self._meta_persisted = max(
+                    self._meta_persisted, int(dirty_total_snapshot)
+                )
+            return True
+        finally:
+            if payload_buf is not None:
+                self._io_engine.release_buffer(payload_buf)
+            self._io_engine.release_buffer(header_block)
 
     def _checkpoint_once(self, force: bool) -> bool:
         """Write a metadata checkpoint when dirty and sufficiently idle."""
@@ -2700,22 +2134,18 @@ class RawBlockCore:
             rereading every slot because individual results are unavailable.
         """
         n = len(offsets)
-        align = self.block_align
         hdr = self.header_bytes
-        raw_buf = bytearray(n * hdr + align - 1)
-        addr = ctypes.addressof(ctypes.c_byte.from_buffer(raw_buf))
-        pad = (-addr) % align
-        views = [
-            memoryview(raw_buf)[pad + i * hdr : pad + (i + 1) * hdr] for i in range(n)
-        ]
-
+        assert self._io_engine is not None
+        bufs = self._io_engine.acquire_buffers(n, hdr)
         with self._lock:
             self._inflight_io_count += 1
         try:
-            raw_dev = self._rawdev()
-            batch_id = raw_dev.batched_read(offsets, views, [hdr] * n)
-            results = self._wait_iouring_results(
-                raw_dev, batch_id, n, "recovery header read"
+            raw_dev = self._io_engine.device()
+            batch_id = raw_dev.batched_read(offsets, bufs, [hdr] * n)
+            results = self._io_engine.wait_for_batch(
+                batch_id,
+                n,
+                "recovery header read",
             )
         except Exception:
             results = [False] * n
@@ -2723,12 +2153,13 @@ class RawBlockCore:
             with self._lock:
                 self._inflight_io_count -= 1
                 self._last_io_ts = time.monotonic()
+            self._io_engine.release_buffers(bufs)
 
         return [
-            self._decode_slot_header(bytes(view))
+            self._decode_slot_header(bytes(buf))
             if success
             else self._read_slot_header(offset)
-            for offset, view, success in zip(offsets, views, results, strict=True)
+            for offset, buf, success in zip(offsets, bufs, results, strict=True)
         ]
 
     def _is_stale_header(

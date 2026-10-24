@@ -25,7 +25,6 @@ from lmcache.v1.storage_backend.raw_block import (
     encode_legacy_key,
     normalize_raw_block_io_engine,
     round_up,
-    validate_raw_block_io_options,
 )
 
 if TYPE_CHECKING:
@@ -146,7 +145,7 @@ class RustRawBlockBackend(StoragePluginInterface):
         )
         if self._core.io_engine == "io_uring":
             try:
-                self._core.register_fixed_buffers_from_allocator(
+                self._core.register_io_buffers_from_allocator(
                     self.local_cpu_backend.get_memory_allocator()
                 )
             except Exception as e:
@@ -208,7 +207,8 @@ class RustRawBlockBackend(StoragePluginInterface):
     @property
     def _raw(self) -> Any:
         """Return the raw device handle for legacy test compatibility."""
-        return self._core.raw_device()
+        assert self._core._io_engine is not None
+        return self._core._io_engine.device()
 
     @_raw.setter
     def _raw(self, raw_device: Any) -> None:
@@ -256,9 +256,6 @@ class RustRawBlockBackend(StoragePluginInterface):
         use_uring_cmd = bool(extra.get("rust_raw_block.use_uring_cmd", False))
         max_data_transfer_size = int(
             extra.get("rust_raw_block.max_data_transfer_size", 0)
-        )
-        validate_raw_block_io_options(
-            iouring_queue_depth=iouring_queue_depth,
         )
         meta_total_bytes = int(
             extra.get("rust_raw_block.meta_total_bytes", 128 * 1024 * 1024)

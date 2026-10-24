@@ -183,6 +183,11 @@ def _build_transfer_limit_backend(
     dev_path: str,
     max_data_transfer_size: int | None = None,
 ) -> RustRawBlockBackend:
+    # The io_uring_cmd engine validates the character device up front, so these
+    # transfer-limit tests require a real NVMe namespace device. Skip when it is
+    # absent, matching the other io_uring_cmd tests in this module.
+    if not os.path.exists(dev_path):
+        pytest.skip(f"Test device {dev_path} not found.")
     config = MockConfig(device_path=dev_path, use_uring_cmd=True)
     if max_data_transfer_size is not None:
         config.extra_config["rust_raw_block.max_data_transfer_size"] = (
@@ -193,7 +198,6 @@ def _build_transfer_limit_backend(
     loop = asyncio.new_event_loop()
     try:
         with (
-            patch.object(RawBlockCore, "_rawdev", return_value=MagicMock()),
             patch.object(RawBlockCore, "_ensure_capacity_and_layout"),
             patch.object(RawBlockCore, "_load_checkpoint_from_device"),
         ):
@@ -256,7 +260,7 @@ def test_uring_cmd_get_nvme_info(loop_in_thread):
         )
 
         # Get the raw device
-        raw_device = backend._core.raw_device()
+        raw_device = backend._core._io_engine.device()
 
         # Test getting namespace ID
         nsid = raw_device.nvme_nsid()
@@ -344,7 +348,6 @@ def test_uring_cmd_disabled(loop_in_thread):
     raw_device.nvme_lba_size.side_effect = RuntimeError("use_uring_cmd not enabled")
 
     with (
-        patch.object(RawBlockCore, "_rawdev", return_value=MagicMock()),
         patch.object(RawBlockCore, "_ensure_capacity_and_layout"),
         patch.object(RawBlockCore, "_load_checkpoint_from_device"),
     ):
@@ -376,7 +379,8 @@ def test_uring_cmd_auto_transfer_limit_from_sysfs_ng_device():
         return None
 
     with patch(
-        "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
+        "lmcache.v1.storage_backend.raw_block.io_engine."
+        "IoUringIoEngine._read_sysfs_int",
         side_effect=fake_read,
     ) as mock_read:
         backend = _build_transfer_limit_backend(
@@ -407,7 +411,8 @@ def test_uring_cmd_auto_transfer_limit_capped_by_max_segments():
         return None
 
     with patch(
-        "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
+        "lmcache.v1.storage_backend.raw_block.io_engine."
+        "IoUringIoEngine._read_sysfs_int",
         side_effect=fake_read,
     ):
         backend = _build_transfer_limit_backend(
@@ -430,7 +435,8 @@ def test_uring_cmd_auto_transfer_limit_ignores_missing_max_segments():
         return None
 
     with patch(
-        "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
+        "lmcache.v1.storage_backend.raw_block.io_engine."
+        "IoUringIoEngine._read_sysfs_int",
         side_effect=fake_read,
     ):
         backend = _build_transfer_limit_backend(
@@ -445,7 +451,8 @@ def test_uring_cmd_auto_transfer_limit_fails_when_sysfs_unavailable():
         f"{_get_sysfs_path(TEST_DEVICES['char_device'])}/queue/max_hw_sectors_kb"
     )
     with patch(
-        "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
+        "lmcache.v1.storage_backend.raw_block.io_engine."
+        "IoUringIoEngine._read_sysfs_int",
         return_value=None,
     ) as mock_read:
         with pytest.raises(RuntimeError, match="failed to read max_hw_sectors_kb"):
