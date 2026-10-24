@@ -393,7 +393,7 @@ def test_read_release_trace_redacts_owners_and_replays_on_single_l1(
         recorder.close()
         trace_decorator.set_tracing_enabled(saved_gate)
 
-    release.assert_called_once_with(keys, 2, owners)
+    release.assert_called_once_with(keys, 2, owners, consumed=True)
     assert release.call_args.args[0] is keys
     assert release.call_args.args[2] is owners
     assert source_l1.report_status()["read_locked_count"] == 0
@@ -406,9 +406,9 @@ def test_read_release_trace_redacts_owners_and_replays_on_single_l1(
     bus.publish.assert_called_once()
     event = bus.publish.call_args.args[0]
     assert event.metadata["qualname"] == qualname
-    assert event.metadata["args"] == {"keys": keys, "read_locks": 2}
+    assert event.metadata["args"] == {"keys": keys, "read_locks": 2, "consumed": True}
     decoded = codecs.decode_args(records[0].args)
-    assert decoded == {"keys": keys, "read_locks": 2}
+    assert decoded == {"keys": keys, "read_locks": 2, "consumed": True}
     assert recorder.dropped_count == 0
 
     dispatcher = build_default_dispatcher()

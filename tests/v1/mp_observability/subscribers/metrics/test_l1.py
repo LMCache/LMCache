@@ -169,6 +169,37 @@ class TestL1CacheSaltTagging:
         assert after.get(key_x, 0) >= before.get(key_x, 0) + 3
         assert after.get(key_y, 0) >= before.get(key_y, 0) + 2
 
+    def test_unconsumed_read_release_is_not_counted(self, bus, subscriber):
+        """Read locks released without reading (consumed=False) are not reads."""
+        before = _read_counters_by_attrs().get("lmcache_mp.l1_read", {})
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.L1_READ_FINISHED,
+                metadata={
+                    "keys": _make_keys(4, cache_salt="unconsumed"),
+                    "consumed": False,
+                },
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.L1_READ_FINISHED,
+                metadata={
+                    "keys": _make_keys(3, cache_salt="consumed"),
+                    "consumed": True,
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counters_by_attrs().get("lmcache_mp.l1_read", {})
+        unconsumed = (("cache_salt", "unconsumed"),)
+        consumed = (("cache_salt", "consumed"),)
+        assert after.get(unconsumed, 0) == before.get(unconsumed, 0)
+        assert after.get(consumed, 0) == before.get(consumed, 0) + 3
+
     def test_empty_cache_salt_omits_attribute(self, bus, subscriber):
         """Empty salt produces a dimensionless counter (no cache_salt attr)."""
         before = _read_counters_by_attrs().get("lmcache_mp.l1_evicted", {})
