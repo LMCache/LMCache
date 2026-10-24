@@ -565,6 +565,8 @@ class RemoteBackend(StorageBackendInterface):
                 "Connection is None in batched_get_non_blocking, returning empty list"
             )
             return []
+        if self._mla_worker_id_as0_mode:
+            keys = [key.with_new_worker_id(0) for key in keys]
         try:
             # warning, this timeout will not actually stop the
             # scheduler from waiting for the result
