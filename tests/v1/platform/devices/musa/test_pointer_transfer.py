@@ -20,6 +20,13 @@ def test_pointer_operands_are_reconstructed_inside_musa_adapter(
     """Paged and staging pointers become views before native dispatch."""
     fake_device = SimpleNamespace(type="musa", index=0)
     calls: list[tuple[int, tuple[int, ...], torch.dtype, tuple[int, ...] | None]] = []
+    format_spec_lookups = 0
+    real_get_spec_class = device_ops.get_spec_class
+
+    def get_spec_class_once(fmt: EngineKVFormat) -> object:
+        nonlocal format_spec_lookups
+        format_spec_lookups += 1
+        return real_get_spec_class(fmt)
 
     def construct(
         ptr: int,
@@ -43,6 +50,7 @@ def test_pointer_operands_are_reconstructed_inside_musa_adapter(
         "construct_musa_tensor_from_data_pointer",
         construct,
     )
+    monkeypatch.setattr(device_ops, "get_spec_class", get_spec_class_once)
     monkeypatch.setattr(
         "lmcache.v1.platform.devices.musa.native_kv_transfer"
         ".try_native_multi_layer_block_kv_transfer",
@@ -76,6 +84,7 @@ def test_pointer_operands_are_reconstructed_inside_musa_adapter(
         (202, (3, 4, 8), torch.bfloat16, (40, 8, 1)),
         (303, (2, 4, 8), torch.bfloat16, None),
     ]
+    assert format_spec_lookups == 1
 
 
 def test_pointer_transfer_rejects_ambiguous_two_byte_dtype() -> None:
@@ -171,4 +180,69 @@ def test_kv_list_pointer_operands_preserve_key_then_value_order(
         (201, (3, 4, 2, 4)),
         (202, (3, 4, 2, 4)),
         (303, (2, 2, 4, 8)),
+    ]
+
+
+def test_blocked_scale_pointer_reconstruction_uses_raw_page_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconstruct DSV4 pages as raw physical bytes, not token-major rows."""
+    fake_device = SimpleNamespace(type="musa", index=0)
+    calls: list[tuple[int, tuple[int, ...], tuple[int, ...] | None]] = []
+
+    def construct(
+        ptr: int,
+        shape: tuple[int, ...],
+        _dtype: torch.dtype,
+        _device: object,
+        *,
+        stride: tuple[int, ...] | None = None,
+        **_kwargs: object,
+    ) -> torch.Tensor:
+        calls.append((ptr, shape, stride))
+        return torch.empty(shape, dtype=torch.uint8)
+
+    monkeypatch.setattr(
+        device_ops,
+        "_as_device",
+        lambda _device, _paged, _objects: fake_device,  # type: ignore[return-value]
+    )
+    monkeypatch.setattr(
+        device_ops,
+        "construct_musa_tensor_from_data_pointer",
+        construct,
+    )
+    monkeypatch.setattr(
+        "lmcache.v1.platform.devices.musa.native_kv_transfer"
+        ".try_native_multi_layer_block_kv_transfer",
+        lambda **_kwargs: True,
+    )
+
+    shape_desc = PageBufferShapeDesc()
+    shape_desc.nl = 2
+    shape_desc.nb = 3
+    shape_desc.bs = 4
+    shape_desc.nh = 1
+    shape_desc.hs = 132
+    shape_desc.kv_size = 1
+    shape_desc.element_size = 1
+    shape_desc.dtype = torch.uint8
+    shape_desc.block_stride_elems = 528
+
+    device_ops.MusaDeviceOps().multi_layer_block_kv_transfer(
+        torch.tensor([101, 202], dtype=torch.int64),
+        [303],
+        torch.tensor([0], dtype=torch.int64),
+        fake_device,  # type: ignore[arg-type]
+        TransferDirection.D2H,
+        shape_desc,
+        4,
+        EngineKVFormat.NL_X_NB_BSV_BSS,
+        0,
+    )
+
+    assert calls == [
+        (101, (3, 528), (528, 1)),
+        (202, (3, 528), (528, 1)),
+        (303, (2, 4, 132), None),
     ]
