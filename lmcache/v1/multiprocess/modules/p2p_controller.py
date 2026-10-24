@@ -202,6 +202,7 @@ class P2PController(DiscoverableModule):
         self._request_scheme = "grpc" if request_transport == "grpc" else "tcp"
         self._next_task_id = 0
         self._jobs: dict[int, _P2PLookupJob] = {}
+        self._inflight_jobs: set[int] = set()
         self._job_lock = threading.Lock()
         # Last abandoned-job scan time; unlocked, as a race only adds a scan.
         self._last_drop_time = time.monotonic()
@@ -381,6 +382,10 @@ class P2PController(DiscoverableModule):
         """
         with self._job_lock:
             job = self._jobs.get(task_id)
+            if job is None or task_id in self._inflight_jobs:
+                job = None
+            else:
+                self._inflight_jobs.add(task_id)
         if job is None:
             logger.warning(
                 "P2P lookup job %d not found (already consumed or invalid)",
@@ -388,16 +393,20 @@ class P2PController(DiscoverableModule):
             )
             return None
 
-        result = self._ctx.storage_manager.query_prefetch_status(job.handle)
-        if result is None:
-            # Still in progress (only possible once L2 prefetch is enabled).
-            return None
+        try:
+            result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+            if result is None:
+                # A concurrent waiter must not consume the one-shot result.
+                return None
 
-        addresses = self._build_addresses(job, result.hit_cells)
+            addresses = self._build_addresses(job, result.hit_cells)
 
-        with self._job_lock:
-            self._jobs.pop(task_id, None)
-        return addresses
+            with self._job_lock:
+                self._jobs.pop(task_id, None)
+            return addresses
+        finally:
+            with self._job_lock:
+                self._inflight_jobs.discard(task_id)
 
     @request_handler(HandlerType.BLOCKING)
     def p2p_unlock_objects(
