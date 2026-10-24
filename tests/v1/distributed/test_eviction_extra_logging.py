@@ -3,8 +3,11 @@
 """Tests for the eviction loop's opt-in L1 memory usage logging."""
 
 # Standard
+from types import SimpleNamespace
+from unittest.mock import Mock
 import argparse
 import logging
+import threading
 import time
 
 # Third Party
@@ -21,12 +24,68 @@ from lmcache.v1.distributed.config import (
     parse_args_to_config,
 )
 from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.storage_controllers import eviction_controller
 from lmcache.v1.distributed.storage_controllers.eviction_controller import (
     L1EvictionController,
+    L2AdapterEvictionState,
+    L2EvictionController,
 )
 from lmcache.v1.mp_observability.config import add_observability_args
 
 _EVICTION_LOGGER = "lmcache.v1.distributed.storage_controllers.eviction_controller"
+
+
+def test_l2_failure_logs_are_throttled_per_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistent failures stay visible without flooding or blocking peers."""
+    ticks = iter([0.0, 1.0, 59.0, 60.0])
+    now = 0.0
+    passes = 0
+    done = threading.Event()
+
+    def advance_clock(_: float) -> None:
+        nonlocal now
+        now = next(ticks, now)
+        time.sleep(0.001)
+
+    def healthy_usage() -> SimpleNamespace:
+        nonlocal passes
+        passes += 1
+        if passes >= 4:
+            done.set()
+        return SimpleNamespace(usage_fraction=0.0)
+
+    monkeypatch.setattr(
+        eviction_controller,
+        "time",
+        SimpleNamespace(monotonic=lambda: now, sleep=advance_clock),
+    )
+    broken = [Mock(spec=L2AdapterInterface), Mock(spec=L2AdapterInterface)]
+    for adapter in broken:
+        adapter.get_usage.side_effect = RuntimeError("adapter unavailable")
+    healthy = Mock(spec=L2AdapterInterface)
+    healthy.get_usage.side_effect = healthy_usage
+    states = [
+        L2AdapterEvictionState(i, adapter, EvictionConfig(eviction_policy="LRU"))
+        for i, adapter in enumerate([*broken, healthy])
+    ]
+    controller = L2EvictionController(states)
+    handler = _CaptureHandler()
+    logger = logging.getLogger(_EVICTION_LOGGER)
+    logger.addHandler(handler)
+    try:
+        controller.start()
+        assert done.wait(timeout=5)
+    finally:
+        controller.stop()
+        logger.removeHandler(handler)
+    failures = [record for record in handler.records if record.exc_info]
+    assert len(failures) == 4
+    for adapter_id in (0, 1):
+        assert sum(f"adapter_id={adapter_id};" in r.getMessage() for r in failures) == 2
+    assert healthy.get_usage.call_count >= 4
 
 
 class TestExtraLoggingConfigPlumbing:
