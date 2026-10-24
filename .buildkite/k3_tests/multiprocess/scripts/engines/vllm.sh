@@ -100,6 +100,14 @@ PY
         VLLM_BATCH_ARGS=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
     fi
 
+    VLLM_MODEL_ARGS=()
+    if [[ "${VLLM_TRUST_REMOTE_CODE:-0}" == "1" ]]; then
+        VLLM_MODEL_ARGS+=(--trust-remote-code)
+    fi
+    if [[ -n "${VLLM_BLOCK_SIZE:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--block-size "$VLLM_BLOCK_SIZE")
+    fi
+
     # Pin the KV block pool (in blocks) on both servers. The preemption test
     # needs the pool size to be independent of the GPU model: a workload whose
     # KV demand exceeds NUM_GPU_BLOCKS_OVERRIDE * block_size preempts by
@@ -199,6 +207,7 @@ engine_launch() {
         "VLLM_BATCH_INVARIANT=${batch_invariant}" \
         PYTHONHASHSEED=0 \
         vllm serve "$MODEL" \
+            "${VLLM_MODEL_ARGS[@]}" \
             "${mode_args[@]}" \
             "${VLLM_ATTENTION_ARGS[@]}" \
             --port "$port" \

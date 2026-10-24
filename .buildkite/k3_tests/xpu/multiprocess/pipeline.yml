@@ -102,6 +102,43 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
+      # Tiny Kimi preserves MLA + KDA groups but has random weights: compare
+      # sample outputs, not task accuracy. Reuse the hybrid workload with a
+      # model override and align one recurrent-state snapshot to each chunk.
+      - label: ":xpu: kimi_linear_tiny / engine_driven / {{matrix.transport}}"
+        command: |
+          export MODEL="yujiepan/kimi-linear-tiny-random"
+          export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+          export ENGINE_DRIVEN_TRANSPORT="{{matrix.transport}}"
+          case "{{matrix.transport}}" in
+            inline) export L1_USE_LAZY="true" ;;
+            shm) export L1_USE_LAZY="false" ;;
+          esac
+          export VLLM_TRUST_REMOTE_CODE="1"
+          export VLLM_BLOCK_SIZE="64"
+          export CHUNK_SIZE="64"
+          export MAX_NUM_BATCHED_TOKENS="64"
+          export MAX_MODEL_LEN="8192"
+          export MAMBA_CACHE_MODE="align"
+          export SEPARATE_OBJECT_GROUPS="1"
+          export NUM_CONCURRENT="1"
+          export LIMIT="5"
+          export SCORE_TOLERANCE="0"
+          export LM_EVAL_VERIFY_MODE="samples"
+          export ENFORCE_EAGER="1"
+          export VLLM_USE_STANDALONE_COMPILE="0"
+          .buildkite/k3_tests/xpu/multiprocess/run.sh hma_lm_eval_qwen3_5
+        matrix:
+          setup:
+            transport:
+              - "inline"
+              - "shm"
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
       - label: ":xpu: vllm_bench"
         command: |
           export LMCACHE_MP_TRANSFER_MODE="engine_driven"
