@@ -130,7 +130,7 @@ def test_cpu_overrides_pointer_construction_only() -> None:
 
 @pytest.mark.musa
 def test_musa_overrides_transfer_and_stream_ordering_ops() -> None:
-    """MusaDeviceOps owns transfer and stream-ordering adaptation."""
+    """MusaDeviceOps owns transfer, codec and stream-ordering adaptation."""
     musa_mod = pytest.importorskip(
         "lmcache.v1.platform.devices.musa.device_ops",
         reason="musa platform package unavailable",
@@ -141,6 +141,10 @@ def test_musa_overrides_transfer_and_stream_ordering_ops() -> None:
         if getattr(musa_mod.MusaDeviceOps, name) is not getattr(DeviceOps, name)
     ]
     assert overridden == [
+        "calculate_cdf",
+        "decode_fast_new",
+        "decode_fast_prefsum",
+        "encode_fast_new",
         "lmcache_memcpy_async",
         "multi_layer_block_kv_transfer",
         "record_completion_on_stream",
