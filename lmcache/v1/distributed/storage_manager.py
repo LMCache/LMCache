@@ -33,6 +33,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError, strerror
 from lmcache.v1.distributed.internal_api import (
+    CxlArenaDescriptor,
     L1ManagerInterface,
     L1MemoryDesc,
     L1OperationResult,
@@ -44,6 +45,9 @@ from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInter
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     get_type_name_for_config,
+)
+from lmcache.v1.distributed.l2_adapters.cxl_peer_l2_adapter import (
+    CxlPeerL2AdapterConfig,
 )
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2DeviceOwner,
@@ -72,6 +76,7 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     resolve_l1_affinity,
 )
 from lmcache.v1.distributed.storage_controllers.write_policy import OrderedWritePolicy
+from lmcache.v1.distributed.transfer_channel.api import MemoryRegionAddress
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaState,
     DevDaxArenaStatus,
@@ -1152,6 +1157,46 @@ class StorageManager:
         self._publish_capacity_changed()
         return result
 
+    @property
+    def cxl_arena(self) -> CxlArenaDescriptor | None:
+        """Return this server's owned shared-pool slab, if configured."""
+        return self._l1_manager.cxl_arena
+
+    def get_cxl_address(self, obj: MemoryObj) -> MemoryRegionAddress | None:
+        """Return the shareable address of a read-reserved owned object.
+
+        Args:
+            obj: Object protected by an L1 read reservation.
+
+        Returns:
+            Peer-addressable CXL location, or None for another backing store.
+        """
+        return self._l1_manager.get_cxl_address(obj)
+
+    def add_cxl_peer(
+        self, arena: CxlArenaDescriptor, request_url: str, lookup_timeout: float
+    ) -> int:
+        """Validate/map a peer slab and attach its borrowing adapter.
+
+        Args:
+            arena: Descriptor advertised by the peer.
+            request_url: Its existing lookup/unlock endpoint.
+            lookup_timeout: Lookup deadline in seconds.
+
+        Returns:
+            Stable adapter ID.
+
+        Raises:
+            ValueError: If this server has no CXL slab or identity checks fail.
+        """
+        local = self.cxl_arena
+        path = self._l1_manager.config.memory_config.devdax_path
+        if local is None or path is None:
+            raise ValueError("CXL peer sharing requires a configured owned slab")
+        # The adapter's wanted L1 tags bind its shadows to the CXL L1.
+        config = CxlPeerL2AdapterConfig(request_url, path, local, arena, lookup_timeout)
+        return self.add_l2_adapter(config)
+
     def add_l2_adapter(self, config: L2AdapterConfigBase) -> int:
         """Blocking function to add a new L2 adapter at runtime. Thread-safe.
 
@@ -1221,6 +1266,11 @@ class StorageManager:
             TimeoutError: If draining did not complete within ``timeout``;
                 the adapter is left active (draining) so the caller can
                 retry.
+            RuntimeError: If the adapter refuses to close (e.g. a CXL peer
+                with live borrowed views); it stays registered so the caller
+                can retry.
+            BufferError: If the adapter's mapped region still has exported
+                buffers; it stays registered so the caller can retry.
         """
         with self._lifecycle_lock:
             if adapter_id not in self._l2_adapters:
@@ -1245,10 +1295,14 @@ class StorageManager:
                 )
 
             self._l2_eviction_controller.remove_adapter_state(adapter_id)
+            # Close before forgetting the adapter: a borrowing adapter refuses
+            # to close while views are live, and must stay reachable for retry.
             with self._adapters_lock:
-                adapter = self._l2_adapters.pop(adapter_id)
-                self._adapter_descriptors.pop(adapter_id, None)
+                adapter = self._l2_adapters[adapter_id]
             adapter.close()
+            with self._adapters_lock:
+                del self._l2_adapters[adapter_id]
+                self._adapter_descriptors.pop(adapter_id, None)
             logger.info("Deleted L2 adapter %d", adapter_id)
             self._publish_capacity_changed()
 
@@ -1291,13 +1345,16 @@ class StorageManager:
             controller.stop()
         self._l2_eviction_controller.stop()
 
-        PeriodicEventNotifier.shutdown()
-
+        # Release CXL shadows while their peer RPC clients are still available.
+        for manager in self._l1_managers_by_id.values():
+            manager.release_shadows()
         for adapter in self._l2_adapters.values():
             adapter.close()
 
         for manager in self._l1_managers_by_id.values():
             manager.close()
+        # Adapters unregister descriptors through the notifier before destruction.
+        PeriodicEventNotifier.shutdown()
 
     @property
     def is_multi_l1(self) -> bool:

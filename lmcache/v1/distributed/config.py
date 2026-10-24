@@ -323,6 +323,9 @@ class L1MemoryManagerConfig:
 
     devdax_size_in_bytes: int = 0
     """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
+    cxl_pool_id: str = ""
+    """Shared-pool identity. When set, the slab at ``devdax_offset_in_bytes``
+    starts with one ``align_bytes`` identity header before the payload."""
 
     devdax_offset_in_bytes: int = 0
     """ Page-aligned byte offset into ``devdax_path`` where the L1 mapping
@@ -332,6 +335,16 @@ class L1MemoryManagerConfig:
     """ mlock the L1 buffer so compaction cannot migrate it (ROCm only). """
 
     def __post_init__(self):
+        if self.cxl_pool_id:
+            if self.align_bytes < 4096 or self.align_bytes & (self.align_bytes - 1):
+                raise ValueError("CXL alignment must be a power of two >= 4096")
+            if not self.devdax_path:
+                raise ValueError("cxl-pool-id requires l1-devdax-path")
+            if self.devdax_offset_in_bytes % self.align_bytes:
+                raise ValueError(
+                    "cxl-pool-id requires l1-devdax-offset to be a multiple of "
+                    "l1-align-bytes"
+                )
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
 
         if self.devdax_path is not None:
@@ -808,6 +821,26 @@ def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
     return True
 
 
+def l1_is_single_cxl_region(config: StorageManagerConfig) -> bool:
+    """Whether L1 is exactly one shared-CXL slab that peers can borrow from.
+
+    CXL P2P exports only the owned slab, so any other L1 memory (a second L1
+    manager, or the DRAM part of a hybrid DRAM + Device-DAX L1) would hold
+    objects peers can never read.
+
+    Args:
+        config: Storage manager configuration to inspect.
+
+    Returns:
+        ``True`` if there is one L1, it has a CXL pool id (which implies a
+        Device-DAX path), and it has no DRAM overflow; ``False`` otherwise.
+    """
+    if len(config.l1_manager_configs) != 1:
+        return False
+    memory = config.l1_manager_config.memory_config
+    return bool(memory.cxl_pool_id) and not memory.devdax_size_in_bytes
+
+
 def add_storage_manager_args(
     parser: argparse.ArgumentParser,
 ) -> argparse.ArgumentParser:
@@ -917,6 +950,15 @@ def add_storage_manager_args(
             "ROCm only: mlock the L1 buffer so memory compaction cannot migrate "
             "it. Requires sysctl vm.compact_unevictable_allowed=0 and an "
             "unlimited memlock ulimit (or CAP_IPC_LOCK)."
+        ),
+    )
+
+    memory_group.add_argument(
+        "--cxl-pool-id",
+        default="",
+        help=(
+            "Shared CXL pool identity. The slab at --l1-devdax-offset-gb then "
+            "starts with one alignment-sized identity header."
         ),
     )
 
@@ -1186,6 +1228,7 @@ def parse_args_to_config(
             devdax_path=args.l1_devdax_path,
             devdax_offset_in_bytes=devdax_offset,
             mlock=args.l1_mlock,
+            cxl_pool_id=getattr(args, "cxl_pool_id", ""),
         )
     else:
         memory_config = L1MemoryManagerConfig(
@@ -1198,6 +1241,7 @@ def parse_args_to_config(
             devdax_path=args.l1_devdax_path,
             devdax_offset_in_bytes=devdax_offset,
             mlock=args.l1_mlock,
+            cxl_pool_id=getattr(args, "cxl_pool_id", ""),
         )
 
     gds_l1_config: GdsL1Config | None = None
