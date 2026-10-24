@@ -68,8 +68,8 @@ def _fetch(cfg: dict[str, Any], model: str) -> None:
 def test_missing_models_names_each_absent_model_once() -> None:
     cfg = load()
     deps = ["vllm_lmcache", "vllm_lmcache_ssm", "vllm_native"]
-    assert missing_models(cfg, deps) == ["mimo26", "qwen38"]
-    _fetch(cfg, "mimo26")
+    assert missing_models(cfg, deps) == ["trinity", "qwen38"]
+    _fetch(cfg, "trinity")
     assert missing_models(cfg, deps) == ["qwen38"]
     _fetch(cfg, "qwen38")
     assert missing_models(cfg, deps) == []
@@ -87,7 +87,7 @@ def test_a_snapshot_without_its_done_marker_is_still_missing() -> None:
 def test_a_deployment_runs_its_own_model() -> None:
     cfg = load()
     for d, model, served in [
-        ("vllm_lmcache", "mimo26", "mimo-v2.6-pro"),
+        ("vllm_lmcache", "trinity", "trinity-large-thinking"),
         ("vllm_lmcache_ssm", "qwen38", "qwen3p8"),
     ]:
         spec = resolve(cfg, "agentic", d)
@@ -97,9 +97,10 @@ def test_a_deployment_runs_its_own_model() -> None:
         assert spec.aiperf_args["tokenizer"] == m["repo"]
         assert spec.aiperf_args["tokenizer-revision"] == m["revision"]
         assert spec.aiperf_env["PRT_LIVE_HISTORY_TOKENIZER"] == m["path"]
-        assert spec.vllm_args["speculative-config"] == (
-            m["vllm_args"]["speculative-config"].replace("<model_path>", m["path"])
-        )
+        if "speculative-config" in m["vllm_args"]:
+            assert spec.vllm_args["speculative-config"] == (
+                m["vllm_args"]["speculative-config"].replace("<model_path>", m["path"])
+            )
 
 
 def test_check_host_needs_rdma_devices_only_for_mooncake(
@@ -107,7 +108,7 @@ def test_check_host_needs_rdma_devices_only_for_mooncake(
 ) -> None:
     monkeypatch.delenv("PRT_RDMA_DEVICES")
     cfg = load()
-    _fetch(cfg, "mimo26")
+    _fetch(cfg, "trinity")
     check_host(cfg, ["vllm_lmcache", "vllm_native"])
     with pytest.raises(HostSetupError, match="PRT_RDMA_DEVICES"):
         check_host(cfg, ["vllm_mooncake"])

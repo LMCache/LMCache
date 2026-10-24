@@ -22,9 +22,9 @@ exit 0 pass | 1 regressed (nightly only) | 2 invalid run / no images / host setu
 
 Workload `agentic`: a Claude Code session replay
 (`semianalysisai/cc-traces-weka-062126-256k`, pinned revision), closed loop.
-Each model is a frontier open-weight release on 8 x H200 (TP8 + EP, FP8 KV; BF16 on MiMo, whose fp8 path fails in vLLM), served
+Each model is a frontier open-weight release on 8 x H200 (TP8 + EP, FP8 KV), served
 with its vLLM recipe's flags and replaced when a newer one appears:
-MiMo-V2.6-Pro-MOPD (hybrid sliding-window, DFlash drafter) at 170 concurrent
+Trinity-Large-Thinking-FP8-Block (hybrid sliding-window, 8 KV heads) at 220 concurrent
 sessions; `vllm_lmcache_ssm` serves Qwen3.8-Flash-Next-FP8 (Gated DeltaNet +
 sparse GQA, MTP) instead, at 230. Every deployment runs the same stock
 vLLM image and the same budget, 1500 GiB DRAM + 6000 GiB disk (`vllm_simple`: the DRAM only;
@@ -75,8 +75,8 @@ Host paths come from the environment:
 # Models, at their [models] revisions. Runs are offline; a suite downloads a
 # missing one first (runner/hf.py), so this only saves that time.
 HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
-    XiaomiMiMo/MiMo-V2.6-Pro-MOPD \
-    --revision 6a7f202e8dbd0e57b3fe1da03917d08d75abc4b8
+    arcee-ai/Trinity-Large-Thinking-FP8-Block \
+    --revision 6412c1ad1588c664977b0f830b80a20273173318
 HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
     Qwen/Qwen3.8-Flash-Next-FP8 \
     --revision 236dfdf285828023ca3bcd3f37366c58a3469b13

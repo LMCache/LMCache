@@ -24,27 +24,21 @@ min_docker_free_gb = 10
 # [vllm.args], `aiperf_args` on top of [aiperf.args].
 # Each model is a frontier open-weight release, served the way its vLLM recipe
 # serves it, and replaced when a newer one appears.
-# Hybrid SWA: 10 full-attention and 60 sliding-window (128) layers.
-[models.mimo26]
-repo = "XiaomiMiMo/MiMo-V2.6-Pro-MOPD"
-revision = "6a7f202e8dbd0e57b3fe1da03917d08d75abc4b8"
-served_name = "mimo-v2.6-pro"
+# Hybrid SWA: 15 full-attention and 45 sliding-window (4096) layers, 8 KV heads.
+[models.trinity]
+repo = "arcee-ai/Trinity-Large-Thinking-FP8-Block"
+revision = "6412c1ad1588c664977b0f830b80a20273173318"
+served_name = "trinity-large-thinking"
 # A first guess from its KV capacity; the knee is still to be measured.
-aiperf_args = { concurrency = 170 }
+aiperf_args = { concurrency = 220 }
 
-[models.mimo26.vllm_args]
-# BF16 KV: its K/V head dims differ, so vLLM upgrades the backend to FA4 after
-# deciding to quantize Q for FA3, and FA4's SM90 fp8 path rejects an fp8 Q.
-kv-cache-dtype = "auto"
+[models.trinity.vllm_args]
 # Matches LMCache's chunk-size; at the default 0 MooncakeStoreConnector never
 # hits. Here so every deployment keeps the same local prefix cache.
 prefix-cache-retention-interval = 1024
-reasoning-parser = "mimo"
+reasoning-parser = "deepseek_r1"
 enable-auto-tool-choice = true
-tool-call-parser = "mimo"
-# vLLM builds one of the checkpoint's three MTP layers (mimo_v2_mtp.py), so the
-# recipe drafts with the DFlash model shipped in the same repo.
-speculative-config = '{"method":"dflash","model":"<model_path>/dflash","num_speculative_tokens":7}'
+tool-call-parser = "qwen3_coder"
 
 # Hybrid linear: 36 Gated DeltaNet layers and 12 sparse GQA (QSA) layers with
 # 2 KV heads. Chosen over GLM-5.3-Flash, whose MLA layers TP replicates on every
@@ -154,7 +148,7 @@ invalid_log_patterns = ["unhealthy"]
 # and wiped before and after the run.
 
 [deployments.vllm_lmcache]
-model = "mimo26"
+model = "trinity"
 image_target = "lmcache"
 
 [deployments.vllm_lmcache.vllm_args]
@@ -243,7 +237,7 @@ max_capacity_gb = 6000
 eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 0.1 }
 
 [deployments.vllm_native]
-model = "mimo26"
+model = "trinity"
 # Both tiers live in the vLLM workers. CPU tier 1500 GiB total over the TP
 # ranks. vLLM's fs tier has no capacity limit, so cap_gb freezes the dir at
 # 6000 GiB (runner/disk_cap.py): full means no new entries, not eviction.
@@ -257,7 +251,7 @@ vllm_scratch = [{ path = "<root>/l2", min_free_gb = 6000, cap_gb = 6000 }]
 kv-transfer-config = '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","block_size":1024,"cpu_bytes_to_use":1610612736000,"eviction_policy":"lru","secondary_tiers":[{"type":"fs","root_dir":"<root>/l2/fs"}]}}'
 
 [deployments.vllm_simple]
-model = "mimo26"
+model = "trinity"
 # vLLM SimpleCPUOffloadConnector. Its offload pool is one tier, CPU or disk,
 # never both: this runs CPU, 1500 GiB total over the TP ranks, and no disk.
 image_target = "serving"
@@ -266,7 +260,7 @@ image_target = "serving"
 kv-transfer-config = '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":1610612736000}}'
 
 [deployments.vllm_simple_l2]
-model = "mimo26"
+model = "trinity"
 # SimpleCPUOffloadConnector's disk backend, 6000 GiB (750 GiB per TP rank),
 # read through the page cache. That cache is the DRAM tier: vllm_memory_gb
 # caps the container's memory, page cache included, at 1500 GiB plus the
@@ -279,7 +273,7 @@ vllm_memory_gb = 1532
 kv-transfer-config = '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"kv_offload_backend":"disk","disk_path":"<root>/l2/simple","disk_capacity_bytes":805306368000,"use_page_cache":true}}'
 
 [deployments.vllm_mooncake]
-model = "mimo26"
+model = "trinity"
 # Tuned through Mooncake's own config only. Standalone-store layout:
 # mooncake_client owns the CPU pool and SSD tier. Budget 1500 GiB pool, 6000
 # GiB disk, split over four clients since one client writes SSD from a single

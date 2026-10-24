@@ -69,7 +69,10 @@ def test_missing_models_are_downloaded_and_a_failed_one_skips_its_pairs(
     monkeypatch.setattr(suite, "run", run)
     deps = ["vllm_simple", "vllm_lmcache_ssm"]
     assert suite.suite("weekly", tmp_path / "s", deps) == suite.EXIT_SUITE_INVALID
-    assert fetched == ["XiaomiMiMo/MiMo-V2.6-Pro-MOPD", "Qwen/Qwen3.8-Flash-Next-FP8"]
+    assert fetched == [
+        "arcee-ai/Trinity-Large-Thinking-FP8-Block",
+        "Qwen/Qwen3.8-Flash-Next-FP8",
+    ]
     assert ran == ["vllm_simple"]
     rep = json.loads((tmp_path / "s" / "report.json").read_text())
     skipped = [r for r in rep["runs"] if r["deployment"] == "vllm_lmcache_ssm"]
