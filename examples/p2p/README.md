@@ -175,8 +175,9 @@ With `LMCACHE_LOG_LEVEL=DEBUG`, the P2P controller also names the peer:
 Added P2P adapter 0 for peer node-b (127.0.0.1:8556)
 ```
 
-When a peer leaves (or after ~3 missed discovery polls), you'll see the adapter
-torn down:
+When a peer is missing from 4 consecutive discovery polls that list this server,
+you'll see the adapter torn down (polls that fail, or that do not list this
+server yet, keep every adapter for up to 12 consecutive polls, about 60 s):
 
 ```
 Deleted L2 adapter 0
