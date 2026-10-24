@@ -293,8 +293,8 @@ cannot serve correctly (``validate_kv_cache_groups`` in
 ``lmcache/integration/vllm/kv_cache_group_edits.py``):
 
 - **Encoder-decoder cross-attention caches** (``CrossAttentionSpec``).
-- **Mamba groups not in** ``align`` **mode** (``mamba_cache_mode != "align"``):
-  other modes keep no reusable per-block state snapshots.
+- **Mamba groups in** ``none`` **mode** (``mamba_cache_mode`` other than
+  ``"align"`` or ``"all"``): they keep no reusable per-block state snapshots.
 
 DeepSeek-V4-style **compressed / indexer caches are supported** — specs that
 declare slot compression (``compress_ratio > 1`` / ``tq_slot_size > 0``) are
