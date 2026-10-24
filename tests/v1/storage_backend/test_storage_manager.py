@@ -167,6 +167,13 @@ def storage_manager(storage_manager_config, storage_manager_metadata, event_mana
     manager.close()
 
 
+def test_event_loop_thread_does_not_block_interpreter_exit(storage_manager):
+    # The host may never call close() (e.g. a connector that drops shutdown);
+    # a non-daemon thread would make interpreter exit wait forever.
+    assert storage_manager.thread.is_alive()
+    assert storage_manager.thread.daemon
+
+
 class TestStorageManagerPrefetchCallback:
     """Test cases for StorageManager prefetch_all_done_callback."""
 
