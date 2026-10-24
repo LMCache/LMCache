@@ -245,13 +245,16 @@ class RemoteBackend(StorageBackendInterface):
         if self._mla_worker_id_as0_mode:
             return create_immediate_empty_future()
 
-        if self.exists_in_put_tasks(key):
-            return create_immediate_empty_future()
+        # Check and mark under a single lock hold. Doing this in two steps let
+        # two concurrent stores of the same key both pass the check and both be
+        # submitted, and the first one to finish then cleared the marker while
+        # the second was still in flight.
+        with self.lock:
+            if key in self.put_tasks:
+                return create_immediate_empty_future()
+            self.put_tasks.add(key)
 
         memory_obj.ref_count_up()
-
-        with self.lock:
-            self.put_tasks.add(key)
 
         compressed_memory_obj = self.serializer.serialize(memory_obj)
         memory_obj.ref_count_down()
