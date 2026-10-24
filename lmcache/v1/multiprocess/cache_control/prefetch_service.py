@@ -89,6 +89,9 @@ class PrefetchService:
             # Unregistered between the two reads: the same answer, not a
             # malformed request.
             raise unregistered from None
+        worker_group_layout_descs = registry.find_worker_group_layout_descs(
+            model_name, world_size
+        )
         try:
             key_groups, chunks = resolve_grouped_object_keys(
                 ctx.token_hasher,
@@ -98,6 +101,7 @@ class PrefetchService:
                 cache_salt,
                 group_layout_descs,
                 attn_desc,
+                worker_group_layout_descs=worker_group_layout_descs,
             )
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None

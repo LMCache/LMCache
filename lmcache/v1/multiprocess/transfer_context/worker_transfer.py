@@ -1027,6 +1027,7 @@ class EngineDrivenTransferContext(TransferContext):
             layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
             num_physical_slots = blocks_in_chunk * block_size
         self._group_states = group_states
+        kv_worker_id = layout_hints.get("kv_worker_id") if layout_hints else None
 
         future = self._submit_registration(
             lambda: self._req_client.register_kv_cache_engine_driven_context(
@@ -1041,6 +1042,7 @@ class EngineDrivenTransferContext(TransferContext):
                     use_mla=use_mla_flag,
                     num_physical_slots=num_physical_slots,
                     group_layouts=group_layouts,
+                    kv_worker_id=kv_worker_id,
                 )
             )
         )

@@ -1636,6 +1636,23 @@ def test_server_register_uses_worker_physical_slots(
     assert layout.shapes[0] == torch.Size([2, 2, 128, 16])
 
 
+def test_server_register_keeps_layout_under_kv_worker_id(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """The registered layout is also kept under the payload's ``kv_worker_id``."""
+    module, _, _, ctx = server_module_factory(chunk_size=256)
+    payload = _default_register_payload(instance_id=11)
+    payload.kv_worker_id = 0
+
+    module.register_kv_cache_engine_driven_context(payload)
+
+    registry = ctx.layout_desc_registry
+    assert registry.find_worker_group_layout_descs("m", 1) == {
+        0: {0: registry.find("m", 1)}
+    }
+
+
 def test_register_multigroup_sizes_object_group_count(
     stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
@@ -1676,6 +1693,49 @@ def test_register_multigroup_sizes_object_group_count(
     group_descs = ctx.layout_desc_registry.find_group_layout_descs("m", 1)
     assert group_descs is not None
     assert set(group_descs) == {0, 1}
+
+
+def test_register_multigroup_keeps_group_layouts_per_kv_worker_id(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Pipeline stages with different layer counts each keep their own
+    multi-group layouts; the later stage does not overwrite the earlier one."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import (
+        GroupLayout,
+        RegisterEngineDrivenContextPayload,
+    )
+
+    module, _, _, ctx = server_module_factory(chunk_size=16)
+    for kv_worker_id, num_layers in ((0, 2), (1, 1)):
+        group = GroupLayout(
+            num_layers=num_layers,
+            hidden_dim_size=16,
+            dtype_str="float32",
+            tokens_per_block=4,
+        )
+        module.register_kv_cache_engine_driven_context(
+            RegisterEngineDrivenContextPayload(
+                instance_id=kv_worker_id + 1,
+                model_name="m",
+                world_size=1,
+                block_size=4,
+                num_layers=2 * num_layers,
+                hidden_dim_size=16,
+                dtype_str="float32",
+                use_mla=False,
+                group_layouts=[group, group],
+                kv_worker_id=kv_worker_id,
+            )
+        )
+
+    worker_descs = ctx.layout_desc_registry.find_worker_group_layout_descs("m", 1)
+    layers = {
+        worker: {gid: desc.shapes[0][1] for gid, desc in descs.items()}
+        for worker, descs in worker_descs.items()
+    }
+    assert layers == {0: {0: 2, 1: 2}, 1: {0: 1, 1: 1}}
 
 
 def _group_obj_key(group: int, chunk: int) -> Any:

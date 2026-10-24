@@ -137,16 +137,30 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     )
 
     module = lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx)
-    module.register_kv_cache(1, [], "shared-model", 1, EngineType.VLLM, {}, [])
-    module.register_kv_cache(2, [], "shared-model", 1, EngineType.VLLM, {}, [])
-    assert ctx.layout_desc_registry.find("shared-model", 1) is layout_desc
+    for instance_id, kv_worker_id in ((1, 0), (2, 1)):
+        module.register_kv_cache(
+            instance_id,
+            [],
+            "shared-model",
+            1,
+            EngineType.VLLM,
+            {"kv_worker_id": kv_worker_id},
+            [],
+        )
+    registry = ctx.layout_desc_registry
+    assert registry.find("shared-model", 1) is layout_desc
+    assert registry.find_worker_group_layout_descs("shared-model", 1) == {
+        0: {0: layout_desc},
+        1: {0: layout_desc},
+    }
 
     module.unregister_kv_cache(1)
 
-    assert ctx.layout_desc_registry.find("shared-model", 1) is layout_desc
+    assert registry.find("shared-model", 1) is layout_desc
 
     module.unregister_kv_cache(2)
-    assert ctx.layout_desc_registry.find("shared-model", 1) is None
+    assert registry.find("shared-model", 1) is None
+    assert registry.find_worker_group_layout_descs("shared-model", 1) == {}
 
 
 def _layout() -> Any:
