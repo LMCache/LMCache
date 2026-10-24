@@ -1028,8 +1028,7 @@ server
 The ``lmcache bench server`` command is an end-to-end sanity test for the
 LMCache Multi-Process (MP) cache server. It connects to a running server
 over ZMQ and exercises the full KV-cache data path for a sequence of
-synthetic requests, then optionally verifies per-chunk checksums through
-the HTTP API.
+synthetic requests, then verifies per-chunk checksums in local worker buffers.
 
 .. code-block:: bash
 
@@ -1037,7 +1036,7 @@ the HTTP API.
 
 Unlike :ref:`lmcache bench engine <lmcache-bench-engine>`, this command does
 **not** require an inference engine. It only needs a running LMCache MP
-server (ZMQ + HTTP). GPU mode additionally requires a CUDA-capable device.
+server (ZMQ). GPU mode additionally requires a CUDA-capable device.
 It also requires the full ``lmcache`` install (not the lightweight
 ``lmcache-cli`` package).
 
@@ -1045,13 +1044,15 @@ It also requires the full ``lmcache`` install (not the lightweight
 What it does
 ~~~~~~~~~~~~
 
-For each sequence in ``[--start, --end)``, the tool runs two passes:
+For each sequence in ``[--start, --end)``, the tool runs two passes. Each
+pass reserves request-exclusive KV blocks and releases them when it finishes.
 
-1. **Cold pass** -- ``LOOKUP`` is expected to miss, so the generated KV
-   tensors are ``STORE``\ d on the server.
-2. **Warm pass** -- ``LOOKUP`` is expected to hit; the tool issues
-   ``RETRIEVE`` and compares the retrieved KV chunks' checksums to the
-   originals.
+1. **Cold pass** -- ``LOOKUP`` is expected to miss. The benchmark records
+   local per-chunk checksums before ``STORE``.
+2. **Warm pass** -- ``LOOKUP`` is expected to hit. The benchmark clears the
+   allocated destination blocks, retrieves the cached KV, and compares each
+   reader's checksums with the cold-pass reference. The two passes may use
+   different physical block IDs.
 
 The full RPC path exercised is::
 
@@ -1059,10 +1060,8 @@ The full RPC path exercised is::
      → QUERY_PREFETCH_STATUS → RETRIEVE → STORE
      → END_SESSION
 
-When ``--url`` points to the server's HTTP endpoint, per-chunk checksums
-are additionally cross-checked against the server-side computation, so a
-mismatch between producer and consumer surfaces as a loud
-``CHECKSUM MISMATCH`` log line.
+Both transfer modes verify local buffers. ``--url`` remains accepted for
+compatibility but is unused.
 
 
 Quick start
@@ -1104,8 +1103,7 @@ Options
      - ZMQ endpoint of the MP cache server.
    * - ``--url URL``
      - ``http://localhost:8080``
-     - HTTP base URL of the server's checksum API. Used to
-       verify per-chunk checksums end-to-end.
+     - Accepted for compatibility; unused by local checksum verification.
    * - ``--mode {gpu,cpu}``
      - ``gpu``
      - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
@@ -1122,12 +1120,15 @@ Options
    * - ``--num-tokens N``
      - ``512``
      - Tokens per synthetic request.
+   * - ``--block-allocation {sequential,random}``
+     - ``sequential``
+     - Allocate the lowest free block IDs or sample from all free IDs.
    * - ``--num-blocks N``
      - ``1024``
-     - Number of paged blocks allocated on the GPU.
+     - Fallback block capacity per KV group; overridden by the shape spec.
    * - ``--block-size N``
      - ``16``
-     - Tokens per paged block.
+     - Fallback tokens per block; overridden by the shape spec.
    * - ``--start N``
      - ``0``
      - First sequence number to run.
@@ -1157,6 +1158,29 @@ Options
      - Suppress all progress messages during the run. Only the final
        structured metrics summary is emitted (unless also redirected
        via ``--output``).
+
+
+Block allocation
+~~~~~~~~~~~~~~~~
+
+Each KV group has an independent block pool. Active requests reserve
+exclusive blocks; all TP ranks use the same block IDs for a group in their
+separate KV buffers. Each concurrent client owns its own pools.
+Blocks are currently not shared between requests, even when their token
+prefixes match.
+
+``--block-allocation sequential`` selects the lowest free IDs; ``random``
+samples free IDs to exercise non-contiguous block mappings. Blocks become
+reusable after request release. Allocation fails immediately if any group
+lacks capacity, without reserving blocks in other groups.
+
+Capacity and block size come from ``NB`` and ``BS`` in
+``--kvcache-shape-spec``, overriding ``--num-blocks`` and ``--block-size``.
+For example, 512 tokens in complete chunks with a block size of 16 require
+32 blocks per group.
+
+If transfer completion is uncertain, the client rejects further operations
+and retains its blocks until teardown.
 
 
 CPU mode (no GPU)
@@ -1370,7 +1394,7 @@ metrics summary is printed. The summary includes:
 
 * **Configuration** -- RPC URL, mode, transfer mode, tokens per request,
   interval, concurrency.
-* **Results** -- total requests, checksum OK / FAIL counts, pass rate,
+* **Results** -- total requests, checksum OK / FAIL counts, checksum pass rate,
   elapsed time, requests per second.
 * **Latency sections** -- per-operation latency statistics (count, mean,
   min, max, p50, p99) for cold lookup, cold store, warm lookup, and warm
@@ -1392,7 +1416,7 @@ to save the summary to a file.
    Total requests:                   3
    Checksum OK:                      3
    Checksum FAIL:                    0
-   Pass rate (%):                    100.0
+   Checksum pass rate (%):           100.0
    -------------------- Cold Lookup (ms) ---------------
    count:                            3
    mean:                             1.647
