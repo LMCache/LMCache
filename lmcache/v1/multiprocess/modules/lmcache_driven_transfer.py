@@ -134,6 +134,29 @@ def all_null_chunk_masks(
     return masks
 
 
+def _block_ids_per_chunk(
+    cache_context: BaseCacheContext, chunk_tokens: int
+) -> list[int]:
+    """Return the engine block IDs in one chunk, per kernel group.
+
+    ``calculate_num_blocks`` counts tensor pages; a kernel-paged group holds
+    ``kernel_pages_per_block`` pages per block ID, so its count is divided
+    back down to the IDs the engine sends.
+
+    Args:
+        cache_context: The registered cache context.
+        chunk_tokens: Tokens in one LMCache chunk.
+
+    Returns:
+        Block IDs per chunk, indexed by kernel-group index.
+    """
+    return [
+        cache_context.calculate_num_blocks(chunk_tokens, idx)
+        // group.kernel_pages_per_block
+        for idx, group in enumerate(cache_context.kv_layer_groups_manager.kernel_groups)
+    ]
+
+
 @dataclass
 class ContextEntry:
     """Registered cache context metadata for a single worker instance.
@@ -652,14 +675,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         num_chunks = len(obj_keys_per_obj_group[0])
 
         # NOTE: different engine groups may have different block sizes, so
-        # ``blocks_per_chunk[i]`` is the number of blocks in one chunk for
+        # ``blocks_per_chunk[i]`` is the number of block IDs in one chunk for
         # group ``i``.
-        blocks_per_chunk = [
-            cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
-            for group_idx in range(
-                cache_context.kv_layer_groups_manager.num_kernel_groups
-            )
-        ]
+        blocks_per_chunk = _block_ids_per_chunk(cache_context, self._ctx.chunk_size)
 
         with (
             torch_dev.device(cache_context.device),
@@ -708,6 +726,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 null_block_id,
             )
 
+            # Transfer kernels index each tensor by page.
+            gpu_block_ids = (
+                cache_context.kv_layer_groups_manager.expand_to_kernel_pages(
+                    gpu_block_ids
+                )
+            )
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
             )
@@ -983,12 +1007,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ),
         )
 
-        blocks_per_chunk = [
-            cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
-            for group_idx in range(
-                cache_context.kv_layer_groups_manager.num_kernel_groups
-            )
-        ]
+        blocks_per_chunk = _block_ids_per_chunk(cache_context, self._ctx.chunk_size)
 
         with (
             torch_dev.device(cache_context.device),
@@ -1018,7 +1037,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 event_backend.record_event(event, cache_context.stream)
                 return event_backend.export_event(event, cache_context.device), False
 
-            # Cut and stage all block_ids to GPU once before the transfer
+            # Cut and stage all block_ids to GPU once before the transfer;
+            # transfer kernels index each tensor by page.
+            gpu_block_ids = (
+                cache_context.kv_layer_groups_manager.expand_to_kernel_pages(
+                    gpu_block_ids
+                )
+            )
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
             )
