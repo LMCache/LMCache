@@ -649,6 +649,20 @@ References
      - ``lmcache/v1/platform/devices/neuron/__init__.py``
    * - Reference ``DeviceOps`` (Neuron, torch baseline)
      - ``lmcache/v1/platform/devices/neuron/device_ops.py``
+   * - Reference ``DeviceSpec`` (Google TPU / TorchTPU, engine-driven only, ``torch.accelerator`` shims)
+     - ``lmcache/v1/platform/devices/tpu/__init__.py``
+   * - Reference ``DeviceOps`` (TorchTPU, block transfer through host memory)
+     - ``lmcache/v1/platform/devices/tpu/device_ops.py``
    * - Engine-driven call site
      - ``lmcache/v1/multiprocess/transfer_context/worker_transfer.py``
        (``EngineDrivenTransferContext``, ``create_transfer_context``)
+
+.. note::
+
+   The TorchTPU backend supports engine-driven transfer only: a TorchTPU
+   tensor's ``data_ptr()`` points at host-side metadata rather than TPU
+   memory, so blocks move with ``index_select`` / ``index_put_`` through host
+   memory. Its chunks keep vllm-torchtpu's packed ``NL_X_NB_BS_NHP_P_HS``
+   layout, alignment padding included, so they are not interchangeable with
+   chunks stored from GPU KV formats; do not share a cache between TPU and GPU
+   workers.

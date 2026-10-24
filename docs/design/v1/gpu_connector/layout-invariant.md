@@ -160,6 +160,7 @@ an `EngineKVFormat`. Nothing else may index raw shapes.
 | `NL_X_NB_BS_NH_CS` | vLLM blocks-first fused (unified KV cache) | NHD | `NL × [NB, BS, NH, CS]`, raw registration; CS = content size = 2·HS (K/V packed) |
 | `NL_X_TWO_NB_NH_ONE_BS_HS` | vLLM-RBLN attention | HND | `NL × [2, NB, NH, 1, BS, HS]`; axis 3 is always 1 (an RBLN attention-backend requirement) |
 | `NL_X_NB_TWO_NH_ONE_BS_HS` | vLLM-RBLN default attention kernels | HND | `NL × [NB, 2, NH, 1, BS, HS]`; blocks-first counterpart of the row above, axis 3 is always 1 |
+| `NL_X_NB_BS_NHP_P_HS` | vLLM on TorchTPU | NHD | `NL × [NB, BS, NHP, P, HS]`; P = dtype packing (2 bf16, 4 fp8), NHP·P = align(2·NH, P), HS = align(head_dim, 128); same bytes as `NL_X_NB_BS_NH_CS`; detected only when the device is `tpu` |
 
 The two cross-layer formats (`NB_NL_TWO_*`) share a single base
 pointer, the kernel walks layers internally via `shape_desc.nl`. Use

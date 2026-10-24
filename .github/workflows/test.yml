@@ -118,7 +118,7 @@ jobs:
           RUN_DAX_L2_INTEGRATION: "1"
           LMCACHE_TEST_DEVDAX_L1_PATHS: ""
         run: |
-          pytest -m "not (cuda or musa or xpu or npu or neuron or rbln)"
+          pytest -m "not (cuda or musa or xpu or npu or neuron or rbln or tpu)"
 
   rust-unit-tests:
     needs: changes
