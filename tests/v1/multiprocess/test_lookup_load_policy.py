@@ -56,7 +56,7 @@ def _ctx() -> MagicMock:
         num_chunks_in_sw=[-1], world_size=1
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
-    ctx.token_hasher.compute_chunk_hashes.return_value = CHUNK_HASHES
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = CHUNK_HASHES
     ctx.storage_manager.submit_prefetch_task.return_value = PrefetchHandle(
         prefetch_request_id=0,
         external_request_id="req-1",
@@ -72,11 +72,11 @@ def _ctx() -> MagicMock:
 def _key(
     request_configs: dict[str, Any] | None, start_chunks: int = 0
 ) -> IPCCacheServerKey:
-    return IPCCacheServerKey(
+    return IPCCacheServerKey.from_token_ids(
         model_name="m",
         world_size=1,
         worker_id=None,
-        token_ids=tuple(range(len(CHUNK_HASHES) * CHUNK_SIZE)),
+        token_ids=range(len(CHUNK_HASHES) * CHUNK_SIZE),
         start=start_chunks * CHUNK_SIZE,
         end=len(CHUNK_HASHES) * CHUNK_SIZE,
         request_id="req-1",

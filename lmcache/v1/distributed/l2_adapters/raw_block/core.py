@@ -28,13 +28,13 @@ from lmcache.utils import (
     TORCH_DTYPE_TO_STR_DTYPE,
     DiskCacheMetadata,
 )
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.storage_backend.raw_block.key_codec import (
+from lmcache.v1.distributed.l2_adapters.raw_block.key_codec import (
     RawBlockKeyNamespace,
     RawBlockKeySpec,
     decode_legacy_key,
     slot_identity_from_encoded_key,
 )
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 
 logger = init_logger(__name__)
 

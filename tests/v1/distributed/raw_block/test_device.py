@@ -15,7 +15,7 @@ import sys
 import pytest
 
 # First Party
-from tests.v1.storage_backend.raw_block_test_utils import (
+from tests.v1.distributed.raw_block.test_utils import (
     RAW_BLOCK_CI_BLOCK_ALIGN,
     RAW_BLOCK_CI_CAPACITY_BYTES,
     is_skip_safe_io_error,

@@ -5,7 +5,7 @@
 import pytest
 
 # First Party
-from tests.v1.storage_backend.raw_block_test_utils import (
+from tests.v1.distributed.raw_block.test_utils import (
     is_skip_safe_device_setup_error,
     is_skip_safe_fdp_status_error,
     require_fdp_char_device_path,

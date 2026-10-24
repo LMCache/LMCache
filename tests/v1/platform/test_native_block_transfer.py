@@ -154,13 +154,36 @@ def test_tensor_operands_lower_to_kernel_launches(
         list(range(8)),
         [8, 9],
     ]
-    # The skip applies to the first launch only, as before the move.
+    # A skip inside the first launch leaves the later launches whole.
     assert [launch.skip for launch in kernel.launches] == [1, 0]
     for launch in kernel.launches:
         assert launch.paged.dtype == torch.int64
         assert launch.paged.tolist() == layer_addresses
         assert launch.block_ids.dtype == torch.int64
         assert launch.direction == direction
+
+
+def test_skip_spanning_launches_carries_into_later_launches() -> None:
+    """A skip past the first launch's blocks continues into the next launch."""
+    kernel = _RecordingKernel()
+    paged, fmt, desc = _paged_kv(num_blocks=10)
+    chunks = cast(list[torch.Tensor], [_host_chunk(0x1000 * (i + 1)) for i in range(5)])
+
+    transfer_with_address_kernel(
+        kernel,
+        paged,
+        chunks,
+        list(range(10)),
+        CPU,
+        H2D,
+        desc,
+        _CHUNK_TOKENS,
+        fmt,
+        9,
+    )
+
+    # Launch 1 holds blocks 0-7 (all skipped); launch 2 holds 8-9 (one skipped).
+    assert [launch.skip for launch in kernel.launches] == [8, 1]
 
 
 def test_pinned_chunks_keep_the_async_path(monkeypatch: pytest.MonkeyPatch) -> None:

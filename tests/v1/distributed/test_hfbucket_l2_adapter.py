@@ -17,6 +17,9 @@ import torch
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l2_adapters import hfbucket_l2_adapter as hfmod
+from lmcache.v1.distributed.l2_adapters.hfbucket_client import (
+    parse_hfbucket_handle,
+)
 from lmcache.v1.distributed.l2_adapters.hfbucket_l2_adapter import (
     HFBucketL2Adapter,
     HFBucketL2AdapterConfig,
@@ -30,9 +33,6 @@ from lmcache.v1.memory_management import (
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd
-from lmcache.v1.storage_backend.connector.hfbucket_connector import (
-    parse_hfbucket_handle,
-)
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
