@@ -31,6 +31,7 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transfer_context.base import (
+    ContextClosedError,
     EngineDrivenContext,
     EngineDrivenContextMetadata,
     compute_kv_layout,
@@ -1126,35 +1127,43 @@ class EngineDrivenTransferContext(TransferContext):
             return self._submit_store_multigroup(key, kv_caches, block_ids)
 
         device = _get_kv_device(kv_caches)
-        synchronize_device(device)
-        result = self._engine_driven_context.prepare_store(key, self._instance_id)
-        out_buffers, chunk_indices = result if result is not None else (None, None)
-        # All chunks already in cache — nothing to gather or commit.
-        if chunk_indices is not None and len(chunk_indices) == 0:
-            future: MessagingFuture[bool] = MessagingFuture()
-            future.set_result(True)
+        ctx = self._engine_driven_context
+        future: MessagingFuture[bool] = MessagingFuture()
+        try:
+            with ctx.transfer_guard():
+                synchronize_device(device)
+                result = ctx.prepare_store(key, self._instance_id)
+                out_buffers, chunk_indices = (
+                    result if result is not None else (None, None)
+                )
+                # All chunks already in cache — nothing to gather or commit.
+                if chunk_indices is not None and len(chunk_indices) == 0:
+                    future.set_result(True)
+                    return future
+                cpu_chunks = gather_paged_kv_to_cpu(
+                    kv_caches,
+                    _single_group_block_ids(block_ids),
+                    blocks_in_chunk,
+                    layout_hints=self._layout_hints,
+                    engine_kv_format=self._engine_kv_format,
+                    out=out_buffers,
+                    chunk_indices=chunk_indices,
+                    engine_type=self._engine_type,
+                )
+                # Gather issues async device->CPU copies on BOTH transports:
+                # into the SHM slots when out_buffers is given, otherwise into
+                # fresh buffers that commit_store serializes immediately. Either
+                # way the copies must be complete first, so this is
+                # unconditional -- guarding it on out_buffers left the inline
+                # path serializing a buffer still being written.
+                synchronize_device(device)
+                ok = ctx.commit_store(key, self._instance_id, cpu_chunks)
+        except ContextClosedError:
+            # Context is being swapped/shut down; the store is simply lost
+            # (same contract as a store against an unhealthy server).
+            future.set_result(False)
             return future
-        cpu_chunks = gather_paged_kv_to_cpu(
-            kv_caches,
-            _single_group_block_ids(block_ids),
-            blocks_in_chunk,
-            layout_hints=self._layout_hints,
-            engine_kv_format=self._engine_kv_format,
-            out=out_buffers,
-            chunk_indices=chunk_indices,
-            engine_type=self._engine_type,
-        )
-        # Gather issues async device->CPU copies on BOTH transports: into the
-        # SHM slots when out_buffers is given, otherwise into fresh buffers that
-        # commit_store serializes immediately. Either way the copies must be
-        # complete first, so this is unconditional -- guarding it on out_buffers
-        # left the inline path serializing a buffer still being written.
-        synchronize_device(device)
-        ok = self._engine_driven_context.commit_store(
-            key, self._instance_id, cpu_chunks
-        )
 
-        future = MessagingFuture()
         future.set_result(ok)
         return future
 
@@ -1174,9 +1183,18 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_retrieve()."
             )
         if self._group_states:
-            return self._submit_retrieve_multigroup(
-                key, kv_caches, block_ids, event, skip_first_n_tokens
-            )
+            try:
+                # Scatter reads views into context-owned SHM, as below.
+                with self._engine_driven_context.transfer_guard():
+                    return self._submit_retrieve_multigroup(
+                        key, kv_caches, block_ids, event, skip_first_n_tokens
+                    )
+            except ContextClosedError:
+                # Context is being swapped/shut down; report a miss so the
+                # engine recomputes the blocks.
+                missed: MessagingFuture[bool] = MessagingFuture()
+                missed.set_result(False)
+                return missed
 
         device = _get_kv_device(kv_caches)
         full_block_ids = _single_group_block_ids(block_ids)
@@ -1186,33 +1204,44 @@ class EngineDrivenTransferContext(TransferContext):
                 f"blocks={len(full_block_ids)}, blocks_in_chunk={blocks_in_chunk}"
             )
         expected_count = len(full_block_ids) // blocks_in_chunk
-        src_buffers = self._engine_driven_context.prepare_retrieve(
-            key, self._instance_id, expected_count
-        )
-        ok = src_buffers is not None
-        if src_buffers is not None:
-            try:
-                if event is not None:
-                    event.wait()
-                scatter_cpu_to_paged_kv(
-                    kv_caches,
-                    full_block_ids,
-                    src_buffers,
-                    blocks_in_chunk,
-                    skip_first_n_tokens=skip_first_n_tokens,
-                    layout_hints=self._layout_hints,
-                    engine_kv_format=self._engine_kv_format,
-                    engine_type=self._engine_type,
-                )
-            except (RuntimeError, ValueError, TypeError, IndexError):
-                logger.exception("Failed to scatter retrieved CPU context chunks")
-                ok = False
-            # SHM path: ensure all device writes are complete before releasing
-            # the SHM slot (server may immediately reuse it after commit_retrieve).
-            synchronize_device(device)
-        self._engine_driven_context.commit_retrieve(key, self._instance_id)
-
+        ctx = self._engine_driven_context
         future: MessagingFuture[bool] = MessagingFuture()
+        try:
+            with ctx.transfer_guard():
+                src_buffers = ctx.prepare_retrieve(
+                    key, self._instance_id, expected_count
+                )
+                ok = src_buffers is not None
+                if src_buffers is not None:
+                    try:
+                        if event is not None:
+                            event.wait()
+                        scatter_cpu_to_paged_kv(
+                            kv_caches,
+                            full_block_ids,
+                            src_buffers,
+                            blocks_in_chunk,
+                            skip_first_n_tokens=skip_first_n_tokens,
+                            layout_hints=self._layout_hints,
+                            engine_kv_format=self._engine_kv_format,
+                            engine_type=self._engine_type,
+                        )
+                    except (RuntimeError, ValueError, TypeError, IndexError):
+                        logger.exception(
+                            "Failed to scatter retrieved CPU context chunks"
+                        )
+                        ok = False
+                    # SHM path: ensure all device writes are complete before
+                    # releasing the SHM slot (server may immediately reuse it
+                    # after commit_retrieve).
+                    synchronize_device(device)
+                ctx.commit_retrieve(key, self._instance_id)
+        except ContextClosedError:
+            # Context is being swapped/shut down; report a miss so the
+            # engine recomputes the blocks.
+            future.set_result(False)
+            return future
+
         future.set_result(ok)
         return future
 
@@ -1399,8 +1428,18 @@ class EngineDrivenTransferContext(TransferContext):
         block_ids: list[list[int]],
     ) -> MessagingFuture:
         """Synchronous multi-group store; resolves before returning."""
+        ctx = self._engine_driven_context
+        assert ctx is not None
         future: MessagingFuture[bool] = MessagingFuture()
-        future.set_result(self._store_multigroup(key, kv_caches, block_ids))
+        try:
+            # The prepared slots are views into context-owned SHM, as on the
+            # single-group path.
+            with ctx.transfer_guard():
+                ok = self._store_multigroup(key, kv_caches, block_ids)
+        except ContextClosedError:
+            # Context is being swapped/shut down; the store is simply lost.
+            ok = False
+        future.set_result(ok)
         return future
 
     def _group_windows(self, block_ids: list[list[int]]) -> list[tuple[int, int]]:
