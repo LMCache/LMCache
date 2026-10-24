@@ -3,7 +3,7 @@
 
 # Standard
 from dataclasses import dataclass
-import asyncio
+from functools import partial
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
@@ -11,7 +11,10 @@ from lmcache.cli.commands.bench.engine_bench.request_sender import (
     RequestSender,
 )
 from lmcache.cli.commands.bench.engine_bench.stats import StatsCollector
-from lmcache.cli.commands.bench.engine_bench.workloads.base import BaseWorkload
+from lmcache.cli.commands.bench.engine_bench.workloads.base import (
+    BaseWorkload,
+    DispatchTracker,
+)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -71,7 +74,7 @@ class RandomPrefillWorkload(BaseWorkload):
 
         self._prompts = self._generate_prompts()
         self._dispatched = False
-        self._pending_tasks: set[asyncio.Task] = set()
+        self._dispatch_tracker = DispatchTracker(progress_monitor)
 
     def log_config(self) -> None:
         """Log key workload config before the benchmark starts."""
@@ -122,6 +125,9 @@ class RandomPrefillWorkload(BaseWorkload):
     async def step(self, time_offset: float) -> float:
         """Dispatch all requests at once on the first call.
 
+        Args:
+            time_offset: Seconds since benchmark start (unused).
+
         Returns:
             0.0 while tasks are pending, -1.0 when all done.
         """
@@ -132,11 +138,9 @@ class RandomPrefillWorkload(BaseWorkload):
                 messages = [{"role": "user", "content": prompt}]
                 self._progress_monitor.on_request_sent(request_id)
 
-                task = asyncio.create_task(
-                    self._dispatch(request_id, messages),
+                await self._dispatch_tracker.start(
+                    partial(self._dispatch, request_id, messages)
                 )
-                self._pending_tasks.add(task)
-                task.add_done_callback(self._on_task_done)
 
             self._progress_monitor.log_message(
                 f"Dispatched all {self._config.num_requests} requests"
@@ -144,11 +148,8 @@ class RandomPrefillWorkload(BaseWorkload):
             return 0.0
 
         # Wait for pending tasks
-        if self._pending_tasks:
-            await asyncio.wait(
-                self._pending_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+        if self._dispatch_tracker.has_pending:
+            await self._dispatch_tracker.wait_one()
             return 0.0
 
         return -1.0
@@ -164,14 +165,6 @@ class RandomPrefillWorkload(BaseWorkload):
             messages,
             max_tokens=1,
         )
-
-    def _on_task_done(self, task: asyncio.Task) -> None:
-        """Clean up completed tasks and log unexpected errors."""
-        self._pending_tasks.discard(task)
-        if not task.cancelled():
-            exc = task.exception()
-            if exc is not None:
-                self._progress_monitor.log_message(f"Dispatch task failed: {exc}")
 
     def on_request_finished(self, request_id: str, output: str) -> None:
         """No-op — this workload is stateless."""
