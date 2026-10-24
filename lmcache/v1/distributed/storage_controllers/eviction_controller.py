@@ -6,6 +6,7 @@ from __future__ import annotations
 # Standard
 from abc import abstractmethod
 from collections import Counter
+from math import ceil
 from typing import TYPE_CHECKING
 import threading
 import time
@@ -14,7 +15,11 @@ import time
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
-from lmcache.v1.distributed.eviction import L1EvictionPolicy, L2EvictionPolicy
+from lmcache.v1.distributed.eviction import (
+    EvictionByteBudget,
+    L1EvictionPolicy,
+    L2EvictionPolicy,
+)
 from lmcache.v1.distributed.eviction_policy import CreateEvictionPolicy
 from lmcache.v1.distributed.internal_api import (
     EvictionAction,
@@ -157,9 +162,15 @@ class L1EvictionController(EvictionController):
             pct,
         )
 
-    def eviction_loop(self):
+    def eviction_loop(self) -> None:
+        """Select a physical-byte budget on each above-watermark L1 tick.
+
+        Whole-object selection follows the configured replacement order.
+        Deletion rechecks locks, so a cycle may reclaim fewer bytes if objects
+        become unavailable after selection.
+        """
         watermark = self._eviction_config.trigger_watermark
-        eviction_ratio = self._eviction_config.eviction_ratio
+        eviction_ratio = max(0.0, min(1.0, self._eviction_config.eviction_ratio))
 
         while not self._stop_flag.is_set():
             time.sleep(1)
@@ -183,7 +194,10 @@ class L1EvictionController(EvictionController):
             )
             actions = self._eviction_policy.get_eviction_actions(
                 eviction_ratio,
-                key_eligible_filter=self._l1_manager.is_key_evictable,
+                byte_budget=EvictionByteBudget(
+                    target_bytes=ceil(used_bytes * eviction_ratio),
+                    get_evictable_size=self._l1_manager.get_evictable_size,
+                ),
             )
             for action in actions:
                 self.execute_eviction_action(action)

@@ -656,6 +656,16 @@ Source: ``lmcache/v1/distributed/config.py``
      - ``0.2``
      - Fraction of allocated memory to evict when triggered (0.0--1.0).
 
+L1 eviction selects whole objects in policy order until their reclaimable
+physical allocation reaches the requested byte fraction. Allocation padding
+counts toward this budget. For example, a 25% ratio at 64 KiB allocated targets
+16 KiB, even when objects have different sizes. The final object may exceed
+the target; this also rounds a fractional uniform-object target upward.
+Read-locked resident allocations and live write buffers are skipped. Expired
+write reservations can be reclaimed. Selection is best effort: concurrent
+lock changes, live staging buffers or insufficient eligible bytes can prevent
+reaching the target. ``noop`` continues to disable policy eviction.
+
 L2 Policies
 -----------
 

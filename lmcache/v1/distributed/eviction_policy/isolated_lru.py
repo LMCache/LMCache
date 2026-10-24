@@ -24,7 +24,7 @@ import threading
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.eviction import EvictionPolicy
+from lmcache.v1.distributed.eviction import EvictionByteBudget, EvictionPolicy
 from lmcache.v1.distributed.internal_api import (
     EvictionAction,
     EvictionDestination,
@@ -120,6 +120,8 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
         expected_ratio: float,
         key_eligible_filter: Callable[[ObjectKey], bool] | None = None,
         cache_salt: str | None = None,
+        *,
+        byte_budget: EvictionByteBudget | None = None,
     ) -> list[EvictionAction]:
         """Select victims in LRU order, scoped to a single ``cache_salt``.
 
@@ -137,6 +139,9 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
             key_eligible_filter: Optional predicate — keys failing the
                 filter (e.g. locked) are skipped.
             cache_salt: The salt whose bucket to evict from. Required.
+            byte_budget: Optional physical-byte target, overriding the ratio.
+                Only this salt's reclaimable keys count toward the target;
+                whole objects are selected in LRU order.
 
         Returns:
             A list with at most one ``EvictionAction`` (one per
@@ -164,15 +169,23 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
             target_count = int(len(pool) * expected_ratio)
             if expected_ratio > 0 and target_count == 0:
                 target_count = 1
-            if target_count == 0:
+            target = target_count if byte_budget is None else byte_budget.target_bytes
+            if target <= 0:
                 return []
 
             keys_to_evict: list[ObjectKey] = []
+            selected_weight = 0
             for key in pool:
                 if key_eligible_filter is not None and not key_eligible_filter(key):
                     continue
+                weight = (
+                    1 if byte_budget is None else byte_budget.get_evictable_size(key)
+                )
+                if weight <= 0:
+                    continue
                 keys_to_evict.append(key)
-                if len(keys_to_evict) >= target_count:
+                selected_weight += weight
+                if selected_weight >= target:
                     break
 
             if not keys_to_evict:

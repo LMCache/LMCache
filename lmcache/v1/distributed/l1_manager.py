@@ -986,6 +986,43 @@ class L1Manager(L1ManagerInterface):
             not staged.write_lock.is_locked() for staged in list(per_tag.values())
         )
 
+    def get_evictable_size(self, key: ObjectKey) -> int:
+        """Estimate the physical bytes a non-forced delete can reclaim.
+
+        Args:
+            key: Key whose resident and staging allocations to inspect.
+
+        Returns:
+            Reclaimable bytes including allocator padding, or zero. Expired
+            staging buffers can be freed even when another writer or reader
+            prevents deleting the resident object. Live staging writers protect
+            the resident object from deletion.
+
+        Notes:
+            This is a lock-free advisory snapshot, like ``is_key_evictable``.
+            Policy selection holds the policy lock, while lifecycle callbacks
+            run under the manager lock; taking it here would invert lock order.
+            ``delete`` rechecks locks under the manager lock, so concurrent
+            changes can reduce the bytes actually reclaimed.
+        """
+        per_tag = self._staging.get(key)
+        staged = tuple(per_tag.values()) if per_tag is not None else ()
+        reclaimable = 0
+        live_writer = False
+        for entry in staged:
+            if entry.write_lock.is_locked():
+                live_writer = True
+            else:
+                reclaimable += entry.memory_obj.get_physical_size()
+        resident = self._objects.get(key)
+        if (
+            not live_writer
+            and resident is not None
+            and not resident.read_lock.is_locked()
+        ):
+            reclaimable += resident.memory_obj.get_physical_size()
+        return reclaimable
+
     def get_memory_usage(self) -> tuple[int, int]:
         """Get the current memory usage of L1 cache.
 
