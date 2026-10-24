@@ -85,7 +85,11 @@ class RESPConnector(RemoteConnector):
         recv_buf = memory_obj.byte_array
         if not isinstance(recv_buf, memoryview):
             recv_buf = memoryview(recv_buf)
-        await self.client.get(key_str, recv_buf)
+        results = await self.client.get(key_str, recv_buf)
+        # key not found: the buffer was never filled
+        if isinstance(results, list) and results and not results[0]:
+            memory_obj.ref_count_down()
+            return None
         return memory_obj
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
@@ -151,7 +155,13 @@ class RESPConnector(RemoteConnector):
             else memoryview(memory_obj.byte_array)
             for memory_obj in memory_objs
         ]
-        await self.client.batch_get(key_strs, recv_bufs)
+        results = await self.client.batch_get(key_strs, recv_bufs)
+        # keys not found were never filled: release them, return None
+        if isinstance(results, list):
+            for i, ok in enumerate(results):
+                if not ok and memory_objs[i] is not None:
+                    memory_objs[i].ref_count_down()
+                    memory_objs[i] = None
         return memory_objs
 
     async def batched_get(
@@ -220,9 +230,20 @@ class RESPConnector(RemoteConnector):
         keys: List[CacheEngineKey],
     ) -> List[MemoryObj]:
         # prefetch priority
-        return await self.pq_executor.submit_job(
+        memory_objs = await self.pq_executor.submit_job(
             self._batched_get, keys=keys, priority=Priorities.PREFETCH
         )
+        # the prefetch path expects the loaded chunks as a prefix:
+        # stop at the first key that was not found and release what follows.
+        prefix: List[MemoryObj] = []
+        for i, memory_obj in enumerate(memory_objs):
+            if memory_obj is None:
+                for rest in memory_objs[i + 1 :]:
+                    if rest is not None:
+                        rest.ref_count_down()
+                break
+            prefix.append(memory_obj)
+        return prefix
 
     # TODO
     @no_type_check
