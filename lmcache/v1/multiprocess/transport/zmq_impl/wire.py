@@ -52,6 +52,23 @@ LEGACY_OPERATION_IDS = MappingProxyType(
 )
 _LEGACY_ID_TO_OPERATION = {value: key for key, value in LEGACY_OPERATION_IDS.items()}
 
+# Reply operation for a request that failed. Deliberately not routable, so a
+# client that predates it fails the future on the existing mismatch path.
+HANDLER_ERROR_OPERATION = "__handler_error__"
+
+
+def encode_handler_error(exc: BaseException) -> list[bytes]:
+    """Encode the operation and payload frames describing a failed request."""
+    return [
+        msgspec.msgpack.encode(HANDLER_ERROR_OPERATION),
+        msgspec.msgpack.encode(f"{type(exc).__name__}: {exc}"),
+    ]
+
+
+def decode_handler_error(data: bytes) -> str:
+    """Decode the payload frame of a handler-error reply."""
+    return msgspec.msgpack.decode(data, type=str)
+
 
 def encode_operation(operation: RpcOperation) -> bytes:
     """Encode an operation as its legacy ID or stable string name."""
