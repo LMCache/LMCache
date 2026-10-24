@@ -32,8 +32,8 @@ MAX_INFLIGHT_REQUESTS="${MAX_INFLIGHT_REQUESTS:-5}"
 MAX_TTFT_SLOWDOWN_PCT="${MAX_TTFT_SLOWDOWN_PCT:--60}"
 MAX_ROUND_TIME_SLOWDOWN_PCT="${MAX_ROUND_TIME_SLOWDOWN_PCT:--15}"
 
-# Canonicalize paths safely supporting paths with spaces
-LMCACHE_DIR="$(cd "$LMCACHE_DIR" 2>/dev/null && pwd || echo "$LMCACHE_DIR")"
+# Resolve paths before each benchmark changes its working directory.
+LMCACHE_DIR="$(cd "$LMCACHE_DIR" && pwd)"
 mkdir -p "$RESULTS_DIR/long_doc_qa"
 LONG_DOC_QA_DIR="$(cd "$RESULTS_DIR/long_doc_qa" && pwd)"
 BASELINE_DIR="$LONG_DOC_QA_DIR/baseline"
@@ -369,39 +369,45 @@ run_long_doc_qa() {
     local port="$1"
     local result_file="$2"
     local description="$3"
+    local output_file="$LONG_DOC_QA_DIR/${description}_output.txt"
     local phase_dir="$LONG_DOC_QA_DIR/$description"
+    local phase_result_file="$phase_dir/${description}_result.json"
 
     echo "=== Running long_doc_qa ($description) ==="
     mkdir -p "$phase_dir"
-
-    local output_file="$phase_dir/diagnostics.txt"
-    local phase_result_file="$phase_dir/${description}_result.json"
-
-    # Execute benchmark inside phase_dir so warmup_round.csv and query_round.csv
-    # are written to the phase's dedicated directory and do not overwrite each other.
-    # Keep paths absolute when changing the child process's working directory.
-    (
-        cd "$phase_dir" && "${PYTHON_EXEC}" "$LMCACHE_DIR/benchmarks/long_doc_qa/long_doc_qa.py" \
-            --port "$port" \
-            --model "$MODEL" \
-            --document-length "$DOCUMENT_LENGTH" \
-            --num-documents "$NUM_DOCUMENTS" \
-            --output-len "$OUTPUT_LEN" \
-            --repeat-count "$REPEAT_COUNT" \
-            --repeat-mode "$REPEAT_MODE" \
-            --shuffle-seed "$SHUFFLE_SEED" \
-            --max-inflight-requests "$MAX_INFLIGHT_REQUESTS" \
-            --output "$output_file" \
-            --json-output \
-            2>>"$output_file" | tee "$phase_result_file"
+    local -a benchmark_command=(
+        "${PYTHON_EXEC}" "$LMCACHE_DIR/benchmarks/long_doc_qa/long_doc_qa.py"
+        --port "$port"
+        --model "$MODEL"
+        --document-length "$DOCUMENT_LENGTH"
+        --num-documents "$NUM_DOCUMENTS"
+        --output-len "$OUTPUT_LEN"
+        --repeat-count "$REPEAT_COUNT"
+        --repeat-mode "$REPEAT_MODE"
+        --shuffle-seed "$SHUFFLE_SEED"
+        --max-inflight-requests "$MAX_INFLIGHT_REQUESTS"
+        --output "$output_file"
+        --json-output
     )
 
-    # Maintain diagnostics.txt, ${description}_output.txt, and compatibility root copies
+    (
+        cd "$phase_dir"
+        "${benchmark_command[@]}" 2>>"$output_file" | tee "$result_file"
+    )
+
     cp -f "$output_file" "$phase_dir/${description}_output.txt" 2>/dev/null || true
-    cp -f "$phase_result_file" "$LONG_DOC_QA_DIR/${description}_result.json" 2>/dev/null || true
-    cp -f "$output_file" "$LONG_DOC_QA_DIR/${description}_output.txt" 2>/dev/null || true
     if [[ -n "$result_file" && "$result_file" != "$phase_result_file" ]]; then
-        cp -f "$phase_result_file" "$result_file" 2>/dev/null || true
+        cp -f "$result_file" "$phase_result_file" 2>/dev/null || true
+    fi
+
+    if [ -f "$COMMON_WORKLOAD_DIR/long_doc_qa_diagnostics.py" ]; then
+        "${PYTHON_EXEC}" "$COMMON_WORKLOAD_DIR/long_doc_qa_diagnostics.py" \
+            --phase "$description" \
+            --engine "${INFERENCE_ENGINE:-${ENGINE_NAME:-vllm}}" \
+            --results-dir "$phase_dir" \
+            --command "${benchmark_command[@]}" | tee "$phase_dir/diagnostics.txt"
+    else
+        cp -f "$output_file" "$phase_dir/diagnostics.txt" 2>/dev/null || true
     fi
 
     echo "$description benchmark completed"

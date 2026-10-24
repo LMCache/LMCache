@@ -40,7 +40,7 @@ rather than double-counting.
 ## The contract
 
 A `DurableComponent`
-([`durable.py`](../../../../../lmcache/v1/mp_coordinator/persistence/durable.py))
+([`durable_component.py`](../../../../../lmcache/v1/mp_coordinator/persistence/durable_component.py))
 owns one section end to end:
 
 | Member | Meaning |

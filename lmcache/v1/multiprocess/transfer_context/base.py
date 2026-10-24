@@ -4,8 +4,8 @@
 This module provides:
 - ``EngineDrivenContextMetadata``: layout metadata dataclass for non-CUDA workers.
 - ``EngineDrivenContext``: abstract base class with a two-phase prepare/commit
-  interface for CPU-side KV data transfer. Concrete implementations (e.g.
-  ``EngineDrivenContextPickle``) each decide *how* data is serialised and transported.
+  interface for CPU-side KV data transfer. Concrete implementations each decide
+  *how* data is serialised and transported.
 - ``create_engine_driven_context()``: factory that returns the appropriate
   ``EngineDrivenContext`` subclass.
 - ``compute_kv_layout``, ``gather_paged_kv_to_cpu``, ``scatter_cpu_to_paged_kv``:
@@ -24,11 +24,9 @@ from typing import TYPE_CHECKING
 import inspect
 
 # Third Party
-import numpy as np
 import torch
 
 # First Party
-from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
@@ -36,6 +34,7 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import resolve_device_ops
+from lmcache.v1.platform.native_block_transfer import transfer_with_address_kernel
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -64,11 +63,6 @@ def _detect_block_transfer_accepts_tensor(transfer_fn: Callable[..., None]) -> b
     return False
 
 
-def _tensors_to_ptrs(tensors: list[torch.Tensor]) -> list[int]:
-    """Convert a list of tensors to a list of their data_ptr() values."""
-    return [t.data_ptr() for t in tensors]
-
-
 # ---------------------------------------------------------------------------
 
 
@@ -77,14 +71,23 @@ class EngineDrivenContextMetadata:
     """Non-GPU context layout metadata for non-CUDA workers.
 
     Attributes:
-        layout_desc: Memory layout descriptor used to interpret chunk payloads.
+        layout_desc: Memory layout descriptor used to interpret chunk payloads
+            (group 0's layout for multi-group workers).
         block_size: Number of tokens per paged block.
         use_mla: Whether the worker KV format is MLA.
+        group_layouts: Per-LMCache-group layouts for multi-group (hybrid-KV)
+            workers, in protocol group order. ``None`` means single-group.
+        group_windows: Per-group trailing-chunk windows parallel to
+            ``group_layouts`` (``-1`` = full attention). A retrieve serves
+            only each group's in-window suffix. ``None`` means every group is
+            full attention.
     """
 
     layout_desc: MemoryLayoutDesc
     block_size: int
     use_mla: bool
+    group_layouts: "list[MemoryLayoutDesc] | None" = None
+    group_windows: "list[int] | None" = None
 
 
 class EngineDrivenContext(ABC):
@@ -122,7 +125,7 @@ class EngineDrivenContext(ABC):
         """Prepare SHM buffers for a store operation.
 
         Returns:
-            None: pickle mode — no pre-allocated buffers. Caller gathers all
+            None: inline mode — no pre-allocated buffers. Caller gathers all
                 chunks to CPU itself and sends the serialized data via
                 commit_store.
             ([], []): SHM mode but all chunks already cached. Caller should
@@ -141,19 +144,65 @@ class EngineDrivenContext(ABC):
     def commit_store(
         self, key: IPCCacheServerKey, instance_id: int, chunks: list[torch.Tensor]
     ) -> bool:
-        """Commit store. Pickle: serialize and send. Shm: notify server."""
+        """Commit store. Inline: serialize and send. Shm: notify server."""
         ...
 
     @abstractmethod
     def prepare_retrieve(
-        self, key: IPCCacheServerKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int, expected_count: int
     ) -> list[torch.Tensor] | None:
-        """Prepare retrieve. Returns chunks or shm views, or None on miss."""
+        """Prepare retrieve for exactly ``expected_count`` chunks.
+
+        Args:
+            key: Cache key to retrieve.
+            instance_id: Worker instance identifier.
+            expected_count: Required number of LMCache chunks.
+
+        Returns:
+            Chunks or SHM views on a hit, or ``None`` on a miss.
+        """
         ...
+
+    def prepare_store_grouped(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        skipped_chunks: tuple[tuple[int, ...], ...] = (),
+    ) -> tuple[list[torch.Tensor], list[int], list[int]] | None:
+        """Multi-group store prepare (SHM transport only).
+
+        Args:
+            key: Cache key for the token range to store.
+            instance_id: Worker instance identifier.
+            skipped_chunks: Per group, the chunk positions the worker will not
+                store (all-null engine blocks); the server reserves no slot for
+                them. Empty means none.
+
+        Returns:
+            Parallel per-slot ``(tensors, chunk_indices, group_ids)`` lists,
+            ``([], [], [])`` when fully cached, or ``None`` on a malformed
+            response.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support multi-group transfers"
+        )
+
+    def prepare_retrieve_grouped(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> tuple[list[torch.Tensor], list[int], list[int]] | None:
+        """Multi-group retrieve prepare (SHM transport only).
+
+        Returns:
+            Parallel per-slot ``(tensors, group_ids, chunk_indices)`` lists
+            covering each group's in-window chunks, or ``None`` on a miss.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support multi-group transfers"
+        )
 
     @abstractmethod
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
-        """Commit retrieve. Pickle: no-op. Shm: release read locks."""
+        """Commit retrieve. Inline: no-op. Shm: release read locks."""
         ...
 
     @abstractmethod
@@ -168,33 +217,25 @@ def create_engine_driven_context(
     mq_timeout: float,
     shm_name: str,
     pool_size: int,
-    *,
-    use_pickle: bool = False,
 ) -> EngineDrivenContext:
     """Factory that returns the appropriate :class:`EngineDrivenContext` implementation.
 
     Returns SHM-based implementation when shared-memory pool information is
-    available; otherwise falls back to the pickle-based implementation.
+    available; otherwise falls back to the safe inline implementation.
     If SHM initialization fails for any reason (e.g. segment not found,
-    permission error), gracefully falls back to pickle transport.
+    permission error), gracefully falls back to inline transport.
 
     Args:
         metadata: Layout metadata for the non-GPU context.
         req_client: Transport-neutral client used for server requests.
         mq_timeout: Timeout in seconds for blocking MQ requests.
-        shm_name: Shared-memory segment name. Empty values force pickle mode.
+        shm_name: Shared-memory segment name. Empty values force inline mode.
         pool_size: Shared-memory pool size in bytes. Non-positive values force
-            pickle mode.
-        use_pickle: Explicitly use pickle transport even when SHM info is
-            available.
-
+            inline mode.
     Returns:
         A concrete :class:`EngineDrivenContext` instance.
     """
-    if not shm_name or pool_size <= 0:
-        use_pickle = True
-
-    if not use_pickle:
+    if shm_name and pool_size > 0:
         # Local
         from .shm import EngineDrivenContextShm
 
@@ -210,16 +251,16 @@ def create_engine_driven_context(
         except Exception:
             logger.warning(
                 "Failed to initialize SHM context (shm_name=%s), "
-                "falling back to pickle transport",
+                "falling back to inline tensor transport",
                 shm_name,
                 exc_info=True,
             )
 
     # Local
-    from .pickle import EngineDrivenContextPickle
+    from .inline import EngineDrivenContextInline
 
-    logger.info("Creating EngineDrivenContextPickle (pickle transport)")
-    return EngineDrivenContextPickle(metadata, req_client, mq_timeout)
+    logger.info("Creating EngineDrivenContextInline")
+    return EngineDrivenContextInline(metadata, req_client, mq_timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -230,12 +271,14 @@ def create_engine_driven_context(
 def compute_kv_layout(
     kv_caches: dict[str, torch.Tensor],
     layout_hints: LayoutHints | None = None,
+    engine_type: EngineType = EngineType.VLLM,
 ) -> tuple[int, int, int, str, "lmcache_native.EngineKVFormat", int]:
     """Compute KV layout metadata from KV tensors.
 
     Args:
         kv_caches: Per-layer KV tensor mapping.
         layout_hints: Optional engine layout hints.
+        engine_type: Serving engine that produced the KV tensors.
 
     Returns:
         Tuple of ``(block_size, num_layers, hidden_dim_size, dtype_str,``
@@ -263,7 +306,7 @@ def compute_kv_layout(
         raise ValueError("kv_caches is empty. Cannot compute KV layout.")
 
     engine_kv_format, normalized = normalize_kv_and_discover_format(
-        tensors, EngineType.VLLM, layout_hints=layout_hints
+        tensors, engine_type, layout_hints=layout_hints
     )
     block_size = get_block_size(normalized, engine_kv_format)
     num_layers = get_num_layers(normalized, engine_kv_format)
@@ -290,6 +333,8 @@ def gather_paged_kv_to_cpu(
     engine_kv_format: "lmcache_native.EngineKVFormat" | None = None,
     out: list[torch.Tensor] | None = None,
     chunk_indices: list[int] | None = None,
+    engine_type: EngineType = EngineType.VLLM,
+    blocks_per_window: int | None = None,
 ) -> list[torch.Tensor]:
     """Gather paged KV blocks into CPU chunk tensors.
 
@@ -311,6 +356,7 @@ def gather_paged_kv_to_cpu(
             ``out``, only those chunks are gathered and written into
             ``out[i]`` in order.  When ``None``, all chunks are gathered
             (backward-compatible behaviour).
+        engine_type: Serving engine that produced the KV tensors.
 
     Returns:
         List of CPU tensors, one per chunk. For split-K/V formats each chunk
@@ -329,7 +375,6 @@ def gather_paged_kv_to_cpu(
         get_block_size,
         get_device,
         get_dtype,
-        get_group_data_ptrs,
         get_head_size,
         get_kv_size,
         get_num_blocks,
@@ -337,11 +382,12 @@ def gather_paged_kv_to_cpu(
         get_num_layers,
         make_page_buffer_shape_desc,
         normalize_kv_and_discover_format,
+        resolve_block_stride_and_log_layout,
     )
 
     tensors = list(kv_caches.values())
     fmt, normalized = normalize_kv_and_discover_format(
-        tensors, EngineType.VLLM, layout_hints=layout_hints
+        tensors, engine_type, layout_hints=layout_hints
     )
     # KV tensors, not process-wide accelerator availability, select the ops.
     device = get_device(normalized)
@@ -359,7 +405,11 @@ def gather_paged_kv_to_cpu(
     )
     num_blocks = get_num_blocks(normalized, engine_kv_format)
     num_chunks = len(block_ids) // blocks_per_chunk
-    chunk_tokens = blocks_per_chunk * block_size
+    # Sliding-window groups store only the trailing window of each chunk; for
+    # full attention bpw == blocks_per_chunk so window_tokens == chunk_tokens
+    # and every branch below collapses to the full-coverage behaviour.
+    bpw = blocks_per_chunk if blocks_per_window is None else blocks_per_window
+    window_tokens = bpw * block_size
 
     shape_desc = make_page_buffer_shape_desc(
         normalized,
@@ -368,6 +418,9 @@ def gather_paged_kv_to_cpu(
         num_layers_in_group=num_layers,
         num_blocks=num_blocks,
         block_size=block_size,
+        block_stride_elems=resolve_block_stride_and_log_layout(
+            normalized, engine_kv_format, layer_idx=0, group_idx=0
+        ),
     )
 
     iter_indices = (
@@ -382,11 +435,10 @@ def gather_paged_kv_to_cpu(
             f"gathered chunks ({len(iter_indices)})"
         )
 
-    # Determine if pinned memory is strictly required
-    # (only for the compiled C++ path which does not accept tensor)
+    # The address-taking native kernel reads host chunks directly, so chunks
+    # allocated here for it are pinned; ``transfer_with_address_kernel``
+    # stages an unpinned ``out``.
     requires_pinned = not accepts_tensor
-    needs_staging = False
-    staged_chunks = []
 
     if out is None:
         # One object plane per K/V entry: MLA and fused-K/V formats
@@ -394,7 +446,7 @@ def gather_paged_kv_to_cpu(
         if get_kv_size(normalized, engine_kv_format) == 1:
             chunks = [
                 torch.empty(
-                    (num_layers, chunk_tokens, content_size),
+                    (num_layers, window_tokens, content_size),
                     dtype=get_dtype(normalized, engine_kv_format),
                     device=torch.device("cpu"),
                     pin_memory=requires_pinned,
@@ -404,49 +456,30 @@ def gather_paged_kv_to_cpu(
         else:
             chunks = [
                 torch.empty(
-                    (2, num_layers, chunk_tokens, content_size),
+                    (2, num_layers, window_tokens, content_size),
                     dtype=get_dtype(normalized, engine_kv_format),
                     device=torch.device("cpu"),
                     pin_memory=requires_pinned,
                 )
                 for _ in iter_indices
             ]
+    elif len(out) == len(iter_indices):
+        # Return ``out`` itself so the in-place fill contract (result is out)
+        # holds.
+        chunks = out
     else:
-        _target_out = out[: len(iter_indices)]
-
-        if requires_pinned and not all(t.is_pinned() for t in _target_out):
-            # Core fallback: Unpinned memory (e.g., IPC Shared Memory) detected.
-            # We cannot dynamically call `.pin_memory()` on `out` because it
-            # would allocate new tensors, breaking the caller's expectation
-            # of an in-place update. Instead, we allocate a temporary pinned
-            # staging buffer for the C++ kernel to write to safely.
-            logger.warning(
-                "Unpinned memory detected in 'out' during "
-                "gather_paged_kv_to_cpu (likely Shared Memory). "
-                "Using an internal pinned staging buffer, which "
-                "adds a CPU memory copy overhead."
-            )
-            needs_staging = True
-            staged_chunks = [torch.empty_like(t, pin_memory=True) for t in _target_out]
-            chunks = (
-                staged_chunks  # Point to the safe staging buffer for the H2D transfer
-            )
-        else:
-            # Ideal case: Memory is pinned, or we are using Python fallback.
-            # Ignore any extra trailing buffers beyond what we actually gather so
-            # the kernel's ``total_blocks % num_objects`` invariant still holds.
-            # Return ``out`` unchanged when no trimming is needed so the in-place
-            # fill contract (result is out) is preserved.
-            if len(out) == len(iter_indices):
-                chunks = out
-            else:
-                chunks = out[: len(iter_indices)]
+        # Ignore extra trailing buffers beyond what we actually gather so the
+        # kernel's ``total_blocks % num_objects`` invariant still holds.
+        chunks = out[: len(iter_indices)]
 
     selected_block_ids: list[int] = []
     for chunk_idx in iter_indices:
-        selected_block_ids.extend(
-            block_ids[chunk_idx * blocks_per_chunk : (chunk_idx + 1) * blocks_per_chunk]
-        )
+        chunk = block_ids[
+            chunk_idx * blocks_per_chunk : (chunk_idx + 1) * blocks_per_chunk
+        ]
+        # Keep only the trailing window blocks of the chunk (whole chunk when
+        # bpw == blocks_per_chunk), matching downsample_and_stage_block_ids.
+        selected_block_ids.extend(chunk[-bpw:])
 
     if selected_block_ids:
         if accepts_tensor:
@@ -463,78 +496,30 @@ def gather_paged_kv_to_cpu(
                 device,
                 lmcache_native.TransferDirection.D2H,
                 shape_desc,
-                chunk_tokens,
+                window_tokens,
                 engine_kv_format,
                 0,
             )
 
         else:
-            # Compiled C++/CUDA/XPU: requires int64 pointer tensor and list[int].
-            _ptrs_np = np.array(
-                get_group_data_ptrs(
-                    normalized, engine_kv_format, list(range(num_layers))
-                ),
-                dtype=np.uint64,
-            ).view(np.int64)
-            paged_arg = torch.from_numpy(_ptrs_np).to(device=device)
-
-            # This safely points to either the pre-pinned chunks
-            # OR the temporary staged_chunks
-            objs_arg = _tensors_to_ptrs(chunks)
-
-            block_ids_arg = torch.tensor(
-                selected_block_ids, dtype=torch.int64, device=device
+            # Compiled CUDA/XPU/NPU kernel: it takes addresses, so the platform
+            # helper builds them and stages an unpinned ``out`` in place.
+            transfer_with_address_kernel(
+                device_ops.multi_layer_block_kv_transfer,
+                normalized,
+                chunks,
+                selected_block_ids,
+                device,
+                lmcache_native.TransferDirection.D2H,
+                shape_desc,
+                window_tokens,
+                engine_kv_format,
+                0,
             )
-
-            # Split transfer to respect CUDA kernel's object count limitation
-            MAX_OBJECTS = 4
-            req_blocks_per_obj = blocks_per_chunk
-            total_objects = len(objs_arg)
-
-            for i in range(0, total_objects, MAX_OBJECTS):
-                # Slice object pointers and corresponding block IDs
-                batch_objs_ptrs = objs_arg[i : i + MAX_OBJECTS]
-
-                start_block = i * req_blocks_per_obj
-                end_block = min(
-                    (i + MAX_OBJECTS) * req_blocks_per_obj, len(selected_block_ids)
-                )
-                batch_blocks = block_ids_arg[start_block:end_block]
-
-                # Execute batched transfer
-                device_ops.multi_layer_block_kv_transfer(
-                    paged_arg,
-                    batch_objs_ptrs,
-                    batch_blocks,
-                    device,
-                    lmcache_native.TransferDirection.D2H,
-                    shape_desc,
-                    chunk_tokens,
-                    engine_kv_format,
-                    0,
-                )
-
-    # --- Final reconciliation ---
-    # If we used a staging buffer to protect unpinned shared memory,
-    # we now copy the gathered data back into the caller's original tensors.
-    if needs_staging:
-        assert out is not None
-        # The CPU MUST block and wait for the GPU ONLY when a temporary
-        # staging buffer is used. This is because the CPU needs to immediately
-        # read this data for the memory copy below.
-        torch_dev.synchronize()
-
-        for dst, src in zip(_target_out, staged_chunks, strict=False):
-            dst.copy_(src)  # High-speed CPU-to-CPU memory copy
-
-        if len(out) == len(iter_indices):
-            chunks = out
-        else:
-            chunks = _target_out
 
     # Fast path: The async GPU copy might still be in progress.
     # We intentionally omit synchronization here for performance.
-    # WARNING: The caller MUST explicitly call `torch_dev.synchronize()`
+    # WARNING: The caller MUST explicitly synchronize the KV tensor device
     # before consuming these chunks to ensure data validity.
 
     return chunks
@@ -548,6 +533,8 @@ def scatter_cpu_to_paged_kv(
     skip_first_n_tokens: int = 0,
     layout_hints: LayoutHints | None = None,
     engine_kv_format: "lmcache_native.EngineKVFormat" | None = None,
+    engine_type: EngineType = EngineType.VLLM,
+    blocks_per_window: int | None = None,
 ) -> None:
     """Scatter CPU chunk tensors back into paged KV tensors.
 
@@ -568,6 +555,7 @@ def scatter_cpu_to_paged_kv(
             GPU transfer path).
         layout_hints: Optional engine layout hints.
         engine_kv_format: Optional pre-detected KV format.
+        engine_type: Serving engine that produced the KV tensors.
 
     Raises:
         ValueError: If ``block_ids`` is shorter than
@@ -577,11 +565,18 @@ def scatter_cpu_to_paged_kv(
     from lmcache.v1.gpu_connector.utils import (
         get_block_size,
         get_device,
-        get_group_data_ptrs,
         get_num_blocks,
         get_num_layers,
         make_page_buffer_shape_desc,
         normalize_kv_and_discover_format,
+        resolve_block_stride_and_log_layout,
+    )
+
+    # Local like the rest: object_group_transfer pulls in the GPU connector and
+    # distributed stack (serde needs `cryptography`), which would otherwise load
+    # for every importer of transfer_context, e.g. the ATOM integration.
+    from lmcache.v1.multiprocess.object_group_transfer import (
+        recalculate_blocks_to_skip,
     )
 
     if not chunks:
@@ -598,7 +593,7 @@ def scatter_cpu_to_paged_kv(
 
     tensors = list(kv_caches.values())
     fmt, normalized = normalize_kv_and_discover_format(
-        tensors, EngineType.VLLM, layout_hints=layout_hints
+        tensors, engine_type, layout_hints=layout_hints
     )
     device = get_device(normalized)
     device_ops = resolve_device_ops(device.type)
@@ -611,7 +606,6 @@ def scatter_cpu_to_paged_kv(
     block_size = get_block_size(normalized, engine_kv_format)
     num_layers = get_num_layers(normalized, engine_kv_format)
     num_blocks = get_num_blocks(normalized, engine_kv_format)
-    chunk_tokens = blocks_per_chunk * block_size
 
     # Block-level transfer can only skip whole blocks. A non-aligned prefix is
     # rounded down to the nearest block (matching the lmcache-driven path in
@@ -626,6 +620,14 @@ def scatter_cpu_to_paged_kv(
             skip_first_n_tokens // block_size,
         )
     skip_prefix_n_blocks = skip_first_n_tokens // block_size
+    bpw = blocks_per_chunk if blocks_per_window is None else blocks_per_window
+    window_tokens = bpw * block_size
+    # For a sliding-window group the leading blocks of each chunk were dropped
+    # by the trailing-keep below, so an APC skip-prefix expressed in full-chunk
+    # blocks must be re-expressed in window blocks. No-op when window == chunk.
+    skip_prefix_window = recalculate_blocks_to_skip(
+        blocks_per_chunk, bpw, skip_prefix_n_blocks
+    )
 
     shape_desc = make_page_buffer_shape_desc(
         normalized,
@@ -634,20 +636,22 @@ def scatter_cpu_to_paged_kv(
         num_layers_in_group=num_layers,
         num_blocks=num_blocks,
         block_size=block_size,
+        block_stride_elems=resolve_block_stride_and_log_layout(
+            normalized, engine_kv_format, layer_idx=0, group_idx=0
+        ),
     )
 
     selected_block_ids: list[int] = []
     for chunk_idx in range(len(chunks)):
-        selected_block_ids.extend(
-            block_ids[chunk_idx * blocks_per_chunk : (chunk_idx + 1) * blocks_per_chunk]
-        )
+        chunk = block_ids[
+            chunk_idx * blocks_per_chunk : (chunk_idx + 1) * blocks_per_chunk
+        ]
+        # Trailing window blocks only (whole chunk when bpw == blocks_per_chunk).
+        selected_block_ids.extend(chunk[-bpw:])
 
     if not selected_block_ids:
         return
 
-    # Only the ptr-only branch below pins temporaries; the tensor branch
-    # hands torch the chunks directly and keeps them alive itself.
-    dynamically_pinned = False
     if accepts_tensor:
         # Python fallback: accepts tensor list directly for all params.
         paged_arg = normalized
@@ -661,81 +665,27 @@ def scatter_cpu_to_paged_kv(
             device,
             lmcache_native.TransferDirection.H2D,
             shape_desc,
-            chunk_tokens,
+            window_tokens,
             engine_kv_format,
-            skip_prefix_n_blocks,
+            skip_prefix_window,
         )
     else:
-        # assuming this is c ops path which requires pin memory
-        # TODO: may have a better approach here
-        # Defensive check: Ensure all incoming CPU chunks are pinned memory.
-        # Otherwise, the underlying CUDA kernel may throw an Illegal
-        # Memory Access error during H2D transfer.
-        dynamically_pinned = not all(chunk.is_pinned() for chunk in chunks)
-        if dynamically_pinned:
-            logger.warning(
-                "Received unpinned CPU tensors in scatter_cpu_to_paged_kv. "
-                "Dynamically pinning memory now, which may incur additional"
-                "synchronization overhead."
-            )
-            chunks = [
-                chunk.pin_memory() if not chunk.is_pinned() else chunk
-                for chunk in chunks
-            ]
-
-        # Compiled C++/CUDA/XPU: requires int64 pointer tensor and list[int].
-        _ptrs_np = np.array(
-            get_group_data_ptrs(normalized, engine_kv_format, list(range(num_layers))),
-            dtype=np.uint64,
-        ).view(np.int64)
-        paged_arg = torch.from_numpy(_ptrs_np).to(device=device)
-        objs_arg = _tensors_to_ptrs(chunks)
-        block_ids_arg = torch.tensor(
-            selected_block_ids, dtype=torch.int64, device=device
+        # Compiled CUDA/XPU/NPU kernel: it takes addresses, so the platform
+        # helper builds them; it pins unpinned chunks into temporaries and
+        # synchronizes before returning, so they outlive the async reads.
+        transfer_with_address_kernel(
+            device_ops.multi_layer_block_kv_transfer,
+            normalized,
+            chunks,
+            selected_block_ids,
+            device,
+            lmcache_native.TransferDirection.H2D,
+            shape_desc,
+            window_tokens,
+            engine_kv_format,
+            skip_prefix_window,
         )
-
-        # Batched transfer to satisfy cuda's limitation (max 4 objects)
-        MAX_OBJECTS = 4
-        req_blocks_per_obj = (
-            blocks_per_chunk  # Each chunk corresponds to one object's blocks
-        )
-        total_chunks = len(chunks)
-
-        for i in range(0, total_chunks, MAX_OBJECTS):
-            # Slice objects and block IDs for this batch
-            batch_objs_ptrs = objs_arg[i : i + MAX_OBJECTS]
-
-            start_block = i * req_blocks_per_obj
-            end_block = min(
-                (i + MAX_OBJECTS) * req_blocks_per_obj, len(selected_block_ids)
-            )
-            batch_blocks = block_ids_arg[start_block:end_block]
-
-            # Execute transfer for this batch
-            device_ops.multi_layer_block_kv_transfer(
-                paged_arg,
-                batch_objs_ptrs,
-                batch_blocks,
-                device,
-                lmcache_native.TransferDirection.H2D,
-                shape_desc,
-                chunk_tokens,
-                engine_kv_format,
-                skip_prefix_n_blocks if i == 0 else 0,
-            )
     # Fast path: The async GPU copy might still be in progress.
     # We intentionally omit synchronization here for performance.
-    # WARNING: The caller MUST explicitly call `torch_dev.synchronize()`
+    # WARNING: The caller MUST explicitly synchronize the KV tensor device
     # before consuming these chunks to ensure data validity.
-
-    if dynamically_pinned:
-        # The temporaries pinned above are read by the async H2D launches
-        # through raw pointers, which torch's stream tracking cannot see.
-        # Returning drops the last reference to them, and the caching host
-        # allocator then hands that memory to the next caller while the
-        # copies are still in flight -- the next pin_memory() overwrites the
-        # bytes mid-transfer. The caller-side synchronize documented above
-        # cannot cover this: by then the temporaries are already gone.
-        # Only the dynamically pinned case pays this; caller-owned pinned
-        # chunks keep the fast path.
-        torch_dev.synchronize()

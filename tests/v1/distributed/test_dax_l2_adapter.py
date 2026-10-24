@@ -240,7 +240,7 @@ def test_dax_hotplug_remove_migrate_preserves_loadability(tmp_path):
                 "device_path": source_path,
                 "mode": "migrate",
             },
-            device_owners=lambda _path: [],
+            device_owners=lambda _path, _offset, _size: [],
         )
 
         assert result["state"] == "removed"
@@ -263,7 +263,9 @@ def test_dax_adapter_implements_generic_reconfigure_status(tmp_path):
     adapter = make_hotplug_adapter(tmp_path)
     try:
         assert isinstance(adapter, L2ReconfigurableAdapter)
-        status = adapter.reconfigure("status", {}, device_owners=lambda _path: [])
+        status = adapter.reconfigure(
+            "status", {}, device_owners=lambda _path, _offset, _size: []
+        )
         assert status == {
             "backend": "dax",
             "supported_operations": ["status", "add", "remove", "resize"],
@@ -389,6 +391,99 @@ def test_dax_hotplug_add_duplicate_device(tmp_path: Path) -> None:
         adapter.close()
 
 
+def test_dax_config_parses_offset_gb(tmp_path: Path) -> None:
+    config = DaxL2AdapterConfig.from_dict(
+        {
+            "slot_bytes": 4096,
+            "devices": [
+                {"device_path": "/dev/dax0.0", "max_dax_size_gb": 1},
+                {"device_path": "/dev/dax0.0", "max_dax_size_gb": 1, "offset_gb": 1},
+            ],
+        }
+    )
+    assert [d.offset_bytes for d in config.devices] == [0, 1 << 30]
+
+    legacy = DaxL2AdapterConfig.from_dict(
+        {
+            "slot_bytes": 4096,
+            "device_path": "/dev/dax0.0",
+            "max_dax_size_gb": 1,
+            "offset_gb": 2,
+        }
+    )
+    assert legacy.devices[0].offset_bytes == 2 << 30
+
+    for bad in (-1, True):
+        with pytest.raises(ValueError, match="offset_gb"):
+            DaxL2AdapterConfig.from_dict(
+                {
+                    "slot_bytes": 4096,
+                    "device_path": "/dev/dax0.0",
+                    "max_dax_size_gb": 1,
+                    "offset_gb": bad,
+                }
+            )
+
+
+def test_dax_one_device_backs_disjoint_ranges(tmp_path: Path) -> None:
+    """Two servers, or two entries, may map disjoint ranges of one device."""
+    device = tmp_path / "shared.bin"
+    device.write_bytes(bytes(4 * 4096))
+    gib = 1024**3
+    adapter = DaxL2Adapter(
+        DaxL2AdapterConfig(
+            devices=[
+                DaxDeviceConfig(str(device), 4096 / gib),
+                DaxDeviceConfig(str(device), 4096 / gib, offset_gb=2 * 4096 / gib),
+            ],
+            slot_bytes=4096,
+            hotplug_enabled=True,
+        )
+    )
+    try:
+        statuses = adapter.hotplug_status()["devices"]
+        assert [s["offset_bytes"] for s in statuses] == [0, 2 * 4096]
+
+        # Overlapping range on the same device is rejected at hotplug time.
+        with pytest.raises(L2ReconfigureError) as exc_info:
+            adapter.hotplug_add_device(str(device), 2 * 4096, offset_bytes=4096)
+        assert exc_info.value.status_code == 409
+
+        # The remaining gap is addable; re-adding the same range is idempotent.
+        added = adapter.hotplug_add_device(str(device), 4096, offset_bytes=4096)
+        repeated = adapter.hotplug_add_device(str(device), 4096, offset_bytes=4096)
+        assert repeated["device"]["device_id"] == added["device"]["device_id"]
+        assert len(adapter.hotplug_status()["devices"]) == 3
+
+        # Growing a range into its neighbour is rejected; shrinking is fine.
+        with pytest.raises(L2ReconfigureError) as grow:
+            adapter.hotplug_resize_device(str(device), 2 * 4096, "migrate")
+        assert grow.value.status_code == 409
+        assert adapter.hotplug_status()["devices"][0]["max_dax_size_bytes"] == 4096
+
+        # Remove and resize address the entry by (path, offset).
+        drained = adapter.hotplug_remove_device(
+            str(device), "drain", offset_bytes=2 * 4096
+        )
+        assert drained["state"] == "draining"
+        with pytest.raises(L2ReconfigureError) as missing:
+            adapter.hotplug_remove_device(str(device), "drain", offset_bytes=3 * 4096)
+        assert missing.value.status_code == 404
+    finally:
+        adapter.close()
+
+    with pytest.raises(ValueError, match="already mapped"):
+        DaxL2Adapter(
+            DaxL2AdapterConfig(
+                devices=[
+                    DaxDeviceConfig(str(device), 2 * 4096 / gib),
+                    DaxDeviceConfig(str(device), 4096 / gib, offset_gb=4096 / gib),
+                ],
+                slot_bytes=4096,
+            )
+        )
+
+
 def test_dax_duplicate_config_rejected(tmp_path: Path) -> None:
     device = tmp_path / "device.bin"
     device.write_bytes(bytes(4096))
@@ -428,7 +523,7 @@ def test_dax_hotplug_add_sanitizes_mapping_errors(tmp_path, path_type, expected_
         candidate.write_bytes(bytes(1024))
     device_path = str(candidate)
     try:
-        assert not adapter.owns_device(device_path)
+        assert not adapter.owns_range(device_path, 0, 2048)
         with pytest.raises(L2ReconfigureError) as exc_info:
             adapter.hotplug_add_device(device_path, 2048)
 
@@ -493,7 +588,7 @@ class _FakeReconfigurableAdapter:
         operation: str,
         payload: dict[str, object],
         *,
-        device_owners: Callable[[str], list[str]],
+        device_owners: Callable[[str, int, int], list[str]],
     ) -> dict:
         self.calls.append((operation, payload))
         return {"status": "ok", "operation": operation, "payload": payload}
@@ -543,6 +638,7 @@ def _wire_capacity_publishing(sm: StorageManager) -> None:
         L1Manager,
         SimpleNamespace(get_capacity_bytes_by_backend=lambda: {}),
     )
+    sm._l1_managers_by_id = {0: sm._l1_manager}
     if not hasattr(sm, "_adapter_descriptors"):
         sm._adapter_descriptors = {
             adapter_id: cast(L2AdapterDescriptor, _FakeAdapterDescriptor("fake"))
