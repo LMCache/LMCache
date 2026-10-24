@@ -20,6 +20,9 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
 )
+from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
+    EngineDrivenTransferContext,
+)
 
 
 class _FakeContext(EngineDrivenContext):
@@ -121,3 +124,21 @@ def test_guard_reentrant_across_sequential_transfers():
             pass
     ctx.close()
     assert ctx.released.is_set()
+
+
+@pytest.mark.parametrize("multigroup", [False, True])
+def test_closed_context_resolves_transfers_false(multigroup):
+    """A store or retrieve that meets a closing context resolves ``False``
+    (lost store / cache miss) without touching the context's buffers."""
+    ctx = _FakeContext()
+    ctx.close()
+    transfer = EngineDrivenTransferContext(1, MagicMock())
+    transfer._engine_driven_context = ctx
+    transfer._group_states = [MagicMock()] if multigroup else []
+    kv_caches = {"layer.0": torch.zeros(1)}
+
+    store = transfer.submit_store("r", object(), kv_caches, [[0]], None, 1)
+    retrieve = transfer.submit_retrieve("r", object(), kv_caches, [[0]], None, 1)
+
+    assert store.result(timeout=1) is False
+    assert retrieve.result(timeout=1) is False
