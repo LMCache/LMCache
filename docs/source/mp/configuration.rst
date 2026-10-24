@@ -8,6 +8,16 @@ server.  Arguments are grouped by the config module that defines them.
    :local:
    :depth: 2
 
+Multimodal cache identity
+-------------------------
+
+For multimodal models, the LMCache-shipped vLLM MP connectors reject startup
+when both ``--mm-processor-cache-gb 0`` and ``--no-enable-prefix-caching`` are
+set. vLLM then supplies request-local media IDs instead of content hashes;
+these IDs can repeat across frontend restarts or replicas sharing an MP server.
+Use a positive ``--mm-processor-cache-gb`` value, or enable vLLM prefix caching
+if supported by the model. See :doc:`../recipes/multimodal_models` for details.
+
 Per-request LMCache configuration
 ---------------------------------
 

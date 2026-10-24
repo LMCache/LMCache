@@ -41,6 +41,7 @@ from lmcache.integration.vllm.utils import (
     extract_mm_features,
     extract_request_configs_from_sampling_params,
     lmcache_get_or_create_config,
+    validate_vllm_multimodal_cache_config,
 )
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
@@ -452,6 +453,8 @@ class LMCacheConnectorV1Impl:
         role: KVConnectorRole,
         parent: KVConnectorBase_V1,
     ):
+        validate_vllm_multimodal_cache_config(vllm_config)
+
         # Banner from the scheduler role only, so tensor-parallel
         # deployments print it once rather than once per worker.
         if role == KVConnectorRole.SCHEDULER:
