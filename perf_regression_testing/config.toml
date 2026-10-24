@@ -21,7 +21,8 @@ gpu_busy_wait_s = 900        # wait this long for enough free GPUs, then give up
 min_docker_free_gb = 10
 
 # Served offline from the HF cache snapshot. `vllm_args` go on top of
-# [vllm.args], `aiperf_args` on top of [aiperf.args].
+# [vllm.args], `aiperf_args` on top of [aiperf.args], `gpu_count` replaces
+# [host].gpu_count.
 # Each model is a frontier open-weight release, served the way its vLLM recipe
 # serves it, and replaced when a newer one appears.
 # Hybrid SWA: 15 full-attention and 45 sliding-window (4096) layers, 8 KV heads.
@@ -47,18 +48,20 @@ tool-call-parser = "qwen3_coder"
 repo = "Qwen/Qwen3.8-Flash-Next-FP8"
 revision = "236dfdf285828023ca3bcd3f37366c58a3469b13"
 served_name = "qwen3p8"
-# A first guess; the knee on 8 GPUs is still to be measured.
+# Kept on the 4-GPU setup it was first measured on: its GPU KV cache (12.2M
+# tokens) was within 6% of Step-3.7-Flash's, so the same load.
+gpu_count = 4
 aiperf_args = { concurrency = 230 }
 
 [models.qwen38.vllm_args]
-# The recipe's 8 x H200 setup: TP8 + EP, Triton MoE on Hopper, fp8 indexer keys.
-moe-backend = "triton"
-"attention-config.indexer_kv_dtype" = "fp8"
-gpu-memory-utilization = 0.85
+tensor-parallel-size = 4
+# The H200 TP4 default; unset, the API server initializes CUDA to look it up.
+compilation-config = '{"pass_config":{"fi_allreduce_fusion_max_size_mb":2}}'
 reasoning-parser = "qwen3"
 enable-auto-tool-choice = true
 tool-call-parser = "qwen3_coder"
-speculative-config = '{"method":"mtp","num_speculative_tokens":3}'
+# The checkpoint has one MTP layer.
+speculative-config = '{"method":"mtp","num_speculative_tokens":1}'
 
 [container]
 network = "host"           # services and AIPerf talk over 127.0.0.1
@@ -191,9 +194,10 @@ max_capacity_gb = 6000
 eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 0.1 }
 
 [deployments.vllm_lmcache_ssm]
-# vllm_lmcache on the hybrid linear model. chunk-size must be a multiple of
-# vLLM's block, which the hybrid sizes to hold a GDN state: 1600 tokens at TP4,
-# estimated 800 at TP8, so 1600 fits either (the connector rejects others).
+# vllm_lmcache on the hybrid model, on 4 GPUs with the 4-GPU budget: 800 GiB
+# DRAM + 1500 GiB disk. With prefix caching vLLM caches Mamba state per block
+# (mamba_cache_mode "align") and LMCache needs chunk-size equal to that block
+# size: 1600 at TP4 with fp8 KV (vLLM's error message, build 28).
 model = "qwen38"
 image_target = "lmcache"
 
@@ -206,7 +210,7 @@ command = ["lmcache", "server"]
 ready_url = "http://127.0.0.1:18080/metrics"
 ready_timeout_s = 1800
 env = { LMCACHE_LOG_LEVEL = "WARNING" }
-scratch = [{ path = "<root>/l2", min_free_gb = 6000 }]
+scratch = [{ path = "<root>/l2", min_free_gb = 1500 }]
 
 [deployments.vllm_lmcache_ssm.services.args]
 host = "127.0.0.1"
@@ -214,18 +218,15 @@ port = 16555
 http-port = 18080
 chunk-size = 1600
 separate-object-groups = true
-l1-size-gb = 1500
-# Pinned up front: pinning lazily while vLLM registers its KV caches can stall
-# the GPU mappings for minutes (docs/source/recipes/kimi_k3.rst).
-l1-init-size-gb = 1500
+l1-size-gb = 800
 eviction-policy = "LRU"
 disable-observability = true
 eviction-trigger-watermark = 0.95
 eviction-ratio = 0.05
 l2-prefetch-policy = "retain"
-# One GPU and one CPU worker by default: all TP ranks' stores and loads queue
-# on a single thread. One worker per TP8 rank, so none shares a slot.
-max-workers = 8
+# One GPU and one CPU worker by default: all 4 TP ranks' stores and loads queue
+# on a single thread.
+max-workers = 4
 
 [deployments.vllm_lmcache_ssm.services.args.l2-adapter]
 type = "fs_native"
@@ -233,7 +234,7 @@ base_path = "<root>/l2"
 # Bypass the page cache, which would serve L2 from RAM outside the L1 budget.
 use_odirect = true
 num_workers = 16
-max_capacity_gb = 6000
+max_capacity_gb = 1500
 eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 0.1 }
 
 [deployments.vllm_native]

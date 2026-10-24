@@ -103,6 +103,15 @@ def test_a_deployment_runs_its_own_model() -> None:
             )
 
 
+def test_a_model_s_gpu_count_replaces_the_host_s_and_matches_its_tp() -> None:
+    cfg = load()
+    assert resolve(cfg, "agentic", "vllm_lmcache_ssm").gpu_count == 4
+    assert resolve(cfg, "agentic", "vllm_lmcache").gpu_count == 8
+    for d in cfg["deployments"]:
+        spec = resolve(cfg, "agentic", d)
+        assert spec.vllm_args["tensor-parallel-size"] == spec.gpu_count, d
+
+
 def test_check_host_needs_rdma_devices_only_for_mooncake(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

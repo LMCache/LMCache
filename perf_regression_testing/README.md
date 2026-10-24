@@ -26,7 +26,8 @@ Each model is a frontier open-weight release on 8 x H200 (TP8 + EP, FP8 KV), ser
 with its vLLM recipe's flags and replaced when a newer one appears:
 Trinity-Large-Thinking-FP8-Block (hybrid sliding-window, 8 KV heads) at 220 concurrent
 sessions; `vllm_lmcache_ssm` serves Qwen3.8-Flash-Next-FP8 (Gated DeltaNet +
-sparse GQA, MTP) instead, at 230. Every deployment runs the same stock
+sparse GQA, MTP) instead, at 230 on 4 x H200 (TP4 + EP) with 800 GiB DRAM +
+1500 GiB disk. Every other deployment runs the same stock
 vLLM image and the same budget, 1500 GiB DRAM + 6000 GiB disk (`vllm_simple`: the DRAM only;
 `vllm_simple_l2`: the disk, with the DRAM as page cache under a memory cap);
 only the cache layer differs:

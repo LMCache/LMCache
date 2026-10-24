@@ -285,7 +285,7 @@ def resolve(cfg: dict[str, Any], workload: str, deployment: str) -> RunSpec:
         workload=workload,
         deployment=deployment,
         image_target=d["image_target"],
-        gpu_count=host["gpu_count"],
+        gpu_count=m.get("gpu_count", host["gpu_count"]),
         gpu_busy_wait_s=host["gpu_busy_wait_s"],
         container=cfg["container"],
         model_path=m["path"],
