@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import Iterator
+from unittest.mock import MagicMock
 
 # Third Party
 import pytest
@@ -12,7 +13,11 @@ import torch
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1ManagerListener
+from lmcache.v1.distributed.internal_api import (
+    L1CommittedUsage,
+    L1ManagerInterface,
+    L1ManagerListener,
+)
 from lmcache.v1.distributed.l1_manager import L1Manager
 import lmcache.v1.memory_management as memory_management
 
@@ -132,3 +137,30 @@ def test_tags_are_independent_writers(l1: L1ManagerInterface) -> None:
     # Only tag "a" can finish its reservation.
     assert l1.finish_write([key(4)], tag="b") == {key(4): L1Error.KEY_NOT_EXIST}
     assert l1.finish_write([key(4)], tag="a") == {key(4): L1Error.SUCCESS}
+
+
+def test_committed_usage_counts_resident_non_temporary_objects(
+    l1: L1ManagerInterface,
+) -> None:
+    other_model = ObjectKey(ObjectKey.IntHash2Bytes(5), "other", 0)
+    for keys, temporary in (
+        ([key(5), key(6), other_model], False),
+        ([key(7)], True),
+    ):
+        l1.reserve_write(keys, [temporary] * len(keys), LAYOUT)
+        l1.finish_write(keys)
+    l1.reserve_write([key(8)], [False], LAYOUT)  # staging only
+    listener = MagicMock(spec=L1ManagerListener)
+    l1.register_listener(listener)
+
+    usage = l1.get_committed_usage([key(5), key(7), key(8), key(9)], "conformance")
+
+    assert usage == L1CommittedUsage(
+        matched_objects=1,
+        matched_bytes=4096,
+        model_objects=2,
+        model_bytes=2 * 4096,
+    )
+    # Counting takes no read lock and notifies nobody.
+    assert l1.unsafe_read([key(5)])[key(5)][0] is L1Error.KEY_NOT_READABLE
+    assert listener.method_calls == []

@@ -33,6 +33,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError, strerror
 from lmcache.v1.distributed.internal_api import (
+    L1CommittedUsage,
     L1ManagerInterface,
     L1MemoryDesc,
     L1OperationResult,
@@ -886,6 +887,33 @@ class StorageManager:
         """
         usages = [m.get_memory_usage() for m in self._l1_managers_by_id.values()]
         return sum(u for u, _ in usages), sum(t for _, t in usages)
+
+    def get_l1_committed_usage(
+        self, keys: list[ObjectKey], model_name: str
+    ) -> L1CommittedUsage:
+        """Count committed L1 objects among ``keys`` and of ``model_name``.
+
+        Each L1 manager is read under its own lock, one after another, so
+        the sum is consistent per manager, not across managers.
+
+        Args:
+            keys: Keys to look up; each occurrence counts, so pass distinct keys.
+            model_name: The ``ObjectKey.model_name`` to count.
+
+        Returns:
+            The committed usage (see :class:`L1CommittedUsage`), summed over
+            every L1 manager.
+        """
+        usages = [
+            m.get_committed_usage(keys, model_name)
+            for m in self._l1_managers_by_id.values()
+        ]
+        return L1CommittedUsage(
+            matched_objects=sum(u.matched_objects for u in usages),
+            matched_bytes=sum(u.matched_bytes for u in usages),
+            model_objects=sum(u.model_objects for u in usages),
+            model_bytes=sum(u.model_bytes for u in usages),
+        )
 
     # L1 reconfiguration APIs
     def get_l1_devdax_arena_statuses(self) -> list[DevDaxArenaStatus]:
