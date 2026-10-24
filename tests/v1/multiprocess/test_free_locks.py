@@ -18,6 +18,7 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.rpc import get_rpc_spec
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 # Test helpers
@@ -129,7 +130,7 @@ def _make_free_locks_ctx(
     ctx.get_read_owners.return_value = None
     ctx.chunk_size = 256
     ctx.token_hasher.chunk_size = 256
-    ctx.token_hasher.compute_chunk_hashes.return_value = chunk_hashes
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=windows
     )
@@ -167,7 +168,7 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
 
 def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
     """Build a lookup-style (worker_id=None) key over [start, end)."""
-    return IPCCacheServerKey(
+    return IPCCacheServerKey.from_token_ids(
         model_name="testmodel",
         world_size=1,
         num_kv_readers=1,
@@ -266,7 +267,7 @@ def test_server_free_lookup_locks_floors_release_to_the_lookup_start():
     released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
     assert released == {(0, b"h2"), (0, b"h3")}
     # The range was floored before hashing: [512, 1024), not [0, 1024).
-    hash_call = ctx.token_hasher.compute_chunk_hashes.call_args
+    hash_call = ctx.token_hasher.compute_packed_chunk_hashes.call_args
     assert hash_call.kwargs["start"] == 512
 
 
@@ -393,12 +394,12 @@ def test_server_free_lookup_locks_no_matching_chunks():
     ctx = MagicMock()
     ctx.get_read_owners.return_value = None
     ctx.token_hasher.chunk_size = 256
-    ctx.token_hasher.compute_chunk_hashes.return_value = []
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
 
     module = LookupModule(ctx)
 
     # Key with start == end means no chunks to free
-    key = IPCCacheServerKey(
+    key = IPCCacheServerKey.from_token_ids(
         model_name="testmodel",
         world_size=1,
         num_kv_readers=1,
@@ -437,7 +438,7 @@ def test_adapter_free_lookup_locks_sends_request(
     adapter = make_scheduler_adapter(monkeypatch, {"tcp://test:0": client}, 16)
 
     adapter.free_lookup_locks(
-        token_ids=list(range(512)),
+        packed_token_ids=pack_token_ids(range(512)),
         start=0,
         end=512,
         request_id="req-1",
@@ -466,12 +467,12 @@ def test_adapter_free_lookup_locks_key_matches_lookup(
     token_ids = list(range(512))
 
     assert adapter.maybe_submit_lookup_request(
-        "req-1", token_ids, request_configs={"lmcache.skip_save": True}
+        "req-1", pack_token_ids(token_ids), request_configs={"lmcache.skip_save": True}
     )
     lookup_key = client.lookup.call_args.args[0]
 
     adapter.free_lookup_locks(
-        token_ids=token_ids,
+        packed_token_ids=pack_token_ids(token_ids),
         start=0,
         end=512,
         request_id="req-1",
@@ -489,7 +490,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup(
     assert lookup_key.start == free_key.start
     assert lookup_key.end == free_key.end
     assert lookup_key.request_id == free_key.request_id
-    assert lookup_key.token_ids == free_key.token_ids
+    assert lookup_key.token_bytes == free_key.token_bytes
     assert lookup_key.request_configs == free_key.request_configs
 
 
