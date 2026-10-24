@@ -62,10 +62,14 @@ def test_missing_models_are_downloaded_and_a_failed_one_skips_its_pairs(
         (out / "summary.json").write_text(json.dumps(summary))
         return suite.EXIT_VALID
 
+    def prune(hf_cache: str, root: str, models: list[dict]) -> list[str]:
+        raise PermissionError("root-owned snapshot")
+
     monkeypatch.setattr(suite.images, "tonight", tonight)
     monkeypatch.setattr(suite.images, "build", lambda args, log: f"prt-{args[0]}")
     monkeypatch.setattr(suite.images, "prune", lambda keep: [])
     monkeypatch.setattr(suite.hf, "fetch", fetch)
+    monkeypatch.setattr(suite.hf, "prune", prune)
     monkeypatch.setattr(suite, "run", run)
     deps = ["vllm_simple", "vllm_lmcache_ssm"]
     assert suite.suite("weekly", tmp_path / "s", deps) == suite.EXIT_SUITE_INVALID
@@ -75,6 +79,7 @@ def test_missing_models_are_downloaded_and_a_failed_one_skips_its_pairs(
     ]
     assert ran == ["vllm_simple"]
     rep = json.loads((tmp_path / "s" / "report.json").read_text())
+    assert rep["prune_error"] == "root-owned snapshot"
     skipped = [r for r in rep["runs"] if r["deployment"] == "vllm_lmcache_ssm"]
     assert "disk full" in skipped[0]["summary"]["invalid"][0]
     root = Path(suite.load()["host"]["root"])

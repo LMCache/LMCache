@@ -73,7 +73,8 @@ Host paths come from the environment:
 
 ```bash
 # Models, at their [models] revisions. Runs are offline; a suite downloads a
-# missing one first (runner/hf.py), so this only saves that time.
+# missing one first (runner/hf.py), so this only saves that time. Under
+# $PRT_ROOT, a suite also deletes models no longer in [models].
 HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
     arcee-ai/Trinity-Large-Thinking-FP8-Block \
     --revision 6412c1ad1588c664977b0f830b80a20273173318

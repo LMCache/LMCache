@@ -223,6 +223,17 @@ def suite(name: str, out: Path, deployments: list[str] | None = None) -> int:
         im["usable"] = False
         im["error"] = f"aiperf image: {e}"
         return finish(EXIT_SUITE_INVALID)
+    # Before downloading, so a replaced model frees its disk first. Failing to
+    # delete one costs only disk, so the runs go ahead.
+    try:
+        rep["pruned_models"] = hf.prune(
+            cfg["host"]["hf_cache"],
+            cfg["host"]["root"],
+            list(cfg["models"].values()),
+        )
+    except OSError as e:
+        logger.exception("pruning old models failed")
+        rep["prune_error"] = str(e)
     # A failed download invalidates only the pairs of that model.
     model_errors = {}
     for model in missing_models(cfg, deps):

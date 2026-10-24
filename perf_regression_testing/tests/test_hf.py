@@ -45,3 +45,45 @@ def test_fetch_marks_only_a_finished_download_and_always_removes_its_container(
     assert f"{cache}:{cache}" in args and f"HF_HOME={cache}" in args
     assert removed == [args[args.index("--name") + 1]]
     assert Path(m["done"]).exists() == (rc == 0)
+
+
+def _repo_dir(cache: Path, repo: str) -> Path:
+    return cache / "hub" / ("models--" + repo.replace("/", "--"))
+
+
+def _seed(cache: Path, repo: str) -> Path:
+    (_repo_dir(cache, repo) / "snapshots").mkdir(parents=True)
+    return _repo_dir(cache, repo)
+
+
+def test_prune_removes_only_models_no_longer_configured() -> None:
+    cfg = load()
+    cache, root = cfg["host"]["hf_cache"], cfg["host"]["root"]
+    models = list(cfg["models"].values())
+    for m in models:
+        _seed(Path(cache), m["repo"])
+        Path(m["done"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(m["done"]).touch()
+    gone = _seed(Path(cache), "XiaomiMiMo/MiMo-V2.6-Pro-MOPD")
+    stale = Path(root, "state", "model-6a7f202e.done")
+    stale.touch()
+    assert hf.prune(cache, root, models) == ["models--XiaomiMiMo--MiMo-V2.6-Pro-MOPD"]
+    assert not gone.exists() and not stale.exists()
+    for m in models:
+        assert _repo_dir(Path(cache), m["repo"]).is_dir()
+        assert Path(m["done"]).exists()
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_prune_leaves_a_cache_outside_prt_root_alone(
+    tmp_path: Path, linked: bool
+) -> None:
+    cfg = load()
+    shared = tmp_path.parent / f"shared-hf-{tmp_path.name}"
+    _seed(shared, "someone/else")
+    root = cfg["host"]["root"]
+    cache = Path(root, "hf-link") if linked else shared
+    if linked:
+        cache.symlink_to(shared)
+    assert hf.prune(str(cache), root, []) == []
+    assert (shared / "hub" / "models--someone--else").is_dir()
