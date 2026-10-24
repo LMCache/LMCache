@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Engine-driven multi-group transfer over kernel-paged KV groups.
+"""Engine-driven transfer over kernel-paged KV groups.
 
 vLLM may page a group's tensor at a kernel block size smaller than its block
 size (``kernel_block_size``): engine block ``b`` then covers tensor pages
@@ -8,17 +8,20 @@ size (``kernel_block_size``): engine block ``b`` then covers tensor pages
 reads such a group as kernel-paged rather than compressed, that store and
 retrieve move tensor pages, that chunk counting (null chunks, retrieve
 windows) still runs on engine block IDs, and that a sliding window of one
-page keeps only each chunk's last page.
+page keeps only each chunk's last page. A single-group model takes the
+legacy path, which must move pages too.
 
 Tensors are ``[2, NB, X, X, HS]`` with the two middle axes equal, so the block
 size is the same whichever of NHD / HND the detector resolves.
 """
 
 # Standard
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 # Third Party
+import pytest
 import torch
 
 # First Party
@@ -27,7 +30,13 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.transfer_context import worker_transfer
+from lmcache.v1.multiprocess.transfer_context import (
+    async_engine_driven,
+    worker_transfer,
+)
+from lmcache.v1.multiprocess.transfer_context.async_engine_driven import (
+    AsyncEngineDrivenTransferContext,
+)
 from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
@@ -71,10 +80,34 @@ def _group_infos() -> list[EngineGroupInfo]:
     ]
 
 
+def _single_kv(
+    num_pages: int, page_tokens: int, seed: int = 0
+) -> dict[str, torch.Tensor]:
+    """One layer holding ``num_pages`` pages of ``page_tokens`` slots."""
+    torch.manual_seed(seed)
+    return {"kv": torch.randn(2, num_pages, page_tokens, page_tokens, HEAD_SIZE)}
+
+
+def _single_group_info(num_blocks: int = NUM_BLOCKS) -> list[EngineGroupInfo]:
+    return [
+        EngineGroupInfo(
+            engine_group_id=0,
+            layer_indices=(0,),
+            tokens_per_block=BLOCK_TOKENS,
+            num_blocks=num_blocks,
+        )
+    ]
+
+
 def _register(
     kv: dict[str, torch.Tensor],
+    group_infos: list[EngineGroupInfo] | None = None,
+    context_cls: type[EngineDrivenTransferContext] = EngineDrivenTransferContext,
 ) -> tuple[EngineDrivenTransferContext, RegisterEngineDrivenContextPayload]:
-    """Register ``kv`` and return the context and the payload it sent."""
+    """Register ``kv`` and return the context and the payload it sent.
+
+    ``group_infos`` defaults to the two-group model.
+    """
     sent: list[Any] = []
 
     def _register_rpc(payload):
@@ -87,14 +120,14 @@ def _register(
 
     req_client = MagicMock()
     req_client.register_kv_cache_engine_driven_context.side_effect = _register_rpc
-    ctx = EngineDrivenTransferContext(1, req_client)
+    ctx = context_cls(1, req_client)
     ctx.register(
         kv_caches=kv,
         model_name="m",
         world_size=1,
         blocks_in_chunk=BLOCKS_IN_CHUNK,
         mq_timeout=1.0,
-        engine_group_infos=_group_infos(),
+        engine_group_infos=_group_infos() if group_infos is None else group_infos,
     )
     return ctx, sent[0]
 
@@ -217,3 +250,97 @@ def test_window_group_round_trip_restores_window_chunks_last_page(
     ]
     assert restored == [3]
     assert torch.equal(dst["swa"][:, 3], src["swa"][:, 3])
+
+
+@pytest.mark.parametrize(
+    ("num_pages", "page_tokens", "num_blocks", "chunk_slots"),
+    [
+        # Two pages per engine block: a chunk holds every page of its blocks.
+        (NUM_BLOCKS * PAGES_PER_BLOCK, PAGE_TOKENS, NUM_BLOCKS, CHUNK_TOKENS),
+        # One full page per engine block.
+        (NUM_BLOCKS, BLOCK_TOKENS, NUM_BLOCKS, CHUNK_TOKENS),
+        # One page per block with fewer slots than tokens (a DCP rank's slice).
+        (NUM_BLOCKS, PAGE_TOKENS, NUM_BLOCKS, BLOCKS_IN_CHUNK * PAGE_TOKENS),
+        # An unreported block count keeps one page per block ID.
+        (NUM_BLOCKS * PAGES_PER_BLOCK, PAGE_TOKENS, 0, BLOCKS_IN_CHUNK * PAGE_TOKENS),
+    ],
+)
+def test_single_group_registers_pages_per_chunk(
+    num_pages: int, page_tokens: int, num_blocks: int, chunk_slots: int
+) -> None:
+    """A single group registers ``k`` pages per engine block only when its
+    tensor holds ``k`` times the engine's block count."""
+    _, payload = _register(
+        _single_kv(num_pages, page_tokens), _single_group_info(num_blocks)
+    )
+
+    assert payload.num_physical_slots == chunk_slots
+
+
+def test_single_group_round_trip_moves_every_page(monkeypatch) -> None:
+    """Store, then retrieve into other engine blocks: both pages of each block
+    move, and pages outside the request stay untouched."""
+    src = _single_kv(NUM_BLOCKS * PAGES_PER_BLOCK, PAGE_TOKENS, seed=1)
+    ctx, _ = _register(src, _single_group_info())
+    ictx = EngineDrivenContextInline(
+        metadata=MagicMock(), req_client=MagicMock(), mq_timeout=0.1
+    )
+    ctx._engine_driven_context = ictx
+    stored: dict[str, Any] = {}
+    requested: list[int] = []
+
+    def _commit(_k: Any, _i: int, chunks: Any) -> bool:
+        stored["chunks"] = chunks
+        return True
+
+    def _prepare_retrieve(_k: Any, _i: int, expected: int) -> Any:
+        requested.append(expected)
+        return stored["chunks"]
+
+    monkeypatch.setattr(ictx, "prepare_store", lambda _k, _i: None)
+    monkeypatch.setattr(ictx, "commit_store", _commit)
+    monkeypatch.setattr(ictx, "prepare_retrieve", _prepare_retrieve)
+    monkeypatch.setattr(ictx, "commit_retrieve", lambda _k, _i: True)
+
+    dst = {"kv": torch.zeros_like(src["kv"])}
+    src_blocks, dst_blocks = [2, 4, 3, 1], [1, 3, 4, 2]
+    store = ctx.submit_store("req", MagicMock(), src, [src_blocks], None, 2)
+    assert store.result(timeout=1) is True
+    retrieve = ctx.submit_retrieve("req", MagicMock(), dst, [dst_blocks], None, 2)
+    assert retrieve.result(timeout=1) is True
+
+    # Two chunks of CHUNK_TOKENS slots each, requested by engine block count.
+    assert [chunk.shape[2] for chunk in stored["chunks"]] == [CHUNK_TOKENS] * 2
+    assert requested == [2]
+    k = PAGES_PER_BLOCK
+    for s, d in zip(src_blocks, dst_blocks, strict=True):
+        assert torch.equal(
+            dst["kv"][:, d * k : (d + 1) * k], src["kv"][:, s * k : (s + 1) * k]
+        )
+    assert not dst["kv"][:, :k].any()
+
+
+def test_async_single_group_store_gathers_pages(monkeypatch) -> None:
+    """The async store path gathers page IDs, a chunk of pages at a time."""
+    monkeypatch.setattr(async_engine_driven, "torch_dev", MagicMock())
+    gathered: list[tuple[list[int], int]] = []
+
+    def _gather(_kv: Any, block_ids: list[int], blocks_per_chunk: int, **kwargs: Any):
+        gathered.append((block_ids, blocks_per_chunk))
+        return kwargs["out"]
+
+    monkeypatch.setattr(async_engine_driven, "gather_paged_kv_to_cpu", _gather)
+    kv = _single_kv(NUM_BLOCKS * PAGES_PER_BLOCK, PAGE_TOKENS)
+    ctx, _ = _register(kv, _single_group_info(), AsyncEngineDrivenTransferContext)
+    ctx._engine_driven_context = SimpleNamespace(  # type: ignore[assignment]
+        layout_desc=SimpleNamespace(shapes=[torch.Size([1])], dtypes=[torch.float32]),
+        prepare_store=lambda _k, _i: None,
+        commit_store=lambda _k, _i, _c: True,
+        close=lambda: None,
+    )
+
+    future = ctx.submit_store("req", MagicMock(), kv, [[3, 1]], MagicMock(), 2)
+
+    assert future.result(timeout=2) is True
+    assert gathered == [([6, 7, 2, 3], BLOCKS_IN_CHUNK * PAGES_PER_BLOCK)]
+    ctx.close()

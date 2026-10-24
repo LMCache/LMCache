@@ -75,7 +75,7 @@ LayerGroupIdentity = KernelGroupIdentity  # Alias for compatibility
 EXCLUDED_ENGINE_GROUP = -1
 
 
-def _kernel_pages_per_block(
+def detect_kernel_pages_per_block(
     tensor_num_blocks: int,
     engine_num_blocks: int,
     slots_per_page: int,
@@ -503,7 +503,7 @@ class KVLayerGroupsManager:
             )
             sw_size_tokens = info.sw_size_tokens if info is not None else -1
             kernel_pages_per_block = (
-                _kernel_pages_per_block(
+                detect_kernel_pages_per_block(
                     group_num_blocks, info.num_blocks, bs, tokens_per_block
                 )
                 if info is not None
