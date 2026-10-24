@@ -1,0 +1,80 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: multi-process-cpu-server
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: lmcache-cpu-server
+  namespace: multi-process-cpu-server
+spec:
+  selector:
+    matchLabels:
+      app: lmcache-cpu-server
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: lmcache-cpu-server
+    spec:
+      nodeSelector:
+        lmcache.ai/cpu-server-example: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: lmcache-server
+          image: lmcache/vllm-openai:nightly-39774749300-amd64@sha256:2e8888e1148d43be3157a854206943817b0cc38c9df760e1fffad0ce8218ab16
+          imagePullPolicy: Always
+          command:
+            - /opt/venv/bin/python3
+            - -m
+            - lmcache.v1.multiprocess.server
+            - --host
+            - "127.0.0.1"
+            - --port
+            - "6555"
+            - --supported-transfer-mode
+            - engine_driven
+            - --l1-size-gb
+            - "2"
+            - --no-l1-use-lazy
+            - --eviction-policy
+            - LRU
+            - --max-workers
+            - "1"
+          env:
+            # Hide GPUs even when the node's default runtime is NVIDIA.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+            - name: CUDA_VISIBLE_DEVICES
+              value: ""
+            - name: LMCACHE_LOG_LEVEL
+              value: INFO
+          resources:
+            requests:
+              memory: 4Gi
+              cpu: "1"
+            limits:
+              memory: 8Gi
+              cpu: "4"
+          readinessProbe:
+            exec:
+              command:
+                - /opt/venv/bin/python3
+                - -c
+                - |
+                  import socket
+                  with socket.create_connection(("127.0.0.1", 6555), timeout=1):
+                      pass
+            periodSeconds: 5
+            timeoutSeconds: 2
