@@ -3,7 +3,13 @@ lmcache quota
 
 The ``lmcache quota`` command manages per-salt cache quotas on a running
 LMCache server. Quotas are soft limits: exceeding a quota triggers eviction
-on the next cycle (~1 s) rather than rejecting writes.
+on the next eviction cycle rather than rejecting writes; the cycle interval
+is configurable.
+
+To manage fleet-wide quotas, point ``--url`` at the MP coordinator, for example
+``--url http://localhost:9300``. The ``get`` and ``list`` commands use the same
+output fields for either endpoint. ``list`` includes explicitly configured
+quotas, excluding coordinator usage records that have no registered quota.
 
 .. code-block:: bash
 
@@ -200,9 +206,11 @@ List all registered quotas along with their current usage.
 delete
 ------
 
-Remove a quota entry for a given ``cache_salt``. Any bytes still cached
-under this salt become over-budget on the next eviction cycle and will be
-evicted (effective limit drops to 0).
+Remove a quota entry for a given ``cache_salt``. With an MP server's per-salt
+eviction policy, removal drops the effective limit to 0, making remaining bytes
+eligible for eviction on the next cycle. On a coordinator, the salt falls back
+to the configured default limit. The startup default is unset, which exempts
+the salt from quota eviction, so deleting its quota does not guarantee eviction.
 
 .. code-block:: bash
 
@@ -293,9 +301,10 @@ Common Patterns
    LIMIT=$(lmcache quota get tenant1 --format json | jq '.metrics.limit_gb')
    echo "tenant1: ${USAGE} / ${LIMIT} GB"
 
-**Revoke access (evict all cached data for a salt):**
+**Remove an explicit quota:**
 
 .. code-block:: bash
 
-   # Deleting the quota causes all data under this salt to be evicted
+   # MP server: a missing quota means a zero limit under per-salt eviction.
+   # Coordinator: the configured default applies; deletion need not evict data.
    lmcache quota delete tenant1
