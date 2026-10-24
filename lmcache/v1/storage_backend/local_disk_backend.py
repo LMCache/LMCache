@@ -691,7 +691,13 @@ class LocalDiskBackend(StorageBackendInterface):
         buffer = memory_obj.byte_array
         path = self._key_to_path(key)
 
-        size = len(buffer)
+        # `usage` must count the same bytes that `remove` later gives back,
+        # which is the metadata size recorded below, and the same ones
+        # `submit_put_task` admitted against `max_cache_size`. `len(buffer)` is
+        # the logical size, which leaves out the allocation's alignment
+        # padding, so adding it here and subtracting the physical size on the
+        # way out made `usage` fall by the padding on every put/remove cycle.
+        size = memory_obj.get_physical_size()
         self.usage += size
         self.stats_monitor.update_local_storage_usage(self.usage)
 
@@ -704,7 +710,6 @@ class LocalDiskBackend(StorageBackendInterface):
         # purposes (e.g., testing mem_leak).
         # TODO(Jiayi): This could be problematic if the
         # freed memory object is immediately reused.
-        size = memory_obj.get_physical_size()
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
