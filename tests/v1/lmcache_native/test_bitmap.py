@@ -295,6 +295,38 @@ class TestBitmapToString:
 class TestBitmapOr:
     """Test bitwise OR between two bitmaps."""
 
+    @pytest.mark.parametrize("size", [0, 1, 7, 8, 9, 15, 16, 17, 63, 64, 65])
+    @pytest.mark.parametrize("reverse", [False, True])
+    @pytest.mark.parametrize("with_prefix", [False, True])
+    def test_or_truncates_highest_set_bit(
+        self, size: int, reverse: bool, with_prefix: bool
+    ) -> None:
+        """Truncated bits must not appear in highest_set_bit or survive clear.
+
+        Args:
+            size: Size of the shorter bitmap, including byte boundaries.
+            reverse: Whether the longer bitmap is the left operand.
+            with_prefix: Whether every valid bit starts set.
+        """
+        short = Bitmap(size, size if with_prefix else 0)
+        long = Bitmap(size + 8)
+        long.set_range(size, size + 8)
+
+        result = long | short if reverse else short | long
+        expected = list(range(size)) if with_prefix else []
+        assert result.size() == size
+        assert result.get_indices_list() == expected
+        assert result.popcount() == len(expected)
+        assert result.highest_set_bit() == (expected[-1] if expected else -1)
+
+        for index in expected:
+            result.clear(index)
+        assert result.highest_set_bit() == -1
+        assert short.size() == size
+        assert short.get_indices_list() == expected
+        assert long.size() == size + 8
+        assert long.get_indices_list() == list(range(size, size + 8))
+
     @pytest.mark.parametrize("size", [1, 7, 8, 9, 10, 16, 17])
     def test_or_same_size_no_overlap(self, size):
         a = Bitmap(size)
