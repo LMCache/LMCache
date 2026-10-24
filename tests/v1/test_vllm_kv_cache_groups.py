@@ -348,6 +348,33 @@ def test_conversion_uniform_group_mixes_kv_and_mla_layouts():
     assert [group.tokens_per_block for group in spec] == [128, 128]
 
 
+def test_conversion_splits_rbln_dsa_fp8_caches():
+    """vLLM-RBLN serves fp8 DeepSeek-V3.2 with three caches per layer in one
+    vLLM group: the MLA latent, the fp8 indexer key and the indexer key's
+    rank-2 fp16 scale. Each becomes its own LMCache group over the shared
+    block-id space."""
+    caches: dict[str, torch.Tensor] = {}
+    for i in range(2):
+        caches[f"attn.{i}"] = torch.zeros(32, 16, 576, dtype=torch.int8)
+        caches[f"idx.{i}"] = torch.zeros(32, 16, 128, dtype=torch.float8_e4m3fn)
+        caches[f"idx.{i}.scale_cache"] = torch.zeros(32, 16, dtype=torch.float16)
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={name: MLAAttentionSpec(block_size=16) for name in caches},
+    )
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[MockKVCacheGroup(list(caches), uniform_spec)]
+        ),
+        caches,
+    )
+
+    assert num_engine_groups(spec) == 1
+    assert [group.engine_group_id for group in spec] == [0, 0, 0]
+    assert [group.layer_indices for group in spec] == [(0, 3), (1, 4), (2, 5)]
+    assert [group.tokens_per_block for group in spec] == [16, 16, 16]
+
+
 def test_group_layers_by_identity_uses_per_layer_format():
     """A per-layer Engine KV format gives the K+V layer kv_size=2 and the MLA
     layer kv_size=1, splitting them into separate identities -- the per-group

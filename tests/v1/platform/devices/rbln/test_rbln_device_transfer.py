@@ -200,6 +200,53 @@ def test_hnd_gather_scatter_on_device() -> None:
         assert torch.equal(layer.cpu(), want)
 
 
+@pytest.mark.parametrize(
+    "shape, dtype",
+    [
+        ((NUM_BLOCKS, BLOCK_SIZE, MLA_HEAD_SIZE), torch.float8_e4m3fn),
+        ((NUM_BLOCKS, BLOCK_SIZE), torch.float16),
+    ],
+    ids=["indexer_key_fp8", "indexer_scale"],
+)
+def test_dsa_indexer_cache_gather_scatter_on_device(
+    shape: tuple[int, ...], dtype: torch.dtype
+) -> None:
+    """vLLM-RBLN's fp8 DSA indexer caches round-trip through MP gather/scatter.
+
+    The key cache is ``[NB, BS, HS]`` fp8; its scale cache is rank-2
+    ``[NB, BS]`` fp16, which detection views as ``[NB, BS, 1]``. Both must take
+    the MLA sequence on the device and come back byte-identical.
+    """
+    torch.manual_seed(17)
+    width = shape[2] if len(shape) == 3 else 1
+    cpu_layers = [torch.randn(shape).to(dtype) for _ in range(NUM_LAYERS)]
+    block_ids = list(range(NUM_BLOCKS))
+    paged = {f"layer.{i}": _bound_device_tensor(t) for i, t in enumerate(cpu_layers)}
+    restored = {
+        name: _bound_device_tensor(torch.zeros_like(t))
+        for name, t in zip(paged, cpu_layers, strict=True)
+    }
+    torch.rbln.synchronize()
+    with torch.rbln.explain() as region:
+        chunks = gather_paged_kv_to_cpu(paged, block_ids, BLOCKS_PER_CHUNK)
+        torch.rbln.synchronize()
+        scatter_cpu_to_paged_kv(restored, block_ids, chunks, BLOCKS_PER_CHUNK)
+        torch.rbln.synchronize()
+    assert region.verdict()["clean"], region.report()
+
+    # Compared as bytes: fp8 has no CPU equality kernel.
+    for idx, chunk in enumerate(chunks):
+        assert tuple(chunk.shape) == (NUM_LAYERS, CHUNK_TOKENS, width)
+        tokens = slice(idx * CHUNK_TOKENS, (idx + 1) * CHUNK_TOKENS)
+        for layer_idx, layer in enumerate(cpu_layers):
+            want = layer.reshape(NUM_BLOCKS * BLOCK_SIZE, width)[tokens]
+            assert torch.equal(
+                chunk[layer_idx].view(torch.uint8), want.view(torch.uint8)
+            )
+    for layer, want in zip(restored.values(), cpu_layers, strict=True):
+        assert torch.equal(layer.cpu().view(torch.uint8), want.view(torch.uint8))
+
+
 def test_mla_round_trip_on_device() -> None:
     """The MLA cache survives store and retrieve on a real NPU."""
     _assert_device_round_trip(

@@ -136,6 +136,14 @@ class VLLM_Detector(EngineDetector):
             if _is_blocked_indexer_plane(first_tensor):
                 return lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS, kv_caches
             return lmcache_native.EngineKVFormat.NL_X_NB_BS_HS, kv_caches
+        # vLLM-RBLN's fp8 DSA indexer keeps its per-token key scale in a cache
+        # of its own, [NB, BS] (one value per token). Viewed as [NB, BS, 1] it
+        # is a one-wide MLA plane, so it moves like the key cache beside it.
+        if list_depth == 1 and tensor_ndim == 2:
+            return (
+                lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
+                [t.unsqueeze(-1) for t in kv_caches],
+            )
         if list_depth == 2 and tensor_ndim == 4:
             layer0_planes = kv_caches[0]
             single_head = all(int(t.shape[2]) == 1 for t in layer0_planes)

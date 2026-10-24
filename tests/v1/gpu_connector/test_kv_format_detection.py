@@ -66,6 +66,16 @@ def test_vllm_mla():
     assert fmt == F.NL_X_NB_BS_HS
 
 
+def test_vllm_rbln_dsa_indexer_scale_cache():
+    # vLLM-RBLN's fp8 DSA indexer scale cache is rank-2 [NB, BS]: it is read
+    # as a one-wide MLA plane through a [NB, BS, 1] view of the same storage.
+    kv = [_t(NB, BS) for _ in range(NL)]
+    fmt, out = detect_format(kv, EngineType.VLLM, {})
+    assert fmt == F.NL_X_NB_BS_HS
+    assert [tuple(t.shape) for t in out] == [(NB, BS, 1)] * NL
+    assert out[0].data_ptr() == kv[0].data_ptr()
+
+
 @pytest.mark.parametrize("hint", [{}, {"kv_layout": "NHD"}, {"kv_layout": "HND"}])
 def test_vllm_rbln_native_singleton_axis(monkeypatch, hint):
     # vLLM-RBLN's 6-D HND layout is its own format, so it is detected from the
@@ -189,9 +199,9 @@ def test_trtllm_cross_layer_6d():
 
 
 def test_unsupported_structure_raises():
-    # vLLM depth-1 list of 2-D tensors matches no branch (needs 5-D, 4-D, or
-    # 3-D). (4-D is now the blocks-first fused layout, so it no longer raises.)
-    kv = [_t(NB, HS) for _ in range(NL)]
+    # vLLM depth-1 list of 1-D tensors matches no branch: every vLLM per-layer
+    # layout is 2-D (vLLM-RBLN's DSA indexer scale cache) to 6-D.
+    kv = [_t(NB) for _ in range(NL)]
     with pytest.raises(ValueError):
         detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
 

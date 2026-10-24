@@ -206,3 +206,39 @@ All RBLN layouts require the engine's KV caches to be real device tensors
 allocation the per-layer tensors are `meta`, and any transfer -- this
 backend's or the shared path's -- dies at the first host copy with "Cannot
 copy out of meta tensor".
+
+## The fp8 DSA indexer caches
+
+With `--kv-cache-dtype fp8`, vLLM-RBLN serves DeepSeek-V3.2 with three
+caches per decoder layer. All three are `MLAAttentionSpec` with one block
+size, so vLLM puts them in a single KV cache group:
+
+| Cache (layer name suffix) | Per-layer shape | dtype |
+|---|---|---|
+| MLA latent (`self_attn.attn`) | `[NB, BS, HS]` | int8 (packed fp8 latent) |
+| Indexer key (`indexer.k_cache`) | `[NB, BS, 128]` | float8_e4m3fn |
+| Indexer key scale (`indexer.k_cache.scale_cache`) | `[NB, BS]` | float16 |
+
+The first two are ordinary `NL_X_NB_BS_HS` planes. The scale cache is the
+only rank-2 KV cache vLLM hands LMCache: one scale per token, no head axis.
+The vLLM detector views it as `[NB, BS, 1]` (`unsqueeze(-1)` over the same
+storage) and classifies it as `NL_X_NB_BS_HS` with a head size of 1. The
+bytes of `[NB, BS]` already are `[NB, BS, 1]`, so a dedicated format would only
+duplicate the MLA spec and kernels for a trailing axis of one; with the view,
+`RblnDeviceOps` moves the scales through the MLA sequence above, like the key
+cache beside them.
+
+Format discovery splits each vLLM group by per-layer shape and dtype
+(`normalize_and_discover_per_layer_formats`), so the three caches become three
+LMCache groups over the one block-id space, moved by the engine-driven
+multi-group path:
+
+```
+vLLM group 0 (UniformTypeKVCacheSpecs)
+├─ LMCache group 0: self_attn.attn               L x [NB, BS, HS]  int8  -> chunk [L, T, HS]
+├─ LMCache group 1: indexer.k_cache              L x [NB, BS, 128] fp8   -> chunk [L, T, 128]
+└─ LMCache group 2: indexer.k_cache.scale_cache  L x [NB, BS, 1]   fp16  -> chunk [L, T, 1]
+```
+
+Without fp8 (`--kv-cache-dtype auto`) the indexer key is bf16 and there is no
+scale cache, so the model registers two groups.
