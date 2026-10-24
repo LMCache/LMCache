@@ -66,6 +66,7 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
 from lmcache.v1.multiprocess.config import add_mp_server_args
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.storage_backend.dax.core import DaxCore
+import lmcache.utils as lmcache_utils
 import lmcache.v1.memory_management as memory_management
 
 
@@ -111,8 +112,6 @@ def _parse_mp_storage_args(args: list[str]) -> StorageManagerConfig:
 
 
 class _FakeMooncakeL2Config:
-    affinity_tag = L2AdapterConfigBase.affinity_tag
-
     def __init__(self, setup_config: dict[str, str]) -> None:
         self.setup_config = setup_config
 
@@ -217,14 +216,27 @@ def test_devdax_config_accepts_explicit_lazy_and_shm_disable(tmp_path):
     assert cfg.shm_name == ""
 
 
+def test_devdax_config_validates_offset(tmp_path):
+    path = _make_mmap_file(tmp_path)
+    kwargs = dict(size_in_bytes=4096, use_lazy=False, shm_name="", devdax_path=path)
+
+    with pytest.raises(ValueError, match="devdax_offset_in_bytes must be >= 0"):
+        L1MemoryManagerConfig(**kwargs, devdax_offset_in_bytes=-4096)
+    with pytest.raises(ValueError, match="multiple of"):
+        L1MemoryManagerConfig(**kwargs, devdax_offset_in_bytes=1)
+    with pytest.raises(ValueError, match="requires devdax_path"):
+        L1MemoryManagerConfig(
+            size_in_bytes=4096, use_lazy=False, shm_name="", devdax_offset_in_bytes=4096
+        )
+    config = L1MemoryManagerConfig(**kwargs, devdax_offset_in_bytes=2 * 4096)
+    assert config.devdax_offset_in_bytes == 2 * 4096
+
+
 @pytest.mark.parametrize(
     ("adapter_name", "adapter_config"),
     [
-        ("nixl_store", SimpleNamespace(affinity_tag=L2AdapterConfigBase.affinity_tag)),
-        (
-            "nixl_store_dynamic",
-            SimpleNamespace(affinity_tag=L2AdapterConfigBase.affinity_tag),
-        ),
+        ("nixl_store", SimpleNamespace()),
+        ("nixl_store_dynamic", SimpleNamespace()),
         ("mooncake_store", _FakeMooncakeL2Config({"protocol": "rdma"})),
     ],
 )
@@ -276,6 +288,65 @@ def test_devdax_allocator_uses_mmap_backing_file(tmp_path):
 
     with open(path, "rb") as f:
         assert f.read(4096) == bytes([0x5A]) * 4096
+
+
+def test_devdax_allocator_maps_at_offset(tmp_path):
+    """Bytes land at ``offset`` in the device; the prefix stays untouched."""
+    path = _make_mmap_file(tmp_path, size=1024 * 1024)
+    offset = 256 * 1024
+    allocator = DevDaxMemoryAllocator(
+        size=64 * 1024, device_path=path, align_bytes=4096, offset=offset
+    )
+    (status,) = allocator.arena_statuses()
+    assert (status.offset_in_bytes, status.size_in_bytes) == (offset, 64 * 1024)
+
+    objs = allocator.batched_allocate(torch.Size([4096]), torch.uint8, 1)
+    assert objs is not None
+    objs[0].raw_tensor.fill_(0xA5)
+    allocator.batched_free(objs)
+    del objs
+    gc.collect()
+    allocator.close()
+
+    with open(path, "rb") as f:
+        assert f.read(offset) == bytes(offset)
+        assert f.read(4096) == bytes([0xA5]) * 4096
+
+
+def test_devdax_allocators_share_one_device_at_disjoint_offsets(tmp_path):
+    """Two independent pools (two servers) on one device do not clobber."""
+    path = _make_mmap_file(tmp_path, size=64 * 1024)
+    first = DevDaxMemoryAllocator(size=16 * 1024, device_path=path, align_bytes=4096)
+    second = DevDaxMemoryAllocator(
+        size=16 * 1024, device_path=path, align_bytes=4096, offset=32 * 1024
+    )
+    a = first.batched_allocate(torch.Size([4096]), torch.uint8, 1)
+    b = second.batched_allocate(torch.Size([4096]), torch.uint8, 1)
+    assert a is not None and b is not None
+    a[0].raw_tensor.fill_(0x11)
+    b[0].raw_tensor.fill_(0x22)
+    assert int(a[0].raw_tensor[0]) == 0x11
+    first.batched_free(a)
+    second.batched_free(b)
+    del a, b
+    gc.collect()
+    first.close()
+    second.close()
+
+    with open(path, "rb") as f:
+        data = f.read()
+    assert data[:4096] == bytes([0x11]) * 4096
+    assert data[32 * 1024 : 32 * 1024 + 4096] == bytes([0x22]) * 4096
+
+
+def test_devdax_allocator_rejects_invalid_offsets(tmp_path):
+    path = _make_mmap_file(tmp_path, size=16 * 1024)
+    with pytest.raises(ValueError, match="offset must be >= 0"):
+        DevDaxMemoryAllocator(size=4096, device_path=path, offset=-4096)
+    with pytest.raises(ValueError, match="multiple of"):
+        DevDaxMemoryAllocator(size=4096, device_path=path, offset=1)
+    with pytest.raises(RuntimeError, match="exceeds"):
+        DevDaxMemoryAllocator(size=8192, device_path=path, offset=12 * 1024)
 
 
 def test_devdax_allocator_registers_cuda_host_mapping(tmp_path, monkeypatch):
@@ -517,9 +588,9 @@ def test_storage_manager_rejects_l1_devdax_add_with_single_region_adapter(
 def test_storage_manager_rejects_l1_add_of_l2_dax_device_alias(
     tmp_path: Path,
 ) -> None:
-    """L1 cannot map a physical device already owned by DAX L2."""
+    """L1 cannot map a device range already owned by DAX L2, even via alias."""
     primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
-    l2_device = _make_mmap_file(tmp_path, size=4096, name="l2-device.bin")
+    l2_device = _make_mmap_file(tmp_path, size=3 * 4096, name="l2-device.bin")
     l1_alias = tmp_path / "l1-alias.bin"
     os.link(l2_device, l1_alias)
     dax_config = DaxL2AdapterConfig(
@@ -539,8 +610,74 @@ def test_storage_manager_rejects_l1_add_of_l2_dax_device_alias(
         assert "already mapped by L2" in str(conflict.value)
         statuses = storage_manager.get_l1_devdax_arena_statuses()
         assert [status.device_path for status in statuses] == [primary]
+
+        # A disjoint range of the same device is shareable between tiers.
+        added = storage_manager.add_l1_devdax_device(str(l1_alias), 4096, 2 * 4096)
+        assert (added.device_path, added.offset_in_bytes) == (str(l1_alias), 8192)
     finally:
         storage_manager.close()
+
+
+def test_storage_manager_rejects_l2_resize_into_l1_range(tmp_path: Path) -> None:
+    """A growing L2 resize is checked against L1 like an add."""
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    shared = _make_mmap_file(tmp_path, size=3 * 4096, name="shared.bin")
+    storage_manager = _pure_devdax_storage_manager(primary, [_dax_l2_config(shared)])
+    try:
+        storage_manager.add_l1_devdax_device(shared, 4096, 4096)
+        with pytest.raises(L2ReconfigureError) as grow:
+            storage_manager.reconfigure_l2_adapter(
+                0, "resize", {"device_path": shared, "size_bytes": 2 * 4096}
+            )
+        assert grow.value.status_code == 409
+        assert "L1" in str(grow.value)
+    finally:
+        storage_manager.close()
+
+
+def test_storage_manager_rejects_overlapping_static_l1_and_l2(tmp_path: Path):
+    """Startup config is range-checked like a runtime add."""
+    shared = _make_mmap_file(tmp_path, size=3 * 4096, name="shared.bin")
+    gib = 1024**3
+
+    def build(l1_offset: int, l2_offset: int, l2_size: int) -> StorageManager:
+        return StorageManager(
+            StorageManagerConfig(
+                l1_manager_config=L1ManagerConfig(
+                    memory_config=L1MemoryManagerConfig(
+                        size_in_bytes=4096,
+                        use_lazy=False,
+                        shm_name="",
+                        align_bytes=4096,
+                        devdax_path=shared,
+                        devdax_offset_in_bytes=l1_offset,
+                    )
+                ),
+                eviction_config=EvictionConfig(eviction_policy="LRU"),
+                l2_adapter_config=L2AdaptersConfig(
+                    adapters=[
+                        DaxL2AdapterConfig(
+                            devices=[
+                                DaxDeviceConfig(
+                                    shared, l2_size / gib, offset_gb=l2_offset / gib
+                                )
+                            ],
+                            slot_bytes=4096,
+                        )
+                    ]
+                ),
+            )
+        )
+
+    # L2 [0, 8192) overlaps L1 [4096, 8192) without sharing its offset, so the
+    # hybrid inference leaves it in L2 and the startup check must catch it.
+    with pytest.raises(ValueError, match="already mapped by L1"):
+        build(l1_offset=4096, l2_offset=0, l2_size=2 * 4096)
+    manager = build(l1_offset=0, l2_offset=4096, l2_size=4096)
+    try:
+        assert len(manager.l2_adapters()) == 1
+    finally:
+        manager.close()
 
 
 @pytest.mark.parametrize("route", ["hotplug", "registration"])
@@ -882,6 +1019,45 @@ def test_cli_parses_l1_devdax_path(tmp_path):
     assert mem_cfg.devdax_path == path
     assert mem_cfg.use_lazy is False
     assert mem_cfg.shm_name == ""
+
+
+def test_cli_parses_l1_devdax_offset_gb(tmp_path):
+    path = _make_mmap_file(tmp_path)
+    config = _parse_mp_storage_args(
+        [
+            "--l1-size-gb",
+            "1",
+            "--eviction-policy",
+            "LRU",
+            "--no-l1-use-lazy",
+            "--shm-name",
+            "",
+            "--l1-devdax-path",
+            path,
+            "--l1-devdax-offset-gb",
+            "0.5",
+        ]
+    )
+
+    mem_cfg = config.l1_manager_config.memory_config
+    assert mem_cfg.devdax_offset_in_bytes == 512 * 1024 * 1024
+
+    with pytest.raises(ValueError, match="multiple of"):
+        _parse_mp_storage_args(
+            [
+                "--l1-size-gb",
+                "1",
+                "--eviction-policy",
+                "LRU",
+                "--no-l1-use-lazy",
+                "--shm-name",
+                "",
+                "--l1-devdax-path",
+                path,
+                "--l1-devdax-offset-gb",
+                "0.0000001",
+            ]
+        )
 
 
 def test_cli_rejects_devdax_l1_with_gds_l1(tmp_path):
@@ -1340,7 +1516,7 @@ def test_remove_device_defers_unmap_while_external_views_alive(tmp_path):
 
     manager.remove_device(extra)
     # A draining arena remains owned while allocations are live.
-    assert manager.owns_device(extra)
+    assert manager.owns_range(extra, 0, 4096)
     manager.free(second)
     del second
     gc.collect()
@@ -1354,7 +1530,7 @@ def test_remove_device_defers_unmap_while_external_views_alive(tmp_path):
     ]
     assert statuses[1].active_allocations == 0
     # Ownership persists while an external view prevents unmapping.
-    assert manager.owns_device(extra)
+    assert manager.owns_range(extra, 0, 4096)
 
     # Once the view is gone, the next free retries and reaps the arena.
     del lingering_view
@@ -1364,7 +1540,7 @@ def test_remove_device_defers_unmap_while_external_views_alive(tmp_path):
     gc.collect()
     assert [status.device_path for status in manager.get_arena_statuses()] == [primary]
     # Ownership ends after the arena is actually unmapped.
-    assert not manager.owns_device(extra)
+    assert not manager.owns_range(extra, 0, 4096)
     manager.close()
 
 
@@ -1491,7 +1667,7 @@ def test_add_duplicate_device_rejected(tmp_path: Path, alias_kind: str) -> None:
 
 
 @pytest.mark.parametrize("same_device", [True, False])
-def test_owns_device_uses_character_device_number(
+def test_owns_range_uses_character_device_number(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, same_device: bool
 ) -> None:
     primary = _make_mmap_file(tmp_path, size=4096)
@@ -1516,8 +1692,10 @@ def test_owns_device_uses_character_device_number(
         with monkeypatch.context() as patch:
             patch.setattr(os, "stat", device_stat)
             patch.setattr(os, "fstat", device_fstat)
-            assert manager.owns_device("/dev/alias") is same_device
-            assert not manager.owns_device(str(tmp_path / "missing.bin"))
+            assert manager.owns_range("/dev/alias", 0, 4096) is same_device
+            # A disjoint range of the same device is not owned.
+            assert not manager.owns_range("/dev/alias", 4096, 4096)
+            assert not manager.owns_range(str(tmp_path / "missing.bin"), 0, 4096)
     finally:
         manager.close()
 
@@ -1531,6 +1709,55 @@ def test_add_device_validates_arguments(tmp_path):
     with pytest.raises(L1ReconfigureError, match="size_in_bytes"):
         manager.add_device(str(tmp_path / "unused.bin"), 0)
 
+    manager.close()
+
+
+def test_add_device_same_path_requires_disjoint_ranges(tmp_path):
+    """One device may back several arenas as long as the ranges are disjoint."""
+    primary = _make_mmap_file(tmp_path, size=16 * 4096, name="shared.bin")
+    manager = _pure_devdax_manager(primary)
+
+    added = manager.add_device(primary, 4096, offset_in_bytes=4096)
+    assert (added.device_path, added.offset_in_bytes) == (primary, 4096)
+
+    with pytest.raises(L1ReconfigureError, match="overlaps") as overlap:
+        manager.add_device(primary, 2 * 4096, offset_in_bytes=0)
+    assert overlap.value.status_code == 409
+    with pytest.raises(L1ReconfigureError, match="already mapped"):
+        manager.add_device(primary, 4096, offset_in_bytes=4096)
+    with pytest.raises(L1ReconfigureError, match="multiple of"):
+        manager.add_device(primary, 4096, offset_in_bytes=4096 + 1)
+
+    manager.add_device(primary, 4096, offset_in_bytes=8 * 4096)
+    assert [s.offset_in_bytes for s in manager.get_arena_statuses()] == [
+        0,
+        4096,
+        8 * 4096,
+    ]
+    manager.close()
+
+
+def test_remove_and_status_identify_arena_by_path_and_offset(tmp_path):
+    """``(device_path, offset)`` names an arena; the offset defaults to 0."""
+    primary = _make_mmap_file(tmp_path, size=16 * 4096, name="shared.bin")
+    manager = _pure_devdax_manager(primary)
+    manager.add_device(primary, 4096, offset_in_bytes=4096)
+    manager.add_device(primary, 4096, offset_in_bytes=2 * 4096)
+
+    # Offset 0 is the primary arena, so the default addresses it.
+    with pytest.raises(L1ReconfigureError, match="primary") as exc_info:
+        manager.remove_device(primary)
+    assert exc_info.value.status_code == 409
+    assert manager.get_arena_status(primary).offset_in_bytes == 0
+    with pytest.raises(L1ReconfigureError, match="offset 12288") as missing:
+        manager.remove_device(primary, offset_in_bytes=3 * 4096)
+    assert missing.value.status_code == 404
+
+    removed = manager.remove_device(primary, offset_in_bytes=2 * 4096)
+    assert removed.state is DevDaxArenaState.REMOVED
+    assert removed.offset_in_bytes == 2 * 4096
+    assert manager.get_arena_status(primary, 4096).state is DevDaxArenaState.ACTIVE
+    assert len(manager.get_arena_statuses()) == 2
     manager.close()
 
 
@@ -1655,5 +1882,89 @@ def test_hybrid_manager_get_backend_type_reports_per_object_medium(tmp_path):
         manager.free(objs)
         del objs
         gc.collect()
+    finally:
+        manager.close()
+
+
+_FAKE_DEVDAX_RDEV = os.makedev(252, 7)
+
+
+def _fake_devdax_node(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    backing: str,
+    *,
+    size: int | None,
+    align: int = 4096,
+) -> None:
+    """Present ``backing`` as a Device-DAX node whose sysfs size/align are given.
+
+    ``size=None`` omits the sysfs ``size`` attribute, as for a non-DAX node.
+    """
+    node = (
+        tmp_path
+        / "sysfs"
+        / f"{os.major(_FAKE_DEVDAX_RDEV)}:{os.minor(_FAKE_DEVDAX_RDEV)}"
+    )
+    node.mkdir(parents=True)
+    if size is not None:
+        (node / "size").write_text(f"{size}\n")
+    (node / "align").write_text(f"{align}\n")
+    monkeypatch.setattr(lmcache_utils, "DAX_SYSFS_CHAR_ROOT", str(tmp_path / "sysfs"))
+
+    real_fstat = os.fstat
+    info = os.stat(backing)
+    identity = (info.st_dev, info.st_ino)
+
+    def fake_fstat(fd: int) -> Any:
+        result = real_fstat(fd)
+        if (result.st_dev, result.st_ino) == identity:
+            return SimpleNamespace(st_mode=stat.S_IFCHR, st_rdev=_FAKE_DEVDAX_RDEV)
+        return result
+
+    monkeypatch.setattr(os, "fstat", fake_fstat)
+
+
+def test_add_device_validates_range_against_sysfs_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Device-DAX range is checked against sysfs before it is mapped.
+
+    ``fstat`` reports size 0 for the node and the kernel accepts an out-of-range
+    mmap, so the pre-check is what stands between a bad offset and a SIGBUS.
+    """
+    primary = _make_mmap_file(tmp_path, size=4096)
+    extra = _make_mmap_file(tmp_path, size=4 * 4096, name="dax0.0")
+    manager = _pure_devdax_manager(primary)
+    _fake_devdax_node(monkeypatch, tmp_path, extra, size=4 * 4096)
+    try:
+        fds_before = len(os.listdir("/proc/self/fd"))
+        with pytest.raises(L1ReconfigureError, match="exceeds") as at_end:
+            manager.add_device(extra, 4096, offset_in_bytes=4 * 4096)
+        assert at_end.value.status_code == 409
+        with pytest.raises(L1ReconfigureError, match="device alignment"):
+            manager.add_device(extra, 4096 + 512, offset_in_bytes=0)
+        assert len(os.listdir("/proc/self/fd")) == fds_before
+        assert len(manager.get_arena_statuses()) == 1
+
+        added = manager.add_device(extra, 2 * 4096, offset_in_bytes=2 * 4096)
+        assert added.state == DevDaxArenaState.ACTIVE
+        assert len(manager.get_arena_statuses()) == 2
+    finally:
+        manager.close()
+
+
+def test_add_device_fails_closed_without_sysfs_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A character device whose size sysfs cannot report is never mapped."""
+    primary = _make_mmap_file(tmp_path, size=4096)
+    extra = _make_mmap_file(tmp_path, size=4 * 4096, name="not-dax")
+    manager = _pure_devdax_manager(primary)
+    _fake_devdax_node(monkeypatch, tmp_path, extra, size=None)
+    try:
+        with pytest.raises(L1ReconfigureError, match="cannot read Device-DAX size"):
+            manager.add_device(extra, 4096)
+        assert len(manager.get_arena_statuses()) == 1
     finally:
         manager.close()

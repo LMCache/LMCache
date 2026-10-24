@@ -216,11 +216,6 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         lambda cache_context, num_tokens, object_group_id: object(),
     )
     monkeypatch.setattr(
-        lmcache_driven_transfer,
-        "transfer_kv_per_object_group",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
         lmcache_driven_transfer.torch_dev,
         "device",
         lambda device: nullcontext(),
@@ -276,6 +271,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
             ),
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
+        transfer_object_group=lambda *args, **kwargs: None,
     )
     entry = lmcache_driven_transfer.ContextEntry(
         cache_context=cast(Any, cache_context),

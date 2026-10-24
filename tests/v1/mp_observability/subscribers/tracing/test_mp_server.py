@@ -750,6 +750,67 @@ class TestHitRateAttributes:
         assert root.attributes["hit_tokens"] == 0
         assert root.attributes["requested_tokens"] == 0
         assert root.attributes["hit_rate"] == 0.0
+        # Emitters predating the request-level fields: rates read 0.0.
+        assert root.attributes["prompt_tokens"] == 0
+        assert root.attributes["engine_hit_rate"] == 0.0
+        assert root.attributes["request_hit_rate"] == 0.0
+
+    def test_request_level_attrs_set_on_root_span(self, exporter):
+        """LP_END with prompt_tokens=2000, engine_hit_tokens=500 and
+        request_hit_tokens=1500 → engine_hit_rate=0.25, request_hit_rate=0.75."""
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        registry = SpanRegistry()
+        bus.register_subscriber(MPServerTracingSubscriber(registry))
+        bus.start()
+        now = time.time()
+        sid = "req-hr-request-level"
+
+        bus.publish(
+            Event(event_type=EventType.MP_REQUEST_START, session_id=sid, timestamp=now)
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_START,
+                session_id=sid,
+                timestamp=now + 0.001,
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id=sid,
+                timestamp=now + 0.010,
+                metadata={
+                    "hit_tokens": 1024,
+                    "requested_tokens": 1536,
+                    "found_count": 6,
+                    "apc_covered_tokens": 512,
+                    "l1_hit_tokens": 1024,
+                    "l2_hit_tokens": 0,
+                    "prompt_tokens": 2000,
+                    "engine_hit_tokens": 500,
+                    "request_hit_tokens": 1500,
+                    "early_exit_reason": "",
+                },
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.MP_REQUEST_END,
+                session_id=sid,
+                timestamp=now + 0.020,
+            )
+        )
+        time.sleep(0.15)
+        bus.stop()
+
+        root = _root_span(exporter, sid)
+        assert root is not None
+        assert root.attributes["prompt_tokens"] == 2000
+        assert root.attributes["engine_hit_tokens"] == 500
+        assert root.attributes["request_hit_tokens"] == 1500
+        assert abs(root.attributes["engine_hit_rate"] - 0.25) < 1e-9
+        assert abs(root.attributes["request_hit_rate"] - 0.75) < 1e-9
 
     def test_no_hit_rate_attrs_on_store_only_path(self, exporter):
         """Store-only request (no LP_END) leaves root span without hit rate attrs."""

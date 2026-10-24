@@ -219,9 +219,9 @@ unread temporary object is evicted like any other.
 
 ## Lookup, locks and sessions
 
-The unfull probe uses `submit_prefetch_task(..., skip_l2=True)`, which reads
-L1 synchronously and takes `num_kv_readers` read locks per key like the chunk
-prefetch. The session records the probed keys and their L1 owners
+The unfull probe is a prefetch whose spec allows no L2 adapter
+(`allowed_l2_memory_tags=frozenset()`). It reads L1 synchronously and takes
+`num_kv_readers` read locks per key like the chunk prefetch. The session records the probed keys and their L1 owners
 separately from the chunk prefetch result:
 
 - each worker's unfull retrieve releases one lock per key;

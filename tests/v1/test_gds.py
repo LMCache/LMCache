@@ -13,8 +13,8 @@ import safetensors
 import torch
 
 # First Party
+from lmcache.inprocess.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.cu_file_memory_allocator import CuFileMemoryAllocator
 from lmcache.v1.memory_allocators.hip_file_memory_allocator import (

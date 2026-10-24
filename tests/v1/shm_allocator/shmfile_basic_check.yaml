@@ -7,7 +7,7 @@
 #
 #   Step 2: Run basic_check
 #     LMCACHE_CONFIG_FILE=configs/shmfile_basic_check.yaml \
-#       python -m lmcache.v1.basic_check \
+#       python -m lmcache.inprocess.v1.basic_check \
 #         --mode test_storage_manager
 #
 # For IDC / TCP mode (worker on host, LMCache in container):
