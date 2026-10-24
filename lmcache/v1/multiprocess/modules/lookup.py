@@ -15,6 +15,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchHandle,
     PrefetchTaskSpec,
+    RankGroupLayouts,
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
@@ -44,6 +45,16 @@ logger = init_logger(__name__)
 _DEFAULT_LOAD_POLICY = DefaultKVLoadPolicy({})
 
 
+def _num_registered_groups(
+    attn_desc: AttnWindowDesc, rank_groups: dict[int, RankGroupLayouts]
+) -> int:
+    """Object groups a lookup can touch: the most any rank registered."""
+    return max(
+        [attn_desc.num_object_groups]
+        + [own.attn_desc.num_object_groups for own in rank_groups.values()]
+    )
+
+
 def resolve_prefetched_obj_keys(
     ctx: MPCacheServerContext,
     key: IPCCacheServerKey,
@@ -56,6 +67,10 @@ def resolve_prefetched_obj_keys(
     ``key.worker_id=None`` resolves every KV rank for scheduler-owned cleanup.
     A worker-specific key resolves only that worker's shard (or one MLA reader
     share), which is required for per-instance RETRIEVE failure cleanup.
+
+    Without ``group_windows`` the windows come from the layout registry, and
+    a rank that registered its own object groups resolves only those, with
+    their own windows, as lookup locked them.
     """
     chunk_hashes = ctx.token_hasher.compute_packed_chunk_hashes(
         key.token_bytes, start=key.start, end=key.end
@@ -65,31 +80,39 @@ def resolve_prefetched_obj_keys(
 
     start_chunk = key.start // ctx.chunk_size
     end_chunk = start_chunk + len(chunk_hashes)
+    rank_groups: dict[int, RankGroupLayouts] = {}
     if group_windows is None:
+        registry = ctx.layout_desc_registry
         group_windows = tuple(
-            ctx.layout_desc_registry.find_attn_desc(
-                key.model_name, key.world_size
-            ).num_chunks_in_sw
+            registry.find_attn_desc(key.model_name, key.world_size).num_chunks_in_sw
         )
+        rank_groups = registry.find_rank_group_layouts(key.model_name, key.world_size)
+    worker_ids = range(key.world_size) if key.worker_id is None else [key.worker_id]
 
     obj_keys: list[ObjectKey] = []
-    for group_idx, window in enumerate(group_windows):
-        if locked_gids and group_idx not in locked_gids:
-            continue
-        if hit_chunks < 0:
-            if window >= 0:
+    for worker_id in worker_ids:
+        own = rank_groups.get(worker_id)
+        windows = group_windows if own is None else own.attn_desc.num_chunks_in_sw
+        rank_key = replace(key, worker_id=worker_id)
+        for group_idx, window in enumerate(windows):
+            if locked_gids and group_idx not in locked_gids:
                 continue
-            lo, hi = start_chunk, end_chunk
-        else:
-            # Locked range per ``unfold``: the whole hit prefix for full
-            # attention, its trailing ``window`` chunks otherwise.
-            lo = 0 if window < 0 else max(0, hit_chunks - window)
-            lo = max(lo, start_chunk)
-            hi = min(hit_chunks, end_chunk)
-        if lo >= hi:
-            continue
-        group_hashes = chunk_hashes[lo - start_chunk : hi - start_chunk]
-        obj_keys.extend(ipc_key_to_object_keys(key, group_hashes, [group_idx])[0])
+            if hit_chunks < 0:
+                if window >= 0:
+                    continue
+                lo, hi = start_chunk, end_chunk
+            else:
+                # Locked range per ``unfold``: the whole hit prefix for full
+                # attention, its trailing ``window`` chunks otherwise.
+                lo = 0 if window < 0 else max(0, hit_chunks - window)
+                lo = max(lo, start_chunk)
+                hi = min(hit_chunks, end_chunk)
+            if lo >= hi:
+                continue
+            group_hashes = chunk_hashes[lo - start_chunk : hi - start_chunk]
+            obj_keys.extend(
+                ipc_key_to_object_keys(rank_key, group_hashes, [group_idx])[0]
+            )
     return obj_keys
 
 
@@ -103,6 +126,7 @@ class _PrefetchJob:
     # Chunk-aligned tokens LMCache was asked to look up, past the engine-covered
     # prefix (hit-rate denominator); 0 on early exits.
     requested_tokens: int
+    # Object groups the prefetch can lock: the most any rank registered.
     num_object_groups: int = 1
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     # First chunk of the looked-up range (``key.start``); chunks below it are
@@ -296,6 +320,12 @@ class LookupModule(DiscoverableModule):
                 key, early_exit_reason="no_group_layout_descs"
             )
             return
+        # A rank that registered its own groups (a pipeline stage holding only
+        # some of the model's KV caches) is looked up for exactly those.
+        rank_groups = self._ctx.layout_desc_registry.find_rank_group_layouts(
+            model_name, world_size
+        )
+        num_groups = _num_registered_groups(attn_desc, rank_groups)
 
         if not self._load_policy.should_load(
             KVLoadContext(
@@ -313,7 +343,7 @@ class LookupModule(DiscoverableModule):
             self._register_empty_prefetch_job(
                 key,
                 requested_tokens=looked_up_tokens,
-                num_object_groups=attn_desc.num_object_groups,
+                num_object_groups=num_groups,
                 attn_desc=attn_desc,
                 engine_covered_chunks=start_chunk,
                 early_exit_reason="load_policy_recompute",
@@ -329,7 +359,7 @@ class LookupModule(DiscoverableModule):
                     for group_keys in ipc_key_to_object_keys(
                         key,
                         chunk_hashes[:start_chunk],
-                        list(range(attn_desc.num_object_groups)),
+                        list(range(num_groups)),
                     )
                     for obj_key in group_keys
                 ]
@@ -343,7 +373,7 @@ class LookupModule(DiscoverableModule):
             self._register_empty_prefetch_job(
                 key,
                 requested_tokens=looked_up_tokens,
-                num_object_groups=attn_desc.num_object_groups,
+                num_object_groups=num_groups,
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
                 engine_covered_chunks=start_chunk,
@@ -357,6 +387,7 @@ class LookupModule(DiscoverableModule):
                 list(range(attn_desc.num_object_groups)),
                 group_layout_descs,
                 attn_desc,
+                rank_groups=rank_groups,
             ),
             num_kv_readers=num_kv_readers,
         )
@@ -370,7 +401,7 @@ class LookupModule(DiscoverableModule):
                 row_windows=tuple(row.sliding_window_size for row in spec.key_groups),
                 request_id=key.request_id,
                 requested_tokens=looked_up_tokens,
-                num_object_groups=attn_desc.num_object_groups,
+                num_object_groups=num_groups,
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
                 engine_covered_chunks=start_chunk,
@@ -608,8 +639,9 @@ class LookupModule(DiscoverableModule):
         """Resolve every object key of a request across all object groups.
 
         The object-group count is read from the layout registry for
-        ``key``'s ``(model_name, world_size)``. The order of the returned keys
-        is unspecified.
+        ``key``'s ``(model_name, world_size)``: the most any rank registered,
+        so a group only some ranks store is covered too. The order of the
+        returned keys is unspecified.
 
         Args:
             key: The IPC key (model/world/worker, salt).
@@ -618,9 +650,11 @@ class LookupModule(DiscoverableModule):
         Returns:
             The object keys of all groups and kv ranks for ``chunk_hashes``.
         """
-        num_groups = self._ctx.layout_desc_registry.find_attn_desc(
-            key.model_name, key.world_size
-        ).num_object_groups
+        registry = self._ctx.layout_desc_registry
+        num_groups = _num_registered_groups(
+            registry.find_attn_desc(key.model_name, key.world_size),
+            registry.find_rank_group_layouts(key.model_name, key.world_size),
+        )
         per_group = ipc_key_to_object_keys(key, chunk_hashes, list(range(num_groups)))
         return [obj_key for group_keys in per_group for obj_key in group_keys]
 
@@ -643,7 +677,8 @@ class LookupModule(DiscoverableModule):
         Args:
             key: The lookup's cache key.
             requested_tokens: Hit-rate denominator tokens; 0 on early exits.
-            num_object_groups: Object groups of the request's layout.
+            num_object_groups: Object groups of the request's layout, the most
+                any rank registered.
             attn_desc: The request's attention window descriptor.
             start_chunk: First chunk of the looked-up range; reported as the
                 hit when everything below it is engine-covered.
@@ -723,7 +758,7 @@ class LookupModule(DiscoverableModule):
         session = self._ctx.session_manager.get_or_create(job.request_id)
         session.record_prefetch_result(
             found_count,
-            tuple(range(job.attn_desc.num_object_groups)),
+            tuple(range(job.num_object_groups)),
             result.l1_owners,
         )
 

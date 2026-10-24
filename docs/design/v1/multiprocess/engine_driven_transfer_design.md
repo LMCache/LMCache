@@ -232,7 +232,9 @@ The engine-driven path uses five request types:
 1. `REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`  
    Worker registers engine-driven KV layout metadata. Server then:
    - stores `EngineDrivenContextEntry` (metadata + model/world info)
-   - registers `MemoryLayoutDesc` in `LayoutDescRegistry`
+   - registers `MemoryLayoutDesc` in `LayoutDescRegistry`, and the worker's
+     own object groups under its `worker_id` when the payload carries one
+     (section 3.4)
    - creates `TransferStrategy` from engine-level `shm_pool_info`
    - returns `shm_name/pool_size` so worker creates matching `EngineDrivenContext`
 
@@ -306,3 +308,41 @@ Retrieve:
 Notes:
 - SHM pool metadata is computed once in `MPCacheServerContext` init, not per registration.
 - `chunk_indices` optimization reduces unnecessary gather/copy work on partial cache hits.
+
+### 3.4 Ranks That Store Different Object Groups
+
+Under pipeline parallelism each stage registers only the KV caches its own
+layers hold, so the ranks of one model can store different object groups.
+Two cases that occur in practice:
+
+- A stage of dense layers holds no sparse-attention indexer cache: on a
+  MiniMax-M3 PP4 split, stage 0 registers one group (K/V) while the later
+  stages register two (K/V and the indexer key cache).
+- A speculative drafter lives on the last stage only, so with EAGLE3 the last
+  stage registers one more group than the others.
+
+`LayoutDescRegistry` keeps one registration-wide descriptor per
+`(model_name, world_size)`, and the latest registration wins it. Lookup used
+to fan every object group of that descriptor out to every kv rank, so what it
+asked for depended on which stage registered last:
+
+```text
+registration-wide desc = stage 0's (1 group)
+  lookup prefetches group 0 only -> stages 1..3 retrieve group 1
+  -> "Failed to read prefetched object" -> KV load failure
+registration-wide desc = a later stage's (2 groups)
+  lookup asks stage 0 for group 1, which it never stores
+```
+
+The worker therefore sends its `worker_id` (the id its store and retrieve
+keys carry) in `RegisterEngineDrivenContextPayload`, and the registry keeps
+each such rank's `RankGroupLayouts` (its windows and layouts) apart. Lookup
+builds one row per `(object group, kv rank)` that rank actually stores, each
+with that rank's own window and layout; scheduler-side lock release and
+`end_session` touch follow the same per-rank groups. Object group ids are
+local to the rank that registered them, so a rank's group 1 need not be the
+same kind of cache on every rank.
+
+A legacy registration without `worker_id` keeps the previous behavior. The
+LMCache-driven `REGISTER_KV_CACHE` does not carry the worker id yet, so that
+path still assumes every rank stores the registration-wide groups.
