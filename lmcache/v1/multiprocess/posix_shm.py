@@ -34,15 +34,32 @@ from __future__ import annotations
 # Standard
 import atexit
 import ctypes
+import errno
 import logging
 import mmap as _mmap
 import os
+import sys
 import threading
 
 # Third Party
 import _posixshmem  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
+
+# Maximum byte length of a POSIX SHM name passed to shm_open(), including the
+# required leading '/'.
+#
+# macOS: PSHMNAMLEN = 31 (sys/posix_shm.h), but XNU's shm_open checks
+#   `namelen >= PSHMNAMLEN` (strictly-greater-or-equal), so the effective
+#   maximum is PSHMNAMLEN - 1 = 30 characters.
+# Linux: shm_open() resolves through /dev/shm; effective limit is NAME_MAX =
+#   255 (one path-component, not counting the '/dev/shm/' directory prefix).
+#
+# We use 30 on Darwin (one below PSHMNAMLEN to satisfy the `>=` check) and
+# 255 on other non-Darwin POSIX targets we test in CI (a conservative default;
+# other kernels may allow longer names). Callers derive token lengths from
+# this constant so generated names fit on Darwin and Linux.
+POSIX_SHM_MAX_NAME_LEN: int = 30 if sys.platform == "darwin" else 255
 
 
 def _strip_leading_slash(name: str) -> str:
@@ -223,6 +240,26 @@ def shm_unlink(name: str) -> None:
             sm_name,
             exc_info=True,
         )
+
+
+def is_shm_name_collision(exc: BaseException) -> bool:
+    """Return ``True`` when *exc* signals a POSIX ``O_CREAT|O_EXCL`` name collision.
+
+    ``shm_open(O_CREAT|O_EXCL)`` raises ``FileExistsError`` (a subclass of
+    ``OSError``) on Linux and macOS; some implementations raise ``OSError``
+    directly with ``errno.EEXIST``.  Callers that need to distinguish a name
+    collision from other I/O errors should use this predicate rather than
+    catching ``FileExistsError`` alone.
+
+    Args:
+        exc: The exception to test.
+
+    Returns:
+        ``True`` if *exc* is a name-collision error, ``False`` otherwise.
+    """
+    if isinstance(exc, FileExistsError):
+        return True
+    return isinstance(exc, OSError) and exc.errno == errno.EEXIST
 
 
 def _atexit_cleanup() -> None:

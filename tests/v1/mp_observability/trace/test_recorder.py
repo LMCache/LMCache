@@ -314,3 +314,65 @@ class TestShutdownContract:
             records = list(r.records())
         assert len(records) == 1
         assert records[0].qualname == "a.b"
+
+
+class TestConfigDigest:
+    def test_generated_shm_names_redacted_from_digest_dict(self):
+        """Configs differing only in a generated SHM name digest equally.
+
+        ``L1MemoryManagerConfig.shm_name`` defaults to a fresh UUID per
+        instance; the digest must not depend on that random token or
+        every default-config record/replay pair would report a config
+        mismatch.  See ``safe_storage_config_dict``.
+        """
+        # First Party
+        from lmcache.v1.distributed.config import (
+            L1_POOL_SHM_NAME_TOKEN_HEX_LEN,
+            EvictionConfig,
+            L1ManagerConfig,
+            L1MemoryManagerConfig,
+            StorageManagerConfig,
+        )
+        from lmcache.v1.mp_observability.trace.recorder import (
+            safe_storage_config_dict,
+        )
+
+        def make_config(shm_name: str) -> StorageManagerConfig:
+            memory = L1MemoryManagerConfig(
+                size_in_bytes=4096,
+                use_lazy=False,
+                shm_name=shm_name,
+            )
+            return StorageManagerConfig(
+                l1_manager_config=L1ManagerConfig(memory_config=memory),
+                eviction_config=EvictionConfig(eviction_policy="LRU"),
+            )
+
+        token_len = L1_POOL_SHM_NAME_TOKEN_HEX_LEN
+        generated_a = make_config("lmcache_l1_pool_" + "a" * token_len)
+        generated_b = make_config("lmcache_l1_pool_" + "b" * token_len)
+        pinned = make_config("lmcache_l1_pool_node0")
+        disabled = make_config("")
+
+        assert (
+            generated_a.l1_manager_config.memory_config.shm_name
+            != generated_b.l1_manager_config.memory_config.shm_name
+        )
+        assert safe_storage_config_dict(generated_a) == safe_storage_config_dict(
+            generated_b
+        )
+        # Pinned names and SHM-disabled are meaningful and preserved.
+        assert safe_storage_config_dict(pinned) != safe_storage_config_dict(generated_a)
+        assert safe_storage_config_dict(disabled) != safe_storage_config_dict(
+            generated_a
+        )
+        memory_dict = safe_storage_config_dict(generated_a)["l1_manager_config"][
+            "memory_config"
+        ]
+        assert memory_dict["shm_name"] == "<generated>"
+        assert (
+            safe_storage_config_dict(pinned)["l1_manager_config"]["memory_config"][
+                "shm_name"
+            ]
+            == "lmcache_l1_pool_node0"
+        )

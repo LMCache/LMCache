@@ -16,7 +16,10 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     ipc_key_to_object_keys,
 )
-from lmcache.v1.distributed.config import StorageManagerConfig
+from lmcache.v1.distributed.config import (
+    StorageManagerConfig,
+    normalize_l1_pool_shm_name,
+)
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -223,10 +226,10 @@ class MPCacheServerContext:
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
 
+        self._storage_manager = StorageManager(storage_manager_config)
         self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
             storage_manager_config
         )
-        self._storage_manager = StorageManager(storage_manager_config)
         self._token_hasher = TokenHasher(
             chunk_size=chunk_size, hash_algorithm=hash_algorithm
         )
@@ -443,10 +446,10 @@ class MPCacheServerContext:
         shm_name = mem_cfg.shm_name or ""
         if not shm_name or mem_cfg.use_lazy or mem_cfg.devdax_path:
             return {"shm_name": "", "pool_size": 0}
-        bare = shm_name.lstrip("/")
-        if not bare.startswith("lmcache_l1_pool_"):
-            shm_name = f"lmcache_l1_pool_{bare}"
-        return {"shm_name": shm_name, "pool_size": mem_cfg.size_in_bytes}
+        return {
+            "shm_name": normalize_l1_pool_shm_name(shm_name),
+            "pool_size": mem_cfg.size_in_bytes,
+        }
 
     def _bind_chunk_size_locked(self, chunk_size: int) -> None:
         """Initialize runtime state that depends on a concrete chunk size."""
