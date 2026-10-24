@@ -299,8 +299,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     memory_obj.unpin()
             memory_obj.ref_count_down()
 
-            if force:
-                self.cache_policy.update_on_force_evict(key)
+            # LFU needs this on internal (force=False) evictions too.
+            self.cache_policy.update_on_force_evict(key)
 
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.add_kv_op(
