@@ -18,6 +18,7 @@
 #   4. Assert the two runs' gsm8k scores match -- a broken LMCache would skew the
 #      retrieved KV and make them diverge.
 #   5. Assert LMCache actually served retrieves in the retrieve run (non-vacuous).
+#      LM_EVAL_VERIFY_MODE=samples additionally requires identical per-doc outputs.
 #
 # The reset endpoint requires VLLM_SERVER_DEV_MODE=1 (set by launch-processes.sh).
 set -e
@@ -39,6 +40,11 @@ LIMIT="${LIMIT:-100}"
 # exact match. For non-bit-exact backends, raise LIMIT to shrink run-to-run
 # drift (~1/sqrt(LIMIT)) rather than loosening this.
 SCORE_TOLERANCE="${SCORE_TOLERANCE:-0}"
+LM_EVAL_VERIFY_MODE="${LM_EVAL_VERIFY_MODE:-score}"
+case "$LM_EVAL_VERIFY_MODE" in
+    score | samples) ;;
+    *) echo "ERROR: LM_EVAL_VERIFY_MODE must be score or samples."; exit 1 ;;
+esac
 # Seconds to let async LMCache stores drain before the retrieve run.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
 # Gemma 4 is a sliding-window + full-attention hybrid whose groups have
@@ -220,7 +226,7 @@ echo "============================================"
 echo "LMCache retrieves logged: before=${retrieves_before}, after=${retrieves_after}"
 
 python3 - "$VLLM_RUN_DIR" "$RETRIEVE_RUN_DIR" \
-    "$SCORE_TOLERANCE" "$retrieves_before" "$retrieves_after" <<'PYEOF'
+    "$SCORE_TOLERANCE" "$retrieves_before" "$retrieves_after" "$LM_EVAL_VERIFY_MODE" <<'PYEOF'
 import glob
 import json
 import os
@@ -230,6 +236,7 @@ vllm_run_dir, retrieve_run_dir, tol_s, before_s, after_s = sys.argv[1:6]
 tol = float(tol_s)
 retrieves_before = int(before_s)
 retrieves_after = int(after_s)
+verify_mode = sys.argv[6]
 
 
 def gsm8k_score_and_stderr(results_dir: str) -> tuple[float, float]:
@@ -279,6 +286,44 @@ print(f"  LMCache retrieve run gsm8k exact_match = {s_retrieve:.4f} +/- {e_retri
 print(f"  tolerance = {tol}")
 
 failures = []
+if verify_mode == "samples":
+    def sample_outputs(results_dir: str) -> dict[int, list[list[str]]]:
+        """Load raw generations keyed by doc_id from the newest GSM8K sample file.
+
+        Args:
+            results_dir: lm_eval output directory to search recursively.
+
+        Returns:
+            Nonempty mapping from unique document IDs to raw generation lists.
+
+        Raises:
+            SystemExit: If samples are missing, empty, duplicated or lack outputs.
+        """
+        files = glob.glob(os.path.join(results_dir, "**", "samples_gsm8k_*.jsonl"), recursive=True)
+        if not files:
+            raise SystemExit(f"No GSM8K samples under {results_dir}")
+        outputs = {}
+        with open(max(files, key=os.path.getmtime)) as f:
+            for line in f:
+                sample = json.loads(line)
+                doc_id = sample["doc_id"]
+                if doc_id in outputs or not sample["resps"]:
+                    raise SystemExit(f"Duplicate doc_id or missing outputs: {doc_id} in {results_dir}")
+                outputs[doc_id] = sample["resps"]
+        if not outputs:
+            raise SystemExit(f"Empty GSM8K samples under {results_dir}")
+        return outputs
+
+    first = sample_outputs(vllm_run_dir)
+    second = sample_outputs(retrieve_run_dir)
+    if first.keys() != second.keys():
+        failures.append("sample doc_id sets differ between runs")
+    else:
+        mismatches = [doc_id for doc_id in first if first[doc_id] != second[doc_id]]
+        if mismatches:
+            failures.append(f"generated outputs differ for doc_id: {mismatches}")
+        else:
+            print(f"  All {len(first)} sample outputs match by doc_id.")
 # The two runs must match -- a broken LMCache would skew the retrieved KV.
 if abs(s_vllm - s_retrieve) > tol:
     failures.append(
@@ -299,7 +344,7 @@ if failures:
     sys.exit(1)
 
 print(
-    f"\nPASS: vLLM and LMCache-retrieve gsm8k scores match (tol={tol}); "
+    f"\nPASS: vLLM and LMCache-retrieve {verify_mode} comparison passed (tol={tol}); "
     f"LMCache served {retrieves_after - retrieves_before} retrieves."
 )
 PYEOF
