@@ -6,7 +6,7 @@ Each subdirectory under `k3_tests/` is a self-contained test with these files:
 |------|---------|
 | `run.sh` | Test script (sources `k3_harness/setup-env.sh`, then runs tests) |
 | `pipeline.yml` | K8s pod spec — GPU count, volumes, timeouts |
-| `buildkite-pipeline.yml` | What to paste into the Buildkite UI "Steps" editor (runs path filter, then uploads `pipeline.yml`) |
+| `buildkite-pipeline.yml` | What to paste into the Buildkite UI "Steps" editor (runs path filter and PR check gate, then uploads `pipeline.yml`) |
 | `BK_WEB_SETUP.md` | Full Buildkite UI setup instructions: env vars, trigger filters, recommendations |
 
 ## Buildkite Web UI Setup
@@ -31,9 +31,12 @@ Each directory has a `BK_WEB_SETUP.md` with the exact settings — env vars, Git
 
    steps:
      - label: ":pipeline: Upload pipeline"
-       command: buildkite-agent pipeline upload .buildkite/k3_tests/<test-name>/pipeline.yml
+       command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/<test-name>/pipeline.yml
    ```
-   The `agents.queue` must match the queue you created above. This routes the upload step to agent-stack-k8s, which checks out the repo, runs the path filter, and (if the build isn't skipped) uploads the real `pipeline.yml`. Each subsequent step also targets the same queue.
+   The `agents.queue` must match the queue you created above. This routes the upload
+   step to agent-stack-k8s, which checks out the repo and runs the path filter.
+   Builds that are not skipped upload the real `pipeline.yml` after passing the
+   PR check gate (for PR builds). Each subsequent step targets the same queue.
 3. `HF_TOKEN` is needed for gated model access (e.g., Llama, Qwen). Set it in the `env` block as shown above, or under **Pipeline Settings → Environment Variables** in the UI — both work
 4. Under **GitHub Settings**, configure trigger filters per the test's `BK_WEB_SETUP.md`
 5. Save — jobs will run on the K8s queue automatically
@@ -79,6 +82,33 @@ To bypass the skip and force a full run, add the **`force-ci`** label to the
 PR on GitHub. Buildkite picks up PR labels automatically; when the filter
 sees `force-ci` it runs the full pipeline regardless of which files changed.
 
+
+### PR check gate (Code Quality and DCO)
+
+For PR builds using `common_scripts/upload-pipeline.sh`, label and path skips
+run first. If the build is not skipped, `common_scripts/wait-for-required-checks.sh`
+waits for Code Quality and DCO on the build's original PR head commit before
+uploading the test pipeline. Non-PR builds do not wait for these checks.
+The `force-ci` label bypasses skip rules but still requires the check gate.
+
+- `Check code quality` must report `success` or `neutral`; `skipped` is accepted
+  only when `Detect changes` succeeded in the same Check Suite.
+- `DCO` must report `success`.
+- Missing or running checks wait. Failed checks, persistent API errors,
+  timeouts, a closed PR, or a changed PR head stop the upload.
+
+The upload agent needs Bash, curl, jq and Git. Provide `GITHUB_TOKEN` or
+`GH_TOKEN` in the **initial upload step** with read access to checks, commit
+statuses and pull requests in the base repository. The gate script is read
+from the PR's target branch in that repository and must exist there.
+
+The default wait is 30 minutes (`REQUIRED_CHECKS_TIMEOUT_SECONDS=1800`). Polling
+starts at 10 seconds (`REQUIRED_CHECKS_POLL_SECONDS=10`) and backs off to 60
+seconds. Set these environment variables on the upload step to override them.
+
+After fixing and rerunning a failed fast check, retry the Buildkite upload step
+or build for the current PR head. A completed gate does not restart automatically
+when a check is rerun; builds for an older head must be replaced with a new build.
 
 ### Trigger strategy
 
@@ -128,7 +158,8 @@ Set **"Rebuild on PR label change"** to `Yes` for label-triggered pipelines so a
    ```
 
 4. Write a `buildkite-pipeline.yml` (the snippet pasted into the Buildkite UI's Steps
-   editor). Use `common_scripts/upload-pipeline.sh` so the test gets path-based skip:
+   editor). Use `common_scripts/upload-pipeline.sh` for path-based skip and the
+   PR check gate:
    ```yaml
    agents:
      queue: "k8s"

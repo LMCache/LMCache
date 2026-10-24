@@ -3,9 +3,8 @@ name: PR Full Build
 # Build all release artifacts (sdist + CUDA wheel, CLI wheel, raw-block Rust
 # module wheels, cu129 wheel, standard ROCm wheel, ROCm torch 2.10 wheel) on
 # PRs carrying the `full` label.
-# The `full` label is added automatically by automerge-labeler.yml when
-# auto-merge is enabled on a code-change PR, so this acts as a pre-merge sanity
-# check that wheels still build.
+# Enabling auto-merge also requests a full build directly: GITHUB_TOKEN label
+# writes from automerge-labeler.yml do not trigger another Actions workflow.
 #
 # No tests, no code-quality checks, no publishing — those are covered by
 # test.yml / code_quality_checks.yml (per-PR) and publish.yml (on merge).
@@ -15,44 +14,55 @@ on:
         branches:
             - dev
             - "release-**"
-        types: [opened, synchronize, reopened, labeled]
+        types: [opened, synchronize, reopened, labeled, auto_merge_enabled]
 
-# Cancel older in-flight runs on the same PR. github.ref is
-# refs/pull/<N>/merge on pull_request events, so each PR gets its own group.
+# Full builds never cancel regular PR CI. An unrelated label must not enter
+# the active full-build group: job-level conditions cannot prevent cancellation.
 concurrency:
-    group: ${{ github.workflow }}-${{ github.ref }}
+    group: pr-full-${{ github.event.action == 'labeled' && github.event.label.name != 'full' && format('ignored-{0}', github.run_id) || github.event.pull_request.number }}
     cancel-in-progress: true
 
 permissions:
     contents: read
 
 jobs:
+    gate:
+        if: >-
+            (github.event.action != 'labeled' || github.event.label.name == 'full') &&
+            (contains(github.event.pull_request.labels.*.name, 'full') || github.event.action == 'auto_merge_enabled')
+        permissions:
+            contents: read
+            checks: read
+            statuses: read
+            pull-requests: read
+        uses: ./.github/workflows/ci_fast_gate.yml
+
     # Each build runs independently — a failure in one does not skip the
     # others, matching publish.yml's isolation model.
 
     build-main:
         name: Build main
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        needs: gate
         uses: ./.github/workflows/build_main_artifacts.yml
 
     build-cli:
         name: Build CLI
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        needs: gate
         uses: ./.github/workflows/build_cli_artifacts.yml
 
     build-raw-block:
         name: Build raw-block Rust module
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        needs: gate
         uses: ./.github/workflows/build_raw_block_artifacts.yml
 
     build-cpu:
         name: Build CPU
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        needs: gate
         uses: ./.github/workflows/build_cpu_artifacts.yml
 
     build-cu129:
         name: Build cu129
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        needs: gate
         uses: ./.github/workflows/build_cu129_artifacts.yml
         # Fork PRs won't expose DOCKERHUB_TOKEN even with `inherit`; the login
         # step in build_cu129_artifacts.yml guards on the token being non-empty.
@@ -61,12 +71,31 @@ jobs:
 
     build-rocm:
         name: Build ROCm
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        needs: gate
         uses: ./.github/workflows/build_rocm_artifacts.yml
         secrets: inherit
 
     build-rocm-torch210:
         name: Build ROCm torch 2.10
-        if: contains(github.event.pull_request.labels.*.name, 'full')
+        needs: gate
         uses: ./.github/workflows/build_rocm_torch210_artifacts.yml
         secrets: inherit
+
+    summary:
+        # Do not emit a successful skipped check with the required name on
+        # unrelated label events; it could hide a failed full build on this SHA.
+        name: ${{ github.event.action == 'labeled' && github.event.label.name != 'full' && 'Ignored full-build event' || 'PR Full Build Summary' }}
+        if: always() && (github.event.action != 'labeled' || github.event.label.name == 'full')
+        needs: [gate, build-main, build-cli, build-raw-block, build-cpu, build-cu129, build-rocm, build-rocm-torch210]
+        runs-on: ubuntu-latest
+        permissions: {}
+        steps:
+            - name: Check full-build admission and results
+              env:
+                  NEEDS: ${{ toJSON(needs) }}
+                  REQUESTED: ${{ contains(github.event.pull_request.labels.*.name, 'full') || github.event.action == 'auto_merge_enabled' }}
+              run: |
+                  jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+                  jq -e --argjson requested "$REQUESTED" '
+                    all(.[]; .result == (if $requested then "success" else "skipped" end))
+                  ' <<<"$NEEDS"

@@ -9,10 +9,10 @@
 # etc.) and none touch .buildkite/, this script:
 #   - Annotates the build with a "skipped" note
 #   - Exits 0 without uploading any further steps → the build is green
-# Otherwise it execs `buildkite-agent pipeline upload <pipeline.yml>`, adding
-# the real test steps to the build.
+# Otherwise PR builds must pass Code Quality and DCO before the real test
+# steps are uploaded. Non-PR builds do not wait for GitHub PR checks.
 #
-# Add a "force-ci" label to the PR on GitHub to bypass the check.
+# The "force-ci" label bypasses path/label skips, not fast-check admission.
 
 set -euo pipefail
 
@@ -49,6 +49,11 @@ if [[ -n "${expensive_pipeline_name}" ]] && \
     exit 0
 fi
 
+# Save the build identity before merge_pr_base_branch changes the checkout.
+if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" && -n "${BUILDKITE_PULL_REQUEST:-}" ]]; then
+    pr_head_sha="$(git rev-parse "${BUILDKITE_COMMIT:?PR build commit is required}^{commit}")"
+fi
+
 merge_pr_base_branch
 
 if [[ "${XPU_CANDIDATE_VALIDATION:-0}" != "1" ]] && should_skip_ci "${PIPELINE_FILE}"; then
@@ -61,6 +66,27 @@ if [[ "${XPU_CANDIDATE_VALIDATION:-0}" != "1" ]] && should_skip_ci "${PIPELINE_F
             || true
     fi
     exit 0
+fi
+
+if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" && -n "${BUILDKITE_PULL_REQUEST:-}" ]]; then
+    # Read the gate from the pipeline's base repository, never the PR checkout.
+    # The wrapper itself remains subject to the agent's existing trust policy.
+    base_branch="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-dev}"
+    repository_url="$(github_https_remote_url "${BUILDKITE_REPO:?Pipeline repository is required}")"
+    repository="${repository_url#https://github.com/}"
+    repository="${repository#http://github.com/}"
+    repository="${repository%.git}"
+    git fetch --no-tags "$repository_url" "refs/heads/${base_branch}"
+    trusted_base_sha="$(git rev-parse FETCH_HEAD)"
+    gate_script="$(mktemp)"
+    trap 'rm -f "$gate_script"' EXIT
+    if ! git show "${trusted_base_sha}:.buildkite/k3_tests/common_scripts/wait-for-required-checks.sh" >"$gate_script"; then
+        echo "ERROR: trusted base has no fast-check gate; land the shared script before enabling admission" >&2
+        exit 1
+    fi
+    bash "$gate_script" "$repository" "$BUILDKITE_PULL_REQUEST" "$pr_head_sha"
+    rm -f "$gate_script"
+    trap - EXIT
 fi
 
 if [[ "${PIPELINE_FILE}" == */xpu/*/pipeline.yml ]]; then

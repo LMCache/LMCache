@@ -1,0 +1,159 @@
+name: PR CI
+
+on:
+  pull_request:
+    branches: [dev, "release-**"]
+    types: [opened, synchronize, reopened]
+
+# Label-driven full builds have their own workflow and concurrency group.
+concurrency:
+  group: pr-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    permissions:
+      contents: read
+      checks: read
+      statuses: read
+      pull-requests: read
+    uses: ./.github/workflows/ci_fast_gate.yml
+
+  changes:
+    name: Select PR checks
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      actionlint: ${{ steps.filter.outputs.actionlint }}
+      azure: ${{ steps.filter.outputs.azure }}
+      aerospike: ${{ steps.filter.outputs.aerospike }}
+      build-cpu: ${{ steps.filter.outputs.build_cpu }}
+      build-cli: ${{ steps.filter.outputs.build_cli }}
+      codeql: ${{ github.base_ref == 'dev' }}
+    steps:
+      # Reusable calls do not apply the callee's event filters. Preserve their
+      # coverage here using picomatch syntax (which differs from GitHub globs).
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            actionlint:
+              - '.github/actions/*.{yml,yaml}'
+              - '.github/workflows/*.{yml,yaml}'
+              - '.github/workflows/actionlint.*'
+            azure:
+              - 'lmcache/v1/storage_backend/connector/azure_connector.py'
+              - 'tests/v1/storage_backend/test_azure_connector.py'
+              - 'tests/v1/storage_backend/test_azure_connector_azurite.py'
+              - '.github/workflows/azure_integration.yml'
+            aerospike:
+              - 'csrc/storage_backends/aerospike/**'
+              - 'lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py'
+              - 'lmcache/v1/storage_backend/native_clients/aerospike_client.py'
+              - 'setup.py'
+              - 'tests/aerospike_ce.conf.template'
+              - 'tests/v1/distributed/test_aerospike_*'
+              - '.github/workflows/aerospike_integration.yml'
+            build_cpu:
+              - 'setup.py'
+              - 'pyproject.toml'
+              - 'csrc/**'
+              - 'requirements/common.txt'
+              - 'requirements/build.txt'
+              - 'lmcache/__init__.py'
+              - '.github/workflows/build_cpu_artifacts.yml'
+              - '.github/actions/build-artifacts/action.yml'
+            build_cli:
+              - 'lmcache/cli/**/*.py'
+              - 'pyproject_cli.toml'
+              - 'requirements/cli.txt'
+              - '.github/workflows/build_cli_artifacts.yml'
+              - '.github/actions/build-artifacts/action.yml'
+
+  test:
+    needs: gate
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/test.yml
+
+  cpu:
+    needs: gate
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/cpu_device.yml
+    secrets:
+      hf_token: ${{ secrets.hf_token }}
+
+  operator:
+    needs: gate
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/operator_ci.yml
+
+  actionlint:
+    needs: [gate, changes]
+    if: needs.changes.outputs.actionlint == 'true'
+    uses: ./.github/workflows/actionlint.yml
+
+  azure:
+    needs: [gate, changes]
+    if: needs.changes.outputs.azure == 'true'
+    uses: ./.github/workflows/azure_integration.yml
+
+  aerospike:
+    needs: [gate, changes]
+    if: needs.changes.outputs.aerospike == 'true'
+    uses: ./.github/workflows/aerospike_integration.yml
+
+  build-cpu:
+    needs: [gate, changes]
+    if: needs.changes.outputs.build-cpu == 'true'
+    uses: ./.github/workflows/build_cpu_artifacts.yml
+
+  build-cli:
+    needs: [gate, changes]
+    if: needs.changes.outputs.build-cli == 'true'
+    uses: ./.github/workflows/build_cli_artifacts.yml
+
+  codeql:
+    needs: [gate, changes]
+    if: needs.changes.outputs.codeql == 'true'
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+      security-events: write
+    uses: ./.github/workflows/codeql.yml
+
+  summary:
+    name: PR CI Summary
+    if: always()
+    needs: [gate, changes, test, cpu, operator, actionlint, azure, aerospike, build-cpu, build-cli, codeql]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Check required and selected jobs
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          # A skipped required job is a failure, even when every dependent
+          # job was skipped too. Optional jobs must match the path decision.
+          jq -e '
+            . as $jobs |
+            all(["gate", "changes", "test", "cpu", "operator"][];
+                $jobs[.].result == "success") and
+            all(["actionlint", "azure", "aerospike", "build-cpu", "build-cli", "codeql"][];
+                . as $name |
+                $jobs.changes.outputs[$name] as $selected |
+                ($selected == "true" or $selected == "false") and
+                $jobs[$name].result ==
+                  (if $selected == "true" then "success" else "skipped" end))
+          ' <<<"$NEEDS"
