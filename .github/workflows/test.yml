@@ -27,7 +27,7 @@ permissions:
 jobs:
   changes:
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pull-requests: read
     outputs:
@@ -73,7 +73,7 @@ jobs:
           - "3.12"
           - "3.13"
         platform:
-          - "ubuntu-latest"
+          - "ubuntu-24.04"
 
     steps:
       - name: "Harden Runner"
@@ -123,7 +123,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.raw_block == 'true'
     name: Rust unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: "Harden Runner"
@@ -149,7 +149,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.raw_block == 'true'
     name: raw-block temp-file tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       LMCACHE_LOG_LEVEL: CRITICAL
 
