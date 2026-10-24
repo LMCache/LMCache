@@ -77,6 +77,8 @@ TTLs must be positive integers. Unknown fields are rejected.
        the device and that the offset is page aligned.
    * - ``GDS``
      - Required ``path``; ``backend`` (``auto``), ``direct_io`` (true).
+       Optional ``io_concurrency`` (0, maximum 4) and ``max_inflight_bytes``
+       (134217728) configure the opt-in concurrent cuFile async path.
        See :doc:`configuration` for backend requirements and location semantics.
 
 The global eviction flags supply defaults. Override them per manager with,

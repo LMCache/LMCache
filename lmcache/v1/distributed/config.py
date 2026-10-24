@@ -428,6 +428,19 @@ class GdsL1Config:
     align_bytes: int = 4096
     """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
 
+    io_concurrency: int = 0
+    """Opt-in concurrent cuFile async slots per process (0 disables, maximum 4)."""
+
+    max_inflight_bytes: int = 128 << 20
+    """Limit in-flight I/O bytes per process and staging bytes per cache context."""
+
+    def __post_init__(self) -> None:
+        """Reject concurrency and byte budgets outside the supported bounds."""
+        if type(self.io_concurrency) is not int or not 0 <= self.io_concurrency <= 4:
+            raise ValueError("GDS io_concurrency must be an integer between 0 and 4")
+        if type(self.max_inflight_bytes) is not int or self.max_inflight_bytes <= 0:
+            raise ValueError("GDS max_inflight_bytes must be a positive integer")
+
 
 @dataclass
 class L1ManagerConfig:
@@ -644,7 +657,12 @@ class GDSL1ManagerConfig(L1ManagerConfig):
             ValueError: A field is unknown, malformed, or incompatible.
         """
         config = _parse_l1_common(
-            cls, values, defaults, read_ttl, write_ttl, {"path", "backend", "direct_io"}
+            cls,
+            values,
+            defaults,
+            read_ttl,
+            write_ttl,
+            {"path", "backend", "direct_io", "io_concurrency", "max_inflight_bytes"},
         )
         if config.memory_config.align_bytes < 4096:
             raise ValueError("GDS align_bytes must be at least 4096")
@@ -657,6 +675,8 @@ class GDSL1ManagerConfig(L1ManagerConfig):
             _l1_bool(values, "direct_io", True),
             backend,
             config.memory_config.align_bytes,
+            cast(int, values.get("io_concurrency", 0)),
+            cast(int, values.get("max_inflight_bytes", 128 << 20)),
         )
         return config
 
@@ -949,6 +969,21 @@ def add_storage_manager_args(
         choices=("auto", *available_backends()),
         help="GDS backend. auto selects the default for this environment.",
     )
+    gds_group.add_argument(
+        "--gds-l1-io-concurrency",
+        type=int,
+        default=0,
+        choices=range(5),
+        help="Opt-in concurrent cuFile async slots, reusing existing staging buffers. "
+        "0 retains the original single-stream path (default); maximum 4.",
+    )
+    gds_group.add_argument(
+        "--gds-l1-max-inflight-bytes",
+        type=int,
+        default=128 << 20,
+        help="Byte budget across in-flight GDS transfers and for each CUDA "
+        "context's staging allocation (default 128 MiB).",
+    )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
         "L1 Manager TTL", "TTL configuration for L1 manager locks"
@@ -1208,6 +1243,8 @@ def parse_args_to_config(
             size_in_bytes=int(args.l1_size_gb * (1 << 30)),
             use_direct_io=args.gds_l1_use_direct_io,
             backend=args.gds_l1_backend,
+            io_concurrency=args.gds_l1_io_concurrency,
+            max_inflight_bytes=args.gds_l1_max_inflight_bytes,
         )
 
     l1_manager_config = L1ManagerConfig(
