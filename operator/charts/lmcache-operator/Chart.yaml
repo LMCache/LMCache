@@ -1,0 +1,13 @@
+apiVersion: v2
+name: lmcache-operator-chart
+description: Kubernetes operator for LMCache multiprocess cache servers
+type: application
+version: 0.5.5
+appVersion: v0.5.5
+home: https://github.com/LMCache/LMCache
+sources:
+  - https://github.com/LMCache/LMCache/tree/dev/operator
+keywords:
+  - lmcache
+  - operator
+  - kv-cache
