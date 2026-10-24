@@ -612,13 +612,19 @@ def _strip_warmup(result: "BenchResult", warmup: int) -> "BenchResult":
     total_rounds = max(1, len(result.round_durations))
     scaled_expected_hit = int(result.expected_hit_count * kept_rounds / total_rounds)
 
+    # Timed-out rounds have no duration entry, so skip only completed warmup rounds.
+    warmup_timeouts = sum(result.round_timed_out[:warmup])
+    warmup_completed = warmup - warmup_timeouts
+
     return BenchResult(
         operation=result.operation,
         in_flight=result.in_flight,
         num_keys=result.num_keys,
         data_size_bytes=result.data_size_bytes,
-        round_durations=result.round_durations[warmup:],
+        round_durations=result.round_durations[warmup_completed:],
         success_counts=result.success_counts[warmup:],
+        timed_out_rounds=result.timed_out_rounds - warmup_timeouts,
+        round_timed_out=result.round_timed_out[warmup:],
         expected_max_hit_rate=result.expected_max_hit_rate,
         expected_hit_count=scaled_expected_hit,
     )
