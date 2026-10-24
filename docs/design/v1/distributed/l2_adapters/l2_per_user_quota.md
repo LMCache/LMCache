@@ -4,6 +4,9 @@ This document describes the per-user quota mechanism for L2 adapters: how
 per-user storage limits are enforced, how user identity propagates through the
 system, and what changes are needed across the codebase.
 
+This feature is supported only in multiprocess (MP) mode; the deprecated
+in-process mode is outside its scope.
+
 ## Motivation
 
 Currently, L2 eviction operates on **aggregate** storage usage. A single
