@@ -25,6 +25,19 @@ logger = init_logger(__name__)
 
 
 class RemoteBackend(StorageBackendInterface):
+    @staticmethod
+    def _per_rank_url(url: str, metadata: LMCacheMetadata) -> str:
+        """Replace "{rank}" in the remote URL with this worker's rank (0 if unset).
+
+        Lets each worker use its own remote instance, e.g.
+        ``resp://valkey-{rank}.ns.svc.cluster.local:6379``, when workers only read
+        and write their own chunks. A URL without "{rank}" is returned unchanged.
+        """
+        if "{rank}" in url:
+            rank = getattr(metadata, "worker_id", None)
+            return url.replace("{rank}", str(rank if rank is not None else 0))
+        return url
+
     def __init__(
         self,
         config: LMCacheEngineConfig,
@@ -51,7 +64,7 @@ class RemoteBackend(StorageBackendInterface):
                 raise ValueError(
                     "remote_url must be provided when not using plugin_name"
                 )
-            self.remote_url = config.remote_url
+            self.remote_url = self._per_rank_url(config.remote_url, metadata)
 
         self.local_cpu_backend = local_cpu_backend
 
@@ -140,7 +153,7 @@ class RemoteBackend(StorageBackendInterface):
                     raise ValueError(
                         "remote_url must be provided when not using plugin_name"
                     )
-                url = self.config.remote_url
+                url = self._per_rank_url(self.config.remote_url, self.metadata)
 
             self.connection = CreateConnector(
                 url,
