@@ -178,8 +178,8 @@ eviction-trigger-watermark = 0.95
 eviction-ratio = 0.05
 l2-prefetch-policy = "retain"
 # One GPU and one CPU worker by default: all TP ranks' stores and loads queue
-# on a single thread.
-max-workers = 4
+# on a single thread. One worker per TP8 rank, so none shares a slot.
+max-workers = 8
 
 [deployments.vllm_lmcache.services.args.l2-adapter]
 type = "fs_native"
@@ -224,8 +224,8 @@ eviction-trigger-watermark = 0.95
 eviction-ratio = 0.05
 l2-prefetch-policy = "retain"
 # One GPU and one CPU worker by default: all TP ranks' stores and loads queue
-# on a single thread.
-max-workers = 4
+# on a single thread. One worker per TP8 rank, so none shares a slot.
+max-workers = 8
 
 [deployments.vllm_lmcache_ssm.services.args.l2-adapter]
 type = "fs_native"
