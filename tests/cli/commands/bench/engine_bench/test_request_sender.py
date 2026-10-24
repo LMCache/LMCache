@@ -221,15 +221,21 @@ class TestRequestSenderSendRequest:
         )
 
         sender = RequestSender("http://localhost:8000", "test-model")
-        result = await sender.send_request("req_0", [{"role": "user", "content": "Hi"}])
+        with patch(
+            "lmcache.cli.commands.bench.engine_bench.request_sender.time",
+        ) as mock_time:
+            mock_time.time.side_effect = [1.0, 2.0, 3.0, 4.0]
+            result = await sender.send_request(
+                "req_0", [{"role": "user", "content": "Hi"}]
+            )
 
         assert result.successful is True
         assert result.error == ""
-        assert result.ttft > 0
-        assert result.request_latency > 0
+        assert result.ttft == 2.0
+        assert result.request_latency == 3.0
         assert result.num_input_tokens == 100
         assert result.num_output_tokens == 2
-        assert result.decode_speed > 0
+        assert result.decode_speed == 2.0
         assert result.submit_time < result.first_token_time < result.finish_time
 
     @pytest.mark.asyncio
