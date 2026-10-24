@@ -10,6 +10,10 @@ cached KV, decode), which are encoded as different requests.
 `LMCacheRequestStream` binds all inference passes belonging to one request
 instead of leaving the management to the user.
 
+Asynchronous decode-time edits should additionally use the
+[generation-fenced drop lifecycle](drop_lifecycle.md) so aborts, request-ID
+reuse, delayed completions, and accepted-token boundaries fail closed.
+
 ```py
 import lmcache.sdk as lmc_sdk
 
