@@ -111,8 +111,10 @@ Options
        ``--coordinator-kafka-topic`` (default: ``lmcache-cache-events``).
        Ignored unless ``--event-transport kafka``.
    * - ``--kafka-group-id GROUP``
-     - Consumer group whose committed offsets a restart resumes from
-       (default: ``lmcache-coordinator``). Ignored unless
+     - Consumer group the coordinator joins, which decides how partitions
+       are shared between members (default: ``lmcache-coordinator``). Where
+       a restart *resumes* comes from the checkpoint, not the group; with
+       no checkpoint it reads the whole retained stream. Ignored unless
        ``--event-transport kafka``.
 
 Configuration
