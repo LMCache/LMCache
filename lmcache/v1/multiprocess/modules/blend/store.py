@@ -4,6 +4,7 @@
 # Standard
 from queue import Empty as QueueEmpty
 from typing import TYPE_CHECKING, Any
+import time
 
 if TYPE_CHECKING:
     # Standard
@@ -33,10 +34,17 @@ logger = init_logger(__name__)
 #: Dispatcher kind for stream-ordered fingerprint enqueues.
 CB_FINGERPRINTS_KIND = "cb_fingerprints"
 
+#: Dispatcher kind for the stream-ordered "store landed" mark: the last
+#: callback a store submits, so it runs after the store's L1 commit and
+#: fingerprint enqueue. Payload: the store's landing sequence number.
+CB_STORE_LANDED_KIND = "cb_store_landed"
+
 #: One fingerprint-registration job:
 #: (tokens_in_range, chunk_hashes, start_chunk_idx, position_offset,
-#: request_id). Also the msgspec decode type for the dispatcher payload.
-FpJob = tuple[list[int], list[bytes], int, int, str]
+#: request_id, store_seq). ``store_seq`` is the landing sequence number of
+#: the store that produced it. Also the msgspec decode type for the
+#: dispatcher payload.
+FpJob = tuple[list[int], list[bytes], int, int, str, int]
 
 
 class StoreMixin:
@@ -54,6 +62,11 @@ class StoreMixin:
         _pending_fp_hashes: set[bytes]
         _pending_fp_lock: "threading.Lock"
         _prompt_store: Any
+        _store_landing_lock: "threading.Lock"
+        _store_seq: int
+        _unlanded_stores: dict[int, int]
+        _cb_landing_tickets: dict[str, tuple[int, float]]
+        _STORE_VISIBILITY_TIMEOUT_S: float
 
     @request_handler(
         HandlerType.BLOCKING,
@@ -73,10 +86,35 @@ class StoreMixin:
         registration ordered after the L1 commit. Fingerprint failures are
         logged, never raised — they do not affect store correctness.
 
+        The store holds a landing sequence number from before the KV write
+        until its L1 commit has run and its fingerprints are indexed; a blend
+        lookup that arrives meanwhile waits for it (``_stores_landed_before``)
+        instead of missing content this store already acknowledged.
+
         Returns:
             The underlying ``LMCacheDrivenTransfer.store`` result
             (event handle, success).
         """
+        seq = self._open_store_landing()
+        handle = b""
+        try:
+            handle, store_ok = self._store_and_enqueue_fingerprints(
+                key, instance_id, gpu_block_ids, event_ipc_handle, seq
+            )
+            return handle, store_ok
+        finally:
+            self._close_store_landing(seq, instance_id if handle else None)
+
+    def _store_and_enqueue_fingerprints(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+        seq: int,
+    ) -> tuple[bytes, bool]:
+        """The KV write plus the fingerprint enqueue of :meth:`store`; each
+        enqueued job holds one part of the store's landing ``seq``."""
         handle, store_ok, stored_mask = self._transfer_module.store_with_chunk_mask(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
@@ -136,6 +174,7 @@ class StoreMixin:
                             run_sci,
                             key.start + run_start * chunk_size,
                             key.request_id,
+                            seq,
                         )
                     )
                 run_start = None
@@ -143,17 +182,23 @@ class StoreMixin:
                 return result
 
             with self._pending_fp_lock:
-                for _, hashes, sci, _, _ in jobs:
+                for _, hashes, sci, _, _, _ in jobs:
                     self._pending_fp_hashes.update(hashes[sci:])
             entry = self._transfer_module.get_and_touch_context_entry(instance_id)
             gpu_ctx = entry.cache_context if entry is not None else None
             for job in jobs:
-                if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
-                    submit_callback_to_stream(
-                        gpu_ctx.cupy_stream, CB_FINGERPRINTS_KIND, job
-                    )
-                else:
-                    self._fingerprint_queue.put_nowait(job)
+                # Held before the job can run; released once it is indexed.
+                self._hold_store_landing(seq)
+                try:
+                    if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
+                        submit_callback_to_stream(
+                            gpu_ctx.cupy_stream, CB_FINGERPRINTS_KIND, job
+                        )
+                    else:
+                        self._fingerprint_queue.put_nowait(job)
+                except Exception:
+                    self._release_store_landing(seq)
+                    raise
         except Exception:
             logger.exception(
                 "CB fingerprint enqueue failed for request %s "
@@ -189,7 +234,14 @@ class StoreMixin:
                 job = self._fingerprint_queue.get_nowait()
             except QueueEmpty:
                 break
-            tokens_in_range, chunk_hashes, start_chunk_idx, position_offset, rid = job
+            (
+                tokens_in_range,
+                chunk_hashes,
+                start_chunk_idx,
+                position_offset,
+                rid,
+                store_seq,
+            ) = job
             try:
                 n_new = self._token_range_matcher.on_new_token_hashes(
                     tokens_in_range,
@@ -200,6 +252,8 @@ class StoreMixin:
                 self._emit_fingerprints_registered(rid, n_new)
             except Exception:
                 logger.exception("CB fingerprint registration failed (sync drain)")
+            finally:
+                self._release_store_landing(store_seq)
 
     def _emit_fingerprints_registered(self, rid: str, num_chunks: int) -> None:
         """Publish CB_FINGERPRINTS_REGISTERED for one drained registration job.
@@ -230,7 +284,14 @@ class StoreMixin:
                 job = self._fingerprint_queue.get(timeout=0.1)
             except QueueEmpty:
                 continue
-            tokens_in_range, chunk_hashes, start_chunk_idx, position_offset, rid = job
+            (
+                tokens_in_range,
+                chunk_hashes,
+                start_chunk_idx,
+                position_offset,
+                rid,
+                store_seq,
+            ) = job
             try:
                 n_new = self._token_range_matcher.on_new_token_hashes(
                     tokens_in_range,
@@ -246,3 +307,100 @@ class StoreMixin:
                     self._pending_fp_hashes.difference_update(
                         chunk_hashes[start_chunk_idx:]
                     )
+                self._release_store_landing(store_seq)
+
+    # ------------------------------------------------------------------
+    # Store landing: a lookup sees every store acknowledged before it
+    # ------------------------------------------------------------------
+
+    def _open_store_landing(self) -> int:
+        """Take a landing sequence number for a store that is starting.
+
+        It holds one part, released by :meth:`_close_store_landing`'s
+        stream-ordered mark (or at once when no device work was submitted);
+        each fingerprint job adds a part, released once the job is indexed.
+        """
+        with self._store_landing_lock:
+            self._store_seq += 1
+            seq = self._store_seq
+            self._unlanded_stores[seq] = 1
+        return seq
+
+    def _hold_store_landing(self, seq: int) -> None:
+        """Add one outstanding part to the landing of store ``seq``."""
+        with self._store_landing_lock:
+            self._unlanded_stores[seq] += 1
+
+    def _release_store_landing(self, seq: int) -> None:
+        """Release one part of store ``seq``; it lands at zero parts.
+        Also the dispatcher handler for ``CB_STORE_LANDED_KIND``."""
+        with self._store_landing_lock:
+            parts = self._unlanded_stores.get(seq)
+            if parts is None:
+                return
+            if parts <= 1:
+                del self._unlanded_stores[seq]
+            else:
+                self._unlanded_stores[seq] = parts - 1
+
+    def _close_store_landing(self, seq: int, instance_id: int | None) -> None:
+        """Release the store's own landing part after its device work.
+
+        With device work (``instance_id`` set) the release is a callback
+        submitted last on the GPU context's stream, so it runs after the
+        store's L1 commit (``finish_write_by_owner``) and its fingerprint
+        enqueue. Otherwise, or if the callback cannot be submitted, the part
+        is released now. Never raises.
+        """
+        stream = None
+        if instance_id is not None:
+            entry = self._transfer_module.get_and_touch_context_entry(instance_id)
+            if entry is not None:
+                stream = entry.cache_context.cupy_stream
+        if stream is not None:
+            try:
+                submit_callback_to_stream(stream, CB_STORE_LANDED_KIND, seq)
+                return
+            except Exception:
+                logger.exception("CB store landing mark failed for store %d", seq)
+        self._release_store_landing(seq)
+
+    def _stores_landed_before(self, rid: str) -> bool:
+        """Whether every store acknowledged before lookup ``rid`` arrived
+        has landed: L1-committed on every rank and fingerprint-indexed.
+
+        The first call fixes the lookup's ticket (the newest store sequence
+        number) so later stores never delay it. Queued fingerprint jobs are
+        indexed here rather than waiting for the background drainer. Past
+        ``_STORE_VISIBILITY_TIMEOUT_S`` the lookup proceeds without them.
+
+        Returns:
+            ``True`` when the lookup may run, ``False`` to defer (the client
+            re-polls).
+        """
+        self._drain_fingerprints_sync()
+        now = time.monotonic()
+        with self._store_landing_lock:
+            ticket = self._cb_landing_tickets.pop(rid, None)
+            if ticket is None:
+                ticket = (self._store_seq, now + self._STORE_VISIBILITY_TIMEOUT_S)
+            seq, deadline = ticket
+            waiting = sum(1 for s in self._unlanded_stores if s <= seq)
+            if waiting == 0:
+                return True
+            if now < deadline:
+                # Drop tickets of lookups that stopped polling (aborted).
+                for stale in [
+                    r for r, (_, d) in self._cb_landing_tickets.items() if d < now
+                ]:
+                    del self._cb_landing_tickets[stale]
+                self._cb_landing_tickets[rid] = ticket
+                return False
+        logger.warning(
+            "CB lookup %s: %d earlier store(s) not indexed after %.1f s; "
+            "looking up without them",
+            rid,
+            waiting,
+            self._STORE_VISIBILITY_TIMEOUT_S,
+        )
+        return True

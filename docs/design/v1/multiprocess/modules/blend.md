@@ -90,6 +90,10 @@ success)`**
   (`submit_callback_to_stream`, kind `"cb_fingerprints"`) — stream-ordered
   after the L1 commit, so a fingerprint becomes matchable only once its
   chunk is readable. Fingerprint failures are logged, never raised.
+- Side effect (every worker): the store holds a landing sequence number
+  from before its KV write until its L1 commit has run (a last
+  stream-ordered callback, kind `"cb_store_landed"`) and, on worker 0, its
+  fingerprint jobs are indexed. See "Store landing" below.
 - Side effect (reorder enabled, worker 0, a store that committed KV): the
   request's prompt is recorded in the `PromptStore` (below).
 
@@ -101,7 +105,9 @@ until every leg is resident.
 
 ```mermaid
 stateDiagram-v2
-  [*] --> PrefixPending: 1st call — submit prefix prefetch + local match / coordinator query
+  [*] --> Landing: 1st call — ticket = newest store landing seq
+  Landing --> Landing: a store with seq ≤ ticket has not landed, before the deadline → None
+  Landing --> PrefixPending: stores landed (or deadline) — submit prefix prefetch + local match / coordinator query
   PrefixPending --> PrefixPending: not resident → None
   PrefixPending --> Reconcile: prefix_chunks (+ retained set if SEGMENTED_PREFIX)
   Reconcile --> CoordPending: coordinator PENDING, before deadline → None
@@ -125,6 +131,28 @@ and takes a stale strike (evicted from the matcher at the strike threshold);
 the rest of the request proceeds. The found set's object keys are stashed in
 `Session.extras` for the retrieve; whatever no retrieve consumes is released
 by the session-destroy listener.
+
+### Store landing
+
+The STORE RPC returns once its device work is enqueued; the L1 commit
+(`finish_write_by_owner`) and the fingerprint enqueue run later as
+stream-ordered callbacks, and a fingerprint is indexed later still, on the
+`cb-fingerprint-worker` thread. The client does not wait for any of it: the
+request's response goes out, and the next request's lookup can arrive while
+the store is still in flight. Looked up then, the store's chunks are not in
+the matcher (or not readable in L1 on every rank), and the lookup reports no
+reuse for content the server already acknowledged.
+
+So every store takes a landing sequence number before its KV write and holds
+it until it lands: its own last stream callback has run (after the L1
+commit and fingerprint enqueue, on every rank's stream) and each of its
+fingerprint jobs is indexed. A lookup's first call fixes a ticket (the newest
+sequence number) and defers, returning `None`, while any store at or below
+the ticket has not landed; it indexes queued fingerprint jobs itself
+meanwhile. Stores acknowledged after the ticket never delay it. The wait is
+bounded by `_STORE_VISIBILITY_TIMEOUT_S` (5 s), after which the lookup runs
+without the missing stores and logs a warning. A store that submits no
+device work releases its sequence number at once.
 
 ## Retrieve (plan-then-execute, all-or-nothing)
 
