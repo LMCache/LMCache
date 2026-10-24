@@ -3,7 +3,7 @@
 
 # Standard
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TypedDict
 import threading
 
@@ -14,6 +14,7 @@ from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
+    RankGroupLayouts,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
@@ -44,6 +45,10 @@ class _LayoutDescEntry:
     order. Defaults to a single full-attention group."""
     group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
     """Per-group layout descriptors, or ``None`` if all share ``layout_desc``."""
+    rank_groups: dict[int, RankGroupLayouts] = field(default_factory=dict)
+    """The object groups each worker id registered on its own."""
+    rank_ref_counts: dict[int, int] = field(default_factory=dict)
+    """Active registrations per worker id in ``rank_groups``."""
 
 
 class LayoutDescRegistry:
@@ -54,6 +59,12 @@ class LayoutDescRegistry:
     for prefetch tasks. Multiple worker instances can share the same
     ``(model_name, world_size)`` entry, so the registry keeps the descriptor
     until the last matching registration is unregistered.
+
+    The pair-wide descriptor is the latest registration's. A worker that
+    registers with its worker id is also kept apart, because the ranks of one
+    model need not store the same object groups: under pipeline parallelism
+    each stage registers only its own layers' KV caches. Lookups read those
+    per-rank groups so that no rank is asked for a group it never stores.
     """
 
     def __init__(self) -> None:
@@ -68,6 +79,7 @@ class LayoutDescRegistry:
         layout_desc: MemoryLayoutDesc,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
+        worker_id: int | None = None,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -84,6 +96,10 @@ class LayoutDescRegistry:
                 (each group is a separate keyed allocation); ``None`` derives
                 one entry per object group in ``attn_desc``, all sharing
                 ``layout_desc``.
+            worker_id: The registering worker's id within ``world_size`` (the
+                ``worker_id`` its store keys carry). When given, these groups
+                are also kept as that rank's own; see
+                :meth:`find_rank_group_layouts`.
         """
         key = (model_name, world_size)
         attn_desc = replace(attn_desc, world_size=world_size)
@@ -94,20 +110,29 @@ class LayoutDescRegistry:
         with self._lock:
             entry = self._registry.get(key)
             if entry is None:
-                self._registry[key] = _LayoutDescEntry(
+                entry = _LayoutDescEntry(
                     layout_desc=layout_desc,
                     ref_count=1,
                     attn_desc=attn_desc,
                     group_layout_descs=group_layout_descs,
                 )
-                return
+                self._registry[key] = entry
+            else:
+                entry.layout_desc = layout_desc
+                entry.attn_desc = attn_desc
+                entry.group_layout_descs = group_layout_descs
+                entry.ref_count += 1
+            if worker_id is not None:
+                entry.rank_groups[worker_id] = RankGroupLayouts(
+                    attn_desc=attn_desc, group_layout_descs=group_layout_descs
+                )
+                entry.rank_ref_counts[worker_id] = (
+                    entry.rank_ref_counts.get(worker_id, 0) + 1
+                )
 
-            entry.layout_desc = layout_desc
-            entry.attn_desc = attn_desc
-            entry.group_layout_descs = group_layout_descs
-            entry.ref_count += 1
-
-    def unregister(self, model_name: str, world_size: int) -> None:
+    def unregister(
+        self, model_name: str, world_size: int, worker_id: int | None = None
+    ) -> None:
         """Unregister one layout descriptor registration for a pair.
 
         The descriptor is removed only when the last active registration for
@@ -116,12 +141,20 @@ class LayoutDescRegistry:
         Args:
             model_name: The model name.
             world_size: The world size.
+            worker_id: The worker id the registration was made with, if any;
+                its own groups go with its last registration.
         """
         key = (model_name, world_size)
         with self._lock:
             entry = self._registry.get(key)
             if entry is None:
                 return
+
+            if worker_id is not None and worker_id in entry.rank_ref_counts:
+                entry.rank_ref_counts[worker_id] -= 1
+                if entry.rank_ref_counts[worker_id] <= 0:
+                    del entry.rank_ref_counts[worker_id]
+                    del entry.rank_groups[worker_id]
 
             if entry.ref_count <= 1:
                 self._registry.pop(key)
@@ -154,6 +187,25 @@ class LayoutDescRegistry:
             if entry is None:
                 return None
             return entry.group_layout_descs
+
+    def find_rank_group_layouts(
+        self, model_name: str, world_size: int
+    ) -> dict[int, RankGroupLayouts]:
+        """Look up the object groups each worker registered on its own.
+
+        Args:
+            model_name: The model name.
+            world_size: The world size.
+
+        Returns:
+            Worker id to that rank's groups, for every worker that registered
+            with its id; empty if none did or the pair is not registered.
+        """
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None:
+                return {}
+            return dict(entry.rank_groups)
 
     def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
         """Look up the attention-window descriptor for a pair.

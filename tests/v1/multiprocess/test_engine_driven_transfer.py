@@ -1816,6 +1816,71 @@ def test_register_multigroup_registers_group_windows_and_kinds(
     assert response.null_block_id == 7
 
 
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)], ids=["stage0-first", "stage0-last"])
+def test_register_keeps_each_pipeline_stages_own_groups(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+    order: tuple[int, int],
+) -> None:
+    """Pipeline stages of one model register different object groups: stage 0
+    holds only dense layers (one K/V cache), stage 1 also a sparse layer's
+    indexer cache. Whichever registers last owns the registration-wide desc,
+    so each rank's own groups are kept apart by its worker id, and leave with
+    that rank's registration."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import (
+        GroupLayout,
+        RegisterEngineDrivenContextPayload,
+    )
+
+    module, _, _, ctx = server_module_factory(chunk_size=16)
+
+    def _group() -> GroupLayout:
+        return GroupLayout(
+            num_layers=1, hidden_dim_size=16, dtype_str="float32", tokens_per_block=4
+        )
+
+    payloads = {
+        # Stage 0: a single group, registered the legacy single-group way.
+        0: RegisterEngineDrivenContextPayload(
+            instance_id=10,
+            model_name="m",
+            world_size=2,
+            block_size=4,
+            num_layers=2,
+            hidden_dim_size=16,
+            dtype_str="float32",
+            use_mla=False,
+            worker_id=0,
+        ),
+        # Stage 1: K/V plus the indexer cache.
+        1: RegisterEngineDrivenContextPayload(
+            instance_id=11,
+            model_name="m",
+            world_size=2,
+            block_size=4,
+            num_layers=2,
+            hidden_dim_size=16,
+            dtype_str="float32",
+            use_mla=False,
+            group_layouts=[_group(), _group()],
+            worker_id=1,
+        ),
+    }
+    for worker_id in order:
+        module.register_kv_cache_engine_driven_context(payloads[worker_id])
+
+    rank_groups = ctx.layout_desc_registry.find_rank_group_layouts("m", 2)
+    assert {w: own.attn_desc.num_object_groups for w, own in rank_groups.items()} == {
+        0: 1,
+        1: 2,
+    }
+
+    module.unregister_kv_cache(11)
+
+    assert set(ctx.layout_desc_registry.find_rank_group_layouts("m", 2)) == {0}
+
+
 @pytest.mark.parametrize(
     ("use_mla", "kv_sizes", "expected_planes"),
     [

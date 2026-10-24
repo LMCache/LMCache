@@ -98,6 +98,7 @@ class PrefetchService:
                 cache_salt,
                 group_layout_descs,
                 attn_desc,
+                rank_groups=registry.find_rank_group_layouts(model_name, world_size),
             )
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None
