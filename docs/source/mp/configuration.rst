@@ -693,6 +693,13 @@ Source: ``lmcache/v1/distributed/config.py``
      - (none)
      - Deprecated and ignored; prefetch admission follows
        ``--l2-prefetch-inflight-watermark``.  Logs a warning when set.
+   * - ``--l2-prefetch-load-admission-wait-seconds``
+     - ``0``
+     - Maximum capacity-retry wait after L2 lookup when other writers hold
+       L1 staging buffers. Zero disables retries. Partial reservations are
+       released while waiting; oversized plans and contended keys do not
+       wait. This does not time out submitted L2 I/O. Keep this budget below
+       the RPC timeout and cache-lock lifetimes.
    * - ``--periodic-notifier-interval-ms``
      - ``5``
      - Interval in milliseconds for the periodic event notifier

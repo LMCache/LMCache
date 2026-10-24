@@ -58,7 +58,8 @@ leaves nothing behind.
 
 ```python
 PrefetchController(l1_managers, l1_manager_descriptors,
-                   l2_adapters, adapter_descriptors, policy, inflight_watermark=0.5)
+                   l2_adapters, adapter_descriptors, policy,
+                   inflight_watermark=0.5, load_admission_wait_seconds=0.0)
 
 submit_prefetch_request(spec: PrefetchTaskSpec) -> PrefetchRequestId
 query_prefetch_result(request_id) -> PrefetchResult | None   # consume-once
@@ -110,6 +111,34 @@ request from starting when L1, full of resident data, could not hold its loads.
 The check runs at the end of every loop iteration, so a completed load (which
 wakes the loop) admits the next requests immediately. Staging held only by
 stores is re-checked at the poll timeout (500 ms) at the latest.
+
+### Post-plan staging pressure
+
+`load_admission_wait_seconds` (default 0) optionally retries reservations that
+fail after lookup because another writer holds L1 staging buffers. Every
+failing manager must report only OOM, have staging owned by other requests,
+and have enough free plus staging bytes for the aligned load plan. Contended
+keys and plans that cannot fit after staging is released fall back immediately.
+
+Before entering `WAIT_LOAD`, the request releases all partial reservations.
+It keeps its original L1 read-lock snapshot and the planned L2 locks, but no
+adapter I/O has been submitted. The first failed attempt starts an absolute
+per-request deadline; retries never extend it. The loop checks capacity every
+10 ms, or when adapter events wake it. At expiry it
+uses the ordinary partial-reservation fallback. New pending requests remain
+FIFO and do not start ahead of a waiting load.
+
+A key that becomes resident during the wait is not added to the L1 snapshot.
+Its write reservation is contended, so the existing replan/fallback applies;
+the controller never claims an L1 hit without a read reservation. Draining an
+adapter drops its planned locks; stopping releases waiting locks and buffers
+through the existing cleanup path.
+
+This budget covers capacity retries only. It neither cancels nor times out
+submitted I/O, and does not replace an overall request deadline. Deployments
+must keep it below their RPC and lock-lifetime budgets. Integration with the
+separate whole-request deadline and borrowed-buffer lifecycle work is still
+required before combining those changes.
 
 Example: a 16 GiB L1 with the default 0.5 watermark (an 8 GiB budget) and
 requests of 288 MiB (2048 tokens of Qwen3-8B KV). 28 requests stage 7.9 GiB,

@@ -21,8 +21,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import enum
 import itertools
+import math
 import select
 import threading
+import time
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -151,6 +153,17 @@ def _gather_keys(
     return ret
 
 
+def _get_selected_load_bytes(
+    key_groups: list[GroupedObjectKeys], cells: Bitmap2D, alignment: int
+) -> int:
+    """Return aligned allocation bytes for the selected cells in each row."""
+    total = 0
+    for group, row in zip(key_groups, cells, strict=True):
+        size = get_size_bytes(group.layout_desc.shapes, group.layout_desc.dtypes)
+        total += row.popcount() * ((size + alignment - 1) // alignment * alignment)
+    return total
+
+
 def _scatter_bitmaps(
     global_indices: Bitmap2D,
     local_bitmap: Bitmap,
@@ -243,7 +256,7 @@ def _reserve_l1_cells(
     cells: Bitmap2D,
     retain: dict[ObjectKey, bool],
     tag: str,
-) -> tuple[Bitmap2D, dict[ObjectKey, "MemoryObj"], int]:
+) -> tuple[Bitmap2D, dict[ObjectKey, "MemoryObj"], dict[L1Error, list[ObjectKey]]]:
     """Reserve a staging buffer in one L1 manager for every cell in ``cells``.
 
     Each row is reserved with its own key group's layout.
@@ -258,15 +271,11 @@ def _reserve_l1_cells(
         tag: The writer tag for the reservations.
 
     Returns:
-        The tuple of (L1 reserve result, reserved objects, failed count).
-        The failed count is the number of cells that were not reserved for
-        any reason.
+        Successful cells, their buffers, and failed keys grouped by error.
     """
     success = cells.zeros_like()
     objs: dict[ObjectKey, "MemoryObj"] = {}
-    failed_count = 0
-    oom_keys: list[ObjectKey] = []
-    contended_keys: list[ObjectKey] = []
+    failures: dict[L1Error, list[ObjectKey]] = defaultdict(list)
     for row_id, (group, row) in enumerate(zip(key_groups, cells, strict=True)):
         cols = row.get_indices_list()
         if not cols:
@@ -281,11 +290,7 @@ def _reserve_l1_cells(
         for col, key in zip(cols, keys, strict=True):
             error, mem_obj = results[key]
             if error != L1Error.SUCCESS or mem_obj is None:
-                failed_count += 1
-                if error == L1Error.OUT_OF_MEMORY:
-                    oom_keys.append(key)
-                elif error == L1Error.KEY_NOT_WRITABLE:
-                    contended_keys.append(key)
+                failures[error].append(key)
                 logger.debug(
                     "reserve_write failed for %s in row %d: %s", key, row_id, error
                 )
@@ -293,30 +298,7 @@ def _reserve_l1_cells(
             success[row_id].set(col)
             objs[key] = mem_obj
 
-    event_bus = get_event_bus()
-    if oom_keys:
-        logger.warning(
-            "%s: %d L1 reservations failed with out-of-memory; "
-            "L1 may be under memory pressure",
-            tag,
-            len(oom_keys),
-        )
-        event_bus.publish(
-            Event(
-                event_type=EventType.L2_PREFETCH_FAILED,
-                metadata={"reason": "l1_oom", "keys": oom_keys},
-            )
-        )
-    if contended_keys:
-        # The key became resident in L1 after the lock pass; the caller
-        # falls back to the L1-only hit.
-        event_bus.publish(
-            Event(
-                event_type=EventType.L2_PREFETCH_FAILED,
-                metadata={"reason": "l1_contended", "keys": contended_keys},
-            )
-        )
-    return success, objs, failed_count
+    return success, objs, dict(failures)
 
 
 def _tags_allowed(tags: MemoryTags, allowed: frozenset[MemoryTags] | None) -> bool:
@@ -369,6 +351,7 @@ class PrefetchKeyState:
 
 class PrefetchPhase(enum.Enum):
     LOOKUP = enum.auto()
+    WAIT_LOAD = enum.auto()
     PLAN_AND_LOAD = enum.auto()
 
 
@@ -408,6 +391,10 @@ class InFlightPrefetchRequest:
     # first load result is admitted.
     l2_loaded_cells: Bitmap2D = field(default_factory=lambda: Bitmap2D([]))
 
+    # Fixed at the first capacity wait; retries never extend the deadline.
+    load_wait_deadline: float = 0.0
+    waiting_for_memory: bool = False
+
     # private fields
     _flattened_keys: list[ObjectKey] = field(init=False, repr=False)
     _max_load_bytes: int = field(init=False, repr=False)
@@ -433,10 +420,11 @@ class InFlightPrefetchRequest:
 
     @property
     def phase(self) -> PrefetchPhase:
-        """The request's phase: lookup while any L2 lookup task is
-        outstanding, plan-and-load afterwards."""
+        """Lookup while tasks are outstanding, capacity wait, or plan-and-load."""
         if self.inflight_lookup_tasks:
             return PrefetchPhase.LOOKUP
+        if self.waiting_for_memory:
+            return PrefetchPhase.WAIT_LOAD
         return PrefetchPhase.PLAN_AND_LOAD
 
     def all_lookups_done(self) -> bool:
@@ -461,7 +449,8 @@ class PrefetchController(StorageControllerInterface):
     3. Plans which cells to serve from L1 and which to load from L2, and
        releases every lock outside the plan.
     4. Reserves L1 staging buffers for the L2 plan; on reservation failures
-       it drops the affected L2 locks and re-plans on what is reserved.
+       it optionally waits for temporary staging pressure to clear, then
+       drops the affected L2 locks and re-plans on what is reserved.
     5. Submits one load task per L2 adapter.
     6. As each load task completes, admits the loaded objects into L1 as
        read-locked, deletes the buffers of failed loads, and returns that
@@ -478,6 +467,8 @@ class PrefetchController(StorageControllerInterface):
         inflight_watermark: Fraction of an L1 manager's capacity that
             in-flight prefetch requests may stage before new requests wait,
             in ``(0, 1]``.
+        load_admission_wait_seconds: Maximum wait after a staging reservation
+            fails under temporary write pressure. Zero disables retries.
     """
 
     # Singleton dispatch for the in-flight load gauges: tests may construct
@@ -495,7 +486,15 @@ class PrefetchController(StorageControllerInterface):
         adapter_descriptors: list[L2AdapterDescriptor],
         policy: PrefetchPolicy,
         inflight_watermark: float = 0.5,
+        load_admission_wait_seconds: float = 0.0,
     ) -> None:
+        if (
+            not math.isfinite(load_admission_wait_seconds)
+            or load_admission_wait_seconds < 0
+        ):
+            raise ValueError(
+                "load_admission_wait_seconds must be finite and non-negative"
+            )
         self._l1_managers: dict[int, L1ManagerInterface] = {
             desc.index: mgr
             for desc, mgr in zip(l1_manager_descriptors, l1_managers, strict=True)
@@ -518,6 +517,7 @@ class PrefetchController(StorageControllerInterface):
         }
 
         self._inflight_watermark = inflight_watermark
+        self._load_admission_wait_seconds = load_admission_wait_seconds
 
         # Adapters being removed: adapter id -> event set once detached.
         self._draining: dict[int, threading.Event] = {}
@@ -700,6 +700,7 @@ class PrefetchController(StorageControllerInterface):
         lookup_phase_count = sum(
             1 for request in in_flight if request.phase == PrefetchPhase.LOOKUP
         )
+        waiting_count = sum(request.waiting_for_memory for request in in_flight)
         return {
             "is_healthy": is_healthy,
             "thread_alive": is_healthy,
@@ -708,7 +709,8 @@ class PrefetchController(StorageControllerInterface):
             "pending_queue_size": len(self._pending_queue),
             "in_flight_request_count": len(in_flight),
             "lookup_phase_count": lookup_phase_count,
-            "load_phase_count": len(in_flight) - lookup_phase_count,
+            "load_phase_count": len(in_flight) - lookup_phase_count - waiting_count,
+            "waiting_load_count": waiting_count,
             "completed_results_count": completed_results_count,
             "num_l2_adapters": len(self._l2_adapters),
             "num_active_adapters": len(self._l2_adapters) - len(self._draining),
@@ -882,7 +884,10 @@ class PrefetchController(StorageControllerInterface):
             # First, apply runtime add/remove of the L2 adapters.
             self._apply_pending_adapter_ops(poller)
 
-            ready = poller.poll(PREFETCH_LOOP_POLL_TIMEOUT_MS)
+            waiting = any(
+                r.waiting_for_memory for r in self._in_flight_requests.values()
+            )
+            ready = poller.poll(10 if waiting else PREFETCH_LOOP_POLL_TIMEOUT_MS)
 
             signaled_adapters: dict[PrefetchPhase, set[int]] = {
                 phase: set() for phase in PrefetchPhase
@@ -913,7 +918,7 @@ class PrefetchController(StorageControllerInterface):
                         fd,
                     )
 
-            if any(signaled_adapters.values()):
+            if any(signaled_adapters.values()) or waiting:
                 for request in list(self._in_flight_requests.values()):
                     try:
                         self._advance_request(request, signaled_adapters)
@@ -945,9 +950,20 @@ class PrefetchController(StorageControllerInterface):
         the request's current phase via the per-phase helper, then trigger
         the phase transition when done."""
         phase_adapters = signaled_adapters[request.phase]
-        if not phase_adapters:
+        if request.phase == PrefetchPhase.WAIT_LOAD:
+            if (
+                time.monotonic() < request.load_wait_deadline
+                and not any(
+                    not self._is_l2_eligible(request, idx)
+                    for idx, _ in request.key_states.l2_locked_keys.items()
+                )
+                and not self._waiting_load_has_capacity(request)
+            ):
+                return
+            self._transition_to_load_phase(request)
+        elif not phase_adapters:
             return
-        if request.phase == PrefetchPhase.LOOKUP:
+        elif request.phase == PrefetchPhase.LOOKUP:
             self._poll_lookup_results(request, phase_adapters)
             if request.all_lookups_done():
                 self._transition_to_load_phase(request)
@@ -1081,6 +1097,10 @@ class PrefetchController(StorageControllerInterface):
         """
         if not self._in_flight_requests:
             return True
+        if any(
+            request.waiting_for_memory for request in self._in_flight_requests.values()
+        ):
+            return False
         request_bytes = _get_max_load_bytes(spec.key_groups)
         lookup_bytes = sum(
             request.get_max_load_bytes()
@@ -1288,12 +1308,15 @@ class PrefetchController(StorageControllerInterface):
         """Plan the loads, reserve their L1 buffers, and submit the load
         tasks.
 
-        On return the locked maps equal the plan, the reserved map equals the
-        L2 plan, and one load task is in flight per adapter in it. With an
+        Capacity retries retain the original L1 snapshot and L2 locks, release
+        partial reservations, and submit no I/O until the plan fits or expires.
+        Otherwise, the locked maps equal the plan, the reserved map equals
+        the L2 plan, and one load task is in flight per adapter in it. With an
         empty L2 plan no task is submitted and the request is ready to
         finish.
         """
         states = request.key_states
+        request.waiting_for_memory = False
 
         # Step 1 and 2: plan on the lookup results and release what the plan
         # leaves out. Only eligible L2 adapters are planned.
@@ -1309,16 +1332,62 @@ class PrefetchController(StorageControllerInterface):
         tag = _get_prefetch_write_tag(request.request_id)
         l1_reserved_keys = MapState()
         reserved_objs: dict[ObjectKey, "MemoryObj"] = {}
-        num_failed_reservations = 0
+        failures_by_l1: dict[int, dict[L1Error, list[ObjectKey]]] = {}
 
         cells_by_l1, retain = self._build_l1_allocation_plans(request)
         for l1_idx, cells in cells_by_l1.items():
-            success, objs, l1_failed_count = _reserve_l1_cells(
+            success, objs, failures = _reserve_l1_cells(
                 self._l1_managers[l1_idx], request.key_groups, cells, retain, tag
             )
             l1_reserved_keys[l1_idx] = success
             reserved_objs.update(objs)
-            num_failed_reservations += l1_failed_count
+            if failures:
+                failures_by_l1[l1_idx] = failures
+
+        states.l1_reserved_keys = l1_reserved_keys
+        num_failed_reservations = sum(
+            len(keys)
+            for failures in failures_by_l1.values()
+            for keys in failures.values()
+        )
+        if failures_by_l1 and self._can_wait_for_staging(
+            request, cells_by_l1, failures_by_l1, reserved_objs
+        ):
+            for l1_idx, cells in l1_reserved_keys.items():
+                keys = _gather_keys(request.key_groups, cells)
+                if keys:
+                    self._l1_managers[l1_idx].finish_write_and_delete(keys, tag=tag)
+            states.l1_reserved_keys = MapState()
+            if not request.load_wait_deadline:
+                request.load_wait_deadline = (
+                    time.monotonic() + self._load_admission_wait_seconds
+                )
+            request.waiting_for_memory = True
+            return
+
+        for error, reason in (
+            (L1Error.OUT_OF_MEMORY, "l1_oom"),
+            (L1Error.KEY_NOT_WRITABLE, "l1_contended"),
+        ):
+            failed_keys = [
+                key
+                for failures in failures_by_l1.values()
+                for key in failures.get(error, [])
+            ]
+            if failed_keys:
+                if error == L1Error.OUT_OF_MEMORY:
+                    logger.warning(
+                        "%s: %d L1 reservations failed with out-of-memory; "
+                        "L1 may be under memory pressure",
+                        tag,
+                        len(failed_keys),
+                    )
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.L2_PREFETCH_FAILED,
+                        metadata={"reason": reason, "keys": failed_keys},
+                    )
+                )
 
         # Step 3.5: a whole-columns request can use a column only if every
         # row reserved; trim to whole columns and release the rest.
@@ -1369,6 +1438,57 @@ class PrefetchController(StorageControllerInterface):
 
         # Step 6: submit the load tasks to L2 adapters
         self._submit_load_tasks(request, reserved_objs)
+
+    def _can_wait_for_staging(
+        self,
+        request: InFlightPrefetchRequest,
+        cells_by_l1: dict[int, Bitmap2D],
+        failures_by_l1: dict[int, dict[L1Error, list[ObjectKey]]],
+        reserved_objs: dict[ObjectKey, "MemoryObj"],
+    ) -> bool:
+        """Retry only OOMs that other writers' staging buffers could unblock."""
+        if self._load_admission_wait_seconds == 0:
+            return False
+        if (
+            request.load_wait_deadline
+            and time.monotonic() >= request.load_wait_deadline
+        ):
+            return False
+        for l1_idx, failures in failures_by_l1.items():
+            if set(failures) != {L1Error.OUT_OF_MEMORY}:
+                return False
+            manager = self._l1_managers[l1_idx]
+            needed = _get_selected_load_bytes(
+                request.key_groups,
+                cells_by_l1[l1_idx],
+                manager.config.memory_config.align_bytes,
+            )
+            capacity = sum(manager.get_capacity_bytes_by_backend().values())
+            used, _ = manager.get_memory_usage()
+            staging = manager.get_staging_memory_usage()
+            own_staging = sum(
+                reserved_objs[key].get_size()
+                for key in _gather_keys(
+                    request.key_groups, request.key_states.l1_reserved_keys[l1_idx]
+                )
+            )
+            if needed > capacity - used + staging or staging <= own_staging:
+                return False
+        return True
+
+    def _waiting_load_has_capacity(self, request: InFlightPrefetchRequest) -> bool:
+        """Avoid failed allocations while other writers still occupy the space."""
+        cells_by_l1, _ = self._build_l1_allocation_plans(request)
+        for l1_idx, cells in cells_by_l1.items():
+            manager = self._l1_managers[l1_idx]
+            needed = _get_selected_load_bytes(
+                request.key_groups, cells, manager.config.memory_config.align_bytes
+            )
+            used, _ = manager.get_memory_usage()
+            capacity = sum(manager.get_capacity_bytes_by_backend().values())
+            if capacity - used < needed:
+                return False
+        return True
 
     def _submit_load_tasks(
         self,

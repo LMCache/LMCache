@@ -11,7 +11,8 @@ the full integration without mocking internals.
 """
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from threading import Event
 from unittest.mock import patch
 import time
@@ -22,6 +23,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
     FULL_ATTENTION_WINDOW_CHUNKS,
     FetchingPolicy,
@@ -171,6 +173,7 @@ def make_controller(
     adapters: list,
     policy: PrefetchPolicy | None = None,
     inflight_watermark: float = 0.5,
+    load_admission_wait_seconds: float = 0.0,
 ) -> PrefetchController:
     """Build a controller over one L1 manager and the given adapters."""
     return PrefetchController(
@@ -180,6 +183,7 @@ def make_controller(
         adapter_descriptors=[make_descriptor(i) for i in range(len(adapters))],
         policy=policy or DefaultPrefetchPolicy(),
         inflight_watermark=inflight_watermark,
+        load_admission_wait_seconds=load_admission_wait_seconds,
     )
 
 
@@ -294,6 +298,86 @@ def assert_l2_unlocked(adapter: MockL2Adapter) -> None:
     assert ok, "L2 locks should be released"
 
 
+class LookupGateAdapter(MockL2Adapter):
+    """Pause lookup completion so another writer can consume admitted capacity."""
+
+    def __init__(self) -> None:
+        super().__init__(MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10))
+        self.lookup_ready = Event()
+        self.release_lookup = Event()
+
+    def query_lookup_and_lock_result(self, task_id: int) -> Bitmap | None:
+        """Wait at the public lookup-result boundary before reserving L1."""
+        self.lookup_ready.set()
+        assert self.release_lookup.wait(timeout=5)
+        return super().query_lookup_and_lock_result(task_id)
+
+
+@contextmanager
+def staging_pressure(
+    wait_seconds: float,
+    *,
+    filler_count: int = 8,
+    key_count: int = 2,
+    groups: int = 1,
+    l1_prefix: int = 0,
+    resident_count: int = 0,
+    fetching_policy: FetchingPolicy = "prefix",
+    lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK,
+) -> Iterator[
+    tuple[
+        L1Manager,
+        LookupGateAdapter,
+        PrefetchController,
+        int,
+        list[ObjectKey],
+        list[ObjectKey],
+    ]
+]:
+    """Submit a request, then fill L1 with other writers before lookup returns."""
+    object_bytes = 100 * 2 * 512 * 2
+    l1 = L1Manager(
+        make_l1_config(size_in_bytes=8 * object_bytes + 65536, use_lazy=False)
+    )
+    adapter = LookupGateAdapter()
+    ctrl = make_controller(
+        l1, [adapter], inflight_watermark=1, load_admission_wait_seconds=wait_seconds
+    )
+    rows = [
+        make_group([make_object_key(i, gid=gid) for i in range(key_count)], gid=gid)
+        for gid in range(groups)
+    ]
+    keys = [key for row in rows for key in row.keys]
+    fillers = [make_object_key(100 + i) for i in range(filler_count)]
+    store_keys_in_l2(adapter, keys, make_layout())
+    if l1_prefix:
+        write_keys_to_l1(l1, keys[:l1_prefix], make_layout())
+    ctrl.start()
+    try:
+        request_id = ctrl.submit_prefetch_request(
+            make_spec(rows, fetching_policy=fetching_policy, lock_mode=lock_mode)
+        )
+        assert adapter.lookup_ready.wait(timeout=5)
+        if resident_count:
+            write_keys_to_l1(
+                l1,
+                [make_object_key(200 + i) for i in range(resident_count)],
+                make_layout(),
+            )
+        reserved = l1.reserve_write(
+            fillers, is_temporary=[True] * len(fillers), layout_desc=make_layout()
+        )
+        assert all(reserved[key][0] == L1Error.SUCCESS for key in fillers)
+        adapter.release_lookup.set()
+        yield l1, adapter, ctrl, request_id, keys, fillers
+    finally:
+        adapter.release_lookup.set()
+        if ctrl.report_status()["thread_alive"]:
+            ctrl.stop()
+        adapter.close()
+        l1.close()
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -310,6 +394,190 @@ def l1_manager():
 # =============================================================================
 # Lifecycle
 # =============================================================================
+
+
+class TestPostPlanAdmission:
+    @pytest.mark.parametrize("wait_seconds", [0, 1])
+    def test_temporary_writer_pressure_recovers_only_when_enabled(
+        self, wait_seconds: float
+    ) -> None:
+        """An admitted L2 hit survives a concurrent writer when retry is enabled."""
+        with staging_pressure(wait_seconds) as (
+            l1,
+            adapter,
+            ctrl,
+            request_id,
+            keys,
+            fillers,
+        ):
+            if wait_seconds:
+                assert wait_for_condition(
+                    lambda: ctrl.report_status()["waiting_load_count"] == 1
+                )
+                assert ctrl.query_prefetch_result(request_id) is None
+                assert l1.get_staging_memory_usage() == 8 * 204800
+                l1.finish_write_and_delete(fillers)
+            result = wait_for_result(ctrl, request_id)
+            assert row_bits(result) == ([0, 1] if wait_seconds else [])
+            if wait_seconds:
+                assert hit_counts(result) == (0, 2)
+                l1.finish_read(keys)
+            else:
+                l1.finish_write_and_delete(fillers)
+            assert_l2_unlocked(adapter)
+            assert l1.get_memory_usage()[0] == 0
+
+    def test_deadline_preserves_original_l1_hit(self) -> None:
+        """Repeated retries cannot extend the wait or lose the original hit."""
+        with staging_pressure(0.15, filler_count=7, key_count=3, l1_prefix=1) as (
+            l1,
+            adapter,
+            ctrl,
+            request_id,
+            keys,
+            fillers,
+        ):
+            result = wait_for_result(ctrl, request_id, timeout=2)
+            assert row_bits(result) == [0]
+            assert hit_counts(result) == (1, 0)
+            assert_l2_unlocked(adapter)
+            assert l1.get_staging_memory_usage() == 7 * 204800
+            l1.finish_read(keys[:1])
+            l1.delete(keys[:1])
+            l1.finish_write_and_delete(fillers)
+            assert l1.get_memory_usage()[0] == 0
+
+    def test_no_lock_retry_retains_residents_without_read_locks(self) -> None:
+        """A background prefetch remains retained and unlocked after a retry."""
+        with staging_pressure(1, lock_mode=PrefetchLockMode.NO_LOCK) as (
+            l1,
+            adapter,
+            ctrl,
+            request_id,
+            keys,
+            fillers,
+        ):
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["waiting_load_count"] == 1
+            )
+            l1.finish_write_and_delete(fillers)
+            assert row_bits(wait_for_result(ctrl, request_id)) == [0, 1]
+            assert all(l1.is_key_evictable(key) for key in keys)
+            assert_l2_unlocked(adapter)
+            assert all(error == L1Error.SUCCESS for error in l1.delete(keys).values())
+            assert l1.get_memory_usage()[0] == 0
+
+    @pytest.mark.parametrize("fetching_policy", ["prefix", "full"])
+    def test_partial_group_reservations_are_released_while_waiting(
+        self, fetching_policy: FetchingPolicy
+    ) -> None:
+        """Waiting holds no staging buffers, including a successfully reserved row."""
+        with staging_pressure(
+            1, filler_count=7, groups=2, key_count=1, fetching_policy=fetching_policy
+        ) as (l1, adapter, ctrl, request_id, keys, fillers):
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["waiting_load_count"] == 1
+            )
+            assert l1.get_staging_memory_usage() == 7 * 204800
+            l1.finish_write_and_delete(fillers)
+            result = wait_for_result(ctrl, request_id)
+            assert row_bits(result, 0) == [0]
+            assert row_bits(result, 1) == [0]
+            l1.finish_read(keys)
+            assert_l2_unlocked(adapter)
+            assert l1.get_memory_usage()[0] == 0
+
+    def test_oversized_plan_does_not_wait_for_other_writers(self) -> None:
+        """A plan larger than L1 cannot be rescued by waiting for staging."""
+        with staging_pressure(10, filler_count=1, key_count=9) as (
+            l1,
+            adapter,
+            ctrl,
+            request_id,
+            keys,
+            fillers,
+        ):
+            result = wait_for_result(ctrl, request_id, timeout=1)
+            assert row_bits(result) == []
+            assert ctrl.report_status()["waiting_load_count"] == 0
+            assert_l2_unlocked(adapter)
+
+    def test_stop_releases_waiting_l2_locks_without_submitted_io(self) -> None:
+        """A waiting request owns locks but has no adapter-borrowed buffers."""
+        with staging_pressure(10) as (l1, adapter, ctrl, request_id, keys, fillers):
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["waiting_load_count"] == 1
+            )
+            ctrl.stop()
+            assert_l2_unlocked(adapter)
+            assert l1.get_staging_memory_usage() == 8 * 204800
+            l1.finish_write_and_delete(fillers)
+            assert l1.get_memory_usage()[0] == 0
+
+    def test_resident_pressure_does_not_wait_for_insufficient_staging(self) -> None:
+        """Releasing one writer cannot fit two objects beside seven residents."""
+        with staging_pressure(10, filler_count=1, resident_count=7) as (
+            l1,
+            adapter,
+            ctrl,
+            request_id,
+            keys,
+            fillers,
+        ):
+            assert row_bits(wait_for_result(ctrl, request_id, timeout=1)) == []
+            assert ctrl.report_status()["waiting_load_count"] == 0
+            assert_l2_unlocked(adapter)
+
+    def test_draining_adapter_can_detach_during_wait(self) -> None:
+        """Drain removes the adapter from the plan and returns its held locks."""
+        with staging_pressure(10) as (l1, adapter, ctrl, request_id, keys, fillers):
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["waiting_load_count"] == 1
+            )
+            done = ctrl.request_remove_adapter(0)
+            assert row_bits(wait_for_result(ctrl, request_id, timeout=1)) == []
+            assert done.wait(timeout=1)
+            assert_l2_unlocked(adapter)
+
+    @pytest.mark.parametrize("release_remaining", [False, True])
+    def test_key_appearing_while_waiting_is_not_an_unreserved_l1_hit(
+        self, release_remaining: bool
+    ) -> None:
+        """The original L1 snapshot is kept; a newly resident key is not borrowed."""
+        with staging_pressure(1) as (l1, adapter, ctrl, request_id, keys, fillers):
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["waiting_load_count"] == 1
+            )
+            # Reserve the new resident before making capacity available to retry.
+            l1.finish_write_and_delete(fillers[:1])
+            write_keys_to_l1(l1, keys[:1], make_layout())
+            if release_remaining:
+                l1.finish_write_and_delete(fillers[1:])
+            result = wait_for_result(ctrl, request_id)
+            assert row_bits(result) == []
+            assert_l2_unlocked(adapter)
+            assert l1.delete(keys[:1])[keys[0]] == L1Error.SUCCESS
+
+    def test_pending_requests_keep_fifo_behind_a_waiting_load(self) -> None:
+        """A younger request cannot use space before the waiting head retries."""
+        with staging_pressure(1) as (l1, adapter, ctrl, request_id, keys, fillers):
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["waiting_load_count"] == 1
+            )
+            younger = [make_object_key(50)]
+            store_keys_in_l2(adapter, younger, make_layout())
+            younger_id = ctrl.submit_prefetch_request(single_row_spec(younger))
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_queue_size"] == 1
+            )
+            assert ctrl.query_prefetch_result(younger_id) is None
+            l1.finish_write_and_delete(fillers)
+            assert row_bits(wait_for_result(ctrl, request_id)) == [0, 1]
+            l1.finish_read(keys)
+            assert row_bits(wait_for_result(ctrl, younger_id)) == [0]
+            l1.finish_read(younger)
+            assert_l2_unlocked(adapter)
+            assert l1.get_memory_usage()[0] == 0
 
 
 class TestLifecycle:
@@ -886,8 +1154,10 @@ class TestAdmission:
                 for i in range(4)
             ]
             assert wait_for_condition(
-                lambda: ctrl.report_status()["pending_queue_size"] == 3
-                and ctrl.report_status()["in_flight_request_count"] == 1
+                lambda: (
+                    ctrl.report_status()["pending_queue_size"] == 3
+                    and ctrl.report_status()["in_flight_request_count"] == 1
+                )
             ), ctrl.report_status()
             results = [wait_for_result(ctrl, r, timeout=15.0) for r in req_ids]
 
@@ -920,8 +1190,10 @@ class TestAdmission:
             req_second = ctrl.submit_prefetch_request(single_row_spec(second))
             # One object of free space is left beside the first request.
             assert wait_for_condition(
-                lambda: ctrl.report_status()["pending_queue_size"] == 1
-                and ctrl.report_status()["in_flight_request_count"] == 1
+                lambda: (
+                    ctrl.report_status()["pending_queue_size"] == 1
+                    and ctrl.report_status()["in_flight_request_count"] == 1
+                )
             ), ctrl.report_status()
 
             l1_manager.delete(fillers)
