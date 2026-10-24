@@ -105,9 +105,14 @@ def try_get_vllm_kv_cache_layout(
     # vllm#51718 and later: vLLM owns alias resolution, unknown-name
     # validation, and the not-yet-resolved error.
     if hasattr(cache_config, "get_resolved_kv_cache_layout"):
-        return translate_vllm_kv_cache_layout(
+        kv_layout = translate_vllm_kv_cache_layout(
             cache_config.get_resolved_kv_cache_layout().name
         )
+        # vllm-neuron pins LBNHC (layer-outermost) but allocates each layer as
+        # [2, NB, NH, BS, HS], which is HND.
+        if torch_device_type == "neuron" and kv_layout == "NHD":
+            return "HND"
+        return kv_layout
 
     try:
         # Third Party

@@ -79,7 +79,8 @@ class TestTranslateVllmKVCacheLayout:
 
 
 class TestTryGetVllmKVCacheLayout:
-    def test_resolved_layout_from_explicit_config(self):
+    def test_resolved_layout_from_explicit_config(self, monkeypatch):
+        monkeypatch.setattr("lmcache.integration.vllm.utils.torch_device_type", "cuda")
         config = make_vllm_config("LBNHC")
         assert try_get_vllm_kv_cache_layout(config) == "NHD"
 
@@ -130,6 +131,18 @@ class TestTryGetVllmKVCacheLayout:
         )
         config = SimpleNamespace(cache_config=LegacyCacheConfig())
         assert try_get_vllm_kv_cache_layout(config) == "HND"
+
+    def test_resolved_neuron_lbnhc_is_normalized_to_hnd(self, monkeypatch):
+        """vllm-neuron 0.29 pins LBNHC but allocates [2, NB, NH, BS, HS]."""
+        monkeypatch.setattr(
+            "lmcache.integration.vllm.utils.torch_device_type", "neuron"
+        )
+        assert try_get_vllm_kv_cache_layout(make_vllm_config("LBNHC")) == "HND"
+
+    def test_resolved_cpu_lbnhc_is_not_normalized(self, monkeypatch):
+        """Post-vllm#51718 CPU layouts are trusted as reported."""
+        monkeypatch.setattr("lmcache.integration.vllm.utils.torch_device_type", "cpu")
+        assert try_get_vllm_kv_cache_layout(make_vllm_config("LBNHC")) == "NHD"
 
     def test_vllm_absent_returns_none(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "vllm", None)
