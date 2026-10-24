@@ -56,6 +56,7 @@ def _ctx() -> MagicMock:
         num_chunks_in_sw=[-1], world_size=1
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
+    ctx.layout_desc_registry.find_rank_group_layouts.return_value = {}
     ctx.token_hasher.compute_packed_chunk_hashes.return_value = CHUNK_HASHES
     ctx.storage_manager.submit_prefetch_task.return_value = PrefetchHandle(
         prefetch_request_id=0,

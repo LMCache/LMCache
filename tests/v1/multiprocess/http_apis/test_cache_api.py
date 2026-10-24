@@ -452,6 +452,11 @@ class _FakeLayoutRegistry:
             raise ValueError(f"no attention-window descriptor for {model_name!r}")
         return replace(DEFAULT_ATTN_WINDOW_DESC, world_size=world_size)
 
+    def find_rank_group_layouts(
+        self, model_name: str, world_size: int
+    ) -> dict[int, object]:
+        return {}
+
 
 class _PrefetchHandle:
     def __init__(self, total: int) -> None:

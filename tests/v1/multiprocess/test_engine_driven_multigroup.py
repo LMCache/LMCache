@@ -790,7 +790,9 @@ def test_register_payload_carries_group_layouts() -> None:
 
 
 def _register_capturing_payload(
-    kv: dict[str, torch.Tensor], engine_group_infos: list[EngineGroupInfo]
+    kv: dict[str, torch.Tensor],
+    engine_group_infos: list[EngineGroupInfo],
+    worker_id: int | None = None,
 ) -> tuple[RegisterEngineDrivenContextPayload, EngineDrivenTransferContext]:
     """Register ``kv`` and return the payload sent to the server."""
     # First Party
@@ -819,8 +821,24 @@ def _register_capturing_payload(
         blocks_in_chunk=2,
         mq_timeout=1.0,
         engine_group_infos=engine_group_infos,
+        worker_id=worker_id,
     )
     return sent[0], ctx
+
+
+@pytest.mark.parametrize("worker_id", [None, 3])
+def test_register_payload_carries_the_worker_id(worker_id: int | None) -> None:
+    """The worker id travels with the registration, so the server keeps this
+    rank's object groups as its own: a pipeline stage registers only the KV
+    caches its layers hold. A caller that passes none sends none."""
+    kv = {f"layer_{i}": torch.zeros(2, 4, 4, 2, 8) for i in range(2)}
+    payload, _ = _register_capturing_payload(
+        kv,
+        [EngineGroupInfo(engine_group_id=0, layer_indices=(0, 1))],
+        worker_id=worker_id,
+    )
+
+    assert payload.worker_id == worker_id
 
 
 def test_register_payload_carries_per_group_kv_size() -> None:

@@ -252,6 +252,11 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
             in protocol group order. Empty means legacy single-group; the
             top-level ``num_layers``/``hidden_dim_size``/``dtype_str`` then
             describe the sole group.
+        worker_id: The worker's id within ``world_size`` (the ``worker_id``
+            its store and retrieve keys carry), so lookups ask this rank for
+            exactly the groups it registered. ``None`` accepts the legacy
+            protocol, where every rank was assumed to store the latest
+            registration's groups.
     """
 
     instance_id: int
@@ -264,6 +269,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     use_mla: bool
     num_physical_slots: int | None = None
     group_layouts: list[GroupLayout] = []
+    worker_id: int | None = None
 
 
 @dataclass

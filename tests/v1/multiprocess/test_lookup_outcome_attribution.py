@@ -137,6 +137,7 @@ def _end_metadata(
         if group_layouts_found
         else {}
     )
+    ctx.layout_desc_registry.find_rank_group_layouts.return_value = {}
     ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
     ctx.storage_manager.submit_prefetch_task.return_value = PrefetchHandle(
         prefetch_request_id=0,
