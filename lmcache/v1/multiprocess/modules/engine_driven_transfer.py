@@ -64,6 +64,9 @@ class EngineDrivenContextEntry:
             instance (register, PING, prepare/commit). Drives reaping.
         has_liveness_signal: True once the instance has sent at least one
             PING. Selects the reap window. Latched only by PING.
+        worker_id: The worker id the instance registered with, or ``None``
+            for a legacy registration; its layout registration is released
+            under the same id.
     """
 
     metadata: EngineDrivenContextMetadata
@@ -71,6 +74,7 @@ class EngineDrivenContextEntry:
     world_size: int
     last_seen: float = 0.0
     has_liveness_signal: bool = False
+    worker_id: int | None = None
 
 
 class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
@@ -291,7 +295,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             if obj_keys:
                 self._ctx.storage_manager.finish_read_prefetched(obj_keys)
 
-        self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
+        self._ctx.layout_desc_registry.unregister(
+            entry.model_name, entry.world_size, entry.worker_id
+        )
 
     @staticmethod
     def _make_transfer_key(
@@ -445,6 +451,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             world_size=payload.world_size,
             last_seen=now,
             has_liveness_signal=False,
+            worker_id=payload.worker_id,
         )
         strategy: TransferStrategy = create_transfer_strategy(
             self._ctx.storage_manager,
@@ -494,10 +501,14 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 layout_desc,
                 attn_desc=attn_desc,
                 group_layout_descs=dict(enumerate(group_layouts)),
+                worker_id=payload.worker_id,
             )
         else:
             self._ctx.layout_desc_registry.register(
-                payload.model_name, payload.world_size, layout_desc
+                payload.model_name,
+                payload.world_size,
+                layout_desc,
+                worker_id=payload.worker_id,
             )
         return RegisterEngineDrivenContextResponse(
             shm_name=shm_name,
