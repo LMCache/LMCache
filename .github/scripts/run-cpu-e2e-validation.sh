@@ -689,14 +689,14 @@ if [ "${EXPECTED_TRANSPORT}" = "lmcache_driven" ]; then
   fi
   echo "✅ Transport mode confirmed: lmcache-driven (IPC handle path)"
 elif [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
-  if ! grep -q "Using shm non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
+  if ! grep -q "Using shm engine-driven transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
     echo "❌ Expected shm transport but server strategy line not found in log"
     tail -50 "${LMCACHE_LOG}"
     false
   fi
   echo "✅ Transport mode confirmed: shm"
 elif [ "${EXPECTED_TRANSPORT}" = "inline" ]; then
-  if ! grep -q "Using safe inline non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
+  if ! grep -q "Using safe inline engine-driven transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
     echo "❌ Expected inline transport but server strategy line not found in log"
     tail -50 "${LMCACHE_LOG}"
     false
