@@ -45,6 +45,10 @@ leaves nothing behind.
 - **An adapter stays attached while any request references it**: an in-flight
   lookup or load task, or an entry in `l2_locked_keys`. Draining adapters are
   never planned or looked up; they detach once no request references them.
+- **Memory-tag filters bound the sources.** Only L1 managers allowed by
+  `allowed_l1_memory_tags` are read-locked, and only L2 adapters allowed by
+  `allowed_l2_memory_tags` are looked up or planned. Loads still land in each
+  adapter's affinity L1 manager (see `../memory_tags.md`).
 - **LRU is decoupled from locking.** Taking and releasing read locks never
   refreshes eviction recency. Finish touches the hit keys explicitly
   (`L1Manager.touch_keys`), so locks held while the request decides do not
@@ -56,15 +60,16 @@ leaves nothing behind.
 PrefetchController(l1_managers, l1_manager_descriptors,
                    l2_adapters, adapter_descriptors, policy, inflight_watermark=0.5)
 
-submit_prefetch_request(spec: PrefetchTaskSpec, skip_l2=False) -> PrefetchRequestId
+submit_prefetch_request(spec: PrefetchTaskSpec) -> PrefetchRequestId
 query_prefetch_result(request_id) -> PrefetchResult | None   # consume-once
 wait_prefetch_result(request_id, timeout) -> bool            # does not consume
 add_adapter(adapter_id, adapter, descriptor) / request_remove_adapter(adapter_id)
 start() / stop()
 ```
 
-`submit_prefetch_request` is thread-safe. When `skip_l2` is set, or no L2
-adapter is attached, the request is served from L1 on the calling thread and
+`submit_prefetch_request` is thread-safe. When the spec allows no L2 adapter
+(an empty `allowed_l2_memory_tags`), or no L2 adapter is attached, the request
+is served from L1 on the calling thread and
 its result is queryable when the call returns. Otherwise it is queued for the
 background loop and admitted in arrival order under the in-flight watermark
 (see [Admission](#admission)).

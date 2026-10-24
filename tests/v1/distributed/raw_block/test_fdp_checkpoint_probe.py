@@ -9,12 +9,12 @@ import os
 import pytest
 
 # First Party
-from lmcache.v1.storage_backend.raw_block import (
+from lmcache.v1.distributed.l2_adapters.raw_block import (
     RawBlockCore,
     RawBlockCoreConfig,
     encode_object_key,
 )
-from tests.v1.storage_backend.raw_block_test_utils import (
+from tests.v1.distributed.raw_block.test_utils import (
     RAW_BLOCK_CI_BLOCK_ALIGN,
     RAW_BLOCK_CI_HEADER_BYTES,
     RAW_BLOCK_CI_META_TOTAL_BYTES,

@@ -15,7 +15,7 @@ storage backend.
 
 ## Components
 
-`lmcache/v1/storage_backend/dax/core.py` defines `DaxCore[KeyT]`. The core owns
+`lmcache/v1/distributed/l2_adapters/dax/core.py` defines `DaxCore[KeyT]`. The core owns
 the mapped DAX arena, fixed-size slot allocation, in-memory index, LRU order,
 in-flight writes, external lock refcounts, active read borrow counts, close
 coordination, and direct `ctypes.memmove` copies.

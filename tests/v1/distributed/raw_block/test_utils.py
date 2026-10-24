@@ -21,13 +21,13 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.l2_adapters.raw_block import RawBlockCoreConfig
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd
-from lmcache.v1.storage_backend.raw_block import RawBlockCoreConfig
 
 RAW_BLOCK_CI_CAPACITY_BYTES = 128 * 1024 * 1024
 RAW_BLOCK_CI_BLOCK_ALIGN = 4096
