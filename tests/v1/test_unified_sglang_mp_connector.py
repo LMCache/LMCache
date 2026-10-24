@@ -20,7 +20,9 @@ from lmcache.integration.sglang.unified_lmcache_mp_connector import (
     UnifiedLMCacheMPConnector,
 )
 from lmcache.utils import EngineType
+from lmcache.v1.distributed.api import ipc_key_to_object_keys
 from lmcache.v1.gpu_connector.kv_format import detect_format
+from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -70,11 +72,6 @@ class _TransferContext:
     def submit_retrieve(self, *args, **kwargs):
         self.retrieve_args = (args, kwargs)
         return _Future(True)
-
-
-class _IPCCacheServerKey:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
 
 
 class TestUnifiedLMCacheMPConnector(unittest.TestCase):
@@ -254,6 +251,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector.model_name = "test-model"
         connector.kv_world_size = 2
         connector.blocks_in_chunk = 4
+        connector.chunk_size = 256
         connector._mq_timeout = 5.0
         connector._mp_transfer_mode = "engine_driven"
         transfer_ctx = Mock()
@@ -279,6 +277,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             layout_hints={"kv_list_layout": "unified"},
             engine_group_infos=[],
             engine_type=EngineType.SGLANG,
+            lmcache_chunk_tokens=256,
         )
         self.assertIs(connector._transfer_ctx, transfer_ctx)
         self.assertTrue(connector._registered)
@@ -346,6 +345,47 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             self.connector._create_key.call_args.kwargs["request_configs"],
             {"lmcache.hint.engine_computed_tokens": 4},
         )
+
+    def test_submitted_lookup_keeps_cache_salt(self) -> None:
+        self.connector.chunk_size = 4
+        self.connector.kv_world_size = 1
+        self.connector._lookups = {}
+        self.connector._active_sessions = set()
+        self.connector._lookup_leader = True
+        self.connector._req_client = Mock()
+        self.connector._req_client.lookup.return_value = _Future(False)
+        self.connector._create_key = Mock(return_value=object())
+        self.connector._sync_success = lambda success: success
+
+        operation = self.connector.submit_lookup(
+            "lookup-request",
+            [1, 2, 3, 4],
+            local_hit_tokens=0,
+            cache_salt="tenant-a",
+        )
+
+        self.assertEqual(operation.cache_salt, "tenant-a")
+
+    def test_create_key_carries_cache_salt(self) -> None:
+        self.assertEqual(self._ipc_key_for_salt("tenant-a").cache_salt, "tenant-a")
+        self.assertEqual(self._ipc_key_for_salt("tenant-b").cache_salt, "tenant-b")
+        self.assertEqual(self._ipc_key_for_salt("").cache_salt, "")
+
+    def test_cache_salt_produces_distinct_object_keys(self) -> None:
+        chunk_hashes = [b"\xab" * 32]
+
+        objects_a = ipc_key_to_object_keys(
+            self._ipc_key_for_salt("tenant-a"), chunk_hashes, [0]
+        )
+        objects_b = ipc_key_to_object_keys(
+            self._ipc_key_for_salt("tenant-b"), chunk_hashes, [0]
+        )
+        objects_a2 = ipc_key_to_object_keys(
+            self._ipc_key_for_salt("tenant-a"), chunk_hashes, [0]
+        )
+
+        self.assertNotEqual(objects_a, objects_b)
+        self.assertEqual(objects_a, objects_a2)
 
     def test_poll_lookup_uses_short_lived_status_queries(self):
         self.connector.chunk_size = 4
@@ -1058,17 +1098,11 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             local_hit_tokens=0,
             cache_salt="salt",
         )
-        custom_types = ModuleType("lmcache.v1.multiprocess.custom_types")
-        custom_types.IPCCacheServerKey = _IPCCacheServerKey
-
-        with patch.dict(
-            "sys.modules",
-            {"lmcache.v1.multiprocess.custom_types": custom_types},
-        ):
-            key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
+        key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
 
         self.assertEqual(key.num_kv_readers, 1)
         self.assertEqual(key.world_size, 2)
+        self.assertEqual(unpack_token_ids(key.token_bytes), [1, 2, 3, 4])
 
     def test_create_key_reserves_one_read_lock_per_tp_replica(self):
         self.connector.model_name = "model"
@@ -1080,14 +1114,19 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             local_hit_tokens=0,
             cache_salt="salt",
         )
-        custom_types = ModuleType("lmcache.v1.multiprocess.custom_types")
-        custom_types.IPCCacheServerKey = _IPCCacheServerKey
-
-        with patch.dict(
-            "sys.modules",
-            {"lmcache.v1.multiprocess.custom_types": custom_types},
-        ):
-            key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
+        key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
 
         self.assertEqual(key.num_kv_readers, 4)
         self.assertEqual(key.world_size, 1)
+
+    def _ipc_key_for_salt(self, cache_salt: str):
+        self.connector.model_name = "test-model"
+        self.connector.kv_world_size = 1
+        self.connector.num_kv_readers = 1
+        operation = LMCacheLookupOperation(
+            request_id="req",
+            token_ids=[1, 2, 3, 4],
+            local_hit_tokens=0,
+            cache_salt=cache_salt,
+        )
+        return self.connector._create_key(operation, start=0, end=4, worker_id=0)

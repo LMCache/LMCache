@@ -57,6 +57,7 @@ from lmcache.v1.multiprocess.request_handler import (
     iter_request_handlers,
     request_handler,
 )
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.grpc_impl import (
     proto_codec,
 )
@@ -162,12 +163,19 @@ def grpc_client(
             requires_client_affinity=True,
         )
         def prepare_store(
-            self, key: IPCCacheServerKey, instance_id: int
+            self,
+            key: IPCCacheServerKey,
+            instance_id: int,
+            skipped_chunks: tuple[tuple[int, ...], ...] = (),
         ) -> PrepareStoreResponse:
             assert key.request_configs == {"blend": True}
             assert instance_id == 7
             return PrepareStoreResponse(
-                context={"slots": [{"offset": 8}], "chunk_indices": [2]}
+                context={
+                    "slots": [{"offset": 8}],
+                    "chunk_indices": [2],
+                    "skipped": [list(g) for g in skipped_chunks],
+                }
             )
 
         @request_handler(
@@ -609,7 +617,7 @@ def test_generated_grpc_services_communicate_end_to_end(
         model_name="model",
         world_size=2,
         worker_id=None,
-        token_ids=(1, 2, 3),
+        token_bytes=pack_token_ids((1, 2, 3)),
         start=0,
         end=3,
         request_id="request",
@@ -625,7 +633,17 @@ def test_generated_grpc_services_communicate_end_to_end(
         True,
     )
     assert client.prepare_store(key, 7).result(5) == PrepareStoreResponse(
-        context={"slots": [{"offset": 8}], "chunk_indices": [2]}
+        context={"slots": [{"offset": 8}], "chunk_indices": [2], "skipped": []}
+    )
+    # Per-group skipped chunks survive the proto round trip, empty groups too.
+    assert client.prepare_store(key, 7, ((0, 1), (), (3,))).result(
+        5
+    ) == PrepareStoreResponse(
+        context={
+            "slots": [{"offset": 8}],
+            "chunk_indices": [2],
+            "skipped": [[0, 1], [], [3]],
+        }
     )
     assert client.prepare_retrieve(key, 7).result(5) == PrepareRetrieveResponse(
         success=True,

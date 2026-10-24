@@ -101,16 +101,22 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             align_bytes=self._align_bytes,
         )
 
-    def owns_device(self, device_path: str) -> bool:
-        """Return whether the allocator maps the physical device at a path.
+    def owns_range(
+        self, device_path: str, offset_in_bytes: int, size_in_bytes: int
+    ) -> bool:
+        """Return whether a mapped arena overlaps a byte range of a device.
 
         Args:
             device_path: Candidate device path or alias.
+            offset_in_bytes: Start of the candidate range on that device.
+            size_in_bytes: Length of the candidate range.
 
         Returns:
-            ``True`` while the device remains mapped; otherwise ``False``.
+            ``True`` while an overlapping arena remains mapped.
         """
-        return cast(DevDaxMemoryAllocator, self._allocator).owns_device(device_path)
+        return cast(DevDaxMemoryAllocator, self._allocator).owns_range(
+            device_path, offset_in_bytes, size_in_bytes
+        )
 
     def add_device(
         self, device_path: str, size_in_bytes: int, offset_in_bytes: int = 0

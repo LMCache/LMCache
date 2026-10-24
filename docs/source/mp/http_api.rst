@@ -1300,15 +1300,20 @@ paths contain slashes. The accepted operations and fields are:
      - Body fields
    * - ``add``
      - ``device_path`` (str, required), ``size`` (int byte count or string
-       such as ``"100GiB"``, required), ``adapter_index`` (default ``0``).
+       such as ``"100GiB"``, required), ``offset`` (int or string, default
+       ``0``), ``adapter_index`` (default ``0``).
    * - ``remove``
-     - ``device_path`` (str, required), ``mode`` (``migrate`` | ``evict`` |
-       ``drain``, default ``migrate``), ``force`` (bool, default ``false``),
-       ``adapter_index`` (default ``0``).
-   * - ``resize``
-     - ``device_path`` (str, required), ``size`` (int or string, required),
-       ``mode`` (``migrate`` | ``evict``, default ``migrate``), ``force``
+     - ``device_path`` (str, required), ``offset`` (default ``0``), ``mode``
+       (``migrate`` | ``evict`` | ``drain``, default ``migrate``), ``force``
        (bool, default ``false``), ``adapter_index`` (default ``0``).
+   * - ``resize``
+     - ``device_path`` (str, required), ``offset`` (default ``0``), ``size``
+       (int or string, required), ``mode`` (``migrate`` | ``evict``, default
+       ``migrate``), ``force`` (bool, default ``false``), ``adapter_index``
+       (default ``0``).
+
+``device_path`` and ``offset`` identify a mapped range as passed to ``add``.
+A range overlapping one this server already maps, in L1 or L2, returns ``409``.
 
 ``size`` accepts an integer byte count or a string with a base-1024 unit
 suffix (``b``, ``kib``, ``mib``, ``gib``, ``tib`` and the ``k``/``m``/``g``/``t``
@@ -1325,7 +1330,7 @@ dict). A successful DAX ``add`` looks like:
       "status": "ok",
       "operation": "add",
       "adapter_index": 0,
-      "device": {"device_path": "/dev/dax0.0", "state": "active", "size_bytes": 107374182400}
+      "device": {"device_path": "/dev/dax0.0", "offset_bytes": 0, "state": "active", "size_bytes": 107374182400}
     }
 
 **HTTP status codes:**
