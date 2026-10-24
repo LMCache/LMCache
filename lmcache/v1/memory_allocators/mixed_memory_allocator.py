@@ -272,5 +272,17 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             return self.pin_allocator.get_paged_buffers()
         return None
 
+    def get_spdk_buffer(self) -> Optional[torch.Tensor]:
+        """
+        Get the main CPU buffer for SPDK external memory registration.
+
+        Returns:
+            The main hugepage-allocated buffer tensor that can be registered
+            with SPDK for zero-copy DMA operations.
+        """
+        if hasattr(self, "buffer") and self.buffer is not None:
+            return self.buffer
+        return None
+
     def __str__(self) -> str:
         return "MixedMemoryAllocator"
