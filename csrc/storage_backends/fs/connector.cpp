@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include "../errno_message.h"
 #include "../keys.h"
 
 namespace lmcache {
@@ -23,7 +24,7 @@ static void write_all(int fd, const void* data, size_t len) {
     ssize_t n = ::write(fd, ptr + written, len - written);
     if (n < 0) {
       if (errno == EINTR) continue;
-      throw std::runtime_error("write failed: " + std::string(strerror(errno)));
+      throw std::runtime_error("write failed: " + errno_message(errno));
     }
     if (n == 0) {
       throw std::runtime_error("write returned 0");
@@ -39,7 +40,7 @@ static size_t read_all(int fd, void* buf, size_t len) {
     ssize_t n = ::read(fd, ptr + total, len - total);
     if (n < 0) {
       if (errno == EINTR) continue;
-      throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+      throw std::runtime_error("read failed: " + errno_message(errno));
     }
     if (n == 0) break;  // EOF
     total += static_cast<size_t>(n);
@@ -151,7 +152,7 @@ void FSConnector::do_single_get(WorkerFSConn& conn, const std::string& key,
   int fd = ::open(file_path.c_str(), flags);
   if (fd < 0) {
     throw std::runtime_error("open for read failed: " + file_path.string() +
-                             ": " + strerror(errno));
+                             ": " + errno_message(errno));
   }
 
   try {
@@ -214,7 +215,7 @@ void FSConnector::do_single_set(WorkerFSConn& conn, const std::string& key,
   int fd = ::open(tmp_path.c_str(), flags, 0644);
   if (fd < 0) {
     throw std::runtime_error("open for write failed: " + tmp_path.string() +
-                             ": " + strerror(errno));
+                             ": " + errno_message(errno));
   }
 
   try {
