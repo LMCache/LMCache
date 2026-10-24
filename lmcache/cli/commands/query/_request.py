@@ -117,6 +117,19 @@ def _sse_piece(obj: dict[str, Any], chat: bool) -> str:
     )
 
 
+def _has_other_output(obj: dict[str, Any]) -> bool:
+    """Whether a chat chunk carries reasoning or tool-call tokens."""
+    choices = obj.get("choices") or []
+    if not choices:
+        return False
+    delta = choices[0].get("delta") or {}
+    return bool(
+        delta.get("reasoning_content")
+        or delta.get("reasoning")
+        or delta.get("tool_calls")
+    )
+
+
 def _trim_misc_buffer(misc: list[str], limit: int = _MAX_ERR) -> None:
     while misc and sum(map(len, misc)) > limit:
         misc.pop(0)
@@ -185,8 +198,10 @@ def _stream(
                     continue
                 _raise_openai_error(obj)
                 piece = _sse_piece(obj, chat)
-                if piece:
+                # Reasoning and tool calls count as output, not as answer text.
+                if piece or (chat and _has_other_output(obj)):
                     first_token_t = first_token_t or time.time()
+                if piece:
                     pieces.append(piece)
 
                 u_chunk = obj.get("usage")
