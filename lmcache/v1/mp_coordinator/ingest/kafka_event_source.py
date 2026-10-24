@@ -71,6 +71,9 @@ class KafkaSourceStats:
             partition's high watermark minus the next offset to read. A
             partition is absent until both are known. Kafka's own lag tools
             cannot report this, because the group never commits offsets.
+        next_offsets: The next offset to read, per assigned partition: the
+            position the next checkpoint records. A partition is absent
+            until a record from it has been read or restored.
     """
 
     records_applied: int = 0
@@ -78,6 +81,18 @@ class KafkaSourceStats:
     records_failed: int = 0
     partitions_assigned: int = 0
     unread_records: dict[int, int] = field(default_factory=dict)
+    next_offsets: dict[int, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class KafkaSourceStatus(CacheEventSourceStatus):
+    """The Kafka source's status, with what it has read.
+
+    Attributes:
+        reads: What the source has read; see :class:`KafkaSourceStats`.
+    """
+
+    reads: KafkaSourceStats
 
 
 class KafkaCacheEventSource(CacheEventSource):
@@ -167,17 +182,19 @@ class KafkaCacheEventSource(CacheEventSource):
             await asyncio.to_thread(self._thread.join)
         self._consumer.close()
 
-    def status(self) -> CacheEventSourceStatus:
+    def status(self) -> KafkaSourceStatus:
         """Return the Kafka source's status.
 
         Returns:
             Source identity ``kafka`` with replay capability
             ``SEEKABLE``: the topic retains the stream, so it can be
-            replayed by rewinding the checkpointed position.
+            replayed by rewinding the checkpointed position. ``reads``
+            carries :meth:`stats`.
         """
-        return CacheEventSourceStatus(
+        return KafkaSourceStatus(
             source_name="kafka",
             replay_capability=EventReplayCapability.SEEKABLE,
+            reads=self.stats(),
         )
 
     def stats(self) -> KafkaSourceStats:
@@ -189,7 +206,11 @@ class KafkaCacheEventSource(CacheEventSource):
         (updated by every fetch, no broker round trip). A failure there
         reaches only the caller, never the poll thread doing the ingest.
         """
-        return replace(self._stats, unread_records=self._unread_records())
+        return replace(
+            self._stats,
+            unread_records=self._unread_records(),
+            next_offsets=self._next_offsets(),
+        )
 
     # -- Poll thread -----------------------------------------------------------
 
@@ -280,6 +301,17 @@ class KafkaCacheEventSource(CacheEventSource):
             summary.duplicates,
             summary.stale,
         )
+
+    def _next_offsets(self) -> dict[int, int]:
+        """Return the next offset to read, per assigned partition that has one."""
+        next_offsets: dict[int, int] = {}
+        for partition in self._assigned:
+            next_offset = self._position.next_offset(
+                partition.topic, partition.partition
+            )
+            if next_offset is not None:
+                next_offsets[partition.partition] = next_offset
+        return next_offsets
 
     def _unread_records(self) -> dict[int, int]:
         """Return the records not yet read, per assigned partition whose
