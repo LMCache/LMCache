@@ -190,8 +190,9 @@ def run_bench(
         monkeypatch.setattr(
             transfer_context,
             "create_transfer_context",
-            lambda _caches, *, instance_id, **_kwargs: MemoryTransferContext(
-                instance_id
+            lambda _caches, *, instance_id, **_kwargs: MagicMock(
+                spec=transfer_context.LMCacheDrivenTransferContext,
+                wraps=MemoryTransferContext(instance_id),
             ),
         )
         messages: list[str] = []

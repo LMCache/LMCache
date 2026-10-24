@@ -124,8 +124,8 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
             "`engine_driven` forces the worker-side gather/scatter "
             "data path (REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT + "
             "PREPARE/COMMIT). "
-            "`auto` keeps the historical mapping: "
-            "gpu->lmcache_driven, cpu->engine_driven."
+            "`auto` uses the device's default transfer mode; "
+            "CPU mode defaults to engine_driven."
         ),
     )
     parser.add_argument(

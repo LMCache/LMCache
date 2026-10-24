@@ -65,16 +65,6 @@ class BenchConfig:
         """Return whether mock Workers use GPU memory."""
         return self.mode == "gpu"
 
-    @property
-    def uses_handle_transfer(self) -> bool:
-        """Return whether this run uses handle-based transfer.
-
-        ``auto`` selects handles for GPU and engine-driven transfer for CPU.
-        """
-        if self.transfer_mode == "auto":
-            return self.is_gpu
-        return self.transfer_mode == "lmcache_driven"
-
 
 @dataclass(frozen=True)
 class WorkerSpec:

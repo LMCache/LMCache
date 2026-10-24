@@ -78,7 +78,7 @@ class KVCacheBuffers:
     def checksums(
         self, block_offset: int, num_blocks: int, chunk_size: int
     ) -> list[str]:
-        """Hash selected CPU blocks per chunk across layers.
+        """Hash selected blocks per chunk across layers, copying bytes to CPU.
 
         ``chunk_size`` counts tokens; incomplete trailing chunks are ignored.
         """
@@ -93,7 +93,9 @@ class KVCacheBuffers:
             start = block_offset + chunk * blocks_per_chunk
             digest = hashlib.md5()
             for view in self.block_views(start, blocks_per_chunk):
-                digest.update(view.contiguous().view(torch.uint8).numpy().tobytes())
+                digest.update(
+                    view.contiguous().view(torch.uint8).cpu().numpy().tobytes()
+                )
             checksums.append(digest.hexdigest())
         return checksums
 

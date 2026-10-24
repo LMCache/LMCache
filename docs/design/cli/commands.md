@@ -190,8 +190,8 @@ RETRIEVE → STORE → END_SESSION``).
 
 Supports two run modes via ``--mode``:
 
-- **``gpu``** (default) -- allocates real CUDA tensors and uses CUDA IPC
-  (LMCache-driven handle transfer path).
+- **``gpu``** (default) -- allocates tensors on the detected accelerator.
+  The transfer context selects the device's default transfer mode.
 - **``cpu``** -- allocates regular CPU tensors and uses the engine-driven
   worker-side gather/scatter path by default. Its ``TransferContext`` uses
   server-owned SHM staging when available and falls back to typed inline
@@ -200,8 +200,11 @@ Supports two run modes via ``--mode``:
   ``--transfer-mode lmcache_driven``.
 
 The transfer path can be overridden explicitly with ``--transfer-mode
-{auto,engine_driven,lmcache_driven}``. ``auto`` keeps the historical mapping:
-gpu→lmcache_driven, cpu→engine_driven.
+{auto,engine_driven,lmcache_driven}``. With ``auto``, GPU mode uses the
+device's default and CPU mode uses engine-driven transfer. Verification
+follows the created context: engine-driven destinations are cleared before
+RETRIEVE and checksummed locally; handle transfers use the server checksum
+endpoint.
 
 ```bash
 $ lmcache bench server \
