@@ -161,6 +161,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         [f"g{g}c{c}" for c in range(num_chunks)] for g in range(num_object_groups)
     ]
     ctx = MagicMock()
+    ctx.lookup_expired.return_value = False
     ctx.get_read_owners.return_value = None
     ctx.chunk_size = 256
     ctx.null_block_id = 0

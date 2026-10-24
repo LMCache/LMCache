@@ -280,6 +280,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         lock.  ``claim_failed_retrieve_release`` also makes duplicate failure
         responses idempotent.
         """
+        if self._ctx.lookup_expired(key.request_id):
+            return
         session = self._ctx.session_manager.get(key.request_id)
         if session is None:
             logger.warning(
@@ -922,6 +924,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             RuntimeError: If the backend does not support IPC event handles.
         """
         st = time.perf_counter()
+
+        if self._ctx.lookup_expired(key.request_id):
+            logger.warning("Rejecting RETRIEVE for expired lookup %s", key.request_id)
+            # Avoid decrementing a newer reader's anonymous count.
+            return b"", False
 
         entry = self.get_and_touch_context_entry(instance_id)
         if entry is None:

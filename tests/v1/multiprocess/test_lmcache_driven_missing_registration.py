@@ -96,6 +96,7 @@ def test_missing_registration_returns_terminal_false(method_name: str) -> None:
         return_value=None
     )
     module._ctx = MagicMock()
+    module._ctx.lookup_expired.return_value = False
     module._ctx.session_manager.get.return_value = None
     producer_event = b"worker-producer-event"
     key = _cache_key(world_size=1, worker_id=0, request_id="request")
@@ -142,6 +143,7 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
         "failed-retrieve cleanup must use the lookup session's layout"
     )
     ctx = SimpleNamespace(
+        lookup_expired=lambda request_id: False,
         get_read_owners=lambda request_id: None,
         chunk_size=hasher.chunk_size,
         token_hasher=hasher,
@@ -216,6 +218,7 @@ def test_cleanup_exception_does_not_suppress_terminal_false() -> None:
         return_value=None
     )
     module._ctx = MagicMock()
+    module._ctx.lookup_expired.return_value = False
     session = MagicMock()
     session.prepare_failed_retrieve_release.return_value = (2, (0,), (-1,), 7)
     module._ctx.session_manager.get.return_value = session

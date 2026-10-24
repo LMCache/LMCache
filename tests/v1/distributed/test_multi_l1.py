@@ -527,3 +527,14 @@ def test_delete_reports_a_key_as_skipped_while_any_copy_is_locked(
     assert store.delete_l1_keys(keys) == (0, 1)
     managers[locked_index].finish_read(keys)
     assert store.delete_l1_keys(keys) == (1, 0)
+
+
+@pytest.mark.parametrize("ttls", [(600, 30), (1, 300)])
+def test_read_ttl_is_shortest_registered_tier(
+    storage_factory: StorageFactory, ttls: tuple[int, int]
+) -> None:
+    """Stale lookup checks must respect non-default tiers with shorter TTLs."""
+    store, managers, _ = storage_factory((4096, 4096))
+    for manager, ttl in zip(managers, ttls, strict=True):
+        manager.config.read_ttl_seconds = ttl
+    assert store.read_ttl_seconds == min(ttls)

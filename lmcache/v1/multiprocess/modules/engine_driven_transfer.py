@@ -489,6 +489,8 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ValueError: If no non-GPU context is registered for the given
                 instance ID.
         """
+        if self._ctx.lookup_expired(key.request_id):
+            return PrepareRetrieveResponse(success=False, data=b"", context={})
         _, strategy = self._resolve_for_transfer(instance_id)
         response = strategy.prepare_retrieve(
             key=key,

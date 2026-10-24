@@ -244,6 +244,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         chunk_size=1,
         null_block_id=0,
         storage_manager=storage_manager,
+        lookup_expired=lambda request_id: False,
         get_read_owners=lambda request_id: None,
         event_bus=SimpleNamespace(
             publish=lambda event: None,

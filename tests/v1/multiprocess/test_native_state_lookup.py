@@ -235,6 +235,7 @@ def _lookup(
     )
     storage = _PresenceStorage(present)
     ctx = SimpleNamespace(
+        lookup_expired=lambda request_id: False,
         get_read_owners=lambda request_id: None,
         storage_manager=storage,
         token_hasher=hasher,
