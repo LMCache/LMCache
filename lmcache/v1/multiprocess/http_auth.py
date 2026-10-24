@@ -12,7 +12,7 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-PUBLIC_HTTP_PATHS = frozenset({"/", "/healthcheck"})
+PUBLIC_HTTP_PATHS = frozenset({"/", "/healthcheck", "/readyz"})
 HTTP_API_KEY_ENV_VAR = "LMCACHE_HTTP_API_KEY"
 HTTP_API_KEY_FILE_ENV_VAR = "LMCACHE_HTTP_API_KEY_FILE"
 
@@ -140,8 +140,8 @@ class HTTPAuthenticationMiddleware:
 
     The active :class:`HTTPAuthenticationConfig` is read from
     ``scope["app"].state.http_authentication``. Authentication is disabled
-    when no keys are configured. The root liveness route and healthcheck are
-    always public so probes do not need credentials.
+    when no keys are configured. The root liveness route, healthcheck and
+    readiness route are always public so probes do not need credentials.
 
     Args:
         app: Downstream ASGI application.

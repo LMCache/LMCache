@@ -31,7 +31,7 @@ Routes are assembled from three sources, all merged into one FastAPI app by
   ``lmcache/v1/multiprocess/http_apis/info_api.py`` includes the router
   from ``lmcache/v1/internal_api_server/vllm/version_api.py``, exposing
   ``/version``, ``/lmc_version``, and ``/commit_id`` alongside ``/``,
-  ``/healthcheck`` and ``/status``.
+  ``/healthcheck``, ``/readyz`` and ``/status``.
 
 .. contents::
    :local:
@@ -77,9 +77,9 @@ Example:
 
 All examples below assume the server is reachable at
 ``http://localhost:8080``. When authentication is enabled, include the key as
-``Authorization: Bearer <api-key>``. The ``/`` and ``/healthcheck`` routes
-remain public for liveness and readiness probes; every other route requires a
-valid key. For example:
+``Authorization: Bearer <api-key>``. The ``/``, ``/healthcheck`` and
+``/readyz`` routes remain public for liveness and readiness probes; every
+other route requires a valid key. For example:
 
 .. code-block:: bash
 
@@ -123,7 +123,10 @@ compatibility with the vLLM-embedded API server.
      - Static liveness ping (does not touch the engine).
    * - GET
      - ``/healthcheck``
-     - K8s liveness/readiness probe; ``503`` until the engine is initialized.
+     - K8s liveness probe; ``503`` until the engine is initialized.
+   * - GET
+     - ``/readyz``
+     - K8s readiness probe; ``503`` while any background component is down.
 
 **Inspection and status**
 
@@ -328,12 +331,16 @@ instead for probes that also verify the engine is initialized.
 ``GET /healthcheck``
 ~~~~~~~~~~~~~~~~~~~~
 
-Health check endpoint suitable for Kubernetes liveness and readiness
-probes. A ``200`` response means the HTTP server is alive **and** the MP
-cache engine object is wired onto ``app.state``. A ``503`` response
-indicates the engine is not yet present (still initializing, or failed to
-initialize). The check verifies that the engine attribute is set; it does
-not call into the engine to assert deeper liveness.
+Health check endpoint suitable for Kubernetes liveness probes. A ``200``
+response means the HTTP server is alive **and** the MP cache engine object
+is wired onto ``app.state``. A ``503`` response indicates the engine is not
+yet present (still initializing, or failed to initialize). The check
+verifies that the engine attribute is set; it does not call into the engine
+to assert deeper liveness.
+
+This stays shallow on purpose: a failing liveness probe restarts the
+container, which drops the whole L1 cache, so a transient storage fault
+should not trip it. Gate traffic on ``/readyz`` instead.
 
 **Response** (``200 OK``):
 
@@ -375,10 +382,82 @@ not call into the engine to assert deeper liveness.
       periodSeconds: 10
     readinessProbe:
       httpGet:
-        path: /healthcheck
+        path: /readyz
         port: 8080
       initialDelaySeconds: 5
       periodSeconds: 5
+
+``GET /readyz``
+~~~~~~~~~~~~~~~
+
+Readiness probe reporting whether the server can serve MP traffic. It checks
+the background threads the data path depends on: the per-L1 store and
+eviction controllers, the prefetch controller and the L2 eviction
+controller. ``components`` maps each controller name to its liveness flag;
+the per-L1 controllers carry their L1 tag.
+
+Two things are deliberately **not** checked here, because answering for them
+costs too much to repeat every few seconds:
+
+- **Allocator consistency**, which walks the L1 free list under the L1 lock.
+- **L2 adapter health**, whose status call may scan the whole object index
+  under the adapter lock. An unreachable external backend also should not
+  drain traffic from a server whose L1 still serves.
+
+``/status`` reports both.
+
+Like ``/healthcheck``, this route stays public when API-key authentication is
+enabled, so probes need no credentials.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "status": "ready",
+      "components": {
+        "prefetch_controller": true,
+        "l2_eviction_controller": true,
+        "store_controller[_default]": true,
+        "l1_eviction_controller[_default]": true
+      }
+    }
+
+**Response** (``503 Service Unavailable``):
+
+.. code-block:: json
+
+    {
+      "status": "not_ready",
+      "components": {
+        "prefetch_controller": true,
+        "l2_eviction_controller": true,
+        "store_controller[_default]": false,
+        "l1_eviction_controller[_default]": true
+      },
+      "unhealthy": ["store_controller[_default]"]
+    }
+
+Before the engine is wired, the ``503`` body carries ``reason`` instead of
+``components``:
+
+.. code-block:: json
+
+    {
+      "status": "not_ready",
+      "reason": "engine not initialized"
+    }
+
+**HTTP status codes:**
+
+- ``200``: every controller is running.
+- ``503``: the engine is not initialized, or a controller has stopped.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/readyz
 
 Inspection and Status
 ---------------------

@@ -57,6 +57,10 @@ class EvictionController(StorageControllerInterface):
         self._stop_flag.set()
         self._thread.join()
 
+    def is_healthy(self) -> bool:
+        """Return whether the eviction loop thread is still running."""
+        return self._thread.is_alive()
+
     @abstractmethod
     def report_status(self) -> dict:
         """Return a status dict for this controller.
@@ -110,7 +114,7 @@ class L1EvictionController(EvictionController):
 
     def report_status(self) -> dict:
         return {
-            "is_healthy": self._thread.is_alive(),
+            "is_healthy": self.is_healthy(),
             "thread_alive": self._thread.is_alive(),
             "eviction_policy": self._eviction_config.eviction_policy,
             "trigger_watermark": self._eviction_config.trigger_watermark,
@@ -254,6 +258,15 @@ class L2EvictionController(StorageControllerInterface):
         self._stop_flag.set()
         self._thread.join()
 
+    def is_healthy(self) -> bool:
+        """Return whether the eviction loop thread is still running.
+
+        Deliberately does not take ``_states_lock``: the eviction pass holds
+        it across ``adapter.delete()`` calls, so a probe that waited on it
+        would block for the length of an eviction cycle.
+        """
+        return self._thread.is_alive()
+
     def add_adapter_state(self, state: L2AdapterEvictionState) -> None:
         """Register a new adapter's eviction state at runtime."""
         with self._states_lock:
@@ -295,7 +308,7 @@ class L2EvictionController(StorageControllerInterface):
                 }
             )
         return {
-            "is_healthy": self._thread.is_alive(),
+            "is_healthy": self.is_healthy(),
             "thread_alive": self._thread.is_alive(),
             "adapters": adapter_statuses,
         }

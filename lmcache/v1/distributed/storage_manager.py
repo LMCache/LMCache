@@ -1354,6 +1354,48 @@ class StorageManager:
             )
         return result
 
+    def report_readiness(self) -> dict[str, bool]:
+        """Return the liveness of every storage controller, keyed by name.
+
+        This is the probe-friendly counterpart of :meth:`report_status`. It
+        reads only ``StorageControllerInterface.is_healthy()``, which by
+        contract takes no storage lock and builds no snapshot, so it is safe
+        to call on a probe interval.
+
+        Two things are deliberately left out, both because answering for them
+        is too expensive to repeat every few seconds:
+
+        - **L1 managers.** ``L1Manager.report_status`` walks the object index
+          and runs ``memcheck()`` under the L1 lock, a debug-only consistency
+          walk over the allocator free list. It stays on ``report_status``
+          and :meth:`memcheck`.
+        - **L2 adapters.** Their ``report_status`` may scan the whole object
+          index under the adapter lock. An unreachable external backend also
+          should not drain traffic from a server whose L1 still serves, so
+          L2 health stays an inspection concern.
+
+        Keys are stable identifiers a probe response can report back: the
+        per-L1 controllers carry their L1 tag, as in
+        ``store_controller[_default]``, and the shared ones are plain names
+        such as ``prefetch_controller``.
+
+        Returns:
+            Controller name to liveness flag. Never empty: the prefetch and
+            L2 eviction controllers are always present.
+        """
+        managers = list(self._l1_managers_by_id.values())
+        tags = [c.tag for c in self._l1_configs]
+        components = {
+            "prefetch_controller": self._prefetch_controller.is_healthy(),
+            "l2_eviction_controller": self._l2_eviction_controller.is_healthy(),
+        }
+        for tag, manager in zip(tags, managers, strict=True):
+            controller = self._store_controllers[manager.l1_manager_id]
+            components[f"store_controller[{tag}]"] = controller.is_healthy()
+        for tag, eviction in zip(tags, self._eviction_controllers, strict=True):
+            components[f"l1_eviction_controller[{tag}]"] = eviction.is_healthy()
+        return components
+
     def register_l2_listener(self, listener: L2AdapterListener) -> None:
         """Register a listener on all current and future L2 adapters.
 

@@ -28,6 +28,10 @@ def _make_app(auth_config: HTTPAuthenticationConfig) -> FastAPI:
     def healthcheck() -> dict[str, bool]:
         return {"ok": True}
 
+    @app.get("/readyz")
+    def readyz() -> dict[str, bool]:
+        return {"ok": True}
+
     @app.get("/status")
     def status() -> dict[str, bool]:
         return {"ok": True}
@@ -35,7 +39,7 @@ def _make_app(auth_config: HTTPAuthenticationConfig) -> FastAPI:
     return app
 
 
-@pytest.mark.parametrize("path", ["/", "/healthcheck"])
+@pytest.mark.parametrize("path", ["/", "/healthcheck", "/readyz"])
 def test_public_routes_do_not_require_api_key(path: str) -> None:
     """Liveness and health probes remain public when auth is enabled."""
     with TestClient(_make_app(HTTPAuthenticationConfig(["secret"]))) as client:
