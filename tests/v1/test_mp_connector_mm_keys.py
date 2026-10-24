@@ -55,6 +55,7 @@ class _FakeMMFeature:
 @dataclass
 class _FakeSamplingParams:
     extra_args: dict[str, object] | None = None
+    max_tokens: int | None = None
 
 
 class _FakeRequest:
@@ -195,6 +196,7 @@ def test_eager_prefetch_forwards_request_configs():
         role=KVConnectorRole.SCHEDULER,
         _eager_prefetch=True,
         _reserve_last_token_for_lookup=False,
+        _save_unfull_chunk=False,
         scheduler_adapter=scheduler_adapter,
         _get_or_create_request_tracker=MagicMock(return_value=tracker),
     )
@@ -207,6 +209,7 @@ def test_eager_prefetch_forwards_request_configs():
         cache_salt="",
         request_configs={"lmcache.skip_save": True},
         reserve_last_token=False,
+        include_unfull_chunk=False,
     )
     assert tracker.lookup_started_at is not None
 
@@ -230,6 +233,7 @@ def test_lookup_hint_carries_vllm_prefix_hit() -> None:
     connector.request_trackers = {}
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = False
+    connector._save_unfull_chunk = False
     connector.lazy_offload = False
     connector._hit_alignment_tokens = 64
 
@@ -249,6 +253,7 @@ def test_recurrent_lookup_reserves_final_prompt_token() -> None:
     connector.request_trackers = {}
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = True
+    connector._save_unfull_chunk = False
     connector._hit_alignment_tokens = 64
     connector._connector_stats = MagicMock()
     connector.lazy_offload = False
@@ -262,6 +267,7 @@ def test_recurrent_lookup_reserves_final_prompt_token() -> None:
         cache_salt="",
         request_configs={"lmcache.hint.engine_computed_tokens": 0},
         reserve_last_token=True,
+        include_unfull_chunk=False,
         start=0,
     )
     tracker = connector.request_trackers[request.request_id]
@@ -353,9 +359,9 @@ def test_store_metadata_decode_chunk_boundary(
     total_tokens = prompt_length + output_length
     tracker.num_scheduled_tokens = total_tokens - tracker.num_lmcache_hit_tokens
     tracker.allocated_block_ids = {0: list(range((total_tokens + 15) // 16))}
-    kwargs = {"save_decode_cache": True} if save_decode_cache else {}
-
-    metadata = LMCacheMPRequestMetadata.GetStoreMetadata(tracker, 256, [16], **kwargs)
+    metadata = LMCacheMPRequestMetadata.GetStoreMetadata(
+        tracker, 256, [16], save_decode_cache=save_decode_cache
+    )
 
     if save_decode_cache and total_tokens // 256 > prompt_length // 256:
         assert metadata is not None

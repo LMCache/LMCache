@@ -56,6 +56,32 @@ def is_scratch_spec(spec: Any) -> bool:
     return not getattr(spec, "participates_in_prefix_caching", True)
 
 
+def is_per_request_state_spec(spec: Any) -> bool:
+    """Return whether the spec is a per-request ring.
+
+    vLLM's ``CircularBufferSpec`` (``KpoolTailSpec`` on older vLLM) gives each
+    request one block for its whole lifetime, written at ``position % capacity``
+    and holding the raw keys of the compression group that is still open. It
+    is a scratch spec (see :func:`is_scratch_spec`), but unlike the other
+    scratch specs its content is needed to resume a request mid-group, e.g.
+    from an unfull chunk. Checked by class name so this module stays
+    importable without vLLM; ``UniformTypeKVCacheSpecs`` is unwrapped first.
+
+    Args:
+        spec: A vLLM KV cache spec, or a ``UniformTypeKVCacheSpecs`` container.
+
+    Returns:
+        ``True`` for a per-request ring spec.
+    """
+    inner = getattr(spec, "kv_cache_specs", None)
+    if isinstance(inner, dict) and inner:
+        spec = next(iter(inner.values()))
+    return is_scratch_spec(spec) and any(
+        cls.__name__ in ("CircularBufferSpec", "KpoolTailSpec")
+        for cls in type(spec).__mro__
+    )
+
+
 def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
     """Global tokens covered by one block id of ``kv_cache_spec``.
 
@@ -72,6 +98,27 @@ def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
     if _is_attention_spec(kv_cache_spec):
         return block_size * dcp_size
     return block_size
+
+
+def is_align_mode_mamba_spec(spec: Any) -> bool:
+    """Return whether the spec is a Mamba/linear-attention spec in align mode.
+
+    Align mode keeps state snapshots only at chosen boundaries and may move
+    them between blocks, so a block-table position does not identify one;
+    vLLM hands each snapshot's block to connectors instead
+    (``SchedulerOutput.kv_connector_block_state.boundary_state_offloads``).
+    Checked by class name so this module stays importable without vLLM.
+
+    Args:
+        spec: A vLLM KV cache spec.
+
+    Returns:
+        True for a ``MambaSpec`` with ``mamba_cache_mode == "align"``.
+    """
+    return (
+        any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__)
+        and getattr(spec, "mamba_cache_mode", "none") == "align"
+    )
 
 
 def _is_sliding_window_spec(spec: Any) -> bool:

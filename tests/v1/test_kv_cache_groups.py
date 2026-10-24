@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Third Party
 import msgspec
+import pytest
 
 # First Party
 from lmcache.v1.multiprocess.group_view import (
@@ -192,3 +193,27 @@ def test_slice_block_ids_scratch_group_yields_empty():
         end_token_idx=3200,
     )
     assert sliced == [[0, 1], []]
+
+
+def test_slice_block_ids_unfull_chunk_takes_the_block_of_the_last_token():
+    """An unaligned end ends with the block holding its last token."""
+    allocated = {0: list(range(32)), 1: list(range(4))}
+    sliced = slice_block_ids_per_group(
+        allocated,
+        group_tokens_per_block=[16, 128],
+        start_token_idx=128,
+        end_token_idx=300,
+        include_unfull_chunk=True,
+    )
+    assert sliced == [list(range(8, 19)), [1, 2]]
+
+
+def test_slice_block_ids_unaligned_end_needs_unfull_chunk():
+    allocated = {0: list(range(32))}
+    with pytest.raises(ValueError, match="does not align"):
+        slice_block_ids_per_group(
+            allocated,
+            group_tokens_per_block=[16],
+            start_token_idx=0,
+            end_token_idx=300,
+        )

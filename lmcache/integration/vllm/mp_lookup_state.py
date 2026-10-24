@@ -35,7 +35,7 @@ class _Phase(enum.Enum):
     scheduler check re-sends it."""
 
     RESOLVED = enum.auto()
-    """The server reported its final hit chunk count."""
+    """The server reported its final hit."""
 
     TIMED_OUT = enum.auto()
     """An RPC to the server passed its deadline."""
@@ -61,8 +61,8 @@ class _Server:
     """Whether a scheduler check ran since the QUERY_PREFETCH_STATUS in flight
     was sent."""
 
-    hit_chunks: int = 0
-    """Final hit chunk count, set in RESOLVED."""
+    hit_tokens: int = 0
+    """Final hit token count, set in RESOLVED."""
 
 
 class LookupState:
@@ -71,9 +71,10 @@ class LookupState:
 
     Each server runs its own chain: LOOKUP, then QUERY_PREFETCH_STATUS as soon
     as that server acknowledges the LOOKUP, re-queried while the server answers
-    None. Once every server reports a hit count, the result is the minimum
-    across servers; servers that reported more get their excess tail locks
-    released.
+    None. Once every server reports a hit, the result is the minimum across
+    servers; servers that reported more get their excess tail locks released.
+    A server answers a LOOKUP whose key sets ``include_unfull_chunk`` in
+    tokens (the hit may end with an unfull chunk), any other in chunks.
 
     RPC completions advance the state through ``on_lookup_finished`` and
     ``on_query_prefetch_status_finished``, which run as future done-callbacks.
@@ -340,7 +341,11 @@ class LookupState:
             if reply is not None:
                 server.phase = _Phase.RESOLVED
                 server.future = None
-                server.hit_chunks = int(reply)
+                server.hit_tokens = (
+                    int(reply)
+                    if self._key.include_unfull_chunk
+                    else int(reply) * self._tokens_per_chunk
+                )
                 self._maybe_resolve_lookup_result()
                 return []
 
@@ -369,33 +374,33 @@ class LookupState:
         if any(s.phase is not _Phase.RESOLVED for s in self._servers.values()):
             return
 
-        hit_chunks = {url: server.hit_chunks for url, server in self._servers.items()}
-        min_chunks = min(hit_chunks.values())
-        if min_chunks != max(hit_chunks.values()):
+        hit_tokens = {url: server.hit_tokens for url, server in self._servers.items()}
+        common_tokens = min(hit_tokens.values())
+        if common_tokens != max(hit_tokens.values()):
+            # Servers that hit different unfull chunks share only the full
+            # chunks below them.
+            common_tokens -= common_tokens % self._tokens_per_chunk
             logger.warning(
-                "[req=%s] LMCache hit mismatch across servers: %s → take min=%d",
+                "[req=%s] LMCache hit mismatch across servers: %s → take %d tokens",
                 self._key.request_id,
-                hit_chunks,
-                min_chunks,
+                hit_tokens,
+                common_tokens,
             )
 
-            # Chunks past the minimum stay locked on the servers that
-            # reported them but will never be retrieved.
+            # Chunks (and an unfull chunk) past the common hit stay locked on
+            # the servers that reported them but will never be retrieved.
             for url, server in self._servers.items():
-                if server.hit_chunks <= min_chunks:
+                if server.hit_tokens <= common_tokens:
                     continue
 
                 tail_key = replace(
                     self._key,
-                    start=min_chunks * self._tokens_per_chunk,
-                    end=min(
-                        server.hit_chunks * self._tokens_per_chunk,
-                        len(self._key.token_ids),
-                    ),
+                    start=common_tokens,
+                    end=min(server.hit_tokens, len(self._key.token_ids)),
                 )
                 server.client.free_lookup_locks(tail_key, self._tp_size)
 
-        self._result = min_chunks * self._tokens_per_chunk
+        self._result = common_tokens
 
     def _get_expired_servers(self, now: float) -> list[str]:
         """Return the servers whose LOOKUP or QUERY_PREFETCH_STATUS is still
