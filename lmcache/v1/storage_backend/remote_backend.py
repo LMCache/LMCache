@@ -253,8 +253,13 @@ class RemoteBackend(StorageBackendInterface):
         with self.lock:
             self.put_tasks.add(key)
 
-        compressed_memory_obj = self.serializer.serialize(memory_obj)
-        memory_obj.ref_count_down()
+        try:
+            compressed_memory_obj = self.serializer.serialize(memory_obj)
+        except Exception:
+            self._abort_put_task(key)
+            raise
+        finally:
+            memory_obj.ref_count_down()
 
         def put_done_callback(f: Future) -> None:
             self.put_callback(f, key)
@@ -264,13 +269,27 @@ class RemoteBackend(StorageBackendInterface):
                 except Exception as e:
                     logger.warning("on_complete_callback failed for key %s: %s", key, e)
 
-        # NOTE: No need to do error handling here
-        # since the `future` is never waited
-        future = asyncio.run_coroutine_threadsafe(
-            self.connection.put(key, compressed_memory_obj), self.loop
-        )
+        # Once scheduled, the put coroutine owns the serialized object's
+        # reference and the done callback clears the pending key. If scheduling
+        # itself fails (e.g. the event loop is closed), neither happens, so
+        # undo both here.
+        put_coro = self.connection.put(key, compressed_memory_obj)
+        try:
+            future = asyncio.run_coroutine_threadsafe(put_coro, self.loop)
+        except Exception:
+            if asyncio.iscoroutine(put_coro):
+                put_coro.close()
+            compressed_memory_obj.ref_count_down()
+            self._abort_put_task(key)
+            raise
         future.add_done_callback(put_done_callback)
         return future
+
+    def _abort_put_task(self, key: CacheEngineKey) -> None:
+        """Clean up a put task that failed before it was scheduled."""
+        with self.lock:
+            self.put_tasks.discard(key)
+        self._put_failed_count += 1
 
     def batched_put_callback(self, future: Future, keys: List[CacheEngineKey]):
         """
