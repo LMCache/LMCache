@@ -3,8 +3,8 @@
 
 vLLM may page a group's tensor at a kernel block size smaller than its block
 size (``kernel_block_size``): engine block ``b`` then covers tensor pages
-``b*k .. b*k+k-1``. vLLM-RBLN does this for a sliding-window group, paging
-4096-token blocks as 128-token windows. These tests pin that registration
+``b*k .. b*k+k-1``. FlashInfer before Blackwell, for example, pages
+``--block-size 128`` groups at 64 tokens. These tests pin that registration
 reads such a group as kernel-paged rather than compressed, that store and
 retrieve move tensor pages, that chunk counting (null chunks, retrieve
 windows) still runs on engine block IDs, and that a sliding window of one

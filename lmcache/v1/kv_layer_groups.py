@@ -106,6 +106,24 @@ def _kernel_pages_per_block(
     return 1
 
 
+def expand_block_ids_to_pages(block_ids: list[int], pages_per_block: int) -> list[int]:
+    """Expand engine block IDs into a kernel-paged group's tensor page IDs.
+
+    Engine block ``b`` covers pages ``b*k .. b*k+k-1``, the mapping vLLM's
+    block table applies for a kernel block size smaller than its block size.
+
+    Args:
+        block_ids: Engine block IDs of one kernel group.
+        pages_per_block: ``KernelGroupInfo.kernel_pages_per_block`` (``k``).
+
+    Returns:
+        The page IDs, or ``block_ids`` itself when ``k == 1``.
+    """
+    if pages_per_block == 1:
+        return block_ids
+    return [b * pages_per_block + i for b in block_ids for i in range(pages_per_block)]
+
+
 def group_layers_by_identity(
     kv_caches: "DiscoverableKVCache",
     engine_kv_formats: "Sequence[lmcache_native.EngineKVFormat]",
@@ -725,18 +743,33 @@ class KVLayerGroupsManager:
             num_tokens: The total number of tokens to be processed for the group.
 
         Returns:
-            The number of blocks.
+            The number of tensor pages (``shape_desc.bs`` slots each). This
+            is the block-ID count except for kernel-paged groups, whose
+            block IDs must go through :meth:`expand_to_kernel_pages`.
 
         Raises:
             IndexError: If *kernel_group_idx* is out of range.
         """
         group = self._kernel_groups[kernel_group_idx]
-        # Physical slots for num_tokens, derived from the per-block geometry
-        # (slots_per_block / tokens_per_block) rather than a compress ratio.
-        num_physical_slots = (
-            num_tokens * group.slots_per_block // group.tokens_per_block
-        )
-        return num_physical_slots // group.shape_desc.bs
+        return group.calculate_slots(num_tokens) // group.shape_desc.bs
+
+    def expand_to_kernel_pages(self, block_ids: Sequence[list[int]]) -> list[list[int]]:
+        """Expand per-kernel-group engine block IDs into tensor page IDs.
+
+        Transfer kernels index a group's tensor by page, so a kernel-paged
+        group's IDs are expanded (see :func:`expand_block_ids_to_pages`);
+        other groups' lists are returned as they are.
+
+        Args:
+            block_ids: Engine block IDs, indexed by kernel-group index.
+
+        Returns:
+            Page IDs, indexed by kernel-group index.
+        """
+        return [
+            expand_block_ids_to_pages(ids, group.kernel_pages_per_block)
+            for ids, group in zip(block_ids, self._kernel_groups, strict=True)
+        ]
 
     ### Helper methods
     def _detect_object_groups(

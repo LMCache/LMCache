@@ -22,7 +22,10 @@ from lmcache.v1.gpu_connector.utils import (
     get_device,
     normalize_and_discover_per_layer_formats,
 )
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+from lmcache.v1.kv_layer_groups import (
+    KVLayerGroupsManager,
+    expand_block_ids_to_pages,
+)
 from lmcache.v1.multiprocess.custom_types import (
     GroupLayout,
     RegisterEngineDrivenContextPayload,
@@ -216,16 +219,8 @@ class _GroupState:
         return self.blocks_in_chunk // self.kernel_pages_per_block
 
     def page_ids(self, block_ids: list[int]) -> list[int]:
-        """Expand engine block IDs into this group's tensor page IDs.
-
-        Engine block ``b`` covers pages ``b*k .. b*k+k-1``, the mapping vLLM's
-        block table applies for a kernel block size smaller than its block
-        size; ``k == 1`` returns the IDs unchanged.
-        """
-        k = self.kernel_pages_per_block
-        if k == 1:
-            return block_ids
-        return [b * k + i for b in block_ids for i in range(k)]
+        """Expand engine block IDs into this group's tensor page IDs."""
+        return expand_block_ids_to_pages(block_ids, self.kernel_pages_per_block)
 
 
 # Allocates ``count`` CPU gather targets of one shape and dtype.

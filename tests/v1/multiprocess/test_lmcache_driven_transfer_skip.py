@@ -15,9 +15,11 @@ from unittest.mock import MagicMock, call
 
 # Third Party
 import pytest
+import torch
 
 # First Party
-from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager, ObjectGroupInfo
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
@@ -26,6 +28,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
 )
+import lmcache.lmcache_native as lmcache_native
 
 # ------------------------------------------------------------------ #
 #  all_null_chunk_masks (store-side skip)                              #
@@ -118,11 +121,18 @@ def _staging_context(
     context.calculate_num_blocks.side_effect = lambda tokens, group: tokens
     context.kv_layer_groups_manager = SimpleNamespace(
         num_kernel_groups=num_kernel_groups,
+        kernel_groups=_unpaged_kernel_groups(num_kernel_groups),
         object_groups=object_groups,
         get_subchunk_sw_size_tokens=lambda group: window_tokens,
+        expand_to_kernel_pages=lambda ids: list(ids),
     )
     context.stage_block_ids.side_effect = lambda ids: ids
     return context
+
+
+def _unpaged_kernel_groups(num_kernel_groups: int) -> list[SimpleNamespace]:
+    """Kernel groups with one tensor page per engine block ID."""
+    return [SimpleNamespace(kernel_pages_per_block=1)] * num_kernel_groups
 
 
 # ------------------------------------------------------------------ #
@@ -141,9 +151,11 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     kvlgm = SimpleNamespace(
         num_object_groups=num_object_groups,
         num_kernel_groups=num_object_groups,
+        kernel_groups=_unpaged_kernel_groups(num_object_groups),
         get_attn_desc=lambda: SimpleNamespace(
             num_chunks_in_sw=num_chunks_in_sw, group_kinds=tuple(group_kinds)
         ),
+        expand_to_kernel_pages=lambda ids: list(ids),
     )
     cache_context = MagicMock()
     cache_context.kv_layer_groups_manager = kvlgm
@@ -414,3 +426,87 @@ def test_downsample_full_attention_keeps_every_block():
     raw = [list(range(n_chunks * bpc))]
     out = mod.downsample_and_stage_block_ids(ctx, [list(raw[0])])
     assert out[0] == raw[0]
+
+
+# ------------------------------------------------------------------ #
+#  Kernel-paged groups (engine block = k tensor pages)                 #
+# ------------------------------------------------------------------ #
+
+
+def _make_kernel_paged_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[LMCacheDrivenTransferModule, MagicMock]:
+    """A module over one kernel-paged group: 32-token engine blocks held as
+    four 8-slot tensor pages, 64-token chunks, two chunks per request."""
+    module, _reads, _transfers = _make_module(monkeypatch, 2, [-1])
+    manager = KVLayerGroupsManager(
+        [torch.zeros(2, 16, 8, 2, 16, dtype=torch.float16)],
+        engine_kv_formats=[lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS],
+        engine_group_infos=[
+            EngineGroupInfo(0, (0,), tokens_per_block=32, num_blocks=4)
+        ],
+        lmcache_tokens_per_chunk=64,
+    )
+    entry = module.get_and_touch_context_entry(1)
+    context = MagicMock()
+    context.lmcache_tokens_per_chunk = 64
+    context.kv_layer_groups_manager = manager
+    context.calculate_num_blocks.side_effect = (
+        lambda tokens, group: manager.calculate_num_blocks(group, tokens)
+    )
+    context.stage_block_ids.side_effect = lambda ids: ids
+    context.transfer_object_group = entry.cache_context.transfer_object_group
+    entry.cache_context = context
+    module.context.chunk_size = 64
+    module.context.session_manager.get.return_value = None
+    module.context.storage_manager.reserve_write.side_effect = lambda keys, layout: {
+        key: MagicMock(get_size=MagicMock(return_value=10)) for key in keys
+    }
+    monkeypatch.setattr(
+        mod, "downsample_and_stage_block_ids", downsample_and_stage_block_ids
+    )
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *a, **kw: object())
+    return module, context
+
+
+def test_store_finds_null_chunks_by_block_id_and_stages_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Null chunks are found on the engine's block IDs, and the transfer is
+    handed tensor page IDs (block ``b`` -> pages ``4b .. 4b+3``)."""
+    module, context = _make_kernel_paged_module(monkeypatch)
+
+    # Chunk 0 is two null blocks; chunk 1 is engine blocks 3 and 1.
+    _handle, ok = module.store(
+        SimpleNamespace(request_id="req", worker_id=1),
+        1,
+        [[0, 0, 3, 1]],
+        b"producer",
+    )
+
+    assert ok
+    reserve_write = cast(MagicMock, module.context.storage_manager.reserve_write)
+    assert [c.args[0] for c in reserve_write.call_args_list] == [["g0c1"]]
+    assert context.stage_block_ids.call_args.args[0] == [
+        [0, 1, 2, 3, 0, 1, 2, 3, 12, 13, 14, 15, 4, 5, 6, 7]
+    ]
+
+
+def test_retrieve_stages_pages_for_kernel_paged_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two block IDs per chunk pass the underflow check, and retrieve stages
+    every page of each block."""
+    module, context = _make_kernel_paged_module(monkeypatch)
+
+    _handle, ok = module.retrieve(
+        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        instance_id=1,
+        gpu_block_ids=[[2, 0, 3, 1]],
+        event_ipc_handle=b"x",
+    )
+
+    assert ok is True
+    assert context.stage_block_ids.call_args.args[0] == [
+        [8, 9, 10, 11, 0, 1, 2, 3, 12, 13, 14, 15, 4, 5, 6, 7]
+    ]

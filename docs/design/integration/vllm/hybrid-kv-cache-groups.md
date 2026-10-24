@@ -129,8 +129,8 @@ A group the backend pages at a smaller kernel block size (vLLM
 connector edits ([kv_cache_group_edits.md](kv_cache_group_edits.md)) leave
 such a tensor raw, the manager tells the two apart by page count: a tensor
 holding exactly `k > 1` times `EngineGroupInfo.num_blocks` pages is
-kernel-paged (`kernel_pages_per_block = k`), and the engine-driven worker
-counts its chunks in pages and expands block IDs to page IDs.
+kernel-paged (`kernel_pages_per_block = k`), and both transfer paths count
+its chunks in pages and expand block IDs to page IDs.
 
 ### Cross-layer KV sharing
 

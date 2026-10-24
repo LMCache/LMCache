@@ -844,10 +844,21 @@ class TestKernelPagedGroups:
         manager = self._manager(num_pages=16, engine_num_blocks=4, sw_size_tokens=8)
         assert manager.get_subchunk_sw_size_tokens(0) == 8
 
+    def test_blocks_count_pages_and_block_ids_expand_to_pages(self):
+        manager = self._manager(num_pages=16, engine_num_blocks=4)
+        # A 64-token chunk is 2 engine blocks of 4 pages each.
+        assert manager.calculate_num_blocks(0, 64) == 8
+        assert manager.expand_to_kernel_pages([[3, 1]]) == [
+            [12, 13, 14, 15, 4, 5, 6, 7]
+        ]
+
     def test_as_many_pages_as_block_ids_stays_compressed(self):
-        group = self._manager(num_pages=4, engine_num_blocks=4).kernel_groups[0]
+        manager = self._manager(num_pages=4, engine_num_blocks=4)
+        group = manager.kernel_groups[0]
         assert group.kernel_pages_per_block == 1
         assert group.calculate_slots(64) == 16
+        assert manager.calculate_num_blocks(0, 64) == 2
+        assert manager.expand_to_kernel_pages([[3, 1]]) == [[3, 1]]
 
     def test_unreported_block_count_keeps_the_old_reading(self):
         group = self._manager(num_pages=16, engine_num_blocks=0).kernel_groups[0]
