@@ -47,10 +47,10 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.inprocess.v1.cache_controller.worker import LMCacheWorker
     from lmcache.inprocess.v1.lookup_client.lmcache_async_lookup_client import (
         LMCacheAsyncLookupServer,
     )
-    from lmcache.v1.cache_controller.worker import LMCacheWorker
 
 logger = init_logger(__name__)
 
@@ -409,30 +409,32 @@ class StorageManager:
             memory_objs,
         )
 
-        for backend_name, backend in self.storage_backends.items():
-            if location and backend_name != location:
-                continue
-            # Skip bypassed backends
-            with self._bypass_lock:
-                if backend_name in self._bypassed_backends:
+        try:
+            for backend_name, backend in self.storage_backends.items():
+                if location and backend_name != location:
                     continue
+                # Skip bypassed backends
+                with self._bypass_lock:
+                    if backend_name in self._bypassed_backends:
+                        continue
 
-            allocator_backend = backend.get_allocator_backend()
-            cname = get_backend_cname(allocator_backend)
-            if cname not in obj_dict:
-                new_keys, new_objs = allocate_and_copy_objects(
-                    allocator_backend, keys, memory_objs, self.internal_copy_stream
-                )
-                obj_dict[cname] = (new_keys, new_objs)
+                allocator_backend = backend.get_allocator_backend()
+                cname = get_backend_cname(allocator_backend)
+                if cname not in obj_dict:
+                    new_keys, new_objs = allocate_and_copy_objects(
+                        allocator_backend, keys, memory_objs, self.internal_copy_stream
+                    )
+                    obj_dict[cname] = (new_keys, new_objs)
 
-            # NOTE: the handling of exists_in_put_tasks
-            # is done in the backend
-            ks, objs = obj_dict[cname]
-            backend.batched_submit_put_task(ks, objs, transfer_spec=transfer_spec)
-
-        for cname, (ks, objs) in obj_dict.items():
-            for memory_obj in objs:
-                memory_obj.ref_count_down()
+                # NOTE: the handling of exists_in_put_tasks
+                # is done in the backend
+                ks, objs = obj_dict[cname]
+                backend.batched_submit_put_task(ks, objs, transfer_spec=transfer_spec)
+        finally:
+            # Release the references this call owns even if a backend raised.
+            for cname, (ks, objs) in obj_dict.items():
+                for memory_obj in objs:
+                    memory_obj.ref_count_down()
 
     def get(
         self,

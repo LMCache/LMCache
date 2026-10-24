@@ -1,8 +1,8 @@
 # LMCache CODEOWNERS
 
 # Core engine
-/lmcache/v1/cache_engine.py            @ApostaC @YaoJiayi @sammshen
-/lmcache/v1/cache_controller/          @maobaolong @YaoJiayi @chunxiaozheng
+/lmcache/inprocess/v1/cache_engine.py   @ApostaC @YaoJiayi @sammshen
+/lmcache/inprocess/v1/cache_controller/  @maobaolong @YaoJiayi @chunxiaozheng
 /lmcache/inprocess/v1/offload_server/            @maobaolong @YaoJiayi
 
 # Memory management

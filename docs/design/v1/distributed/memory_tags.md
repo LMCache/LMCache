@@ -22,9 +22,9 @@ Source: `lmcache/v1/distributed/api.py` (types),
 Before memory tags, each `--l2-adapter` JSON carried a hand-written
 `affinity_tag` naming an L1, defaulting to `_default`. Users had to know which
 L1s an adapter could work with (GDS was rejected by a special case), and a
-prefetch could not be restricted to "local" tiers: P2P serving only had the
-all-or-nothing `skip_l2=True`. Memory tags make those properties intrinsic to
-each L1 manager and L2 adapter, so the runtime can decide.
+prefetch could not be restricted to "local" tiers: P2P serving could only turn
+L2 off entirely. Memory tags make those properties intrinsic to each L1 manager
+and L2 adapter, so the runtime can decide.
 
 ## Types
 
@@ -142,19 +142,41 @@ Consequences:
 - A future GDS/GDR adapter overrides `get_wanted_l1_memory_tags()`, for
   example to `((VRAM, DUMMY),)`, once a dummy L1 exists.
 
-## Prefetch target filtering (planned)
+## Prefetch target filtering
 
-Not implemented yet. The intended design:
+`PrefetchTaskSpec` carries two filters, one per tier. They are separate because
+an L1 and an L2 can share tags (a `dax` L2 and a CXL L1 are both
+`(CXL, LOCAL)`).
 
-- `StorageManager.submit_prefetch_task` and
-  `PrefetchController.submit_prefetch_request` take separate allowed-tag sets
-  for L1 and L2, replacing `skip_l2`. They must be separate because a `dax` L2
-  and a CXL L1 are both `(CXL, LOCAL)`.
-- The filter applies to L1 locking and to the L2 lookup and load phases. An L2
-  adapter is eligible only if its affinity L1 is eligible too.
-- P2P serving passes L1 `{(DRAM, LOCAL)}` and the `LOCAL` L2 tags, so a peer
-  lookup can hit local storage but never S3, Redis or another peer.
+```python
+PrefetchTaskSpec(
+    key_groups=...,
+    allowed_l1_memory_tags=frozenset({MemoryTags(DRAM, LOCAL)}),  # hit sources
+    allowed_l2_memory_tags=frozenset(),                           # no L2 at all
+)
+```
 
-Open questions: keeping the synchronous L1-only fast path P2P relies on when no
-L2 matches, and the requester-side lookup timeouts once serving goes through
-the asynchronous L2 path.
+| Value | Meaning |
+|---|---|
+| `None` (default) | every L1 manager / L2 adapter is allowed |
+| empty `frozenset()` | none is allowed |
+| non-empty set | only managers / adapters whose tags are in the set |
+
+- **L1 filter = hit sources only.** Only allowed L1 managers are read-locked,
+  so only their resident objects count as L1 hits.
+- **L2 filter = lookup and load sources.** Only allowed, non-draining adapters
+  are looked up and planned.
+- **Loads still land in the affinity L1.** An allowed L2 adapter loads into its
+  affinity L1 even when that L1's tags are not allowed. A key already resident
+  there cannot be reserved again, so it is reported as a miss.
+- **Synchronous fast path.** A spec with an empty L2 filter, or a controller
+  with no L2 adapter attached, is served from L1 on the calling thread. A
+  non-empty filter that matches no adapter is served from L1 on the loop
+  thread.
+
+P2P serving passes `allowed_l1_memory_tags=frozenset({(DRAM, LOCAL)})` and
+`allowed_l2_memory_tags=frozenset()`: a peer lookup only locks what this node
+already holds in its DRAM L1, the L1 registered with the transfer channel, and
+never recurses into this node's L2 adapters (including its own P2P adapters). Serving peers from local L2 is a
+follow-up: it moves P2P lookups onto the asynchronous L2 path, which interacts
+with the requester-side lookup timeouts.

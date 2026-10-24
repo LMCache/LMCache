@@ -16,13 +16,13 @@ import torch
 import zmq
 
 # First Party
-from lmcache.inprocess.v1.transfer_channel.transfer_utils import P2PInitSideRetMsg
-from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.cache_controller.message import (
+from lmcache.inprocess.v1.cache_controller.message import (
     BatchedP2PLookupMsg,
     BatchedP2PLookupRetMsg,
 )
+from lmcache.inprocess.v1.transfer_channel.transfer_utils import P2PInitSideRetMsg
+from lmcache.logging import init_logger
+from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
     PagedCpuGpuMemoryAllocator,
@@ -623,7 +623,7 @@ class TestP2PBackendWithController:
             with mock_controller_context(peer_mappings) as controller_url:
                 with MockLMCacheWorker(controller_url) as mock_worker:
                     with patch(
-                        "lmcache.v1.rpc_utils.get_zmq_socket_with_timeout"
+                        "lmcache.v1.storage_backend.p2p_backend.get_zmq_socket_with_timeout"
                     ) as mock_get_socket:
                         mock_get_socket.return_value = MagicMock()
 

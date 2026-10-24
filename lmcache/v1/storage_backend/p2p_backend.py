@@ -12,6 +12,17 @@ import zmq
 import zmq.asyncio
 
 # First Party
+from lmcache.inprocess.v1.cache_controller.message import (
+    BatchedP2PLookupMsg,
+    BatchedP2PLookupRetMsg,
+    ErrorMsg,
+)
+from lmcache.inprocess.v1.rpc_utils import (
+    DEFAULT_SOCKET_RECV_TIMEOUT_MS,
+    DEFAULT_SOCKET_SEND_TIMEOUT_MS,
+    get_zmq_context,
+    get_zmq_socket_with_timeout,
+)
 from lmcache.inprocess.v1.transfer_channel import CreateTransferChannel
 from lmcache.inprocess.v1.transfer_channel.transfer_utils import (
     P2PInitSideMsg,
@@ -20,11 +31,6 @@ from lmcache.inprocess.v1.transfer_channel.transfer_utils import (
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.cache_controller.message import (
-    BatchedP2PLookupMsg,
-    BatchedP2PLookupRetMsg,
-    ErrorMsg,
-)
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
     PagedCpuGpuMemoryAllocator,
@@ -34,18 +40,12 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.rpc_utils import (
-    DEFAULT_SOCKET_RECV_TIMEOUT_MS,
-    DEFAULT_SOCKET_SEND_TIMEOUT_MS,
-    get_zmq_context,
-    get_zmq_socket_with_timeout,
-)
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.cache_controller import LMCacheWorker
+    from lmcache.inprocess.v1.cache_controller import LMCacheWorker
 
 logger = init_logger(__name__)
 
