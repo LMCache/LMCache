@@ -21,14 +21,6 @@ from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
-_SUPPORTED_FORMATS = frozenset(
-    (
-        EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-        EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
-        EngineKVFormat.NL_X_NB_BS_HS,
-    )
-)
-
 
 class MluDeviceOps(DeviceOps):
     """MLU engine-driven ops with explicit unsupported pointer paths."""
@@ -49,8 +41,9 @@ class MluDeviceOps(DeviceOps):
     ) -> None:
         """Transfer MLU KV blocks to or from canonical LMCache chunks.
 
-        Supports K/V-first NHD and HND, and single-plane MLA. Transfers use
-        the current stream. D2H into a strided host slice blocks: torch_mlu
+        Supports rank-five K/V-first NHD and HND, and rank-three MLA,
+        selected through KVFormatSpec layout facts. Transfers use the
+        current stream. D2H into a strided host slice blocks: torch_mlu
         1.26.1 does not correctly complete that copy with non_blocking=True.
         Callers must synchronize before consuming other host chunks or
         releasing input storage.
@@ -68,8 +61,9 @@ class MluDeviceOps(DeviceOps):
 
         Raises:
             TypeError: If either operand collection contains raw pointers.
-            NotImplementedError: If the KV layout is unsupported.
-            ValueError: If chunk size, skip count, or direction is invalid.
+            NotImplementedError: If the layout facts or tensor rank are unsupported.
+            ValueError: If the format is unknown, or chunk size, skip count,
+                or direction is invalid.
         """
         if not isinstance(paged_buffer_ptrs_tensor, list) or not all(
             isinstance(tensor, torch.Tensor) for tensor in paged_buffer_ptrs_tensor
@@ -77,8 +71,28 @@ class MluDeviceOps(DeviceOps):
             raise TypeError("MLU block transfer requires per-layer tensor operands")
         if not all(isinstance(tensor, torch.Tensor) for tensor in lmcache_objects_ptrs):
             raise TypeError("MLU block transfer requires tensor chunks, not pointers")
-        if engine_kv_format not in _SUPPORTED_FORMATS:
+        # The specs package reads lmcache.device_ops, so load it only after
+        # device initialization, as in the shared torch and RBLN paths.
+        # First Party
+        from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec_class
+
+        format_spec = get_spec_class(engine_kv_format)
+        if (
+            not format_spec.is_layer_list
+            or format_spec.is_fused_packed
+            or format_spec.is_pbs_fused
+            or format_spec.is_kv_second_tuple
+            or format_spec.requires_blocked_scale_repacking
+            or not (format_spec.is_mla or format_spec.is_two_major)
+        ):
             raise NotImplementedError(f"Unsupported MLU KV format: {engine_kv_format}")
+        # HND formats with an extra singleton axis share these layout facts,
+        # but the indexing below requires ordinary rank-five paged tensors.
+        expected_rank = 3 if format_spec.is_mla else 5
+        if any(layer.ndim != expected_rank for layer in paged_buffer_ptrs_tensor):
+            raise NotImplementedError(
+                f"MLU block transfer requires rank-{expected_rank} paged tensors"
+            )
         if direction != TransferDirection.D2H:
             super().multi_layer_block_kv_transfer(
                 paged_buffer_ptrs_tensor,
@@ -108,8 +122,8 @@ class MluDeviceOps(DeviceOps):
             return
         blocks_per_chunk = lmcache_chunk_size // block_size
         ids = torch.as_tensor(block_ids, dtype=torch.long, device=device)
-        is_mla = engine_kv_format == EngineKVFormat.NL_X_NB_BS_HS
-        is_hnd = engine_kv_format == EngineKVFormat.NL_X_TWO_NB_NH_BS_HS
+        is_mla = format_spec.is_mla
+        is_hnd = format_spec.is_hnd
         chunks = cast(list[torch.Tensor], lmcache_objects_ptrs)
         for chunk_idx, chunk in enumerate(chunks):
             begin = max(chunk_idx * blocks_per_chunk, skip_prefix_n_blocks)

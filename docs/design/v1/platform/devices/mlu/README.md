@@ -27,6 +27,13 @@ Cambricon's V1 FlashAttention backend allocates `[2, NB, NH, BS, HS]` even
 when the generic vLLM query returns NHD. A resolved `CacheConfig` layout
 takes precedence over this legacy normalization.
 
+Layout selection reads `get_spec_class(engine_kv_format)` facts. It requires
+one tensor per layer and either MLA or a leading K/V axis, excluding packed
+K/V, fused block/token axes, tuple entries, and blocked-scale repacking.
+The tensor rank must be three for MLA or five for NHD/HND: a singleton-axis
+HND format shares the HND facts but needs different indexing. Both transfer
+directions reject unsupported layouts before modifying either operand.
+
 Both paged buffers and chunks must be tensors. The shared fallback treats
 integer chunk pointers as CPU addresses, while the LMCache-driven path can
 pass device staging addresses. Rejecting these operands before dispatch

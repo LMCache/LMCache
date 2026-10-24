@@ -163,6 +163,76 @@ def test_block_transfer_rejects_addresses(raw_paged: bool) -> None:
 
 
 @pytest.mark.parametrize("direction", [TransferDirection.H2D, TransferDirection.D2H])
+@pytest.mark.parametrize(
+    "fmt",
+    [
+        EngineKVFormat.NL_X_NB_BSV_BSS,
+        EngineKVFormat.NL_X_NBBS_ONE_HS,
+        EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,
+        EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS,
+        EngineKVFormat.NL_X_NB_NH_BS_CS,
+        EngineKVFormat.NL_X_NB_BS_NH_CS,
+        EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
+        EngineKVFormat.NL_X_NB_BS_NH_TWO_HS,
+        EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
+        EngineKVFormat.NL_X_NB_TWO_NH_ONE_BS_HS,
+        EngineKVFormat.NB_NL_TWO_BS_NH_HS,
+        EngineKVFormat.NB_NL_TWO_NH_BS_HS,
+        EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS,
+        EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS,
+        EngineKVFormat.NL_X_NB_BS_NH_HS,
+    ],
+    ids=lambda fmt: fmt.name,
+)
+def test_block_transfer_rejects_unsupported_layouts_before_copy(
+    fmt: EngineKVFormat, direction: TransferDirection
+) -> None:
+    """Unsupported layout contracts cannot modify either tensor operand."""
+    pages = [torch.ones(2, 4, 2, 1, 4)]
+    chunks = [torch.full((2, 1, 4, 4), -1.0)]
+    desc = PageBufferShapeDesc()
+    desc.nl, desc.nb, desc.bs = 1, 4, 2
+    desc.nh, desc.hs, desc.kv_size = 1, 4, 2
+    desc.element_size, desc.dtype = 4, torch.float32
+    with pytest.raises(NotImplementedError, match="Unsupported MLU KV format"):
+        MluDeviceOps().multi_layer_block_kv_transfer(
+            pages, chunks, [0, 1], "cpu", direction, desc, 4, fmt, 0
+        )
+    assert torch.equal(pages[0], torch.ones_like(pages[0]))
+    assert torch.equal(chunks[0], torch.full_like(chunks[0], -1))
+
+
+@pytest.mark.parametrize("direction", [TransferDirection.H2D, TransferDirection.D2H])
+@pytest.mark.parametrize("singleton_layer", [0, 1])
+def test_block_transfer_rejects_singleton_hnd_before_copy(
+    singleton_layer: int, direction: TransferDirection
+) -> None:
+    """HND traits cannot admit an extra axis, even in a later layer."""
+    pages = [torch.ones(2, 4, 3, 2, 8) for _ in range(2)]
+    pages[singleton_layer] = pages[singleton_layer].unsqueeze(3)
+    chunks = [torch.full((2, 2, 4, 24), -1.0)]
+    desc = PageBufferShapeDesc()
+    desc.nl, desc.nb, desc.bs = 2, 4, 2
+    desc.nh, desc.hs, desc.kv_size = 3, 8, 2
+    desc.element_size, desc.dtype = 4, torch.float32
+    with pytest.raises(NotImplementedError, match="rank-5 paged tensors"):
+        MluDeviceOps().multi_layer_block_kv_transfer(
+            pages,
+            chunks,
+            [0, 1],
+            "cpu",
+            direction,
+            desc,
+            4,
+            EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS,
+            0,
+        )
+    assert all(torch.equal(layer, torch.ones_like(layer)) for layer in pages)
+    assert torch.equal(chunks[0], torch.full_like(chunks[0], -1))
+
+
+@pytest.mark.parametrize("direction", [TransferDirection.H2D, TransferDirection.D2H])
 def test_tensor_copy_and_pointer_rejection(direction: TransferDirection) -> None:
     """Tensor copies honor byte count; even valid host pointers are rejected."""
     ops = MluDeviceOps()
