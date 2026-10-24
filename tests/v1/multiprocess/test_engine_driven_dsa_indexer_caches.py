@@ -6,12 +6,12 @@ all in one vLLM KV cache group:
 
 - the packed MLA latent, ``[NB, BS, HS]`` (int8),
 - the lightning-indexer key, ``[NB, BS, 128]`` (float8_e4m3fn),
-- the indexer key's scale, ``[NB, BS]`` (float16, one value per token).
+- the indexer key's scale, ``[NB, BS, 1]`` (float16, one value per token).
 
-The scale cache is the only rank-2 KV cache vLLM hands LMCache. These tests
-pin that registration gives each cache its own group (the scale cache as a
-one-wide plane) and that the scale cache round-trips through the MP
-gather/scatter helpers.
+The scale cache is allocated flat, ``[NB, BS]``, and registered as a
+``[NB, BS, 1]`` view of it. These tests pin that registration gives each cache
+its own group (the scale cache as a one-wide plane) and that the scale cache
+round-trips through the MP gather/scatter helpers.
 """
 
 # Standard
@@ -56,7 +56,7 @@ def _dsa_caches() -> dict[str, torch.Tensor]:
         )
         kv[f"layers.{i}.indexer.k_cache.scale_cache"] = torch.zeros(
             NUM_BLOCKS, BLOCK_SIZE, dtype=torch.float16
-        )
+        ).unsqueeze(-1)
     return kv
 
 
@@ -118,7 +118,7 @@ def test_scale_cache_round_trips_through_gather_and_scatter() -> None:
     src = {
         f"layers.{i}.indexer.k_cache.scale_cache": torch.randn(
             NUM_BLOCKS, BLOCK_SIZE, dtype=torch.float16
-        )
+        ).unsqueeze(-1)
         for i in range(NUM_LAYERS)
     }
     block_ids = [2, 5, 3, 7]
@@ -129,8 +129,8 @@ def test_scale_cache_round_trips_through_gather_and_scatter() -> None:
         (NUM_LAYERS, CHUNK_TOKENS, 1)
     ] * 2
     for layer, scales in enumerate(src.values()):
-        assert torch.equal(chunks[0][layer, :, 0], torch.cat([scales[2], scales[5]]))
-        assert torch.equal(chunks[1][layer, :, 0], torch.cat([scales[3], scales[7]]))
+        assert torch.equal(chunks[0][layer], torch.cat([scales[2], scales[5]]))
+        assert torch.equal(chunks[1][layer], torch.cat([scales[3], scales[7]]))
 
     dst = {name: torch.zeros_like(scales) for name, scales in src.items()}
     scatter_cpu_to_paged_kv(dst, block_ids, chunks, BLOCKS_IN_CHUNK)

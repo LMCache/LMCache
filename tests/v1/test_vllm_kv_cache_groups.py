@@ -351,13 +351,13 @@ def test_conversion_uniform_group_mixes_kv_and_mla_layouts():
 def test_conversion_splits_rbln_dsa_fp8_caches():
     """vLLM-RBLN serves fp8 DeepSeek-V3.2 with three caches per layer in one
     vLLM group: the MLA latent, the fp8 indexer key and the indexer key's
-    rank-2 fp16 scale. Each becomes its own LMCache group over the shared
+    one-wide fp16 scale. Each becomes its own LMCache group over the shared
     block-id space."""
     caches: dict[str, torch.Tensor] = {}
     for i in range(2):
         caches[f"attn.{i}"] = torch.zeros(32, 16, 576, dtype=torch.int8)
         caches[f"idx.{i}"] = torch.zeros(32, 16, 128, dtype=torch.float8_e4m3fn)
-        caches[f"idx.{i}.scale_cache"] = torch.zeros(32, 16, dtype=torch.float16)
+        caches[f"idx.{i}.scale_cache"] = torch.zeros(32, 16, 1, dtype=torch.float16)
     uniform_spec = UniformTypeKVCacheSpecs(
         block_size=16,
         kv_cache_specs={name: MLAAttentionSpec(block_size=16) for name in caches},

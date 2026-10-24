@@ -150,7 +150,7 @@ an `EngineKVFormat`. Nothing else may index raw shapes.
 | `NL_X_NB_TWO_BS_NH_HS` | vLLM flash-infer | NHD | `NL × [NB, 2, BS, NH, HS]` |
 | `NL_X_TWO_NB_NH_BS_HS` | vLLM flash-attn | HND | `NL × [2, NB, NH, BS, HS]` |
 | `NL_X_NB_TWO_NH_BS_HS` | vLLM flash-infer | HND | `NL × [NB, 2, NH, BS, HS]` |
-| `NL_X_NB_BS_HS` | vLLM MLA | — | `NL × [NB, BS, HS]`; vLLM-RBLN's rank-2 fp8 DSA indexer scale cache `[NB, BS]` is viewed as `[NB, BS, 1]` |
+| `NL_X_NB_BS_HS` | vLLM MLA | — | `NL × [NB, BS, HS]` |
 | `TWO_X_NL_X_NBBS_NH_HS` | SGLang MHA | NHD | `[K_list, V_list]`, each `NL × [PBS, NH, HS]` |
 | `TWO_X_NL_X_NB_BS_NH_HS` | SGLang MHA via MP daemon | NHD | `[K_list, V_list]`, each `NL × [NB, BS, NH, HS]` |
 | `NL_X_NBBS_ONE_HS` | SGLang MLA | — | `NL × [PBS, 1, HS]` |

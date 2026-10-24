@@ -211,22 +211,24 @@ copy out of meta tensor".
 
 With `--kv-cache-dtype fp8`, vLLM-RBLN serves DeepSeek-V3.2 with three
 caches per decoder layer. All three are `MLAAttentionSpec` with one block
-size, so vLLM puts them in a single KV cache group:
+size, so vLLM puts them in a single KV cache group. vLLM-RBLN registers them
+with the connector as:
 
-| Cache (layer name suffix) | Per-layer shape | dtype |
+| Cache (layer name suffix) | Registered shape | dtype |
 |---|---|---|
 | MLA latent (`self_attn.attn`) | `[NB, BS, HS]` | int8 (packed fp8 latent) |
 | Indexer key (`indexer.k_cache`) | `[NB, BS, 128]` | float8_e4m3fn |
-| Indexer key scale (`indexer.k_cache.scale_cache`) | `[NB, BS]` | float16 |
+| Indexer key scale (`indexer.k_cache.scale_cache`) | `[NB, BS, 1]` | float16 |
 
-The first two are ordinary `NL_X_NB_BS_HS` planes. The scale cache is the
-only rank-2 KV cache vLLM hands LMCache: one scale per token, no head axis.
-The vLLM detector views it as `[NB, BS, 1]` (`unsqueeze(-1)` over the same
-storage) and classifies it as `NL_X_NB_BS_HS` with a head size of 1. The
-bytes of `[NB, BS]` already are `[NB, BS, 1]`, so a dedicated format would only
-duplicate the MLA spec and kernels for a trailing axis of one; with the view,
+All three are ordinary `NL_X_NB_BS_HS` planes; the scale cache holds one
+value per token, so its head size is 1. Its kernel reads it flat,
+`[NB, BS]`, because the RBLN compiler refuses a squeeze on a dynamic-shaped
+input. vLLM-RBLN therefore allocates it flat and registers an `unsqueeze(-1)`
+view of the same storage, so LMCache needs no rank-2 layout:
 `RblnDeviceOps` moves the scales through the MLA sequence above, like the key
-cache beside them.
+cache beside them. A vLLM-RBLN that registers the flat tensor fails at
+registration with `ValueError: unsupported kv_caches structure for
+EngineType.VLLM`.
 
 Format discovery splits each vLLM group by per-layer shape and dtype
 (`normalize_and_discover_per_layer_formats`), so the three caches become three

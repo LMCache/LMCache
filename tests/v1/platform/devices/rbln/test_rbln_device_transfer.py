@@ -75,6 +75,11 @@ def _bound_device_tensor(source: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
+def _registered_view(cache: torch.Tensor) -> torch.Tensor:
+    """``cache`` as vLLM-RBLN registers it: a flat ``[NB, BS]`` as ``[NB, BS, 1]``."""
+    return cache.unsqueeze(-1) if cache.dim() == 2 else cache
+
+
 def _transfer(
     layers: list[torch.Tensor],
     chunks: list[torch.Tensor],
@@ -213,17 +218,21 @@ def test_dsa_indexer_cache_gather_scatter_on_device(
 ) -> None:
     """vLLM-RBLN's fp8 DSA indexer caches round-trip through MP gather/scatter.
 
-    The key cache is ``[NB, BS, HS]`` fp8; its scale cache is rank-2
-    ``[NB, BS]`` fp16, which detection views as ``[NB, BS, 1]``. Both must take
-    the MLA sequence on the device and come back byte-identical.
+    The key cache is ``[NB, BS, HS]`` fp8. The scale cache is allocated flat,
+    ``[NB, BS]`` fp16, and vLLM-RBLN registers a ``[NB, BS, 1]`` view of it, so
+    the device tensor is bound flat and handed over the same way. Both must
+    take the MLA sequence on the device and come back byte-identical.
     """
     torch.manual_seed(17)
     width = shape[2] if len(shape) == 3 else 1
     cpu_layers = [torch.randn(shape).to(dtype) for _ in range(NUM_LAYERS)]
     block_ids = list(range(NUM_BLOCKS))
-    paged = {f"layer.{i}": _bound_device_tensor(t) for i, t in enumerate(cpu_layers)}
+    paged = {
+        f"layer.{i}": _registered_view(_bound_device_tensor(t))
+        for i, t in enumerate(cpu_layers)
+    }
     restored = {
-        name: _bound_device_tensor(torch.zeros_like(t))
+        name: _registered_view(_bound_device_tensor(torch.zeros_like(t)))
         for name, t in zip(paged, cpu_layers, strict=True)
     }
     torch.rbln.synchronize()
@@ -244,7 +253,9 @@ def test_dsa_indexer_cache_gather_scatter_on_device(
                 chunk[layer_idx].view(torch.uint8), want.view(torch.uint8)
             )
     for layer, want in zip(restored.values(), cpu_layers, strict=True):
-        assert torch.equal(layer.cpu().view(torch.uint8), want.view(torch.uint8))
+        assert torch.equal(
+            layer.cpu().reshape(want.shape).view(torch.uint8), want.view(torch.uint8)
+        )
 
 
 def test_mla_round_trip_on_device() -> None:
