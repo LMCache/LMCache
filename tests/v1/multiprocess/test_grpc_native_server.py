@@ -12,6 +12,7 @@ services.
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
+import importlib
 import shutil
 import socket
 import sys
@@ -33,9 +34,6 @@ from lmcache.v1.multiprocess.protocols.server_module import (
     ServerModuleCallResponse,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-    extension_service_pb2,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl.client import GrpcMultiprocessClient
 from lmcache.v1.multiprocess.transport.grpc_impl.native_server import (
     GrpcNativeMultiprocessServer,
@@ -48,6 +46,10 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
 )
 
 pytest.importorskip("pygrpc_native")
+
+extension_service_pb2 = importlib.import_module(
+    "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.extension_service_pb2"
+)
 
 _PING = "/lmcache.mp.ManagementService/Ping"
 _SUBSCRIBE = "/lmcache.mp.KVEventService/SubscribeKvEvents"
