@@ -13,6 +13,7 @@ commands, and HTTP endpoints.
    usage/index
    extending_lmcache/native_connectors
    extending_lmcache/adding_a_new_device_backend
+   extending_lmcache/mlu_backend
    extending_lmcache/server_modules
    extending_lmcache/musa_aiter_integration
    cli
