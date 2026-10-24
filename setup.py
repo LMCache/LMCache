@@ -10,6 +10,7 @@ zero changes to this file.
 from pathlib import Path
 from types import ModuleType
 import importlib.util
+import re
 import sys
 
 ROOT_DIR = Path(__file__).parent
@@ -21,6 +22,7 @@ if str(ROOT_DIR) not in sys.path:
 # Third Party
 from setuptools import find_packages, setup  # noqa: E402
 from setuptools.command.build_py import build_py as _build_py  # noqa: E402
+from setuptools.command.egg_info import egg_info as _egg_info  # noqa: E402
 
 # First Party
 from setup_extensions import BuildPolicy, BuildProfile  # noqa: E402
@@ -71,11 +73,27 @@ class _BuildPyWithGrpcStubs(_build_py):
         super().run()
 
 
+class _EggInfoWithNixlConnector(_egg_info):
+    """Add the native NIXL connector, at this version, to the nixl extra."""
+
+    def run(self) -> None:
+        nixl_extra = self.distribution.extras_require.get("nixl")
+        version = self.distribution.get_version()
+        # lmcache-nixl is published only at release versions, so dev builds
+        # keep the extra to the nixl runtime. Same marker as nixl.txt.
+        if nixl_extra is not None and re.fullmatch(
+            r"\d+\.\d+\.\d+((a|b|rc)\d+)?", version
+        ):
+            nixl_extra.append(f'lmcache-nixl=={version}; python_version < "3.13"')
+        super().run()
+
+
 if __name__ == "__main__":
     policy = BuildPolicy()
     profile = policy.resolve_profile()
     ext_modules, cmdclass, req_file = policy.collect_extensions(profile)
     cmdclass["build_py"] = _BuildPyWithGrpcStubs
+    cmdclass["egg_info"] = _EggInfoWithNixlConnector
 
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
     # Platform-neutral extras; the build profile adds its own below.
