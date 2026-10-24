@@ -122,27 +122,85 @@ Development
 Set up your dev environment
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The following prerequisites are required:
+You can develop the CLI, storage, eviction, and observability components on Linux
+or macOS without a GPU. Accelerator kernels and accelerator-specific integration
+tests require the corresponding hardware and toolchain.
 
-- OS: Linux
-- GPU: NVIDIA compute capability 7.0+ (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
-- CUDA 12.8+
-
-The following tools are required:
+The following tools are required for a source checkout:
 
 - `git <https://git-scm.com>`_
-- `python <https://www.python.org>`_ (v3.10 -- v3.13)
+- `python <https://www.python.org>`_ (v3.10 -- v3.13; CPU device CI uses 3.12)
 - `pip <https://pypi.org/project/pip/>`_ (v23.0+)
+- A C++ compiler for the common native extensions (for example, GCC on Linux or
+  the Xcode Command Line Tools on macOS)
 
-The first step is to install the necessary Python packages required for development. The commands to do this are as follows:
+From the repository root, create an environment and install the build dependencies:
 
 .. code-block:: bash
 
-    # Equivalent to pip install -r requirements/common.txt
-    pip install -e .
+    python3.12 -m venv .venv
+    source .venv/bin/activate
+    python -m pip install --upgrade pip
+    python -m pip install -r requirements/build.txt
 
-    pip install -r requirements/lint.txt
-    pip install -r requirements/test.txt
+CPU-only development (Linux and macOS)
+""""""""""""""""""""""""""""""""""""""
+
+Install PyTorch before building LMCache. On Linux, use the CPU wheel index:
+
+.. code-block:: bash
+
+    python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+On macOS, use PyPI and install Cython before the ``nvtx`` dependency is built:
+
+.. code-block:: bash
+
+    python -m pip install torch Cython
+
+Then install LMCache and the development dependencies:
+
+.. code-block:: bash
+
+    NO_GPU_EXT=1 python -m pip install -e . --no-build-isolation
+    python -m pip install -r requirements/cli.txt
+    python -m pip install -r requirements/lint.txt -r requirements/test.txt
+    python lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py
+
+``NO_GPU_EXT=1`` skips GPU extensions and their platform-specific dependencies,
+while retaining the common C++ extensions used by the MP server. Keep build
+isolation disabled so those extensions use the installed PyTorch. A serving
+engine such as vLLM is not needed for the standalone server benchmark.
+
+Run the CPU server benchmark from the repository root:
+
+.. code-block:: bash
+
+    bash .github/scripts/cpu_server_bench_test.sh
+
+The script starts the server, waits for its health check, verifies three
+store/retrieve requests, and stops the server. A successful run reports
+``CHECKSUM MATCH: 3/3 request(s) verified OK``. This checks tensor transfer
+correctness; it does not run model inference or measure GPU performance.
+
+For CPU vLLM end-to-end validation, follow the setup and version selection in
+the `CPU device workflow <https://github.com/LMCache/LMCache/blob/dev/.github/workflows/cpu_device.yml>`_
+and its scripts. The workflow covers Ubuntu and macOS, and installs vLLM's CPU
+build separately from LMCache.
+
+Accelerator development
+"""""""""""""""""""""""
+
+For NVIDIA CUDA development, use Linux, an NVIDIA GPU with compute capability
+7.0 or newer, and a CUDA toolkit matching the installed PyTorch. Follow the
+:doc:`installation guide </getting_started/installation>` for the appropriate
+serving engine, PyTorch build, and accelerator toolchain, including ROCm and XPU.
+With those dependencies installed, build LMCache without ``NO_GPU_EXT``:
+
+.. code-block:: bash
+
+    python -m pip install -e . --no-build-isolation
+    python -m pip install -r requirements/lint.txt -r requirements/test.txt
 
 Before pushing changes to GitHub, you need to run the coding style checks and unit tests as shown below.
 
