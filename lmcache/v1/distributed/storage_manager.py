@@ -448,6 +448,68 @@ class StorageManager:
 
         # TODO: global key states update
 
+    def abort_write(
+        self,
+        keys: list[ObjectKey],
+    ) -> None:
+        """
+        Abort write reservations, discarding the objects without publishing.
+
+        Unlike :meth:`finish_write`, the reserved objects never become
+        resident and are never reported as written, so lookups cannot hit
+        them and store listeners (e.g. the L2 store controller) cannot
+        persist their unwritten contents.
+
+        Args:
+            keys (list[ObjectKey]): Reserved object keys whose contents will
+                not be written.
+
+        Raises:
+            ValueError: Multiple managers require captured owner/key groups via
+                prepare_write_completion and abort_write_by_owner instead.
+        """
+        self._require_single_l1()
+        self.abort_write_by_owner([(self._l1_manager.l1_manager_id, keys)])
+
+    def abort_write_by_owner(self, completion: L1WriteCompletion) -> None:
+        """Abort captured reservations, discarding them without publishing.
+
+        The owner-routed counterpart of :meth:`abort_write`, taking the same
+        batch as :meth:`finish_write_by_owner`.
+
+        Args:
+            completion: Owner/key groups captured by prepare_write_completion.
+
+        Raises:
+            ValueError: A captured owner is no longer registered.
+        """
+        if any(owner not in self._l1_managers_by_id for owner, _ in completion):
+            raise ValueError("write completion requires a registered L1 owner")
+        if is_tracing_enabled() and len(self._l1_managers_by_id) == 1:
+            # Same key-only replay schema as finish_write_by_owner.
+            publish_call_event(
+                "lmcache.v1.distributed.storage_manager.StorageManager.abort_write",
+                {"keys": [key for _, keys in completion for key in keys]},
+            )
+        abort_result: dict[ObjectKey, L1Error] = {}
+        for owner, keys in completion:
+            abort_result.update(
+                self._l1_managers_by_id[owner].finish_write_and_delete(
+                    keys, tag=_L1_WRITE_TAG
+                )
+            )
+        successful_keys = [k for k, e in abort_result.items() if e == L1Error.SUCCESS]
+        failed_keys = [k for k, e in abort_result.items() if e != L1Error.SUCCESS]
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_WRITE_ABORTED,
+                metadata={
+                    "succeeded_keys": successful_keys,
+                    "failed_keys": failed_keys,
+                },
+            )
+        )
+
     @contextmanager
     def read_prefetched_results(
         self,

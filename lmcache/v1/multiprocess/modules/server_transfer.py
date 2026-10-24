@@ -289,18 +289,18 @@ class InlineTransferStrategy(TransferStrategy):
                         {k: reserved_dict[k] for k in written_keys}
                     )
                 )
-            # Release reservations that were never written so their write
-            # locks don't wedge later operations on the same keys, then drop
-            # the unwritten objects so they can never surface as cache hits.
+            # Abort reservations that were never written. Left in place, their
+            # write locks would wedge later operations on the same keys;
+            # finish_write'd, a store listener could persist the unwritten
+            # contents before they are deleted, and lookups could hit them.
             written = set(written_keys)
             leftover = [k for k in reserved_dict if k not in written]
             if leftover:
-                self._storage_manager.finish_write_by_owner(
+                self._storage_manager.abort_write_by_owner(
                     self._storage_manager.prepare_write_completion(
                         {k: reserved_dict[k] for k in leftover}
                     )
                 )
-                self._storage_manager.delete_l1_keys(leftover)
 
         success = len(written_keys) == len(reserved_dict)
         if not success:
@@ -553,7 +553,11 @@ class ShmTransferStrategy(TransferStrategy):
                     obj_key for obj_key in reserved if obj_key not in g_reserved_set
                 ]
                 if unused_keys:
-                    self._storage_manager.finish_write(unused_keys)
+                    # These reservations never get SHM slots, so the worker
+                    # will never write them: abort instead of finish_write,
+                    # which would publish empty objects for lookups and L2
+                    # store listeners.
+                    self._storage_manager.abort_write(unused_keys)
             reserved_keys.extend(g_reserved)
 
         if not reserved_keys:

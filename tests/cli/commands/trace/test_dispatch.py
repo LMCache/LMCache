@@ -100,6 +100,7 @@ class TestDefaultDispatcher:
         expected = {
             f"{_SM_PREFIX}.reserve_write",
             f"{_SM_PREFIX}.finish_write",
+            f"{_SM_PREFIX}.abort_write",
             f"{_SM_PREFIX}.submit_prefetch_task",
             f"{_SM_PREFIX}.finish_read_prefetched",
             f"{_SM_PREFIX}.read_prefetched_results.__enter__",
