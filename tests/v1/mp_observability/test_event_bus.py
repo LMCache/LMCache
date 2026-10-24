@@ -10,6 +10,7 @@ import time
 import pytest
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import (
     EventBus,
@@ -146,6 +147,21 @@ class TestLifecycle:
 
 
 class TestEventDispatch:
+    def test_xpu_fallback_stream_event_reaches_subscriber(self, bus: EventBus) -> None:
+        """The XPU torch fallback publishes to its own bus without a native callback."""
+        if torch_device_type != "xpu":
+            pytest.skip("requires XPU fallback")
+
+        received: list[Event] = []
+        bus.subscribe(EventType.MP_STORE_START, received.append)
+        bus.publish_on_stream(
+            object(), Event(event_type=EventType.MP_STORE_START, session_id="s1")
+        )
+        bus.stop()
+
+        assert len(received) == 1
+        assert received[0].session_id == "s1"
+
     def test_event_reaches_subscriber(self, bus):
         sub = _RecordingSubscriber()
         bus.register_subscriber(sub)
