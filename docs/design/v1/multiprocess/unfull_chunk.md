@@ -32,6 +32,17 @@ Why the grid rather than the exact prompt end `P`:
 - A lookup does not know where an earlier request's tail ended. With every
   tail on the grid it probes at most `C / g` candidate ends.
 
+A request that ends at its prompt (`max_tokens == 1`, e.g. a disaggregated
+prefill) also stores its exact tail `[kC, P)`: no later forward rewrites its
+blocks, so the block table describes exactly `P`, and a lookup probes its own
+end before the grid. This is the LMCache counterpart of NIXL's exact P/D
+handoff, where the prefill stops at `P - b` and the decode loads exactly that
+and recomputes `b` tokens (`b = 1` with Mamba). For attention-only models
+(`b = 0`) the decode looks up `P` and hits the exact tail. With Mamba the
+decode looks up `P - 1`, so the exact tail meets it only once the prefill
+stops at `P - 1` (the P/D change); until then it falls back to the grid
+tail.
+
 Enabled per connector with `lmcache.mp.save_unfull_chunk: true`
 (`kv_connector_extra_config`). Off by default: nothing changes for existing
 deployments.
@@ -86,9 +97,10 @@ store (B on the grid, B < P)                load (lookup end L)
 STORE [kC, B), include_unfull_chunk          LOOKUP [0, L), include_unfull_chunk,
   blocks: ceil(B/T_g) slices per group         hint lmcache.hint.unfull_chunk_grid = g
   Mamba: the block vLLM handed over            chunk prefetch -> k full chunks hit
-  is_temporary from request config             probe e = floor(min(L, kC+C-1)/g)*g,
-                                                 e-g, ... > kC (L1 only), stop at first
-                                                 hit; read-locked like a chunk
+  is_temporary from request config             probe e = L (if inside chunk k), then
+  (prompt-ending request: also [kC, P),          floor(min(L, kC+C-1)/g)*g, -g, ... > kC
+   all blocks from the block table)              (L1 only), stop at first hit;
+                                                 read-locked like a chunk
                                                reply (in tokens): e, or k*C
                                              RETRIEVE [s, e), include_unfull_chunk
 ```
@@ -228,6 +240,10 @@ separately from the chunk prefetch result:
 - **Store, other models**: the tail ends at `floor((P - 1) / g) * g`, stored
   once the step computing it is scheduled; its blocks come from the block
   table.
+- **Store, requests that end at the prompt**: also the exact tail `[kC, P)`
+  once the prompt is computed, with every block (Mamba's running block
+  included) from the block table. Skipped when `P` is chunk-aligned, where
+  the full chunk covers it.
 - **Hand-off timing**: hand-offs are read for the requests scheduled in the
   step; one offered for a request not scheduled then is dropped, and that
   boundary gets no tail.

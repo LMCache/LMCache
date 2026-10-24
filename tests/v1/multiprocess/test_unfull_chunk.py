@@ -370,6 +370,18 @@ def test_grid_lookup_hits_the_longest_unfull_chunk_up_to_its_end(lookup_module):
     )
 
 
+def test_exact_unfull_chunk_wins_over_the_grid(lookup_module):
+    """A disaggregated prefill stores its exact tail; the decode's lookup ends
+    there and hits it before any grid end."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 9))
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+    for end in (2 * CHUNK_SIZE + 8, len(tokens)):
+        _write(storage_manager, _unfull_keys(hasher, tokens, end), is_temporary=False)
+
+    assert _lookup(module, tokens, len(tokens), "r1", grid=4) == len(tokens)
+
+
 def test_identical_prompt_resuming_before_its_last_token_hits_its_tail(
     lookup_module,
 ):

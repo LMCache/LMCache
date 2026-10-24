@@ -843,8 +843,10 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
      - ``false``
      - Also cache the trailing partial chunk of each prompt, ending where
        vLLM's prefix cache could resume (on its hit grid, before the prompt's
-       last token), so a later lookup (a disaggregated decode, or a chat's
-       next round) can hit past the last chunk boundary. A request whose ``kv_transfer_params`` set
+       last token), and, for a request that ends at its prompt (a
+       disaggregated prefill), ending exactly at the prompt end, so a later
+       lookup (a disaggregated decode, or a chat's next round) can hit past
+       the last chunk boundary. A request whose ``kv_transfer_params`` set
        ``"lmcache.temporary_unfull_chunk": true`` stores its partial chunk
        read-once. Served from L1 only. Requires the ``lmcache_driven``
        transfer mode; not supported with speculative decoding,

@@ -41,13 +41,43 @@ def test_mamba_tail_ends_where_vllm_handed_over_the_state():
     tracker = _tracker()
     tracker.increase_num_scheduled_tokens(PROMPT)
 
-    (meta,) = _store_tails(tracker, {TAIL_END: {1: HANDOFF_BLOCK}})
+    ((meta, handed_over),) = LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
+        tracker,
+        CHUNK,
+        GROUP_TOKENS_PER_BLOCK,
+        GRID,
+        {TAIL_END: {1: HANDOFF_BLOCK}},
+        (1,),
+    )
 
     assert (meta.op.start, meta.op.end) == (2 * CHUNK, TAIL_END)
     assert meta.op.include_unfull_chunk
     # The Mamba block is the handed-over snapshot, not the running block.
     assert meta.op.block_ids == [list(range(16, 21)), [HANDOFF_BLOCK]]
+    assert handed_over == [HANDOFF_BLOCK]
     assert _store_tails(tracker, {TAIL_END: {1: HANDOFF_BLOCK}}) == []
+
+
+def test_prompt_ending_request_also_stores_its_exact_tail():
+    """A disaggregated prefill ends at its prompt: its block table describes
+    exactly P, where the decode resumes."""
+    tracker = _tracker(max_tokens=1)
+    tracker.increase_num_scheduled_tokens(PROMPT)
+
+    metas = _store_tails(tracker, {TAIL_END: {1: HANDOFF_BLOCK}})
+
+    assert [(meta.op.end, meta.op.block_ids[1]) for meta in metas] == [
+        (TAIL_END, [HANDOFF_BLOCK]),
+        # The running Mamba block holds the state at P: nothing runs after.
+        (PROMPT, MAMBA_BLOCKS[2:]),
+    ]
+
+
+def test_exact_tail_waits_for_the_whole_prompt():
+    tracker = _tracker(max_tokens=1)
+    tracker.increase_num_scheduled_tokens(PROMPT - 1)
+
+    assert [meta.op.end for meta in _store_tails(tracker, {})] == []
 
 
 def test_mamba_tail_needs_a_hand_off_inside_the_last_chunk():
@@ -194,7 +224,7 @@ def _connector(lookup_hit: int) -> tuple[LMCacheMPConnector, MagicMock]:
     return connector, scheduler_adapter
 
 
-def _request(num_tokens: int = PROMPT, max_tokens: int = 1) -> SimpleNamespace:
+def _request(num_tokens: int = PROMPT, max_tokens: int = 16) -> SimpleNamespace:
     return SimpleNamespace(
         request_id="req-0",
         resumable=False,
@@ -209,7 +239,7 @@ def _request(num_tokens: int = PROMPT, max_tokens: int = 1) -> SimpleNamespace:
     )
 
 
-def _tracker(num_tokens: int = PROMPT, max_tokens: int = 1) -> LMCacheMPRequestTracker:
+def _tracker(num_tokens: int = PROMPT, max_tokens: int = 16) -> LMCacheMPRequestTracker:
     tracker = LMCacheMPRequestTracker(_request(num_tokens, max_tokens))
     tracker.append_block_ids(
         (
@@ -225,11 +255,14 @@ def _store_tails(
     boundary_state_blocks: dict[int, dict[int, int]],
     boundary_state_groups: tuple[int, ...] = (1,),
 ) -> list[LMCacheMPRequestMetadata]:
-    return LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
-        tracker,
-        CHUNK,
-        GROUP_TOKENS_PER_BLOCK,
-        GRID,
-        boundary_state_blocks,
-        boundary_state_groups,
-    )
+    return [
+        meta
+        for meta, _handed_over in LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
+            tracker,
+            CHUNK,
+            GROUP_TOKENS_PER_BLOCK,
+            GRID,
+            boundary_state_blocks,
+            boundary_state_groups,
+        )
+    ]

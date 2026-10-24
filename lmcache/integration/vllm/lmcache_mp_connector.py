@@ -2117,9 +2117,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         """Queue the stores of the request's newly storable unfull chunks.
 
-        For align-mode Mamba groups, an unfull chunk's state block is one vLLM
-        handed over this step; it is not part of the request's block table, so
-        it is pinned until the request's stores finish.
+        For align-mode Mamba groups, a grid unfull chunk's state block is one
+        vLLM handed over this step; it is not part of the request's block
+        table, so it is pinned until the request's stores finish.
 
         Args:
             scheduler_output: This step's scheduler output.
@@ -2137,7 +2137,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 tracker.request_id, ()
             ):
                 boundary_state_blocks.setdefault(boundary, {})[group] = block_id
-        for r_meta in LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
+        for r_meta, handed_over in LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
             tracker,
             self.scheduler_adapter.lmcache_tokens_per_chunk,
             self._group_tokens_per_block,
@@ -2145,15 +2145,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             boundary_state_blocks,
             self._boundary_state_groups,
         ):
-            if pool is not None and self._boundary_state_groups:
-                block_ids = [
-                    boundary_state_blocks[r_meta.op.end][group]
-                    for group in self._boundary_state_groups
-                ]
-                pool.touch([pool.blocks[block_id] for block_id in block_ids])
+            if pool is not None and handed_over:
+                pool.touch([pool.blocks[block_id] for block_id in handed_over])
                 self._pinned_boundary_state_blocks.setdefault(
                     tracker.request_id, []
-                ).extend(block_ids)
+                ).extend(handed_over)
             metadata.add_request_metadata(r_meta)
 
     def _release_boundary_state_blocks(self, request_id: str) -> None:

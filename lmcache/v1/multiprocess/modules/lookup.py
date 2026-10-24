@@ -2,7 +2,6 @@
 """LookupModule: lookup, prefetch polling, and session lifecycle."""
 
 # Standard
-from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 import threading
@@ -781,10 +780,11 @@ class LookupModule(DiscoverableModule):
 
         An unfull chunk extending ``hit_chunks`` full chunks lies inside the
         next chunk, so it ends in ``(hit, min(key.end, hit + chunk_size))``.
-        Stores put unfull chunks on the engine's prefix-cache grid
-        (``lmcache.hint.unfull_chunk_grid`` in ``key.request_configs``), so
-        only ends on that grid are probed, longest first; without the hint
-        only ``key.end`` is. Each probe is an L1-only prefetch, which
+        Stores put unfull chunks at a request's exact prompt end and on the
+        engine's prefix-cache grid (``lmcache.hint.unfull_chunk_grid`` in
+        ``key.request_configs``), so ``key.end`` is probed first, then the
+        grid ends below it, longest first; without the hint only ``key.end``
+        is. Each probe is an L1-only prefetch, which
         completes synchronously and keeps its locks only when every object
         group and kv rank hit, so a partial hit holds nothing. A hit is
         recorded on ``session`` for the retrieve and for
@@ -812,11 +812,15 @@ class LookupModule(DiscoverableModule):
         hit_end = hit_chunks * chunk_size
         last_end = min(key.end, hit_end + chunk_size - 1)
         grid = int((key.request_configs or {}).get("lmcache.hint.unfull_chunk_grid", 0))
-        candidate_ends: Sequence[int]
+        # An exact hit ends where the lookup does (a disaggregated decode
+        # resuming where its prefill stopped).
+        candidate_ends: list[int] = [key.end] if hit_end < key.end == last_end else []
         if grid:
-            candidate_ends = range(last_end // grid * grid, hit_end, -grid)
-        else:
-            candidate_ends = [key.end] if hit_end < key.end == last_end else []
+            candidate_ends.extend(
+                end
+                for end in range(last_end // grid * grid, hit_end, -grid)
+                if end != key.end
+            )
         for num_probes, end in enumerate(candidate_ends, start=1):
             unfull_hash = TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(end))
             spec = PrefetchTaskSpec(

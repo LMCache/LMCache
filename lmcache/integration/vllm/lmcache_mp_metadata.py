@@ -76,6 +76,10 @@ class LMCacheMPRequestTracker:
     # prompt (stored by it, or found by its lookup), so none is stored twice.
     unfull_chunk_ends: set[int] = field(default_factory=set)
 
+    # Whether the request generates nothing past its first token, so no
+    # later forward writes its blocks after the prompt-end step.
+    ends_at_prompt: bool = False
+
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
 
@@ -111,6 +115,9 @@ class LMCacheMPRequestTracker:
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
         self.unfull_chunk_ends = set()
+        # Pooling requests carry no sampling params and never decode.
+        sampling_params = getattr(request, "sampling_params", None)
+        self.ends_at_prompt = sampling_params is None or sampling_params.max_tokens == 1
         self.apc_covered_tokens = 0
         self.need_full_lookup = False
         self.pending_free_ranges = []
@@ -359,24 +366,26 @@ class LMCacheMPRequestMetadata:
         tail_grid_tokens: int,
         boundary_state_blocks: Mapping[int, Mapping[int, int]],
         boundary_state_groups: Collection[int],
-    ) -> list["LMCacheMPRequestMetadata"]:
+    ) -> list[tuple["LMCacheMPRequestMetadata", list[int]]]:
         """Generate store metadata for the prompt's newly storable unfull chunks.
 
         An unfull chunk ``[kC, end)`` lies in the prompt's last chunk
-        (``kC = floor((P - 1) / C) * C``) and ends at a point the engine can
-        resume a later request from, so its prefix-cache hit and LMCache's
-        meet there:
+        (``kC = floor((P - 1) / C) * C``) and ends at a point a later request
+        can resume from:
 
-        - With recurrent groups whose state blocks the engine hands over
-          (``boundary_state_groups``), at each prompt boundary whose state
-          block it handed over this step for every such group. Their
-          blocks replace the groups' blocks: the request's own block keeps
-          running past the boundary.
-        - Otherwise at the prompt's last ``tail_grid_tokens`` boundary
-          before its last token, ``floor((P - 1) / g) * g``, once computed.
-
-        Its blocks below ``end`` are never rewritten, so the async store is
-        safe while the request keeps decoding.
+        - On the engine's prefix-cache grid, where its own hits land, for any
+          request. With recurrent groups whose state blocks the engine hands
+          over (``boundary_state_groups``), at each prompt boundary
+          (``end < P``) handed over this step for every such group; their
+          blocks replace the groups' blocks, since the request's own block
+          keeps running past the boundary. Otherwise at
+          ``floor((P - 1) / g) * g`` once computed. These blocks are never
+          rewritten, so the store is safe while the request keeps decoding.
+        - At ``P`` exactly, for a request that ends at its prompt
+          (``tracker.ends_at_prompt``, e.g. a disaggregated prefill) once the
+          prompt is computed: no later forward rewrites its blocks, so the
+          block table describes exactly ``P``. A disaggregated decode
+          resumes there.
 
         Args:
             tracker: The request tracker to generate the metadata from.
@@ -387,12 +396,13 @@ class LMCacheMPRequestMetadata:
                 a model without ``boundary_state_groups``.
             boundary_state_blocks: Block IDs the engine handed over this step,
                 as ``{boundary token: {engine group: block id}}``.
-            boundary_state_groups: Engine groups whose state at the end must
-                come from ``boundary_state_blocks``.
+            boundary_state_groups: Engine groups whose state at a grid end
+                must come from ``boundary_state_blocks``.
 
         Returns:
-            One store metadata per newly storable unfull chunk, each with
-            ``op.start = kC`` and ``op.end`` its end.
+            One ``(metadata, handed-over block IDs it reads)`` pair per newly
+            storable unfull chunk, each with ``op.start = kC`` and
+            ``op.end`` its end.
         """
         num_prompt_tokens = tracker.num_prompt_tokens
         chunk_start = (
@@ -400,18 +410,24 @@ class LMCacheMPRequestMetadata:
             // lmcache_tokens_per_chunk
             * lmcache_tokens_per_chunk
         )
+        computed_tokens = tracker.num_scheduled_tokens + max(
+            tracker.num_vllm_hit_tokens, tracker.num_lmcache_hit_tokens
+        )
+        # Each end, with the handed-over block per boundary-state group it
+        # reads (empty: every block comes from the block table).
+        ends: dict[int, list[int]] = {}
         if boundary_state_groups:
-            ends = [
-                end
-                for end, group_blocks in boundary_state_blocks.items()
-                if all(group in group_blocks for group in boundary_state_groups)
-            ]
+            for end, group_blocks in boundary_state_blocks.items():
+                if end < num_prompt_tokens and all(
+                    group in group_blocks for group in boundary_state_groups
+                ):
+                    ends[end] = [group_blocks[group] for group in boundary_state_groups]
         else:
-            computed_tokens = tracker.num_scheduled_tokens + max(
-                tracker.num_vllm_hit_tokens, tracker.num_lmcache_hit_tokens
-            )
             tail_end = (num_prompt_tokens - 1) // tail_grid_tokens * tail_grid_tokens
-            ends = [tail_end] if computed_tokens >= tail_end else []
+            if computed_tokens >= tail_end:
+                ends[tail_end] = []
+        if tracker.ends_at_prompt and computed_tokens >= num_prompt_tokens:
+            ends[num_prompt_tokens] = []
 
         allocated_lengths = tracker.num_allocated_blocks()
         allocated_tokens = min(
@@ -419,13 +435,15 @@ class LMCacheMPRequestMetadata:
             for engine_group_idx, tokens_per_block in enumerate(group_tokens_per_block)
             if tokens_per_block > 0
         )
-        max_end = num_prompt_tokens - 1
+        max_end = num_prompt_tokens
         if tracker.max_offload_tokens is not None:
             max_end = min(max_end, tracker.max_offload_tokens)
-        metadata: list[LMCacheMPRequestMetadata] = []
-        for end in sorted(ends):
+        stores: list[tuple[LMCacheMPRequestMetadata, list[int]]] = []
+        for end, handed_over in sorted(ends.items()):
             if (
                 not chunk_start < end <= max_end
+                # A chunk-aligned prompt end is a full chunk's.
+                or end % lmcache_tokens_per_chunk == 0
                 or end in tracker.unfull_chunk_ends
                 or end <= tracker.num_lmcache_hit_tokens
                 # Every group's blocks must cover the range.
@@ -439,25 +457,31 @@ class LMCacheMPRequestMetadata:
                 end,
                 include_unfull_chunk=True,
             )
-            for group in boundary_state_groups:
-                block_ids[group][-1] = boundary_state_blocks[end][group]
+            if handed_over:
+                for group, block_id in zip(
+                    boundary_state_groups, handed_over, strict=True
+                ):
+                    block_ids[group][-1] = block_id
             tracker.unfull_chunk_ends.add(end)
-            metadata.append(
-                LMCacheMPRequestMetadata(
-                    request_id=tracker.request_id,
-                    direction="STORE",
-                    op=LoadStoreOp(
-                        token_ids=tracker.get_token_ids(),
-                        block_ids=block_ids,
-                        start=chunk_start,
-                        end=end,
-                        include_unfull_chunk=True,
+            stores.append(
+                (
+                    LMCacheMPRequestMetadata(
+                        request_id=tracker.request_id,
+                        direction="STORE",
+                        op=LoadStoreOp(
+                            token_ids=tracker.get_token_ids(),
+                            block_ids=block_ids,
+                            start=chunk_start,
+                            end=end,
+                            include_unfull_chunk=True,
+                        ),
+                        cache_salt=tracker.cache_salt,
+                        request_configs=tracker.request_configs,
                     ),
-                    cache_salt=tracker.cache_salt,
-                    request_configs=tracker.request_configs,
+                    handed_over,
                 )
             )
-        return metadata
+        return stores
 
     @staticmethod
     def GetRetrieveMetadata(
