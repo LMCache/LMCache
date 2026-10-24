@@ -32,8 +32,10 @@ MAX_INFLIGHT_REQUESTS="${MAX_INFLIGHT_REQUESTS:-5}"
 MAX_TTFT_SLOWDOWN_PCT="${MAX_TTFT_SLOWDOWN_PCT:--60}"
 MAX_ROUND_TIME_SLOWDOWN_PCT="${MAX_ROUND_TIME_SLOWDOWN_PCT:--15}"
 
-# Output directories
-LONG_DOC_QA_DIR="$RESULTS_DIR/long_doc_qa"
+# Canonicalize paths safely supporting paths with spaces
+LMCACHE_DIR="$(cd "$LMCACHE_DIR" 2>/dev/null && pwd || echo "$LMCACHE_DIR")"
+mkdir -p "$RESULTS_DIR/long_doc_qa"
+LONG_DOC_QA_DIR="$(cd "$RESULTS_DIR/long_doc_qa" && pwd)"
 BASELINE_DIR="$LONG_DOC_QA_DIR/baseline"
 LMCACHE_OUT_DIR="$LONG_DOC_QA_DIR/lmcache"
 
@@ -98,23 +100,23 @@ def calc_stats(values):
         if n == 1:
             return s_val[0]
         idx = (n - 1) * (p / 100.0)
-        lower = int(idx)
-        upper = min(lower + 1, n - 1)
-        weight = idx - lower
-        return s_val[lower] * (1.0 - weight) + s_val[upper] * weight
+        low = int(math.floor(idx))
+        high = int(math.ceil(idx))
+        weight = idx - low
+        return s_val[low] * (1.0 - weight) + s_val[high] * weight
 
     return {
         "count": n,
-        "mean": round(mean, 4),
-        "std": round(std, 4),
-        "min": round(s_val[0], 4),
-        "p25": round(percentile(25), 4),
-        "p50": round(percentile(50), 4),
-        "p75": round(percentile(75), 4),
-        "p90": round(percentile(90), 4),
-        "p95": round(percentile(95), 4),
-        "p99": round(percentile(99), 4),
-        "max": round(s_val[-1], 4),
+        "mean": mean,
+        "std": std,
+        "min": s_val[0],
+        "p25": percentile(25),
+        "p50": percentile(50),
+        "p75": percentile(75),
+        "p90": percentile(90),
+        "p95": percentile(95),
+        "p99": percentile(99),
+        "max": s_val[-1],
     }
 
 def parse_round_csv(csv_path):
@@ -125,29 +127,19 @@ def parse_round_csv(csv_path):
             "successful_samples": 0,
             "ttft_stats": None,
         }
-    rows = []
-    try:
-        with open(csv_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                rows.append(row)
-    except Exception as e:
-        return {
-            "present": False,
-            "error": str(e),
-            "total_samples": 0,
-            "successful_samples": 0,
-            "ttft_stats": None,
-        }
-    total = len(rows)
     successful_ttfts = []
-    for r in rows:
-        succ_val = str(r.get("successful", "")).strip().lower()
-        if succ_val in ("true", "1", "t"):
-            try:
-                successful_ttfts.append(float(r["ttft"]))
-            except (ValueError, KeyError):
-                pass
+    total = 0
+    with open(csv_path, "r", encoding="utf-8", errors="replace") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            total += 1
+            success = row.get("success", "").strip().lower() in ("true", "1")
+            ttft_str = row.get("ttft", "")
+            if success and ttft_str:
+                try:
+                    successful_ttfts.append(float(ttft_str))
+                except ValueError:
+                    pass
     return {
         "present": True,
         "total_samples": total,
@@ -223,27 +215,35 @@ def compare_metric(name, l_val, b_val, threshold):
 b_agg = baseline_json or {}
 l_agg = lmcache_json or {}
 
-ttft_comp = compare_metric(
-    "query_ttft_per_prompt",
-    l_agg.get("query_ttft_per_prompt"),
-    b_agg.get("query_ttft_per_prompt"),
-    max_ttft_slowdown
-)
-round_comp = compare_metric(
-    "query_round_time_per_prompt",
-    l_agg.get("query_round_time_per_prompt"),
-    b_agg.get("query_round_time_per_prompt"),
-    max_round_time_slowdown
-)
-
-verdict = os.environ.get("DIAG_VERDICT", "UNKNOWN")
-if verdict == "UNKNOWN":
-    verdict = "PASS" if (ttft_comp["passed"] and round_comp["passed"]) else "FAIL"
+comparison = {
+    "query_ttft_per_prompt": compare_metric(
+        "query_ttft_per_prompt",
+        l_agg.get("query_ttft_per_prompt"),
+        b_agg.get("query_ttft_per_prompt"),
+        max_ttft_slowdown
+    ),
+    "query_round_time_per_prompt": compare_metric(
+        "query_round_time_per_prompt",
+        l_agg.get("query_round_time_per_prompt"),
+        b_agg.get("query_round_time_per_prompt"),
+        max_round_time_slowdown
+    ),
+    "warmup_round_time_per_prompt": compare_metric(
+        "warmup_round_time_per_prompt",
+        l_agg.get("warmup_round_time_per_prompt"),
+        b_agg.get("warmup_round_time_per_prompt"),
+        0.0
+    ),
+}
 
 summary = {
-    "verdict": verdict,
-    "model": os.environ.get("MODEL", ""),
-    "workload_settings": {
+    "verdict": os.environ.get("DIAG_VERDICT", "UNKNOWN"),
+    "build_id": os.environ.get("BUILD_ID", "local"),
+    "attempt": int(os.environ.get("DIAG_ATTEMPT", "0")),
+    "checkout_sha": os.environ.get("DIAG_CHECKOUT_SHA", "unknown"),
+    "timestamp": os.environ.get("DIAG_TIMESTAMP", ""),
+    "config": {
+        "engine": os.environ.get("ENGINE_NAME", "vllm"),
         "model": os.environ.get("MODEL", ""),
         "document_length": int(os.environ.get("DOCUMENT_LENGTH", "10000")),
         "num_documents": int(os.environ.get("NUM_DOCUMENTS", "30")),
@@ -255,68 +255,47 @@ summary = {
         "max_ttft_slowdown_pct": max_ttft_slowdown,
         "max_round_time_slowdown_pct": max_round_time_slowdown,
     },
-    "engine": {
-        "name": os.environ.get("ENGINE_NAME", "vllm"),
-        "port": os.environ.get("ENGINE_PORT", "8000"),
-        "baseline_port": os.environ.get("ENGINE_BASELINE_PORT", "9000"),
-    },
-    "build_id": os.environ.get("BUILD_ID", ""),
-    "attempt": int(os.environ.get("DIAG_ATTEMPT", "0")) if os.environ.get("DIAG_ATTEMPT", "0").isdigit() else 0,
-    "checkout_sha": os.environ.get("DIAG_CHECKOUT_SHA", "unknown"),
-    "timestamp": os.environ.get("DIAG_TIMESTAMP", ""),
     "phases": {
         "baseline": baseline_phase,
         "lmcache": lmcache_phase,
     },
-    "comparison": {
-        "query_ttft_per_prompt": ttft_comp,
-        "query_round_time_per_prompt": round_comp,
-    },
+    "comparison": comparison,
 }
 
-summary_file = os.environ.get("DIAG_SUMMARY_FILE", "")
-if summary_file:
-    with open(summary_file, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
+out_file = os.environ.get("DIAG_SUMMARY_FILE", "")
+if out_file:
+    try:
+        with open(out_file, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+    except Exception as e:
+        print(f"Failed to write diagnostic summary to {out_file}: {e}", file=sys.stderr)
 
-    if os.path.isdir(baseline_dir):
-        with open(os.path.join(baseline_dir, "diagnostic_summary.json"), "w", encoding="utf-8") as f:
-            json.dump(baseline_phase, f, indent=2)
-    if os.path.isdir(lmcache_dir):
-        with open(os.path.join(lmcache_dir, "diagnostic_summary.json"), "w", encoding="utf-8") as f:
-            json.dump(lmcache_phase, f, indent=2)
-
+# Print human-readable summary
+print()
 print("============================================")
 print("=== Long Doc QA Diagnostic Summary ===")
 print("============================================")
-print(f"Verdict: {verdict}")
-print(f"Model: {summary['workload_settings']['model']}")
-print(
-    f"Settings: Document length={summary['workload_settings']['document_length']}, "
-    f"Documents={summary['workload_settings']['num_documents']}, "
-    f"Output len={summary['workload_settings']['output_len']}, "
-    f"Repeat={summary['workload_settings']['repeat_count']} ({summary['workload_settings']['repeat_mode']}), "
-    f"Seed={summary['workload_settings']['shuffle_seed']}, "
-    f"Max inflight={summary['workload_settings']['max_inflight_requests']}"
-)
+print(f"Verdict: {summary['verdict']}")
+print(f"Attempt: {summary['attempt']}")
+print(f"Timestamp: {summary['timestamp']}")
+print(f"Checkout SHA: {summary['checkout_sha']}")
 print()
-
-for p_name, p_data in [("Baseline", baseline_phase), ("LMCache", lmcache_phase)]:
-    print(f"Phase: {p_name} (Port {p_data['port']})")
-    w_stats = p_data["warmup_round"]
-    q_stats = p_data["query_round"]
-    w_ttft = w_stats["ttft_stats"]
-    q_ttft = q_stats["ttft_stats"]
-    print(f"  Warmup: {w_stats['total_samples']} samples, {w_stats['successful_samples']} successful")
-    if w_ttft:
-        print(f"    Warmup TTFT: mean={w_ttft['mean']:.4f}s, median={w_ttft['p50']:.4f}s, min={w_ttft['min']:.4f}s, max={w_ttft['max']:.4f}s, std={w_ttft['std']:.4f}s")
-    print(f"  Query:  {q_stats['total_samples']} samples, {q_stats['successful_samples']} successful")
-    if q_ttft:
-        print(f"    Query TTFT:  mean={q_ttft['mean']:.4f}s, median={q_ttft['p50']:.4f}s, min={q_ttft['min']:.4f}s, max={q_ttft['max']:.4f}s, std={q_ttft['std']:.4f}s")
-        print(f"    Percentiles: p25={q_ttft['p25']:.4f}s, p75={q_ttft['p75']:.4f}s, p90={q_ttft['p90']:.4f}s, p95={q_ttft['p95']:.4f}s, p99={q_ttft['p99']:.4f}s")
-    agg = p_data.get("aggregate") or {}
-    if agg:
-        print(f"  Aggregate: query_ttft={agg.get('query_ttft_per_prompt')}s, query_round_time={agg.get('query_round_time_per_prompt')}s, warmup_round_time={agg.get('warmup_round_time_per_prompt')}s")
+print("Phase Highlights:")
+for phase_name in ["baseline", "lmcache"]:
+    ph = summary["phases"][phase_name]
+    agg = ph["aggregate"] or {}
+    print(f"  [{phase_name.upper()}] (port {ph['port']})")
+    print(f"    Aggregates: query_ttft={agg.get('query_ttft_per_prompt')}, query_round_time={agg.get('query_round_time_per_prompt')}, warmup_round_time={agg.get('warmup_round_time_per_prompt')}")
+    for rnd in ["warmup_round", "query_round"]:
+        r_info = ph[rnd]
+        if r_info["present"]:
+            st = r_info["ttft_stats"]
+            if st:
+                print(f"    {rnd} TTFT (N={st['count']}): mean={st['mean']:.4f}s, p50={st['p50']:.4f}s, p95={st['p95']:.4f}s, p99={st['p99']:.4f}s, min={st['min']:.4f}s, max={st['max']:.4f}s")
+            else:
+                print(f"    {rnd} TTFT: 0 valid samples (total={r_info['total_samples']})")
+        else:
+            print(f"    {rnd} CSV: not found")
     print()
 
 print("Comparisons:")
@@ -392,7 +371,7 @@ run_long_doc_qa() {
     echo "=== Running long_doc_qa ($description) ==="
     mkdir -p "$phase_dir"
 
-    local output_file="$phase_dir/${description}_output.txt"
+    local output_file="$phase_dir/diagnostics.txt"
     local phase_result_file="$phase_dir/${description}_result.json"
 
     # Execute benchmark inside phase_dir so warmup_round.csv and query_round.csv
@@ -414,7 +393,8 @@ run_long_doc_qa() {
             2>>"$output_file" | tee "$phase_result_file"
     )
 
-    # Keep compatibility copies in $LONG_DOC_QA_DIR
+    # Maintain diagnostics.txt, ${description}_output.txt, and compatibility root copies
+    cp -f "$output_file" "$phase_dir/${description}_output.txt" 2>/dev/null || true
     cp -f "$phase_result_file" "$LONG_DOC_QA_DIR/${description}_result.json" 2>/dev/null || true
     cp -f "$output_file" "$LONG_DOC_QA_DIR/${description}_output.txt" 2>/dev/null || true
     if [[ -n "$result_file" && "$result_file" != "$phase_result_file" ]]; then
