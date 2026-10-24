@@ -55,6 +55,7 @@ class _FmtCase:
     hidden: int  # per-plane scalars per token
     head_stride: int  # rope stride between heads in the K plane
     paged_shape: tuple  # per-layer paged tensor shape
+    mem_obj_kv_layout: "lmcache_native.MemObjKVLayout"  # chunk buffer layout contract
 
 
 _CASES = {
@@ -65,6 +66,7 @@ _CASES = {
         hidden=_NH * 2 * _HS,
         head_stride=2 * _HS,
         paged_shape=(_NB, _NH, _BS, 2 * _HS),
+        mem_obj_kv_layout=lmcache_native.MemObjKVLayout.FUSED_PACKED,
     ),
     # Un-fused flash-attention HND: [2, NB, NH, BS, HS], separate K/V planes.
     "split": _FmtCase(
@@ -73,6 +75,7 @@ _CASES = {
         hidden=_NH * _HS,
         head_stride=_HS,
         paged_shape=(2, _NB, _NH, _BS, _HS),
+        mem_obj_kv_layout=lmcache_native.MemObjKVLayout.UNSPECIFIED,
     ),
 }
 
@@ -104,7 +107,8 @@ def _reference_scatter(
             lmcache_native.TransferDirection.H2D,
             case.fmt,
             block_size=_BS,
-            head_size=_HS,
+            head_size=case.head_stride,
+            mem_obj_kv_layout=case.mem_obj_kv_layout,
         )
     torch_dev.synchronize()
 
@@ -134,7 +138,9 @@ def _run_plan(
         engine_kv_format=case.fmt,
         page_buffer_size=_NB * _BS,
         block_size=_BS,
-        head_size=_HS,
+        # Spec per-head width: packed CS (== head_stride) for the fused
+        # format, HS for the split one.
+        head_size=case.head_stride,
         slot_mapping_base=slot_mapping.data_ptr(),
         slot_mapping_capacity=slot_mapping.numel(),
         cos_sin_cache=cos_sin.data_ptr(),
