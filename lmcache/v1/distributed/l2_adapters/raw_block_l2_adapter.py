@@ -42,9 +42,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
-from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.platform import EventNotifier, create_event_notifier
-from lmcache.v1.storage_backend.raw_block import (
+from lmcache.v1.distributed.l2_adapters.raw_block import (
     DEFAULT_IOURING_QUEUE_DEPTH,
     RawBlockCore,
     RawBlockCoreConfig,
@@ -54,6 +52,8 @@ from lmcache.v1.storage_backend.raw_block import (
     normalize_raw_block_placement_ids,
     validate_raw_block_io_options,
 )
+from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import EventNotifier, create_event_notifier
 
 logger = init_logger(__name__)
 

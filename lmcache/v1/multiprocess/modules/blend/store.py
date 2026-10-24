@@ -25,6 +25,7 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
@@ -95,7 +96,7 @@ class StoreMixin:
             session = self._ctx.session_manager.get_or_create(key.request_id)
             # Request-end cleanup may have replaced the session; re-set tokens
             # (idempotent if it survived, corrective if not).
-            session.set_tokens(list(key.token_ids))
+            session.set_tokens(key.token_bytes)
             chunk_hashes = [
                 TokenHasher.hash_to_bytes(h)
                 for h in session.get_hashes(key.start, key.end)
@@ -105,7 +106,9 @@ class StoreMixin:
             # Record prompts whose KV was stored, for the reorder planner.
             if getattr(self, "_prompt_store", None) is not None and any(stored_mask):
                 self._record_prompt(key, session)
-            tokens_in_range = list(key.token_ids)[key.start : key.end]
+            tokens_in_range = unpack_token_ids(
+                key.token_bytes[key.start * TOKEN_STRIDE : key.end * TOKEN_STRIDE]
+            )
             # Chunk 0 is owned by the prefix lookup leg; skip its fingerprint.
             start_chunk_idx = 0 if key.start != 0 else 1
 
@@ -171,7 +174,7 @@ class StoreMixin:
             self._prompt_store.record(
                 (key.model_name, key.world_size, key.cache_salt),
                 key.request_id,
-                key.token_ids,
+                unpack_token_ids(key.token_bytes),
                 chain,
             )
         except Exception:
