@@ -589,6 +589,7 @@ class AtomMPWorkerAdapter:
                 layout_hints={},
                 engine_group_infos=engine_group_infos,
                 engine_type=EngineType.ATOM,
+                lmcache_chunk_tokens=self.lmcache_tokens_per_chunk,
             )
         except Exception:
             try:
