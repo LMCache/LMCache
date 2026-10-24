@@ -600,30 +600,32 @@ class StorageManager:
         self,
         spec: PrefetchTaskSpec,
         external_request_id: str = "",
-        skip_l2: bool = False,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
         Args:
             spec: The request (see :class:`PrefetchTaskSpec`).
             external_request_id: Caller id for end-to-end log tracing.
-            skip_l2: If True, serve from L1 only. The result is available
-                as soon as this returns.
 
         Returns:
             PrefetchHandle to track the task.
+
+        Note:
+            A spec that allows no L2 adapter (an empty
+            ``allowed_l2_memory_tags``) is served from L1 only, and its result
+            is available as soon as this returns.
         """
-        prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-            spec, skip_l2=skip_l2
-        )
+        prefetch_request_id = self._prefetch_controller.submit_prefetch_request(spec)
         logger.debug(
             "Prefetch request submitted: %d keys in %d groups "
-            "(external_request_id=%s, prefetch_request_id=%d, skip_l2=%s)",
+            "(external_request_id=%s, prefetch_request_id=%d, "
+            "allowed_l1_memory_tags=%s, allowed_l2_memory_tags=%s)",
             len(spec.key_groups) * spec.group_size,
             len(spec.key_groups),
             external_request_id,
             prefetch_request_id,
-            skip_l2,
+            spec.allowed_l1_memory_tags,
+            spec.allowed_l2_memory_tags,
         )
         return PrefetchHandle(
             prefetch_request_id=prefetch_request_id,

@@ -8,8 +8,8 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
+from lmcache.inprocess.v1.cache_engine import LMCacheEngine
 from lmcache.inprocess.v1.internal_api_server.api_server import app
-from lmcache.v1.cache_engine import LMCacheEngine
 
 
 class TestCacheClearAPI:

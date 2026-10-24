@@ -275,7 +275,7 @@ detached once no in-flight request references it.
 
 ```python
 # Called from the serving thread
-request_id = controller.submit_prefetch_request(spec, skip_l2=False)
+request_id = controller.submit_prefetch_request(spec)
 
 # Polled (or waited on) by the serving thread
 result = controller.query_prefetch_result(request_id)  # PrefetchResult | None
@@ -283,8 +283,8 @@ controller.wait_prefetch_result(request_id, timeout)   # bool, does not consume
 ```
 
 - `submit_prefetch_request` enqueues the request and signals the background
-  thread via an eventfd. With `skip_l2`, or no attached adapter, the request
-  is served from L1 on the calling thread instead.
+  thread via an eventfd. When the spec allows no L2 adapter, or none is
+  attached, the request is served from L1 on the calling thread instead.
 - `query_prefetch_result` returns `None` while in progress, then the result
   exactly once (pop semantics): one hit bitmap per key group, split into the
   cells L1 already held and the cells loaded from L2.
