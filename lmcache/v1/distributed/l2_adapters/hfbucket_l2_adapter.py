@@ -41,14 +41,14 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
-from lmcache.v1.platform import create_event_notifier
-from lmcache.v1.storage_backend.connector.hfbucket_connector import (
+from lmcache.v1.distributed.l2_adapters.hfbucket_client import (
     HFBucketClient,
     HFBucketClientInterface,
     HFBucketLocation,
     encode_hfbucket_object_name,
     parse_hfbucket_handle,
 )
+from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 

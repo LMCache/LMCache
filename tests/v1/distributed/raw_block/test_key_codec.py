@@ -2,7 +2,7 @@
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.storage_backend.raw_block.key_codec import (
+from lmcache.v1.distributed.l2_adapters.raw_block.key_codec import (
     decode_object_key,
     object_key_to_string,
 )
