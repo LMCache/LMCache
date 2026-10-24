@@ -314,17 +314,20 @@ PY
 
     DIAGNOSTIC_SAVED=1
 
-    # Preserve attempt-specific copy
+    # Preserve attempt-specific copy without duplicating *.csv files under LONG_DOC_QA_DIR
+    # on standard single-attempt runs (where BUILDKITE_RETRY_COUNT is unset)
     if [ -f "$summary_file" ]; then
         cp "$summary_file" "$attempt_dir/diagnostic_summary.json" 2>/dev/null || true
     fi
-    if [ -d "$LONG_DOC_QA_DIR/baseline" ]; then
-        mkdir -p "$attempt_dir/baseline"
-        cp -r "$LONG_DOC_QA_DIR/baseline"/* "$attempt_dir/baseline/" 2>/dev/null || true
-    fi
-    if [ -d "$LONG_DOC_QA_DIR/lmcache" ]; then
-        mkdir -p "$attempt_dir/lmcache"
-        cp -r "$LONG_DOC_QA_DIR/lmcache"/* "$attempt_dir/lmcache/" 2>/dev/null || true
+    if [ -n "${BUILDKITE_RETRY_COUNT:-}" ]; then
+        if [ -d "$LONG_DOC_QA_DIR/baseline" ]; then
+            mkdir -p "$attempt_dir/baseline"
+            cp -r "$LONG_DOC_QA_DIR/baseline"/* "$attempt_dir/baseline/" 2>/dev/null || true
+        fi
+        if [ -d "$LONG_DOC_QA_DIR/lmcache" ]; then
+            mkdir -p "$attempt_dir/lmcache"
+            cp -r "$LONG_DOC_QA_DIR/lmcache"/* "$attempt_dir/lmcache/" 2>/dev/null || true
+        fi
     fi
 
     # Copy to log files in /tmp so cleanup.sh copies them and Buildkite collects them as *.log artifacts
