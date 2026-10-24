@@ -18,6 +18,8 @@ message IpcCacheServerKey {
   string cache_salt = 8;
   optional bytes encoded_request_configs = 9;
   int64 num_kv_readers = 10;
+  // Optional transport metadata; old protobuf peers ignore the new field.
+  optional bytes encoded_trace_context = 11;
 }
 
 // Store / Retrieve and CacheBlend retrieve share this reply shape.

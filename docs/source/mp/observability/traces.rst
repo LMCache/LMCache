@@ -32,6 +32,39 @@ View traces in any OTel-compatible backend such as **Jaeger** or
         --l1-size-gb 100 --eviction-policy LRU \
         --enable-tracing --otlp-endpoint http://localhost:4317
 
+Propagate a caller trace over ZMQ
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Set ``LMCACHE_MP_TRACE_CONTEXT=1`` in both the caller and MP server processes.
+Keep the server's existing ``--enable-tracing --otlp-endpoint <URL>`` flags.
+The caller needs an active OpenTelemetry span when it submits a request that
+contains an ``IPCCacheServerKey``.
+
+The client copies only W3C ``traceparent`` and ``tracestate`` into the request
+key. The server restores that parent in the executing worker and restores the
+previous context when the handler returns or raises. The request key's cache
+identity and the original caller object remain unchanged. Existing key maps
+without headers still decode; older map decoders ignore the extra field.
+
+The shared key's optional protobuf field is kept aligned with its Python
+dataclass. This keeps the existing gRPC structural codec usable even when
+propagation is off. The baseline transport still requires the separate gRPC
+metadata propagation change to forward a caller's parent through gRPC.
+
+Events capture the parent before the EventBus drain thread or an asynchronous
+GPU callback runs. The standard MP subscriber's existing ``request`` span uses this
+snapshot; LMCache does not install another tracer provider or change the
+provider's sampling policy. Invalid headers and values longer than 512
+characters are ignored. Headers are separate from event metadata and are not
+exported as attributes. Prompt content, token values, and baggage are not
+carried by this feature.
+
+The propagation switch is off by default. Without the OpenTelemetry API,
+request handlers use their original path. This boundary covers keyed ZMQ
+requests, CPU event submission, and CacheBlend roots created from event
+snapshots. It does not cover gRPC, keyless control calls, L2 scheduling
+queues, or native storage backends.
+
 Per-Request Hit-Rate Attributes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -158,6 +191,16 @@ Example TraceQL queries (Grafana Tempo):
 For the full event-to-span mapping and the registry pattern that links
 child spans back to the root see
 ``docs/design/observability/request-event-span.md`` in the source tree.
+
+W3C context in the prefetch queue
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Set ``LMCACHE_MP_TRACE_CONTEXT=1`` in the process that runs the distributed
+controllers. ``submit_prefetch_request`` captures the active caller context
+before queueing. The poll thread restores that context for lookup and load
+submission and restores its previous context after each request, including
+failed submissions. Sampled and unsampled requests keep their own parents.
+This does not extend context into adapter I/O threads or trace GPU/RDMA work.
 
 .. _trace-recording:
 
