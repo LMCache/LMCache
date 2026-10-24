@@ -137,7 +137,7 @@ size_t execute_direct_copy_transfer(
  */
 void multi_layer_block_kv_transfer(
     const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
+    std::vector<uintptr_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
     EngineKVFormat engine_kv_format, int skip_prefix_n_blocks);
