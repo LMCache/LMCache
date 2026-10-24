@@ -298,9 +298,15 @@ lmcache tool cache-simulator gen-dataset [OPTIONS]
 ### How token generation works
 
 1. A *safe vocabulary* is built from the tokenizer: token IDs that decode to printable text and round-trip stably through `encode(decode([id])) == [id]`. Tokens with a leading space are preferred to prevent BPE merges at chunk boundaries.
-2. Each unique chunk hash is mapped deterministically to `chunk_size` token IDs by seeding a PRNG with `SHA-256(hash)`. The same hash always produces the same tokens.
+2. Each unique chunk hash is mapped deterministically to `chunk_size` token IDs by seeding a PRNG with the full `SHA-256(hash)` digest. The same hash, token count, ordered vocabulary, and Python runtime produce the same tokens.
 3. Tail tokens (`seq_len mod chunk_size`) use a per-request seed so they are never accidentally shared across requests (matching LMCache's behaviour of never caching partial chunks).
 4. The full token list is decoded to text and written as the `"prompt"` field. `"output_tokens"` is set to `--output-len`.
+
+Datasets generated with full-digest seeds are not byte-compatible with older
+datasets generated with 31-bit seeds: regenerating them can change both full
+chunks and tails. Use the same generator version and tokenizer for comparable
+benchmark inputs. Finite sampled token sequences can still coincide, and
+decode/re-encode stability remains tokenizer-dependent.
 
 ---
 
