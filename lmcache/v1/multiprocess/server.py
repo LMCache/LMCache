@@ -204,16 +204,36 @@ def _build_server_components(
     module_configs = {
         module_type: config for module_type, config in configured_external
     }
+    external_modules = [module_type for module_type, _ in configured_external]
+    builtin_modules = discover_modules()
+    builtin_by_name = {
+        module_type.module_name: module_type for module_type in builtin_modules
+    }
+    for external_module in external_modules:
+        builtin_module = builtin_by_name.get(external_module.module_name)
+        if builtin_module is not None and not issubclass(
+            external_module, builtin_module
+        ):
+            raise ValueError(
+                f"{external_module.__name__} uses built-in module name "
+                f"{external_module.module_name!r}, but does not subclass "
+                f"{builtin_module.__name__}."
+            )
+    external_names = {module_type.module_name for module_type in external_modules}
+    module_classes = [
+        *external_modules,
+        *(
+            module_type
+            for module_type in builtin_modules
+            if module_type.module_name not in external_names
+        ),
+    ]
     build_ctx = ModuleBuildContext(
         ctx,
         mp_config,
         coordinator_config,
         module_configs=module_configs,
     )
-    module_classes = [
-        *discover_modules(),
-        *(module_type for module_type, _ in configured_external),
-    ]
     known_modules = set(module_classes)
 
     for module_cls in order_modules(

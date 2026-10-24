@@ -135,12 +135,19 @@ def _schedule(
     block_ids: tuple[list[int], ...] = (),
     *,
     new: bool = False,
+    num_computed_tokens: int = 0,
 ) -> SchedulerOutput:
     return cast(
         SchedulerOutput,
         SimpleNamespace(
             scheduled_new_reqs=(
-                [SimpleNamespace(req_id=request_id, block_ids=block_ids)]
+                [
+                    SimpleNamespace(
+                        req_id=request_id,
+                        block_ids=block_ids,
+                        num_computed_tokens=num_computed_tokens,
+                    )
+                ]
                 if new and num_tokens
                 else []
             ),
@@ -148,6 +155,9 @@ def _schedule(
                 req_ids=[request_id] if not new and num_tokens else [],
                 new_block_ids=[block_ids] if not new and num_tokens else [],
                 resumed_req_ids=set(),
+                num_computed_tokens=(
+                    [num_computed_tokens] if not new and num_tokens else []
+                ),
             ),
             num_scheduled_tokens={request_id: num_tokens} if num_tokens else {},
             total_num_scheduled_tokens=num_tokens,
@@ -663,9 +673,11 @@ def test_kv_events_survive_multi_connector(
     monkeypatch.setattr(
         KVConnectorFactory,
         "get_connector_class",
-        lambda c: LMCacheMPConnector
-        if c.kv_connector == "LMCacheMPConnector"
-        else MagicMock(return_value=peer),
+        lambda c: (
+            LMCacheMPConnector
+            if c.kv_connector == "LMCacheMPConnector"
+            else MagicMock(return_value=peer)
+        ),
     )
     config = _config(
         KVTransferConfig(
@@ -768,4 +780,58 @@ def test_kv_events_worker_reports_merge_across_ranks(
         assert _stored_hashes(scheduler) == []
     finally:
         worker.shutdown()
+        scheduler.shutdown()
+
+
+@pytest.mark.parametrize("replay", [0, 128])
+def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
+    mock_io: SimpleNamespace, replay: int
+) -> None:
+    """A full-prompt hit must not retrieve past what vLLM allocates.
+
+    With SWA bounded replay vLLM floors the external hit to the scheduler
+    block boundary before allocating, so the classic ``ret - 1`` leaves the
+    retrieve one block past the allocation. Under replay the connector gives
+    back the last chunk instead (retrieve end 8 of 12, lock on [8, 12)
+    released); without replay the ``ret - 1`` rule is unchanged.
+    """
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    scheduler.bind_gpu_block_pool(mock_io.pool)
+    try:
+        scheduler._prefix_replay_tokens = replay
+        request = _request()  # 12 prompt tokens, chunk 4
+        mock_io.scheduler.check_lookup_result.return_value = 12
+        need, async_load = scheduler.get_num_new_matched_tokens(request, 0)
+        assert need is not None  # the lookup result is ready
+        tracker = scheduler.request_trackers[request.request_id]
+        if replay:
+            assert (need, async_load) == (8, True)
+            assert tracker.num_lmcache_hit_tokens == 8
+            assert tracker.pending_free_ranges == [(8, 12)]
+        else:
+            assert (need, async_load) == (11, True)
+            assert tracker.num_lmcache_hit_tokens == 12
+            assert tracker.pending_free_ranges == []
+        # vLLM allocates exactly the blocks it was told about (8 tokens = 2
+        # blocks under replay); the retrieve must fit in them.
+        n_blocks = 2 if replay else 3
+        scheduler.update_state_after_alloc(
+            request,
+            MagicMock(get_block_ids=lambda: (list(range(1, n_blocks + 1)),)),
+            need,
+        )
+        metadata = scheduler.build_connector_meta(_schedule())
+        assert isinstance(metadata, LMCacheMPConnectorMetadata)
+        assert len(metadata.requests) == 1
+        meta = metadata.requests[0]
+        assert meta.direction == "RETRIEVE"
+        assert (meta.op.start, meta.op.end) == (0, 8 if replay else 12)
+        assert len(meta.op.block_ids[0]) * 4 >= meta.op.end
+        if replay:
+            kwargs = mock_io.scheduler.free_lookup_locks.call_args.kwargs
+            assert kwargs["extra_ranges"] == ((8, 12),)
+    finally:
         scheduler.shutdown()

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 # Third Party
 import pytest
@@ -9,7 +10,10 @@ import torch
 # First Party
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
+    get_tokens_per_block,
+    is_scratch_spec,
 )
+from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
 from lmcache.v1.multiprocess.group_view import (
     expand_engine_block_ids,
     get_engine_group_indices,
@@ -478,13 +482,60 @@ class CircularBufferSpec(AttentionSpec):
         return False
 
 
-def test_conversion_excludes_scratch_group_layers():
-    """Scratch groups cover no tokens: their layers form no info."""
-    # First Party
-    from lmcache.integration.vllm.kv_cache_groups import get_tokens_per_block
-    from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
+@dataclass
+class KpoolTailSpec(AttentionSpec):
+    """Scratch tail double using the older vLLM prefix-caching marker."""
 
-    ring = CircularBufferSpec(block_size=8)
+    @property
+    def participates_in_prefix_caching(self) -> bool:
+        return False
+
+
+@pytest.mark.parametrize(
+    "markers,expected",
+    [
+        pytest.param({}, False, id="no-marker"),
+        pytest.param({"prefix_cacheable": True}, False, id="new-cacheable"),
+        pytest.param({"prefix_cacheable": False}, True, id="new-scratch"),
+        pytest.param(
+            {"participates_in_prefix_caching": True}, False, id="legacy-cacheable"
+        ),
+        pytest.param(
+            {"participates_in_prefix_caching": False}, True, id="legacy-scratch"
+        ),
+        pytest.param(
+            {"prefix_cacheable": True, "participates_in_prefix_caching": False},
+            False,
+            id="new-cacheable-wins",
+        ),
+        pytest.param(
+            {"prefix_cacheable": False, "participates_in_prefix_caching": True},
+            True,
+            id="new-scratch-wins",
+        ),
+    ],
+)
+@pytest.mark.parametrize("wrapped", [False, True], ids=["leaf", "uniform"])
+def test_scratch_spec_prefix_caching_markers(
+    markers: dict[str, bool], expected: bool, wrapped: bool
+) -> None:
+    """Scratch detection honors both marker versions, with the new one first."""
+    spec: SimpleNamespace | UniformTypeKVCacheSpecs = SimpleNamespace(
+        block_size=8, **markers
+    )
+    if wrapped:
+        spec = UniformTypeKVCacheSpecs(block_size=8, kv_cache_specs={"layer.0": spec})
+
+    assert is_scratch_spec(spec) is expected
+    assert get_tokens_per_block(spec, dcp_size=1) == (0 if expected else 8)
+
+
+@pytest.mark.parametrize("ring_type", [CircularBufferSpec, KpoolTailSpec])
+def test_conversion_excludes_scratch_group_layers(
+    ring_type: type[CircularBufferSpec] | type[KpoolTailSpec],
+) -> None:
+    """Scratch groups cover no tokens: their layers form no info."""
+    ring = ring_type(block_size=8)
     assert get_tokens_per_block(ring, 1) == 0
     assert get_tokens_per_block(MockKVCacheSpec(block_size=8), 1) == 8
 
@@ -503,12 +554,12 @@ def test_conversion_excludes_scratch_group_layers():
     assert get_engine_group_indices(spec, 3) == [0, EXCLUDED_ENGINE_GROUP, 2]
 
 
-def test_conversion_skips_format_discovery_for_scratch_layers():
+@pytest.mark.parametrize("ring_type", [CircularBufferSpec, KpoolTailSpec])
+def test_conversion_skips_format_discovery_for_scratch_layers(
+    ring_type: type[CircularBufferSpec] | type[KpoolTailSpec],
+) -> None:
     """A scratch ring whose layout format discovery would reject must not block
     registration: its layers skip discovery and stay excluded."""
-    # First Party
-    from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
-
     # Interior padding between the two heads (dim-1 stride 700 != tight 560):
     # a layout format discovery rejects outright.
     num_blocks, capacity, head_size, block_step = 3, 4, 140, 1400
@@ -523,7 +574,7 @@ def test_conversion_skips_format_discovery_for_scratch_layers():
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
-                MockKVCacheGroup(["layer.1"], CircularBufferSpec(block_size=capacity)),
+                MockKVCacheGroup(["layer.1"], ring_type(block_size=capacity)),
             ]
         ),
         kv_caches,
