@@ -182,6 +182,12 @@ def run_server_bench(
         args: Parsed CLI arguments for ``lmcache bench server``.
     """
     config = parse_args_to_config(args)
+    # The IPC policy is process-wide and the CUDA event backend is cached on
+    # first resolution, so set it before any client starts.
+    # First Party
+    from lmcache.v1.platform.ipc_policy import set_isolated_ipc
+
+    set_isolated_ipc(config.isolated_ipc)
     stop = threading.Event()
     cases = _build_cases(config, args, stop)
 
@@ -265,6 +271,7 @@ def _emit_server_bench_metrics(
     cfg_section.add("num_tokens", "Tokens / request", args.num_tokens)
     cfg_section.add("interval", "Interval (s)", args.interval)
     cfg_section.add("concurrency", "Concurrency", getattr(args, "concurrency", 1))
+    cfg_section.add("isolated_ipc", "Isolated IPC", args.isolated_ipc)
 
     result_section = metrics.add_section("results", "Results")
     result_section.add("total_requests", "Total requests", result.completed_runs)
