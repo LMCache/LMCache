@@ -327,7 +327,13 @@ class KeyDirectory(View):
             stored_key
             for stored_key in chunk_binding.keys
             if stored_key.object_group_id != key.object_group_id
-            and replace(stored_key, object_group_id=key.object_group_id) == key
+            and replace(
+                stored_key,
+                identity=replace(
+                    stored_key.identity, object_group_id=key.object_group_id
+                ),
+            )
+            == key
         ]
 
     def get_token_ids(self, chunk_hashes: list[bytes]) -> list[tuple[int, ...]]:

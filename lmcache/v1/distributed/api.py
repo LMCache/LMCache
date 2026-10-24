@@ -7,7 +7,7 @@ Could be implemented by native code in the future
 """
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, get_args
 import enum
 
@@ -16,6 +16,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.cache_identity import ObjectKeyIdentity
 
 if TYPE_CHECKING:
     # First Party
@@ -155,69 +156,103 @@ class MemoryTags:
     """Where the bytes reside relative to this host."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ObjectKey:
     """
     The unique identifier for an object in the distributed storage manager
     """
 
-    chunk_hash: bytes
-    """ Content hash of this particular chunk """
+    identity: ObjectKeyIdentity
 
-    model_name: str
-    """ Name of the model this chunk belongs to.
+    def __init__(
+        self,
+        chunk_hash: bytes | None = None,
+        model_name: str | None = None,
+        kv_rank: int | None = None,
+        object_group_id: int | None = None,
+        cache_salt: str | None = None,
+        *,
+        identity: ObjectKeyIdentity | None = None,
+    ) -> None:
+        """Build a key from its identity or the existing flat constructor.
 
-    Invariant: must not contain ``@``. The L2 adapters use ``@`` as the
-    field separator in serialized keys/filenames and rely on this
-    invariant for unambiguous parsing. HuggingFace model IDs use
-    alphanumerics + ``/-_.`` so this rejects nothing that appears in
-    practice.
-    """
+        Explicit flat fields override the supplied identity. This also retains
+        ``dataclasses.replace(key, object_group_id=...)`` and other flat field
+        replacements used by existing consumers.
 
-    kv_rank: int
-    """ The rank that uniquely identifies the slice of the KV cache """
+        Args:
+            chunk_hash: Content hash; required without ``identity``.
+            model_name: Model name; required without ``identity``.
+            kv_rank: Packed KV rank; required without ``identity``.
+            object_group_id: Object group; defaults to 0 without an identity.
+            cache_salt: Isolation salt; defaults to empty without an identity.
+            identity: Immutable identity providing fields not supplied explicitly.
 
-    object_group_id: int = 0
-    """ Index of the object group this chunk belongs to. """
-
-    cache_salt: str = ""
-    """ Per-user isolation salt. Same content from different users with
-    different cache_salt values produces different ObjectKeys, giving
-    strict per-user cache isolation. Defaults to empty string, in which
-    case serialized keys and filenames match the pre-cache_salt shape
-    (no trailing salt field) — no migration is needed for un-salted
-    deployments.
-
-    Invariant: must not contain ``@``, ``/``, ``\\``, or NUL. The L2
-    adapters use ``@`` as the field separator; ``/`` and ``\\`` are
-    filesystem path separators (FS adapter embeds the salt into
-    filenames); NUL terminates C strings (C++ connector). Max length
-    128 to stay well within ``NAME_MAX`` (255) after the model, rank,
-    hash, and extension are added.
-    """
-
-    _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
-    _SALT_MAX_LEN = 128
-
-    def __post_init__(self) -> None:
-        if "@" in self.model_name:
-            raise ValueError(
-                f"model_name must not contain '@' (got {self.model_name!r})"
+        Raises:
+            TypeError: A required flat field is missing without ``identity``.
+            ValueError: An identity field violates its invariant.
+        """
+        if identity is None:
+            if chunk_hash is None or model_name is None or kv_rank is None:
+                raise TypeError("chunk_hash, model_name and kv_rank are required")
+            identity = ObjectKeyIdentity(
+                chunk_hash=chunk_hash,
+                model_name=model_name,
+                kv_rank=kv_rank,
+                object_group_id=object_group_id if object_group_id is not None else 0,
+                cache_salt=cache_salt if cache_salt is not None else "",
             )
-        if self.object_group_id < 0:
-            raise ValueError(
-                f"object_group_id must be >= 0 (got {self.object_group_id})"
+        elif (
+            chunk_hash is not None
+            or model_name is not None
+            or kv_rank is not None
+            or object_group_id is not None
+            or cache_salt is not None
+        ):
+            identity = replace(
+                identity,
+                chunk_hash=chunk_hash
+                if chunk_hash is not None
+                else identity.chunk_hash,
+                model_name=model_name
+                if model_name is not None
+                else identity.model_name,
+                kv_rank=kv_rank if kv_rank is not None else identity.kv_rank,
+                object_group_id=(
+                    object_group_id
+                    if object_group_id is not None
+                    else identity.object_group_id
+                ),
+                cache_salt=cache_salt
+                if cache_salt is not None
+                else identity.cache_salt,
             )
-        bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
-        if bad:
-            raise ValueError(
-                f"cache_salt must not contain {bad!r} (got {self.cache_salt!r})"
-            )
-        if len(self.cache_salt) > self._SALT_MAX_LEN:
-            raise ValueError(
-                f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
-                f"(got {len(self.cache_salt)})"
-            )
+        object.__setattr__(self, "identity", identity)
+
+    @property
+    def chunk_hash(self) -> bytes:
+        """Read chunk_hash from the identity."""
+        return self.identity.chunk_hash
+
+    @property
+    def model_name(self) -> str:
+        """Read model_name from the identity."""
+        return self.identity.model_name
+
+    @property
+    def cache_salt(self) -> str:
+        """Read cache_salt from the identity."""
+        return self.identity.cache_salt
+
+    @property
+    def kv_rank(self) -> int:
+        """Read kv_rank from the identity."""
+        return self.identity.kv_rank
+
+    @property
+    def object_group_id(self) -> int:
+        """Read object_group_id from the identity."""
+        return self.identity.object_group_id
 
     def to_encoded_object_key(self) -> "EncodedObjectKey":
         """Return the JSON-safe :class:`EncodedObjectKey` projection."""

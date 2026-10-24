@@ -6,6 +6,14 @@ syntax = "proto3";
 
 package lmcache.mp;
 
+message ObjectKeyIdentity {
+  bytes chunk_hash = 1;
+  int64 kv_rank = 2;
+  string model_name = 3;
+  int64 object_group_id = 4;
+  string cache_salt = 5;
+}
+
 // Cache key used by engine and CacheBlend RPCs.
 message IpcCacheServerKey {
   string model_name = 1;
