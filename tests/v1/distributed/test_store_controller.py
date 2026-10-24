@@ -22,7 +22,11 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.eviction_policy.noop import (
     NoOpEvictionPolicy,
@@ -451,6 +455,62 @@ class TestStoreControllerSingleAdapter:
 
         ok = wait_for_condition(all_keys_evictable, timeout=5.0)
         assert ok, "Read locks must be released for every concurrent request"
+
+        ctrl.stop()
+        adapter.close()
+
+
+class TestStoreBudget:
+    def test_groups_past_budget_wait_unlocked(self, l1_manager):
+        """With two groups in flight the third waits unlocked; evicting it
+        while it waits means it never reaches L2."""
+        group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
+        # Lazy allocation grows L1 in the background; wait for its full size.
+        total_bytes = l1_manager.config.memory_config.size_in_bytes
+        assert wait_for_condition(
+            lambda: l1_manager.get_memory_usage()[1] == total_bytes
+        )
+        eviction = EvictionConfig(
+            eviction_policy="LRU",
+            trigger_watermark=0.5,
+            eviction_ratio=0.5 - 1.5 * group_bytes / total_bytes,
+        )
+        # About 3 s per group, so the first two stay in flight below.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=group_bytes / 3 / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy(),
+            eviction_config=eviction,
+        )
+        ctrl.start()
+
+        groups = [[make_object_key(g * 4 + i) for i in range(4)] for g in range(3)]
+        for keys in groups:
+            write_keys_to_l1(l1_manager, keys, make_layout())
+            # One listener drain per write, so each write is its own group.
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_keys_count"] == 0
+            )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["queued_keys_count"] == 4
+            and ctrl.report_status()["in_flight_task_count"] == 2
+        )
+
+        deleted = l1_manager.delete(groups[2])
+        assert all(err == L1Error.SUCCESS for err in deleted.values())
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["queued_keys_count"] == 0
+            and ctrl.report_status()["in_flight_task_count"] == 0,
+            timeout=10.0,
+        )
+        assert all(adapter.debug_has_key(k) for k in groups[0] + groups[1])
+        assert not any(adapter.debug_has_key(k) for k in groups[2])
 
         ctrl.stop()
         adapter.close()
