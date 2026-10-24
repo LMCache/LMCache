@@ -197,8 +197,12 @@ class TransferRequest {
   TransferRequest(const TransferRequest&) = delete;
   TransferRequest& operator=(const TransferRequest&) = delete;
 
+  nixl_status_t post() { return agent_.postXferReq(handle_); }
+
+  nixl_status_t poll() { return agent_.getXferStatus(handle_); }
+
   void execute(const std::atomic<bool>& stop) {
-    nixl_status_t status = agent_.postXferReq(handle_);
+    nixl_status_t status = post();
     if (status < NIXL_SUCCESS) {
       check_nixl(status, "NIXL transfer submission");
     }
@@ -206,7 +210,7 @@ class TransferRequest {
       if (stop.load(std::memory_order_acquire)) {
         throw std::runtime_error("NIXL transfer cancelled during shutdown");
       }
-      status = agent_.getXferStatus(handle_);
+      status = poll();
       if (status == NIXL_IN_PROG) std::this_thread::yield();
     }
     check_nixl(status, "NIXL transfer progress");
@@ -234,6 +238,80 @@ void execute_transfer(nixlAgent& agent, nixlBackendH* backend,
                           static_cast<size_t>(local_descriptors.descCount()));
   request.execute(stop);
 }
+
+class ObjectTransferOperation final : public NixlPendingOperation {
+ public:
+  ObjectTransferOperation(
+      nixlAgent& agent, nixlBackendH* backend, const std::string& agent_name,
+      nixl_xfer_op_t operation, const nixl_reg_dlist_t& registration,
+      const nixl_xfer_dlist_t& local, const nixl_xfer_dlist_t& storage,
+      const std::vector<uint8_t>& results, const std::vector<size_t>& selected)
+      : results_(results), selected_(selected) {
+    if (registration.isEmpty()) return;
+    if (local.descCount() != storage.descCount()) {
+      throw std::runtime_error("NIXL descriptor lists have different sizes");
+    }
+    // C++ destroys members in reverse declaration order: request, then
+    // dlists, then registration.
+    registration_ = std::make_unique<RegisteredMemory>(
+        agent, backend, nixl_reg_dlist_t(registration));
+    local_ = std::make_unique<PreparedDlist>(agent, backend, local);
+    storage_ =
+        std::make_unique<PreparedDlist>(agent, backend, agent_name, storage);
+    request_ = std::make_unique<TransferRequest>(
+        agent, backend, operation, *local_, *storage_,
+        static_cast<size_t>(local.descCount()));
+  }
+
+  nixl_status_t post() override {
+    if (!request_) return NIXL_SUCCESS;
+    nixl_status_t status = request_->post();
+    if (status < NIXL_SUCCESS) {
+      terminal_ = true;
+      terminal_status_ = status;
+      check_nixl(status, "NIXL transfer submission");
+    } else if (status == NIXL_SUCCESS) {
+      terminal_ = true;
+      terminal_status_ = status;
+    }
+    return status;
+  }
+
+  nixl_status_t poll() override {
+    if (terminal_ || !request_) return terminal_status_;
+    nixl_status_t status = request_->poll();
+    if (status != NIXL_IN_PROG) {
+      terminal_ = true;
+      terminal_status_ = status;
+    }
+    return status;
+  }
+
+  std::vector<uint8_t> complete() override {
+    discard();
+    if (terminal_status_ == NIXL_SUCCESS) {
+      for (size_t index : selected_) results_[index] = 1;
+    }
+    return std::move(results_);
+  }
+
+  void discard() noexcept override {
+    request_.reset();
+    storage_.reset();
+    local_.reset();
+    registration_.reset();
+  }
+
+ private:
+  std::vector<uint8_t> results_;
+  std::vector<size_t> selected_;
+  bool terminal_ = false;
+  nixl_status_t terminal_status_ = NIXL_SUCCESS;
+  std::unique_ptr<RegisteredMemory> registration_;
+  std::unique_ptr<PreparedDlist> local_;
+  std::unique_ptr<PreparedDlist> storage_;
+  std::unique_ptr<TransferRequest> request_;
+};
 
 bool parse_bool_parameter(
     const std::unordered_map<std::string, std::string>& parameters,
@@ -513,11 +591,123 @@ class NixlObjectStorage final : public NixlStorageStrategy {
         "NIXL 1.3 OBJECT storage does not support deletion");
   }
 
+  std::unique_ptr<NixlPendingOperation> prepare_store(
+      nixlAgent& agent, nixlBackendH* backend, const std::string& agent_name,
+      const std::vector<NixlTransferBuffer>& buffers,
+      const NixlDescriptorIdAllocator& allocate_id) override {
+    nixl_reg_dlist_t registration(OBJ_SEG);
+    nixl_xfer_dlist_t local(DRAM_SEG);
+    nixl_xfer_dlist_t storage(OBJ_SEG);
+    for (const NixlTransferBuffer& buffer : buffers) {
+      local.addDesc(nixlBasicDesc(reinterpret_cast<uintptr_t>(buffer.data),
+                                  buffer.length, 0));
+      nixlBlobDesc object_descriptor(
+          0, buffer.length, allocate_id(),
+          key_to_filename(buffer.key, shard_directories_));
+      registration.addDesc(object_descriptor);
+      storage.addDesc(object_descriptor);
+    }
+    return std::make_unique<ObjectTransferOperation>(
+        agent, backend, agent_name, NIXL_WRITE, registration, local, storage,
+        std::vector<uint8_t>(), std::vector<size_t>());
+  }
+
+  std::unique_ptr<NixlPendingOperation> prepare_load(
+      nixlAgent& agent, nixlBackendH* backend, const std::string& agent_name,
+      const std::vector<NixlTransferBuffer>& buffers,
+      const NixlDescriptorIdAllocator& allocate_id) override {
+    std::vector<uint8_t> results(buffers.size(), 0);
+    std::vector<size_t> selected;
+    selected.reserve(buffers.size());
+    nixl_reg_dlist_t registration(OBJ_SEG);
+    nixl_xfer_dlist_t local(DRAM_SEG);
+    nixl_xfer_dlist_t storage(OBJ_SEG);
+    for (const NixlTransferBuffer& buffer : buffers) {
+      selected.push_back(selected.size());
+      local.addDesc(nixlBasicDesc(reinterpret_cast<uintptr_t>(buffer.data),
+                                  buffer.length, 0));
+      nixlBlobDesc object_descriptor(
+          0, buffer.length, allocate_id(),
+          key_to_filename(buffer.key, shard_directories_));
+      registration.addDesc(object_descriptor);
+      storage.addDesc(object_descriptor);
+    }
+    std::unique_ptr<NixlPendingOperation> operation;
+    try {
+      operation = std::make_unique<ObjectTransferOperation>(
+          agent, backend, agent_name, NIXL_READ, registration, local, storage,
+          results, selected);
+    } catch (const std::runtime_error& error) {
+      // NIXL registration and preparation failures keep the load semantics:
+      // false result bits, successful tile completion. Allocation and other
+      // internal faults stay hard failures.
+      throw NixlLoadPrepareError(
+          "NIXL load preparation failed: " + std::string(error.what()),
+          std::move(results));
+    }
+    return operation;
+  }
+
+  std::unique_ptr<NixlPendingOperation> prepare_load_fallback(
+      nixlAgent& agent, nixlBackendH* backend, const std::string& agent_name,
+      const std::vector<NixlTransferBuffer>& buffers,
+      const NixlDescriptorIdAllocator& allocate_id) override {
+    std::vector<std::string> identities;
+    identities.reserve(buffers.size());
+    for (const NixlTransferBuffer& buffer : buffers) {
+      identities.push_back(key_to_filename(buffer.key, shard_directories_));
+    }
+    std::vector<uint8_t> present =
+        query_storage(agent, backend, OBJ_SEG, identities);
+    std::vector<uint8_t> results(buffers.size(), 0);
+    size_t missing = 0;
+    for (const uint8_t bit : present) missing += bit == 0;
+    if (missing == buffers.size()) {
+      // Nothing to retry: an empty operation completes all keys as false.
+      return std::make_unique<ObjectTransferOperation>(
+          agent, backend, agent_name, NIXL_READ, nixl_reg_dlist_t(OBJ_SEG),
+          nixl_xfer_dlist_t(DRAM_SEG), nixl_xfer_dlist_t(OBJ_SEG), results,
+          std::vector<size_t>());
+    }
+    if (missing == 0) {
+      throw NixlLoadPrepareError(
+          "NIXL load retry skipped: all keys present after transfer failure",
+          std::move(results));
+    }
+    nixl_reg_dlist_t registration(OBJ_SEG);
+    nixl_xfer_dlist_t local(DRAM_SEG);
+    nixl_xfer_dlist_t storage(OBJ_SEG);
+    std::vector<size_t> selected;
+    for (size_t index = 0; index < buffers.size(); ++index) {
+      if (!present[index]) continue;
+      selected.push_back(index);
+      const NixlTransferBuffer& buffer = buffers[index];
+      local.addDesc(nixlBasicDesc(reinterpret_cast<uintptr_t>(buffer.data),
+                                  buffer.length, 0));
+      nixlBlobDesc object_descriptor(0, buffer.length, allocate_id(),
+                                     identities[index]);
+      registration.addDesc(object_descriptor);
+      storage.addDesc(object_descriptor);
+    }
+    std::unique_ptr<NixlPendingOperation> operation;
+    try {
+      operation = std::make_unique<ObjectTransferOperation>(
+          agent, backend, agent_name, NIXL_READ, registration, local, storage,
+          results, selected);
+    } catch (const std::runtime_error& error) {
+      throw NixlLoadPrepareError(
+          "NIXL load retry preparation failed: " + std::string(error.what()),
+          std::move(results));
+    }
+    return operation;
+  }
+
   NixlStorageCapabilities capabilities() const override {
     return {.query = true,
             .deletion = false,
             .direct_io = false,
-            .atomic_publication = false};
+            .atomic_publication = false,
+            .pending_transfers = true};
   }
 
  private:
