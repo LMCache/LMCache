@@ -12,36 +12,43 @@ costs at most one chunk of recompute. For hybrid models it is worse:
 - A linear-attention (Mamba/GDN) layer can only resume where a state snapshot
   exists, so the recurrent state at the resume point must be stored too.
 
-This feature lets LMCache store and load the unfull chunk `[kC, B)` at the
-end of a request's prompt, so a later request (a decode instance in PD
-disaggregation, or the next round of a chat) resumes at `B` instead of `kC`.
-`B` is the last point before the prompt's last token where vLLM's own prefix
-cache could resume: `B = floor((P - 1) / g) * g` on vLLM's hit grid `g`. It
-is the shared groundwork for PD handoff and multi-round reuse; neither policy
-lives here.
+This feature lets LMCache store and load the unfull chunk at the end of a
+request's prompt, so a later request resumes past `kC`. Two kinds of tail
+serve the two consumers; both are stored as the same kind of object:
 
-Why the grid rather than the exact prompt end `P`:
+| Tail | Ends at | Stored by | Serves |
+|---|---|---|---|
+| Exact | `P`, the prompt end | requests that end at the prompt (`max_tokens == 1`, e.g. a disaggregated prefill) | the disaggregated decode, exactly where the prefill stopped |
+| Grid | `B = floor((P - 1) / g) * g` on vLLM's hit grid `g` | every request | a later request sharing the prefix (the same prompt again, or the next round of a chat), where vLLM's own prefix cache could resume |
 
-- vLLM always recomputes the last prompt token for its logits, so a request
-  with the same prompt resumes at `P - 1` (with Mamba, the connector looks up
-  `P - 1` tokens). A state stored at `P` is useless to it, and an exact-end
-  key would never match.
+A lookup probes its own end first, so an exact tail wins, then the grid ends
+below it. This is the shared groundwork for PD handoff and multi-round reuse;
+neither policy lives here.
+
+**Exact tail (PD).** A request that ends at its prompt runs no later forward,
+so its block table describes exactly `P`. This is the LMCache counterpart of
+NIXL's P/D handoff, where the prefill stops at `P - b` and the decode loads
+exactly that and recomputes `b` tokens (`b = 0` for attention-only models,
+`1` with Mamba):
+
+- Attention-only: the decode looks up `P` and hits the exact tail; it
+  recomputes nothing LMCache could serve.
+- Mamba: the decode looks up `P - 1`, the state it can resume from, while the
+  prefill's exact tail holds the state at `P`. The two meet once the prefill
+  stops at `P - 1`, the NIXL truncation (the P/D change). Until then the
+  decode hits the grid tail and recomputes `P - 1 - B < g` tokens more than
+  NIXL would.
+
+**Grid tail (reuse).** Why a grid rather than each request's exact end:
+
+- vLLM always recomputes the last prompt token for its logits, so a later
+  request with the same prompt resumes at `P - 1`, not `P`; with Mamba the
+  connector looks up `P - 1` tokens, and a state at `P` cannot serve it.
 - A Mamba state exists only where vLLM snapshots one. On the grid, vLLM hands
   the snapshot block over (boundary-state hand-offs), a copy the next forward
   does not rewrite, so the store is safe while the request keeps decoding.
 - A lookup does not know where an earlier request's tail ended. With every
   tail on the grid it probes at most `C / g` candidate ends.
-
-A request that ends at its prompt (`max_tokens == 1`, e.g. a disaggregated
-prefill) also stores its exact tail `[kC, P)`: no later forward rewrites its
-blocks, so the block table describes exactly `P`, and a lookup probes its own
-end before the grid. This is the LMCache counterpart of NIXL's exact P/D
-handoff, where the prefill stops at `P - b` and the decode loads exactly that
-and recomputes `b` tokens (`b = 1` with Mamba). For attention-only models
-(`b = 0`) the decode looks up `P` and hits the exact tail. With Mamba the
-decode looks up `P - 1`, so the exact tail meets it only once the prefill
-stops at `P - 1` (the P/D change); until then it falls back to the grid
-tail.
 
 Enabled per connector with `lmcache.mp.save_unfull_chunk: true`
 (`kv_connector_extra_config`). Off by default: nothing changes for existing
@@ -56,10 +63,10 @@ that ring is a follow-up.
 ## Concepts
 
 - **Unfull chunk**: a token range `[kC, B)` with `kC = floor(B / C) * C`
-  and `0 < B - kC < C`, where `C` is the LMCache chunk size. It is stored as
-  one object per object group with the regular chunk layout, plus one block
-  per narrow sliding-window group (see below); only the blocks that cover
-  `[kC, B)` are copied.
+  and `0 < B - kC < C`, where `B` is the exact or the grid end and `C` the
+  LMCache chunk size. It is stored as one object per object group with the
+  regular chunk layout, plus one block per narrow sliding-window group (see
+  below); only the blocks that cover `[kC, B)` are copied.
 - **Hit grid `g`**: where vLLM's prefix-cache hits land. For a model with
   align-mode Mamba groups it is vLLM's `hash_block_size` (sub-block hits);
   otherwise the scheduler block, the LMCache connector's
@@ -92,7 +99,7 @@ for the longest unfull chunk on the grid after its hit prefix, up to `end`.
 ## Data flow
 
 ```text
-store (B on the grid, B < P)                load (lookup end L)
+store (B: grid end, or P exactly)           load (lookup end L)
 ----------------------------------------    -------------------------------------------
 STORE [kC, B), include_unfull_chunk          LOOKUP [0, L), include_unfull_chunk,
   blocks: ceil(B/T_g) slices per group         hint lmcache.hint.unfull_chunk_grid = g
