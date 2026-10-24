@@ -45,6 +45,10 @@ text, including streams with an empty ``content`` field. One workload,
 :ref:`rag-qa-quality <bench-rag-qa-quality>`, measures answer *correctness*
 instead of speed.
 
+For a checkout example that preserves exact token prefixes across mixed-length
+conversations, see :doc:`multi_turn_kv`. It reuses the engine-benchmark library
+and leaves existing workload defaults unchanged.
+
 .. code-block:: bash
 
    lmcache bench engine [options]
