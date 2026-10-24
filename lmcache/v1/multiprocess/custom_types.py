@@ -230,6 +230,8 @@ class CBMatchResult:
         cur_st: Start position in the query sequence where the match was found.
         cur_ed: End position in the query sequence where the match was found.
         hash: Token hash bytes (from registration) used as the storage key.
+        predecessor_hash: Token hash of the chunk immediately preceding this
+            chunk in the stored sequence, or ``None`` when unknown.
     """
 
     old_st: int
@@ -237,6 +239,7 @@ class CBMatchResult:
     cur_st: int
     cur_ed: int
     hash: bytes
+    predecessor_hash: bytes | None = None
 
 
 @dataclass
@@ -251,8 +254,11 @@ class CBUnifiedLookupResult:
             tokens — what the standard LOOKUP would report.
         non_prefix_segments: Fingerprint matches outside the prefix coverage
             (cur_st order), each carrying ``(old_st, old_ed, cur_st, cur_ed,
-            hash)``. Already sparse-prefetched, so the retrieve set equals the
-            prefetched set. Includes fleet-coordinator (shared-L2) matches:
+            hash, predecessor_hash)``. ``predecessor_hash`` is the token hash
+            of the chunk immediately preceding the matched chunk in the
+            stored sequence, or ``None`` when it is unknown. Already
+            sparse-prefetched, so the retrieve set equals the prefetched set.
+            Includes fleet-coordinator (shared-L2) matches:
             those are merged in before the sparse prefetch -- prefix-covered and
             locally-duplicated ones dropped -- so they ride the identical
             prefetch + retrieve path and need no separate handling.

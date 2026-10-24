@@ -950,6 +950,64 @@ def test_repeated_registration_of_same_hash_is_idempotent():
     assert matches[0].old_st == 0
 
 
+def test_match_reports_the_stored_predecessor_hash():
+    """Each indexed chunk reports the hash immediately before it."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    hashes = [ObjectKey.IntHash2Bytes(seed) for seed in (101, 102, 103)]
+    _register_content(
+        matcher,
+        _content_chunk(1) + _content_chunk(2) + _content_chunk(3),
+        [101, 102, 103],
+    )
+
+    matches = matcher.match_sub_sequence(
+        _content_chunk(1) + _content_chunk(2) + _content_chunk(3)
+    )
+
+    assert [match.predecessor_hash for match in matches] == [
+        None,
+        hashes[0],
+        hashes[1],
+    ]
+
+
+def test_match_reports_external_predecessor_for_a_slice():
+    """A tail registration can provide its predecessor from the full sequence."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    predecessor = ObjectKey.IntHash2Bytes(100)
+    matcher.on_new_token_hashes(
+        _content_chunk(1),
+        [ObjectKey.IntHash2Bytes(101)],
+        position_offset=CHUNK_SIZE,
+        predecessor_hash=predecessor,
+    )
+
+    matches = matcher.match_sub_sequence(_content_chunk(1))
+
+    assert matches[0].predecessor_hash == predecessor
+
+
+def test_content_dedup_keeps_first_predecessor():
+    """Content deduplication retains the first stored sequence's context."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE, dedup_content=True)
+    first = ObjectKey.IntHash2Bytes(101)
+    second = ObjectKey.IntHash2Bytes(202)
+    first_predecessor = ObjectKey.IntHash2Bytes(100)
+    second_predecessor = ObjectKey.IntHash2Bytes(200)
+
+    matcher.on_new_token_hashes(
+        _content_chunk(1), [first], predecessor_hash=first_predecessor
+    )
+    matcher.on_new_token_hashes(
+        _content_chunk(1), [second], predecessor_hash=second_predecessor
+    )
+
+    matches = matcher.match_sub_sequence(_content_chunk(1))
+
+    assert matches[0].hash == first
+    assert matches[0].predecessor_hash == first_predecessor
+
+
 # -- Config -------------------------------------------------------------------
 
 
