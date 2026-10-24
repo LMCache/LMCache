@@ -24,6 +24,7 @@ from collections import OrderedDict
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, Iterator, cast
+from unittest.mock import MagicMock
 import asyncio
 
 # Third Party
@@ -36,7 +37,11 @@ from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
+from lmcache.v1.storage_backend.abstract_backend import (
+    AllocatorBackendInterface,
+    StorageBackendInterface,
+)
+from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 from lmcache.v1.storage_backend.storage_manager import (
     StorageManager,
     allocate_and_copy_objects,
@@ -505,3 +510,19 @@ class TestStorageManagerBatchedPutRefCount:
         for backend in storage_manager.storage_backends.values():
             assert backend.put_calls == [(keys, objs)]
         assert [obj.ref_count for obj in objs] == [0, 0, 0]
+
+
+class TestStorageManagerClear:
+    """StorageManager.clear() reaches LocalDiskBackend (issue #5835)."""
+
+    @pytest.mark.parametrize("locations", [["LocalDiskBackend"], None])
+    def test_clear_includes_local_disk(self, locations):
+        disk = MagicMock(spec=LocalDiskBackend)
+        disk.clear.return_value = 32
+        manager = object.__new__(StorageManager)
+        manager.storage_backends = OrderedDict(
+            [("LocalDiskBackend", cast(StorageBackendInterface, disk))]
+        )
+
+        assert manager.clear(locations) == 32
+        disk.clear.assert_called_once_with()

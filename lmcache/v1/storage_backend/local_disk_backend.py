@@ -301,6 +301,38 @@ class LocalDiskBackend(StorageBackendInterface):
 
         return True
 
+    def clear(self) -> int:
+        """
+        removes unpinned entries and their files, and
+        counts the number of tokens removed
+        """
+        num_cleared_tokens = 0
+        with self.disk_lock:
+            try:
+                for key, meta in list(self.dict.items()):
+                    if not meta.can_evict:
+                        continue
+                    try:
+                        os.remove(meta.path)
+                    except FileNotFoundError:
+                        logger.debug(
+                            "Disk cache file %s was already removed", meta.path
+                        )
+                    del self.dict[key]
+                    self.usage -= meta.size
+                    self.current_cache_size -= meta.size
+                    self.cache_policy.update_on_force_evict(key)
+                    num_cleared_tokens += meta.shape[meta.fmt.token_dim()]
+                    if self.batched_msg_sender is not None:
+                        self.batched_msg_sender.add_kv_op(
+                            op_type=OpType.EVICT,
+                            key=key.chunk_hash,
+                        )
+            finally:
+                self.stats_monitor.update_local_storage_usage(self.usage)
+
+        return num_cleared_tokens
+
     def insert_key(
         self,
         key: CacheEngineKey,
