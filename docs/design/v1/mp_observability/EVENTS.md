@@ -271,7 +271,7 @@ denormalized token-level counts so subscribers need not know `chunk_size`:
 - `prompt_tokens`, `engine_hit_tokens` and `request_hit_tokens` are the
   request-level view, reported on every path (early exits and declined
   lookups included) because they describe the request, not the lookup:
-  - `prompt_tokens = len(key.token_ids)`: the whole prompt, sub-chunk tail
+  - `prompt_tokens = num_packed_tokens(key.token_bytes)`: the whole prompt, sub-chunk tail
     included, so a request-level rate uses the same denominator a user
     would.
   - `engine_hit_tokens`: the engine's own prefix-cache hit, read from the

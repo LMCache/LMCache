@@ -95,6 +95,66 @@ class L1BackendType(str, enum.Enum):
     GDS = "gds"
 
 
+class MemorySegment(str, enum.Enum):
+    """The kind of memory or storage that holds an L1's or L2's bytes.
+
+    Note:
+        Only for prefetch target filtering and L1-L2 affinity. Any other
+        use needs agreement from @ApostaC first.
+    """
+
+    VRAM = "vram"
+    """GPU memory. Reserved for GDS/GDR L2 adapters; nothing reports it yet."""
+
+    DRAM = "dram"
+    """Host CPU memory."""
+
+    CXL = "cxl"
+    """CXL memory mapped through Device-DAX."""
+
+    GDS = "gds"
+    """NVMe storage accessed through GPUDirect Storage."""
+
+    STORAGE = "storage"
+    """Any other storage medium."""
+
+
+class MemoryResidency(str, enum.Enum):
+    """Where the bytes of an L1 or L2 reside relative to this host.
+
+    Note:
+        Only for prefetch target filtering and L1-L2 affinity. Any other
+        use needs agreement from @ApostaC first.
+    """
+
+    LOCAL = "local"
+    """The bytes reside on this host."""
+
+    REMOTE = "remote"
+    """The bytes reside elsewhere, or in a domain shared with other hosts."""
+
+    DUMMY = "dummy"
+    """No bytes reside anywhere: placeholder L1 memory objects. Reserved for
+    GDS/GDR L2 adapters; nothing reports it yet."""
+
+
+@dataclass(frozen=True)
+class MemoryTags:
+    """The intrinsic memory properties of an L1 manager or an L2 adapter.
+
+    Note:
+        Only for prefetch target filtering and L1-L2 affinity. Any other
+        use needs agreement from @ApostaC first. Tags are compared by exact
+        equality.
+    """
+
+    segment: MemorySegment
+    """The kind of memory or storage that holds the bytes."""
+
+    residency: MemoryResidency
+    """Where the bytes reside relative to this host."""
+
+
 @dataclass(frozen=True)
 class ObjectKey:
     """
@@ -484,17 +544,29 @@ class PrefetchTaskSpec:
             reader that will retrieve it. Ignored under ``NO_LOCK``.
         fetching_policy: See :data:`FetchingPolicy`.
         lock_mode: See :class:`PrefetchLockMode`.
+        allowed_l1_memory_tags: Memory tags of the L1 managers whose resident
+            objects count as hits. ``None`` allows every L1 manager; an empty
+            set allows none.
+        allowed_l2_memory_tags: Memory tags of the L2 adapters to look up and
+            load from. ``None`` allows every L2 adapter; an empty set allows
+            none.
 
     Note:
         Every key group holds the same number of keys (``group_size``). The
         groups may be listed in any order; the prefetch result is reported
         per group, in the same order as ``key_groups``.
+
+        Objects loaded from an L2 adapter land in that adapter's affinity L1
+        manager even when its tags are not in ``allowed_l1_memory_tags``. A
+        key already resident there cannot be loaded again and is a miss.
     """
 
     key_groups: list[GroupedObjectKeys]
     num_kv_readers: int = 1
     fetching_policy: FetchingPolicy = "prefix"
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
+    allowed_l1_memory_tags: frozenset[MemoryTags] | None = None
+    allowed_l2_memory_tags: frozenset[MemoryTags] | None = None
 
     def __post_init__(self) -> None:
         if not self.key_groups:
