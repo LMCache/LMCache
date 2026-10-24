@@ -14,8 +14,9 @@ import torch
 # First Party
 from lmcache.sdk.qringbuffer import (
     QRingBuffer,
-    attention_layer_names_from_vllm,
+    QRingBufferCapture,
     get_tensor,
+    q_capture_group_from_vllm,
 )
 
 BLOCK_SIZE = 8
@@ -154,41 +155,137 @@ def test_get_tensor_prefers_the_first_matching_name() -> None:
     assert get_tensor({"k": q}, ["q", "query"]) is None
 
 
-def _attention_spec() -> object:
-    """Registers a fake attention spec for testing
-    attention_layer_names_from_vllm()."""
-    kv_iface = pytest.importorskip("vllm.v1.kv_cache_interface")
-    return kv_iface.FullAttentionSpec(
-        block_size=16, num_kv_heads=8, head_size=64, dtype=torch.bfloat16
-    )
+class AttentionSpec:
+    """Stand-ins named like vLLM's specs: detection is by class name."""
+
+    def __init__(self, block_size: int = 16, **fields: int) -> None:
+        self.block_size = block_size
+        self.sliding_window = fields.get("sliding_window")
+        self.attention_chunk_size = fields.get("attention_chunk_size")
+
+
+class FullAttentionSpec(AttentionSpec):
+    pass
+
+
+class SlidingWindowSpec(AttentionSpec):
+    pass
+
+
+class MambaSpec:
+    block_size = 544
 
 
 def _caches(*names: str) -> dict[str, torch.Tensor]:
-    """Registers a fake kv_caches dict for testing
-    attention_layer_names_from_vllm()."""
+    """A fake kv_caches dict keyed by layer name."""
     return {name: torch.zeros(1) for name in names}
 
 
-@pytest.mark.parametrize("config", [None, SimpleNamespace(kv_cache_groups=[])])
-def test_layer_names_fall_back_to_kv_cache_order(config) -> None:
-    """Check that if the vLLM config has no attention spec, the layer names are
-    taken from the kv_caches dict in order."""
-    caches = _caches("layer.2", "layer.0", "layer.1")
-
-    assert attention_layer_names_from_vllm(config, caches) == list(caches)
-
-
-def test_only_attention_layers_selected_in_kv_cache_order() -> None:
-    """Check that only layers with an attention spec are selected,
-    returned in the order they appear in the kv_caches dict."""
-    config = SimpleNamespace(
+def _groups(*specs_and_layers: tuple[object, list[str]]) -> SimpleNamespace:
+    """A fake KVCacheConfig with one group per (spec, layer names)."""
+    return SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(layer_names=["layer.2"], kv_cache_spec=_attention_spec()),
-            SimpleNamespace(layer_names=["layer.1"], kv_cache_spec=object()),
-            SimpleNamespace(layer_names=["layer.0"], kv_cache_spec=_attention_spec()),
+            SimpleNamespace(kv_cache_spec=spec, layer_names=layers)
+            for spec, layers in specs_and_layers
         ]
     )
-    names = attention_layer_names_from_vllm(
-        config, _caches("layer.0", "layer.1", "layer.2")
+
+
+@pytest.mark.parametrize("config", [None, SimpleNamespace(kv_cache_groups=[])])
+def test_capture_falls_back_to_every_layer_as_group_zero(config) -> None:
+    """Without group metadata, every registered layer is captured, in
+    kv_caches order, with the engine's base block size."""
+    caches = _caches("layer.2", "layer.0", "layer.1")
+
+    group = q_capture_group_from_vllm(config, caches, default_tokens_per_block=16)
+
+    assert group == (0, tuple(caches), 16)
+
+
+def test_hybrid_captures_only_the_full_attention_group() -> None:
+    """Qwen3.5-style: linear-attention (Mamba/GDN) groups are skipped, and the
+    full-attention group's index and block size are reported."""
+    config = _groups(
+        (MambaSpec(), ["layer.0", "layer.1", "layer.2"]),
+        (FullAttentionSpec(block_size=544), ["layer.3"]),
+        (MambaSpec(), ["layer.4", "layer.5", "layer.6"]),
     )
-    assert names == ["layer.0", "layer.2"]
+    caches = _caches(*(f"layer.{i}" for i in range(7)))
+
+    group = q_capture_group_from_vllm(config, caches, default_tokens_per_block=16)
+
+    assert group == (1, ("layer.3",), 544)
+
+
+def test_windowed_attention_is_not_captured() -> None:
+    """Sliding-window and chunked-local layers (as their own spec, or as a
+    FullAttentionSpec with a window) are not full attention."""
+    config = _groups(
+        (SlidingWindowSpec(sliding_window=128), ["layer.0"]),
+        (FullAttentionSpec(sliding_window=128), ["layer.1"]),
+        (FullAttentionSpec(attention_chunk_size=64), ["layer.2"]),
+        (FullAttentionSpec(), ["layer.3"]),
+    )
+    group = q_capture_group_from_vllm(
+        config, _caches(*(f"layer.{i}" for i in range(4))), 16
+    )
+
+    assert group is not None and group[1] == ("layer.3",)
+
+
+def test_only_the_first_full_attention_group_is_captured() -> None:
+    """A step's scatter plan comes from one layer's slot_mapping, so layers of
+    another group (another block table) cannot share the ring."""
+    config = _groups(
+        (FullAttentionSpec(), ["layer.2"]),
+        (MambaSpec(), ["layer.1"]),
+        (FullAttentionSpec(), ["layer.0"]),
+    )
+    group = q_capture_group_from_vllm(
+        config, _caches("layer.0", "layer.1", "layer.2"), 16
+    )
+
+    assert group is not None
+    assert group[:2] == (0, ("layer.2",))
+
+
+def test_no_full_attention_group_disables_capture() -> None:
+    config = _groups((MambaSpec(), ["layer.0"]))
+
+    assert q_capture_group_from_vllm(config, _caches("layer.0"), 16) is None
+
+
+def test_decode_context_parallel_scales_attention_blocks() -> None:
+    """Attention blocks cover block_size * dcp tokens, as the scheduler's
+    capture windows count them."""
+    config = _groups((FullAttentionSpec(block_size=16), ["layer.0"]))
+
+    group = q_capture_group_from_vllm(config, _caches("layer.0"), 16, dcp_size=2)
+
+    assert group is not None and group[2] == 32
+
+
+def _capture(engine_group_idx: int) -> QRingBufferCapture:
+    capture = QRingBufferCapture(SimpleNamespace(), SimpleNamespace())  # type: ignore[arg-type]
+    capture.q_engine_group_idx = engine_group_idx
+    return capture
+
+
+def test_op_blocks_come_from_the_captured_group() -> None:
+    """A hybrid request carries one block list per group; the captured
+    group's list maps its layers' query rows."""
+    meta = SimpleNamespace(block_ids=[[1, 2], [7, 8], [3, 4]])
+
+    assert _capture(1)._op_gpu_blocks(meta) == [7, 8]  # type: ignore[arg-type]
+
+
+def test_op_blocks_accept_the_flattened_single_group_format() -> None:
+    meta = SimpleNamespace(block_ids=[5, 6])
+
+    assert _capture(0)._op_gpu_blocks(meta) == [5, 6]  # type: ignore[arg-type]
+
+
+def test_op_blocks_missing_the_captured_group_are_rejected() -> None:
+    meta = SimpleNamespace(block_ids=[[1, 2]])
+
+    assert _capture(1)._op_gpu_blocks(meta) is None  # type: ignore[arg-type]
