@@ -186,36 +186,11 @@ void Hf3fsConnector::init_write_iov(hf3fs_iov& iov) {
 /**
  * Create a new per-thread connection.
  *
- * Initializes:
- * - Read Ior and Iov
- * - Write Ior and Iov
- * - File descriptors (initialized to -1)
  *
  * @return WorkerHf3fsConn Initialized connection structure
  */
 WorkerHf3fsConn Hf3fsConnector::create_connection() {
-  WorkerHf3fsConn conn;
-
-  // Initialize read Ior
-  init_read_ior(conn.read_ior);
-  conn.read_ior_initialized = true;
-
-  // Initialize write Ior
-  init_write_ior(conn.write_ior);
-  conn.write_ior_initialized = true;
-
-  // Initialize read Iov
-  init_read_iov(conn.read_iov);
-  conn.read_iov_initialized = true;
-
-  // Initialize write Iov
-  init_write_iov(conn.write_iov);
-  conn.write_iov_initialized = true;
-
-  // File descriptors start uninitialized
-  conn.fd = -1;
-
-  return conn;
+  return WorkerHf3fsConn{};
 }
 
 /**
@@ -483,6 +458,15 @@ void Hf3fsConnector::do_single_get(WorkerHf3fsConn& conn,
                                    const std::string& key, void* buf,
                                    size_t len, size_t chunk_size) {
   (void)chunk_size;  // Unused for 3FS
+  if (!conn.read_ior_initialized) {
+    init_read_ior(conn.read_ior);
+    conn.read_ior_initialized = true;
+  }
+  if (!conn.read_iov_initialized) {
+    init_read_iov(conn.read_iov);
+    conn.read_iov_initialized = true;
+  }
+
   std::string file_path = key_to_path(key);
   open_file(conn, file_path, false);
   try {
@@ -514,6 +498,15 @@ void Hf3fsConnector::do_single_set(WorkerHf3fsConn& conn,
                                    const std::string& key, const void* buf,
                                    size_t len, size_t chunk_size) {
   (void)chunk_size;  // Unused for 3FS
+
+  if (!conn.write_ior_initialized) {
+    init_write_ior(conn.write_ior);
+    conn.write_ior_initialized = true;
+  }
+  if (!conn.write_iov_initialized) {
+    init_write_iov(conn.write_iov);
+    conn.write_iov_initialized = true;
+  }
 
   std::string file_path = key_to_path(key);
   open_file(conn, file_path, true);
