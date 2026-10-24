@@ -66,7 +66,7 @@ speculative-config = '{"method":"mtp","num_speculative_tokens":1}'
 [container]
 network = "host"           # services and AIPerf talk over 127.0.0.1
 ipc = "host"               # LMCache MP server <-> vLLM shared memory / CUDA IPC
-ulimit_memlock = -1        # L1 is 1500 GiB of pinned host memory
+ulimit_memlock = -1        # L1 pins up to 1500 GiB of host memory
 # Mounted at the same path inside the container.
 mounts = [
   { path = "<root>/vllm-cache" },  # VLLM_CACHE_ROOT
@@ -171,10 +171,10 @@ port = 16555
 http-port = 18080
 chunk-size = 1024
 separate-object-groups = true
+# Pinned lazily, in 64 MiB chunks after the first 20 GiB: one 1500 GiB
+# cudaHostRegister fails and leaves L1 pageable, and LMCache then fell minutes
+# behind until loads failed (builds 43 and 44).
 l1-size-gb = 1500
-# Pinned up front: pinning lazily while vLLM registers its KV caches can stall
-# the GPU mappings for minutes (docs/source/recipes/kimi_k3.rst).
-l1-init-size-gb = 1500
 eviction-policy = "LRU"
 disable-observability = true
 eviction-trigger-watermark = 0.95

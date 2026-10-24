@@ -594,8 +594,10 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
                 io1 = io_bytes(servers)
                 summary["disk_read_gb"] = (io1["rbytes"] - io0["rbytes"]) / 1e9
                 summary["disk_write_gb"] = (io1["wbytes"] - io0["wbytes"]) / 1e9
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                logger.exception("disk I/O not recorded: a server is gone")
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                # Expected once a server exited mid-run, which the run already
+                # names as invalid; a traceback here reads like the cause.
+                logger.warning("disk I/O not recorded, a server is gone: %s", e)
         # Not invalid: the measurement is done; the next run fails to start instead.
         summary["containers_left"] = docker.remove(names, stop_s)
         remove_shm_regions(out)
