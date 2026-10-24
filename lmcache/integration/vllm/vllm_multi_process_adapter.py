@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
+import functools
 import math
 import os
 import threading
@@ -60,7 +61,9 @@ from lmcache.v1.multiprocess.transfer_context import (
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.multiprocess.vmm_fd import fd_channel_path_for_server_url, send_fd
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
+from lmcache.v1.platform.devices.cuda.ipc_wrapper import set_vmm_fd_sender
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
 
 if TYPE_CHECKING:
@@ -328,6 +331,31 @@ def get_experimental(
             timeout,
         )
         return set()
+
+
+def _install_vmm_fd_sender(server_url: str) -> None:
+    """Route POSIX fds of VMM KV caches to the MP server behind ``server_url``.
+
+    Only called under ``lmcache.mp.use_vmm_api``: installs a VMM fd sender
+    so ``VmmCudaIPCWrapper.wrap`` delivers each exported fd over the
+    server's fd channel before REGISTER (see
+    ``lmcache.v1.multiprocess.vmm_fd``).
+
+    Args:
+        server_url: The worker's MP server URL.
+
+    Raises:
+        ValueError: If the URL's port is not a valid port number.
+    """
+    path = fd_channel_path_for_server_url(server_url)
+    if path is None:
+        logger.warning(
+            "MP server URL %s has no port to locate its VMM fd channel; "
+            "POSIX-fd VMM KV caches cannot be registered.",
+            server_url,
+        )
+        return
+    set_vmm_fd_sender(functools.partial(send_fd, path))
 
 
 def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
@@ -1329,6 +1357,11 @@ class LMCacheMPWorkerAdapter:
                 isolated_ipc=cfg[ExtraConfigDefault.isolated_ipc.name],
                 use_vmm_api=cfg[ExtraConfigDefault.use_vmm_api.name],
             )
+            if cfg[ExtraConfigDefault.use_vmm_api.name]:
+                # Whether a pool exports as a fabric handle or a POSIX fd is
+                # decided per allocation at wrap time, so the sender is always
+                # installed; it opens a connection only for a POSIX-fd wrapper.
+                _install_vmm_fd_sender(server_url)
         else:
             self._mp_transfer_mode = None
         self.req_client = RequestClientFactory.create(server_url, context=context)
