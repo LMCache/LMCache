@@ -46,7 +46,7 @@ permissions:
 jobs:
     build-rocm-torch210-artifacts:
         name: Build ROCm torch 2.10 wheel (gfx942, gfx950)
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         outputs:
             rocm_torch210_version: ${{ steps.prepare.outputs.version }}
         steps:
