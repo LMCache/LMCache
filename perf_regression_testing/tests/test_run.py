@@ -180,3 +180,9 @@ def test_gpu_holders_names_the_container_of_each_process(
         "GPU-0, 11, python3, 9000 MiB, container=prt-old-lmcache",
         "GPU-1, 22, python3, 10 MiB",
     ]
+
+
+def test_a_dead_vllm_is_named_as_exited(monkeypatch: pytest.MonkeyPatch) -> None:
+    states = {"prt-x-lmcache": "running", "prt-x-vllm": "exited"}
+    monkeypatch.setattr(run.docker, "status", states.get)
+    assert run.exited(["prt-x-lmcache", "prt-x-vllm"]) == ["prt-x-vllm"]

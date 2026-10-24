@@ -183,6 +183,21 @@ def host_resources(spec: RunSpec) -> dict[str, float]:
     }
 
 
+def exited(names: list[str]) -> list[str]:
+    """Return the containers in ``names`` that are no longer running.
+
+    vLLM is checked too: when it dies, AIPerf fails with rc 1, which alone does
+    not say which side broke.
+
+    Args:
+        names: Container names.
+
+    Returns:
+        The names whose docker status is not ``running``, in order.
+    """
+    return [n for n in names if docker.status(n) != "running"]
+
+
 def io_bytes(names: list[str]) -> dict[str, int]:
     """Sum the block I/O of running containers from their cgroup v2 ``io.stat``.
 
@@ -564,9 +579,8 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
         summary["aiperf_rc"] = rc
         if rc != 0:
             summary["invalid"].append(f"aiperf rc={rc}")
-        for s in spec.services:
-            if docker.status(f"prt-{run_id}-{s.name}") != "running":
-                summary["invalid"].append(f"{s.name} exited during the run")
+        for name in exited(servers):
+            summary["invalid"].append(f"{name} exited during the run")
     except Cancelled:
         stop_s = 0
         raise
