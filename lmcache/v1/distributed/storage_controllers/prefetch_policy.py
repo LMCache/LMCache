@@ -162,6 +162,31 @@ class PrefetchPolicy(ABC):
         """
         raise NotImplementedError
 
+    def needs_l2_lookup(
+        self,
+        key_groups: list[GroupedObjectKeys],
+        l1_locked_keys: MapState,
+        fetching_policy: FetchingPolicy,
+    ) -> bool:
+        """Decide whether an L2 lookup could change the plan of a request.
+
+        Called after the L1 lock pass and before any L2 lookup. ``False``
+        promises that :meth:`plan_load` returns the same plan, with no L2
+        cell, whatever the L2 adapters hold. The base implementation always
+        returns ``True``.
+
+        Args:
+            key_groups: The original object keys in the request, grouped by
+                different (object_group_id, kv_rank) tuples.
+            l1_locked_keys: L1 manager index -> per-group bitmaps indicating
+                which keys are read-locked in L1 managers.
+            fetching_policy: ``"prefix"`` or ``"full"``.
+
+        Returns:
+            Whether to look up L2.
+        """
+        return True
+
     def plan_l1_retention(
         self,
         keys: list[ObjectKey],
@@ -271,6 +296,40 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
         l1_plan, needed = _plan_tier(needed, l1_locked_keys, sorted(l1_manager_descs))
         l2_plan, _needed = _plan_tier(needed, l2_locked_keys, sorted(l2_adapter_descs))
         return PrefetchPlan(l1_planned_keys=l1_plan, l2_planned_keys=l2_plan)
+
+    def needs_l2_lookup(
+        self,
+        key_groups: list[GroupedObjectKeys],
+        l1_locked_keys: MapState,
+        fetching_policy: FetchingPolicy,
+    ) -> bool:
+        """Look up L2 unless L1 alone serves the whole request.
+
+        Under ``"prefix"``, L1 alone serves it when the cells L1 holds fold to
+        a hit over every chunk; under ``"full"``, when L1 holds every cell.
+
+        Args:
+            key_groups: The original object keys in the request, grouped by
+                different (object_group_id, kv_rank) tuples.
+            l1_locked_keys: L1 manager index -> per-group bitmaps indicating
+                which keys are read-locked in L1 managers.
+            fetching_policy: ``"prefix"`` or ``"full"``.
+
+        Returns:
+            ``False`` if L1 alone serves the request, ``True`` otherwise.
+
+        Note:
+            This relies on the L1-first :meth:`plan_load`; a subclass that
+            plans differently must override this method too.
+        """
+        l1_found = _merged_or_zeros(l1_locked_keys, key_groups)
+        num_chunks = len(key_groups[0].keys)
+        if fetching_policy == "full":
+            return l1_found.popcount() < len(key_groups) * num_chunks
+        hit_length, _retain = fold_unfold_grouped(
+            l1_found.to_list(), [group.sliding_window_size for group in key_groups]
+        )
+        return hit_length < num_chunks
 
     def plan_l1_retention(
         self,

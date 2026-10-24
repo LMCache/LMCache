@@ -38,6 +38,7 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l2_adapters.base import L2TaskId
 from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
     FaultInjectL2Adapter,
 )
@@ -61,6 +62,7 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     Bitmap2D,
     L1ManagerDescriptor,
     L2AdapterDescriptor,
+    MapState,
 )
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 from lmcache.v1.storage_backend.raw_block import RawBlockCore, encode_object_key
@@ -1274,6 +1276,80 @@ class TestSlidingWindowRows:
         assert row_bits(result, 1) == []
         assert_l2_unlocked(adapter)
         assert_absent(l1_manager, full_keys + sw_keys)
+        ctrl.stop()
+        adapter.close()
+
+
+# =============================================================================
+# L1 serves the whole request
+# =============================================================================
+
+
+class LookupCountingAdapter(MockL2Adapter):
+    """MockL2Adapter that counts the lookup tasks submitted to it."""
+
+    def __init__(self) -> None:
+        super().__init__(MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0))
+        self.lookup_count = 0
+
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
+    ) -> L2TaskId:
+        self.lookup_count += 1
+        return super().submit_lookup_and_lock_task(keys, group_layout_descs)
+
+
+class BaseLookupDecisionPolicy(DefaultPrefetchPolicy):
+    """Default planning with the base class's ``needs_l2_lookup``."""
+
+    def needs_l2_lookup(
+        self,
+        key_groups: list[GroupedObjectKeys],
+        l1_locked_keys: MapState,
+        fetching_policy: FetchingPolicy,
+    ) -> bool:
+        return PrefetchPolicy.needs_l2_lookup(
+            self, key_groups, l1_locked_keys, fetching_policy
+        )
+
+
+class TestL1ServesWholeRequest:
+    @pytest.mark.parametrize(
+        "num_in_l1, policy_cls, lookups, hits",
+        [
+            (4, DefaultPrefetchPolicy, 0, (4, 0)),
+            (3, DefaultPrefetchPolicy, 1, (3, 1)),
+            (4, BaseLookupDecisionPolicy, 1, (4, 0)),
+        ],
+        ids=["l1_serves_all", "missing_last_chunk", "base_decision"],
+    )
+    def test_l2_looked_up_only_when_it_can_help(
+        self,
+        l1_manager,
+        num_in_l1: int,
+        policy_cls: type[PrefetchPolicy],
+        lookups: int,
+        hits: tuple[int, int],
+    ):
+        """L2 holds every chunk; it is looked up only when it can add to the
+        plan, or when the policy keeps the base ``needs_l2_lookup``."""
+        adapter = LookupCountingAdapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(4)]
+        store_keys_in_l2(adapter, keys, layout)
+        write_keys_to_l1(l1_manager, keys[:num_in_l1], layout)
+        ctrl = make_controller(l1_manager, [adapter], policy=policy_cls())
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+        result = wait_for_result(ctrl, req_id)
+
+        assert row_bits(result) == [0, 1, 2, 3]
+        assert hit_counts(result) == hits
+        assert adapter.lookup_count == lookups
+        assert_l2_unlocked(adapter)
+        assert_read_locked(l1_manager, keys)
+        l1_manager.finish_read(keys)
         ctrl.stop()
         adapter.close()
 
