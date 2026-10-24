@@ -5,6 +5,7 @@
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import cast
 from unittest.mock import Mock
 import socket
 
@@ -373,6 +374,66 @@ def test_failed_split_batch_rolls_back_the_earlier_rpcs(clients):
             [ReadRequest(key(name), 1) for name in names] + [ReadRequest(key("x"), 0)]
         )
     assert excinfo.value.code == "INVALID_ARGUMENT"
+    assert client.usage().read_leases == before.read_leases
+
+
+@pytest.mark.parametrize(
+    ("invalid_payload_bytes", "expected_error"),
+    [
+        (-1, ValueError),
+        (1 << 64, ValueError),
+        ("invalid", TypeError),
+        (None, RequestRejectedError),
+    ],
+)
+def test_split_write_encoding_failure_rolls_back_earlier_grants(
+    clients: Callable[[str], MemoryOrchestratorClient],
+    invalid_payload_bytes: int | str | None,
+    expected_error: type[Exception],
+) -> None:
+    """A rejected write batch must not leave earlier split batches pending."""
+    client = clients(f"mp-write-encoding-{invalid_payload_bytes}")
+    names = [f"write-encoding-{invalid_payload_bytes}-{i}" for i in range(MAX_BATCH)]
+    before = client.usage()
+    with pytest.raises(expected_error):
+        client.reserve_write(
+            [write(name) for name in names]
+            + [write("invalid", cast(int, invalid_payload_bytes))]
+        )
+    after = client.usage()
+    assert after.writing == before.writing
+    assert after.consumed == before.consumed + MAX_BATCH
+    grants = client.reserve_write([write(name) for name in names])
+    assert [grant.status for grant in grants] == [WriteStatus.WRITE_GRANTED] * MAX_BATCH
+
+
+@pytest.mark.parametrize(
+    ("invalid_reader_count", "expected_error"),
+    [
+        (-1, ValueError),
+        (1 << 32, ValueError),
+        ("invalid", TypeError),
+        (None, RequestRejectedError),
+    ],
+)
+def test_split_read_encoding_failure_releases_earlier_leases(
+    clients: Callable[[str], MemoryOrchestratorClient],
+    invalid_reader_count: int | str | None,
+    expected_error: type[Exception],
+) -> None:
+    """A rejected read batch must release leases from earlier split batches."""
+    client = clients(f"mp-read-encoding-{invalid_reader_count}")
+    names = [f"read-encoding-{invalid_reader_count}-{i}" for i in range(MAX_BATCH)]
+    grants = client.reserve_write([write(name) for name in names])
+    for grant in grants:
+        assert grant.token is not None
+        assert client.finish_write([grant.token]) == [TokenStatus.OK]
+    before = client.usage()
+    with pytest.raises(expected_error):
+        client.reserve_read(
+            [ReadRequest(key(name), 1) for name in names]
+            + [ReadRequest(key("invalid"), cast(int, invalid_reader_count))]
+        )
     assert client.usage().read_leases == before.read_leases
 
 
