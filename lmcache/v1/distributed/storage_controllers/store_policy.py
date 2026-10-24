@@ -130,8 +130,12 @@ class DefaultStorePolicy(StorePolicy):
 
         Returns:
             Mapping from every adapter index to the full list of keys.
+            The same list object is shared across all adapters to avoid
+            one allocation per adapter; callers must treat the returned
+            lists as read-only.
         """
-        return {ad.index: list(keys) for ad in adapters}
+        key_list = list(keys)
+        return {ad.index: key_list for ad in adapters}
 
     def select_l1_deletions(
         self,
