@@ -15,6 +15,7 @@ MODEL="${MODEL:-Qwen/Qwen3-14B}"
 BUILD_ID="${BUILD_ID:-local_$$}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 LMCACHE_DIR="${LMCACHE_DIR:-$REPO_ROOT}"
+PYTHON_EXEC="${PYTHON_EXEC:-python3}"
 
 DOCUMENT_LENGTH="${DOCUMENT_LENGTH:-10000}"
 NUM_DOCUMENTS="${NUM_DOCUMENTS:-30}"
@@ -35,6 +36,320 @@ MAX_ROUND_TIME_SLOWDOWN_PCT="${MAX_ROUND_TIME_SLOWDOWN_PCT:--15}"
 LMCACHE_DIR="$(cd "$LMCACHE_DIR" && pwd)"
 mkdir -p "$RESULTS_DIR/long_doc_qa"
 LONG_DOC_QA_DIR="$(cd "$RESULTS_DIR/long_doc_qa" && pwd)"
+BASELINE_DIR="$LONG_DOC_QA_DIR/baseline"
+LMCACHE_OUT_DIR="$LONG_DOC_QA_DIR/lmcache"
+
+mkdir -p "$LONG_DOC_QA_DIR" "$BASELINE_DIR" "$LMCACHE_OUT_DIR"
+
+DIAGNOSTIC_SAVED=0
+CURRENT_VERDICT="UNKNOWN"
+
+save_diagnostic_summary() {
+    local verdict="$1"
+    CURRENT_VERDICT="$verdict"
+
+    local summary_file="$LONG_DOC_QA_DIR/diagnostic_summary.json"
+    local attempt="${BUILDKITE_RETRY_COUNT:-0}"
+    local attempt_dir="$LONG_DOC_QA_DIR/attempt_${attempt}"
+
+    mkdir -p "$LONG_DOC_QA_DIR" "$attempt_dir"
+
+    local checkout_sha
+    checkout_sha="$(git rev-parse HEAD 2>/dev/null || echo "unknown")"
+
+    local timestamp
+    timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")"
+
+    DIAG_VERDICT="$verdict" \
+    DIAG_CHECKOUT_SHA="$checkout_sha" \
+    DIAG_TIMESTAMP="$timestamp" \
+    DIAG_ATTEMPT="$attempt" \
+    DIAG_SUMMARY_FILE="$summary_file" \
+    LONG_DOC_QA_DIR="$LONG_DOC_QA_DIR" \
+    MODEL="$MODEL" \
+    DOCUMENT_LENGTH="$DOCUMENT_LENGTH" \
+    NUM_DOCUMENTS="$NUM_DOCUMENTS" \
+    OUTPUT_LEN="$OUTPUT_LEN" \
+    REPEAT_COUNT="$REPEAT_COUNT" \
+    REPEAT_MODE="$REPEAT_MODE" \
+    SHUFFLE_SEED="$SHUFFLE_SEED" \
+    MAX_INFLIGHT_REQUESTS="$MAX_INFLIGHT_REQUESTS" \
+    MAX_TTFT_SLOWDOWN_PCT="$MAX_TTFT_SLOWDOWN_PCT" \
+    MAX_ROUND_TIME_SLOWDOWN_PCT="$MAX_ROUND_TIME_SLOWDOWN_PCT" \
+    ENGINE_PORT="$ENGINE_PORT" \
+    ENGINE_BASELINE_PORT="$ENGINE_BASELINE_PORT" \
+    ENGINE_NAME="${ENGINE_NAME:-vllm}" \
+    BUILD_ID="$BUILD_ID" \
+    "${PYTHON_EXEC}" - <<'PY'
+import json
+import os
+import sys
+import math
+import csv
+
+def calc_stats(values):
+    if not values:
+        return None
+    n = len(values)
+    s_val = sorted(values)
+    mean = sum(s_val) / n
+    variance = sum((x - mean) ** 2 for x in s_val) / n if n > 1 else 0.0
+    std = math.sqrt(variance)
+
+    def percentile(p):
+        if n == 1:
+            return s_val[0]
+        idx = (n - 1) * (p / 100.0)
+        low = int(math.floor(idx))
+        high = int(math.ceil(idx))
+        weight = idx - low
+        return s_val[low] * (1.0 - weight) + s_val[high] * weight
+
+    return {
+        "count": n,
+        "mean": mean,
+        "std": std,
+        "min": s_val[0],
+        "p25": percentile(25),
+        "p50": percentile(50),
+        "p75": percentile(75),
+        "p90": percentile(90),
+        "p95": percentile(95),
+        "p99": percentile(99),
+        "max": s_val[-1],
+    }
+
+def parse_round_csv(csv_path):
+    if not os.path.isfile(csv_path):
+        return {
+            "present": False,
+            "total_samples": 0,
+            "successful_samples": 0,
+            "ttft_stats": None,
+        }
+    successful_ttfts = []
+    total = 0
+    with open(csv_path, "r", encoding="utf-8", errors="replace") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            total += 1
+            success = row.get("success", "").strip().lower() in ("true", "1")
+            ttft_str = row.get("ttft", "")
+            if success and ttft_str:
+                try:
+                    successful_ttfts.append(float(ttft_str))
+                except ValueError:
+                    pass
+    return {
+        "present": True,
+        "total_samples": total,
+        "successful_samples": len(successful_ttfts),
+        "ttft_stats": calc_stats(successful_ttfts),
+    }
+
+def load_json(path):
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = [l.strip() for l in f if l.strip()]
+            if not lines:
+                return None
+            return json.loads(lines[-1])
+    except Exception:
+        return None
+
+base_dir = os.environ.get("LONG_DOC_QA_DIR", "")
+baseline_dir = os.path.join(base_dir, "baseline")
+lmcache_dir = os.path.join(base_dir, "lmcache")
+
+baseline_json = load_json(os.path.join(baseline_dir, "baseline_result.json")) or load_json(os.path.join(base_dir, "baseline_result.json"))
+lmcache_json = load_json(os.path.join(lmcache_dir, "lmcache_result.json")) or load_json(os.path.join(base_dir, "lmcache_result.json"))
+
+baseline_phase = {
+    "phase": "baseline",
+    "port": os.environ.get("ENGINE_BASELINE_PORT", "9000"),
+    "warmup_round": parse_round_csv(os.path.join(baseline_dir, "warmup_round.csv")),
+    "query_round": parse_round_csv(os.path.join(baseline_dir, "query_round.csv")),
+    "aggregate": baseline_json,
+}
+
+lmcache_phase = {
+    "phase": "lmcache",
+    "port": os.environ.get("ENGINE_PORT", "8000"),
+    "warmup_round": parse_round_csv(os.path.join(lmcache_dir, "warmup_round.csv")),
+    "query_round": parse_round_csv(os.path.join(lmcache_dir, "query_round.csv")),
+    "aggregate": lmcache_json,
+}
+
+max_ttft_slowdown = float(os.environ.get("MAX_TTFT_SLOWDOWN_PCT", "-60"))
+max_round_time_slowdown = float(os.environ.get("MAX_ROUND_TIME_SLOWDOWN_PCT", "-15"))
+
+def compare_metric(name, l_val, b_val, threshold):
+    try:
+        l = float(l_val)
+        b = float(b_val)
+    except (ValueError, TypeError):
+        return {
+            "name": name,
+            "baseline": None,
+            "lmcache": None,
+            "diff_percent": None,
+            "threshold_percent": threshold,
+            "passed": False,
+        }
+    if b > 0:
+        diff_pct = ((l - b) / b) * 100.0
+    else:
+        diff_pct = 0.0
+    passed = diff_pct <= threshold
+    return {
+        "name": name,
+        "baseline": round(b, 4),
+        "lmcache": round(l, 4),
+        "diff_percent": round(diff_pct, 2),
+        "threshold_percent": threshold,
+        "passed": passed,
+    }
+
+b_agg = baseline_json or {}
+l_agg = lmcache_json or {}
+
+comparison = {
+    "query_ttft_per_prompt": compare_metric(
+        "query_ttft_per_prompt",
+        l_agg.get("query_ttft_per_prompt"),
+        b_agg.get("query_ttft_per_prompt"),
+        max_ttft_slowdown
+    ),
+    "query_round_time_per_prompt": compare_metric(
+        "query_round_time_per_prompt",
+        l_agg.get("query_round_time_per_prompt"),
+        b_agg.get("query_round_time_per_prompt"),
+        max_round_time_slowdown
+    ),
+    "warmup_round_time_per_prompt": compare_metric(
+        "warmup_round_time_per_prompt",
+        l_agg.get("warmup_round_time_per_prompt"),
+        b_agg.get("warmup_round_time_per_prompt"),
+        0.0
+    ),
+}
+
+summary = {
+    "verdict": os.environ.get("DIAG_VERDICT", "UNKNOWN"),
+    "build_id": os.environ.get("BUILD_ID", "local"),
+    "attempt": int(os.environ.get("DIAG_ATTEMPT", "0")),
+    "checkout_sha": os.environ.get("DIAG_CHECKOUT_SHA", "unknown"),
+    "timestamp": os.environ.get("DIAG_TIMESTAMP", ""),
+    "config": {
+        "engine": os.environ.get("ENGINE_NAME", "vllm"),
+        "model": os.environ.get("MODEL", ""),
+        "document_length": int(os.environ.get("DOCUMENT_LENGTH", "10000")),
+        "num_documents": int(os.environ.get("NUM_DOCUMENTS", "30")),
+        "output_len": int(os.environ.get("OUTPUT_LEN", "200")),
+        "repeat_count": int(os.environ.get("REPEAT_COUNT", "2")),
+        "repeat_mode": os.environ.get("REPEAT_MODE", "tile"),
+        "shuffle_seed": int(os.environ.get("SHUFFLE_SEED", "0")),
+        "max_inflight_requests": int(os.environ.get("MAX_INFLIGHT_REQUESTS", "5")),
+        "max_ttft_slowdown_pct": max_ttft_slowdown,
+        "max_round_time_slowdown_pct": max_round_time_slowdown,
+    },
+    "phases": {
+        "baseline": baseline_phase,
+        "lmcache": lmcache_phase,
+    },
+    "comparison": comparison,
+}
+
+out_file = os.environ.get("DIAG_SUMMARY_FILE", "")
+if out_file:
+    try:
+        with open(out_file, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+    except Exception as e:
+        print(f"Failed to write diagnostic summary to {out_file}: {e}", file=sys.stderr)
+
+# Print human-readable summary
+print()
+print("============================================")
+print("=== Long Doc QA Diagnostic Summary ===")
+print("============================================")
+print(f"Verdict: {summary['verdict']}")
+print(f"Attempt: {summary['attempt']}")
+print(f"Timestamp: {summary['timestamp']}")
+print(f"Checkout SHA: {summary['checkout_sha']}")
+print()
+print("Phase Highlights:")
+for phase_name in ["baseline", "lmcache"]:
+    ph = summary["phases"][phase_name]
+    agg = ph["aggregate"] or {}
+    print(f"  [{phase_name.upper()}] (port {ph['port']})")
+    print(f"    Aggregates: query_ttft={agg.get('query_ttft_per_prompt')}, query_round_time={agg.get('query_round_time_per_prompt')}, warmup_round_time={agg.get('warmup_round_time_per_prompt')}")
+    for rnd in ["warmup_round", "query_round"]:
+        r_info = ph[rnd]
+        if r_info["present"]:
+            st = r_info["ttft_stats"]
+            if st:
+                print(f"    {rnd} TTFT (N={st['count']}): mean={st['mean']:.4f}s, p50={st['p50']:.4f}s, p95={st['p95']:.4f}s, p99={st['p99']:.4f}s, min={st['min']:.4f}s, max={st['max']:.4f}s")
+            else:
+                print(f"    {rnd} TTFT: 0 valid samples (total={r_info['total_samples']})")
+        else:
+            print(f"    {rnd} CSV: not found")
+    print()
+
+print("Comparisons:")
+for c_key in ["query_ttft_per_prompt", "query_round_time_per_prompt"]:
+    c = summary["comparison"][c_key]
+    if c["baseline"] is not None and c["lmcache"] is not None:
+        diff_str = f"{abs(c['diff_percent']):.1f}% faster" if c['diff_percent'] < 0 else f"{c['diff_percent']:.1f}% slower"
+        thresh_str = f"need >= {abs(c['threshold_percent']):.0f}% faster" if c['threshold_percent'] < 0 else f"max {c['threshold_percent']}% slower"
+        status_str = "PASS" if c["passed"] else "FAIL"
+        print(f"  {c_key}: {c['lmcache']:.4f}s vs baseline {c['baseline']:.4f}s ({diff_str}, {thresh_str}) -- {status_str}")
+    else:
+        print(f"  {c_key}: missing data -- FAIL")
+print("============================================")
+print()
+PY
+
+    DIAGNOSTIC_SAVED=1
+
+    # Preserve attempt-specific copy without duplicating *.csv files under LONG_DOC_QA_DIR
+    # on standard single-attempt runs (where BUILDKITE_RETRY_COUNT is unset)
+    if [ -f "$summary_file" ]; then
+        cp "$summary_file" "$attempt_dir/diagnostic_summary.json" 2>/dev/null || true
+    fi
+    if [ -n "${BUILDKITE_RETRY_COUNT:-}" ]; then
+        if [ -d "$LONG_DOC_QA_DIR/baseline" ]; then
+            mkdir -p "$attempt_dir/baseline"
+            cp -r "$LONG_DOC_QA_DIR/baseline"/* "$attempt_dir/baseline/" 2>/dev/null || true
+        fi
+        if [ -d "$LONG_DOC_QA_DIR/lmcache" ]; then
+            mkdir -p "$attempt_dir/lmcache"
+            cp -r "$LONG_DOC_QA_DIR/lmcache"/* "$attempt_dir/lmcache/" 2>/dev/null || true
+        fi
+    fi
+
+    # Copy to log files in /tmp so cleanup.sh copies them and Buildkite collects them as *.log artifacts
+    local diag_log="/tmp/build_${BUILD_ID}_attempt_${attempt}_long_doc_qa_diagnostic.log"
+    cp "$summary_file" "$diag_log" 2>/dev/null || true
+    cp "$summary_file" "/tmp/build_${BUILD_ID}_long_doc_qa_diagnostic.log" 2>/dev/null || true
+
+    # Upload artifacts directly if buildkite-agent is available
+    if command -v buildkite-agent >/dev/null 2>&1; then
+        buildkite-agent artifact upload "$summary_file" 2>/dev/null || true
+        buildkite-agent artifact upload "$LONG_DOC_QA_DIR/baseline/*" 2>/dev/null || true
+        buildkite-agent artifact upload "$LONG_DOC_QA_DIR/lmcache/*" 2>/dev/null || true
+    fi
+}
+
+on_exit() {
+    local rc=$?
+    if [ "$rc" -ne 0 ] && [ "${CURRENT_VERDICT:-}" != "FAIL" ]; then
+        save_diagnostic_summary "FAIL"
+    fi
+}
+trap on_exit EXIT
 
 echo "=== Long Doc QA Test ==="
 echo "Model: $MODEL"
@@ -50,18 +365,18 @@ echo "  Max TTFT slowdown: ${MAX_TTFT_SLOWDOWN_PCT}% (LMCache must be >= $(echo 
 echo "  Max round time slowdown: ${MAX_ROUND_TIME_SLOWDOWN_PCT}% (LMCache must be >= $(echo "$MAX_ROUND_TIME_SLOWDOWN_PCT" | tr -d '-')% faster)"
 echo ""
 
-
 run_long_doc_qa() {
     local port="$1"
     local result_file="$2"
     local description="$3"
-
-    echo "=== Running long_doc_qa ($description) ==="
     local output_file="$LONG_DOC_QA_DIR/${description}_output.txt"
     local phase_dir="$LONG_DOC_QA_DIR/$description"
+    local phase_result_file="$phase_dir/${description}_result.json"
+
+    echo "=== Running long_doc_qa ($description) ==="
     mkdir -p "$phase_dir"
     local -a benchmark_command=(
-        python3 "$LMCACHE_DIR/benchmarks/long_doc_qa/long_doc_qa.py"
+        "${PYTHON_EXEC}" "$LMCACHE_DIR/benchmarks/long_doc_qa/long_doc_qa.py"
         --port "$port"
         --model "$MODEL"
         --document-length "$DOCUMENT_LENGTH"
@@ -80,11 +395,20 @@ run_long_doc_qa() {
         "${benchmark_command[@]}" 2>>"$output_file" | tee "$result_file"
     )
 
-    python3 "$COMMON_WORKLOAD_DIR/long_doc_qa_diagnostics.py" \
-        --phase "$description" \
-        --engine "$INFERENCE_ENGINE" \
-        --results-dir "$phase_dir" \
-        --command "${benchmark_command[@]}" | tee "$phase_dir/diagnostics.txt"
+    cp -f "$output_file" "$phase_dir/${description}_output.txt" 2>/dev/null || true
+    if [[ -n "$result_file" && "$result_file" != "$phase_result_file" ]]; then
+        cp -f "$result_file" "$phase_result_file" 2>/dev/null || true
+    fi
+
+    if [ -f "$COMMON_WORKLOAD_DIR/long_doc_qa_diagnostics.py" ]; then
+        "${PYTHON_EXEC}" "$COMMON_WORKLOAD_DIR/long_doc_qa_diagnostics.py" \
+            --phase "$description" \
+            --engine "${INFERENCE_ENGINE:-${ENGINE_NAME:-vllm}}" \
+            --results-dir "$phase_dir" \
+            --command "${benchmark_command[@]}" | tee "$phase_dir/diagnostics.txt"
+    else
+        cp -f "$output_file" "$phase_dir/diagnostics.txt" 2>/dev/null || true
+    fi
 
     echo "$description benchmark completed"
     echo ""
@@ -95,7 +419,7 @@ extract_json_field() {
     local field="$2"
     local json_line
     json_line=$(tail -n 1 "$json_file")
-    python3 -c "
+    "${PYTHON_EXEC}" -c "
 import json, sys
 try:
     data = json.loads('''$json_line''')
@@ -107,8 +431,15 @@ except json.JSONDecodeError:
 }
 
 compare_results() {
-    local lmcache_result="$LONG_DOC_QA_DIR/lmcache_result.json"
-    local baseline_result="$LONG_DOC_QA_DIR/baseline_result.json"
+    local lmcache_result="$LONG_DOC_QA_DIR/lmcache/lmcache_result.json"
+    local baseline_result="$LONG_DOC_QA_DIR/baseline/baseline_result.json"
+
+    if [ ! -f "$lmcache_result" ] && [ -f "$LONG_DOC_QA_DIR/lmcache_result.json" ]; then
+        lmcache_result="$LONG_DOC_QA_DIR/lmcache_result.json"
+    fi
+    if [ ! -f "$baseline_result" ] && [ -f "$LONG_DOC_QA_DIR/baseline_result.json" ]; then
+        baseline_result="$LONG_DOC_QA_DIR/baseline_result.json"
+    fi
 
     echo "=== Comparing benchmark results ==="
 
@@ -130,7 +461,7 @@ compare_results() {
     echo "=== Performance Summary ==="
     echo "============================================"
 
-    python3 << EOF
+    "${PYTHON_EXEC}" << EOF
 import sys
 
 def safe_float(val):
@@ -181,8 +512,15 @@ EOF
 }
 
 verify_thresholds() {
-    local lmcache_result="$LONG_DOC_QA_DIR/lmcache_result.json"
-    local baseline_result="$LONG_DOC_QA_DIR/baseline_result.json"
+    local lmcache_result="$LONG_DOC_QA_DIR/lmcache/lmcache_result.json"
+    local baseline_result="$LONG_DOC_QA_DIR/baseline/baseline_result.json"
+
+    if [ ! -f "$lmcache_result" ] && [ -f "$LONG_DOC_QA_DIR/lmcache_result.json" ]; then
+        lmcache_result="$LONG_DOC_QA_DIR/lmcache_result.json"
+    fi
+    if [ ! -f "$baseline_result" ] && [ -f "$LONG_DOC_QA_DIR/baseline_result.json" ]; then
+        baseline_result="$LONG_DOC_QA_DIR/baseline_result.json"
+    fi
 
     echo "=== Verifying LMCache performance vs baseline ==="
     echo "Max allowed TTFT slowdown: ${MAX_TTFT_SLOWDOWN_PCT}%"
@@ -194,7 +532,7 @@ verify_thresholds() {
     baseline_query_ttft=$(extract_json_field "$baseline_result" "query_ttft_per_prompt")
     baseline_query_round_time=$(extract_json_field "$baseline_result" "query_round_time_per_prompt")
 
-    python3 << EOF
+    "${PYTHON_EXEC}" << EOF
 import sys
 
 def safe_float(val):
@@ -239,6 +577,15 @@ else:
     print("\nAll thresholds passed")
     sys.exit(0)
 EOF
+    local verify_status=$?
+
+    if [ "$verify_status" -eq 0 ]; then
+        save_diagnostic_summary "PASS"
+        return 0
+    else
+        save_diagnostic_summary "FAIL"
+        return 1
+    fi
 }
 
 # Run benchmark against baseline
@@ -259,6 +606,7 @@ echo "=== Comparing Results ==="
 echo "============================================"
 if ! compare_results; then
     echo "Comparison failed"
+    save_diagnostic_summary "FAIL"
     exit 1
 fi
 

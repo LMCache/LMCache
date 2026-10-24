@@ -303,9 +303,19 @@ send_cache_hit_request() {
             \"kv_transfer_params\": {\"cached_token_stats\": true}
         }")
 
+    if [[ ! "$http_code" =~ ^[0-9]{3}$ ]]; then
+        echo "${label} request returned an invalid HTTP status: '${http_code}'"
+        return 1
+    fi
+
     if [ "$http_code" -ne 200 ]; then
         echo "${label} request returned HTTP $http_code"
         cat "$output_file" 2>/dev/null || true
+        return 1
+    fi
+
+    if [ ! -s "$output_file" ]; then
+        echo "${label} request produced no response file: $output_file"
         return 1
     fi
     echo "${label} request completed (HTTP 200)"
@@ -413,23 +423,45 @@ verify_cache_hit_replay() {
     echo "=== Cache Hit Replay Validation ==="
     echo "============================================"
 
+    mkdir -p "$CACHE_HIT_DIR"
+
     retrieve_before=$(count_retrieve_log_lines)
-    send_cache_hit_request "Cold" "$cold_file"
-    validate_cache_hit_response "Cold" "$cold_file"
+
+    if ! send_cache_hit_request "Cold" "$cold_file"; then
+        return 1
+    fi
+
+    if ! validate_cache_hit_response "Cold" "$cold_file"; then
+        return 1
+    fi
 
     # Allow the asynchronous store path to commit objects before replaying the
     # same prompt. Without this short delay the second request can race the
     # offload and spuriously observe a cold cache.
     sleep 2
 
-    send_cache_hit_request "Warm" "$warm_file"
-    validate_cache_hit_response "Warm" "$warm_file"
+    if ! send_cache_hit_request "Warm" "$warm_file"; then
+        return 1
+    fi
+
+    if ! validate_cache_hit_response "Warm" "$warm_file"; then
+        return 1
+    fi
+
     sleep 2
 
     retrieve_after=$(count_retrieve_log_lines)
-    validate_cache_hit_progression "$cold_file" "$warm_file"
-    validate_retrieve_log_growth "$retrieve_before" "$retrieve_after"
+
+    if ! validate_cache_hit_progression "$cold_file" "$warm_file"; then
+        return 1
+    fi
+
+    if ! validate_retrieve_log_growth "$retrieve_before" "$retrieve_after"; then
+        return 1
+    fi
+
     echo ""
+    return 0
 }
 
 echo "Using random seed: $RANDOM_SEED"
