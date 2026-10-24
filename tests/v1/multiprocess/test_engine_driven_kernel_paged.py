@@ -157,9 +157,12 @@ def test_store_skips_all_null_chunks_by_engine_block(monkeypatch) -> None:
     too: null chunks are counted in engine block IDs, not in pages."""
     ctx, ictx = _inline_ctx(monkeypatch)
     committed: list[Any] = []
-    monkeypatch.setattr(
-        ictx, "commit_store", lambda _k, _i, chunks: committed.append(chunks) or True
-    )
+
+    def _commit(_k: Any, _i: int, chunks: Any) -> bool:
+        committed.append(chunks)
+        return True
+
+    monkeypatch.setattr(ictx, "commit_store", _commit)
     gathered = _capture_gather(monkeypatch)
 
     # Chunk 0 is [0, 0] (all null) in both groups; chunk 1 is [3, 1].
@@ -178,11 +181,12 @@ def test_window_group_round_trip_restores_window_chunks_last_page(
     one-page window group only the last page of its one-chunk window."""
     ctx, ictx = _inline_ctx(monkeypatch)
     stored: dict[str, Any] = {}
-    monkeypatch.setattr(
-        ictx,
-        "commit_store",
-        lambda _k, _i, chunks: stored.update(chunks=chunks) or True,
-    )
+
+    def _commit(_k: Any, _i: int, chunks: Any) -> bool:
+        stored["chunks"] = chunks
+        return True
+
+    monkeypatch.setattr(ictx, "commit_store", _commit)
     requested: list[list[int]] = []
 
     def _prepare_retrieve(_k, _i, expected):
