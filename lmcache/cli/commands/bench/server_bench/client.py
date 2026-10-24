@@ -6,13 +6,18 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from contextlib import nullcontext
 from dataclasses import dataclass
+from threading import Event
 from typing import TYPE_CHECKING, Any, Literal
 import hashlib
 import time
 
 # First Party
 from lmcache import torch_dev
+from lmcache.cli.commands.bench.server_bench import helpers
 from lmcache.cli.commands.bench.server_bench.config import (
     BenchConfig,
     WorkerSpec,
@@ -27,6 +32,7 @@ if _IMPORT_ERROR is None:
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.multiprocess.transfer_context import TransferContext
+    from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
     from lmcache.v1.multiprocess.transport.base import RequestClient
 
 
@@ -171,6 +177,8 @@ class ServerBenchClient:
         self._zmq_context: Any | None = None
         self._req_client: "RequestClient | None" = None
         self._workers: list[WorkerContext] = []
+        self._transfer_executor: ThreadPoolExecutor | None = None
+        self._transfer_uncertain = False
         self._started = False
 
         self._chunk_size = 0
@@ -192,6 +200,17 @@ class ServerBenchClient:
 
         try:
             self._initialize()
+            self._transfer_executor = ThreadPoolExecutor(max_workers=len(self._workers))
+            # Start all transfer threads outside measured operations.
+            ready = Event()
+            try:
+                warmup = [
+                    self._transfer_executor.submit(ready.wait) for _ in self._workers
+                ]
+            finally:
+                ready.set()
+            for future in warmup:
+                future.result(timeout=self._config.transfer_timeout_s)
         except BaseException:
             self.close()
             raise
@@ -313,20 +332,7 @@ class ServerBenchClient:
         start_token: int,
         token_count: int,
     ) -> TransferResult | None:
-        """STORE a token range on every write-enabled Worker.
-
-        Args:
-            request: Request to store.
-            start_token: Start offset in the request.
-            token_count: Number of tokens.
-
-        Returns:
-            Worker results, or ``None`` for an empty range.
-
-        Raises:
-            RuntimeError: If the client is not started.
-            ValueError: If a non-empty range is invalid or not chunk-aligned.
-        """
+        """STORE a token range concurrently on write-enabled workers."""
         return self._transfer("store", request, start_token, token_count)
 
     def retrieve(
@@ -335,20 +341,7 @@ class ServerBenchClient:
         start_token: int,
         token_count: int,
     ) -> TransferResult | None:
-        """RETRIEVE a token range on every read-enabled Worker.
-
-        Args:
-            request: Request to retrieve.
-            start_token: Start offset in the request.
-            token_count: Number of tokens.
-
-        Returns:
-            Worker results, or ``None`` for an empty range.
-
-        Raises:
-            RuntimeError: If the client is not started.
-            ValueError: If a non-empty range is invalid or not chunk-aligned.
-        """
+        """RETRIEVE a token range concurrently on read-enabled workers."""
         return self._transfer("retrieve", request, start_token, token_count)
 
     def zero_destination(
@@ -489,14 +482,16 @@ class ServerBenchClient:
         _send_end_session(req_client, request.request_id)
 
     def close(self) -> None:
-        """Close transfer contexts before releasing their worker-owned buffers.
-
-        Cleanup is idempotent, including after partial startup.
-        """
+        """Wait for transfer threads, then synchronously release resources."""
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
             _DEFAULT_RPC_TIMEOUT_S,
         )
+
+        self._started = False
+        if self._transfer_executor is not None:
+            self._transfer_executor.shutdown(wait=True, cancel_futures=True)
+            self._transfer_executor = None
 
         if self._req_client is not None:
             for worker in self._workers:
@@ -547,7 +542,7 @@ class ServerBenchClient:
                 self._zmq_context = None
 
         self._workers.clear()
-        self._started = False
+        self._transfer_uncertain = False
 
     def _transfer(
         self,
@@ -562,67 +557,58 @@ class ServerBenchClient:
             return None
         self._validate_token_range(request, start_token, token_count)
 
-        # First Party
-        from lmcache.cli.commands.bench.server_bench.helpers import (
-            _TIMEOUT,
-            _make_key,
-            _wait_for_result,
-        )
-
-        attempted: list[int] = []
+        workers = [
+            worker
+            for worker in self._workers
+            if (
+                worker.spec.store_enabled
+                if operation == "store"
+                else worker.spec.retrieve_enabled
+            )
+        ]
+        attempted = [worker.spec.rank for worker in workers]
         successful: list[int] = []
         failed: list[int] = []
-        is_store = operation == "store"
-        success_status = "stored" if is_store else "retrieved"
+        success_status = "stored" if operation == "store" else "retrieved"
         status = success_status
+        timed_out = False
         started_at = time.monotonic()
-        block_offset = request.block_offset + (start_token // self._block_size)
-        num_blocks = token_count // self._block_size
-        block_ids = list(range(block_offset, block_offset + num_blocks))
-        for worker in self._workers:
-            enabled = (
-                worker.spec.store_enabled if is_store else worker.spec.retrieve_enabled
-            )
-            if not enabled:
-                continue
-            attempted.append(worker.spec.rank)
-            key = _make_key(
-                request.token_ids,
-                request.request_id,
-                start=start_token,
-                end=start_token + token_count,
-                worker_id=worker.spec.kv_worker_id,
-                world_size=self._kv_world_size,
-            )
-            block_ids_per_group = [
-                block_ids.copy() for _ in range(self._num_engine_group_infos)
-            ]
+        assert self._transfer_executor is not None
+        deadline = started_at + self._config.transfer_timeout_s
+        pending: list[Future[str]] = []
+        for worker in workers:
+            # Record on the caller's producer stream before dispatching.
             event = worker.transfer_context.create_recorded_event()
-            submit = (
-                worker.transfer_context.submit_store
-                if is_store
-                else worker.transfer_context.submit_retrieve
+            self._transfer_uncertain = True
+            pending.append(
+                self._transfer_executor.submit(
+                    self._transfer_worker,
+                    worker,
+                    operation,
+                    request,
+                    start_token,
+                    token_count,
+                    event,
+                    deadline,
+                )
             )
-            future = submit(
-                request.request_id,
-                key,
-                worker.buffers.kv_caches,
-                block_ids_per_group,
-                event,
-                self._blocks_in_chunk,
-            )
-            reply = _wait_for_result(
-                future, retain_refs=(event,) if event is not None else ()
-            )
-            if reply is _TIMEOUT:
+        for worker, future in zip(workers, pending, strict=True):
+            try:
+                worker_status = future.result(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
+            except (FuturesTimeoutError, TimeoutError):
+                future.cancel()
                 worker_status = "timeout"
-            else:
-                worker_status = success_status if reply else f"{operation}_failed"
             if worker_status == success_status:
                 successful.append(worker.spec.rank)
             else:
                 failed.append(worker.spec.rank)
                 status = worker_status
+            timed_out |= worker_status == "timeout"
+        self._transfer_uncertain = timed_out
+        if timed_out:
+            status = "timeout"
 
         latency_ms = (time.monotonic() - started_at) * 1000
         result = TransferResult(
@@ -643,10 +629,60 @@ class ServerBenchClient:
                 token_count,
                 latency_ms,
                 len(attempted),
-                "writers" if is_store else "workers",
+                "writers" if operation == "store" else "workers",
             )
         )
         return result
+
+    def _transfer_worker(
+        self,
+        worker: WorkerContext,
+        operation: Literal["store", "retrieve"],
+        request: RequestContext,
+        start_token: int,
+        token_count: int,
+        event: IPCEvent | None,
+        deadline: float,
+    ) -> str:
+        """Submit and wait on one worker; its submit may itself block."""
+        key = helpers._make_key(
+            request.token_ids,
+            request.request_id,
+            start=start_token,
+            end=start_token + token_count,
+            worker_id=worker.spec.kv_worker_id,
+            world_size=self._kv_world_size,
+        )
+        start = request.block_offset + start_token // self._block_size
+        blocks = list(range(start, start + token_count // self._block_size))
+        block_ids = [blocks] * self._num_engine_group_infos
+        submit = (
+            worker.transfer_context.submit_store
+            if operation == "store"
+            else worker.transfer_context.submit_retrieve
+        )
+        device = next(iter(worker.buffers.kv_caches.values())).device
+        with torch_dev.device(device) if device.type != "cpu" else nullcontext():
+            future = submit(
+                request.request_id,
+                key,
+                worker.buffers.kv_caches,
+                block_ids,
+                event,
+                self._blocks_in_chunk,
+            )
+            reply = helpers._wait_for_result(
+                future,
+                timeout_s=max(0.0, deadline - time.monotonic()),
+                retain_refs=(event,) if event is not None else (),
+            )
+        if reply is helpers._TIMEOUT:
+            return "timeout"
+        return (
+            ("stored" if operation == "store" else "retrieved")
+            if reply
+            else f"{operation}_failed"
+        )
 
     def _initialize(self) -> None:
         """Allocate resources and register Workers."""
@@ -867,6 +903,10 @@ class ServerBenchClient:
         """Return the live multiprocess client or raise before startup."""
         if not self._started or self._req_client is None:
             raise RuntimeError("ServerBenchClient must be started before use")
+        if self._transfer_uncertain:
+            raise RuntimeError(
+                "transfer completion is uncertain; close the client before reuse"
+            )
         return self._req_client
 
     def _validate_token_range(

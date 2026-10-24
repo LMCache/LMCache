@@ -1065,6 +1065,11 @@ mismatch between producer and consumer surfaces as a loud
 ``CHECKSUM MISMATCH`` log line.
 
 
+STORE/RETRIEVE runs enabled workers concurrently; latency covers dispatch through
+completion of all workers. ``--transfer-timeout`` bounds each call's wait. After a
+timeout or transfer exception, close the client before reuse. Shutdown waits for
+running transfers and may block if a native call hangs.
+
 Quick start
 ~~~~~~~~~~~
 
@@ -1122,6 +1127,9 @@ Options
    * - ``--num-tokens N``
      - ``512``
      - Tokens per synthetic request.
+   * - ``--transfer-timeout SECS``
+     - ``10``
+     - Positive, finite wait budget for each STORE or RETRIEVE call.
    * - ``--num-blocks N``
      - ``1024``
      - Number of paged blocks allocated on the GPU.

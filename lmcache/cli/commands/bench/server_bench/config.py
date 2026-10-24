@@ -7,6 +7,7 @@ from __future__ import annotations
 # Standard
 from dataclasses import dataclass
 import argparse
+import math
 
 # First Party
 from lmcache.cli.commands.bench.server_bench.cases.base import BenchCase
@@ -45,6 +46,7 @@ class BenchConfig:
     num_blocks: int
     block_size: int
     concurrency: int = 1
+    transfer_timeout_s: float = 10.0
 
     def __post_init__(self) -> None:
         if self.mode not in ("cpu", "gpu"):
@@ -59,6 +61,9 @@ class BenchConfig:
             raise ValueError(f"tp_size must be positive, got {self.tp_size}")
         if self.concurrency < 1:
             raise ValueError(f"concurrency must be positive, got {self.concurrency}")
+
+        if not math.isfinite(self.transfer_timeout_s) or self.transfer_timeout_s <= 0:
+            raise ValueError("transfer_timeout_s must be finite and positive")
 
     @property
     def is_gpu(self) -> bool:
@@ -140,4 +145,5 @@ def parse_args_to_config(args: argparse.Namespace) -> BenchConfig:
         num_blocks=args.num_blocks,
         block_size=args.block_size,
         concurrency=int(getattr(args, "concurrency", 1)),
+        transfer_timeout_s=float(getattr(args, "transfer_timeout", 10.0)),
     )
