@@ -62,3 +62,21 @@ class LayoutHints(TypedDict, total=False):
     tokens_per_block: int
     kv_list_layout: Literal["k_v", "unified"]
     head_dim: int
+
+
+# uint8 rows vLLM pages as [BS x values][BS x scales] (NL_X_NB_BSV_BSS): fp8 / MXFP4
+# indexer K and the DeepSeek-V4 SM90 main KV. The per-token scale is one transfer word.
+BLOCKED_SCALE_ROWS: frozenset[int] = frozenset({132, 68, 584})
+
+
+def transfer_word_bytes(row_bytes: int) -> int:
+    """The transfer word the native kernels pick for a ``row_bytes`` row."""
+    for word in (8, 4, 2):
+        if row_bytes % word == 0:
+            return word
+    return 1
+
+
+def is_blocked_scale_row(row_bytes: int) -> bool:
+    """Whether ``row_bytes``-wide uint8 rows are a blocked-scale record."""
+    return int(row_bytes) in BLOCKED_SCALE_ROWS
