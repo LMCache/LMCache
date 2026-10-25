@@ -25,6 +25,14 @@ Both out-of-tree models publish a wheel through the
 same ``DeviceSpec`` and ``DeviceOps`` interfaces and use the same runtime
 detection and dispatch paths.
 
+.. important::
+
+   Every new device integration must add user-facing documentation under
+   ``docs/source/platform/devices/<backend>/`` and link it from
+   ``docs/source/platform/index.rst``, regardless of the ownership model. For
+   an out-of-tree plugin, submit this documentation change to the LMCache main
+   repository even though the plugin implementation lives elsewhere.
+
 **For basic users:** read :ref:`Part 1 <part-1-basic>` only — a ``DeviceSpec``
 and a ``DeviceOps`` subclass are all you need to use the built-in torch
 baseline ops.
@@ -375,6 +383,9 @@ the backend whose ``backend_name`` matches that value.
 
 Debugging checklist:
 
+- [ ] Device documentation exists under
+  ``docs/source/platform/devices/foo/`` and is linked from
+  ``docs/source/platform/index.rst``.
 - [ ] ``torch.foo.is_available()`` returns ``True``.
 - [ ] For an out-of-tree plugin,
   ``importlib.metadata.entry_points(group="lmcache.device_plugins")`` includes
