@@ -48,6 +48,7 @@ from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import validate_and_set_config_value
+from lmcache.v1.tier_pipeline import admission_tokens, offer_waiting_lookups
 
 if TYPE_CHECKING:
     # Third Party
@@ -492,6 +493,9 @@ class LMCacheConnectorV1Impl:
             VLLM_VERSION,
             getattr(self.lmcache_engine, "metadata", None),
         )
+        if role == KVConnectorRole.SCHEDULER and self._split_metadata_lookup_enabled():
+            self._tier_preempt_seen: dict[str, int] = {}
+            self._install_tier_schedule_bridge()
 
     def _apply_extra_config(
         self, config: LMCacheEngineConfig, vllm_config: "VllmConfig"
@@ -1354,6 +1358,82 @@ class LMCacheConnectorV1Impl:
         logger.info("Starting LMCacheConnector shutdown...")
         self._manager.stop_services()
 
+    def _split_metadata_lookup_enabled(self) -> bool:
+        cfg = getattr(self, "config", None)
+        if cfg is None:
+            return False
+        if not bool(getattr(cfg, "split_metadata_lookup", False)):
+            return False
+        if not bool(getattr(cfg, "enable_async_loading", False)):
+            return False
+        client = self.lookup_client
+        return client is not None and callable(getattr(client, "lookup_phase", None))
+
+    def _install_tier_schedule_bridge(self) -> None:
+        """Wrap Scheduler.schedule only while the split flag is on."""
+        from vllm.v1.core.sched.scheduler import Scheduler
+
+        impls = getattr(Scheduler, "_lmcache_tier_impls", None)
+        if impls is None:
+            impls = []
+            Scheduler._lmcache_tier_impls = impls
+        if self not in impls:
+            impls.append(self)
+        if getattr(Scheduler.schedule, "_lmcache_tier_bridge", False):
+            return
+        original = Scheduler.schedule
+
+        def schedule(scheduler, *args, **kwargs):
+            for impl in list(getattr(Scheduler, "_lmcache_tier_impls", ())):
+                bridge = getattr(impl, "on_vllm_schedule", None)
+                if callable(bridge):
+                    bridge(scheduler)
+            return original(scheduler, *args, **kwargs)
+
+        schedule._lmcache_tier_bridge = True  # type: ignore[attr-defined]
+        Scheduler.schedule = schedule  # type: ignore[method-assign]
+
+    def on_vllm_schedule(self, scheduler) -> None:
+        """Start metadata lookup for waiting requests. Do not touch vLLM queues."""
+        if not self._split_metadata_lookup_enabled():
+            return
+        offer_waiting_lookups(
+            scheduler,
+            self.lookup_client,
+            self._prepare_lookup_tokens,
+            self._waiting_lookup_window(scheduler),
+            self._tier_preempt_seen,
+        )
+
+    def _waiting_lookup_window(self, scheduler) -> int:
+        for owner in (scheduler, getattr(self, "_vllm_config", None)):
+            cfg = (
+                getattr(owner, "scheduler_config", None) if owner is not None else None
+            )
+            raw = getattr(cfg, "max_num_seqs", None) if cfg is not None else None
+            if raw is None:
+                continue
+            try:
+                return max(1, int(raw))
+            except (TypeError, ValueError):
+                continue
+        return 1
+
+    def _prepare_lookup_tokens(self, request):
+        token_ids = request.all_token_ids
+        mm_hashes, mm_positions = extract_mm_features(request)
+        if mm_hashes and mm_positions:
+            token_ids = torch.tensor(request.prompt_token_ids)
+            apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
+            token_ids = token_ids.tolist()
+        request_configs = extract_request_configs(request.sampling_params)
+        if self.skip_last_n_tokens > 0:
+            token_ids = token_ids[: -self.skip_last_n_tokens]
+        self._requests_priority[request.request_id] = int(
+            getattr(request, "priority", 0) or 0
+        )
+        return token_ids, request_configs
+
     ###################
     # Scheduler side APIs
     ####################
@@ -1400,7 +1480,17 @@ class LMCacheConnectorV1Impl:
         if self.lookup_client is None:
             return 0
 
-        if (
+        if self._split_metadata_lookup_enabled():
+            # Lookup was offered when the request entered the waiting queue.
+            # This call only reads that result. Pending is not a miss.
+            admitted = admission_tokens(
+                self.lookup_client.lookup_phase(req_id),
+                self.lookup_client.preloaded_tokens(req_id),
+            )
+            if admitted is None:
+                return None
+            num_external_hit_tokens = admitted
+        elif (
             num_external_hit_tokens := self.lookup_client.lookup_cache(lookup_id=req_id)
         ) != -1:
             # -1 means no result cached

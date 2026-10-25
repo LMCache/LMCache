@@ -17,6 +17,7 @@ from lmcache.inprocess.v1.lookup_client.async_lookup_message import (
     LookupRequestMsg,
     LookupResponseMsg,
 )
+from lmcache.v1.tier_pipeline import TierAdmission
 from lmcache.inprocess.v1.rpc_utils import (
     get_zmq_context,
     get_zmq_rpc_path_lmcache,
@@ -156,6 +157,14 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 config.extra_config.get("lookup_backoff_time", self.lookup_backoff_time)
             )
 
+        # None keeps the legacy one-response path. Set only when the split is on.
+        self.tier_admission: Optional[TierAdmission] = None
+        self._tier_parts: dict[tuple[str, str], list[int]] = {}
+        if bool(getattr(config, "split_metadata_lookup", False)) and bool(
+            getattr(config, "enable_async_loading", False)
+        ):
+            self.tier_admission = TierAdmission()
+
     def lookup_cache(self, lookup_id: str) -> Optional[int]:
         """
         -1 means not found;
@@ -192,13 +201,22 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
 
             return req_status
 
-    # TODO(Jiayi): Consider batching here
-    def lookup(
+    def submit_lookup(
         self,
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
-    ) -> Optional[int]:
+    ) -> bool:
+        """Send a lookup. Returns False when this id is already being tracked.
+
+        Unlike ``lookup``, this does not sleep. The scheduler calls it while
+        walking the waiting queue.
+        """
+        if self.tier_admission is not None and not self.tier_admission.offer(
+            lookup_id
+        ):
+            return False
+
         hashes: list[int] = []
         offsets = []
         for start, end, hash_val in self.token_database.process_tokens(
@@ -207,21 +225,39 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             hashes.append(hash_val)  # type: ignore[arg-type]
             offsets.append(end - start)
 
-        # Create structured message
         msg = LookupRequestMsg(
             lookup_id=lookup_id,
             hashes=hashes,
             offsets=offsets,
             request_configs=request_configs,
         )
-
-        # Serialize message using msgspec
         msg_buf = msgspec.msgpack.encode(msg)
-
         for i in range(self.world_size):
             self.push_sockets[i].send(msg_buf, copy=False)
+        return True
+
+    # TODO(Jiayi): Consider batching here
+    def lookup(
+        self,
+        token_ids: Union[torch.Tensor, list[int]],
+        lookup_id: str,
+        request_configs: Optional[dict] = None,
+    ) -> Optional[int]:
+        self.submit_lookup(
+            token_ids, lookup_id=lookup_id, request_configs=request_configs
+        )
         time.sleep(self.lookup_backoff_time)
         return None
+
+    def lookup_phase(self, lookup_id: str) -> str:
+        if self.tier_admission is None:
+            return "absent"
+        return self.tier_admission.phase(lookup_id)
+
+    def preloaded_tokens(self, lookup_id: str) -> int:
+        if self.tier_admission is None:
+            return 0
+        return self.tier_admission.preloaded_tokens(lookup_id)
 
     def process_responses_from_workers(self):
         while self.running:
@@ -231,6 +267,13 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 msg = msgspec.msgpack.decode(msg_buf, type=LookupResponseMsg)
                 lookup_id = msg.lookup_id
                 res = msg.num_hit_tokens
+
+                # A typed ACK is not the legacy "tokens are already in host"
+                # response. Empty kind keeps the path below unchanged.
+                if msg.kind:
+                    if self.tier_admission is not None:
+                        self._collect_tier_response(msg)
+                    continue
 
                 with self.lock:
                     if lookup_id not in self.res_for_each_worker:
@@ -251,13 +294,43 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             except Exception as e:
                 logger.error("Error processing response from worker: %s", e)
 
+    def _collect_tier_response(self, msg: LookupResponseMsg) -> None:
+        """Fold one worker ACK into the scheduler phase. Min across TP ranks."""
+        if self.tier_admission is None:
+            return
+        key = (msg.lookup_id, msg.kind)
+        with self.lock:
+            bucket = self._tier_parts.setdefault(key, [])
+            bucket.append(int(msg.num_hit_tokens))
+            if len(bucket) < self.world_size:
+                return
+            tokens = min(self._tier_parts.pop(key))
+        self.tier_admission.note(msg.lookup_id, msg.kind, tokens)
+
     def clear_lookup_status(self, lookup_id: str) -> None:
         with self.lock:
             self.reqs_status.pop(lookup_id, None)
             self.first_lookup_time.pop(lookup_id, None)
+            self._tier_parts = {
+                key: value
+                for key, value in self._tier_parts.items()
+                if key[0] != lookup_id
+            }
+        if self.tier_admission is not None:
+            self.tier_admission.clear(lookup_id)
 
     def cancel_lookup(self, lookup_id: str) -> None:
-        """Mark lookup as aborted. Cleanup will happen after task finishes."""
+        """Mark lookup as aborted. Cleanup will happen after task finishes.
+
+        The split path also tells the worker immediately, so a GET that has
+        not started is dropped instead of waiting for HBM admission.
+        """
+        if self.tier_admission is not None:
+            # Miss releases the in-flight slot. The worker drops a GET that
+            # has not started; a GET already running frees its buffers.
+            self.tier_admission.note(lookup_id, "lookup", 0)
+            self._send_cleanup_message(lookup_id)
+            return
         self.aborted_lookups.add(lookup_id)
 
     def _cleanup_finished_aborted_lookups(self) -> None:
@@ -387,11 +460,14 @@ class LMCacheAsyncLookupServer:
             except Exception as e:
                 logger.error("Error processing request from scheduler: %s", e)
 
-    def send_response_to_scheduler(self, lookup_id: str, num_hit_tokens: int):
-        # Create structured response message
+    def send_response_to_scheduler(
+        self, lookup_id: str, num_hit_tokens: int, kind: str = ""
+    ):
+        # Create structured response message. Empty kind is the legacy ACK.
         msg = LookupResponseMsg(
             lookup_id=lookup_id,
             num_hit_tokens=num_hit_tokens,
+            kind=kind,
         )
 
         # Serialize message using msgspec
