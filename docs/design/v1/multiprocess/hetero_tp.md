@@ -82,16 +82,24 @@ are swapped together when a stage is replaced.
 1. **Primary stage** (B keys): if it finds no chunk and a candidate remains,
    the next stage is submitted. A partial hit is final.
 2. **Source stage** (A keys, layouts from `reshard_layout_desc`,
-   `num_kv_readers=1`): a hit is resharded and the final stage is submitted.
-   A miss moves on to the next candidate.
+   `num_kv_readers=1`): a hit is resharded on a background thread, which
+   then submits the final stage. A miss moves on to the next candidate.
 3. **Final stage** (B keys, `allowed_l2_memory_tags=frozenset()`): its result
    is the lookup's result.
 
 Stages advance inside `query_prefetch_status` / `wait_prefetch_status`. The
-reshard runs inside that call, and `timeout` covers every stage.
+reshard runs on `LookupModule`'s own thread pool (4 threads), not on the
+request handler's thread, because its copy grows with the hit:
+`query_prefetch_status` returns None while it runs, and `wait_prefetch_status`
+waits for it, with `timeout` covering every stage. Each reshard logs its cost:
+
+```
+Resharded 8 chunks (28.0 MiB) from TP1 to TP2 for request <id> in 12.34 ms (queued 0.05 ms)
+```
 
 `free_lookup_locks` consumes without advancing. A source-stage result has its
-A read locks released and reports a miss. An exception in any stage is logged
+A read locks released and reports a miss; a running reshard is waited for, so
+the release sees the final stage's locks. An exception in any stage is logged
 and reported as a miss, so the job always resolves. If a reshard fails
 mid-group, the destination objects reserved for that group stay reserved
 until the write TTL, because the storage manager cannot abandon a
@@ -131,7 +139,7 @@ The e2e test is native PD on one node: two servers, a coordinator, NIXL P2P,
 | Phase | Content |
 | --- | --- |
 | 2 | GDN and Mamba2 recurrent groups, and hybrid subpaged attention. This needs a per-kernel-group shard description (segments sharded along one axis), because GDN conv is `[q\|k\|v]_local` and ssm splits by v heads. chunk_size must be a multiple of both engines' block sizes, which can differ by TP in hybrids. |
-| 3 | Measure the reshard cost on the PD handoff; move it off the request thread or to the GPU if it matters. |
+| 3 | Measure the reshard cost on the PD handoff (logged per reshard); move it to the GPU if it matters. |
 
 ## Open questions
 

@@ -11,6 +11,7 @@ deleted.
 
 # Standard
 from collections.abc import Callable, Iterator
+import threading
 import time
 
 # Third Party
@@ -208,8 +209,9 @@ ModuleFactory = Callable[[int, int, list[int]], LookupModule]
 
 
 @pytest.fixture
-def make_module(mp_ctx: MPCacheServerContext) -> ModuleFactory:
+def make_module(mp_ctx: MPCacheServerContext) -> Iterator[ModuleFactory]:
     """Register the model at the lookup's TP and build a LookupModule."""
+    modules: list[LookupModule] = []
 
     def create(num_heads: int, world_size: int, sources: list[int]) -> LookupModule:
         mp_ctx.layout_desc_registry.register(
@@ -218,9 +220,34 @@ def make_module(mp_ctx: MPCacheServerContext) -> ModuleFactory:
             _layout(num_heads, world_size),
             total_num_kv_heads=num_heads,
         )
-        return LookupModule(mp_ctx, hetero_tp_source_world_sizes=sources)
+        module = LookupModule(mp_ctx, hetero_tp_source_world_sizes=sources)
+        modules.append(module)
+        return module
 
-    return create
+    yield create
+    for module in modules:
+        module.close()
+
+
+def _gate_reserve_write(
+    monkeypatch: pytest.MonkeyPatch, sm: StorageManager
+) -> tuple[threading.Event, threading.Event]:
+    """Hold the reshard inside ``reserve_write`` until ``release`` is set.
+
+    Returns:
+        ``(entered, release)``: set when the reshard reaches the gate, and
+        set by the test to let it continue.
+    """
+    entered, release = threading.Event(), threading.Event()
+    reserve = sm.reserve_write
+
+    def gated(keys: list[ObjectKey], layout_desc: MemoryLayoutDesc) -> dict:
+        entered.set()
+        assert release.wait(TIMEOUT)
+        return reserve(keys, layout_desc)
+
+    monkeypatch.setattr(sm, "reserve_write", gated)
+    return entered, release
 
 
 # (total KV heads, source TP, lookup TP); the last three replicate heads.
@@ -410,3 +437,105 @@ def test_second_source_tried_after_first_misses(
 
     assert module.wait_prefetch_status("req", TIMEOUT) == NUM_CHUNKS
     _assert_holds(mp_ctx, _keys(mp_ctx, 4), 4, 4)
+
+
+def _start_reshard(module: LookupModule, entered: threading.Event) -> None:
+    """Poll until the lookup's source-stage hit is handed to the reshard."""
+    deadline = time.monotonic() + TIMEOUT
+    while not entered.is_set():
+        assert time.monotonic() < deadline, "reshard never started"
+        assert module.query_prefetch_status("req") is None
+        time.sleep(0.005)
+
+
+def test_query_does_not_block_on_reshard(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While the reshard runs, polling returns None at once; then the hit."""
+    module = make_module(2, 1, [2])
+    _store(mp_ctx, 2, 2)
+    entered, release = _gate_reserve_write(monkeypatch, mp_ctx.storage_manager)
+
+    module.lookup(_lookup_key(1), 1)
+    _start_reshard(module, entered)
+
+    started = time.monotonic()
+    assert module.query_prefetch_status("req") is None
+    assert time.monotonic() - started < 1.0
+    release.set()
+    assert _poll(module, "req") == NUM_CHUNKS
+    _assert_holds(mp_ctx, _keys(mp_ctx, 1), 2, 1)
+
+
+def test_wait_times_out_during_reshard_then_resolves(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wait shorter than the reshard returns None; a later wait gets the hit."""
+    module = make_module(2, 1, [2])
+    _store(mp_ctx, 2, 2)
+    entered, release = _gate_reserve_write(monkeypatch, mp_ctx.storage_manager)
+
+    module.lookup(_lookup_key(1), 1)
+    _start_reshard(module, entered)
+
+    assert module.wait_prefetch_status("req", 0.05) is None
+    release.set()
+    assert module.wait_prefetch_status("req", TIMEOUT) == NUM_CHUNKS
+
+
+def test_free_during_reshard_waits_and_releases_everything(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Freeing mid-reshard waits for it, then drops both A and B locks."""
+    module = make_module(2, 1, [2])
+    src_keys = _store(mp_ctx, 2, 2)
+    dst_keys = _keys(mp_ctx, 1)
+    entered, release = _gate_reserve_write(monkeypatch, mp_ctx.storage_manager)
+    key = _lookup_key(1)
+
+    module.lookup(key, 1)
+    _start_reshard(module, entered)
+
+    threading.Timer(0.05, release.set).start()
+    module.free_lookup_locks(key, 1)
+
+    assert release.is_set()
+    session = mp_ctx.session_manager.get("req")
+    assert session is not None
+    assert session.prefetch_hit_chunks == NUM_CHUNKS
+    assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
+    assert _num_locked(mp_ctx.storage_manager, dst_keys) == 0
+    assert module.query_prefetch_status("req") == 0
+
+
+def test_final_stage_failure_resolves_as_miss(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the final prefetch cannot be submitted, the lookup reports a miss."""
+    module = make_module(2, 1, [2])
+    src_keys = _store(mp_ctx, 2, 2)
+    calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
+    submit = mp_ctx.storage_manager.submit_prefetch_task
+
+    def fail_third(
+        spec: PrefetchTaskSpec, external_request_id: str = ""
+    ) -> PrefetchHandle:
+        if len(calls) == 2:
+            raise RuntimeError("injected final-stage failure")
+        return submit(spec, external_request_id=external_request_id)
+
+    monkeypatch.setattr(mp_ctx.storage_manager, "submit_prefetch_task", fail_third)
+
+    module.lookup(_lookup_key(1), 1)
+
+    assert module.wait_prefetch_status("req", TIMEOUT) == 0
+    assert module.query_prefetch_status("req") == 0
+    assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
