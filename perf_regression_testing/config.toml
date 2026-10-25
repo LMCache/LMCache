@@ -219,9 +219,8 @@ host = "127.0.0.1"
 port = 16555
 http-port = 18080
 # A multiple of vLLM's block, which the hybrid sizes to hold a KDA state:
-# 5760 estimated from the DCP run's 1152 (x8 state per rank, BF16 KV). The
-# connector rejects a mismatch and names the block.
-chunk-size = 5760
+# 4480 at DP8 with BF16 KV (the connector's error message, build 46).
+chunk-size = 4480
 separate-object-groups = true
 # Pinned lazily, as in vllm_lmcache.
 l1-size-gb = 1500
