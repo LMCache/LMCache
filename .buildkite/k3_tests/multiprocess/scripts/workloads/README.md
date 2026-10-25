@@ -18,11 +18,15 @@ a workload owns its requests and assertions.
 - `restart-recovery.sh`: LMCache server restart and worker re-registration.
 - `http-api.sh`: LMCache HTTP API and CLI coverage with a live engine.
 
-`vllm/` contains workloads that currently depend on vLLM-specific commands,
-response extensions, endpoints, logs, or model launch flags. A future
-`sglang/` directory holds the corresponding SGLang-only coverage. For example,
-`mp-autostart-tp2.sh` verifies vLLM-specific connector auto-start behavior and
-therefore remains under `vllm/` rather than `common/`.
+`verification/` contains shared assertions and request helpers that are sourced
+by executable workloads but are not discoverable workloads themselves.
+
+`vllm/` and `sglang/` contain workloads that depend on engine-specific
+commands, response extensions, endpoints, logs, or model launch flags. For
+example, each engine has its own `dsv4-flash-tp.sh` and `kimi-linear-tp.sh`
+lifecycle while sourcing shared prompt construction and L1 round-trip checks
+from `verification/`. `mp-autostart-tp2.sh` verifies vLLM-specific connector
+auto-start behavior and therefore remains under `vllm/` rather than `common/`.
 
 The harness converts a test name from underscores to hyphens and discovers the
 script automatically. For example, `long_doc_qa` resolves to

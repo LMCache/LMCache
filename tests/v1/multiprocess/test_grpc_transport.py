@@ -57,6 +57,10 @@ from lmcache.v1.multiprocess.request_handler import (
     iter_request_handlers,
     request_handler,
 )
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
+from lmcache.v1.multiprocess.transport.grpc_impl import (
+    proto_codec,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl import (
     server_builder as grpc_server_builder,
 )
@@ -159,12 +163,19 @@ def grpc_client(
             requires_client_affinity=True,
         )
         def prepare_store(
-            self, key: IPCCacheServerKey, instance_id: int
+            self,
+            key: IPCCacheServerKey,
+            instance_id: int,
+            skipped_chunks: tuple[tuple[int, ...], ...] = (),
         ) -> PrepareStoreResponse:
             assert key.request_configs == {"blend": True}
             assert instance_id == 7
             return PrepareStoreResponse(
-                context={"slots": [{"offset": 8}], "chunk_indices": [2]}
+                context={
+                    "slots": [{"offset": 8}],
+                    "chunk_indices": [2],
+                    "skipped": [list(g) for g in skipped_chunks],
+                }
             )
 
         @request_handler(
@@ -565,6 +576,35 @@ def test_service_message_codec_registry_round_trips_custom_types() -> None:
     assert shape_codec.reader(shape_message) == shape
 
 
+def test_response_encoder_compiles_its_codec_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Encoding many responses compiles the structural codec only once."""
+    kv_event_service_pb2 = importlib.import_module(
+        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.kv_event_service_pb2"
+    )
+    compiled: list[Any] = []
+    compile_message_codec = proto_codec._compile_message_codec
+
+    def counting_compile(descriptor: Any, py_type: Any) -> Any:
+        compiled.append(descriptor.full_name)
+        return compile_message_codec(descriptor, py_type)
+
+    monkeypatch.setattr(proto_codec, "_compile_message_codec", counting_compile)
+    encode = proto_codec.compile_response_encoder_for_type(
+        kv_event_service_pb2.KVEventBatch, KVEventBatch
+    )
+    record = KVEventRecord(1, "stored", "cpu", "model", [b"h"], None, [1, 2, 3])
+    batch = KVEventBatch(True, 1, 2, False, [record])
+
+    first = encode(batch).SerializeToString()
+    after_first = len(compiled)
+    for _ in range(3):
+        assert encode(batch).SerializeToString() == first
+    assert after_first > 0
+    assert len(compiled) == after_first
+
+
 def test_generated_grpc_services_communicate_end_to_end(
     grpc_client: tuple[GrpcMultiprocessClient, _Calls],
 ) -> None:
@@ -573,7 +613,7 @@ def test_generated_grpc_services_communicate_end_to_end(
         model_name="model",
         world_size=2,
         worker_id=None,
-        token_ids=(1, 2, 3),
+        token_bytes=pack_token_ids((1, 2, 3)),
         start=0,
         end=3,
         request_id="request",
@@ -589,7 +629,17 @@ def test_generated_grpc_services_communicate_end_to_end(
         True,
     )
     assert client.prepare_store(key, 7).result(5) == PrepareStoreResponse(
-        context={"slots": [{"offset": 8}], "chunk_indices": [2]}
+        context={"slots": [{"offset": 8}], "chunk_indices": [2], "skipped": []}
+    )
+    # Per-group skipped chunks survive the proto round trip, empty groups too.
+    assert client.prepare_store(key, 7, ((0, 1), (), (3,))).result(
+        5
+    ) == PrepareStoreResponse(
+        context={
+            "slots": [{"offset": 8}],
+            "chunk_indices": [2],
+            "skipped": [[0, 1], [], [3]],
+        }
     )
     assert client.prepare_retrieve(key, 7).result(5) == PrepareRetrieveResponse(
         success=True,
