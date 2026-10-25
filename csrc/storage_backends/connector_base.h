@@ -357,7 +357,13 @@ class ConnectorBase : public IStorageConnector {
       }
     }
   }
+  // Called by close() after stop_ is set and before the workers are joined.
+  // Only interrupt blocking I/O here (for example shutdown(2) on a socket) so
+  // that join() can return. Workers may still be using every resource, so
+  // nothing may be freed.
   virtual void shutdown_connections() {}
+  // Called by close() after every worker has been joined. Release resources
+  // the workers used here.
   virtual void on_workers_stopped() {}
 
   bool is_stopping() const { return stop_.load(std::memory_order_acquire); }
