@@ -21,14 +21,14 @@ import types
 import pytest
 
 # First Party
-from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
-from lmcache.v1.storage_backend.raw_block import (
+from lmcache.v1.distributed.l2_adapters.raw_block import (
     RawBlockCore,
     RawBlockCoreConfig,
     encode_object_key,
     normalize_raw_block_placement_ids,
 )
-from tests.v1.storage_backend.raw_block_test_utils import (
+from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
+from tests.v1.distributed.raw_block.test_utils import (
     RAW_BLOCK_CI_BLOCK_ALIGN,
     RAW_BLOCK_CI_CAPACITY_BYTES,
     RAW_BLOCK_CI_HEADER_BYTES,
@@ -42,7 +42,7 @@ from tests.v1.storage_backend.raw_block_test_utils import (
     make_raw_block_file,
     memory_obj_bytes,
 )
-import lmcache.v1.storage_backend.raw_block.core as raw_block_core
+import lmcache.v1.distributed.l2_adapters.raw_block.core as raw_block_core
 
 Buffer = bytes | bytearray | memoryview
 
@@ -1192,7 +1192,7 @@ def test_raw_block_core_uses_bounded_posix_recovery_read_tasks(monkeypatch):
             return map(fn, mapped_items)
 
     monkeypatch.setattr(
-        "lmcache.v1.storage_backend.raw_block.core.ThreadPoolExecutor",
+        "lmcache.v1.distributed.l2_adapters.raw_block.core.ThreadPoolExecutor",
         RecordingThreadPoolExecutor,
     )
 
@@ -1232,7 +1232,7 @@ def test_raw_block_core_iouring_recovery_does_not_use_posix_threads(monkeypatch)
         raise AssertionError("io_uring recovery must not use POSIX read threads")
 
     monkeypatch.setattr(
-        "lmcache.v1.storage_backend.raw_block.core.ThreadPoolExecutor",
+        "lmcache.v1.distributed.l2_adapters.raw_block.core.ThreadPoolExecutor",
         fail_thread_pool_executor,
     )
 

@@ -26,7 +26,7 @@ import sys
 import pytest
 
 # First Party
-from lmcache.v1.storage_backend.valkey.worker_pool import (
+from lmcache.v1.distributed.l2_adapters.valkey.worker_pool import (
     CLIENT_INFO_TAG_MIN_GLIDE_VERSION,
     ValkeyWorkerPool,
     _glide_config_supports_client_info_tag,
