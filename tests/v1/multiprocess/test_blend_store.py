@@ -10,7 +10,9 @@ is mocked.
 
 # Standard
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import MagicMock
+import socket
 import threading
 import time
 
@@ -21,6 +23,11 @@ import torch
 # First Party
 from lmcache import device_ops  # noqa: F401
 from lmcache.v1.mp_coordinator.blend_client import PENDING  # noqa: F401
+from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
+from lmcache.v1.multiprocess import server as server_mod
+from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod  # noqa: F401
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.read_set import (
@@ -28,6 +35,19 @@ from lmcache.v1.multiprocess.modules.blend.read_set import (
     _classify_cb_read_groups,
 )
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    LMCacheDrivenTransferModule,
+)
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.multiprocess.transport.server_factory import create_request_server
+from tests.v1.multiprocess.transport_test_utils import (
+    REQUEST_TRANSPORTS,
+    RequestTransport,
+    request_server_config,
+    request_server_url,
+)
 
 # ---------------------------------------------------------------------------
 # S1: async fingerprint registration
@@ -177,7 +197,7 @@ def test_submit_coordinator_match_sends_this_server_s_namespace():
         model_name="llama",
         world_size=4,
         worker_id=None,
-        token_ids=tuple(range(8)),
+        token_bytes=pack_token_ids(range(8)),
         start=0,
         end=8,
         request_id="rid",
@@ -203,7 +223,7 @@ def test_submit_coordinator_match_skips_a_query_shorter_than_a_chunk():
         model_name="llama",
         world_size=1,
         worker_id=None,
-        token_ids=(1, 2),
+        token_bytes=pack_token_ids([1, 2]),
         start=0,
         end=2,
         request_id="rid",
@@ -607,7 +627,7 @@ def _store_hook_key(num_chunks: int, chunk_size: int = 4):
         world_size=1,
         num_kv_readers=1,
         worker_id=0,
-        token_ids=tuple(range(1000, 1000 + n)),
+        token_bytes=pack_token_ids(range(1000, 1000 + n)),
         start=0,
         end=n,
         request_id="req-store-mask",
@@ -647,3 +667,110 @@ def test_store_registers_nothing_when_no_chunk_committed():
     assert result == (b"evt", True)
     assert eng._fingerprint_queue.empty()
     assert eng._pending_fp_hashes == set()
+
+
+@pytest.mark.parametrize(
+    ("engine_type", "mode"),
+    [("default", "lmcache_driven"), ("blend", "engine_driven")],
+)
+def test_blend_factory_gating(
+    engine_type: str,
+    mode: Literal["lmcache_driven", "engine_driven"],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constructor = MagicMock(return_value=None)
+    monkeypatch.setattr(BlendModule, "__init__", constructor)
+    build_ctx = ModuleBuildContext(
+        MagicMock(),
+        MPServerConfig(engine_type=engine_type, supported_transfer_mode=mode),
+        CoordinatorConfig(),
+    )
+    if engine_type == "default":
+        assert BlendModule.create(build_ctx) is None
+    else:
+        with pytest.raises(ValueError, match="blend engine requires"):
+            BlendModule.create(build_ctx)
+    constructor.assert_not_called()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_blend_factory_forwards_configuration(
+    enabled: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    constructor = MagicMock(return_value=None)
+    monkeypatch.setattr(BlendModule, "__init__", constructor)
+    coordinator = MagicMock()
+    factory = MagicMock(return_value=coordinator)
+    monkeypatch.setattr(BlendCoordinatorClient, "maybe_create", factory)
+    context, transfer = MagicMock(), MagicMock(spec=LMCacheDrivenTransferModule)
+    config = MPServerConfig(
+        engine_type="blend",
+        enable_segmented_prefix=enabled,
+        enable_dedup_content=enabled,
+        enable_blend_reorder=enabled,
+    )
+    coordinator_config = CoordinatorConfig(
+        url="http://coordinator",
+        event_reporting=enabled,
+        blend_timeout=2.5,
+        blend_match_concurrency=3,
+    )
+    build_ctx = ModuleBuildContext(context, config, coordinator_config)
+    build_ctx.register(LMCacheDrivenTransferModule, transfer)
+
+    assert isinstance(BlendModule.create(build_ctx), BlendModule)
+
+    constructor.assert_called_once_with(
+        context,
+        transfer,
+        coordinator=coordinator,
+        enable_segmented_prefix=enabled,
+        enable_dedup_content=enabled,
+        enable_reorder=enabled,
+    )
+    factory.assert_called_once_with(
+        coordinator_config.url if enabled else "", timeout=2.5, match_concurrency=3
+    )
+
+
+@pytest.mark.parametrize("transport", REQUEST_TRANSPORTS)
+def test_blend_store_overrides_transfer_handler(
+    transport: RequestTransport,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_module_resources,
+) -> None:
+    @request_handler(HandlerType.BLOCKING, requires_client_affinity=True)
+    def store(
+        self: object,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, bool]:
+        return type(self).__name__.encode(), True
+
+    monkeypatch.setattr(BlendModule, "store", store)
+    monkeypatch.setattr(LMCacheDrivenTransferModule, "store", store)
+    modules = server_mod._build_modules(
+        MagicMock(),
+        MPServerConfig(engine_type="blend", worker_reap_timeout_seconds=0),
+        CoordinatorConfig(),
+    )
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    url = request_server_url(transport, port)
+    server = create_request_server(modules, request_server_config(transport, url))
+    key = IPCCacheServerKey.from_token_ids("model", 1, 0, [1], end=1)
+    try:
+        server.start()
+        client = RequestClientFactory.create(url)
+        try:
+            assert client.store(key, 1, [[0]], b"").result(timeout=5) == (
+                b"BlendModule",
+                True,
+            )
+        finally:
+            client.close()
+    finally:
+        server.close()

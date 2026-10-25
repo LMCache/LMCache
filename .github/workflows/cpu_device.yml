@@ -39,7 +39,7 @@ defaults:
 jobs:
   changes:
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pull-requests: read
     outputs:
@@ -274,7 +274,7 @@ jobs:
         run: bash .github/scripts/download_gh_release_model.sh
 
       # The three e2e steps below cover the worker-side transfer paths:
-      # engine-driven splits into pickle and shm data modes, and
+      # engine-driven splits into inline and shm data modes, and
       # lmcache-driven is the IPC handle path. MLA profiles temporarily run
       # only lmcache-driven so Engine-driven format/store issues can be
       # investigated independently.
@@ -282,12 +282,12 @@ jobs:
       # Never pass a bare `engine_driven` here: LMCACHE_E2E_DATA_MODE then
       # defaults to shm, so the step silently becomes a second copy of the
       # shm leg below instead of testing anything new.
-      - name: vLLM e2e — Engine-driven (pickle)
+      - name: vLLM e2e — Engine-driven (inline)
         if: matrix.model.run_engine_driven_e2e
         env:
           HF_TOKEN: ${{ secrets.hf_token }}
         run: |
-          LMCACHE_E2E_TRANSPORT_MODE=pickle \
+          LMCACHE_E2E_TRANSPORT_MODE=inline \
           LMCACHE_HTTP_PORT_E2E=18082 \
           LMCACHE_REQUEST_PORT_E2E=15557 \
           VLLM_PORT_E2E=18000 \

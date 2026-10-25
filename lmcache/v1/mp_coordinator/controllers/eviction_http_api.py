@@ -2,11 +2,11 @@
 """The endpoints the fleet eviction controller owns.
 
 ``/quota`` is the fleet-level counterpart of the MP server's node-local group,
-and ``/cache/pins`` is eviction protection expressed as cache content. Both act
-on the controller's own quota registry and pin table, so both are built around
-it rather than resolving it per request -- which is what makes them disappear
-with it when an operator leaves it unbuilt, freeing the paths for whatever
-replaced it.
+``/cache/pins`` is eviction protection expressed as cache content, and
+``/cache/delete`` honors those pins. All three act on the controller's own
+quota registry and pin table, so they are built around it rather than resolving
+it per request -- which is what makes them disappear with it when an operator
+leaves it unbuilt, freeing the paths for whatever replaced it.
 
 Usage arrives through the fleet cache-event stream (``POST /events``), admitted
 by the ingest gate; the usage view those reads come from is a view, resolved
@@ -17,17 +17,24 @@ per request like any other collaborator that is not this controller.
 from __future__ import annotations
 
 # Standard
+from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 # Third Party
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+import httpx
 
 # First Party
 from lmcache.v1.distributed.api import Tier
 from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
+from lmcache.v1.mp_coordinator.http_apis.dependencies import (
+    get_context,
+    get_outbound_client,
+)
 from lmcache.v1.mp_coordinator.schemas import (
+    DeleteRequest,
+    DeleteResponse,
     PinListResponse,
     PinnedKeyInfo,
     PinRequest,
@@ -39,6 +46,8 @@ from lmcache.v1.mp_coordinator.schemas import (
     StatusListResponse,
     StatusResponse,
 )
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
@@ -396,6 +405,108 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
                 )
                 for pinned in page
             ],
+        )
+
+    # -- Delete (honors the pins above) ----------------------------------
+
+    @router.post("/cache/delete")
+    async def request_delete(body: DeleteRequest, request: Request) -> DeleteResponse:
+        """Delete a token sequence on one MP server, per ``body.tier``.
+
+        ``body.tier`` is ``l1``, ``l2`` or ``all``. When the delete touches L2,
+        keys pinned in this controller's table are held back unless
+        ``body.force`` is set; a forced delete removes them and drops their
+        pins. Served by the controller that holds the pins, so a replacement
+        eviction controller serves its own.
+
+        Args:
+            body: Target instance, model/world_size, token_ids, cache_salt, tier,
+                force.
+
+        Returns:
+            ``DeleteResponse`` with ``requested`` chunks, ``affected`` keys
+            removed, and ``skipped`` keys refused (L1 locks reported by the node,
+            plus L2 pins held back here).
+
+        Raises:
+            HTTPException: 400 if the token cap is exceeded or a key field is
+                invalid; 404 if ``instance_id`` is not registered; 502 if the
+                target server is unreachable or rejects the delete.
+        """
+        ctx = get_context(request)
+        target = ctx.views.get(InstanceRegistry).get(body.instance_id)
+        if target is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no MP server registered with instance_id={body.instance_id!r}",
+            )
+        try:
+            resolved, chunks = resolve_object_keys(
+                ctx.token_hasher,
+                body.model_name,
+                body.world_size,
+                body.token_ids,
+                body.cache_salt,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        resolved = ctx.views.get(KeyDirectory).get_keys_across_object_groups(resolved)
+
+        if not chunks:
+            return DeleteResponse(
+                instance_id=body.instance_id,
+                requested=0,
+                affected=0,
+                skipped=0,
+                status="noop",
+            )
+
+        # When the delete touches L2, hold back L2-pinned keys (non-force). They
+        # are dropped from the delete set entirely, so a pinned key is retained
+        # in both tiers; ``force`` deletes them and clears the pins.
+        touches_l2 = body.tier in (Tier.L2, Tier.ALL)
+        if touches_l2 and not body.force:
+            delete_keys = controller.filter_unpinned(resolved)
+            pin_skipped = len(resolved) - len(delete_keys)
+        else:
+            delete_keys = resolved
+            pin_skipped = 0
+
+        node_deleted = 0
+        node_skipped = 0
+        if delete_keys:
+            client = get_outbound_client(request)
+            url = f"http://{target.ip}:{target.http_port}/cache/objects"
+            payload = {
+                "keys": [asdict(k.to_encoded_object_key()) for k in delete_keys],
+                "tier": body.tier.value,
+                "force": body.force,
+            }
+            try:
+                # httpx ``.delete`` can't take ``json=``; use ``request(...)``.
+                resp = await client.request("DELETE", url, json=payload)
+                resp.raise_for_status()
+                result = resp.json()
+            except httpx.HTTPError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"delete to {body.instance_id!r} failed: {exc}",
+                ) from None
+            node_deleted = result.get("deleted", 0)
+            node_skipped = result.get("skipped", 0)
+
+        if touches_l2 and body.force:
+            controller.drop_pins(resolved)
+            ctx.metadata_persister.save()
+
+        # ``skipped`` = L1 keys the node refused (locks) + L2 keys held back
+        # for a pin.
+        return DeleteResponse(
+            instance_id=body.instance_id,
+            requested=chunks,
+            affected=node_deleted,
+            skipped=node_skipped + pin_skipped,
+            status="deleted",
         )
 
     return (router,)

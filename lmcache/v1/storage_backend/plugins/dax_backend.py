@@ -17,9 +17,9 @@ import threading
 from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.distributed.l2_adapters.dax.core import DaxCore
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StoragePluginInterface
-from lmcache.v1.storage_backend.dax.core import DaxCore
 
 if TYPE_CHECKING:
     # Standard
@@ -149,6 +149,13 @@ class DaxBackend(StoragePluginInterface):
         if self.max_dax_size <= 0:
             raise ValueError("extra_config['dax.max_dax_size'] must be > 0")
 
+        offset_gb = extra.get("dax.offset_gb", 0)
+        if isinstance(offset_gb, bool) or not isinstance(offset_gb, (int, float)):
+            raise ValueError("extra_config['dax.offset_gb'] must be a number")
+        if offset_gb < 0:
+            raise ValueError("extra_config['dax.offset_gb'] must be >= 0")
+        self.offset_gb = float(offset_gb)
+
         if self.local_cpu_backend is None:
             raise ValueError("DaxBackend requires local_cpu_backend")
 
@@ -169,6 +176,7 @@ class DaxBackend(StoragePluginInterface):
             device_path=self.device_path,
             max_dax_size_bytes=int(self.max_dax_size * 1024**3),
             slot_bytes=max(1, full_chunk_size),
+            offset_bytes=int(self.offset_gb * 1024**3),
         )
         self.slot_bytes = self._core.slot_bytes
         self._arena_bytes = self._core.arena_bytes

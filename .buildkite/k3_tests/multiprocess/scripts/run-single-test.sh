@@ -101,14 +101,14 @@ elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ]; then
     export LIMIT="${LIMIT:-300}"
 elif [ "$TEST_NAME" = "kimi_linear_tp" ]; then
     # Self-contained test: kimi-linear-tp.sh owns the server lifecycle and
-    # all launch flags (TP=2, trust-remote-code, align, chunk/batch sizes). Only
-    # the model name is declared here so the banner and the script's ${MODEL:-}
-    # fallback both resolve to Kimi-Linear rather than the generic default below.
+    # all engine-specific launch flags for TP=2. Only the model name is declared
+    # here so the banner and the script's ${MODEL:-} fallback both resolve to
+    # Kimi-Linear rather than the generic default below.
     export MODEL="${MODEL:-moonshotai/Kimi-Linear-48B-A3B-Instruct}"
 elif [ "$TEST_NAME" = "dsv4_flash_tp" ]; then
     # Self-contained test: dsv4-flash-tp.sh owns the server lifecycle and
-    # all launch flags (TP=4, fp8_ds_mla, deepseek_v4 tokenizer). Only the
-    # model name is declared here so the banner and the script's ${MODEL:-}
+    # each engine-specific implementation owns its TP=4 launch flags. Only
+    # the model name is declared here so the banner and the script's ${MODEL:-}
     # fallback both resolve to DeepSeek-V4-Flash.
     export MODEL="${MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
 elif [ "$TEST_NAME" = "deadlock" ]; then

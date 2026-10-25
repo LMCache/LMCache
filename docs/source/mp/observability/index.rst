@@ -224,6 +224,12 @@ Configuration
    * - ``--disable-metrics``
      - off
      - Skip metrics subscribers (Prometheus endpoint is not started).
+   * - ``--disable-grpc-metrics``
+     - off
+     - Skip gRPC Python runtime metrics while keeping LMCache EventBus
+       metrics enabled. By default, the MP server enables these metrics only
+       for ``--transport grpc``; ZMQ mode keeps the existing LMCache metrics
+       unchanged.
    * - ``--disable-logging``
      - off
      - Skip logging subscribers.
