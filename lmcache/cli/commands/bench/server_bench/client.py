@@ -16,12 +16,12 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
-from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
 from lmcache.cli.commands.bench.server_bench.allocator import (
     BlockAllocator,
     GroupBlocks,
     RequestBlocks,
 )
+from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
 from lmcache.cli.commands.bench.server_bench.config import (
     BenchConfig,
     WorkerSpec,

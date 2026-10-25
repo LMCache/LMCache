@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """``lmcache bench server`` subcommand implementation.
 
-This module provides argument registration via :func:`add_server_arguments`
-and the execution orchestrator :func:`run_server_bench` for the end-to-end
-LMCache MP cache-server sanity test.
+This module re-exports :func:`add_server_arguments` from the lightweight
+arguments module and provides the execution orchestrator :func:`run_server_bench`
+for the end-to-end LMCache MP cache-server sanity test.
 
 The command exercises the full store / retrieve data path:
 
