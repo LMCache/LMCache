@@ -42,10 +42,20 @@ def is_false(value: str) -> bool:
 
 def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
     """Build layout_hints dict by querying vLLM at runtime."""
-    hints: dict[str, str] = {}
+    hints: dict[str, str | int] = {}
     kv_layout = try_get_vllm_kv_cache_layout(vllm_config)
     if kv_layout is not None:
         hints["kv_layout"] = kv_layout
+    if vllm_config is not None:
+        model_config = vllm_config.model_config
+        # Cross-TP reshard splits attention KV by head; MLA has no head split
+        # and hybrid models carry recurrent state that is sharded differently.
+        if not (
+            mla_enabled(model_config)
+            or model_config.is_hybrid
+            or model_config.is_attention_free
+        ):
+            hints["total_num_kv_heads"] = model_config.get_total_num_kv_heads()
     return hints  # type: ignore[return-value]
 
 

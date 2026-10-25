@@ -143,6 +143,14 @@ class MPServerConfig:
     the longest time a request can wait in the engine's queue between its
     lookup and its admission (minutes under deep agentic backlogs)."""
 
+    hetero_tp_source_world_sizes: list[int] = field(default_factory=list)
+    """TP sizes other engines of the same model store with (e.g. a prefill
+    instance at another TP). A lookup that finds no chunk at its own TP size
+    retries at each of these, in order, and reshards the first hit into its
+    own layout. Takes effect only for engines that report their KV head count:
+    attention-only, non-MLA vLLM models without PP, DCP or multiple servers,
+    under LMCache-driven transfer."""
+
     kv_load_policy: str = "DEFAULT"
     """Per-request choice between serving a lookup and letting the engine
     recompute the prompt: a built-in name ("DEFAULT") or
@@ -553,6 +561,16 @@ def add_mp_server_args(
         "Raise it above the longest engine queueing delay. Default is 600.",
     )
     mp_group.add_argument(
+        "--hetero-tp-source-world-sizes",
+        type=int,
+        nargs="*",
+        default=[],
+        help="TP sizes other engines of the same model store with. A lookup "
+        "that finds no chunk at its own TP size retries at these and reshards "
+        "the hit. Attention-only, non-MLA models without PP or DCP. "
+        "Example: --hetero-tp-source-world-sizes 1",
+    )
+    mp_group.add_argument(
         "--kv-load-policy",
         type=str,
         default="DEFAULT",
@@ -663,6 +681,7 @@ def parse_args_to_mp_server_config(
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         session_ttl_seconds=args.session_ttl_seconds,
         kv_load_policy=args.kv_load_policy,
+        hetero_tp_source_world_sizes=args.hetero_tp_source_world_sizes,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         kv_event_log_size=args.kv_event_log_size,
         server_modules=parse_server_module_specs(args.server_module or []),
