@@ -38,7 +38,23 @@ def test_factory_selects_zmq_by_scheme(
     result = RequestClientFactory.create(server_url, context=context)
 
     assert result is client
-    create.assert_called_once_with(normalized_url, context=context)
+    create.assert_called_once_with(normalized_url, context=context, api_key=None)
+
+
+def test_factory_passes_explicit_zmq_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programmatic clients can provide one request credential explicitly."""
+    client = MagicMock(name="zmq_request_client")
+    create = MagicMock(return_value=client)
+    monkeypatch.setattr(zmq_impl, "create_request_client", create)
+
+    result = RequestClientFactory.create("tcp://localhost:5555", api_key="secret")
+
+    assert result is client
+    create.assert_called_once_with(
+        "tcp://localhost:5555", context=None, api_key="secret"
+    )
 
 
 @pytest.mark.parametrize(
@@ -64,6 +80,12 @@ def test_factory_selects_grpc_by_scheme(
     create.assert_called_once_with(normalized_url, context=context)
 
 
+def test_factory_rejects_grpc_api_key_until_supported() -> None:
+    """A configured key must never be silently ignored by gRPC."""
+    with pytest.raises(ValueError, match="not yet supported by gRPC"):
+        RequestClientFactory.create("grpc://localhost:5555", api_key="secret")
+
+
 @pytest.mark.parametrize("server_url", ["", "grpc://", "http://localhost:5555"])
 def test_factory_rejects_invalid_or_unsupported_urls(server_url: str) -> None:
     with pytest.raises(ValueError):
@@ -86,6 +108,16 @@ def test_request_server_factory_selects_grpc_server(
 
     assert result is server
     build.assert_called_once_with(modules, config)
+
+
+def test_request_server_factory_rejects_grpc_api_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The server does not appear protected when gRPC auth is unavailable."""
+    monkeypatch.setenv("LMCACHE_API_KEY", "secret")
+
+    with pytest.raises(ValueError, match="not yet supported by gRPC"):
+        create_request_server([], MPServerConfig(transport="grpc"))
 
 
 def test_request_server_factory_selects_zmq_server(

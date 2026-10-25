@@ -104,6 +104,7 @@ def test_business_callers_create_clients_through_factory() -> None:
         / "tests/v1/distributed/l2_adapters/test_p2p_l2_adapter_integration.py",
         repo_root / "tests/v1/multiprocess/test_client.py",
         repo_root / "tests/v1/multiprocess/test_mq.py",
+        repo_root / "tests/v1/multiprocess/test_zmq_auth.py",
         repo_root / "tests/v1/multiprocess/test_p2p_controller.py",
         repo_root / "tests/v1/multiprocess/test_protocols.py",
         repo_root / "tests/v1/multiprocess/transport_test_utils.py",
