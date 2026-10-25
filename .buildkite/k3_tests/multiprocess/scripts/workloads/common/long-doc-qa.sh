@@ -52,7 +52,7 @@ save_diagnostic_summary() {
     local attempt="${BUILDKITE_RETRY_COUNT:-0}"
     local attempt_dir="$LONG_DOC_QA_DIR/attempt_${attempt}"
 
-    mkdir -p "$LONG_DOC_QA_DIR" "$attempt_dir"
+    mkdir -p "$LONG_DOC_QA_DIR"
 
     local checkout_sha
     checkout_sha="$(git rev-parse HEAD 2>/dev/null || echo "unknown")"
@@ -242,7 +242,7 @@ summary = {
     "attempt": int(os.environ.get("DIAG_ATTEMPT", "0")),
     "checkout_sha": os.environ.get("DIAG_CHECKOUT_SHA", "unknown"),
     "timestamp": os.environ.get("DIAG_TIMESTAMP", ""),
-    "config": {
+    "workload_settings": {
         "engine": os.environ.get("ENGINE_NAME", "vllm"),
         "model": os.environ.get("MODEL", ""),
         "document_length": int(os.environ.get("DOCUMENT_LENGTH", "10000")),
@@ -315,11 +315,13 @@ PY
     DIAGNOSTIC_SAVED=1
 
     # Preserve attempt-specific copy without duplicating *.csv files under LONG_DOC_QA_DIR
-    # on standard single-attempt runs (where BUILDKITE_RETRY_COUNT is unset)
-    if [ -f "$summary_file" ]; then
-        cp "$summary_file" "$attempt_dir/diagnostic_summary.json" 2>/dev/null || true
-    fi
-    if [ -n "${BUILDKITE_RETRY_COUNT:-}" ]; then
+    # on standard initial runs (where BUILDKITE_RETRY_COUNT is 0 or unset).
+    # Only archive to attempt_$attempt when this is an actual retry (> 0).
+    if [[ "${BUILDKITE_RETRY_COUNT:-0}" =~ ^[1-9][0-9]*$ ]]; then
+        mkdir -p "$attempt_dir"
+        if [ -f "$summary_file" ]; then
+            cp "$summary_file" "$attempt_dir/diagnostic_summary.json" 2>/dev/null || true
+        fi
         if [ -d "$LONG_DOC_QA_DIR/baseline" ]; then
             mkdir -p "$attempt_dir/baseline"
             cp -r "$LONG_DOC_QA_DIR/baseline"/* "$attempt_dir/baseline/" 2>/dev/null || true
