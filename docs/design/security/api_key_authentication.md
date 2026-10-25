@@ -51,3 +51,8 @@ each uses the corresponding gRPC interceptor before decoding requests.
 The default insecure channel does not encrypt tokens. Use TLS on untrusted
 networks; mTLS can add certificate-based peer identity independently of the
 API-key verifier.
+
+During the gRPC-only rollout, ZMQ retains its existing unauthenticated wire
+behavior. Server keys still protect HTTP with ZMQ selected; startup emits a
+warning, not an error. ZMQ clients ignore shared key environment variables,
+but reject explicit credentials rather than claiming to authenticate them.

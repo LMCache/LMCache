@@ -83,6 +83,13 @@ or incorrect credentials return gRPC ``UNAUTHENTICATED``. Authentication stays
 disabled when the server has no keys. Both ``--grpc-server-mode sync`` and
 ``--grpc-server-mode aio`` enforce this authentication policy.
 
+The same key sources also protect the HTTP API. With the default ZMQ
+transport, the server continues to start and warns that only HTTP is protected;
+ZMQ requests remain unauthenticated until ZMQ authentication is implemented.
+ZMQ clients ignore the shared key environment variables so existing engines
+can inherit an HTTP-protected server's environment. Explicitly passing
+``api_key`` to a ZMQ client is rejected rather than silently ignored.
+
 .. code-block:: bash
 
    lmcache server --transport grpc --host 0.0.0.0 --port 5555 \
