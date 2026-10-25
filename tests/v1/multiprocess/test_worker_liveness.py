@@ -29,6 +29,7 @@ from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
 from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules import engine_driven_transfer as non_gpu_mod
 from lmcache.v1.multiprocess.modules import kv_events as kv_events_mod
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as gpu_mod
@@ -120,7 +121,10 @@ def _bare_gpu_module() -> LMCacheDrivenTransferModule:
     liveness methods can be exercised without GPU hardware.
     """
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
-    module._ctx = MagicMock(name="ctx")
+    ctx = MagicMock(name="ctx")
+    ctx.separate_object_groups = False
+    ctx.chunk_size = 256
+    module._ctx = ctx
     module._cache_contexts = {}
     module._lock = threading.Lock()
     return module
@@ -158,6 +162,86 @@ def test_gpu_register_inserts_unlatched_entry(monkeypatch) -> None:
     assert module.tracked_instance_count() == 1
     entry = module.get_and_touch_context_entry(1)
     assert entry is not None and entry.has_liveness_signal is False
+
+
+def test_gpu_register_rejects_recurrent_groups_without_separation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recurrent-state registrations require separate object groups."""
+    create = MagicMock()
+    monkeypatch.setattr(gpu_mod, "create_cache_context", create)
+    module = _bare_gpu_module()
+
+    response = module.register_kv_cache(
+        1,
+        MagicMock(),
+        "model",
+        1,
+        MagicMock(),
+        MagicMock(),
+        [EngineGroupInfo(0, (0,), recurrent_state=True)],
+    )
+
+    assert response.succeed is False
+    assert "--separate-object-groups" in response.error_message
+    assert module.tracked_instance_count() == 0
+    create.assert_not_called()
+
+
+def test_gpu_register_rejects_distinct_object_buckets_without_separation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full-attention plus SWA registrations require object-group separation."""
+    create = MagicMock()
+    monkeypatch.setattr(gpu_mod, "create_cache_context", create)
+    module = _bare_gpu_module()
+
+    response = module.register_kv_cache(
+        1,
+        MagicMock(),
+        "model",
+        1,
+        MagicMock(),
+        MagicMock(),
+        [
+            EngineGroupInfo(0, (0,)),
+            EngineGroupInfo(1, (1,), sw_size_tokens=4096),
+        ],
+    )
+
+    assert response.succeed is False
+    assert "--separate-object-groups" in response.error_message
+    assert module.tracked_instance_count() == 0
+    create.assert_not_called()
+
+
+def test_gpu_register_accepts_homogeneous_engine_groups_without_separation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Engine groups with identical object semantics may share one object."""
+    _stub_gpu_registration_backend(monkeypatch)
+    monkeypatch.setattr(
+        gpu_mod,
+        "create_cache_context",
+        lambda *a, **kw: MagicMock(
+            num_layers=2, **{"kv_layer_groups_manager.num_object_groups": 1}
+        ),
+    )
+    monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
+    module = _bare_gpu_module()
+
+    response = module.register_kv_cache(
+        1,
+        MagicMock(),
+        "model",
+        1,
+        MagicMock(),
+        MagicMock(),
+        [EngineGroupInfo(0, (0,)), EngineGroupInfo(1, (1,))],
+    )
+
+    assert response.succeed is True
+    assert module.tracked_instance_count() == 1
 
 
 def test_gpu_noop_register_refreshes_without_latching(monkeypatch) -> None:

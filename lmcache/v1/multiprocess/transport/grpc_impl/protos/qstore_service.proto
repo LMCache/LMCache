@@ -8,8 +8,10 @@ package lmcache.mp;
 
 import "lmcache_driven_service.proto";
 
+message RegisterQCacheResponse {}
+
 service QStoreService {
-  rpc RegisterQCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
+  rpc RegisterQCache(RegisterKvCacheRequest) returns (RegisterQCacheResponse);
   rpc UnregisterQCache(UnregisterKvCacheRequest)
       returns (UnregisterKvCacheResponse);
   rpc StoreQ(StoreRequest) returns (StoreResponse);
