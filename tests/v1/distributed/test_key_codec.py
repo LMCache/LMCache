@@ -5,7 +5,6 @@
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.key_codec import (
     decode_fs_filename,
@@ -24,15 +23,7 @@ from lmcache.v1.distributed.l2_adapters.raw_block.key_codec import (
 
 @pytest.mark.parametrize("salt", ["", "tenant"])
 def test_legacy_backend_bytes_and_recovery(salt: str) -> None:
-    key = ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=b"\xde\xad\xbe\xef",
-            model_name="org/model",
-            kv_rank=42,
-            object_group_id=3,
-            cache_salt=salt,
-        )
-    )
+    key = ObjectKey(b"\xde\xad\xbe\xef", "org/model", 42, 3, salt)
     suffix = f"@{salt}" if salt else ""
     assert encode_storage_key(key) == f"org/model@0000002a@3@deadbeef{suffix}"
     assert decode_storage_key(encode_storage_key(key)) == key

@@ -6,7 +6,6 @@ from collections.abc import Callable
 import urllib.parse
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey
 
 
@@ -38,18 +37,18 @@ def format_storage_key(
     Returns:
         The formatted storage name.
     """
-    if not key.identity.cache_salt and template.endswith("@{salt}"):
+    if not key.cache_salt and template.endswith("@{salt}"):
         template = template[:-7]
-    suffix = f"@{key.identity.cache_salt}" if key.identity.cache_salt else ""
-    chunk_hex = key.identity.chunk_hash.hex()
+    suffix = f"@{key.cache_salt}" if key.cache_salt else ""
+    chunk_hex = key.chunk_hash.hex()
     result = template.format(
-        model=key.identity.model_name.replace("/", model_separator) + model_suffix,
-        quoted_model=urllib.parse.quote(key.identity.model_name, safe=""),
-        rank=format(key.identity.kv_rank, rank_format),
-        group=f"{key.identity.object_group_id:x}",
+        model=key.model_name.replace("/", model_separator) + model_suffix,
+        quoted_model=urllib.parse.quote(key.model_name, safe=""),
+        rank=format(key.kv_rank, rank_format),
+        group=f"{key.object_group_id:x}",
         hash=chunk_hex,
         hash_prefix=chunk_hex[:4],
-        salt=key.identity.cache_salt,
+        salt=key.cache_salt,
         suffix=suffix,
     )
     return result
@@ -57,7 +56,7 @@ def format_storage_key(
 
 def storage_shard(key: ObjectKey) -> tuple[str, str]:
     """Return two directory components from the first four hash hex digits."""
-    chunk_hex = key.identity.chunk_hash.hex()
+    chunk_hex = key.chunk_hash.hex()
     return chunk_hex[:2], chunk_hex[2:4]
 
 
@@ -94,13 +93,11 @@ def decode_storage_key(
         raise ValueError("invalid ObjectKey encoding: expected 4 or 5 fields")
     model, rank, group, chunk_hash, salt = parts
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=bytes.fromhex(chunk_hash),
-            kv_rank=int(rank, 16),
-            object_group_id=int(group, 16),
-            model_name=model_decoder(model),
-            cache_salt=salt,
-        )
+        chunk_hash=bytes.fromhex(chunk_hash),
+        kv_rank=int(rank, 16),
+        object_group_id=int(group, 16),
+        model_name=model_decoder(model),
+        cache_salt=salt,
     )
 
 
