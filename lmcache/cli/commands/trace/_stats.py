@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import csv
 import json
+import math
 import statistics
 import threading
 
@@ -88,10 +89,11 @@ def _percentile(sorted_values: list[float], pct: float) -> float:
         return sorted_values[0]
     if pct >= 100:
         return sorted_values[-1]
-    # bisect_left gives the insertion index; the nearest-rank formula
-    # maps p to ceil(p/100 * N) which equals floor((p/100 * N - eps) + 1).
+    # Nearest-rank: p maps to the 1-based rank ceil(p * N / 100), so the
+    # 0-based index is ceil(p * N / 100) - 1.  Multiply before dividing
+    # so integer percentiles land exactly on a whole rank.
     n = len(sorted_values)
-    idx = max(0, min(n - 1, int((pct / 100.0) * n)))
+    idx = max(0, min(n - 1, math.ceil((pct * n) / 100.0) - 1))
     return sorted_values[idx]
 
 

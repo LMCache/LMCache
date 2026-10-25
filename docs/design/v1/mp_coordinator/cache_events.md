@@ -3,7 +3,7 @@
 Module: `lmcache/v1/mp_coordinator/cache_events.py`
 Contract vocabulary: `lmcache/v1/mp_coordinator/api.py`
 Consumer: `lmcache/v1/mp_coordinator/views/key_directory.py` (see
-[key_directory.md](key_directory.md))
+[key_directory.md](views/key_directory.md))
 
 This is the emission half of the key directory (M1 of the control-plane
 RFC, [issue #4226](https://github.com/LMCache/LMCache/issues/4226)): MP
@@ -91,6 +91,16 @@ One `CacheEventSubscriber` per MP-server process owns the buffer, the
   if a durable transport retained the failed batch; HTTP did not.
   Reusing the seqs instead would hide partial-delivery ambiguity (an
   HTTP timeout after the coordinator applied the batch).
+- **`dropped_events` says how much was lost.** A `seq` numbers a batch,
+  so a gap shows that something was lost, not how much. Every batch also
+  carries `dropped_events`: the cumulative number of entries this
+  incarnation's sink failed to deliver (a refused or undelivered Kafka
+  record, a failed HTTP post), read from `CacheEventSink.dropped_events`
+  when the batch is built. A loss is therefore reported by the next batch
+  that gets through. An HTTP request that timed out after the coordinator
+  applied it is counted too, so the number is an upper bound. The field is
+  optional on the wire (default `0`), so older emitters and trace files
+  still parse.
 - **`incarnation` = server start time** (`int(time.time())` at
   lifespan startup). A restarted server's first batch fences out the
   **L1** placements its previous incarnation reported, matching the
@@ -137,7 +147,7 @@ listener plumbing or a dedicated flush task:
   indexes tokens by the chunk hash already in every key). Only
   worker 0 reports: bindings depend on token content alone, so one
   report covers every rank's keys. Other store paths (engine-driven
-  transfer, blend pre-computed docs, experimental qstore) do not emit
+  transfer, blend pre-computed docs, the qstore plugin module) do not emit
   bindings yet — the engine-driven path can publish the same event from
   its ``commit_store`` when it needs directory tokens.
 - **`CacheEventSubscriber`** maps those events onto the directory
@@ -153,7 +163,7 @@ listener plumbing or a dedicated flush task:
   so token bindings ride the store events themselves. Tokens are
   therefore repeated per rank/group/tier placement — an accepted wire
   trade for a self-contained protocol (see
-  [key_directory.md](key_directory.md) — Token index).
+  [key_directory.md](views/key_directory.md) — Token index).
   `ACCESS` batches carry an **empty backend**: the directory only
   refreshes key-level recency and access count on access, so there is
   no placement identity to name. The vocabulary requires a non-empty

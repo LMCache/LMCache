@@ -26,7 +26,13 @@ import zmq
 # First Party
 from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -349,6 +355,10 @@ class P2PL2Adapter(L2AdapterInterface):
     # --------------------
     # Lifecycle / status
     # --------------------
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this adapter: a peer's DRAM L1."""
+        return MemoryTags(MemorySegment.DRAM, MemoryResidency.REMOTE)
 
     def close(self) -> None:
         if self._closed:

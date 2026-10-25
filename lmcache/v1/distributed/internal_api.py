@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import enum
 
 # First Party
-from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    L1BackendType,
+    MemoryLayoutDesc,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.memory_management import MemoryObj
 
@@ -27,13 +32,22 @@ L1OperationResult = tuple[L1Error, "MemoryObj | None"]
 
 @dataclass(frozen=True)
 class L1MemoryDesc:
-    """
-    Describes the L1 memory buffer registered with an external backend (e.g. Nixl).
+    """Describe the contiguous L1 memory arena exposed to external backends.
+
+    Attributes:
+        ptr: Base address of the L1 arena.
+        size: Final size of the L1 arena in bytes.
+        align_bytes: Allocation alignment within the arena.
+        stable_registration_size: Stable size of the L1 arena. For a lazy
+            allocator, this is a snapshot of the currently pinned prefix and
+            does not change as the allocator grows. ``None`` means that no
+            stable size is exposed.
     """
 
     ptr: int
     size: int
     align_bytes: int
+    stable_registration_size: int | None = None
 
 
 @dataclass(frozen=True)
@@ -337,16 +351,24 @@ class L1ManagerInterface(Protocol):
         """Describe a registerable L1 buffer, or None when there is none."""
         ...
 
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this L1's primary pool."""
+        ...
+
     def get_devdax_arena_statuses(self) -> list["DevDaxArenaStatus"]:
         """Return Device-DAX arena statuses for hot-pluggable L1s."""
         ...
 
-    def get_devdax_arena_status(self, device_path: str) -> "DevDaxArenaStatus":
-        """Return one hot-pluggable Device-DAX arena's status."""
+    def get_devdax_arena_status(
+        self, device_path: str, offset_in_bytes: int = 0
+    ) -> "DevDaxArenaStatus":
+        """Return the status of the arena at ``(device_path, offset)``."""
         ...
 
-    def owns_device(self, device_path: str) -> bool:
-        """Whether this L1 maps the physical device at ``device_path``."""
+    def owns_range(
+        self, device_path: str, offset_in_bytes: int, size_in_bytes: int
+    ) -> bool:
+        """Whether this L1 maps a range of the device overlapping the given one."""
         ...
 
     def memory_region_count(self) -> int:
@@ -354,15 +376,18 @@ class L1ManagerInterface(Protocol):
         ...
 
     def add_devdax_device(
-        self, device_path: str, size_in_bytes: int
+        self, device_path: str, size_in_bytes: int, offset_in_bytes: int = 0
     ) -> "DevDaxArenaStatus":
-        """Hot-add a Device-DAX arena."""
+        """Hot-add a Device-DAX arena mapping ``[offset, offset + size)``."""
         ...
 
     def remove_devdax_device(
-        self, device_path: str, mode: "DevDaxRemoveMode" = ...
+        self,
+        device_path: str,
+        mode: "DevDaxRemoveMode" = ...,
+        offset_in_bytes: int = 0,
     ) -> "DevDaxArenaStatus":
-        """Hot-remove a Device-DAX arena."""
+        """Hot-remove the Device-DAX arena at ``(device_path, offset)``."""
         ...
 
     def report_status(self) -> dict:
