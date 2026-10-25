@@ -85,8 +85,10 @@ existing deployments. The same key sources also protect the HTTP API.
 ZMQ clients send the credential in a dedicated, versioned frame that the
 server removes and verifies before decoding the RPC operation or payload
 frames; streaming acknowledgements and cancellations carry the same envelope.
-Enabling authentication requires clients that understand the versioned frame,
-so upgrade servers first and then clients.
+Enabling authentication requires clients that understand the versioned frame:
+old servers cannot read the new credential frame, and clients that predate it
+cannot talk to an authenticating server. Upgrade the deployment before
+enabling keys.
 
 On gRPC, a server interceptor checks Bearer metadata before protobuf request
 deserialization and handler dispatch, and a client interceptor injects it for
