@@ -26,6 +26,7 @@ from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_ke
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
+    RegisterKVCacheResponse,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
@@ -463,7 +464,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
-    ) -> None:
+    ) -> RegisterKVCacheResponse:
         """Register the KV cache tensors for a given GPU instance ID.
 
         Args:
@@ -478,7 +479,27 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 GPUCacheContext for GPU KV format detection.
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
+
+        Returns:
+            The registration result. A configuration error is returned to the
+            worker so transports that cannot propagate handler exceptions do
+            not turn it into a timeout.
         """
+        if not self._ctx.separate_object_groups and any(
+            group.recurrent_state for group in engine_group_infos
+        ):
+            error_message = (
+                "Cannot register a hybrid KV cache with recurrent-state "
+                "groups because the LMCache server was started without "
+                "--separate-object-groups. Restart the server with "
+                "--separate-object-groups and try again."
+            )
+            logger.error(error_message)
+            return RegisterKVCacheResponse(
+                succeed=False,
+                error_message=error_message,
+            )
+
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
@@ -492,7 +513,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     "Instance %d already registered; refreshing liveness",
                     instance_id,
                 )
-                return
+                return RegisterKVCacheResponse()
 
         # Build the context and layout descriptor outside the lock.
         cache_context = self._create_cache_context(
@@ -541,6 +562,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             instance_id,
             cache_context.num_layers,
         )
+        return RegisterKVCacheResponse()
 
     @request_handler()
     def unregister_kv_cache(self, instance_id: int) -> None:

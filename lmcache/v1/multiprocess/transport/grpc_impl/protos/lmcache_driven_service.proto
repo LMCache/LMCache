@@ -18,7 +18,10 @@ message RegisterKvCacheRequest {
   repeated EngineGroupInfo engine_group_infos = 7;
 }
 
-message RegisterKvCacheResponse {}
+message RegisterKvCacheResponse {
+  bool succeed = 1;
+  string error_message = 2;
+}
 
 message UnregisterKvCacheRequest {
   int64 instance_id = 1;

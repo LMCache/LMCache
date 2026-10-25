@@ -23,6 +23,7 @@ from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
+    RegisterKVCacheResponse,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
@@ -427,7 +428,8 @@ def test_mq_noop_multiple_clients():
 def test_mq_register_kv_cache():
     """
     Test MessageQueue with REGISTER_KV_CACHE request type.
-    REGISTER_KV_CACHE takes (gpu_id: int, kv_cache: KVCache) and returns None.
+    REGISTER_KV_CACHE takes (gpu_id: int, kv_cache: KVCache) and returns a
+    registration response.
     """
     # First Party
     from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
@@ -459,7 +461,7 @@ def test_mq_register_kv_cache():
             {"vllm_block_size": 16},
             [],
         ],
-        expected_response=None,
+        expected_response=RegisterKVCacheResponse(),
         num_requests=1,
     )
 

@@ -27,6 +27,7 @@ from lmcache.v1.multiprocess.custom_types import (
     GroupLayout,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
+    RegisterKVCacheResponse,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -587,7 +588,8 @@ class LMCacheDrivenTransferContext(TransferContext):
 
         Raises:
             RuntimeError: If event IPC is unsupported for the KV-cache device.
-            ValueError: If ``kv_caches`` is empty.
+            ValueError: If ``kv_caches`` is empty or the server rejects the
+                model's object-group configuration.
         """
         device = _get_kv_device(kv_caches)
         event_backend = get_event_ipc_backend(device)
@@ -604,7 +606,9 @@ class LMCacheDrivenTransferContext(TransferContext):
                 list(engine_group_infos),
             )
         )
-        future.result(timeout=mq_timeout)
+        response: RegisterKVCacheResponse = future.result(timeout=mq_timeout)
+        if not response.succeed:
+            raise ValueError(response.error_message)
         if self._is_closed():
             return
         self._device = device
