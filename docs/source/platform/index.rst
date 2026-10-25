@@ -5,6 +5,10 @@ The LMCache platform layer detects the active device backend and provides the
 device-specific operations used by LMCache. This section is the entry point for
 documentation maintained by each backend.
 
+LMCache can also be extended with additional device backends. See
+:doc:`Adding a New Device Backend
+<../developer_guide/extending_lmcache/adding_a_new_device_backend>`.
+
 Supported devices
 -----------------
 

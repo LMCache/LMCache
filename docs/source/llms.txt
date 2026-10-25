@@ -86,7 +86,6 @@ These docs describe LMCache's multiprocess (MP) architecture, the current recomm
 - [Integration](https://docs.lmcache.ai/developer_guide/integration.html): Integrate LMCache with a serving engine or framework.
 - [Extending LMCache](https://docs.lmcache.ai/developer_guide/extending_lmcache/storage_plugins.html): Write storage plugins, runtime plugins, remote storage plugins, native connectors, and new device backends.
 - [Platform](https://docs.lmcache.ai/platform/index.html): Built-in device backends and their vendor-maintained documentation.
-- [MUSA AITER Integration](https://docs.lmcache.ai/platform/devices/musa/index.html): Worked example of integrating a non-CUDA hardware backend, for Moore Threads MUSA.
 - [SERDE](https://docs.lmcache.ai/mp/serde.html): The serialization interface for compression, token dropping, and custom KV transformation.
 
 ## Community and project
