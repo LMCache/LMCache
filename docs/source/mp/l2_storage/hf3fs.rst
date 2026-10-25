@@ -155,3 +155,8 @@ variable to the mount point directory of a real 3FS storage cluster:
 
     HF3FS_MOUNT_POINT=/3fs/stage \
     pytest tests/v1/distributed/test_hf3fs_l2_adapter.py -v
+
+
+A second, faster 3FS backend -- ``raw_hf3fs`` -- connects directly to the
+3FS Storage Client RDMA interface (bypassing FUSE/usrbio entirely). It is
+documented separately in :doc:`raw_hf3fs`.
