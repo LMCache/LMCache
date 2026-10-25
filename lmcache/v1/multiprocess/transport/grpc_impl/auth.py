@@ -2,7 +2,14 @@
 """Bearer authentication interceptors for the gRPC request transport."""
 
 # Standard
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Iterator,
+    Sequence,
+)
 from dataclasses import dataclass
 from typing import Any
 
@@ -61,6 +68,27 @@ def _abort_stream_stream(
     yield  # pragma: no cover - marks this function as an iterator
 
 
+async def _abort_aio_unary(request: Any, context: grpc.aio.ServicerContext) -> Any:
+    """Reject an unauthenticated aio call without decoding its request."""
+    await context.abort(grpc.StatusCode.UNAUTHENTICATED, _AUTHENTICATION_ERROR)
+
+
+async def _abort_aio_stream(
+    request: Any, context: grpc.aio.ServicerContext
+) -> AsyncIterator[Any]:
+    """Reject an unauthenticated aio response stream before iteration."""
+    await context.abort(grpc.StatusCode.UNAUTHENTICATED, _AUTHENTICATION_ERROR)
+    return
+    yield  # pragma: no cover - marks this function as an async iterator
+
+
+def _authenticated(verifier: APIKeyVerifier, details: grpc.HandlerCallDetails) -> bool:
+    """Check gRPC metadata against the transport-neutral verifier."""
+    return not verifier.enabled or verifier.verify_token(
+        bearer_token(_authorization_metadata(details.invocation_metadata))
+    )
+
+
 class GrpcAuthenticationInterceptor(grpc.ServerInterceptor):
     """Reject invalid metadata before protobuf request deserialization."""
 
@@ -74,12 +102,7 @@ class GrpcAuthenticationInterceptor(grpc.ServerInterceptor):
     ) -> grpc.RpcMethodHandler | None:
         """Authenticate one RPC and preserve its streaming cardinality."""
         handler = continuation(handler_call_details)
-        if handler is None or not self._verifier.enabled:
-            return handler
-        authorization = _authorization_metadata(
-            handler_call_details.invocation_metadata
-        )
-        if self._verifier.verify_token(bearer_token(authorization)):
+        if handler is None or _authenticated(self._verifier, handler_call_details):
             return handler
 
         # Deliberately omit the request deserializer. gRPC therefore invokes
@@ -91,6 +114,32 @@ class GrpcAuthenticationInterceptor(grpc.ServerInterceptor):
         if handler.response_streaming:
             return grpc.unary_stream_rpc_method_handler(_abort_unary_stream)
         return grpc.unary_unary_rpc_method_handler(_abort_unary)
+
+
+class GrpcAioAuthenticationInterceptor(grpc.aio.ServerInterceptor):
+    """Authenticate aio RPCs before protobuf decoding and handler dispatch."""
+
+    def __init__(self, verifier: APIKeyVerifier) -> None:
+        self._verifier = verifier
+
+    async def intercept_service(
+        self,
+        continuation: Callable[
+            [grpc.HandlerCallDetails], Awaitable[grpc.RpcMethodHandler | None]
+        ],
+        handler_call_details: grpc.HandlerCallDetails,
+    ) -> grpc.RpcMethodHandler | None:
+        """Preserve the RPC cardinality while rejecting unauthenticated calls."""
+        handler = await continuation(handler_call_details)
+        if handler is None or _authenticated(self._verifier, handler_call_details):
+            return handler
+        if handler.request_streaming and handler.response_streaming:
+            return grpc.stream_stream_rpc_method_handler(_abort_aio_stream)
+        if handler.request_streaming:
+            return grpc.stream_unary_rpc_method_handler(_abort_aio_unary)
+        if handler.response_streaming:
+            return grpc.unary_stream_rpc_method_handler(_abort_aio_stream)
+        return grpc.unary_unary_rpc_method_handler(_abort_aio_unary)
 
 
 @dataclass(frozen=True)
