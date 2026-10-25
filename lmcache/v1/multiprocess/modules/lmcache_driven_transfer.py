@@ -446,6 +446,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         """Drain submitted transfers and callbacks before releasing GPU resources.
 
         Request handlers must have stopped submitting work before this call.
+        Synchronization errors propagate without releasing contexts or stopping
+        the dispatcher, since device work may still be outstanding.
         """
         with self._lock:
             entries = list(self._cache_contexts.values())

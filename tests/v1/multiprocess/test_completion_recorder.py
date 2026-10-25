@@ -4,6 +4,9 @@
 
 # Standard
 from unittest.mock import MagicMock
+import os
+import subprocess
+import sys
 import threading
 import time
 
@@ -182,10 +185,31 @@ class TestDeadlockRegression:
 
 
 @pytest.mark.parametrize("direction", ["h2d", "d2h"])
-def test_close_drains_pending_cuda_transfers(
+def test_close_drains_pending_cuda_transfers(direction: str) -> None:
+    """Closing with pending copies delivers native callbacks before context release."""
+    # CI enables CUDA_LAUNCH_BLOCKING. Set async mode before CUDA initializes.
+    script = """
+import runpy
+import sys
+
+namespace = runpy.run_path(sys.argv[1])
+with namespace["pytest"].MonkeyPatch.context() as monkeypatch:
+    namespace["_check_close_drains_pending_cuda_transfers"](monkeypatch, sys.argv[2])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, __file__, direction],
+        env={**os.environ, "CUDA_LAUNCH_BLOCKING": "0"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _check_close_drains_pending_cuda_transfers(
     monkeypatch: pytest.MonkeyPatch, direction: str
 ) -> None:
-    """Closing with pending copies delivers native callbacks before context release."""
+    """Exercise real asynchronous copies and native callbacks in a fresh process."""
     delay = cupy.RawKernel(
         r"""extern "C" __global__ void delay() {
             unsigned long long start, now;

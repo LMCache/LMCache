@@ -392,3 +392,49 @@ def test_close_delivers_pending_stream_callbacks(
     for context in contexts:
         context.release_imported_event.assert_called_once_with(7)
         context.close.assert_called_once_with()
+
+
+def test_close_preserves_contexts_when_stream_sync_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed stream wait must not release possibly active device resources."""
+    dispatcher = MagicMock()
+    monkeypatch.setattr(
+        lmcache_driven_transfer, "DeviceHostFuncDispatcher", lambda: dispatcher
+    )
+    contexts = [MagicMock(), MagicMock()]
+    for context in contexts:
+        context.device = torch.device("cpu")
+        context.kv_layer_groups_manager.num_object_groups = 1
+    contexts[0].stream.synchronize.side_effect = RuntimeError("stream sync failed")
+    monkeypatch.setattr(
+        lmcache_driven_transfer, "create_cache_context", MagicMock(side_effect=contexts)
+    )
+    monkeypatch.setattr(lmcache_driven_transfer, "get_layout_desc", MagicMock())
+    monkeypatch.setattr(
+        lmcache_driven_transfer,
+        "get_event_ipc_backend",
+        lambda device: _FakeEventBackend(),
+    )
+    monkeypatch.setattr(lmcache_driven_transfer, "torch_dev", MagicMock())
+    module = lmcache_driven_transfer.LMCacheDrivenTransferModule(MagicMock())
+    for instance_id in range(2):
+        module.register_kv_cache(
+            instance_id, [], "close-sync-error", 1, EngineType.VLLM, {}, []
+        )
+
+    with pytest.raises(RuntimeError, match="stream sync failed"):
+        module.close()
+
+    assert module.tracked_instance_count() == 2
+    dispatcher.stop.assert_not_called()
+    for context in contexts:
+        context.close.assert_not_called()
+
+    # The injected error is transient; this does not simulate device recovery.
+    contexts[0].stream.synchronize.side_effect = None
+    module.close()
+    assert module.tracked_instance_count() == 0
+    dispatcher.stop.assert_called_once_with()
+    for context in contexts:
+        context.close.assert_called_once_with()
