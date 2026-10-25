@@ -73,8 +73,9 @@ Commonly used flags include:
        Default is ``sync``. ``native`` needs the ``pygrpc-native``
        package.
    * - ``--api-key-file PATH``
-     - Read an API key accepted by the request transport. Repeat during key
-       rotation; supported by gRPC. See
+     - Read a key accepted by the HTTP API and gRPC request transport. Repeat
+       during rotation. With ZMQ, only HTTP is protected and startup warns
+       that ZMQ requests remain unauthenticated. See
        :doc:`/mp/request_transport`.
    * - ``--coordinator-url URL``
      - Register with an MP coordinator at this base URL (e.g.
