@@ -1236,11 +1236,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     def shutdown(self) -> None:
         """
-        Shutdown the connector. This is called when the owning process
-        (worker or scheduler) is shutting down to ensure that all the async
-        operations are completed and the connector is cleaned up properly.
+        Release resources owned by the worker or scheduler as it shuts down.
         On the scheduler side it also logs the lazy-offload counter ledger
         so the drop rate is auditable from the log.
+
+        Scheduler shutdown does not establish that remote STORE handlers have
+        stopped. It therefore does not end pending eager sessions without an
+        aggregated completion report; doing so could recreate the session race.
         """
         if hasattr(self, "worker_adapter"):
             self.worker_adapter.shutdown()
@@ -1640,6 +1642,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         Successful eager requests end their sessions only after all workers
         report finished_sending. Lazy offload retains its own receipt lifecycle.
+        A STORE returning False still reports completion. A missing worker
+        report retains the pending entry and lookup state for the connector's
+        lifetime; this path does not implement timeout or worker-loss recovery.
 
         Args:
             connector_output (KVConnectorOutput): the worker-side

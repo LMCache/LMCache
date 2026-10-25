@@ -408,16 +408,19 @@ def test_chunked_prefill_stores_and_completion(
     ids=["stop", "length"],
 )
 @pytest.mark.parametrize("store_finishes_first", [False, True], ids=["late", "early"])
+@pytest.mark.parametrize("store_succeeds", [True, False], ids=["stored", "failed"])
 def test_successful_eager_session_cannot_be_recreated_by_final_store(
     connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
     mock_io: SimpleNamespace,
     finish_status: RequestStatus,
     store_finishes_first: bool,
+    store_succeeds: bool,
 ) -> None:
     """The late STORE race from #5062 must not leave a real orphan session.
 
     Only transport/GPU I/O is stubbed. The delayed STORE handler creates a real
-    SessionManager entry before completing its real MessagingFuture.
+    SessionManager entry before completing its real MessagingFuture. A failed
+    STORE response must retire the session just like a successful response.
     """
     scheduler, worker = connectors
     request = _request()
@@ -443,14 +446,14 @@ def test_successful_eager_session_cannot_be_recreated_by_final_store(
 
         if store_finishes_first:
             sessions.get_or_create(request.request_id)
-            future.set_result(True)
+            future.set_result(store_succeeds)
             assert not any(worker.get_finished(set()))
 
         request.status = finish_status
         assert scheduler.request_finished(request, [1]) == (True, None)
         if not store_finishes_first:
             sessions.get_or_create(request.request_id)
-            future.set_result(True)
+            future.set_result(store_succeeds)
 
         sending, receiving = worker.get_finished({request.request_id})
         assert sending == {request.request_id}
@@ -471,9 +474,11 @@ def test_successful_eager_session_cannot_be_recreated_by_final_store(
 
 @pytest.mark.parametrize("kv_role", ["kv_both"])
 @pytest.mark.parametrize("lazy_offload", [False])
+@pytest.mark.parametrize("store_succeeds", [True, False], ids=["stored", "failed"])
 def test_completed_chunk_cannot_report_a_newer_pending_store_finished(
     connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
     mock_io: SimpleNamespace,
+    store_succeeds: bool,
 ) -> None:
     """An older chunk's completion cannot authorize reuse during a later STORE."""
     scheduler, worker = connectors
@@ -499,7 +504,7 @@ def test_completed_chunk_cannot_report_a_newer_pending_store_finished(
     assert scheduler.request_finished(request, [1, 2]) == (True, None)
     assert not any(worker.get_finished({request.request_id}))
     assert not final.query()
-    final.set_result(True)
+    final.set_result(store_succeeds)
     sending, receiving = worker.get_finished(set())
     assert sending == {request.request_id}
     assert not receiving
@@ -508,10 +513,12 @@ def test_completed_chunk_cannot_report_a_newer_pending_store_finished(
     assert not any(worker.get_finished({request.request_id}))
 
 
+@pytest.mark.parametrize("final_rank_reports", [True, False], ids=["all", "missing"])
 def test_successful_eager_session_waits_for_all_eight_store_reports(
     mock_io: SimpleNamespace,
+    final_rank_reports: bool,
 ) -> None:
-    """Seven ranks cannot retire a successful session; the eighth does once."""
+    """Seven ranks cannot retire a session, even at scheduler shutdown."""
     scheduler = LMCacheMPConnector(
         _config(KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")),
         KVConnectorRole.SCHEDULER,
@@ -521,7 +528,8 @@ def test_successful_eager_session_waits_for_all_eight_store_reports(
         request.status = RequestStatus.FINISHED_STOPPED
         assert scheduler.request_finished(request, []) == (True, None)
         aggregator = KVOutputAggregator(8)
-        for reporting_ranks in ({0, 1, 2, 3, 4, 5, 6}, {7}):
+        reports = [{0, 1, 2, 3, 4, 5, 6}, {7} if final_rank_reports else set()]
+        for reporting_ranks in reports:
             outputs = [
                 ModelRunnerOutput(
                     req_ids=[],
@@ -541,6 +549,10 @@ def test_successful_eager_session_waits_for_all_eight_store_reports(
             if len(reporting_ranks) == 7:
                 mock_io.scheduler.end_session.assert_not_called()
                 mock_io.scheduler.cleanup_lookup_result.assert_not_called()
+        if not final_rank_reports:
+            mock_io.scheduler.end_session.assert_not_called()
+            mock_io.scheduler.cleanup_lookup_result.assert_not_called()
+            return
         scheduler.update_connector_output(
             KVConnectorOutput(finished_sending={request.request_id})
         )
@@ -550,6 +562,9 @@ def test_successful_eager_session_waits_for_all_eight_store_reports(
         )
     finally:
         scheduler.shutdown()
+        if not final_rank_reports:
+            mock_io.scheduler.end_session.assert_not_called()
+            mock_io.scheduler.cleanup_lookup_result.assert_not_called()
 
 
 @pytest.mark.parametrize(
