@@ -11,6 +11,9 @@ for a turn's full output with ``prt_src``.
   under ``(root_correlation_id, conversation_id, turn_index)``, and every
   request's prompt ids as ``$PRT_LIVE_HISTORY_LOG_DIR/prompts/<x_request_id>.i32``
   (native-endian int32), from which PRT scores the ideal cache hit share.
+* ``format_payload`` also moves a ``system_suffix`` cache-bust marker that
+  AIPerf put at the end of the first user message (a conversation without the
+  loader's shared header) to its start, so that message is unique from token 0.
 
 Why this rendering: the server generated after
 ``<|im_start|>assistant\\n<think>\\n``, and the Step template renders an
@@ -46,6 +49,22 @@ _MAX_OUTPUTS = 50_000
 _THINK_PREFIX = "<think>\n"
 
 OutputKey = tuple[str, str, int]
+
+
+def _prt_marker_to_front(messages: list[dict[str, Any]], marker: str | None) -> None:
+    """Move a suffix marker on the first user message to its start, in place.
+
+    Without a system message AIPerf's ``system_suffix`` falls back to the end
+    of the first user message; recycled plays of one trace would then share
+    that whole message. ``first_turn_prefix`` puts the same id in front.
+    """
+    if not marker or not messages or messages[0].get("role") != "user":
+        return
+    content = messages[0].get("content")
+    if isinstance(content, str) and content.endswith(marker):
+        body = content[: -len(marker)]
+        # Copy: the message aliases the session's raw_messages.
+        messages[0] = {**messages[0], "content": f"{marker.strip()}\n\n{body}"}
 
 
 class LiveHistoryChatEndpoint(ChatEndpoint):
@@ -105,6 +124,7 @@ class LiveHistoryChatEndpoint(ChatEndpoint):
                 messages.append({k: v for k, v in msg.items() if k != SRC_KEY})
             else:
                 messages.append({"role": "assistant", "reasoning": "", "content": text})
+        _prt_marker_to_front(messages, request_info.cache_bust_marker)
         payload["messages"] = messages
         payload["return_token_ids"] = True
         return payload

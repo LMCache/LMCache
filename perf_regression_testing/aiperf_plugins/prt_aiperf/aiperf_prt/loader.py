@@ -80,6 +80,8 @@ SHARED_HEADER_TOKENS = 32640
 # Per-trace ids are below _MODEL_ID_STRIDE, and model offsets below _SHARED_ID_BASE.
 _MODEL_ID_STRIDE = 1 << 32
 _SHARED_ID_BASE = 1 << 40
+# Shared id = _SHARED_ID_BASE + model * _SHARED_MODEL_STRIDE + block position.
+_SHARED_MODEL_STRIDE = 1 << 16
 
 
 def _cut_layout(layout: Layout, blocks: int) -> Layout:
@@ -123,33 +125,41 @@ def _split_by_model(trace: WekaTrace) -> None:
         req.hash_ids = [h + offset for h in req.hash_ids]
 
 
-def _share_header(trace: WekaTrace) -> int:
+def _share_header(trace: WekaTrace, models: dict[str, int]) -> int:
     """Map a trace's session headers onto the shared id range, in place.
 
     A chain is the top-level requests with the same first hash id; one of two
     or more requests is a session (a lone one is a one-shot call such as title
     generation). Its header is the prefix all of its requests keep, cut to
     ``SHARED_HEADER_TOKENS``. Every occurrence of a header id in the trace,
-    subagents included, is renamed.
+    subagents included, is renamed. The shared id holds the chain's model, so
+    a session shares its header only with sessions on the same model.
+
+    Runs after AIPerf has split the trace into conversations: the shared ids
+    would otherwise give unrelated chains of one trace a common prefix and
+    change that split.
 
     Args:
         trace: A parsed trace.
+        models: Model name to index, the same for every trace.
 
     Returns:
         The longest header, in blocks; 0 if the trace has no session.
     """
     cap = SHARED_HEADER_TOKENS // trace.block_size
-    chains: dict[int, list[list[int]]] = defaultdict(list)
+    chains: dict[int, list[Any]] = defaultdict(list)
     for req in trace.requests:
         if req.type != "subagent" and req.hash_ids:
-            chains[req.hash_ids[0]].append(req.hash_ids)
+            chains[req.hash_ids[0]].append(req)
     rename: dict[int, int] = {}
     longest = 0
     for chain in chains.values():
         if len(chain) < 2:
             continue
-        n = min(cap, *(longest_common_prefix(chain[0], h) for h in chain))
-        rename.update({h: _SHARED_ID_BASE + i for i, h in enumerate(chain[0][:n])})
+        first = chain[0].hash_ids
+        n = min(cap, *(longest_common_prefix(first, r.hash_ids) for r in chain))
+        base = _SHARED_ID_BASE + models[chain[0].model] * _SHARED_MODEL_STRIDE
+        rename.update({h: base + i for i, h in enumerate(first[:n])})
         longest = max(longest, n)
     for req in _walk_requests(trace.requests):
         req.hash_ids = [rename.get(h, h) for h in req.hash_ids]
@@ -478,13 +488,6 @@ class PrtWekaTraceLoader(WekaTraceLoader):
         self._shared_blocks: dict[int, list[int]] = {}
         for traces in data.values():
             _split_by_model(traces[0])
-        shared = [_share_header(traces[0]) for traces in data.values()]
-        _logger.info(
-            "prt: shared header %d to %d blocks over %d traces",
-            min(shared),
-            max(shared),
-            len(shared),
-        )
         bound = type(
             "BoundPrtReconstructor",
             (PrtReconstructor,),
@@ -501,8 +504,20 @@ class PrtWekaTraceLoader(WekaTraceLoader):
         return conversations
 
     def _build_reconstruction_plans(self, data: dict[str, list[Any]]) -> Any:
-        """Build plans as the base loader, recording each chain's turn-0 layout."""
+        """Build plans as the base loader, then share headers and record layouts.
+
+        The plans hold the parsed requests, so the header rename reaches them.
+        """
         plans = super()._build_reconstruction_plans(data)
+        names = {r.model for t in data.values() for r in _walk_requests(t[0].requests)}
+        models = {name: i for i, name in enumerate(sorted(names))}
+        shared = [_share_header(traces[0], models) for traces in data.values()]
+        _logger.info(
+            "prt: shared header %d to %d blocks over %d traces",
+            min(shared),
+            max(shared),
+            len(shared),
+        )
         flats_by_trace: dict[str, list[Any]] = defaultdict(list)
         for fp in plans.flat_plans:
             flats_by_trace[fp.parent_trace_id].append(fp)
