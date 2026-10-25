@@ -333,10 +333,9 @@ class PrtReconstructor(ConversationReconstructor):
     def _split_header(self, hash_ids: list[int]) -> None:
         """Send a leading run of shared blocks as a system message of its own.
 
-        Only a first user segment longer than the run is split. One built in an
-        earlier turn was split then, and one no longer than the run stays whole
-        so the turn still ends with a user message (the cache-bust marker then
-        follows that message).
+        Only a first user segment is split, once: one built in an earlier turn
+        was split then. Its last block stays in the user message when the run
+        covers it all, so the turn still ends with a user message.
 
         Args:
             hash_ids: This turn's hash ids.
@@ -347,7 +346,8 @@ class PrtReconstructor(ConversationReconstructor):
         if n == 0 or not self._segments:
             return
         first = self._segments[0]
-        if first.role != "user" or first.block_count <= n:
+        n = min(n, first.block_count - 1)
+        if first.role != "user" or n == 0:
             return
         cut = n * self.block_size
         head, rest = first.tokens[:cut], first.tokens[cut:]
@@ -507,6 +507,12 @@ class PrtWekaTraceLoader(WekaTraceLoader):
         """Build plans as the base loader, then share headers and record layouts.
 
         The plans hold the parsed requests, so the header rename reaches them.
+
+        Args:
+            data: Parsed traces by trace id, as the base loader takes them.
+
+        Returns:
+            The base loader's plans.
         """
         plans = super()._build_reconstruction_plans(data)
         names = {r.model for t in data.values() for r in _walk_requests(t[0].requests)}
