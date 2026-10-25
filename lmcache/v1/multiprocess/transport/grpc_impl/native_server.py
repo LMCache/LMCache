@@ -243,7 +243,10 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
             streams = list(self._streams.values())
             self._streams.clear()
         for stream in streams:
-            stream.close()
+            try:
+                stream.close()
+            except Exception:
+                logger.exception("Error closing a gRPC stream on shutdown")
         self._ext_server.stop(grace=None)
 
     def _release_threads(self, wait: bool) -> None:

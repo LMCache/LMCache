@@ -722,6 +722,44 @@ def test_failing_stream_close_callback_does_not_stop_the_server() -> None:
         server.close()
 
 
+def test_close_survives_a_failing_stream_close_callback() -> None:
+    """close() still closes the other streams and the pools if one raises."""
+    made: list[MessagingStream[KVEventBatch]] = []
+    closed = threading.Event()
+
+    def broken_close() -> None:
+        raise RuntimeError("close failed")
+
+    def read(stop: threading.Event) -> KVEventBatch:
+        stop.wait()
+        raise StopIteration
+
+    def make() -> MessagingStream[KVEventBatch]:
+        if made:
+            made.append(_idle_stream(closed))
+        else:
+            made.append(MessagingStream(read, broken_close))
+        return made[-1]
+
+    server = cast(GrpcNativeMultiprocessServer, _serve([_stream_module(make)]))
+    client = _client(server)
+    streams = [client.subscribe_kv_events(i, "model", 0, 8) for i in (1, 2)]
+    try:
+        deadline = time.monotonic() + 5
+        while len(server._streams) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(server._streams) == 2
+        server.close()
+        assert closed.is_set()
+        with pytest.raises(RuntimeError):
+            server._normal_pool.submit(lambda: None)
+    finally:
+        for stream in streams:
+            stream.close()
+        client.close()
+        server.close()
+
+
 def test_non_blocking_handlers_are_unimplemented() -> None:
     """NON_BLOCKING handlers are rejected, as on the sync and aio servers."""
 
