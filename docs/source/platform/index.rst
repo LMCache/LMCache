@@ -22,6 +22,7 @@ LMCache currently includes the following built-in device backends:
 - :doc:`CPU <devices/cpu/index>`
 - :doc:`CUDA <devices/cuda/index>`
 - :doc:`HPU <devices/hpu/index>`
+- :doc:`MLU <devices/mlu/index>`
 - :doc:`MUSA <devices/musa/index>`
 - :doc:`Neuron <devices/neuron/index>`
 - :doc:`NPU <devices/npu/index>`
@@ -82,6 +83,7 @@ and package a plugin.
    devices/cpu/index
    devices/cuda/index
    devices/hpu/index
+   devices/mlu/index
    devices/musa/index
    devices/neuron/index
    devices/npu/index
