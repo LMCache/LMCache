@@ -546,6 +546,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             shard_replication_desc=_fold_shard_replication_desc(
                 kv_groups_manager.object_groups, engine_group_infos
             ),
+            total_num_kv_heads=layout_hints.get("total_num_kv_heads"),
         )
 
         with self._lock:

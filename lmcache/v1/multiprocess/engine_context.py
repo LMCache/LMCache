@@ -49,6 +49,9 @@ class _LayoutDescEntry:
     shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC
     """How each object group is spread over the kv ranks; the default stores
     every group per rank."""
+    total_num_kv_heads: int | None = None
+    """KV heads of the whole model, or ``None`` when the engine did not
+    report it (MLA, or engines without the hint)."""
 
 
 def finish_lookup_read(
@@ -103,6 +106,7 @@ class LayoutDescRegistry:
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
         shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
+        total_num_kv_heads: int | None = None,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -122,6 +126,8 @@ class LayoutDescRegistry:
             shard_replication_desc: How each object group is spread over the kv ranks.
                 Empty (the default) stores every group per rank; otherwise it
                 describes every object group of ``attn_desc``.
+            total_num_kv_heads: KV heads of the whole model, used to map
+                heads across TP sizes; ``None`` if unknown.
 
         Raises:
             ValueError: If ``shard_replication_desc`` describes a different number of
@@ -151,6 +157,7 @@ class LayoutDescRegistry:
                     attn_desc=attn_desc,
                     group_layout_descs=group_layout_descs,
                     shard_replication_desc=shard_replication_desc,
+                    total_num_kv_heads=total_num_kv_heads,
                 )
                 return
 
@@ -158,6 +165,7 @@ class LayoutDescRegistry:
             entry.attn_desc = attn_desc
             entry.group_layout_descs = group_layout_descs
             entry.shard_replication_desc = shard_replication_desc
+            entry.total_num_kv_heads = total_num_kv_heads
             entry.ref_count += 1
 
     def unregister(self, model_name: str, world_size: int) -> None:
@@ -207,6 +215,23 @@ class LayoutDescRegistry:
             if entry is None:
                 return None
             return entry.group_layout_descs
+
+    def find_total_num_kv_heads(self, model_name: str, world_size: int) -> int | None:
+        """Look up the model-wide KV head count registered for a pair.
+
+        Args:
+            model_name: The model name.
+            world_size: The world size.
+
+        Returns:
+            The head count, or ``None`` if the pair is unregistered or the
+            engine did not report it.
+        """
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None:
+                return None
+            return entry.total_num_kv_heads
 
     def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
         """Look up the attention-window descriptor for a pair.
