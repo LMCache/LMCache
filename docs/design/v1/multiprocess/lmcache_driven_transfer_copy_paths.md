@@ -24,7 +24,7 @@ staging copy's line rate, so the kernel dominates the transfer.
 | GPU resources | temp buffer (4 slots), SMs | copy engine only |
 | CPU cost | ~1 launch + 1 copy per chunk | ~0.6 us per (kv, layer, block) entry |
 | Layouts | all `EngineKVFormat`s | token-major, contiguous block: formats 0, 1, 2, 3, 4, 5, 9, 11, 13 |
-| Requirements | any CUDA / HIP | CUDA runtime and driver >= 12.8, or ROCm/HIP >= 7.15 (opt-in) |
+| Requirements | any CUDA / HIP | device-addressable registered host memory, and CUDA runtime and driver >= 12.8 or ROCm/HIP >= 7.15 (opt-in) |
 
 On ROCm the direct path is **opt-in**: it is built when HIP >= 7.15 but stays
 disabled at runtime unless `LMCACHE_ROCM_ENABLE_BATCH_MEMCPY` is set to a
@@ -44,7 +44,10 @@ after `tests/v1/multiprocess/test_direct_copy_transfer_gpu.py` and
 `test_direct_copy_planner_gpu.py` pass, set `LMCACHE_ROCM_FORCE_BATCH_MEMCPY`
 to a non-zero value (together with `LMCACHE_ROCM_ENABLE_BATCH_MEMCPY`) to skip
 the attribute check.
-CUDA behaviour is unchanged (gated purely on the 12.8 runtime/driver check).
+On CUDA the probe requires the 12.8 runtime and driver and
+`cudaDevAttrCanUseHostPointerForRegisteredMem == 1`, for the same reason: where
+the attribute is `0` (observed on WSL2) the batched copy faults with an illegal
+memory access, so the connector uses the staging kernel there.
 
 Every eligible format is affine in (kv plane, layer, block):
 `address = base(kv, layer) + kv * kv_stride + layer * layer_stride +

@@ -937,7 +937,26 @@ bool batch_memcpy_supported() {
     }
     return can_use_host_ptr != 0;
   #else
-    return runtime >= 12080 && driver >= 12080;
+    if (runtime < 12080 || driver < 12080) {
+      return false;
+    }
+    // Same requirement as on ROCm above: cudaMemcpyBatchAsync's copy engine
+    // dereferences the cudaHostRegister'd host operand directly, so the pinned
+    // host pool must be device-addressable at its host VA. Where
+    // cudaDevAttrCanUseHostPointerForRegisteredMem == 0 (observed on WSL2) the
+    // batched D2H/H2D copy faults asynchronously with an illegal memory
+    // access, so the connector must use the staging kernel instead.
+    int device = 0;
+    if (cudaGetDevice(&device) != cudaSuccess) {
+      return false;
+    }
+    int can_use_host_ptr = 0;
+    if (cudaDeviceGetAttribute(&can_use_host_ptr,
+                               cudaDevAttrCanUseHostPointerForRegisteredMem,
+                               device) != cudaSuccess) {
+      return false;
+    }
+    return can_use_host_ptr != 0;
   #endif
   }();
   return supported;
