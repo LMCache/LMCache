@@ -29,6 +29,10 @@ them (turn 0, or a reset such as the turn after a title-generation preamble)
 sends them as a system message, so ``cache-bust = "system_suffix"`` diverges
 right after them.
 
+Models. Each model a trace records gets its own hash id range, so a request
+recorded on another model shares no prefix with the main model's requests
+(another model's KV is not reusable) but keeps reuse within its own session.
+
 The reconstructor subclass is swapped into ``weka_synth_buf`` only during
 :meth:`PrtWekaTraceLoader.convert_to_conversations` (0.13.0 has no hook).
 Parallel workers never see the swap, so the loader always takes the serial
@@ -73,7 +77,8 @@ _TURN0_SEED_SUFFIX = ":turn_0:partial_tail"
 # the median is 41k). Which blocks users share is not in a local-scope trace, so
 # this is an upper bound on the prefix common to all users.
 SHARED_HEADER_TOKENS = 32640
-# Above any per-trace hash id.
+# Per-trace ids are below _MODEL_ID_STRIDE, and model offsets below _SHARED_ID_BASE.
+_MODEL_ID_STRIDE = 1 << 32
 _SHARED_ID_BASE = 1 << 40
 
 
@@ -99,6 +104,23 @@ def _walk_requests(requests: list[Any]) -> list[Any]:
         else:
             out.append(req)
     return out
+
+
+def _split_by_model(trace: WekaTrace) -> None:
+    """Give each model of a trace its own hash id range, in place.
+
+    A request recorded on another model would be served on that model's nodes,
+    whose KV the main model cannot reuse; every request here goes to the one
+    served model. Its blocks therefore match no other model's, while a
+    session's own turns on one model still reuse each other, as a new trace.
+
+    Args:
+        trace: A parsed trace.
+    """
+    index: dict[str, int] = {}
+    for req in _walk_requests(trace.requests):
+        offset = index.setdefault(req.model, len(index)) * _MODEL_ID_STRIDE
+        req.hash_ids = [h + offset for h in req.hash_ids]
 
 
 def _share_header(trace: WekaTrace) -> int:
@@ -454,6 +476,8 @@ class PrtWekaTraceLoader(WekaTraceLoader):
         """
         self._turn0_layouts: dict[str, Layout] = {}
         self._shared_blocks: dict[int, list[int]] = {}
+        for traces in data.values():
+            _split_by_model(traces[0])
         shared = [_share_header(traces[0]) for traces in data.values()]
         _logger.info(
             "prt: shared header %d to %d blocks over %d traces",
