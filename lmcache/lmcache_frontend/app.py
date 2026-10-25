@@ -672,7 +672,8 @@ async def proxy_request(
     registered in :data:`_node_registry`; this prevents the endpoint
     from being used as an open relay (SSRF).  Socket paths are
     accepted as-is because they are local UDS endpoints. When frontend
-    authentication is enabled, the caller's credential is removed and an
+    authentication or a backend credential is configured, both supported
+    caller credential headers are removed and an
     independently configured backend credential is added instead.
     """
     target_port_or_socket = unquote(str(target_port_or_socket))
@@ -704,7 +705,7 @@ async def proxy_request(
     backend_authorization_header = request.app.state.backend_authorization_header
     headers = {}
     for key, value in request.headers.items():
-        if key.lower() == "authorization" and (
+        if key.lower() in ("authorization", "x-lmcache-api-key") and (
             request.app.state.http_authentication.enabled
             or backend_authorization_header is not None
         ):

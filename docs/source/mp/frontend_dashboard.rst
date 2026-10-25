@@ -204,11 +204,14 @@ dashboard's **Frontend API key** field. The browser keeps it in
 written to the URL. ``/`` and ``/static/`` remain public so the browser can
 load the login controls. ``/health`` remains public for probes and ``/metrics``
 remains public for Prometheus scraping; other data and management endpoints
-require a valid key.
+require a valid key. API callers can use ``Authorization: Bearer <key>`` or
+``X-LMCache-API-Key: <key>`` through the shared HTTP authentication adapter.
 
 The backend key is independent: the dashboard replaces the browser's
 ``Authorization`` value with this key when it proxies to an authenticated
-LMCache server. Prefer distinct high-entropy keys for the dashboard and the
+LMCache server. Both caller credential headers are removed when frontend
+authentication or a backend key is configured. Prefer distinct high-entropy keys
+for the dashboard and the
 server. API keys do not encrypt traffic; terminate TLS at a trusted reverse
 proxy when traffic crosses an untrusted network.
 

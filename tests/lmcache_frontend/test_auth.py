@@ -75,17 +75,20 @@ def test_metrics_remain_public_with_authenticated_backend(
     assert "cache_hits 7" in response.text
 
 
-def test_frontend_api_accepts_configured_key() -> None:
+@pytest.mark.parametrize(
+    "headers",
+    [{"Authorization": "Bearer secret"}, {"X-LMCache-API-Key": "secret"}],
+)
+def test_frontend_api_accepts_configured_key(headers: dict[str, str]) -> None:
     """A configured frontend token reaches the requested API handler."""
     with TestClient(frontend.create_app(APIKeyVerifier(["secret"]))) as client:
-        response = client.get(
-            "/api/proxies", headers={"Authorization": "Bearer secret"}
-        )
+        response = client.get("/api/proxies", headers=headers)
 
     assert response.status_code == 200
     assert response.json() == {"proxies": []}
 
 
+@pytest.mark.parametrize("include_custom_header", [False, True])
 @pytest.mark.parametrize(
     ("frontend_keys", "backend_authorization", "expected_authorization"),
     [
@@ -100,12 +103,20 @@ def test_proxy_does_not_forward_frontend_key(
     frontend_keys: list[str],
     backend_authorization: str | None,
     expected_authorization: list[str],
+    include_custom_header: bool,
 ) -> None:
     """Backend credentials replace caller headers even when inbound auth is off."""
     captured_headers: list[str] = []
 
     def backend(request: httpx.Request) -> httpx.Response:
         captured_headers.extend(request.headers.get_list("authorization"))
+        assert request.headers.get("x-lmcache-api-key") == (
+            "frontend-secret"
+            if include_custom_header
+            and not frontend_keys
+            and backend_authorization is None
+            else None
+        )
         return httpx.Response(200, content=b"ok")
 
     async_client = httpx.AsyncClient
@@ -121,9 +132,12 @@ def test_proxy_does_not_forward_frontend_key(
     )
 
     with TestClient(app) as client:
+        headers = {"Authorization": "Bearer frontend-secret"}
+        if include_custom_header:
+            headers["X-LMCache-API-Key"] = "frontend-secret"
         response = client.get(
             "/proxy2/node/status",
-            headers={"Authorization": "Bearer frontend-secret"},
+            headers=headers,
         )
 
     assert response.status_code == 200
