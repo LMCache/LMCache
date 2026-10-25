@@ -2,6 +2,7 @@
 # Standard
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 import subprocess
 
 # Third Party
@@ -18,9 +19,11 @@ def test_busy_gpus_make_the_run_invalid(
     monkeypatch.setattr(run, "pick_gpus", lambda count, wait_s: None)
     spec = resolve(load(), "agentic", "vllm_native")
     code = run.run(spec, tmp_path / "r", "img", "aiperf")
-    summary = (tmp_path / "r" / "summary.json").read_text()
+    summary = json.loads((tmp_path / "r" / "summary.json").read_text())
     assert code == run.EXIT_GPU_BUSY
-    assert "busy" in summary
+    assert "busy" in summary["invalid"][0]
+    # The results page draws one line per model and load.
+    assert summary["concurrency"] == spec.aiperf_args["concurrency"] == 340
 
 
 def _fake_smi(

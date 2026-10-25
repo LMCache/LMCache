@@ -491,6 +491,7 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
         "workload": spec.workload,
         "deployment": spec.deployment,
         "model": spec.served_name,
+        "concurrency": spec.aiperf_args["concurrency"],
         "invalid": [],
     }
 
