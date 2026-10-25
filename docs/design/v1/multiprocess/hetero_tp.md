@@ -91,10 +91,14 @@ Stages advance inside `query_prefetch_status` / `wait_prefetch_status`. The
 reshard runs on `LookupModule`'s own thread pool (4 threads), not on the
 request handler's thread, because its copy grows with the hit:
 `query_prefetch_status` returns None while it runs, and `wait_prefetch_status`
-waits for it, with `timeout` covering every stage. Each reshard logs its cost:
+waits for it, with `timeout` covering every stage. A reshard whose
+destination keys another running reshard is writing waits for that one and
+writes only the rest; otherwise it would find the keys reserved and the
+second lookup of a prefix would miss. Each reshard logs its cost (Qwen3-0.6B,
+2048 tokens, measured):
 
 ```
-Resharded 8 chunks (28.0 MiB) from TP1 to TP2 for request <id> in 12.34 ms (queued 0.05 ms)
+Resharded 8 chunks from TP1 to TP2 for request <id>: wrote 224.0 MiB in 38.36 ms (queued 0.20 ms, waited 0.00 ms on 0 other reshards)
 ```
 
 `free_lookup_locks` consumes without advancing. A source-stage result has its

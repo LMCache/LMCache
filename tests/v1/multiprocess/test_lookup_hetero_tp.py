@@ -539,3 +539,42 @@ def test_final_stage_failure_resolves_as_miss(
     assert module.wait_prefetch_status("req", TIMEOUT) == 0
     assert module.query_prefetch_status("req") == 0
     assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
+
+
+def test_concurrent_lookups_of_one_prefix_both_hit(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second lookup of a prefix being resharded waits for it and hits too."""
+    module = make_module(2, 1, [2])
+    _store(mp_ctx, 2, 2)
+    sm = mp_ctx.storage_manager
+    # Hold the first reshard after it reserved its destination objects, the
+    # point where a second reshard of the same keys finds them taken.
+    entered, release = threading.Event(), threading.Event()
+    prepare = sm.prepare_write_completion
+
+    def gated(reserved: dict) -> object:
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(TIMEOUT)
+        return prepare(reserved)
+
+    monkeypatch.setattr(sm, "prepare_write_completion", gated)
+
+    module.lookup(_lookup_key(1, "first"), 1)
+    deadline = time.monotonic() + TIMEOUT
+    while not entered.is_set():
+        assert time.monotonic() < deadline, "first reshard never started"
+        assert module.query_prefetch_status("first") is None
+        time.sleep(0.005)
+    module.lookup(_lookup_key(1, "second"), 1)
+    for _ in range(20):
+        assert module.query_prefetch_status("second") is None
+        time.sleep(0.005)
+
+    release.set()
+    assert _poll(module, "first") == NUM_CHUNKS
+    assert _poll(module, "second") == NUM_CHUNKS
+    _assert_holds(mp_ctx, _keys(mp_ctx, 1), 2, 1)

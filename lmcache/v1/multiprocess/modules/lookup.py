@@ -243,6 +243,11 @@ class LookupModule(DiscoverableModule):
         self._reshard_executor = ThreadPoolExecutor(
             max_workers=_RESHARD_WORKERS, thread_name_prefix="hetero-tp-reshard"
         )
+        # Destination keys each running reshard writes. A later reshard of
+        # the same keys waits for it instead of finding them reserved and
+        # reporting a miss.
+        self._reshard_writers: dict[ObjectKey, Future[bool]] = {}
+        self._reshard_writers_lock = threading.Lock()
         self._setup_metrics()
 
     @property
@@ -1014,10 +1019,7 @@ class LookupModule(DiscoverableModule):
             return None
         if found > 0 and advance:
             state.source_result = result
-            # Off the request thread: the copy is proportional to the hit.
-            state.reshard = self._reshard_executor.submit(
-                self._reshard_and_finalize, job, state, found, time.monotonic()
-            )
+            self._submit_reshard(job, state, found)
             return None
         if found > 0:
             self._ctx.storage_manager.finish_read_prefetched(
@@ -1031,11 +1033,63 @@ class LookupModule(DiscoverableModule):
         job.hetero = None
         return ()
 
+    def _submit_reshard(
+        self, job: _PrefetchJob, state: _HeteroTPState, found: int
+    ) -> None:
+        """Start the background reshard of a source-stage hit.
+
+        Off the request thread because the copy grows with the hit. The
+        reshard first waits for running reshards that write any of its
+        destination keys; those were registered earlier, so waits never form
+        a cycle.
+
+        Args:
+            job: The lookup's job.
+            state: ``job.hetero``, in a source stage with ``source_result``.
+            found: Leading chunks the source stage hit.
+        """
+        dst_keys = [
+            k
+            for group in ipc_key_to_object_keys(
+                state.key,
+                state.suffix_hashes[:found],
+                list(range(job.attn_desc.num_object_groups)),
+            )
+            for k in group
+        ]
+        with self._reshard_writers_lock:
+            writers = {
+                self._reshard_writers[k] for k in dst_keys if k in self._reshard_writers
+            }
+            reshard = self._reshard_executor.submit(
+                self._reshard_and_finalize,
+                job,
+                state,
+                found,
+                writers,
+                time.monotonic(),
+            )
+            mine = [k for k in dst_keys if k not in self._reshard_writers]
+            for k in mine:
+                self._reshard_writers[k] = reshard
+        state.reshard = reshard
+        reshard.add_done_callback(partial(self._drop_reshard_writer, mine))
+
+    def _drop_reshard_writer(
+        self, keys: list[ObjectKey], reshard: Future[bool]
+    ) -> None:
+        """Unregister ``reshard`` as the writer of ``keys`` once it is done."""
+        with self._reshard_writers_lock:
+            for k in keys:
+                if self._reshard_writers.get(k) is reshard:
+                    del self._reshard_writers[k]
+
     def _reshard_and_finalize(
         self,
         job: _PrefetchJob,
         state: _HeteroTPState,
         found: int,
+        writers: set[Future[bool]],
         queued_at: float,
     ) -> bool:
         """Reshard a source-stage hit, then submit the final L1-only stage.
@@ -1047,11 +1101,15 @@ class LookupModule(DiscoverableModule):
             job: The lookup's job.
             state: ``job.hetero``, in a source stage with ``source_result``.
             found: Leading chunks the source stage hit.
+            writers: Running reshards that write some of the same destination
+                keys; this one waits for them, then writes only the rest.
             queued_at: ``time.monotonic()`` when the reshard was submitted.
 
         Returns:
             Whether the final stage was submitted and swapped into ``job``.
         """
+        dequeued = time.monotonic()
+        wait_futures(writers)
         started = time.monotonic()
         try:
             nbytes = self._reshard_into_l1(
@@ -1061,15 +1119,18 @@ class LookupModule(DiscoverableModule):
                 cast(PrefetchResult, state.source_result).l1_owners,
             )
             logger.info(
-                "Resharded %d chunks (%.1f MiB) from TP%d to TP%d for request "
-                "%s in %.2f ms (queued %.2f ms)",
+                "Resharded %d chunks from TP%d to TP%d for request %s: wrote "
+                "%.1f MiB in %.2f ms (queued %.2f ms, waited %.2f ms on %d "
+                "other reshards)",
                 found,
-                nbytes / (1 << 20),
                 state.source_world_size,
                 state.key.world_size,
                 job.request_id,
+                nbytes / (1 << 20),
                 (time.monotonic() - started) * 1e3,
-                (started - queued_at) * 1e3,
+                (dequeued - queued_at) * 1e3,
+                (started - dequeued) * 1e3,
+                len(writers),
             )
         except Exception:
             logger.exception("Cross-TP reshard failed for request %s", job.request_id)
