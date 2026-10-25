@@ -29,10 +29,17 @@ class LookupRequestMsg(AsyncLookupMsg):
 
 
 class LookupResponseMsg(AsyncLookupMsg):
-    """Async lookup response message from worker to scheduler"""
+    """Async lookup response message from worker to scheduler.
+
+    An empty ``kind`` is the legacy single response: the tokens are already
+    in host memory. ``kind="lookup"`` is only the metadata hit length.
+    ``kind="reading"`` means host GET has started and carries no length.
+    ``kind="preloaded"`` means the body is in host memory.
+    """
 
     lookup_id: str
     num_hit_tokens: int
+    kind: str = ""
 
     def describe(self) -> str:
         return (

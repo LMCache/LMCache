@@ -1408,6 +1408,10 @@ class LMCacheEngine:
         has finished its prefetch tasks.
         """
         try:
+            storage = self.storage_manager
+            abort = getattr(storage, "abort_tier_load", None) if storage else None
+            if callable(abort) and abort(lookup_id):
+                return
             # Get the completed future from event_manager
             if (
                 self.event_manager.get_event_status(EventType.LOADING, lookup_id)
