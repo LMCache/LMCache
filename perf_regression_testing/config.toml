@@ -30,8 +30,10 @@ min_docker_free_gb = 10
 repo = "arcee-ai/Trinity-Large-Thinking-FP8-Block"
 revision = "6412c1ad1588c664977b0f830b80a20273173318"
 served_name = "trinity-large-thinking"
-# A first guess from its KV capacity; the knee is still to be measured.
-aiperf_args = { concurrency = 220 }
+# 220 left LMCache 18% of prompt tokens (build 45; Step-3.7 had 47%): its 18.5M
+# token GPU cache holds most sessions. Scaled by KV capacity; the knee is still
+# to be measured. The trace has 393 sessions.
+aiperf_args = { concurrency = 340 }
 
 [models.trinity.vllm_args]
 # Matches LMCache's chunk-size; at the default 0 MooncakeStoreConnector never
