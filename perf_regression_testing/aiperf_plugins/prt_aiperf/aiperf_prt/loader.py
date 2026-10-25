@@ -19,6 +19,16 @@ the real output when it has it. Tagged at dataset build time:
 * Assistant segments copied into a child's turn 0 by the role tiling are
   matched by content within the trace and get the provider's tag.
 
+Shared header. ``hash_id_scope: "local"`` numbers blocks per trace, so no two
+traces share a block and the server sees no cross-user reuse. Real users share
+the system prompt and tool definitions. This loader maps the first
+``min(SHARED_HEADER_TOKENS / block_size, L)`` blocks of each session, where ``L``
+is the prefix every request of the session keeps, onto one global id
+range whose content is the same in every trace. A context that starts with
+them (turn 0, or a reset such as the turn after a title-generation preamble)
+sends them as a system message, so ``cache-bust = "system_suffix"`` diverges
+right after them.
+
 The reconstructor subclass is swapped into ``weka_synth_buf`` only during
 :meth:`PrtWekaTraceLoader.convert_to_conversations` (0.13.0 has no hook).
 Parallel workers never see the swap, so the loader always takes the serial
@@ -31,6 +41,7 @@ from __future__ import annotations
 # Standard
 from collections import defaultdict
 from typing import Any
+import hashlib
 import math
 
 # Third Party
@@ -47,6 +58,7 @@ from aiperf.dataset.loader.weka_trace import (
     WekaTraceLoader,
     _child_plans_for_active_subagents,
 )
+from aiperf.dataset.loader.weka_trace_models import WekaTrace
 
 _logger = AIPerfLogger(__name__)
 
@@ -56,6 +68,13 @@ SRC_KEY = "prt_src"
 # Every built-in call site seeds with f"{session_id}:turn_{k}:partial_tail".
 _SEED_TURN = ":turn_"
 _TURN0_SEED_SUFFIX = ":turn_0:partial_tail"
+
+# The shortest prefix a session keeps across /compact in the trace (31dd54e6;
+# the median is 41k). Which blocks users share is not in a local-scope trace, so
+# this is an upper bound on the prefix common to all users.
+SHARED_HEADER_TOKENS = 32640
+# Above any per-trace hash id.
+_SHARED_ID_BASE = 1 << 40
 
 
 def _cut_layout(layout: Layout, blocks: int) -> Layout:
@@ -69,6 +88,50 @@ def _cut_layout(layout: Layout, blocks: int) -> Layout:
         if blocks == 0:
             break
     return out
+
+
+def _walk_requests(requests: list[Any]) -> list[Any]:
+    """Return every request with hash ids, descending into subagent entries."""
+    out = []
+    for req in requests:
+        if req.type == "subagent":
+            out += _walk_requests(req.requests)
+        else:
+            out.append(req)
+    return out
+
+
+def _share_header(trace: WekaTrace) -> int:
+    """Map a trace's session headers onto the shared id range, in place.
+
+    A chain is the top-level requests with the same first hash id; one of two
+    or more requests is a session (a lone one is a one-shot call such as title
+    generation). Its header is the prefix all of its requests keep, cut to
+    ``SHARED_HEADER_TOKENS``. Every occurrence of a header id in the trace,
+    subagents included, is renamed.
+
+    Args:
+        trace: A parsed trace.
+
+    Returns:
+        The longest header, in blocks; 0 if the trace has no session.
+    """
+    cap = SHARED_HEADER_TOKENS // trace.block_size
+    chains: dict[int, list[list[int]]] = defaultdict(list)
+    for req in trace.requests:
+        if req.type != "subagent" and req.hash_ids:
+            chains[req.hash_ids[0]].append(req.hash_ids)
+    rename: dict[int, int] = {}
+    longest = 0
+    for chain in chains.values():
+        if len(chain) < 2:
+            continue
+        n = min(cap, *(longest_common_prefix(chain[0], h) for h in chain))
+        rename.update({h: _SHARED_ID_BASE + i for i, h in enumerate(chain[0][:n])})
+        longest = max(longest, n)
+    for req in _walk_requests(trace.requests):
+        req.hash_ids = [rename.get(h, h) for h in req.hash_ids]
+    return longest
 
 
 def _trace_of(conv: Conversation) -> str:
@@ -147,6 +210,7 @@ class PrtReconstructor(ConversationReconstructor):
             super().init_turn_0(
                 hash_ids, in_tokens, tool_tokens, system_tokens, seed, is_tool_result
             )
+            self._split_header(hash_ids)
             return
         # With no tool/system prefix the base class emits one user segment that
         # holds every covered block plus the synthesized tail; re-tile it.
@@ -187,6 +251,7 @@ class PrtReconstructor(ConversationReconstructor):
                 )
             )
         self._segments: list[RoleSegment] = segs
+        self._split_header(hash_ids)
 
     def advance_turn(self, *args: Any, **kwargs: Any) -> None:
         """Advance as the base class, then record the source of a new assistant segment.
@@ -201,6 +266,9 @@ class PrtReconstructor(ConversationReconstructor):
         before = list(self._segments)
         before_ids = {id(s) for s in before}
         super().advance_turn(*args, **kwargs)
+        self._split_header(
+            kwargs.get("curr_hash_ids", args[3] if len(args) > 3 else [])
+        )
         seed = kwargs.get("seed", args[5] if len(args) > 5 else "")
         if _SEED_TURN not in seed:
             return
@@ -229,6 +297,45 @@ class PrtReconstructor(ConversationReconstructor):
     def segment_layout(self) -> Layout:
         """Return the current ``[(role, block_count), ...]`` tiling, in order."""
         return [(s.role, s.block_count) for s in self._segments]
+
+    def _split_header(self, hash_ids: list[int]) -> None:
+        """Send a leading run of shared blocks as a system message of its own.
+
+        Only a first user segment longer than the run is split. One built in an
+        earlier turn was split then, and one no longer than the run stays whole
+        so the turn still ends with a user message (the cache-bust marker then
+        follows that message).
+
+        Args:
+            hash_ids: This turn's hash ids.
+        """
+        n = 0
+        while n < len(hash_ids) and hash_ids[n] >= _SHARED_ID_BASE:
+            n += 1
+        if n == 0 or not self._segments:
+            return
+        first = self._segments[0]
+        if first.role != "user" or first.block_count <= n:
+            return
+        cut = n * self.block_size
+        head, rest = first.tokens[:cut], first.tokens[cut:]
+        self._segments[0:1] = [
+            RoleSegment(
+                role="system",
+                block_start=0,
+                block_count=n,
+                tokens=head,
+                content=self.decode_tokens_to_text(head),
+            ),
+            RoleSegment(
+                role="user",
+                block_start=n,
+                block_count=first.block_count - n,
+                tokens=rest,
+                content=self.decode_tokens_to_text(rest),
+                tool_result_turn=first.tool_result_turn,
+            ),
+        ]
 
 
 def _plan_turn0_layouts(
@@ -346,6 +453,14 @@ class PrtWekaTraceLoader(WekaTraceLoader):
             The conversations.
         """
         self._turn0_layouts: dict[str, Layout] = {}
+        self._shared_blocks: dict[int, list[int]] = {}
+        shared = [_share_header(traces[0]) for traces in data.values()]
+        _logger.info(
+            "prt: shared header %d to %d blocks over %d traces",
+            min(shared),
+            max(shared),
+            len(shared),
+        )
         bound = type(
             "BoundPrtReconstructor",
             (PrtReconstructor,),
@@ -378,7 +493,44 @@ class PrtWekaTraceLoader(WekaTraceLoader):
             )
         return plans
 
+    def _decode_block_tokens(self, hash_ids: list[int]) -> list[int]:
+        """Decode as the base class, with shared ids decoded the same in every trace.
+
+        Args:
+            hash_ids: Block ids, per-trace or shared.
+
+        Returns:
+            ``len(hash_ids) * block_size`` tokens.
+        """
+        tokens: list[int] = []
+        run: list[int] = []
+        for h in hash_ids:
+            if h < _SHARED_ID_BASE:
+                run.append(h)
+                continue
+            if run:
+                tokens += super()._decode_block_tokens(run)
+                run = []
+            tokens += self._shared_block(h)
+        if run:
+            tokens += super()._decode_block_tokens(run)
+        return tokens
+
     def _reconstruct_parallel(self, **kwargs: Any) -> list[Conversation]:
         # Parallel workers never see the swap and would silently drop tags.
         kwargs.pop("configured_workers")
         return self._reconstruct_serial(dropped_per_trace={}, **kwargs)
+
+    def _shared_block(self, hash_id: int) -> list[int]:
+        """Return a shared block's tokens: a corpus slice keyed by the id alone."""
+        cache = self._shared_blocks
+        if hash_id not in cache:
+            pg = self.prompt_generator
+            size = pg._corpus_size
+            digest = hashlib.sha256(f"prt-shared:{hash_id}".encode()).digest()
+            start = int.from_bytes(digest[:8], "big") % size
+            # Wrap like the base class when the slice runs past the corpus end.
+            corpus = pg._tokenized_corpus
+            block = corpus[start : start + self._block_size]
+            cache[hash_id] = block + corpus[: self._block_size - len(block)]
+        return cache[hash_id]

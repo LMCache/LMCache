@@ -417,7 +417,10 @@ tokenizer-revision = "<model_revision>"
 custom-dataset-type = "weka_trace"
 max-context-length = 262144
 prompt-corpus = "coding"
-cache-bust = "first_turn_prefix"
+# Per-session marker after the shared header the loader declares as the system
+# prompt: sessions share that header, and nothing else (the scenario wants
+# first_turn_prefix, which shares nothing; unsafe-override allows it).
+cache-bust = "system_suffix"
 benchmark-duration = 960
 benchmark-grace-period = 60
 ui = "simple"
