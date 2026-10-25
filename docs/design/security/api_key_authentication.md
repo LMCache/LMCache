@@ -46,6 +46,8 @@ enable authentication on any transport by itself.
 gRPC carries a credential as Bearer metadata. A server interceptor rejects
 invalid metadata before protobuf deserialization and handler dispatch; a
 client interceptor injects the key into unary and server-streaming calls.
+The server builder loads one verifier for either the sync or aio implementation;
+each uses the corresponding gRPC interceptor before decoding requests.
 The default insecure channel does not encrypt tokens. Use TLS on untrusted
 networks; mTLS can add certificate-based peer identity independently of the
 API-key verifier.
