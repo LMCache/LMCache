@@ -317,9 +317,15 @@ With the Kafka transport, start the coordinator with
 instead of serving ``POST /events``; without that, the broker retains the
 records but nothing reads them. Both sides need the optional
 ``lmcache[kafka]`` extra (``pip install 'lmcache[kafka]'``), imported only
-when Kafka is selected. A restarted coordinator resumes from its consumer
-group's committed offsets; coordinator-driven replay of a detected gap is a
-follow-up.
+when Kafka is selected. A restarted coordinator resumes from its own
+checkpoint (the ``StreamPosition`` recorded beside the state it produced,
+seeked on partition assignment); the consumer group never commits offsets
+(``enable.auto.commit: False``, no ``store_offsets``), so
+``kafka-consumer-groups --describe`` shows this group no progress. A
+partition ``StreamPosition`` has never seen -- a first start, one added
+since, or any start with no checkpoint path configured -- falls back to
+``auto.offset.reset`` (``earliest``). Coordinator-driven replay of a
+detected gap is a follow-up.
 
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a

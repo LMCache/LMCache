@@ -65,8 +65,11 @@ On the coordinator side, transport adapters converge at
 advertises no replay capability; `KafkaCacheEventSource` (selected by
 `--event-transport kafka` in place of the HTTP source, see
 [ingest.md](ingest.md)) polls the topic and advertises `seekable`. Gate cursors (`instance_id` / `incarnation` /
-`seq`) remain separate from Kafka's partition offsets, which the consumer
-group commits.
+`seq`) remain separate from Kafka's partition offsets, which
+`StreamPosition` records into the coordinator's own checkpoint -- the
+consumer group itself never commits (`enable.auto.commit: False`, no
+`store_offsets`), so the checkpoint is the only cursor a restart resumes
+from. See [ingest.md](ingest.md) for the resume contract.
 
 ## Batching and sequencing (inside the subscriber)
 
