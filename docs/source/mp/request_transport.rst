@@ -97,8 +97,8 @@ source is configured, preserving existing deployments.
 API keys do not encrypt ZMQ traffic. Use a trusted network or encrypted tunnel
 when the request transport crosses an untrusted network. CURVE can be added as
 a future transport-security adapter. Enabling authentication requires clients
-that understand the versioned frame; upgrade servers before enabling keys and
-then update clients.
+that understand the versioned frame. Upgrade both servers and clients before
+enabling keys; old servers cannot read the new credential frame.
 
 For multiple servers, specify the scheme on every entry in
 ``lmcache.mp.server_urls``, for example

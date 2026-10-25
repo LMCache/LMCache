@@ -42,6 +42,7 @@ does not raise a comparison error.
 for ZMQ and gRPC adapters. Accepted server keys are cumulative, while a client
 sends one explicit key or one environment-supplied key. This helper does not
 enable authentication on any transport by itself.
+
 ZMQ request authentication uses a dedicated, versioned frame before the
 request UID and operation. The server removes and verifies this frame before
 decoding request payloads or dispatching a handler. Configure accepted keys

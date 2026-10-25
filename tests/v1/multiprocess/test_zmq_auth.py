@@ -6,6 +6,7 @@ from typing import Any
 import socket
 
 # Third Party
+import msgspec
 import pytest
 import zmq
 
@@ -16,6 +17,11 @@ from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     MessageQueueClient,
     MessageQueueServer,
+)
+from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
+    AUTH_ENVELOPE_MAGIC,
+    AUTH_ERROR_FRAME,
+    encode_authentication_frame,
 )
 
 
@@ -41,7 +47,7 @@ def _run_noop(
     server = MessageQueueServer(
         _unused_tcp_url(), context, APIKeyVerifier(accepted_keys)
     )
-    server.add_handler("noop", HandlerType.SYNC, noop)
+    server.add_handler("noop", HandlerType.SERIALIZED, noop)
     server.start()
     endpoint = server.socket.getsockopt_string(zmq.LAST_ENDPOINT)
     client = MessageQueueClient(endpoint, context, api_key=client_key)
@@ -82,3 +88,36 @@ def test_zmq_authentication_disabled_is_wire_compatible(
 ) -> None:
     """A new server without keys accepts legacy and enveloped requests."""
     assert _run_noop([], client_key) == ("NOOP_OK", 1)
+
+
+@pytest.mark.parametrize(
+    "auth_frames",
+    [
+        [],
+        [encode_authentication_frame("wrong")],
+        [AUTH_ENVELOPE_MAGIC + b"\xc1"],
+        [
+            AUTH_ENVELOPE_MAGIC
+            + msgspec.msgpack.encode({"version": 2, "token": "secret"})
+        ],
+    ],
+)
+def test_invalid_authentication_precedes_operation_decoding(
+    auth_frames: list[bytes],
+) -> None:
+    """Invalid credentials are rejected even if the RPC data cannot be decoded."""
+    context = zmq.Context()
+    server = MessageQueueServer(
+        "tcp://127.0.0.1:0", context, APIKeyVerifier(["secret"])
+    )
+    client = context.socket(zmq.DEALER)
+    client.setsockopt(zmq.RCVTIMEO, 3000)
+    client.connect(server.socket.getsockopt_string(zmq.LAST_ENDPOINT))
+    server.start()
+    try:
+        client.send_multipart([*auth_frames, b"opaque-uid", b"\xc1", b"\xc1"])
+        assert client.recv_multipart() == [b"opaque-uid", AUTH_ERROR_FRAME]
+    finally:
+        client.close(linger=0)
+        server.close()
+        context.term()
