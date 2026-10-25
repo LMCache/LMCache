@@ -202,6 +202,10 @@ eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 
 model = "glm53"
 image_target = "lmcache"
 aiperf_args = { url = "http://127.0.0.1:18001" }
+# The 8 DP engines warm up one after another, about a minute each, and the API
+# servers give up after vLLM's default 600 s (build 47). Matches
+# [vllm].startup_timeout_s.
+vllm_env = { VLLM_ENGINE_READY_TIMEOUT_S = "2400" }
 
 [deployments.vllm_lmcache_ssm.vllm_args]
 kv-transfer-config = '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://localhost","lmcache.mp.port":16555,"lmcache.mp.mq_timeout":1500}}'
