@@ -7,7 +7,7 @@ Could be implemented by native code in the future
 """
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, get_args
 import enum
 
@@ -156,23 +156,112 @@ class MemoryTags:
     """Where the bytes reside relative to this host."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ObjectKey:
     """
     The unique identifier for an object in the distributed storage manager
     """
 
     identity: ObjectKeyIdentity
-    """Immutable matching fields shared with internal wire messages."""
+
+    def __init__(
+        self,
+        chunk_hash: bytes | None = None,
+        model_name: str | None = None,
+        kv_rank: int | None = None,
+        object_group_id: int | None = None,
+        cache_salt: str | None = None,
+        *,
+        identity: ObjectKeyIdentity | None = None,
+    ) -> None:
+        """Build a key from its identity or the existing flat constructor.
+
+        Explicit flat fields override the supplied identity. This also retains
+        ``dataclasses.replace(key, object_group_id=...)`` and other flat field
+        replacements used by existing consumers.
+
+        Args:
+            chunk_hash: Content hash; required without ``identity``.
+            model_name: Model name; required without ``identity``.
+            kv_rank: Packed KV rank; required without ``identity``.
+            object_group_id: Object group; defaults to 0 without an identity.
+            cache_salt: Isolation salt; defaults to empty without an identity.
+            identity: Immutable identity providing fields not supplied explicitly.
+
+        Raises:
+            TypeError: A required flat field is missing without ``identity``.
+            ValueError: An identity field violates its invariant.
+        """
+        if identity is None:
+            if chunk_hash is None or model_name is None or kv_rank is None:
+                raise TypeError("chunk_hash, model_name and kv_rank are required")
+            identity = ObjectKeyIdentity(
+                chunk_hash=chunk_hash,
+                model_name=model_name,
+                kv_rank=kv_rank,
+                object_group_id=object_group_id if object_group_id is not None else 0,
+                cache_salt=cache_salt if cache_salt is not None else "",
+            )
+        elif (
+            chunk_hash is not None
+            or model_name is not None
+            or kv_rank is not None
+            or object_group_id is not None
+            or cache_salt is not None
+        ):
+            identity = replace(
+                identity,
+                chunk_hash=chunk_hash
+                if chunk_hash is not None
+                else identity.chunk_hash,
+                model_name=model_name
+                if model_name is not None
+                else identity.model_name,
+                kv_rank=kv_rank if kv_rank is not None else identity.kv_rank,
+                object_group_id=(
+                    object_group_id
+                    if object_group_id is not None
+                    else identity.object_group_id
+                ),
+                cache_salt=cache_salt
+                if cache_salt is not None
+                else identity.cache_salt,
+            )
+        object.__setattr__(self, "identity", identity)
+
+    @property
+    def chunk_hash(self) -> bytes:
+        """Read chunk_hash from the identity."""
+        return self.identity.chunk_hash
+
+    @property
+    def model_name(self) -> str:
+        """Read model_name from the identity."""
+        return self.identity.model_name
+
+    @property
+    def cache_salt(self) -> str:
+        """Read cache_salt from the identity."""
+        return self.identity.cache_salt
+
+    @property
+    def kv_rank(self) -> int:
+        """Read kv_rank from the identity."""
+        return self.identity.kv_rank
+
+    @property
+    def object_group_id(self) -> int:
+        """Read object_group_id from the identity."""
+        return self.identity.object_group_id
 
     def to_encoded_object_key(self) -> "EncodedObjectKey":
         """Return the JSON-safe :class:`EncodedObjectKey` projection."""
         return EncodedObjectKey(
-            chunk_hash_hex=self.identity.chunk_hash.hex(),
-            model_name=self.identity.model_name,
-            kv_rank=self.identity.kv_rank,
-            object_group_id=self.identity.object_group_id,
-            cache_salt=self.identity.cache_salt,
+            chunk_hash_hex=self.chunk_hash.hex(),
+            model_name=self.model_name,
+            kv_rank=self.kv_rank,
+            object_group_id=self.object_group_id,
+            cache_salt=self.cache_salt,
         )
 
     @staticmethod
@@ -253,11 +342,11 @@ class ObjectKey:
 
 @dataclass(frozen=True)
 class EncodedObjectKey:
-    """JSON-safe flat projection of :class:`ObjectKey`'s identity.
-    ``chunk_hash`` is hex-encoded; other identity fields are unchanged."""
+    """JSON-safe wire form of :class:`ObjectKey` — ``chunk_hash`` is
+    hex-encoded; other fields are preserved verbatim."""
 
     chunk_hash_hex: str
-    """Hex-encoded ``ObjectKey.identity.chunk_hash``."""
+    """Hex-encoded ``ObjectKey.chunk_hash``."""
 
     model_name: str
     kv_rank: int
@@ -276,13 +365,11 @@ class EncodedObjectKey:
                 :class:`ObjectKey`'s field invariants is violated.
         """
         return ObjectKey(
-            identity=ObjectKeyIdentity(
-                chunk_hash=bytes.fromhex(self.chunk_hash_hex),
-                model_name=self.model_name,
-                kv_rank=self.kv_rank,
-                object_group_id=self.object_group_id,
-                cache_salt=self.cache_salt,
-            )
+            chunk_hash=bytes.fromhex(self.chunk_hash_hex),
+            model_name=self.model_name,
+            kv_rank=self.kv_rank,
+            object_group_id=self.object_group_id,
+            cache_salt=self.cache_salt,
         )
 
 
@@ -662,13 +749,11 @@ def ipc_key_to_object_keys(
     return [
         [
             ObjectKey(
-                identity=ObjectKeyIdentity(
-                    chunk_hash=chunk_hash,
-                    model_name=ipc_key.model_name,
-                    kv_rank=kv_rank,
-                    object_group_id=object_group_id,
-                    cache_salt=cache_salt,
-                )
+                chunk_hash=chunk_hash,
+                model_name=ipc_key.model_name,
+                kv_rank=kv_rank,
+                object_group_id=object_group_id,
+                cache_salt=cache_salt,
             )
             for chunk_hash in chunk_hashes
             for kv_rank in kv_ranks
@@ -733,13 +818,11 @@ def ipc_key_to_grouped_object_keys(
                 GroupedObjectKeys(
                     keys=[
                         ObjectKey(
-                            identity=ObjectKeyIdentity(
-                                chunk_hash=chunk_hash,
-                                model_name=ipc_key.model_name,
-                                kv_rank=kv_rank,
-                                object_group_id=object_group_id,
-                                cache_salt=ipc_key.cache_salt,
-                            )
+                            chunk_hash=chunk_hash,
+                            model_name=ipc_key.model_name,
+                            kv_rank=kv_rank,
+                            object_group_id=object_group_id,
+                            cache_salt=ipc_key.cache_salt,
                         )
                         for chunk_hash in chunk_hashes
                     ],

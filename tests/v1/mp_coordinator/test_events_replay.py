@@ -22,7 +22,6 @@ import msgspec
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     CACHE_EVENT_SCHEMA_VERSION,
@@ -65,12 +64,7 @@ def _reset_trace_gate():
 
 def _key(chunk: str) -> ObjectKey:
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=bytes.fromhex(chunk),
-            model_name="m",
-            kv_rank=0,
-            cache_salt="alice",
-        )
+        chunk_hash=bytes.fromhex(chunk), model_name="m", kv_rank=0, cache_salt="alice"
     )
 
 

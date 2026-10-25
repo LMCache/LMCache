@@ -20,7 +20,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.serde.asym_k16_v8 import (
     AsymK16V8MultiDeserializer,
@@ -29,9 +28,7 @@ from lmcache.v1.distributed.serde.asym_k16_v8 import (
 from lmcache.v1.distributed.serde.multi import MemoryObjGroup
 from lmcache.v1.memory_management import MemoryObj
 
-_TEST_KEY = ObjectKey(
-    identity=ObjectKeyIdentity(chunk_hash=b"\x00" * 32, model_name="test", kv_rank=0)
-)
+_TEST_KEY = ObjectKey(chunk_hash=b"\x00" * 32, model_name="test", kv_rank=0)
 
 # =============================================================================
 # Test scaffolding (mirrors the _FakeMemoryObj in test_multi.py / test_fp8.py)

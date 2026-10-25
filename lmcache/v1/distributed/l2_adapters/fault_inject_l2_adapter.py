@@ -256,8 +256,8 @@ class FaultInjectL2Adapter(L2AdapterInterface):
         # whose format is for debugging and may change or carry non-deterministic
         # fields, breaking the lookup-vs-load drop consistency this relies on.
         ident = (
-            f"{self._seed}:{key.identity.chunk_hash.hex()}:{key.identity.model_name}:"
-            f"{key.identity.kv_rank}:{key.identity.object_group_id}:{key.identity.cache_salt}"
+            f"{self._seed}:{key.chunk_hash.hex()}:{key.model_name}:"
+            f"{key.kv_rank}:{key.object_group_id}:{key.cache_salt}"
         )
         h = hashlib.blake2b(ident.encode(), digest_size=8).digest()
         bucket = int.from_bytes(h, "big") % _HASH_DENOM

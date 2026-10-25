@@ -14,7 +14,6 @@ import threading
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -32,12 +31,10 @@ from lmcache.v1.distributed.l2_adapters.base import (
 
 def _make_key(chunk_id: int, salt: str = "") -> ObjectKey:
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
-            model_name="m",
-            kv_rank=0,
-            cache_salt=salt,
-        )
+        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+        model_name="m",
+        kv_rank=0,
+        cache_salt=salt,
     )
 
 

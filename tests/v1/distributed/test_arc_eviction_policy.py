@@ -6,7 +6,6 @@ import argparse
 import json
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -27,9 +26,9 @@ from lmcache.v1.distributed.l2_adapters.config import (
 
 def _key(chunk_id: int) -> ObjectKey:
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id), model_name="model", kv_rank=0
-        )
+        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+        model_name="model",
+        kv_rank=0,
     )
 
 

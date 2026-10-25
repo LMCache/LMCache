@@ -12,7 +12,6 @@ import httpx
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.api import (
@@ -38,9 +37,10 @@ from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
 def _make_key(salt: str, model: str = "m", rank: int = 0, h: str = "aa") -> ObjectKey:
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=bytes.fromhex(h), model_name=model, kv_rank=rank, cache_salt=salt
-        )
+        chunk_hash=bytes.fromhex(h),
+        model_name=model,
+        kv_rank=rank,
+        cache_salt=salt,
     )
 
 

@@ -16,7 +16,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -76,11 +75,9 @@ requires_native = pytest.mark.skipif(
 
 def create_object_key(chunk_id: int, model_name: str = "test_model") -> ObjectKey:
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
-            model_name=model_name,
-            kv_rank=0,
-        )
+        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+        model_name=model_name,
+        kv_rank=0,
     )
 
 

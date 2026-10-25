@@ -17,13 +17,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
-    GroupedObjectKeys,
-    MemoryLayoutDesc,
-    PrefetchTaskSpec,
-    Tier,
-)
+from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc, Tier
 from lmcache.v1.multiprocess.cache_control import key_resolver
 from lmcache.v1.multiprocess.cache_control.errors import (
     InvalidRequest,
@@ -46,9 +40,9 @@ class _Handle:
 class _StorageManager:
     """Records what a prefetch asked for; nothing is loaded."""
 
-    rows: list[GroupedObjectKeys] = field(default_factory=list)
+    rows: list = field(default_factory=list)
 
-    def submit_prefetch_task(self, spec: PrefetchTaskSpec) -> _Handle:
+    def submit_prefetch_task(self, spec):
         self.rows = list(spec.key_groups)
         return _Handle(sum(len(row.keys) for row in self.rows))
 

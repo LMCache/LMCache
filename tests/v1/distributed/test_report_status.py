@@ -11,7 +11,6 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -108,11 +107,7 @@ def storage_manager_with_l2(basic_l1_config):
 
 def make_object_key(chunk_hash: int, model_name: str = "test_model", kv_rank: int = 0):
     hash_bytes = ObjectKey.IntHash2Bytes(chunk_hash)
-    return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=hash_bytes, model_name=model_name, kv_rank=kv_rank
-        )
-    )
+    return ObjectKey(chunk_hash=hash_bytes, model_name=model_name, kv_rank=kv_rank)
 
 
 # =============================================================================

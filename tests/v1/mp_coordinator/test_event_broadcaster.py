@@ -6,7 +6,6 @@ batch and fence fan-out)."""
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
@@ -41,9 +40,7 @@ class _RaisingConsumer:
 
 
 def _batch(seq: int = 1) -> CacheEventBatch:
-    key = ObjectKey(
-        identity=ObjectKeyIdentity(chunk_hash=b"\xaa" * 4, model_name="m", kv_rank=0)
-    )
+    key = ObjectKey(chunk_hash=b"\xaa" * 4, model_name="m", kv_rank=0)
     return CacheEventBatch(
         instance_id="node-a",
         incarnation=1,

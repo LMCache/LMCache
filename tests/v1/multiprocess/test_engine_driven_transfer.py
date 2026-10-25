@@ -16,7 +16,6 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.custom_types import (
     PrepareRetrieveResponse,
@@ -1684,12 +1683,10 @@ def _group_obj_key(group: int, chunk: int) -> Any:
     from lmcache.v1.distributed.api import ObjectKey
 
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=ObjectKey.IntHash2Bytes(chunk),
-            model_name="m",
-            kv_rank=0,
-            object_group_id=group,
-        )
+        chunk_hash=ObjectKey.IntHash2Bytes(chunk),
+        model_name="m",
+        kv_rank=0,
+        object_group_id=group,
     )
 
 

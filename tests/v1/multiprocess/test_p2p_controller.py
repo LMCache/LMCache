@@ -15,7 +15,6 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -23,7 +22,6 @@ from lmcache.v1.distributed.api import (
     MemoryTags,
     ObjectKey,
     PrefetchResult,
-    PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
@@ -55,12 +53,10 @@ def _result(rows: list[Bitmap]) -> PrefetchResult:
 
 def _make_key(i: int, object_group_id: int = 0) -> ObjectKey:
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=f"hash{i}".encode(),
-            model_name="test_model",
-            kv_rank=1,
-            object_group_id=object_group_id,
-        )
+        chunk_hash=f"hash{i}".encode(),
+        model_name="test_model",
+        kv_rank=1,
+        object_group_id=object_group_id,
     )
 
 
@@ -188,7 +184,6 @@ def test_lookup_and_lock_submits_l1_only_and_returns_task_id():
     task_id = controller.p2p_lookup_and_lock(keys, group_layout_descs)
 
     assert task_id == 0
-    spec: PrefetchTaskSpec
     (spec,), _kwargs = ctx.storage_manager.submit_prefetch_task.call_args
     assert [row.keys for row in spec.key_groups] == [keys]
     assert [row.object_group_id for row in spec.key_groups] == [0]
@@ -219,7 +214,6 @@ def test_lookup_and_lock_groups_keys_per_object_group():
     ]
     controller.p2p_lookup_and_lock(keys, layouts)
 
-    spec: PrefetchTaskSpec
     (spec,), _ = ctx.storage_manager.submit_prefetch_task.call_args
     assert [row.object_group_id for row in spec.key_groups] == [1, 0]
     assert spec.key_groups[0].keys == [keys[0], keys[2]]

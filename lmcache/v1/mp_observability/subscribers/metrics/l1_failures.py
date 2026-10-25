@@ -67,7 +67,7 @@ class L1FailureMetricsSubscriber(EventSubscriber):
     def _on_allocation_failed(self, event: Event) -> None:
         during: str = event.metadata["during"]
         keys: list[ObjectKey] = event.metadata["keys"]
-        for model_name, count in Counter(k.identity.model_name for k in keys).items():
+        for model_name, count in Counter(k.model_name for k in keys).items():
             self._allocation_counter.add(
                 count,
                 {"during": during, "model_name": model_name},
@@ -77,7 +77,7 @@ class L1FailureMetricsSubscriber(EventSubscriber):
         during: str = event.metadata["during"]
         reason: str = event.metadata["reason"]
         keys: list[ObjectKey] = event.metadata["keys"]
-        for model_name, count in Counter(k.identity.model_name for k in keys).items():
+        for model_name, count in Counter(k.model_name for k in keys).items():
             self._read_counter.add(
                 count,
                 {

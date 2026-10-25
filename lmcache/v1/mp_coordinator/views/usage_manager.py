@@ -246,7 +246,7 @@ class CacheUsageManager(View):
         else:
             self._key_bytes.pop(key_id, None)
 
-        salt_id = (tier, key.identity.cache_salt)
+        salt_id = (tier, key.cache_salt)
         salt_total = self._salt_bytes.get(salt_id, 0) + delta
         if salt_total > 0:
             self._salt_bytes[salt_id] = salt_total
@@ -256,7 +256,7 @@ class CacheUsageManager(View):
                 logger.warning(
                     "%s usage underflow for cache_salt=%r (delta %d); clamping to 0",
                     tier.value,
-                    key.identity.cache_salt,
+                    key.cache_salt,
                     delta,
                 )
 

@@ -23,8 +23,6 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
-from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.metrics.sm_lifecycle import (
@@ -35,26 +33,37 @@ from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _
 _DRAIN_WAIT = 0.15
 
 
-def _make_key(chunk_hash: str, cache_salt: str = "", kv_rank: int = 0) -> ObjectKey:
-    """Build a real storage key from readable chunk labels."""
-    return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=chunk_hash.encode("utf-8"),
-            model_name="test",
-            kv_rank=kv_rank,
-            cache_salt=cache_salt,
+class _Key:
+    """ObjectKey-shape stand-in for L1 event metadata."""
+
+    __slots__ = ("chunk_hash", "cache_salt", "kv_rank")
+
+    def __init__(self, chunk_hash: str, cache_salt: str = "", kv_rank: int = 0):
+        self.chunk_hash = chunk_hash
+        self.cache_salt = cache_salt
+        self.kv_rank = kv_rank
+
+    def __hash__(self) -> int:
+        return hash((self.chunk_hash, self.cache_salt, self.kv_rank))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _Key):
+            return NotImplemented
+        return (
+            self.chunk_hash == other.chunk_hash
+            and self.cache_salt == other.cache_salt
+            and self.kv_rank == other.kv_rank
         )
-    )
 
 
-def _l1_read(keys: list[ObjectKey]) -> Event:
+def _l1_read(keys: list) -> Event:
     return Event(
         event_type=EventType.SM_READ_PREFETCHED_FINISHED,
         metadata={"succeeded_keys": keys, "failed_keys": []},
     )
 
 
-def _l1_write(keys: list[ObjectKey]) -> Event:
+def _l1_write(keys: list) -> Event:
     return Event(
         event_type=EventType.SM_WRITE_FINISHED,
         metadata={"succeeded_keys": keys, "failed_keys": []},
@@ -113,8 +122,8 @@ class TestReadEmitsGap:
         before_c = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
-        bus.publish(_l1_read([_make_key("h1", cache_salt="t-a")]))  # counter=1, seed
-        bus.publish(_l1_read([_make_key("h1", cache_salt="t-a")]))  # counter=2, gap=1
+        bus.publish(_l1_read([_Key("h1", cache_salt="t-a")]))  # counter=1, seed
+        bus.publish(_l1_read([_Key("h1", cache_salt="t-a")]))  # counter=2, gap=1
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -130,8 +139,8 @@ class TestReadEmitsGap:
         before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
-        bus.publish(_l1_write([_make_key("h1", cache_salt="t-w")]))  # counter=1, seed
-        bus.publish(_l1_read([_make_key("h1", cache_salt="t-w")]))  # counter=2, gap=1
+        bus.publish(_l1_write([_Key("h1", cache_salt="t-w")]))  # counter=1, seed
+        bus.publish(_l1_read([_Key("h1", cache_salt="t-w")]))  # counter=2, gap=1
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -144,7 +153,7 @@ class TestReadEmitsGap:
         before_c = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
-        bus.publish(_l1_read([_make_key("cold", cache_salt="t-cold")]))
+        bus.publish(_l1_read([_Key("cold", cache_salt="t-cold")]))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -160,8 +169,8 @@ class TestWriteDoesNotEmit:
         before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
-        bus.publish(_l1_write([_make_key("k", cache_salt="t-ww")]))
-        bus.publish(_l1_write([_make_key("k", cache_salt="t-ww")]))
+        bus.publish(_l1_write([_Key("k", cache_salt="t-ww")]))
+        bus.publish(_l1_write([_Key("k", cache_salt="t-ww")]))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -173,8 +182,8 @@ class TestWriteDoesNotEmit:
         before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
-        bus.publish(_l1_read([_make_key("k", cache_salt="t-rw")]))  # seed
-        bus.publish(_l1_write([_make_key("k", cache_salt="t-rw")]))  # no emit
+        bus.publish(_l1_read([_Key("k", cache_salt="t-rw")]))  # seed
+        bus.publish(_l1_write([_Key("k", cache_salt="t-rw")]))  # no emit
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -186,13 +195,11 @@ class TestWriteDoesNotEmit:
         before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
-        bus.publish(_l1_read([_make_key("k", cache_salt="t-x")]))  # counter=1
-        bus.publish(_l1_read([_make_key("a", cache_salt="t-x")]))  # counter=2
-        bus.publish(_l1_write([_make_key("k", cache_salt="t-x")]))  # counter=3, anchor
-        bus.publish(_l1_read([_make_key("b", cache_salt="t-x")]))  # counter=4
-        bus.publish(
-            _l1_read([_make_key("k", cache_salt="t-x")])
-        )  # counter=5, gap=5-3=2
+        bus.publish(_l1_read([_Key("k", cache_salt="t-x")]))  # counter=1
+        bus.publish(_l1_read([_Key("a", cache_salt="t-x")]))  # counter=2
+        bus.publish(_l1_write([_Key("k", cache_salt="t-x")]))  # counter=3, anchor
+        bus.publish(_l1_read([_Key("b", cache_salt="t-x")]))  # counter=4
+        bus.publish(_l1_read([_Key("k", cache_salt="t-x")]))  # counter=5, gap=5-3=2
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -207,13 +214,13 @@ class TestChunksGapCounter:
         before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
-        bus.publish(_l1_read([_make_key("target", cache_salt="t-b")]))  # counter=1
+        bus.publish(_l1_read([_Key("target", cache_salt="t-b")]))  # counter=1
         # Mixed reads + writes of unrelated chunks bump the counter.
-        bus.publish(_l1_read([_make_key("c0", cache_salt="t-b")]))  # 2
-        bus.publish(_l1_write([_make_key("c1", cache_salt="t-b")]))  # 3
-        bus.publish(_l1_read([_make_key("c2", cache_salt="t-b")]))  # 4
-        bus.publish(_l1_write([_make_key("c3", cache_salt="t-b")]))  # 5
-        bus.publish(_l1_read([_make_key("target", cache_salt="t-b")]))  # 6, gap=5
+        bus.publish(_l1_read([_Key("c0", cache_salt="t-b")]))  # 2
+        bus.publish(_l1_write([_Key("c1", cache_salt="t-b")]))  # 3
+        bus.publish(_l1_read([_Key("c2", cache_salt="t-b")]))  # 4
+        bus.publish(_l1_write([_Key("c3", cache_salt="t-b")]))  # 5
+        bus.publish(_l1_read([_Key("target", cache_salt="t-b")]))  # 6, gap=5
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -225,17 +232,17 @@ class TestChunksGapCounter:
         before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
-        bus.publish(_l1_read([_make_key("target", cache_salt="t-y")]))  # y=1
+        bus.publish(_l1_read([_Key("target", cache_salt="t-y")]))  # y=1
         bus.publish(
             _l1_read(
                 [
-                    _make_key("a", cache_salt="t-x"),
-                    _make_key("b", cache_salt="t-x"),
-                    _make_key("c", cache_salt="t-x"),
+                    _Key("a", cache_salt="t-x"),
+                    _Key("b", cache_salt="t-x"),
+                    _Key("c", cache_salt="t-x"),
                 ]
             )
         )  # x=1..3
-        bus.publish(_l1_read([_make_key("target", cache_salt="t-y")]))  # y=2, gap=1
+        bus.publish(_l1_read([_Key("target", cache_salt="t-y")]))  # y=2, gap=1
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -249,8 +256,8 @@ class TestChunksGapCounter:
         before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
-        bus.publish(_l1_read([_make_key("shared", cache_salt="t-p")]))
-        bus.publish(_l1_read([_make_key("shared", cache_salt="t-q")]))
+        bus.publish(_l1_read([_Key("shared", cache_salt="t-p")]))
+        bus.publish(_l1_read([_Key("shared", cache_salt="t-q")]))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -269,7 +276,7 @@ class TestSampling:
 
         bus.start()
         for _ in range(3):
-            bus.publish(_l1_read([_make_key("unsamp", cache_salt="t-u")]))
+            bus.publish(_l1_read([_Key("unsamp", cache_salt="t-u")]))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -293,12 +300,12 @@ class TestSampling:
         before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
-        bus.publish(_l1_read([_make_key("k", cache_salt="t-cnt")]))  # 1, seed
+        bus.publish(_l1_read([_Key("k", cache_salt="t-cnt")]))  # 1, seed
         # Many unrelated chunks of varied access types.
         for i in range(10):
             ev = _l1_write if i % 2 else _l1_read
-            bus.publish(ev([_make_key(f"c{i}", cache_salt="t-cnt")]))
-        bus.publish(_l1_read([_make_key("k", cache_salt="t-cnt")]))  # 12, gap=11
+            bus.publish(ev([_Key(f"c{i}", cache_salt="t-cnt")]))
+        bus.publish(_l1_read([_Key("k", cache_salt="t-cnt")]))  # 12, gap=11
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -309,7 +316,7 @@ class TestSampling:
 class TestTPFanout:
     def test_read_dedupes_tp_fanout(self, bus, subscriber):
         """Same logical chunk fanned across TP ranks counts as one access."""
-        keys = [_make_key("tp-chunk", cache_salt="t-tp", kv_rank=r) for r in range(4)]
+        keys = [_Key("tp-chunk", cache_salt="t-tp", kv_rank=r) for r in range(4)]
         before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
@@ -326,11 +333,11 @@ class TestTPFanout:
     def test_write_dedupes_tp_fanout(self, bus, subscriber):
         """Write fanout produces a single anchor, not one per rank."""
         before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
-        keys = [_make_key("tp", cache_salt="t-tpw", kv_rank=r) for r in range(4)]
+        keys = [_Key("tp", cache_salt="t-tpw", kv_rank=r) for r in range(4)]
 
         bus.start()
         bus.publish(_l1_write(keys))  # counter=1, seed (deduped)
-        bus.publish(_l1_read([_make_key("tp", cache_salt="t-tpw")]))  # 2, gap=1
+        bus.publish(_l1_read([_Key("tp", cache_salt="t-tpw")]))  # 2, gap=1
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
@@ -348,7 +355,7 @@ class TestBounds:
 
         bus.start()
         for i in range(50):
-            bus.publish(_l1_read([_make_key(f"h{i}", cache_salt="t-cap")]))
+            bus.publish(_l1_read([_Key(f"h{i}", cache_salt="t-cap")]))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 

@@ -20,7 +20,6 @@ import torch
 
 # First Party
 from lmcache import torch_device_type
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 
 nixl = pytest.importorskip("nixl")
 if torch_device_type == "xpu":
@@ -91,11 +90,9 @@ POOL_SIZE = 20  # number of storage descriptors to pre-allocate
 def create_object_key(chunk_id: int, model_name: str = "test_model") -> ObjectKey:
     """Create a test ObjectKey with the given chunk ID."""
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
-            model_name=model_name,
-            kv_rank=0,
-        )
+        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+        model_name=model_name,
+        kv_rank=0,
     )
 
 

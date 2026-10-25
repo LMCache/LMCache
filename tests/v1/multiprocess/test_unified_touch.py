@@ -16,7 +16,6 @@ from unittest.mock import MagicMock
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey, ipc_key_to_object_keys
 from lmcache.v1.distributed.eviction import L1EvictionPolicy
 from lmcache.v1.distributed.eviction_policy import LRUEvictionPolicy
@@ -33,11 +32,7 @@ from lmcache.v1.multiprocess.token_hasher import TokenHasher
 def make_key(chunk_hash: int, model: str = "model", kv_rank: int = 0) -> ObjectKey:
     """Create an ObjectKey for testing."""
     hash_bytes = ObjectKey.IntHash2Bytes(chunk_hash)
-    return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=hash_bytes, model_name=model, kv_rank=kv_rank
-        )
-    )
+    return ObjectKey(chunk_hash=hash_bytes, model_name=model, kv_rank=kv_rank)
 
 
 def make_ipc_key(
@@ -108,9 +103,9 @@ class TestL1EvictionPolicyAccessedBridge:
 
         # Eviction order should now be: 3, 2, 1 (1 is most recent)
         candidates = lru.get_eviction_candidates(3)
-        assert ObjectKey.Bytes2IntHash(candidates[0].identity.chunk_hash) == 3
-        assert ObjectKey.Bytes2IntHash(candidates[1].identity.chunk_hash) == 2
-        assert ObjectKey.Bytes2IntHash(candidates[2].identity.chunk_hash) == 1
+        assert ObjectKey.Bytes2IntHash(candidates[0].chunk_hash) == 3
+        assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 2
+        assert ObjectKey.Bytes2IntHash(candidates[2].chunk_hash) == 1
 
     def test_on_l1_keys_read_finished_keeps_lru_order(self):
         """Releasing a read lock must not change the LRU order."""
@@ -122,14 +117,14 @@ class TestL1EvictionPolicyAccessedBridge:
         lru.on_keys_created(keys)
 
         before = [
-            ObjectKey.Bytes2IntHash(c.identity.chunk_hash)
+            ObjectKey.Bytes2IntHash(c.chunk_hash)
             for c in lru.get_eviction_candidates(3)
         ]
 
         listener.on_l1_keys_read_finished([make_key(2)])
 
         after = [
-            ObjectKey.Bytes2IntHash(c.identity.chunk_hash)
+            ObjectKey.Bytes2IntHash(c.chunk_hash)
             for c in lru.get_eviction_candidates(3)
         ]
         assert after == before
@@ -158,9 +153,7 @@ class TestL1EvictionPolicyUnifiedTouchOrder:
         # because on_keys_touched processes them sequentially,
         # so key 5 is the most recently touched
         candidates = lru.get_eviction_candidates(5)
-        evicted_ids = [
-            ObjectKey.Bytes2IntHash(c.identity.chunk_hash) for c in candidates
-        ]
+        evicted_ids = [ObjectKey.Bytes2IntHash(c.chunk_hash) for c in candidates]
         # LRU evicts from the back of the ordered dict (least recent first)
         # After touching [1,2,3,4,5] in order, 1 is least recent, 5 is most recent
         assert evicted_ids == [5, 4, 3, 2, 1]
@@ -185,9 +178,7 @@ class TestL1EvictionPolicyUnifiedTouchOrder:
         lru.on_keys_touched(keys)
 
         candidates = lru.get_eviction_candidates(5)
-        evicted_ids = [
-            ObjectKey.Bytes2IntHash(c.identity.chunk_hash) for c in candidates
-        ]
+        evicted_ids = [ObjectKey.Bytes2IntHash(c.chunk_hash) for c in candidates]
         # Last chunk (5) should be evicted last (most recently touched)
         assert evicted_ids[-1] == 1
 

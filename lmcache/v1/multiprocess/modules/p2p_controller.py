@@ -80,7 +80,7 @@ def _group_keys_by_object_group(
     """
     by_group: dict[int, list[ObjectKey]] = {}
     for key in keys:
-        by_group.setdefault(key.identity.object_group_id, []).append(key)
+        by_group.setdefault(key.object_group_id, []).append(key)
     group_sizes = {gid: len(group_keys) for gid, group_keys in by_group.items()}
     if len(set(group_sizes.values())) > 1:
         logger.error(

@@ -12,7 +12,6 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
     MemoryLayoutDesc,
@@ -143,11 +142,7 @@ def large_layout():
 def make_object_key(chunk_hash: int, model_name: str = "test_model", kv_rank: int = 0):
     """Helper to create ObjectKey instances."""
     hash_bytes = ObjectKey.IntHash2Bytes(chunk_hash)
-    return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=hash_bytes, model_name=model_name, kv_rank=kv_rank
-        )
-    )
+    return ObjectKey(chunk_hash=hash_bytes, model_name=model_name, kv_rank=kv_rank)
 
 
 def wait_for_condition(

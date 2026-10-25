@@ -310,8 +310,8 @@ class FleetEvictionController(Controller):
         matching = [
             PinnedKey(key=key, pin_count=count)
             for key, count in self._pin_counts.items()
-            if (not cache_salt or key.identity.cache_salt == cache_salt)
-            and (not model_name or key.identity.model_name == model_name)
+            if (not cache_salt or key.cache_salt == cache_salt)
+            and (not model_name or key.model_name == model_name)
         ]
         return len(matching), matching[offset : offset + limit]
 
@@ -447,7 +447,7 @@ class FleetEvictionController(Controller):
                     body=body,
                     instance_id=target.instance_id,
                     key_count=len(chunk),
-                    salt_count=len({k.identity.cache_salt for k in chunk}),
+                    salt_count=len({k.cache_salt for k in chunk}),
                 )
             )
             self._in_flight_dispatches.add(task)
@@ -517,6 +517,6 @@ def _pinned_chunk_key(key: ObjectKey) -> ObjectKey:
     """
     return (
         replace(key, identity=replace(key.identity, object_group_id=0))
-        if key.identity.object_group_id
+        if key.object_group_id
         else key
     )

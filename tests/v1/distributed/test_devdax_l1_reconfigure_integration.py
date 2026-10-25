@@ -27,7 +27,6 @@ import torch
 
 # First Party
 from lmcache.utils import get_dax_device_geometry
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -116,11 +115,9 @@ def _layout(num_bytes: int = SLOT_BYTES) -> MemoryLayoutDesc:
 
 def _key(seed: int) -> ObjectKey:
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=seed.to_bytes(4, "big") + b"\0" * 28,
-            model_name="devdax-l1-reconfig-it",
-            kv_rank=0,
-        )
+        chunk_hash=seed.to_bytes(4, "big") + b"\0" * 28,
+        model_name="devdax-l1-reconfig-it",
+        kv_rank=0,
     )
 
 

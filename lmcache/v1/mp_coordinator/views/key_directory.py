@@ -311,9 +311,7 @@ class KeyDirectory(View):
             expanded_keys: list[ObjectKey] = []
             for key in keys:
                 key_in_each_group = [key, *self._get_stored_keys_in_other_groups(key)]
-                key_in_each_group.sort(
-                    key=lambda group_key: group_key.identity.object_group_id
-                )
+                key_in_each_group.sort(key=lambda group_key: group_key.object_group_id)
                 expanded_keys.extend(key_in_each_group)
             return expanded_keys
 
@@ -322,17 +320,17 @@ class KeyDirectory(View):
 
         Call under the directory lock.
         """
-        chunk_binding = self._token_bindings.get(key.identity.chunk_hash)
+        chunk_binding = self._token_bindings.get(key.chunk_hash)
         if chunk_binding is None:
             return []
         return [
             stored_key
             for stored_key in chunk_binding.keys
-            if stored_key.identity.object_group_id != key.identity.object_group_id
+            if stored_key.object_group_id != key.object_group_id
             and replace(
                 stored_key,
                 identity=replace(
-                    stored_key.identity, object_group_id=key.identity.object_group_id
+                    stored_key.identity, object_group_id=key.object_group_id
                 ),
             )
             == key
@@ -342,7 +340,7 @@ class KeyDirectory(View):
         """Return the known token ids for each requested chunk hash.
 
         Args:
-            chunk_hashes: ``ObjectKey.identity.chunk_hash`` values to look up.
+            chunk_hashes: ``ObjectKey.chunk_hash`` values to look up.
 
         Returns:
             One token-id tuple per hash, in request order — empty for
@@ -774,7 +772,7 @@ class KeyDirectory(View):
             key: The stored key whose chunk binding to fill.
             entry: The store entry carrying the token ids and offset.
         """
-        chunk_hash = key.identity.chunk_hash
+        chunk_hash = key.chunk_hash
         try:
             token_ids = np.asarray(entry.token_ids, dtype=_TOKEN_DTYPE)
         except (OverflowError, TypeError, ValueError):
@@ -809,20 +807,20 @@ class KeyDirectory(View):
         """Index ``key`` under its chunk's token binding, creating an
         empty binding on first reference. A key joining a binding that
         already has content claims it for the key's namespace."""
-        binding = self._token_bindings.get(key.identity.chunk_hash)
+        binding = self._token_bindings.get(key.chunk_hash)
         if binding is None:
-            self._token_bindings[key.identity.chunk_hash] = _TokenBinding(
+            self._token_bindings[key.chunk_hash] = _TokenBinding(
                 token_ids=_NO_TOKENS, token_offset=UNKNOWN_TOKEN_OFFSET, keys={key}
             )
             return
         binding.keys.add(key)
-        self._claim_binding(key.identity.chunk_hash, binding, key)
+        self._claim_binding(key.chunk_hash, binding, key)
 
     def _remove_token_binding(self, key: ObjectKey) -> None:
         """Remove ``key`` from its chunk's token binding, releasing the
         chunk's blend claim with the namespace's last key and dropping the
         binding with its last key overall."""
-        binding = self._token_bindings.get(key.identity.chunk_hash)
+        binding = self._token_bindings.get(key.chunk_hash)
         if binding is None:
             return
         binding.keys.discard(key)
@@ -835,10 +833,10 @@ class KeyDirectory(View):
                 for held in binding.keys
             ):
                 self._blend_index.remove_claim(
-                    binding.token_ids, key.identity.chunk_hash, namespace
+                    binding.token_ids, key.chunk_hash, namespace
                 )
         if not binding.keys:
-            del self._token_bindings[key.identity.chunk_hash]
+            del self._token_bindings[key.chunk_hash]
 
     def _claim_binding(
         self, chunk_hash: bytes, binding: _TokenBinding, key: ObjectKey

@@ -67,7 +67,7 @@ Every store entry carries its chunk's `token_ids` plus its
 `token_offset` — a deliberate wire trade: both ride once per
 rank/group/tier placement in exchange for a
 self-contained protocol (no per-chunk canonical entry, no cross-entry
-ordering to reason about). Bindings are keyed by `ObjectKey.identity.chunk_hash`
+ordering to reason about). Bindings are keyed by `ObjectKey.chunk_hash`
 — the identity every entry and every lookup already carries — so the
 coordinator does no hashing at all.
 
@@ -90,7 +90,7 @@ lookup miss) instead of failing the batch.
 
 The lookups this serves:
 
-- **key → tokens**: `key.identity.chunk_hash` → binding
+- **key → tokens**: `key.chunk_hash` → binding
   (`get_token_ids(chunk_hashes)`, served by `POST /directory/lookup`'s
   keys form). Content only — the stored position reaches the blend path
   as a match's `old_st`, never as a standalone lookup.
@@ -256,7 +256,7 @@ Type placement:
 `CacheEventEntry`, `CacheEventBatch`) plus the blend vocabulary
 (`BlendMatch`, `BlendNamespace`): the contract between the
 MP-server emitter and the directory. Plain dataclasses with intrinsic
-invariants in `__post_init__` (the `ObjectKeyIdentity` pattern: `seq >= 1`,
+invariants in `__post_init__` (the `ObjectKey` pattern: `seq >= 1`,
 concrete tier, non-empty ids are unconstructible anywhere).
 - **`key_directory.py`** — the engine plus everything the directory
 itself produces (`Placement`, `DirectoryStats`) and its private

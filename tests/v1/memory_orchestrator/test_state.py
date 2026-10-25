@@ -11,7 +11,6 @@ from unittest.mock import Mock
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.memory_orchestrator.api import (
     CloseResult,
     Envelope,
@@ -62,13 +61,11 @@ def register(state: RegionState, client_id: str = "a") -> Envelope:
 
 def key(name: str) -> WireObjectKey:
     return WireObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=name.encode(),
-            model_name="model",
-            kv_rank=0,
-            object_group_id=0,
-            cache_salt="",
-        )
+        chunk_hash=name.encode(),
+        model_name="model",
+        kv_rank=0,
+        object_group_id=0,
+        cache_salt="",
     )
 
 

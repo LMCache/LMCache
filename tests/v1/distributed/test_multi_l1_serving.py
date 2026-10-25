@@ -11,7 +11,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     DevDaxL1ManagerConfig,
@@ -102,16 +101,7 @@ def test_dram_devdax_serving_round_trip(tmp_path: Path) -> None:
         )
     )
     storage = StorageManager(config)
-    keys = [
-        ObjectKey(
-            identity=ObjectKeyIdentity(
-                chunk_hash=ObjectKey.IntHash2Bytes(i),
-                model_name="multi-serving",
-                kv_rank=0,
-            )
-        )
-        for i in range(3)
-    ]
+    keys = [ObjectKey(ObjectKey.IntHash2Bytes(i), "multi-serving", 0) for i in range(3)]
     try:
         owners = []
         for index, key in enumerate(keys):
@@ -177,14 +167,7 @@ def test_affinity_binds_first_dram_l1_after_devdax(tmp_path: Path) -> None:
         + ["--l2-adapter", json.dumps({"type": "fs", "base_path": str(archive)})]
     )
     storage = StorageManager(config)
-    keys = [
-        ObjectKey(
-            identity=ObjectKeyIdentity(
-                chunk_hash=ObjectKey.IntHash2Bytes(i), model_name="affinity", kv_rank=0
-            )
-        )
-        for i in range(3)
-    ]
+    keys = [ObjectKey(ObjectKey.IntHash2Bytes(i), "affinity", 0) for i in range(3)]
     try:
         for key in keys:
             objects = storage.reserve_write([key], LAYOUT)

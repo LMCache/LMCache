@@ -56,8 +56,8 @@ non-zero identifiers except the metadata checkpoint identifier.
 
 The adapter maps KV data writes onto FDP placement identifiers with a
 cache-salt prefix policy. It derives a case-insensitive bucket from the part of
-`ObjectKey.identity.cache_salt` before `:` only when the separator is present,
-assigns buckets to placement identifiers in first-seen order, and reuses the same
+`ObjectKey.cache_salt` before `:` only when the separator is present, assigns
+buckets to placement identifiers in first-seen order, and reuses the same
 identifier for later writes in that bucket. Values without `:` or with an empty
 prefix omit the directive; `rag:` is a valid opt-in to the `rag` bucket. The
 mapping is availability-first: if the number of buckets exceeds the number of

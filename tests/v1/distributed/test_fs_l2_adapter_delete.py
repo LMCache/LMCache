@@ -17,7 +17,6 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
     FSL2Adapter,
@@ -62,9 +61,10 @@ AdapterFixture = tuple[FSL2Adapter, _RecordingListener]
 
 def _key(h: bytes = b"\xde\xad\xbe\xef", salt: str = "alice") -> ObjectKey:
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=h, model_name="llama", kv_rank=42, cache_salt=salt
-        )
+        chunk_hash=h,
+        model_name="llama",
+        kv_rank=42,
+        cache_salt=salt,
     )
 
 

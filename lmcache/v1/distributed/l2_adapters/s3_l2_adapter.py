@@ -38,7 +38,6 @@ from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     KeyEntry,
     KeyListPage,
@@ -112,13 +111,11 @@ def _string_to_object_key(name: str) -> ObjectKey:
             f"unparsable S3 object name {name!r}: bad chunk_hash {chunk_hash_hex!r}"
         ) from exc
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=chunk_hash,
-            model_name=model_name,
-            kv_rank=kv_rank,
-            object_group_id=object_group_id,
-            cache_salt=cache_salt,
-        )
+        chunk_hash=chunk_hash,
+        model_name=model_name,
+        kv_rank=kv_rank,
+        object_group_id=object_group_id,
+        cache_salt=cache_salt,
     )
 
 
@@ -187,14 +184,14 @@ def _object_key_to_string(key: ObjectKey) -> str:
         <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
 
     ``@`` in ``model_name`` and ``cache_salt`` is rejected by
-    ``ObjectKeyIdentity.__post_init__``, so the format is unambiguous.
+    ``ObjectKey.__post_init__``, so the format is unambiguous.
     """
     base = (
-        f"{key.identity.model_name}@{key.identity.kv_rank:08x}"
-        f"@{key.identity.object_group_id:x}@{key.identity.chunk_hash.hex()}"
+        f"{key.model_name}@{key.kv_rank:08x}"
+        f"@{key.object_group_id:x}@{key.chunk_hash.hex()}"
     )
-    if key.identity.cache_salt:
-        return f"{base}@{key.identity.cache_salt}"
+    if key.cache_salt:
+        return f"{base}@{key.cache_salt}"
     return base
 
 

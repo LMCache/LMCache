@@ -19,7 +19,6 @@ import pytest
 import zmq
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
@@ -76,15 +75,11 @@ def _publish_kv(bus: EventBus, event_type: EventType, **metadata: Any) -> None:
 
 
 def _event_key(index: int, model: str = "model", rank: int = 0) -> ObjectKey:
-    return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=bytes([index]) * 32, model_name=model, kv_rank=rank
-        )
-    )
+    return ObjectKey(bytes([index]) * 32, model, rank)
 
 
 def _bind_kv(bus: EventBus, keys: list[ObjectKey]) -> None:
-    hashes = [key.identity.chunk_hash for key in keys]
+    hashes = [key.chunk_hash for key in keys]
     _publish_kv(
         bus,
         EventType.MP_TOKENS,
@@ -426,13 +421,13 @@ def test_cpu_events_preserve_tokens_parents_and_deduplicate_ranks() -> None:
         (r.kind, r.block_hashes, r.token_ids, r.parent_block_hash)
         for r in result.events
     ] == [
-        ("stored", [keys[0].identity.chunk_hash], [0], None),
-        ("stored", [keys[1].identity.chunk_hash], [1], keys[0].identity.chunk_hash),
+        ("stored", [keys[0].chunk_hash], [0], None),
+        ("stored", [keys[1].chunk_hash], [1], keys[0].chunk_hash),
     ]
     _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[keys[0], _event_key(1, rank=1)])
     removed = module.read_kv_events("model", result.next_cursor, 8)
     assert [(r.kind, r.medium, r.block_hashes) for r in removed.events] == [
-        ("removed", "CPU", [keys[0].identity.chunk_hash]),
+        ("removed", "CPU", [keys[0].chunk_hash]),
     ]
     assert removed.incarnation == result.incarnation and not removed.lost
     assert module.read_kv_events("model", removed.next_cursor, 8).events == []
@@ -514,7 +509,7 @@ def test_unknown_and_expired_token_bindings_skip_stores(monkeypatch) -> None:
     _bind_kv(bus, keys)
     _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[keys[0], keys[-1]])
     result = module.read_kv_events("model", 0, 8)
-    assert [r.block_hashes for r in result.events] == [[keys[-1].identity.chunk_hash]]
+    assert [r.block_hashes for r in result.events] == [[keys[-1].chunk_hash]]
     assert module.report_status()["kv_events"]["unbound_stores"] == 2
 
 

@@ -27,7 +27,7 @@ LMCache MP Server
   │  ipc_key_to_object_keys(key, chunk_hashes)
   │    reads key.cache_salt internally and propagates
   ▼
-ObjectKey(identity=ObjectKeyIdentity(..., cache_salt="alice"))
+ObjectKey(chunk_hash, model_name, kv_rank, cache_salt="alice")
   │                                         ▲
   │                            cache_salt IS part of key identity
   │                            (participates in __eq__ / __hash__)
@@ -61,22 +61,16 @@ L2EvictionController (every 1s):
 
 ### 1. Strict User Isolation — `cache_salt` as ObjectKey Identity Field
 
-User identity is a **full identity field** on `ObjectKeyIdentity`, participating in
+User identity is a **full identity field** on `ObjectKey`, participating in
 `__eq__` and `__hash__`:
 
 ```python
 @dataclass(frozen=True)
-class ObjectKeyIdentity:
+class ObjectKey:
     chunk_hash: bytes
     model_name: str
     kv_rank: int
-    object_group_id: int = 0
     cache_salt: str = ""
-
-
-@dataclass(frozen=True)
-class ObjectKey:
-    identity: ObjectKeyIdentity
 ```
 
 Two ObjectKeys with the same (chunk_hash, model_name, kv_rank) but different
@@ -160,7 +154,7 @@ Worker path (STORE/RETRIEVE):                              │
                                               key.cache_salt = "alice"
                                               ipc_key_to_object_keys(key, hashes)
                                                 — reads key.cache_salt
-                                              → ObjectKey(identity=ObjectKeyIdentity(..., cache_salt="alice"))
+                                              → ObjectKey(cache_salt="alice", ...)
 ```
 
 Because both scheduler and worker set `cache_salt` directly on the IPC key,
@@ -293,9 +287,9 @@ See the **Configuration** section for the full JSON example.
 
 **File:** `lmcache/v1/distributed/api.py`
 
-Store `cache_salt: str = ""` on `ObjectKeyIdentity` (as shown in section 1).
+Add `cache_salt: str = ""` to `ObjectKey` (as shown in section 1).
 `ipc_key_to_object_keys()` reads `ipc_key.cache_salt` directly and
-propagates it to each constructed `ObjectKey.identity` — no separate parameter,
+propagates it to each constructed `ObjectKey` — no separate parameter,
 so callers cannot accidentally drop the salt.
 
 ### 2. Server — `cache_salt` is carried by `IPCCacheServerKey`
@@ -443,8 +437,8 @@ class L2AdapterInterface(ABC):
         with self._usage_lock:
             for key, size in zip(keys, sizes, strict=True):
                 self._total_bytes_used += size
-                self._bytes_by_cache_salt[key.identity.cache_salt] = (
-                    self._bytes_by_cache_salt.get(key.identity.cache_salt, 0) + size
+                self._bytes_by_cache_salt[key.cache_salt] = (
+                    self._bytes_by_cache_salt.get(key.cache_salt, 0) + size
                 )
         for listener in self._listeners:
             listener.on_l2_keys_stored(keys)
@@ -455,8 +449,8 @@ class L2AdapterInterface(ABC):
         with self._usage_lock:
             for key, size in zip(keys, sizes, strict=True):
                 self._total_bytes_used -= size
-                self._bytes_by_cache_salt[key.identity.cache_salt] = (
-                    self._bytes_by_cache_salt.get(key.identity.cache_salt, 0) - size
+                self._bytes_by_cache_salt[key.cache_salt] = (
+                    self._bytes_by_cache_salt.get(key.cache_salt, 0) - size
                 )
         for listener in self._listeners:
             listener.on_l2_keys_deleted(keys)
@@ -563,7 +557,7 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
     def on_keys_created(self, keys: list[ObjectKey]):
         with self._lock:
             for key in reversed(keys):
-                cache_salt = key.identity.cache_salt
+                cache_salt = key.cache_salt
                 if cache_salt not in self._per_user_order:
                     self._per_user_order[cache_salt] = OrderedDict()
                 user_order = self._per_user_order[cache_salt]
@@ -575,7 +569,7 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
     def on_keys_touched(self, keys: list[ObjectKey]):
         with self._lock:
             for key in reversed(keys):
-                cache_salt = key.identity.cache_salt
+                cache_salt = key.cache_salt
                 user_order = self._per_user_order.get(cache_salt)
                 if user_order and key in user_order:
                     user_order.move_to_end(key)
@@ -583,7 +577,7 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
     def on_keys_removed(self, keys: list[ObjectKey]):
         with self._lock:
             for key in keys:
-                cache_salt = key.identity.cache_salt
+                cache_salt = key.cache_salt
                 user_order = self._per_user_order.get(cache_salt)
                 if user_order:
                     user_order.pop(key, None)
@@ -742,24 +736,20 @@ curl http://localhost:8000/quota
 
   ```python
   def _object_key_to_string(key: ObjectKey) -> str:
-      identity = key.identity
-      base = (
-          f"{identity.model_name}@{identity.kv_rank:08x}"
-          f"@{identity.object_group_id:x}@{identity.chunk_hash.hex()}"
-      )
-      if identity.cache_salt:
-          return f"{base}@{identity.cache_salt}"
+      base = f"{key.model_name}@{key.kv_rank:08x}@{key.chunk_hash.hex()}"
+      if key.cache_salt:
+          return f"{base}@{key.cache_salt}"
       return base
   ```
 
   Because un-salted wire keys and filenames are unchanged, existing
   cache directories and remote stores need **no migration**. Parsers
-  split on ``@`` and dispatch by field count (4 vs 5); both
+  split on ``@`` and dispatch by field count (3 vs 4); both
   ``model_name`` and ``cache_salt`` are forbidden from containing
   ``@`` so the parse is unambiguous.
 
 - **Listener interface:** `L2AdapterListener` method signatures are unchanged.
-  `cache_salt` flows through `ObjectKey.identity.cache_salt`, not through callback
+  `cache_salt` flows through `ObjectKey.cache_salt`, not through callback
   parameters.
 
 ## PR Plan
@@ -800,18 +790,17 @@ Populate `cache_salt` from `request.cache_salt` and pass to adapters.
 
 ### PR2 — LMCache: `cache_salt` on data model + server (LMCache repo)
 
-Add `cache_salt` to `ObjectKeyIdentity` and `IPCCacheServerKey`. Server passes
+Add `cache_salt` to `ObjectKey` and `IPCCacheServerKey`. Server passes
 it through. Update serialization. No behavioral change with `cache_salt=""`.
 
 | File | Change |
 |------|--------|
-| `lmcache/v1/cache_identity.py` | `cache_salt: str = ""` on `ObjectKeyIdentity` with `__post_init__` validation (`@`, `/`, `\`, NUL, length cap on `cache_salt`; `@` rejected on `model_name`) |
-| `lmcache/v1/distributed/api.py` | `ObjectKey.identity` holds the matching fields; `ipc_key_to_object_keys()` reads `ipc_key.cache_salt` directly (no separate param) |
+| `lmcache/v1/distributed/api.py` | `cache_salt: str = ""` on `ObjectKey` with `__post_init__` validation (`@`, `/`, `\`, NUL, length cap on `cache_salt`; `@` rejected on `model_name`); `ipc_key_to_object_keys()` reads `ipc_key.cache_salt` directly (no separate param) |
 | `lmcache/v1/multiprocess/custom_types.py` | `cache_salt: str = ""` on `IPCCacheServerKey` with `__post_init__` validation; update `no_worker_id_version()`, `from_token_ids()` |
 | `lmcache/v1/multiprocess/server.py` | No code changes — existing `ipc_key_to_object_keys(key, chunk_hashes)` calls now carry salt automatically |
 | `lmcache/integration/vllm/vllm_multi_process_adapter.py` | Scheduler + worker `_create_key()` now forward `cache_salt` to `IPCCacheServerKey` |
 | `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | `_object_key_to_string()` appends trailing `@<cache_salt>` when salted; un-salted output is unchanged |
-| `lmcache/v1/distributed/l2_adapters/fs_l2_adapter.py` | `_object_key_to_filename()` / `_filename_to_object_key()` accept 4-field (unsalted) or 5-field (salted) shapes |
+| `lmcache/v1/distributed/l2_adapters/fs_l2_adapter.py` | `_object_key_to_filename()` / `_filename_to_object_key()` accept 3-field (unsalted) or 4-field (salted) shapes |
 | `csrc/storage_backends/fs/connector.cpp` | `key_to_filename()` splits on `@` and dispatches by field count |
 
 ### PR3 — LMCache: Adapter interface refactor (LMCache repo)

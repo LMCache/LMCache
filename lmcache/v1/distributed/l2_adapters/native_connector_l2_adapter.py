@@ -45,7 +45,7 @@ logger = init_logger(__name__)
 
 # Key separator — kept in sync with fs_l2_adapter.py and
 # csrc/storage_backends/fs/connector.cpp. Both ``@`` in ``model_name``
-# and ``@`` in ``cache_salt`` are rejected by ObjectKeyIdentity.__post_init__
+# and ``@`` in ``cache_salt`` are rejected by ObjectKey.__post_init__
 # so splitting on ``@`` is unambiguous.
 _KEY_SEP = "@"
 
@@ -83,11 +83,11 @@ def _object_key_to_string(key: ObjectKey) -> str:
         <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
     """
     base = (
-        f"{key.identity.model_name}{_KEY_SEP}{key.identity.kv_rank:08x}"
-        f"{_KEY_SEP}{key.identity.object_group_id:x}{_KEY_SEP}{key.identity.chunk_hash.hex()}"
+        f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}"
+        f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
     )
-    if key.identity.cache_salt:
-        return f"{base}{_KEY_SEP}{key.identity.cache_salt}"
+    if key.cache_salt:
+        return f"{base}{_KEY_SEP}{key.cache_salt}"
     return base
 
 

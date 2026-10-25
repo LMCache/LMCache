@@ -530,7 +530,7 @@ class BlendMatchModel(BaseModel):
     """Wire form of one blend match (see ``BlendMatch``).
 
     Attributes:
-        chunk_hash: Hex of the matched chunk's ``ObjectKey.identity.chunk_hash``.
+        chunk_hash: Hex of the matched chunk's ``ObjectKey.chunk_hash``.
         old_st: Its position in the sequence it was stored under
             (re-RoPE source).
         cur_st: Its position in the query (re-RoPE target).

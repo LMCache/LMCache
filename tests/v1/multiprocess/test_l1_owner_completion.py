@@ -13,7 +13,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -112,14 +111,7 @@ def test_store_owner_callback_round_trip(
         if failure == "owner" and len(copied) == 2:
             copied[-1].reset_l1_manager()
 
-    keys = [
-        ObjectKey(
-            identity=ObjectKeyIdentity(
-                chunk_hash=b"chunk", model_name="model", kv_rank=0, object_group_id=gid
-            )
-        )
-        for gid in range(2)
-    ]
+    keys = [ObjectKey(b"chunk", "model", 0, gid) for gid in range(2)]
     ctx = SimpleNamespace(
         chunk_size=1,
         null_block_id=0,

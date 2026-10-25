@@ -12,7 +12,6 @@ import numpy as np
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     BlendNamespace,
@@ -423,17 +422,15 @@ def _key(
     """Build a key the way a server would, so ``kv_rank`` carries the
     world size the namespace is derived from."""
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=bytes([hash_byte]) * 4,
-            model_name=model_name,
-            kv_rank=ObjectKey.ComputeKVRank(
-                world_size=world_size,
-                global_rank=rank,
-                local_world_size=world_size,
-                local_rank=rank,
-            ),
-            cache_salt=cache_salt,
-        )
+        chunk_hash=bytes([hash_byte]) * 4,
+        model_name=model_name,
+        kv_rank=ObjectKey.ComputeKVRank(
+            world_size=world_size,
+            global_rank=rank,
+            local_world_size=world_size,
+            local_rank=rank,
+        ),
+        cache_salt=cache_salt,
     )
 
 
@@ -481,7 +478,7 @@ def test_a_stored_chunk_becomes_fragment_matchable():
     matches = directory.blend_match(
         np.asarray([0, 10, 11, 12, 13], dtype=np.uint64), DIR_NS
     )
-    assert _tuples(matches) == [(_key(1).identity.chunk_hash, 256, 1)]
+    assert _tuples(matches) == [(_key(1).chunk_hash, 256, 1)]
 
 
 def test_deleting_the_last_placement_removes_it_from_fragment_matching():
@@ -521,7 +518,7 @@ def test_chunk_stays_matchable_while_any_rank_holds_it():
 
     query = np.asarray([10, 11, 12, 13], dtype=np.uint64)
     assert _tuples(directory.blend_match(query, namespace)) == [
-        (_key(1).identity.chunk_hash, 0, 0)
+        (_key(1).chunk_hash, 0, 0)
     ]
 
     directory.consume(
@@ -548,7 +545,7 @@ def test_restoring_a_chunk_with_new_content_retires_the_old_fingerprint():
     )
     assert _tuples(
         directory.blend_match(np.asarray([20, 21, 22, 23], dtype=np.uint64), DIR_NS)
-    ) == [(_key(1).identity.chunk_hash, 0, 0)]
+    ) == [(_key(1).chunk_hash, 0, 0)]
     assert directory.blend_stats().num_contents == 1
 
 
@@ -603,7 +600,7 @@ def test_chunk_with_unreported_offset_is_not_fragment_matchable():
     )
 
     # Content known, but with no position it cannot be indexed.
-    assert directory.get_token_ids([_key(1).identity.chunk_hash]) == [(10, 11, 12, 13)]
+    assert directory.get_token_ids([_key(1).chunk_hash]) == [(10, 11, 12, 13)]
     assert directory.blend_stats().num_chunks == 0
     assert (
         directory.blend_match(np.asarray([10, 11, 12, 13], dtype=np.uint64), DIR_NS)
@@ -623,7 +620,7 @@ def test_a_later_offset_bearing_store_makes_the_chunk_matchable():
     matches = directory.blend_match(
         np.asarray([10, 11, 12, 13], dtype=np.uint64), DIR_NS
     )
-    assert _tuples(matches) == [(_key(1).identity.chunk_hash, 256, 0)]
+    assert _tuples(matches) == [(_key(1).chunk_hash, 256, 0)]
 
 
 def test_blend_lookup_is_off_until_enabled():
@@ -639,7 +636,7 @@ def test_blend_lookup_is_off_until_enabled():
         == []
     )
     # The token binding itself is still recorded for introspection.
-    assert directory.get_token_ids([_key(1).identity.chunk_hash]) == [(10, 11, 12, 13)]
+    assert directory.get_token_ids([_key(1).chunk_hash]) == [(10, 11, 12, 13)]
 
 
 def test_enabling_does_not_retroactively_index_earlier_stores():
@@ -786,9 +783,7 @@ def test_directory_does_not_offer_matches_across_namespaces(
 
     query = np.asarray([10, 11, 12, 13], dtype=np.uint64)
     assert directory.blend_match(query, requester) == []
-    assert _tuples(directory.blend_match(query, DIR_NS)) == [
-        (_key(1).identity.chunk_hash, 0, 0)
-    ]
+    assert _tuples(directory.blend_match(query, DIR_NS)) == [(_key(1).chunk_hash, 0, 0)]
 
 
 def test_directory_offers_a_chunk_two_tenants_stored_to_each_of_them():
@@ -801,7 +796,7 @@ def test_directory_offers_a_chunk_two_tenants_stored_to_each_of_them():
     for salt in ("a", "b"):
         namespace = BlendNamespace(model_name="m", cache_salt=salt, world_size=1)
         assert _tuples(directory.blend_match(query, namespace)) == [
-            (tenant_a.identity.chunk_hash, 0, 0)
+            (tenant_a.chunk_hash, 0, 0)
         ]
     assert directory.blend_stats().num_claims == 2
 
@@ -819,9 +814,7 @@ def test_directory_releases_a_namespace_claim_when_its_last_key_goes():
     ns_a = BlendNamespace(model_name="m", cache_salt="a", world_size=1)
     ns_b = BlendNamespace(model_name="m", cache_salt="b", world_size=1)
     assert directory.blend_match(query, ns_a) == []
-    assert _tuples(directory.blend_match(query, ns_b)) == [
-        (tenant_b.identity.chunk_hash, 0, 0)
-    ]
+    assert _tuples(directory.blend_match(query, ns_b)) == [(tenant_b.chunk_hash, 0, 0)]
 
 
 def test_a_namespace_joining_a_bound_chunk_without_tokens_still_claims_it():
@@ -833,6 +826,4 @@ def test_a_namespace_joining_a_bound_chunk_without_tokens_still_claims_it():
 
     query = np.asarray([10, 11, 12, 13], dtype=np.uint64)
     ns_b = BlendNamespace(model_name="m", cache_salt="b", world_size=1)
-    assert _tuples(directory.blend_match(query, ns_b)) == [
-        (_key(1).identity.chunk_hash, 0, 0)
-    ]
+    assert _tuples(directory.blend_match(query, ns_b)) == [(_key(1).chunk_hash, 0, 0)]

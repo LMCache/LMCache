@@ -120,7 +120,7 @@ The two loop counters distinguish "loop is alive" from "eviction fired" — impo
 ## L1 Failure Metrics (LM-291 health monitoring)
 
 Tagged counters covering L1 allocation and read failures. The subscriber
-groups keys by `ObjectKey.identity.model_name` to emit a `model_name` OTel
+groups keys by `ObjectKey.model_name` to emit a `model_name` OTel
 attribute on every data point, enabling per-model Prometheus slicing
 (e.g. `lmcache_mp_l1_allocation_failure_total{during="l1_store",model_name="llama-7b"}`).
 

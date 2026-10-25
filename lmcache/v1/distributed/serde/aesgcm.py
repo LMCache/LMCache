@@ -73,7 +73,7 @@ class AesGcmSerializer(Serializer):
         Returns:
             Number of bytes written to ``dst``.
         """
-        dek = self._keys.get_key(key.identity.cache_salt)
+        dek = self._keys.get_key(key.cache_salt)
         iv = os.urandom(_IV_LEN)
         ciphertext = AESGCM(dek).encrypt(iv, bytes(src.byte_array), None)
         # Cast to native "B": MemoryObj.byte_array is a ctypes-backed memoryview
@@ -126,7 +126,7 @@ class AesGcmDeserializer(Deserializer):
         frame_end = _HDR_LEN + plaintext_len + _TAG_LEN
         if len(blob) < frame_end or blob[0] != _VERSION:
             raise ValueError("aesgcm serde: malformed frame or unknown version")
-        dek = self._keys.get_key(key.identity.cache_salt)
+        dek = self._keys.get_key(key.cache_salt)
         plaintext = AESGCM(dek).decrypt(
             blob[1:_HDR_LEN], blob[_HDR_LEN:frame_end], None
         )

@@ -10,7 +10,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
@@ -58,11 +57,7 @@ def test_l1_reservation_owner_survives_prefetch_completion(
     """Direct and prefetch reservations stamp the actual L1 before exposure."""
     first, second = managers
     assert first.l1_manager_id != second.l1_manager_id
-    key = ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=ObjectKey.IntHash2Bytes(1), model_name="owner-test", kv_rank=0
-        )
-    )
+    key = ObjectKey(ObjectKey.IntHash2Bytes(1), "owner-test", 0)
     layout = MemoryLayoutDesc([torch.Size([64])], [torch.uint8])
     error, obj = first.reserve_write([key], [False], layout, tag="prefetch")[key]
     assert error == L1Error.SUCCESS and obj is not None

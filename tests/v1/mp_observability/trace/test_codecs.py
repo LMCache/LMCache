@@ -7,7 +7,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     GroupedObjectKeys,
@@ -53,36 +52,25 @@ class TestPrimitives:
 
 class TestObjectKey:
     def test_roundtrip(self):
-        k = ObjectKey(
-            identity=ObjectKeyIdentity(
-                chunk_hash=b"\x00\x01\x02", model_name="m", kv_rank=42
-            )
-        )
+        k = ObjectKey(chunk_hash=b"\x00\x01\x02", model_name="m", kv_rank=42)
         out = _roundtrip(k)
         assert out == k
 
     def test_object_group_id_roundtrip(self):
         k = ObjectKey(
-            identity=ObjectKeyIdentity(
-                chunk_hash=b"\x00\x01\x02",
-                model_name="m",
-                kv_rank=42,
-                object_group_id=7,
-            )
+            chunk_hash=b"\x00\x01\x02",
+            model_name="m",
+            kv_rank=42,
+            object_group_id=7,
         )
         out = _roundtrip(k)
         assert out == k
-        assert isinstance(out, ObjectKey)
-        assert out.identity.object_group_id == 7
+        assert out.object_group_id == 7
 
     def test_inside_list(self):
         keys = [
-            ObjectKey(
-                identity=ObjectKeyIdentity(chunk_hash=b"a", model_name="m", kv_rank=1)
-            ),
-            ObjectKey(
-                identity=ObjectKeyIdentity(chunk_hash=b"b", model_name="m", kv_rank=2)
-            ),
+            ObjectKey(chunk_hash=b"a", model_name="m", kv_rank=1),
+            ObjectKey(chunk_hash=b"b", model_name="m", kv_rank=2),
         ]
         assert _roundtrip(keys) == keys
 
@@ -127,12 +115,7 @@ def _grouped_object_keys(gid: int, window: int = -1) -> GroupedObjectKeys:
     return GroupedObjectKeys(
         keys=[
             ObjectKey(
-                identity=ObjectKeyIdentity(
-                    chunk_hash=bytes([i]),
-                    model_name="m",
-                    kv_rank=1,
-                    object_group_id=gid,
-                )
+                chunk_hash=bytes([i]), model_name="m", kv_rank=1, object_group_id=gid
             )
             for i in range(3)
         ],
@@ -221,12 +204,8 @@ class TestAttnWindowDesc:
 class TestSet:
     def test_roundtrip(self):
         keys = {
-            ObjectKey(
-                identity=ObjectKeyIdentity(chunk_hash=b"a", model_name="m", kv_rank=1)
-            ),
-            ObjectKey(
-                identity=ObjectKeyIdentity(chunk_hash=b"b", model_name="m", kv_rank=2)
-            ),
+            ObjectKey(chunk_hash=b"a", model_name="m", kv_rank=1),
+            ObjectKey(chunk_hash=b"b", model_name="m", kv_rank=2),
         }
         out = _roundtrip(keys)
         assert out == keys
@@ -261,13 +240,7 @@ class TestErrors:
 class TestEncodeArgs:
     def test_args_dict(self):
         args = {
-            "keys": [
-                ObjectKey(
-                    identity=ObjectKeyIdentity(
-                        chunk_hash=b"x", model_name="m", kv_rank=0
-                    )
-                )
-            ],
+            "keys": [ObjectKey(chunk_hash=b"x", model_name="m", kv_rank=0)],
             "mode": "new",
             "num_kv_readers": 1,
         }

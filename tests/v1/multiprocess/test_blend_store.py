@@ -22,7 +22,6 @@ import torch
 
 # First Party
 from lmcache import device_ops  # noqa: F401
-from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_coordinator.blend_client import PENDING  # noqa: F401
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
 from lmcache.v1.multiprocess import server as server_mod
@@ -559,20 +558,20 @@ def test_chunk_major_object_keys_ordering():
         model_name="m", world_size=2, worker_id=None, token_ids=[1, 2, 3]
     )
     hashes = [b"\x01" * 8, b"\x02" * 8]
-    keys: list[ObjectKey] = _cb_chunk_major_object_keys(key, hashes, (0, 2))
+    keys = _cb_chunk_major_object_keys(key, hashes, (0, 2))
     # 2 hashes x 2 groups x world_size 2.
     assert len(keys) == 8
-    assert [k.identity.object_group_id for k in keys] == [0, 0, 2, 2, 0, 0, 2, 2]
-    assert [k.identity.chunk_hash for k in keys][:4] == [hashes[0]] * 4
-    assert [k.identity.chunk_hash for k in keys][4:] == [hashes[1]] * 4
+    assert [k.object_group_id for k in keys] == [0, 0, 2, 2, 0, 0, 2, 2]
+    assert [k.chunk_hash for k in keys][:4] == [hashes[0]] * 4
+    assert [k.chunk_hash for k in keys][4:] == [hashes[1]] * 4
 
     # Worker-specific key: expansion of 1 per (hash, group).
     wkey = IPCCacheServerKey.from_token_ids(
         model_name="m", world_size=2, worker_id=1, token_ids=[1, 2, 3]
     )
-    wkeys: list[ObjectKey] = _cb_chunk_major_object_keys(wkey, hashes, (0, 2))
+    wkeys = _cb_chunk_major_object_keys(wkey, hashes, (0, 2))
     assert len(wkeys) == 4
-    assert [k.identity.object_group_id for k in wkeys] == [0, 2, 0, 2]
+    assert [k.object_group_id for k in wkeys] == [0, 2, 0, 2]
 
 
 def test_classify_read_groups_recurrent_first_layout():

@@ -1152,9 +1152,7 @@ class PrefetchController(StorageControllerInterface):
                     "request_id": request_id,
                     "key_count": len(flattened_keys),
                     "adapter_count": len(request.inflight_lookup_tasks),
-                    "key_count_per_salt": Counter(
-                        k.identity.cache_salt for k in flattened_keys
-                    ),
+                    "key_count_per_salt": Counter(k.cache_salt for k in flattened_keys),
                 },
             )
         )
@@ -1423,9 +1421,7 @@ class PrefetchController(StorageControllerInterface):
                     "request_id": request.request_id,
                     "key_count": len(plan_keys),
                     "adapter_count": len(request.inflight_load_tasks),
-                    "key_count_per_salt": Counter(
-                        k.identity.cache_salt for k in plan_keys
-                    ),
+                    "key_count_per_salt": Counter(k.cache_salt for k in plan_keys),
                 },
             )
         )
@@ -1586,7 +1582,7 @@ class PrefetchController(StorageControllerInterface):
                         "loaded_count": len(loaded_keys),
                         "failed_count": len(failed_keys),
                         "key_count_per_salt": Counter(
-                            k.identity.cache_salt for k in loaded_keys
+                            k.cache_salt for k in loaded_keys
                         ),
                     },
                 )

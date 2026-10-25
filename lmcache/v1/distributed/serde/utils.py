@@ -10,7 +10,6 @@ import os
 import torch
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.serde.base import SerdeProcessor
 
@@ -48,11 +47,9 @@ def make_temp_key(original_key: ObjectKey) -> ObjectKey:
         original_key: The original ObjectKey to derive from.
     """
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=original_key.identity.chunk_hash + os.urandom(16),
-            model_name=original_key.identity.model_name,
-            kv_rank=original_key.identity.kv_rank,
-            object_group_id=original_key.identity.object_group_id,
-            cache_salt=original_key.identity.cache_salt,
-        )
+        chunk_hash=original_key.chunk_hash + os.urandom(16),
+        model_name=original_key.model_name,
+        kv_rank=original_key.kv_rank,
+        object_group_id=original_key.object_group_id,
+        cache_salt=original_key.cache_salt,
     )

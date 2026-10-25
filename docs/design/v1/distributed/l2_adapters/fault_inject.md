@@ -36,8 +36,7 @@ of the following hold:
 Defaults are pass-through (`rate=0.0`, empty `gap_indices`/`gap_tail_ratios`).
 
 > **Why a ratio and not a chunk hash?** An earlier `drop_chunk_hashes` knob keyed
-> drops on `ObjectKey.identity.chunk_hash` — content-addressed, so the *same*
-> chunk failed
+> drops on `ObjectKey.chunk_hash` — content-addressed, so the *same* chunk failed
 > on every leg. But it forced the test author (and thus the server config) to know
 > a hash computed from a not-yet-stored workload, which inverted the dependency
 > (the server "knowing" a future workload). `gap_tail_ratios` is a positional rule

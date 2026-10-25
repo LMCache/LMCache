@@ -15,16 +15,13 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.serde.fp8 import (
     Fp8QuantizationDeserializer,
     Fp8QuantizationSerializer,
 )
 
-_TEST_KEY = ObjectKey(
-    identity=ObjectKeyIdentity(chunk_hash=b"\x00" * 32, model_name="test", kv_rank=0)
-)
+_TEST_KEY = ObjectKey(chunk_hash=b"\x00" * 32, model_name="test", kv_rank=0)
 
 
 @dataclass

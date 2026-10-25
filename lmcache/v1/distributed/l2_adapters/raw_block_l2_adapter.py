@@ -1065,7 +1065,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         placement_ids: list[int | None] = []
         for key in keys:
-            bucket = _cache_salt_to_fdp_bucket(key.identity.cache_salt)
+            bucket = _cache_salt_to_fdp_bucket(key.cache_salt)
             if bucket is None:
                 placement_ids.append(None)
                 continue
@@ -1082,14 +1082,14 @@ class RawBlockL2Adapter(L2AdapterInterface):
         """Return per-rank FDP placement IDs inside each cache_salt bucket."""
         placement_ids: list[int | None] = []
         for key in keys:
-            bucket = _cache_salt_to_fdp_bucket(key.identity.cache_salt)
+            bucket = _cache_salt_to_fdp_bucket(key.cache_salt)
             if bucket is None:
                 placement_ids.append(None)
                 continue
             placement_ids.append(
                 self._get_or_assign_fdp_rank_placement_id(
                     bucket,
-                    _local_rank_from_kv_rank(key.identity.kv_rank),
+                    _local_rank_from_kv_rank(key.kv_rank),
                 )
             )
 
@@ -1238,9 +1238,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
         total_delta = len(recovered_keys) * slot_bytes
         by_salt: dict[str, int] = {}
         for key in recovered_keys:
-            by_salt[key.identity.cache_salt] = (
-                by_salt.get(key.identity.cache_salt, 0) + slot_bytes
-            )
+            by_salt[key.cache_salt] = by_salt.get(key.cache_salt, 0) + slot_bytes
 
         with self._usage_lock:
             self._total_bytes_used += total_delta

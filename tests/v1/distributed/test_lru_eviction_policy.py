@@ -13,7 +13,6 @@ These tests verify the basic functionality of the LRUEvictionPolicy:
 # Third Party
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.eviction_policy import LRUEvictionPolicy
 from lmcache.v1.distributed.internal_api import (
@@ -28,11 +27,7 @@ from lmcache.v1.distributed.internal_api import (
 def make_key(chunk_hash: int, model: str = "model", kv_rank: int = 0) -> ObjectKey:
     """Create an ObjectKey for testing."""
     hash_bytes = ObjectKey.IntHash2Bytes(chunk_hash)
-    return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=hash_bytes, model_name=model, kv_rank=kv_rank
-        )
-    )
+    return ObjectKey(chunk_hash=hash_bytes, model_name=model, kv_rank=kv_rank)
 
 
 # =============================================================================
@@ -103,9 +98,9 @@ class TestLRUEvictionPolicyOrdering:
         # Get candidates - should be in LRU order: 1, 2, 3
         candidates = policy.get_eviction_candidates(3)
         assert len(candidates) == 3
-        assert ObjectKey.Bytes2IntHash(candidates[0].identity.chunk_hash) == 1
-        assert ObjectKey.Bytes2IntHash(candidates[1].identity.chunk_hash) == 2
-        assert ObjectKey.Bytes2IntHash(candidates[2].identity.chunk_hash) == 3
+        assert ObjectKey.Bytes2IntHash(candidates[0].chunk_hash) == 1
+        assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 2
+        assert ObjectKey.Bytes2IntHash(candidates[2].chunk_hash) == 3
 
     def test_touch_moves_key_to_most_recent(self):
         """Touching a key should move it to the most recently used position."""
@@ -118,9 +113,9 @@ class TestLRUEvictionPolicyOrdering:
 
         # Now order should be: 2, 1, 3
         candidates = policy.get_eviction_candidates(3)
-        assert ObjectKey.Bytes2IntHash(candidates[0].identity.chunk_hash) == 2
-        assert ObjectKey.Bytes2IntHash(candidates[1].identity.chunk_hash) == 1
-        assert ObjectKey.Bytes2IntHash(candidates[2].identity.chunk_hash) == 3
+        assert ObjectKey.Bytes2IntHash(candidates[0].chunk_hash) == 2
+        assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 1
+        assert ObjectKey.Bytes2IntHash(candidates[2].chunk_hash) == 3
 
     def test_touch_nonexistent_key_is_safe(self):
         """Touching a nonexistent key should not raise an error."""
@@ -140,9 +135,9 @@ class TestLRUEvictionPolicyOrdering:
 
         # Now order should be: 2, 1, 3
         candidates = policy.get_eviction_candidates(3)
-        assert ObjectKey.Bytes2IntHash(candidates[0].identity.chunk_hash) == 2
-        assert ObjectKey.Bytes2IntHash(candidates[1].identity.chunk_hash) == 1
-        assert ObjectKey.Bytes2IntHash(candidates[2].identity.chunk_hash) == 3
+        assert ObjectKey.Bytes2IntHash(candidates[0].chunk_hash) == 2
+        assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 1
+        assert ObjectKey.Bytes2IntHash(candidates[2].chunk_hash) == 3
 
 
 # =============================================================================
@@ -244,8 +239,8 @@ class TestLRUEvictionPolicyCandidates:
         policy.on_keys_created([make_key(1), make_key(2), make_key(3)])
         candidates = policy.get_eviction_candidates(2)
         assert len(candidates) == 2
-        assert ObjectKey.Bytes2IntHash(candidates[0].identity.chunk_hash) == 3
-        assert ObjectKey.Bytes2IntHash(candidates[1].identity.chunk_hash) == 2
+        assert ObjectKey.Bytes2IntHash(candidates[0].chunk_hash) == 3
+        assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 2
 
     def test_get_candidates_respects_count_limit(self):
         """Candidates should be limited by count parameter."""
@@ -278,14 +273,14 @@ class TestLRUEvictionPolicyKeyEligibleFilter:
 
         # Filter out keys with even chunk_hash
         def key_eligible_filter(key: ObjectKey) -> bool:
-            return ObjectKey.Bytes2IntHash(key.identity.chunk_hash) % 2 != 0
+            return ObjectKey.Bytes2IntHash(key.chunk_hash) % 2 != 0
 
         actions = policy.get_eviction_actions(
             1.0, key_eligible_filter=key_eligible_filter
         )
         assert len(actions) == 1
         evicted_hashes = {
-            ObjectKey.Bytes2IntHash(k.identity.chunk_hash) for k in actions[0].keys
+            ObjectKey.Bytes2IntHash(k.chunk_hash) for k in actions[0].keys
         }
         # Only odd keys should be evicted: 1, 3
         assert evicted_hashes == {1, 3}
@@ -331,7 +326,7 @@ class TestLRUEvictionPolicyKeyEligibleFilter:
 
         # Filter: only accept keys with hash >= 5
         def key_eligible_filter(key: ObjectKey) -> bool:
-            return ObjectKey.Bytes2IntHash(key.identity.chunk_hash) >= 5
+            return ObjectKey.Bytes2IntHash(key.chunk_hash) >= 5
 
         # Request 100% eviction -> target_count = 10, but only 5 pass filter
         actions = policy.get_eviction_actions(
@@ -340,7 +335,7 @@ class TestLRUEvictionPolicyKeyEligibleFilter:
         assert len(actions) == 1
         assert len(actions[0].keys) == 5
         for k in actions[0].keys:
-            assert ObjectKey.Bytes2IntHash(k.identity.chunk_hash) >= 5
+            assert ObjectKey.Bytes2IntHash(k.chunk_hash) >= 5
 
     def test_key_eligible_filter_preserves_lru_order(self):
         """Filtered eviction should still respect LRU order."""
@@ -356,7 +351,7 @@ class TestLRUEvictionPolicyKeyEligibleFilter:
         actions = policy.get_eviction_actions(0.6, key_eligible_filter=lambda _: True)
         assert len(actions) == 1
         evicted_hashes = [
-            ObjectKey.Bytes2IntHash(k.identity.chunk_hash) for k in actions[0].keys
+            ObjectKey.Bytes2IntHash(k.chunk_hash) for k in actions[0].keys
         ]
         # LRU order after touch: 2, 3, 4, 5, 1
         # 60% of 5 = 3 keys, should be 2, 3, 4
@@ -372,7 +367,7 @@ class TestLRUEvictionPolicyKeyEligibleFilter:
         locked_hashes = {1, 3}
 
         def key_eligible_filter(key: ObjectKey) -> bool:
-            return ObjectKey.Bytes2IntHash(key.identity.chunk_hash) not in locked_hashes
+            return ObjectKey.Bytes2IntHash(key.chunk_hash) not in locked_hashes
 
         # Request 100% eviction
         actions = policy.get_eviction_actions(
@@ -380,7 +375,7 @@ class TestLRUEvictionPolicyKeyEligibleFilter:
         )
         assert len(actions) == 1
         evicted_hashes = {
-            ObjectKey.Bytes2IntHash(k.identity.chunk_hash) for k in actions[0].keys
+            ObjectKey.Bytes2IntHash(k.chunk_hash) for k in actions[0].keys
         }
         # Keys 1 and 3 should be skipped
         assert evicted_hashes == {2, 4, 5}
@@ -396,7 +391,7 @@ class TestLRUEvictionPolicyKeyEligibleFilter:
         # Filter: only accept keys with hash divisible by 5
         # Eligible: 0, 5, 10, 15 (4 keys)
         def key_eligible_filter(key: ObjectKey) -> bool:
-            return ObjectKey.Bytes2IntHash(key.identity.chunk_hash) % 5 == 0
+            return ObjectKey.Bytes2IntHash(key.chunk_hash) % 5 == 0
 
         # Request 10% eviction -> target_count = 2
         actions = policy.get_eviction_actions(
@@ -405,4 +400,4 @@ class TestLRUEvictionPolicyKeyEligibleFilter:
         assert len(actions) == 1
         assert len(actions[0].keys) == 2
         for k in actions[0].keys:
-            assert ObjectKey.Bytes2IntHash(k.identity.chunk_hash) % 5 == 0
+            assert ObjectKey.Bytes2IntHash(k.chunk_hash) % 5 == 0

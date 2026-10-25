@@ -12,12 +12,7 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
-    ObjectKey,
-    PrefetchHandle,
-    PrefetchResult,
-)
+from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
@@ -187,10 +182,9 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
 
 def _released_chunks(finish_read_mock: MagicMock) -> set[tuple[int, bytes]]:
     """Collect (object_group_id, chunk_hash) pairs released by the module."""
-    args, kwargs = finish_read_mock.call_args
-    obj_keys: list[ObjectKey] = args[0]
+    (obj_keys,), kwargs = finish_read_mock.call_args
     assert kwargs == {"read_locks": 1, "l1_owners": None}
-    return {(k.identity.object_group_id, k.identity.chunk_hash) for k in obj_keys}
+    return {(k.object_group_id, k.chunk_hash) for k in obj_keys}
 
 
 def test_server_free_lookup_locks_sliding_window_skips_unlocked_chunks():
@@ -360,9 +354,8 @@ def test_server_free_lookup_locks_consumes_pending_result_first():
         == EventType.MP_LOOKUP_PREFETCH_END
     )
     ctx.storage_manager.finish_read_prefetched.assert_called_once()
-    args, kwargs = ctx.storage_manager.finish_read_prefetched.call_args
-    obj_keys: list[ObjectKey] = args[0]
-    assert {(k.identity.object_group_id, k.identity.chunk_hash) for k in obj_keys} == {
+    (obj_keys,), kwargs = ctx.storage_manager.finish_read_prefetched.call_args
+    assert {(k.object_group_id, k.chunk_hash) for k in obj_keys} == {
         (0, b"h0"),
         (0, b"h1"),
     }
@@ -476,7 +469,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup(
     assert adapter.maybe_submit_lookup_request(
         "req-1", pack_token_ids(token_ids), request_configs={"lmcache.skip_save": True}
     )
-    lookup_key: IPCCacheServerKey = client.lookup.call_args.args[0]
+    lookup_key = client.lookup.call_args.args[0]
 
     adapter.free_lookup_locks(
         packed_token_ids=pack_token_ids(token_ids),
@@ -485,7 +478,6 @@ def test_adapter_free_lookup_locks_key_matches_lookup(
         request_id="req-1",
         request_configs={"lmcache.skip_save": True},
     )
-    free_key: IPCCacheServerKey
     free_key, tp_size, extra_ranges = client.free_lookup_locks.call_args.args
     assert tp_size == 1
     assert extra_ranges == ()

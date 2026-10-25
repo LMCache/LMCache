@@ -83,10 +83,10 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
             # later keys in a request should be evicted first, so we
             # insert in reverse to place the final key at the LRU head.
             for key in reversed(keys):
-                order = self._per_salt_order.get(key.identity.cache_salt)
+                order = self._per_salt_order.get(key.cache_salt)
                 if order is None:
                     order = OrderedDict()
-                    self._per_salt_order[key.identity.cache_salt] = order
+                    self._per_salt_order[key.cache_salt] = order
                 if key in order:
                     order.move_to_end(key)
                 else:
@@ -97,7 +97,7 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
             return
         with self._lock:
             for key in reversed(keys):
-                order = self._per_salt_order.get(key.identity.cache_salt)
+                order = self._per_salt_order.get(key.cache_salt)
                 if order is not None and key in order:
                     order.move_to_end(key)
 
@@ -106,14 +106,14 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
             return
         with self._lock:
             for key in keys:
-                order = self._per_salt_order.get(key.identity.cache_salt)
+                order = self._per_salt_order.get(key.cache_salt)
                 if order is None:
                     continue
                 order.pop(key, None)
                 if not order:
                     # Drop the empty bucket so ``list``/iteration
                     # snapshots stay compact.
-                    del self._per_salt_order[key.identity.cache_salt]
+                    del self._per_salt_order[key.cache_salt]
 
     def get_eviction_actions(
         self,

@@ -3,14 +3,13 @@
 """Tests for L1MetricsSubscriber."""
 
 # Standard
+from types import SimpleNamespace
 import time
 
 # Third Party
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
-from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.metrics.l1 import (
@@ -21,22 +20,12 @@ from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _
 _DRAIN_WAIT = 0.15
 
 
-def _make_keys(count: int, cache_salt: str = "") -> list[ObjectKey]:
-    """Build distinct object identities for the requested tenant."""
-    return [
-        ObjectKey(
-            identity=ObjectKeyIdentity(
-                chunk_hash=i.to_bytes(4, "big"),
-                model_name="test",
-                kv_rank=0,
-                cache_salt=cache_salt,
-            )
-        )
-        for i in range(count)
-    ]
+def _make_keys(count: int, cache_salt: str = "") -> list:
+    """Create a list of placeholder key objects with a cache_salt attribute."""
+    return [SimpleNamespace(cache_salt=cache_salt, id=i) for i in range(count)]
 
 
-def _make_event(event_type: EventType, keys: list[ObjectKey]) -> Event:
+def _make_event(event_type: EventType, keys: list) -> Event:
     return Event(event_type=event_type, metadata={"keys": keys})
 
 

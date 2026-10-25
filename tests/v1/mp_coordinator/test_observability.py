@@ -10,7 +10,6 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator import observability
 from lmcache.v1.mp_coordinator.api import (
@@ -46,11 +45,7 @@ from .otel_reader import labels, private_meter, read_values
 
 
 def _key(hash_byte: int) -> ObjectKey:
-    return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=bytes([hash_byte]) * 4, model_name="m", kv_rank=0
-        )
-    )
+    return ObjectKey(chunk_hash=bytes([hash_byte]) * 4, model_name="m", kv_rank=0)
 
 
 def _batch(

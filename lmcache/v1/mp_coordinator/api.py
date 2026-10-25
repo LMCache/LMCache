@@ -77,9 +77,9 @@ class BlendNamespace:
             The namespace a requester must share to reach ``key``.
         """
         return cls(
-            model_name=key.identity.model_name,
-            cache_salt=key.identity.cache_salt,
-            world_size=ObjectKey.WorldSizeFromKVRank(key.identity.kv_rank),
+            model_name=key.model_name,
+            cache_salt=key.cache_salt,
+            world_size=ObjectKey.WorldSizeFromKVRank(key.kv_rank),
         )
 
 
@@ -91,7 +91,7 @@ class BlendMatch:
     the MP-server client, which consumes them.
 
     Attributes:
-        chunk_hash: The matched chunk's ``ObjectKey.identity.chunk_hash``; the
+        chunk_hash: The matched chunk's ``ObjectKey.chunk_hash``; the
             same bytes a local ``CBMatchResult.hash`` holds.
         old_st: Its position in the sequence it was stored under
             (re-RoPE source).

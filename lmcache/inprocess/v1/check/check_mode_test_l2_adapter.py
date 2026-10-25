@@ -17,7 +17,6 @@ from lmcache.inprocess.v1.check.utils import (
     parse_kv_dtype,
     print_performance_results,
 )
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
@@ -37,11 +36,9 @@ _POLL_TIMEOUT_MS = 100000
 def _create_object_key(model: str, key_id: str) -> ObjectKey:
     """Create a test ObjectKey."""
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=ObjectKey.IntHash2Bytes(hash(key_id) & 0xFFFFFFFF),
-            model_name=model,
-            kv_rank=0,
-        )
+        chunk_hash=ObjectKey.IntHash2Bytes(hash(key_id) & 0xFFFFFFFF),
+        model_name=model,
+        kv_rank=0,
     )
 
 

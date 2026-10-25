@@ -18,7 +18,6 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.trace.info_command import InfoCommand
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     CACHE_EVENT_SCHEMA_VERSION,
@@ -70,9 +69,7 @@ class _FakeStorageManagerCfg:
 
 def _key(salt: str, chunk: str) -> ObjectKey:
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=bytes.fromhex(chunk), model_name="m", kv_rank=0, cache_salt=salt
-        )
+        chunk_hash=bytes.fromhex(chunk), model_name="m", kv_rank=0, cache_salt=salt
     )
 
 

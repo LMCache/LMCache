@@ -3,7 +3,6 @@
 per tier, derived from the gate-admitted cache-event stream)."""
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
@@ -15,12 +14,10 @@ from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
 def _key(hash_byte: int, salt: str = "") -> ObjectKey:
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=bytes([hash_byte]) * 4,
-            model_name="m",
-            kv_rank=0,
-            cache_salt=salt,
-        )
+        chunk_hash=bytes([hash_byte]) * 4,
+        model_name="m",
+        kv_rank=0,
+        cache_salt=salt,
     )
 
 

@@ -23,7 +23,6 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -113,11 +112,9 @@ def create_object_key(
         local_rank=worker_id,
     )
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=ObjectKey.IntHash2Bytes(chunk_hash),
-            model_name=model_name,
-            kv_rank=kv_rank,
-        )
+        chunk_hash=ObjectKey.IntHash2Bytes(chunk_hash),
+        model_name=model_name,
+        kv_rank=kv_rank,
     )
 
 

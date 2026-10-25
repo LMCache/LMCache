@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
@@ -86,11 +85,7 @@ def _batch(seq: int) -> CacheEventBatch:
     Returns:
         One valid cache-event batch.
     """
-    key = ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=seq.to_bytes(4, "big"), model_name="model", kv_rank=0
-        )
-    )
+    key = ObjectKey(chunk_hash=seq.to_bytes(4, "big"), model_name="model", kv_rank=0)
     return CacheEventBatch(
         instance_id="node-a",
         incarnation=1,

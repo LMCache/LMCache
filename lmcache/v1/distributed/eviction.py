@@ -153,7 +153,7 @@ class EvictionPolicy:
                 skipped. This is useful for skipping locked keys that
                 cannot be deleted.
             cache_salt: When set, scope eviction to keys belonging to this
-                salt only (identified by ``ObjectKey.identity.cache_salt``). When
+                salt only (identified by ``ObjectKey.cache_salt``). When
                 None, evict globally across all salts. Only meaningful for
                 policies where ``support_isolation`` is True; other policies
                 ignore this parameter.

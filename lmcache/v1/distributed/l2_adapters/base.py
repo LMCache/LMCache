@@ -44,8 +44,8 @@ class AdapterUsage:
 
     Replaces the old ``tuple[float, float]`` return shape with a structured
     record that exposes both aggregate and per cache_salt byte counts.
-    Buckets are keyed by ``ObjectKey.identity.cache_salt`` directly — the salt
-    may represent a user, a vLLM deployment, or any other isolation
+    Buckets are keyed by ``ObjectKey.cache_salt`` directly — the salt may
+    represent a user, a vLLM deployment, or any other isolation
     granularity the caller chooses; the adapter stays agnostic.
 
     Instances are returned as immutable snapshots:
@@ -423,9 +423,7 @@ class L2AdapterInterface(ABC):
         delta: dict[str, int] = {}
         total_delta = 0
         for key, size in zip(keys, sizes, strict=True):
-            delta[key.identity.cache_salt] = (
-                delta.get(key.identity.cache_salt, 0) + size
-            )
+            delta[key.cache_salt] = delta.get(key.cache_salt, 0) + size
             total_delta += size
 
         with self._usage_lock:
@@ -484,9 +482,7 @@ class L2AdapterInterface(ABC):
         delta: dict[str, int] = {}
         total_delta = 0
         for key, size in zip(keys, sizes, strict=True):
-            delta[key.identity.cache_salt] = (
-                delta.get(key.identity.cache_salt, 0) + size
-            )
+            delta[key.cache_salt] = delta.get(key.cache_salt, 0) + size
             total_delta += size
 
         with self._usage_lock:
@@ -572,7 +568,7 @@ class L2AdapterInterface(ABC):
 
         Args:
             model_name: if set, restrict to keys with this
-                ``ObjectKey.identity.model_name``.
+                ``ObjectKey.model_name``.
             page_size: maximum entries to return in this page.
             cursor: opaque cursor from the previous page; ``None`` on
                 the first call.

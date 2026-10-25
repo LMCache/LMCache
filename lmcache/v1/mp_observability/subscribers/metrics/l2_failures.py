@@ -57,7 +57,7 @@ class L2FailureMetricsSubscriber(EventSubscriber):
     def _on_prefetch_failed(self, event: Event) -> None:
         reason: str = event.metadata["reason"]
         keys: list[ObjectKey] = event.metadata["keys"]
-        for model_name, count in Counter(k.identity.model_name for k in keys).items():
+        for model_name, count in Counter(k.model_name for k in keys).items():
             self._prefetch_counter.add(
                 count,
                 {"reason": reason, "model_name": model_name},

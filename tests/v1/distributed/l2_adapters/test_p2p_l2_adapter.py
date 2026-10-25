@@ -10,7 +10,6 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -33,11 +32,7 @@ _LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 
 def _key(i: int) -> ObjectKey:
-    return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=f"hash{i}".encode(), model_name="m", kv_rank=1
-        )
-    )
+    return ObjectKey(chunk_hash=f"hash{i}".encode(), model_name="m", kv_rank=1)
 
 
 class _FakeFuture:

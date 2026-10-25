@@ -189,7 +189,6 @@ def _build_fake_glide_modules() -> dict[str, types.ModuleType]:
 
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity  # noqa: E402
 from lmcache.v1.distributed.api import (  # noqa: E402
     MemoryLayoutDesc,
     ObjectKey,
@@ -242,12 +241,10 @@ def create_object_key(
     cache_salt: str = "",
 ) -> ObjectKey:
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
-            model_name=model_name,
-            kv_rank=0,
-            cache_salt=cache_salt,
-        )
+        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+        model_name=model_name,
+        kv_rank=0,
+        cache_salt=cache_salt,
     )
 
 

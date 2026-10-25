@@ -19,7 +19,6 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     DEFAULT_ATTN_WINDOW_DESC,
     AttnWindowDesc,
@@ -160,14 +159,12 @@ class TestDeleteObjectsEndpoint:
         assert secondary.delete_calls == []
         forwarded = primary.delete_calls[0]
         assert forwarded[0] == ObjectKey(
-            identity=ObjectKeyIdentity(
-                chunk_hash=b"\x00\x00\x00\x01",
-                model_name="llama",
-                kv_rank=0,
-                cache_salt="alice",
-            )
+            chunk_hash=b"\x00\x00\x00\x01",
+            model_name="llama",
+            kv_rank=0,
+            cache_salt="alice",
         )
-        assert forwarded[1].identity.cache_salt == ""
+        assert forwarded[1].cache_salt == ""
 
     def test_adapter_in_body_selects_non_primary(self):
         primary = _FakeAdapter()
@@ -336,12 +333,10 @@ class TestDeleteObjectsEndpoint:
 class TestListObjectsEndpoint:
     def test_happy_path_defaults_to_primary(self):
         k1 = ObjectKey(
-            identity=ObjectKeyIdentity(
-                chunk_hash=b"\xde\xad\xbe\xef",
-                model_name="llama",
-                kv_rank=2,
-                cache_salt="alice",
-            )
+            chunk_hash=b"\xde\xad\xbe\xef",
+            model_name="llama",
+            kv_rank=2,
+            cache_salt="alice",
         )
         primary = _FakeAdapter(
             list_page=KeyListPage(

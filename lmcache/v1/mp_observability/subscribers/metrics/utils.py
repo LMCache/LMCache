@@ -7,18 +7,14 @@ from __future__ import annotations
 
 # Standard
 from collections import Counter
-from collections.abc import Iterable
 
 # Third Party
 from opentelemetry import metrics
 
-# First Party
-from lmcache.v1.distributed.api import ObjectKey
 
-
-def group_by_salt(keys: Iterable[ObjectKey]) -> dict[str, int]:
+def group_by_salt(keys: list) -> dict[str, int]:
     """Group *keys* by ``cache_salt``, returning salt → count."""
-    return Counter(k.identity.cache_salt for k in keys)
+    return Counter(getattr(k, "cache_salt", "") for k in keys)
 
 
 def emit_salt_counts(

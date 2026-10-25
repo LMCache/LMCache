@@ -48,9 +48,7 @@ def test_prefetch_rows_cover_every_group_with_its_own_layout_and_window():
     for row in rows:
         assert row.layout_desc == layouts[row.object_group_id]
         assert len(row.keys) == CHUNKS
-        assert {key.identity.object_group_id for key in row.keys} == {
-            row.object_group_id
-        }
+        assert {key.object_group_id for key in row.keys} == {row.object_group_id}
 
 
 def test_a_group_with_no_layout_is_refused():

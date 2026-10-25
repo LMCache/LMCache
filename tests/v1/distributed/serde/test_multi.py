@@ -34,7 +34,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.serde.base import Deserializer, Serializer
 from lmcache.v1.distributed.serde.multi import (
@@ -47,9 +46,7 @@ from lmcache.v1.distributed.serde.multi import (
     validate_group_size,
 )
 
-_TEST_KEY = ObjectKey(
-    identity=ObjectKeyIdentity(chunk_hash=b"\x00" * 32, model_name="test", kv_rank=0)
-)
+_TEST_KEY = ObjectKey(chunk_hash=b"\x00" * 32, model_name="test", kv_rank=0)
 
 # =============================================================================
 # Test scaffolding: a minimal MemoryObj stand-in mirroring test_fp8.py.

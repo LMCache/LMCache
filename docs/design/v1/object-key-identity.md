@@ -1,20 +1,23 @@
 # Typed object identity
 
 `ObjectKeyIdentity` owns the immutable matching fields of `ObjectKey`:
-chunk hash, model, packed KV rank, object group and cache salt. Consumers read
-these fields through `key.identity`, for example `key.identity.chunk_hash`.
+chunk hash, model, packed KV rank, object group and cache salt. Read-only key
+properties retain existing field access without storing a second copy.
 
-`ObjectKey` uses the dataclass-generated constructor:
+The flat constructor stays available:
 
 ```python
-from dataclasses import replace
+key = ObjectKey(b"chunk", "model", 0, cache_salt="tenant")
+same = ObjectKey(identity=key.identity)
+```
 
-from lmcache.v1.cache_identity import ObjectKeyIdentity
-from lmcache.v1.distributed.api import ObjectKey
+Dataclass subclasses declare and construct the inherited `identity` field;
+they do not inherit the base class's custom flat constructor.
 
-key = ObjectKey(identity=ObjectKeyIdentity(
-    chunk_hash=b"chunk", model_name="model", kv_rank=0, cache_salt="tenant",
-))
+Runtime `dataclasses.replace(key, object_group_id=...)` remains supported.
+For statically checked code, replace the declared identity field explicitly:
+
+```python
 other = replace(key, identity=replace(key.identity, object_group_id=1))
 ```
 
@@ -23,5 +26,5 @@ Internal P2P and memory-orchestrator messages carry a nested identity and requir
 both services to upgrade together. Their shared structural codec validates the
 same model, salt and object-group invariants as local construction.
 
-Storage formatting remains adapter-owned, outside the identity type. The
-identity refactor alone does not add request extensions or change persistent names.
+Storage formatting remains adapter-owned, outside the identity type. The identity refactor alone does not add request extensions or
+change persistent names.

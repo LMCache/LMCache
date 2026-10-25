@@ -80,14 +80,14 @@ def test_lookup_submits_one_row_per_group_and_rank_group_major():
     assert len(rows) == 4
     assert [row.object_group_id for row in rows] == [0, 0, 1, 1]
     for row in rows:
-        assert [k.identity.chunk_hash for k in row.keys] == [b"c0", b"c1"]
-        assert {k.identity.object_group_id for k in row.keys} == {row.object_group_id}
-        assert len({k.identity.kv_rank for k in row.keys}) == 1
+        assert [k.chunk_hash for k in row.keys] == [b"c0", b"c1"]
+        assert {k.object_group_id for k in row.keys} == {row.object_group_id}
+        assert len({k.kv_rank for k in row.keys}) == 1
     # The two rank rows of one group address distinct kv_ranks.
-    assert rows[0].keys[0].identity.kv_rank != rows[1].keys[0].identity.kv_rank
+    assert rows[0].keys[0].kv_rank != rows[1].keys[0].kv_rank
     # Every group's rows use the same rank order.
-    assert [r.keys[0].identity.kv_rank for r in rows[:2]] == [
-        r.keys[0].identity.kv_rank for r in rows[2:]
+    assert [r.keys[0].kv_rank for r in rows[:2]] == [
+        r.keys[0].kv_rank for r in rows[2:]
     ]
 
 

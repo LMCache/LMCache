@@ -81,7 +81,7 @@ async def lookup_placements(
         obj_keys = directory.get_keys_across_object_groups(obj_keys)
         encoded_keys = [key.to_encoded_object_key() for key in obj_keys]
     placements = directory.lookup(obj_keys)
-    token_ids = directory.get_token_ids([key.identity.chunk_hash for key in obj_keys])
+    token_ids = directory.get_token_ids([key.chunk_hash for key in obj_keys])
     access_counts = directory.get_access_counts(obj_keys)
     return DirectoryLookupResponse(
         chunks=chunks,
@@ -178,7 +178,7 @@ async def list_directory_keys(
     def _scan() -> DirectoryListResponse:
         """Page the directory and shape the rows for the wire."""
         total, page = directory.list_keys(tier, instance_id, backend, offset, limit)
-        token_ids = directory.get_token_ids([key.identity.chunk_hash for key in page])
+        token_ids = directory.get_token_ids([key.chunk_hash for key in page])
         access_counts = directory.get_access_counts(list(page))
         return DirectoryListResponse(
             total=total,

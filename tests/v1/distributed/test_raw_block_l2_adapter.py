@@ -11,7 +11,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
@@ -81,12 +80,10 @@ def _create_object_key(
     cache_salt: str = "",
 ) -> ObjectKey:
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
-            model_name=model_name,
-            kv_rank=0,
-            cache_salt=cache_salt,
-        )
+        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+        model_name=model_name,
+        kv_rank=0,
+        cache_salt=cache_salt,
     )
 
 

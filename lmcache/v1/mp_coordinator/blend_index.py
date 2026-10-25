@@ -153,7 +153,7 @@ class BlendIndex:
         Args:
             token_ids: The chunk's tokens. Held by reference, so the
                 caller must not mutate it afterwards.
-            chunk_hash: The chunk's ``ObjectKey.identity.chunk_hash``.
+            chunk_hash: The chunk's ``ObjectKey.chunk_hash``.
             token_offset: The chunk's position in its stored sequence.
             namespace: The namespace the chunk was stored in.
         """

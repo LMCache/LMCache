@@ -20,7 +20,6 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -54,9 +53,9 @@ if not torch_dev.is_available():
 def _make_key(chunk_hash: bytes) -> ObjectKey:
     """Create an ObjectKey with the given raw hash bytes."""
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=chunk_hash, model_name="test-model", kv_rank=0
-        )
+        chunk_hash=chunk_hash,
+        model_name="test-model",
+        kv_rank=0,
     )
 
 

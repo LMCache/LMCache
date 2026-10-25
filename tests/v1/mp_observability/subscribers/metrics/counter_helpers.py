@@ -13,7 +13,6 @@ hand-rolling the plumbing in every test file.
 from __future__ import annotations
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey
 from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _reader
 
@@ -23,11 +22,9 @@ TaggedKey = tuple[str, frozenset[tuple[str, str]]]
 def make_key(model: str, chunk_id: int) -> ObjectKey:
     """Build a test ObjectKey with the given model name and chunk id."""
     return ObjectKey(
-        identity=ObjectKeyIdentity(
-            chunk_hash=chunk_id.to_bytes(4, byteorder="big"),
-            model_name=model,
-            kv_rank=0,
-        )
+        chunk_hash=chunk_id.to_bytes(4, byteorder="big"),
+        model_name=model,
+        kv_rank=0,
     )
 
 

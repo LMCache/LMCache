@@ -41,7 +41,7 @@ into the manager. See LM-291 for the health-monitoring rationale.
 
 Producers split keys by `(during[, reason])` and publish one event per
 non-empty bucket; `keys` is the list of ObjectKeys that failed for that
-bucket. Subscribers bucket by `ObjectKey.identity.model_name` to emit per-model
+bucket. Subscribers bucket by `ObjectKey.model_name` to emit per-model
 counter increments.
 
 | EventType | Metadata keys | Types | Vocabulary |

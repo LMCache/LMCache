@@ -11,14 +11,13 @@ provider and assert on counter **deltas** between before/after snapshots.
 
 # Standard
 from collections import Counter
+from types import SimpleNamespace
 import time
 
 # Third Party
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
-from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.metrics.l2 import (
@@ -34,23 +33,12 @@ _DRAIN_WAIT = 0.15
 # ---------------------------------------------------------------------------
 
 
-def _make_keys(count: int, cache_salt: str = "") -> list[ObjectKey]:
-    """Build distinct object identities for the requested tenant."""
-    return [
-        ObjectKey(
-            identity=ObjectKeyIdentity(
-                chunk_hash=i.to_bytes(4, "big"),
-                model_name="test",
-                kv_rank=0,
-                cache_salt=cache_salt,
-            )
-        )
-        for i in range(count)
-    ]
+def _make_keys(count: int, cache_salt: str = "") -> list:
+    return [SimpleNamespace(cache_salt=cache_salt, id=i) for i in range(count)]
 
 
-def _salt_counts(keys: list[ObjectKey]) -> dict[str, int]:
-    return dict(Counter(k.identity.cache_salt for k in keys))
+def _salt_counts(keys: list) -> dict[str, int]:
+    return dict(Counter(k.cache_salt for k in keys))
 
 
 def _read_counters() -> dict[str, int]:

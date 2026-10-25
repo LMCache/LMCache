@@ -9,7 +9,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     GroupedObjectKeys,
@@ -28,12 +27,10 @@ LAYOUT = MemoryLayoutDesc(shapes=[torch.Size([2, 3])], dtypes=[torch.float16])
 def _keys(n: int, gid: int = 0, kv_rank: int = 0) -> list[ObjectKey]:
     return [
         ObjectKey(
-            identity=ObjectKeyIdentity(
-                chunk_hash=ObjectKey.IntHash2Bytes(i),
-                model_name="m",
-                kv_rank=kv_rank,
-                object_group_id=gid,
-            )
+            chunk_hash=ObjectKey.IntHash2Bytes(i),
+            model_name="m",
+            kv_rank=kv_rank,
+            object_group_id=gid,
         )
         for i in range(n)
     ]
@@ -130,17 +127,15 @@ class TestIpcKeyToGroupedObjectKeys:
         assert [r.sliding_window_size for r in rows] == [-1, -1, 1, 1]
         assert all(r.layout_desc is LAYOUT for r in rows)
         for row in rows:
-            assert [k.identity.chunk_hash for k in row.keys] == hashes
-            assert {k.identity.object_group_id for k in row.keys} == {
-                row.object_group_id
-            }
-            assert {k.identity.cache_salt for k in row.keys} == {"salt"}
-            assert len({k.identity.kv_rank for k in row.keys}) == 1
+            assert [k.chunk_hash for k in row.keys] == hashes
+            assert {k.object_group_id for k in row.keys} == {row.object_group_id}
+            assert {k.cache_salt for k in row.keys} == {"salt"}
+            assert len({k.kv_rank for k in row.keys}) == 1
         # Same rank order in every group; ranks distinct within a group.
-        assert rows[0].keys[0].identity.kv_rank != rows[1].keys[0].identity.kv_rank
-        assert [rows[0].keys[0].identity.kv_rank, rows[1].keys[0].identity.kv_rank] == [
-            rows[2].keys[0].identity.kv_rank,
-            rows[3].keys[0].identity.kv_rank,
+        assert rows[0].keys[0].kv_rank != rows[1].keys[0].kv_rank
+        assert [rows[0].keys[0].kv_rank, rows[1].keys[0].kv_rank] == [
+            rows[2].keys[0].kv_rank,
+            rows[3].keys[0].kv_rank,
         ]
 
     def test_matches_flat_expansion(self):

@@ -12,7 +12,6 @@ appended as a trailing field when non-empty. Unsalted keys use the
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
     _filename_to_object_key,
@@ -36,13 +35,11 @@ class TestFilenameRoundtrip:
     @pytest.mark.parametrize("object_group_id", [0, 1, 255])
     def test_roundtrip(self, model_name: str, cache_salt: str, object_group_id: int):
         key = ObjectKey(
-            identity=ObjectKeyIdentity(
-                chunk_hash=b"\xde\xad\xbe\xef",
-                model_name=model_name,
-                kv_rank=42,
-                object_group_id=object_group_id,
-                cache_salt=cache_salt,
-            )
+            chunk_hash=b"\xde\xad\xbe\xef",
+            model_name=model_name,
+            kv_rank=42,
+            object_group_id=object_group_id,
+            cache_salt=cache_salt,
         )
         fn = _object_key_to_filename(key)
         assert fn.endswith(".data")
@@ -56,22 +53,18 @@ class TestFilenameRoundtrip:
         """Keys differing only in object_group_id must not collide."""
         fn0 = _object_key_to_filename(
             ObjectKey(
-                identity=ObjectKeyIdentity(
-                    chunk_hash=b"\xde\xad\xbe\xef",
-                    model_name="llama",
-                    kv_rank=42,
-                    object_group_id=0,
-                )
+                chunk_hash=b"\xde\xad\xbe\xef",
+                model_name="llama",
+                kv_rank=42,
+                object_group_id=0,
             )
         )
         fn1 = _object_key_to_filename(
             ObjectKey(
-                identity=ObjectKeyIdentity(
-                    chunk_hash=b"\xde\xad\xbe\xef",
-                    model_name="llama",
-                    kv_rank=42,
-                    object_group_id=1,
-                )
+                chunk_hash=b"\xde\xad\xbe\xef",
+                model_name="llama",
+                kv_rank=42,
+                object_group_id=1,
             )
         )
         assert fn0 != fn1
@@ -81,13 +74,11 @@ class TestFilenameRoundtrip:
         fn = "llama@0x0000002a@0@deadbeef.data"
         parsed = _filename_to_object_key(fn)
         assert parsed == ObjectKey(
-            identity=ObjectKeyIdentity(
-                chunk_hash=b"\xde\xad\xbe\xef",
-                model_name="llama",
-                kv_rank=42,
-                object_group_id=0,
-                cache_salt="",
-            )
+            chunk_hash=b"\xde\xad\xbe\xef",
+            model_name="llama",
+            kv_rank=42,
+            object_group_id=0,
+            cache_salt="",
         )
 
     def test_salted_format(self):
@@ -95,13 +86,11 @@ class TestFilenameRoundtrip:
         fn = "llama@0x0000002a@2@deadbeef@alice.data"
         parsed = _filename_to_object_key(fn)
         assert parsed == ObjectKey(
-            identity=ObjectKeyIdentity(
-                chunk_hash=b"\xde\xad\xbe\xef",
-                model_name="llama",
-                kv_rank=42,
-                object_group_id=2,
-                cache_salt="alice",
-            )
+            chunk_hash=b"\xde\xad\xbe\xef",
+            model_name="llama",
+            kv_rank=42,
+            object_group_id=2,
+            cache_salt="alice",
         )
 
     def test_non_data_file_returns_none(self):
@@ -119,7 +108,7 @@ class TestFilenameRoundtrip:
 
     def test_salt_with_forbidden_char_returns_none(self):
         # A filename that parses into 5 fields but whose trailing "salt"
-        # slot contains a char ObjectKeyIdentity.__post_init__ rejects (NUL here
+        # slot contains a char ObjectKey.__post_init__ rejects (NUL here
         # is impossible in filenames, so use the length cap instead).
         too_long_salt = "x" * 129
         fn = f"llama@0x0000002a@0@deadbeef@{too_long_salt}.data"
@@ -145,7 +134,7 @@ class TestIpcKeyToObjectKeys:
         )
         out = ipc_key_to_object_keys(k, [b"h1", b"h2"], [0])[0]
         assert len(out) == 2
-        assert all(o.identity.cache_salt == "alice" for o in out)
+        assert all(o.cache_salt == "alice" for o in out)
 
     def test_forwards_cache_salt_scheduler_path(self):
         """worker_id=None explodes one chunk into one ObjectKey per worker."""
@@ -162,7 +151,7 @@ class TestIpcKeyToObjectKeys:
         )
         out = ipc_key_to_object_keys(k, [b"h1"], [0])[0]
         assert len(out) == 4
-        assert all(o.identity.cache_salt == "alice" for o in out)
+        assert all(o.cache_salt == "alice" for o in out)
 
     def test_empty_salt_passes_through(self):
         # First Party
@@ -176,7 +165,7 @@ class TestIpcKeyToObjectKeys:
             token_ids=[1],
         )
         out = ipc_key_to_object_keys(k, [b"h1"], [0])[0]
-        assert all(o.identity.cache_salt == "" for o in out)
+        assert all(o.cache_salt == "" for o in out)
 
     def test_object_group_id_zero(self):
         # First Party
@@ -190,7 +179,7 @@ class TestIpcKeyToObjectKeys:
             token_ids=[1, 2],
         )
         out = ipc_key_to_object_keys(k, [b"h1", b"h2"], [0])[0]
-        assert all(o.identity.object_group_id == 0 for o in out)
+        assert all(o.object_group_id == 0 for o in out)
 
     def test_object_group_id_propagates_to_all_keys(self):
         """A non-zero object_group_id reaches every produced ObjectKey,
@@ -207,7 +196,7 @@ class TestIpcKeyToObjectKeys:
         )
         out = ipc_key_to_object_keys(k, [b"h1"], [3])[0]
         assert len(out) == 4
-        assert all(o.identity.object_group_id == 3 for o in out)
+        assert all(o.object_group_id == 3 for o in out)
 
     def test_multiple_object_groups(self):
         """Each requested object group gets its own positional key list."""
@@ -226,27 +215,25 @@ class TestIpcKeyToObjectKeys:
         assert len(out) == 2
         # 2 chunks * 2 workers = 4 keys per group.
         assert all(len(group_keys) == 4 for group_keys in out)
-        assert all(o.identity.object_group_id == 0 for o in out[0])
-        assert all(o.identity.object_group_id == 3 for o in out[1])
+        assert all(o.object_group_id == 0 for o in out[0])
+        assert all(o.object_group_id == 3 for o in out[1])
         # The groups differ only in object_group_id.
         for first, second in zip(out[0], out[1], strict=True):
-            assert first.identity.chunk_hash == second.identity.chunk_hash
-            assert first.identity.kv_rank == second.identity.kv_rank
-            assert first.identity.cache_salt == second.identity.cache_salt
+            assert first.chunk_hash == second.chunk_hash
+            assert first.kv_rank == second.kv_rank
+            assert first.cache_salt == second.cache_salt
 
 
 class TestObjectKeyValidation:
-    """``ObjectKeyIdentity.__post_init__`` rejects invalid ``object_group_id``."""
+    """``ObjectKey.__post_init__`` rejects invalid ``object_group_id``."""
 
     def test_negative_object_group_id_rejected(self):
         with pytest.raises(ValueError, match="object_group_id"):
             ObjectKey(
-                identity=ObjectKeyIdentity(
-                    chunk_hash=b"\xde\xad\xbe\xef",
-                    model_name="llama",
-                    kv_rank=0,
-                    object_group_id=-1,
-                )
+                chunk_hash=b"\xde\xad\xbe\xef",
+                model_name="llama",
+                kv_rank=0,
+                object_group_id=-1,
             )
 
 

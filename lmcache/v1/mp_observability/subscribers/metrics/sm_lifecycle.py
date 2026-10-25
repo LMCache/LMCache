@@ -31,7 +31,6 @@ import time
 from opentelemetry import metrics
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 
@@ -127,10 +126,11 @@ class SMLifecycleSubscriber(EventSubscriber):
         # Dedupe TP fanout: one ObjectKey per kv_rank for the same logical
         # chunk should bump the per-salt counter once.
         seen: set[tuple[str, bytes]] = set()
-        keys: list[ObjectKey] = event.metadata.get("succeeded_keys", [])
-        for key in keys:
-            chunk_hash = key.identity.chunk_hash
-            cache_salt = key.identity.cache_salt
+        for key in event.metadata.get("succeeded_keys", []):
+            chunk_hash = getattr(key, "chunk_hash", None)
+            if chunk_hash is None:
+                continue
+            cache_salt = getattr(key, "cache_salt", "")
             track_key = (cache_salt, chunk_hash)
             if track_key in seen:
                 continue
@@ -150,10 +150,11 @@ class SMLifecycleSubscriber(EventSubscriber):
         """Bump counter and update anchor; never emit a sample on write."""
         now = event.timestamp or time.time()
         seen: set[tuple[str, bytes]] = set()
-        keys: list[ObjectKey] = event.metadata.get("succeeded_keys", [])
-        for key in keys:
-            chunk_hash = key.identity.chunk_hash
-            cache_salt = key.identity.cache_salt
+        for key in event.metadata.get("succeeded_keys", []):
+            chunk_hash = getattr(key, "chunk_hash", None)
+            if chunk_hash is None:
+                continue
+            cache_salt = getattr(key, "cache_salt", "")
             track_key = (cache_salt, chunk_hash)
             if track_key in seen:
                 continue
