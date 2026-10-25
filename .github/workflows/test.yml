@@ -236,7 +236,6 @@ jobs:
 
       - name: Run native, shared transport and liveness tests
         run: |
-          pytest -q tests/v1/multiprocess/test_grpc_native_server.py
-          pytest -q -k native \
+          pytest -q tests/v1/multiprocess/test_grpc_native_server.py \
             tests/v1/multiprocess/test_grpc_transport.py \
             tests/v1/multiprocess/test_worker_liveness.py
