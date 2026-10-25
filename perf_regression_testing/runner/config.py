@@ -176,9 +176,7 @@ def cli_args(args: dict[str, Any]) -> list[str]:
 
 @dataclass
 class Service:
-    """A container of the deployment besides vLLM: a cache layer started
-    before it, or, with ``after_vllm``, a front end (a router) started once
-    vLLM is up."""
+    """A cache-layer container started before vLLM."""
 
     name: str
     command: list[str]
@@ -189,7 +187,6 @@ class Service:
     scratch: list[dict[str, Any]]
     # docker --security-opt seccomp= value, or None for docker's default.
     seccomp: str | None
-    after_vllm: bool
 
 
 @dataclass
@@ -269,7 +266,6 @@ def resolve(cfg: dict[str, Any], workload: str, deployment: str) -> RunSpec:
             ready_timeout_s=s["ready_timeout_s"],
             scratch=s.get("scratch", []),
             seccomp=s.get("seccomp"),
-            after_vllm=s.get("after_vllm", False),
         )
         for s in raw_services
     ]
@@ -280,7 +276,6 @@ def resolve(cfg: dict[str, Any], workload: str, deployment: str) -> RunSpec:
             **cfg["aiperf"]["args"],
             "model": m["served_name"],
             **m.get("aiperf_args", {}),
-            **d.get("aiperf_args", {}),
             **w["aiperf"].get("args", {}),
         },
         msubst,

@@ -186,24 +186,3 @@ def test_a_dead_vllm_is_named_as_exited(monkeypatch: pytest.MonkeyPatch) -> None
     states = {"prt-x-lmcache": "running", "prt-x-vllm": "exited"}
     monkeypatch.setattr(run.docker, "status", states.get)
     assert run.exited(["prt-x-lmcache", "prt-x-vllm"]) == ["prt-x-vllm"]
-
-
-def test_kv_cache_tokens_sums_the_engines_of_a_dp_deployment() -> None:
-    log = (
-        "(EngineCore_DP0 pid=1) GPU KV cache size: 1,000 tokens, Maximum\n"
-        "(EngineCore_DP1 pid=2) GPU KV cache size: 2,500 tokens, Maximum\n"
-    )
-    assert run.kv_cache_tokens(log) == 3500
-    assert run.kv_cache_tokens("no size here") is None
-
-
-def test_after_vllm_services_start_once_vllm_is_up(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    spec = resolve(load(), "agentic", "vllm_lmcache_ssm")
-    started: list[str] = []
-    monkeypatch.setattr(run.docker, "start", lambda cmd, log: started.append(cmd[0]))
-    monkeypatch.setattr(run.docker, "wait_http", lambda url, timeout, name: True)
-    cmds = {s.name: [s.name] for s in spec.services} | {"vllm": ["vllm"]}
-    assert run.start_servers(spec, cmds, tmp_path, "r") is None
-    assert started == ["lmcache", "vllm", "router"]

@@ -68,27 +68,27 @@ def _fetch(cfg: dict[str, Any], model: str) -> None:
 def test_missing_models_names_each_absent_model_once() -> None:
     cfg = load()
     deps = ["vllm_lmcache", "vllm_lmcache_ssm", "vllm_native"]
-    assert missing_models(cfg, deps) == ["trinity", "glm53"]
+    assert missing_models(cfg, deps) == ["trinity", "qwen38"]
     _fetch(cfg, "trinity")
-    assert missing_models(cfg, deps) == ["glm53"]
-    _fetch(cfg, "glm53")
+    assert missing_models(cfg, deps) == ["qwen38"]
+    _fetch(cfg, "qwen38")
     assert missing_models(cfg, deps) == []
 
 
 def test_a_snapshot_without_its_done_marker_is_still_missing() -> None:
     # An interrupted download leaves config.json but not every weight.
     cfg = load()
-    path = Path(cfg["models"]["glm53"]["path"])
+    path = Path(cfg["models"]["qwen38"]["path"])
     path.mkdir(parents=True)
     (path / "config.json").write_text("{}")
-    assert missing_models(cfg, ["vllm_lmcache_ssm"]) == ["glm53"]
+    assert missing_models(cfg, ["vllm_lmcache_ssm"]) == ["qwen38"]
 
 
 def test_a_deployment_runs_its_own_model() -> None:
     cfg = load()
     for d, model, served in [
         ("vllm_lmcache", "trinity", "trinity-large-thinking"),
-        ("vllm_lmcache_ssm", "glm53", "glm-5.3-flash"),
+        ("vllm_lmcache_ssm", "qwen38", "qwen3p8"),
     ]:
         spec = resolve(cfg, "agentic", d)
         m = cfg["models"][model]
@@ -103,16 +103,13 @@ def test_a_deployment_runs_its_own_model() -> None:
             )
 
 
-def test_a_model_s_gpu_count_replaces_the_host_s_and_matches_its_ranks() -> None:
+def test_a_model_s_gpu_count_replaces_the_host_s_and_matches_its_tp() -> None:
     cfg = load()
-    for d in cfg["deployments"]:
-        spec = resolve(cfg, "agentic", d)
-        a = spec.vllm_args
-        assert a["tensor-parallel-size"] * a.get("data-parallel-size", 1) == 8, d
-        assert spec.gpu_count == 8, d
-    cfg["models"]["glm53"]["gpu_count"] = 4
     assert resolve(cfg, "agentic", "vllm_lmcache_ssm").gpu_count == 4
     assert resolve(cfg, "agentic", "vllm_lmcache").gpu_count == 8
+    for d in cfg["deployments"]:
+        spec = resolve(cfg, "agentic", d)
+        assert spec.vllm_args["tensor-parallel-size"] == spec.gpu_count, d
 
 
 def test_check_host_needs_rdma_devices_only_for_mooncake(
@@ -136,11 +133,3 @@ def test_a_replicated_service_expands_per_index() -> None:
         assert s.args["http_port"] == 19301 + i
         assert s.ready_url == f"http://127.0.0.1:{19301 + i}/health"
         assert s.scratch[0]["path"].endswith(f"/l2/c{i}")
-
-
-def test_a_deployments_aiperf_args_override_its_models() -> None:
-    cfg = load()
-    cfg["models"]["glm53"]["aiperf_args"] = {"url": "model", "concurrency": 7}
-    spec = resolve(cfg, "agentic", "vllm_lmcache_ssm")
-    assert spec.aiperf_args["url"] == "http://127.0.0.1:18001"
-    assert spec.aiperf_args["concurrency"] == 7

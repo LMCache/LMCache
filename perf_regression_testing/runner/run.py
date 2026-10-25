@@ -33,7 +33,6 @@ from perf_regression_testing.runner import docker
 from perf_regression_testing.runner.config import (
     PKG_DIR,
     RunSpec,
-    Service,
     cli_args,
     substitute,
 )
@@ -224,20 +223,6 @@ def io_bytes(names: list[str]) -> dict[str, int]:
     return total
 
 
-def kv_cache_tokens(log: str) -> int | None:
-    """Return the GPU KV cache capacity in tokens that a vLLM log reports.
-
-    Args:
-        log: Text of ``vllm.log``.
-
-    Returns:
-        The sum over the engines (data parallelism starts one per DP rank,
-        each logging its own size), or None when no engine logged one.
-    """
-    sizes = [int(n.replace(",", "")) for n in KV_TOKENS.findall(log)]
-    return sum(sizes) if sizes else None
-
-
 def _trace_ok(spec: RunSpec) -> str | None:
     """Return None when the trace matches its pin, else the reason."""
     got = dir_digest(str(spec.trace_dir))
@@ -339,8 +324,7 @@ def aiperf_phase(log: Path, now: datetime) -> str:
 def start_servers(
     spec: RunSpec, cmds: dict[str, list[str]], out: Path, run_id: str
 ) -> str | None:
-    """Write the deployment's files, start the services, vLLM, then the
-    ``after_vllm`` services.
+    """Write the deployment's files, start the services, then vLLM.
 
     Args:
         spec: Resolved run settings.
@@ -354,8 +338,12 @@ def start_servers(
     for name, content in spec.files.items():
         (out / name).write_text(json.dumps(content, indent=1))
     for s in spec.services:
-        if not s.after_vllm and (reason := _start_service(s, cmds, out, run_id)):
-            return reason
+        logger.info("starting %s", s.name)
+        docker.start(cmds[s.name], out / f"{s.name}.log")
+        if not docker.wait_http(
+            s.ready_url, s.ready_timeout_s, f"prt-{run_id}-{s.name}"
+        ):
+            return f"{s.name} not up"
     logger.info("starting vLLM (log: %s)", out / "vllm.log")
     t0 = time.monotonic()
     docker.start(cmds["vllm"], out / "vllm.log")
@@ -366,20 +354,6 @@ def start_servers(
     ):
         return "vllm not up"
     logger.info("vLLM up after %.0f s", time.monotonic() - t0)
-    for s in spec.services:
-        if s.after_vllm and (reason := _start_service(s, cmds, out, run_id)):
-            return reason
-    return None
-
-
-def _start_service(
-    s: Service, cmds: dict[str, list[str]], out: Path, run_id: str
-) -> str | None:
-    """Start one service and wait for it; return None when up, else the reason."""
-    logger.info("starting %s", s.name)
-    docker.start(cmds[s.name], out / f"{s.name}.log")
-    if not docker.wait_http(s.ready_url, s.ready_timeout_s, f"prt-{run_id}-{s.name}"):
-        return f"{s.name} not up"
     return None
 
 
@@ -411,8 +385,8 @@ def build_commands(
         aiperf_image: AIPerf image.
 
     Returns:
-        Container role -> full ``docker run ... image cmd`` argument list;
-        :func:`start_servers` decides the start order. ``<artifact_dir>`` in
+        Container role -> full ``docker run ... image cmd`` argument list, in
+        start order: services, ``vllm``, ``aiperf``. ``<artifact_dir>`` in
         env values becomes ``out``.
     """
     subst = {"<artifact_dir>": str(out), "<trace_dir>": str(spec.trace_dir)}
@@ -644,7 +618,8 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
 
     logger.info("%s: torn down", run_id)
     log = (out / "vllm.log").read_text(errors="replace")
-    summary["kv_cache_tokens"] = kv_cache_tokens(log)
+    kv = KV_TOKENS.search(log)
+    summary["kv_cache_tokens"] = int(kv.group(1).replace(",", "")) if kv else None
     for pat in spec.invalid_log_patterns:
         if pat in log:
             summary["invalid"].append(f"vllm.log contains {pat!r}")
