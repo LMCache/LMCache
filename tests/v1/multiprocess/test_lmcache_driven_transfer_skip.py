@@ -17,6 +17,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager, ObjectGroupInfo
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
@@ -201,7 +202,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
 
 def _make_checkpoint_module(
     monkeypatch: pytest.MonkeyPatch,
-    merged: bool,
+    merged: bool = False,
 ) -> tuple[LMCacheDrivenTransferModule, MagicMock, list, list]:
     windows = [-1] if merged else [-1, 1]
     groups = [_og([0, 1, 2])] if merged else [_og([0]), _og([1, 2])]
@@ -292,13 +293,15 @@ def test_store_does_not_publish_an_absent_checkpoint_at_chunk_end(
 ) -> None:
     """A real earlier block cannot validate the null state actually transferred."""
     module, context, _reads, transfers = _make_checkpoint_module(monkeypatch, merged)
-    module.context.null_block_id = null_block_id
+    cast(MagicMock, module.context).null_block_id = null_block_id
     context.kv_layer_groups_manager.get_subchunk_sw_size_tokens = lambda group: (
         2 if group == 0 else 1
     )
 
     _handle, ok, stored = module.store_with_chunk_mask(
-        SimpleNamespace(request_id="req", worker_id=1),
+        IPCCacheServerKey.from_token_ids(
+            "m", 1, 1, [0, 1, 2, 3], end=4, request_id="req"
+        ),
         1,
         [[11, 12, 13, 14], [7, null_block_id, 8, 9], [7, null_block_id, 8, 9]],
         b"producer",

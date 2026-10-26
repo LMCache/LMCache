@@ -72,6 +72,16 @@ sparse kernel groups is stored only where every retained slice is present;
 separation avoids discarding complete objects because another group is missing
 data.
 
+## Upgrade compatibility
+
+The STORE mask only prevents new incomplete objects from being published.
+Neither lookup nor retrieval detects or repairs existing invalid objects, and
+cache keys are unchanged. Affected deployments must stop the services, select
+fresh namespaces or storage locations for all persistent backends, and restart
+with the fixed version to rebuild caches. Restarting alone does not remove
+persistent entries. The user-facing migration steps and unreleased notice live
+in `docs/source/mp/deployment.rst` and `docs/source/mp/release_notes.rst`.
+
 ## Testing
 
 - `tests/v1/multiprocess/test_config.py` covers the default and CLI override.
