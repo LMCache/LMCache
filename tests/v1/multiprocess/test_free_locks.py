@@ -319,13 +319,12 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
         _free_locks_key(1024, start=0, end=0), 1, extra_ranges=((512, 1024),)
     )
 
-    (old_keys,), kwargs = ctx.storage_manager.finish_read_prefetched.call_args
-    assert kwargs == {
-        "read_locks": 1,
-        "l1_owners": original_owners,
-        "read_generations": original_generations,
-    }
-    released = {(k.object_group_id, k.chunk_hash) for k in old_keys}
+    (claims,), kwargs = ctx.storage_manager.finish_read_reservations.call_args
+    assert not kwargs
+    assert {claim.key: claim.generation for claim in claims} == original_generations
+    assert {claim.key: claim.owner for claim in claims} == original_owners
+    assert all(claim.count == 1 for claim in claims)
+    released = {(claim.key.object_group_id, claim.key.chunk_hash) for claim in claims}
     # Window 1 with hit=4 (the range end): only chunk 3; full attention:
     # chunks 2-3 (floored to the range start).
     assert released == {(0, b"h3"), (1, b"h2"), (1, b"h3")}

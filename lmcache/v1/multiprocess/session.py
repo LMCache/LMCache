@@ -32,7 +32,11 @@ logger = init_logger(__name__)
 
 @dataclass(frozen=True)
 class AbandonedPrefetch:
-    """The completed reservation superseded by an APC full-prefix retry."""
+    """Original lookup metadata and unclaimed shares retained by an APC retry.
+
+    Worker-owned shares remain with their transfer receipts. Only
+    ``unclaimed_reads`` may be released by abandoned-lookup cancellation.
+    """
 
     key: IPCCacheServerKey
     hit_chunks: int
@@ -40,6 +44,7 @@ class AbandonedPrefetch:
     group_windows: tuple[int, ...]
     l1_owners: dict[ObjectKey, int]
     read_generations: dict[ObjectKey, int]
+    unclaimed_reads: tuple[L1ReadReservation, ...]
 
 
 @dataclass
@@ -176,6 +181,9 @@ class Session:
     ) -> bool:
         """Start a lookup while preserving a completed APC-shrink reservation.
 
+        Snapshot only shares not already claimed by FREE or a worker. A
+        worker's existing completion receipt survives the lookup replacement.
+
         Args:
             key: Lookup key. A full-prefix retry replaces a nonzero APC start.
             group_windows: Attention windows of the admitted lookup.
@@ -202,6 +210,16 @@ class Session:
                     self.prefetch_group_windows,
                     self._prefetch_owners.copy(),
                     self.prefetch_read_generations.copy(),
+                    tuple(
+                        L1ReadReservation(
+                            obj_key,
+                            self.prefetch_read_generations[obj_key],
+                            self._prefetch_owners.get(obj_key),
+                            count,
+                        )
+                        for obj_key, count in self._unclaimed_reads.items()
+                        if count
+                    ),
                 )
             self.lookup_ipc_key = key
             self.prefetch_hit_chunks = -1

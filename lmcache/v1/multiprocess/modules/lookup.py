@@ -477,8 +477,8 @@ class LookupModule(DiscoverableModule):
         key's range is floored to the current lookup's ``start``, and each
         extra range resolves against its own boundaries.
 
-        Releases the same per-object count the lookup reserved
-        (``key.num_kv_readers``).
+        Release only the original per-object shares not already claimed by
+        another FREE or a worker's transfer completion.
 
         The release is derived from the lookup result recorded on the
         session (hit length, lock model, L1 owners). If that result has not
@@ -563,11 +563,11 @@ class LookupModule(DiscoverableModule):
                 old.group_windows,
             )
             if session.claim_abandoned_prefetch(old) and old_keys:
-                self._ctx.storage_manager.finish_read_prefetched(
-                    old_keys,
-                    read_locks=old.key.require_num_kv_readers(),
-                    l1_owners=old.l1_owners,
-                    read_generations=old.read_generations,
+                resolved = set(old_keys)
+                self._ctx.storage_manager.finish_read_reservations(
+                    tuple(
+                        claim for claim in old.unclaimed_reads if claim.key in resolved
+                    )
                 )
 
     @request_handler(HandlerType.BLOCKING)

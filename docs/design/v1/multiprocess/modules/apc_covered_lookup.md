@@ -74,6 +74,15 @@ available for retry; a failure after claiming may have partially released
 locks and must not authorize a second decrement. Unreleased locks in that
 unknown outcome expire through the read TTL.
 
+With read-transfer ownership enabled, the snapshot also retains only the
+original per-key shares that FREE or a worker has not yet claimed. A worker's
+completion receipt keeps its share across the replacement and settles it
+independently. Abandoned cleanup filters these remaining receipts by the old
+range; it must not reconstruct the original `num_kv_readers` count, which would
+release shares already transferred to a worker or canceled before the retry.
+The snapshot is captured under the Session lock, together with the original
+metadata, so a concurrent claim belongs entirely to one side of that boundary.
+
 Only one abandoned reservation is retained per session. Until it is claimed,
 another lookup is declined with a cache miss, without replacing the retained
 reservation or reporting the previous lookup's hit. Both the ordinary lookup
@@ -94,6 +103,11 @@ replacement path. Raw handler replays that bypass that order remain unsupported;
 ordinary FREE does not carry wire-level attempt isolation. This guarantee
 applies to APC retries after a final prefetch result, not arbitrary replacement
 of a still-running background prefetch.
+
+Similarly, an already issued transfer completion is safe across a replacement,
+but the unchanged wire key cannot distinguish a delayed old RETRIEVE from a
+new RETRIEVE with the same request ID, worker and token identity. This composition
+does not claim wire-level isolation for arbitrary replayed worker requests.
 
 Pinning the covered blocks instead is implemented on the `core/skip-apc-pin`
 branch. Non-pin won: no block-pool pressure, no coupling to vLLM's

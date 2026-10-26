@@ -489,3 +489,42 @@ def test_declined_retry_preserves_an_unclaimed_reservation(session: Session) -> 
     assert reservation.read_generations == {obj: 7}
     assert session.claim_abandoned_prefetch(reservation)
     assert session.begin_lookup(retry, (-1,))
+
+
+def test_apc_snapshot_retains_only_unclaimed_original_shares(session: Session) -> None:
+    """Worker and FREE claims stay excluded when replacement metadata changes."""
+    old = IPCCacheServerKey.from_token_ids(
+        "model",
+        1,
+        None,
+        range(12),
+        start=4,
+        end=12,
+        request_id=session.request_id,
+        num_kv_readers=2,
+    )
+    keys = [ObjectKey(b"head", "model", 0), ObjectKey(b"tail", "model", 0)]
+    assert session.begin_lookup(old, (-1,))
+    session.record_prefetch_result(
+        3, (0,), dict.fromkeys(keys, 3), read_generations=dict.fromkeys(keys, 9)
+    )
+    worker_claim = session.claim_worker_read(replace(old, worker_id=0), 11, keys[:1])
+    assert worker_claim is not None and worker_claim[0].count == 1
+    free_claim = session.claim_free_reads(old, keys[1:])
+    assert len(free_claim) == 1 and free_claim[0].count == 2
+
+    retry = replace(old, start=0)
+    assert session.begin_lookup(retry, (-1,))
+    session.record_prefetch_result(
+        3, (0,), dict.fromkeys(keys, 5), read_generations=dict.fromkeys(keys, 12)
+    )
+    original = session.get_abandoned_prefetch(retry, 4, 12)
+    assert original is not None
+    assert len(original.unclaimed_reads) == 1
+    claim = original.unclaimed_reads[0]
+    assert (claim.key, claim.generation, claim.owner, claim.count) == (keys[0], 9, 3, 1)
+    assert session.claim_abandoned_prefetch(original)
+    assert not session.claim_abandoned_prefetch(original)
+    assert {
+        claim.key: claim.count for claim in session.claim_free_reads(retry, keys)
+    } == (dict.fromkeys(keys, 2))

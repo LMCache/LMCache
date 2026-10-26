@@ -35,10 +35,8 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.session import SessionManager
-import lmcache.v1.distributed.l1_manager as l1_manager_module
-
-
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
+import lmcache.v1.distributed.l1_manager as l1_manager_module
 
 LookupFixture = tuple[LookupModule, StorageManager, IPCCacheServerKey, ObjectKey]
 
@@ -455,6 +453,39 @@ def test_repeated_apc_cleanup_cannot_release_peer(lookup: LookupFixture) -> None
     assert module.wait_prefetch_status(peer.request_id, timeout=5) == 3
     module.free_lookup_locks(key, 1, ((4, 12),))
     module.free_lookup_locks(replace(key, end=0), 1, ((4, 12),))
+    assert sm.delete_l1_keys(keys) == (0, 3)
+    module.free_lookup_locks(peer, 1)
+    assert_all_reads_released(sm, keys)
+
+
+@pytest.mark.parametrize("complete_before_retry", [False, True])
+def test_apc_snapshot_excludes_claimed_worker_reads(
+    lookup: LookupFixture, retriever, complete_before_retry: bool
+) -> None:
+    """Old APC cleanup cannot reclaim a share already owned by a transfer."""
+    module, sm, _, _ = lookup
+    transfer_module, _cache, _backend, pending = retriever
+    original, keys = seed_prompt(lookup)
+    key = replace(original, num_kv_readers=2)
+    old = replace(key, start=4)
+    module.lookup(old, 2)
+    assert module.wait_prefetch_status(old.request_id, timeout=5) == 3
+    worker = replace(old, worker_id=0, end=8)
+    with patch.object(module.context, "resolve_obj_keys", return_value=[[keys[1]]]):
+        assert transfer_module.retrieve(worker, 11, [[0]], b"event")[1]
+    receipt = pending.pop()
+    if complete_before_retry:
+        sm.finish_read_transfer(receipt)
+
+    module.lookup(key, 2)
+    assert module.wait_prefetch_status(key.request_id, timeout=5) == 3
+    peer = replace(key, request_id="peer", num_kv_readers=1)
+    module.lookup(peer, 1)
+    assert module.wait_prefetch_status(peer.request_id, timeout=5) == 3
+    module.free_lookup_locks(key, 2, ((4, 12),))
+    module.free_lookup_locks(replace(key, end=0), 2, ((4, 12),))
+    if not complete_before_retry:
+        sm.finish_read_transfer(receipt)
     assert sm.delete_l1_keys(keys) == (0, 3)
     module.free_lookup_locks(peer, 1)
     assert_all_reads_released(sm, keys)
