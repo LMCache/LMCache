@@ -680,10 +680,14 @@ def test_tail_free_orders_only_its_own_servers_end(
 
 @pytest.mark.parametrize("phase", ["lookup", "query", "free"])
 def test_failed_predecessor_is_not_a_successful_ack(
-    make_adapter: AdapterFactory, phase: str, caplog: pytest.LogCaptureFixture
+    make_adapter: AdapterFactory,
+    phase: str,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A failed RPC cannot authorize END, including an already-completed failure."""
     adapter, (client,) = make_adapter()
+    monkeypatch.setattr(adapter_module.logger, "propagate", True)
     if phase == "free":
         client.free_ack = MessagingFuture()
         adapter.free_lookup_locks(pack_token_ids(range(256)), 0, 128, "r")
