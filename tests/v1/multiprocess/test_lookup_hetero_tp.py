@@ -48,7 +48,7 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
-from lmcache.v1.multiprocess.tp_reshard import HeteroTPFallback
+from lmcache.v1.multiprocess.tp_reshard import HeteroTP, PrefetchStage
 import lmcache.v1.memory_management as memory_management
 
 pytestmark = pytest.mark.no_shared_allocator
@@ -121,14 +121,18 @@ def _keys(ctx: MPCacheServerContext, world_size: int) -> list[ObjectKey]:
 
 
 def _store(
-    ctx: MPCacheServerContext, num_heads: int, tp: int, offset: float = 0.0
+    ctx: MPCacheServerContext,
+    num_heads: int,
+    tp: int,
+    offset: float = 0.0,
+    num_chunks: int = NUM_CHUNKS,
 ) -> list[ObjectKey]:
-    """Store the test prompt's objects as written by a TP-``tp`` engine."""
+    """Store the test prompt's first ``num_chunks`` chunks as a TP-``tp`` engine."""
     sm = ctx.storage_manager
-    keys = _keys(ctx, tp)
+    keys = _keys(ctx, tp)[: num_chunks * tp]
     objs = sm.reserve_write(keys, _layout(num_heads, tp))
     assert len(objs) == len(keys)
-    for chunk in range(NUM_CHUNKS):
+    for chunk in range(num_chunks):
         full = _global_kv(num_heads, chunk, offset)
         for rank in range(tp):
             obj = objs[keys[chunk * tp + rank]]
@@ -232,7 +236,7 @@ def mp_ctx(
     ctx.close()
 
 
-ModuleFactory = Callable[[int, int, list[int]], LookupModule]
+ModuleFactory = Callable[[int, int, int | None], LookupModule]
 
 
 @pytest.fixture
@@ -240,14 +244,14 @@ def make_module(mp_ctx: MPCacheServerContext) -> Iterator[ModuleFactory]:
     """Register the model at the lookup's TP and build a LookupModule."""
     modules: list[LookupModule] = []
 
-    def create(num_heads: int, world_size: int, sources: list[int]) -> LookupModule:
+    def create(num_heads: int, world_size: int, source: int | None) -> LookupModule:
         mp_ctx.layout_desc_registry.register(
             MODEL,
             world_size,
             _layout(num_heads, world_size),
             total_num_kv_heads=num_heads,
         )
-        module = LookupModule(mp_ctx, hetero_tp_source_world_sizes=sources)
+        module = LookupModule(mp_ctx, hetero_tp_source_world_size=source)
         modules.append(module)
         return module
 
@@ -290,7 +294,7 @@ def test_reshard_hit_returns_all_chunks_with_exact_heads(
     dst_tp: int,
 ) -> None:
     """A miss at B served from A objects yields every chunk, B-sharded."""
-    module = make_module(num_heads, dst_tp, [src_tp])
+    module = make_module(num_heads, dst_tp, src_tp)
     _store(mp_ctx, num_heads, src_tp)
     dst_keys = _keys(mp_ctx, dst_tp)
 
@@ -309,7 +313,7 @@ def test_reshard_leaves_no_read_locks(
     dst_tp: int,
 ) -> None:
     """The reshard drops A locks; free_lookup_locks drops the B locks."""
-    module = make_module(num_heads, dst_tp, [src_tp])
+    module = make_module(num_heads, dst_tp, src_tp)
     src_keys = _store(mp_ctx, num_heads, src_tp)
     dst_keys = _keys(mp_ctx, dst_tp)
     key = _lookup_key(dst_tp)
@@ -325,57 +329,58 @@ def test_reshard_leaves_no_read_locks(
     assert _num_locked(mp_ctx.storage_manager, dst_keys) == 0
 
 
+def _local_stage(windows: list[int]) -> PrefetchStage:
+    """The local stage of a TP-4 lookup over chunk hashes ``a`` and ``b``."""
+    return PrefetchStage(
+        key=_lookup_key(4),
+        chunk_hashes=[b"a", b"b"],
+        group_layout_descs={g: _layout(4, 4) for g in range(len(windows))},
+        attn_desc=AttnWindowDesc(windows, world_size=4),
+        num_kv_readers=4,
+    )
+
+
 @pytest.fixture
-def fallback(mp_ctx: MPCacheServerContext) -> Iterator[HeteroTPFallback]:
-    """A fallback over sources ``[1, 2]`` for a model registered at TP 4."""
+def hetero_tp(mp_ctx: MPCacheServerContext) -> Iterator[HeteroTP]:
+    """Cross-TP lookups from source TP 2 for a model registered at TP 4."""
     mp_ctx.layout_desc_registry.register(MODEL, 4, _layout(4, 4), total_num_kv_heads=4)
-    fallback = HeteroTPFallback(
-        mp_ctx.layout_desc_registry, mp_ctx.storage_manager, [1, 2]
-    )
-    yield fallback
-    fallback.close()
+    hetero_tp = HeteroTP(mp_ctx.layout_desc_registry, mp_ctx.storage_manager, 2)
+    yield hetero_tp
+    hetero_tp.close()
 
 
-def test_plan_yields_sources_in_configured_order(fallback: HeteroTPFallback) -> None:
-    """Each source stage is at the next configured TP, with its own layout."""
-    plan = fallback.plan(
-        _lookup_key(4), [], AttnWindowDesc([-1], world_size=4), {0: _layout(4, 4)}
-    )
+def test_source_stage_covers_the_rest_at_the_source_tp(hetero_tp: HeteroTP) -> None:
+    """The source stage starts after the local hit, keyed and shaped for A."""
+    plan = hetero_tp.plan(_local_stage([-1]))
     assert plan is not None
 
-    stages = list(iter(plan.next_source, None))
+    stage = plan.source_stage(1)
 
-    assert [
-        (s.key.world_size, s.attn_desc.world_size, s.group_layout_descs[0])
-        for s in stages
-    ] == [(1, 1, _layout(4, 1)), (2, 2, _layout(4, 2))]
-    assert all(s.num_kv_readers == 1 for s in stages)
+    assert stage.key.world_size == 2
+    assert stage.chunk_hashes == [b"b"]
+    assert stage.group_layout_descs == {0: _layout(4, 2)}
+    assert stage.attn_desc.world_size == 2
+    assert stage.num_kv_readers == 1
+    assert stage.allowed_l2_memory_tags is None
 
 
 @pytest.mark.parametrize("windows,qualifies", [([-1, -1], True), ([-1, 2], False)])
 def test_plan_requires_full_attention(
-    fallback: HeteroTPFallback, windows: list[int], qualifies: bool
+    hetero_tp: HeteroTP, windows: list[int], qualifies: bool
 ) -> None:
-    """A model with a sliding-window group gets no cross-TP fallback."""
-    plan = fallback.plan(
-        _lookup_key(4),
-        [],
-        AttnWindowDesc(windows, world_size=4),
-        {0: _layout(4, 4), 1: _layout(4, 4)},
-    )
-
-    assert (plan is not None) == qualifies
+    """A model with a sliding-window group gets no cross-TP lookup."""
+    assert (hetero_tp.plan(_local_stage(windows)) is not None) == qualifies
 
 
-@pytest.mark.parametrize("sources", [[], [4], [3], [8]])
+@pytest.mark.parametrize("source", [None, 4, 3, 8])
 def test_no_usable_source_keeps_normal_miss(
     mp_ctx: MPCacheServerContext,
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
-    sources: list[int],
+    source: int | None,
 ) -> None:
-    """No source, the lookup's own TP, or a TP not dividing the heads: no fallback."""
-    module = make_module(4, 4, sources)
+    """No source, the lookup's own TP, or a TP not dividing the heads: a miss."""
+    module = make_module(4, 4, source)
     src_keys = _store(mp_ctx, 4, 2)
     calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
 
@@ -398,7 +403,7 @@ def test_reshard_drops_source_copies_loaded_from_l2(
     # MockL2Adapter never completes loads of multi-tensor objects.
     monkeypatch.setattr(sys.modules[__name__], "KERNEL_GROUP_LAYERS", (2,))
     sm = mp_ctx.storage_manager
-    module = make_module(4, 2, [4])
+    module = make_module(4, 2, 4)
     src_keys = _store(mp_ctx, 4, 4)
     adapter = sm.l2_adapters()[0][1]
     assert isinstance(adapter, MockL2Adapter)
@@ -419,7 +424,7 @@ def test_reshard_keeps_source_objects_already_in_l1(
     mp_ctx: MPCacheServerContext, make_module: ModuleFactory
 ) -> None:
     """A objects in L1 before the lookup (a TP=A engine on this server) stay."""
-    module = make_module(4, 2, [4])
+    module = make_module(4, 2, 4)
     src_keys = _store(mp_ctx, 4, 4)
 
     module.lookup(_lookup_key(2), 2)
@@ -435,7 +440,7 @@ def test_lookup_tp_above_head_count_keeps_normal_miss(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A lookup TP larger than the KV head count is a plain miss, not an error."""
-    module = make_module(2, 4, [1])
+    module = make_module(2, 4, 1)
     src_keys = _store(mp_ctx, 2, 1)
     calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
 
@@ -448,13 +453,13 @@ def test_lookup_tp_above_head_count_keeps_normal_miss(
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
-def test_primary_hit_skips_source_stage(
+def test_full_local_hit_skips_source_stage(
     mp_ctx: MPCacheServerContext,
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """B objects already present: served as-is, A objects never read."""
-    module = make_module(2, 1, [2])
+    module = make_module(2, 1, 2)
     src_keys = _store(mp_ctx, 2, 2)
     dst_keys = _store(mp_ctx, 2, 1, offset=0.5)
     calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
@@ -470,13 +475,106 @@ def test_primary_hit_skips_source_stage(
     assert _num_locked(mp_ctx.storage_manager, dst_keys) == 0
 
 
+def test_partial_local_hit_reshards_only_the_rest(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local hit of chunk 0 is kept; only chunk 1 is looked up at A and
+    resharded; the answer locks both chunks once, with no lock left over."""
+    module = make_module(2, 1, 2)
+    src_keys = _store(mp_ctx, 2, 2)
+    _store(mp_ctx, 2, 1, num_chunks=1)
+    dst_keys = _keys(mp_ctx, 1)
+    calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
+    key = _lookup_key(1)
+
+    module.lookup(key, 1)
+
+    assert _poll(module, "req") == NUM_CHUNKS
+    source_spec = calls[1][0]
+    assert {k for row in source_spec.key_groups for k in row.keys} == set(src_keys[2:])
+    _assert_holds(mp_ctx, dst_keys, 2, 1)
+    assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
+    module.free_lookup_locks(key, 1)
+    assert _num_locked(mp_ctx.storage_manager, dst_keys) == 0
+
+
+@pytest.mark.parametrize("source_hits", [False, True])
+def test_partial_local_hit_survives_a_missing_or_freed_source(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    source_hits: bool,
+) -> None:
+    """With the source missing, or freed before its reshard starts, the
+    lookup answers with its local hit and holds exactly its locks."""
+    module = make_module(2, 1, 2)
+    src_keys = _store(mp_ctx, 2, 2) if source_hits else []
+    local_keys = _store(mp_ctx, 2, 1, num_chunks=1)
+    calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
+    key = _lookup_key(1)
+
+    module.lookup(key, 1)
+    if source_hits:
+        deadline = time.monotonic() + TIMEOUT
+        while len(calls) < 2:
+            assert time.monotonic() < deadline, "source stage never submitted"
+            assert module.query_prefetch_status("req") is None
+            time.sleep(0.005)
+        assert mp_ctx.storage_manager.wait_prefetch_status(calls[1][1], TIMEOUT)
+        module.free_lookup_locks(key, 1)
+        session = mp_ctx.session_manager.get("req")
+        assert session is not None
+        assert session.prefetch_hit_chunks == 1
+    else:
+        assert _poll(module, "req") == 1
+        assert _num_locked(mp_ctx.storage_manager, local_keys) == len(local_keys)
+        module.free_lookup_locks(key, 1)
+
+    assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
+    assert _num_locked(mp_ctx.storage_manager, local_keys) == 0
+
+
+@pytest.mark.parametrize("mp_ctx", [True], indirect=True)
+def test_local_prefix_loaded_from_l2_survives_the_lock_handoff(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local prefix loaded from L2 is temporary in L1; the final stage locks
+    it before the local stage lets go, so it is still there to be served."""
+    # MockL2Adapter never completes loads of multi-tensor objects.
+    monkeypatch.setattr(sys.modules[__name__], "KERNEL_GROUP_LAYERS", (2,))
+    sm = mp_ctx.storage_manager
+    module = make_module(4, 2, 4)
+    local_keys = _store(mp_ctx, 4, 2, num_chunks=1)
+    adapter = sm.l2_adapters()[0][1]
+    assert isinstance(adapter, MockL2Adapter)
+    deadline = time.monotonic() + TIMEOUT
+    while not all(adapter.debug_has_key(k) for k in local_keys):
+        assert time.monotonic() < deadline, "local prefix never reached L2"
+        time.sleep(0.005)
+    assert sm.delete_l1_keys(local_keys) == (len(local_keys), 0)
+    _store(mp_ctx, 4, 4)
+    key = _lookup_key(2)
+
+    module.lookup(key, 2)
+
+    assert _poll(module, "req") == NUM_CHUNKS
+    _assert_holds(mp_ctx, _keys(mp_ctx, 2), 4, 2)
+    module.free_lookup_locks(key, 2)
+    assert _num_resident(sm, local_keys) == 0
+
+
 def test_free_locks_after_source_stage_releases_and_misses(
     mp_ctx: MPCacheServerContext,
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Freeing a lookup whose source stage hit drops A locks and reports a miss."""
-    module = make_module(2, 1, [2])
+    """Freeing a lookup whose source stage hit drops A locks and answers with
+    the local hit (none here)."""
+    module = make_module(2, 1, 2)
     src_keys = _store(mp_ctx, 2, 2)
     calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
     key = _lookup_key(1)
@@ -510,8 +608,8 @@ def test_reshard_failure_resolves_as_miss(
     monkeypatch: pytest.MonkeyPatch,
     use_wait: bool,
 ) -> None:
-    """A failing reshard answers the lookup with a miss and drops A locks."""
-    module = make_module(2, 1, [2])
+    """A failing reshard answers with the local hit (none here), drops A locks."""
+    module = make_module(2, 1, 2)
     src_keys = _store(mp_ctx, 2, 2)
 
     def fail(keys: list[ObjectKey], layout_desc: MemoryLayoutDesc) -> dict:
@@ -536,7 +634,7 @@ def test_wait_follows_stage_chain_in_one_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One wait covers primary, source and final stages and returns the hit."""
-    module = make_module(2, 1, [2])
+    module = make_module(2, 1, 2)
     _store(mp_ctx, 2, 2)
     calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
 
@@ -555,20 +653,6 @@ def test_wait_follows_stage_chain_in_one_call(
     _assert_holds(mp_ctx, _keys(mp_ctx, 1), 2, 1)
 
 
-def test_second_source_tried_after_first_misses(
-    mp_ctx: MPCacheServerContext,
-    make_module: ModuleFactory,
-) -> None:
-    """Candidates are tried in order; a miss at one moves to the next."""
-    module = make_module(4, 4, [1, 2])
-    _store(mp_ctx, 4, 2)
-
-    module.lookup(_lookup_key(4), 4)
-
-    assert module.wait_prefetch_status("req", TIMEOUT) == NUM_CHUNKS
-    _assert_holds(mp_ctx, _keys(mp_ctx, 4), 4, 4)
-
-
 def _start_reshard(module: LookupModule, entered: threading.Event) -> None:
     """Poll until the lookup's source-stage hit is handed to the reshard."""
     deadline = time.monotonic() + TIMEOUT
@@ -584,7 +668,7 @@ def test_query_does_not_block_on_reshard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """While the reshard runs, polling returns None at once; then the hit."""
-    module = make_module(2, 1, [2])
+    module = make_module(2, 1, 2)
     _store(mp_ctx, 2, 2)
     entered, release = _gate_reserve_write(monkeypatch, mp_ctx.storage_manager)
 
@@ -605,7 +689,7 @@ def test_wait_times_out_during_reshard_then_resolves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A wait shorter than the reshard returns None; a later wait gets the hit."""
-    module = make_module(2, 1, [2])
+    module = make_module(2, 1, 2)
     _store(mp_ctx, 2, 2)
     entered, release = _gate_reserve_write(monkeypatch, mp_ctx.storage_manager)
 
@@ -623,7 +707,7 @@ def test_free_during_reshard_waits_and_releases_everything(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Freeing mid-reshard waits for it, then drops both A and B locks."""
-    module = make_module(2, 1, [2])
+    module = make_module(2, 1, 2)
     src_keys = _store(mp_ctx, 2, 2)
     dst_keys = _keys(mp_ctx, 1)
     entered, release = _gate_reserve_write(monkeypatch, mp_ctx.storage_manager)
@@ -650,7 +734,7 @@ def test_final_stage_failure_resolves_as_miss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """If the final prefetch cannot be submitted, the lookup reports a miss."""
-    module = make_module(2, 1, [2])
+    module = make_module(2, 1, 2)
     src_keys = _store(mp_ctx, 2, 2)
     calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
     submit = mp_ctx.storage_manager.submit_prefetch_task
@@ -677,7 +761,7 @@ def test_concurrent_lookups_of_one_prefix_both_hit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A second lookup of a prefix being resharded waits for it and hits too."""
-    module = make_module(2, 1, [2])
+    module = make_module(2, 1, 2)
     _store(mp_ctx, 2, 2)
     sm = mp_ctx.storage_manager
     # Hold the first reshard after it reserved its destination objects, the
