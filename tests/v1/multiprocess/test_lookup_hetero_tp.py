@@ -11,6 +11,7 @@ deleted.
 
 # Standard
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future
 import logging
 import sys
 import threading
@@ -49,7 +50,13 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
-from lmcache.v1.multiprocess.tp_reshard import HeteroTP, PrefetchStage
+from lmcache.v1.multiprocess.tp_reshard import (
+    HeteroTP,
+    L1Resharder,
+    PrefetchStage,
+    ReshardResult,
+    ReshardTask,
+)
 import lmcache.v1.memory_management as memory_management
 
 pytestmark = pytest.mark.no_shared_allocator
@@ -799,6 +806,93 @@ def test_free_during_cross_tp_prefetch_waits_and_releases_everything(
     assert _num_locked(sm, same_tp_keys) == 0
     assert _num_locked(sm, src_keys) == 0
     assert module.query_prefetch_status("req") == 0
+
+
+def test_reshard_refused_after_close_releases_source_locks(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cross-TP hit whose reshard cannot start (the module is closed)
+    answers with the same-TP hit (none here) and drops the A locks."""
+    module = make_module(2, 1, 2)
+    src_keys = _store(mp_ctx, 2, 2)
+    sm = mp_ctx.storage_manager
+    calls = _spy_submits(monkeypatch, sm)
+
+    module.lookup(_lookup_key(1), 1)
+    deadline = time.monotonic() + TIMEOUT
+    while len(calls) < 2:
+        assert time.monotonic() < deadline, "cross-TP stage never submitted"
+        assert module.query_prefetch_status("req") is None
+        time.sleep(0.005)
+    assert sm.wait_prefetch_status(calls[1][1], TIMEOUT)
+    module.close()
+
+    assert module.query_prefetch_status("req") == 0
+    assert _num_locked(sm, src_keys) == 0
+
+
+def test_reshard_waits_for_the_latest_writer_of_its_keys(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three lookups of one prefix: the first reshard writes nothing, and the
+    third, started while the second still writes, waits for it and hits."""
+    module = make_module(2, 1, 2)
+    _store(mp_ctx, 2, 2)
+    sm = mp_ctx.storage_manager
+    first_in, first_go = threading.Event(), threading.Event()
+    second_in, second_go = threading.Event(), threading.Event()
+    reserve, prepare = sm.reserve_write, sm.prepare_write_completion
+    submit = L1Resharder.submit
+    submitted: list[Future[ReshardResult]] = []
+
+    def failing_first(
+        keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> dict[ObjectKey, MemoryObj]:
+        if not first_in.is_set():
+            first_in.set()
+            assert first_go.wait(TIMEOUT)
+            return {}
+        return reserve(keys, layout_desc)
+
+    def held_second(reserved: dict[ObjectKey, MemoryObj]) -> L1WriteCompletion:
+        if not second_in.is_set():
+            second_in.set()
+            assert second_go.wait(TIMEOUT)
+        return prepare(reserved)
+
+    def counting(self: L1Resharder, task: ReshardTask) -> Future[ReshardResult]:
+        future = submit(self, task)
+        submitted.append(future)
+        return future
+
+    monkeypatch.setattr(sm, "reserve_write", failing_first)
+    monkeypatch.setattr(sm, "prepare_write_completion", held_second)
+    monkeypatch.setattr(L1Resharder, "submit", counting)
+
+    module.lookup(_lookup_key(1, "first"), 1)
+    deadline = time.monotonic() + TIMEOUT
+    while not first_in.is_set():
+        assert time.monotonic() < deadline, "first reshard never started"
+        assert module.query_prefetch_status("first") is None
+        time.sleep(0.005)
+    module.lookup(_lookup_key(1, "second"), 1)
+    while len(submitted) < 2:
+        assert time.monotonic() < deadline, "second reshard never submitted"
+        assert module.query_prefetch_status("second") is None
+        time.sleep(0.005)
+    first_go.set()
+    assert _poll(module, "first") == 0
+    assert second_in.wait(TIMEOUT)
+
+    module.lookup(_lookup_key(1, "third"), 1)
+    threading.Timer(0.1, second_go.set).start()
+
+    assert _poll(module, "third") == NUM_CHUNKS
+    assert _poll(module, "second") == NUM_CHUNKS
 
 
 def _drop_reservation(
