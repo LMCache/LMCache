@@ -24,8 +24,8 @@ import torch
 
 # First Party
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.cache_engine import LMCacheEngine
-from lmcache.v1.event_manager import EventManager, EventStatus, EventType
+from lmcache.inprocess.v1.cache_engine import LMCacheEngine
+from lmcache.inprocess.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 
 CHUNK = 256
