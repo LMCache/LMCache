@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Head-slice reshard plans checked against vLLM's KV head sharding."""
+"""Head-slice reshard plans checked against contiguous KV head sharding."""
 
 # Third Party
 import pytest
@@ -32,10 +32,19 @@ def _shard(full: torch.Tensor, h: int, tp: int, rank: int) -> torch.Tensor:
     return full[..., first * HEAD_ELEMS : (first + n) * HEAD_ELEMS].clone()
 
 
-def test_replicated_ranks_share_heads() -> None:
-    """With more ranks than heads, consecutive ranks hold the same head."""
-    assert [kv_head_range(2, 8, r) for r in range(8)] == [(0, 1)] * 4 + [(1, 1)] * 4
+def test_ranks_hold_contiguous_heads() -> None:
+    """Rank ``r`` holds the ``r``-th contiguous block of heads."""
     assert [kv_head_range(8, 2, r) for r in range(2)] == [(0, 4), (4, 4)]
+    assert [kv_head_range(8, 8, r) for r in range(8)] == [(r, 1) for r in range(8)]
+
+
+def test_more_ranks_than_heads_rejected() -> None:
+    """A TP size larger than the KV head count is not supported."""
+    assert not is_valid_tp(2, 4)
+    with pytest.raises(ValueError):
+        kv_head_range(2, 4, 0)
+    with pytest.raises(ValueError):
+        plan_head_reshard(2, 4, 1, 0)
 
 
 def test_invalid_tp_rejected() -> None:
@@ -54,7 +63,7 @@ def test_invalid_tp_rejected() -> None:
 def test_reshard_rebuilds_destination_shards(h: int, src_tp: int, dst_tp: int) -> None:
     """Every destination rank is rebuilt exactly from the source ranks."""
     if not (is_valid_tp(h, src_tp) and is_valid_tp(h, dst_tp)):
-        pytest.skip("vLLM rejects this TP size")
+        pytest.skip("TP size does not divide the head count")
     full = _full_kv(h)
     src_by_rank = {r: [_shard(full, h, src_tp, r)] for r in range(src_tp)}
     for dst_rank in range(dst_tp):

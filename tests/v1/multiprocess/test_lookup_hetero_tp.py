@@ -11,6 +11,7 @@ deleted.
 
 # Standard
 from collections.abc import Callable, Iterator
+import logging
 import threading
 import time
 
@@ -51,13 +52,16 @@ TIMEOUT = 5.0
 
 
 def _head_range(num_heads: int, tp: int, rank: int) -> tuple[int, int]:
-    """vLLM GQA sharding, written independently of the planner under test."""
-    n = max(1, num_heads // tp)
-    return (rank // max(1, tp // num_heads)) * n, n
+    """Contiguous KV head sharding, written independently of the planner."""
+    n = num_heads // tp
+    return rank * n, n
 
 
 def _layout(num_heads: int, tp: int) -> MemoryLayoutDesc:
-    """One rank's object layout: ``[kv, L, T, local_heads * head_elems]``."""
+    """One rank's object layout: ``[kv, L, T, local_heads * head_elems]``.
+
+    A TP size above the head count gives each rank one (replicated) head.
+    """
     width = max(1, num_heads // tp) * HEAD_ELEMS
     return MemoryLayoutDesc(
         shapes=[torch.Size([2, n, CHUNK, width]) for n in KERNEL_GROUP_LAYERS],
@@ -251,8 +255,8 @@ def _gate_reserve_write(
     return entered, release
 
 
-# (total KV heads, source TP, lookup TP); the last three replicate heads.
-RESHARD_CASES = [(2, 2, 1), (2, 1, 2), (4, 2, 4), (2, 4, 1), (2, 1, 4), (2, 4, 2)]
+# (total KV heads, source TP, lookup TP)
+RESHARD_CASES = [(2, 2, 1), (2, 1, 2), (4, 2, 4), (4, 4, 1), (4, 1, 4), (4, 4, 2)]
 
 
 @pytest.mark.parametrize("num_heads,src_tp,dst_tp", RESHARD_CASES)
@@ -299,14 +303,14 @@ def test_reshard_leaves_no_read_locks(
     assert _num_locked(mp_ctx.storage_manager, dst_keys) == 0
 
 
-@pytest.mark.parametrize("sources", [[], [4], [3]])
+@pytest.mark.parametrize("sources", [[], [4], [3], [8]])
 def test_no_usable_source_keeps_normal_miss(
     mp_ctx: MPCacheServerContext,
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
     sources: list[int],
 ) -> None:
-    """No source, only the lookup's own TP, or an unshardable TP: one prefetch."""
+    """No source, the lookup's own TP, or a TP not dividing the heads: no fallback."""
     module = make_module(4, 4, sources)
     src_keys = _store(mp_ctx, 4, 2)
     calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
@@ -317,6 +321,26 @@ def test_no_usable_source_keeps_normal_miss(
     assert len(calls) == 1
     assert _num_resident(mp_ctx.storage_manager, _keys(mp_ctx, 4)) == 0
     assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
+
+
+def test_lookup_tp_above_head_count_keeps_normal_miss(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A lookup TP larger than the KV head count is a plain miss, not an error."""
+    module = make_module(2, 4, [1])
+    src_keys = _store(mp_ctx, 2, 1)
+    calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
+
+    with caplog.at_level(logging.ERROR):
+        module.lookup(_lookup_key(4), 4)
+        assert _poll(module, "req") == 0
+
+    assert len(calls) == 1
+    assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
 def test_primary_hit_skips_source_stage(

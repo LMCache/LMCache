@@ -960,9 +960,10 @@ class LookupModule(DiscoverableModule):
 
         A lookup qualifies when source world sizes are configured, the engine
         reported the model-wide KV head count (it does so only for
-        attention-only models whose world size equals their TP size), and no
-        object group has a sliding window. Candidates the head count cannot
-        be sharded over are dropped.
+        attention-only models whose world size equals their TP size), the
+        lookup's world size divides that head count, and no object group has
+        a sliding window. Candidates that do not divide the head count are
+        dropped.
 
         Args:
             key: The lookup's key.
@@ -979,7 +980,11 @@ class LookupModule(DiscoverableModule):
         num_heads = self._ctx.layout_desc_registry.find_total_num_kv_heads(
             key.model_name, key.world_size
         )
-        if num_heads is None or any(w >= 0 for w in attn_desc.num_chunks_in_sw):
+        if (
+            num_heads is None
+            or not is_valid_tp(num_heads, key.world_size)
+            or any(w >= 0 for w in attn_desc.num_chunks_in_sw)
+        ):
             return None
         candidates = []
         for world_size in self._hetero_tp_source_world_sizes:

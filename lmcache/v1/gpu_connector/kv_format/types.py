@@ -56,11 +56,12 @@ class LayoutHints(TypedDict, total=False):
             components ``[NB, BS, NH, HS]``.
         head_dim: Per-head dimension. Used by TRT-LLM (same).
         total_num_kv_heads: KV heads of the whole model, before tensor
-            parallelism. Lets the server map heads across TP sizes; it
-            cannot be derived from the per-rank head count once ranks
-            replicate heads (``tp > num_kv_heads``). vLLM reports it only
-            for attention-only, non-MLA models whose server world size is
-            their TP size (no PP, DCP or multiple servers).
+            parallelism. Lets the server map heads across TP sizes and
+            refuse TP sizes above it; it cannot be derived from the per-rank
+            head count once ranks replicate heads (``tp > num_kv_heads``).
+            vLLM reports it only for attention-only, non-MLA models whose
+            server world size is their TP size (no PP, DCP or multiple
+            servers).
     """
 
     kv_layout: KVLayoutName
