@@ -194,5 +194,19 @@ The e2e test is native PD on one node: two servers, a coordinator, NIXL P2P,
 
 1. Source TP discovery: should a peer advertise its layouts (P2P RPC or
    coordinator metadata) instead of using static config?
-2. The NIXL load does not compare the remote object size with the local
-   buffer (`P2PL2Adapter.submit_load_task`). Fix it separately.
+
+## Pre-existing P2P gap: no object size check
+
+This is a P2P issue that exists at equal TP too; this change neither
+introduces nor fixes it. `P2PL2Adapter.submit_load_task` hands NIXL the
+peer's addresses (which carry the peer object's size) and the local buffers
+(sized from the reader's layout) without comparing the two sizes, and the
+NIXL channel pairs them page by page without checking either. An object key
+does not encode dtype or head count, so a key can match while the shapes
+differ, for example P and D with different KV dtypes. When both sizes
+round to the same number of pages, D reads wrong bytes and reports a hit.
+
+It matters more here because D derives the source shape (H / A heads per
+rank) instead of reading it from its own registration. The fix is a size
+comparison in `submit_load_task` that fails the mismatched keys, in its own
+PR.
