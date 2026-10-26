@@ -12,6 +12,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 # ============================================================================
 # Grouped key layout
@@ -25,7 +26,7 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
         world_size=world_size,
         num_kv_readers=1,
         worker_id=None,
-        token_ids=(0,),
+        token_bytes=pack_token_ids((0,)),
         start=0,
         end=0,
         request_id="r",
@@ -42,6 +43,10 @@ def _captured_lookup_key_groups(
     reaching into a private helper.
     """
     ctx = MagicMock()
+    # No previous lookup to settle: ``lookup`` claims any unreleased
+    # result before ``begin_lookup`` resets it.
+    _sess = ctx.session_manager.get_or_create.return_value
+    _sess.take_prefetch_release.return_value = None
     ctx.chunk_size = 16
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = MagicMock()  # non-None layout
@@ -53,7 +58,7 @@ def _captured_lookup_key_groups(
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1] * num_groups
     )
-    ctx.token_hasher.compute_chunk_hashes.return_value = chunk_hashes
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
 
     module = LookupModule(ctx)
     module.lookup(_lookup_key(world_size=world_size), tp_size=1)
@@ -104,16 +109,20 @@ def test_lookup_single_group_matches_single_group_expansion():
 def test_lookup_hashing_stops_at_key_end() -> None:
     """LOOKUP must not hash chunks beyond the IPC key's requested range."""
     ctx = MagicMock()
+    # No previous lookup to settle: ``lookup`` claims any unreleased
+    # result before ``begin_lookup`` resets it.
+    _sess = ctx.session_manager.get_or_create.return_value
+    _sess.take_prefetch_release.return_value = None
     ctx.chunk_size = 16
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = MagicMock()
-    ctx.token_hasher.compute_chunk_hashes.return_value = []
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
     key = IPCCacheServerKey(
         model_name="m",
         world_size=1,
         num_kv_readers=1,
         worker_id=None,
-        token_ids=tuple(range(32)),
+        token_bytes=pack_token_ids(range(32)),
         start=0,
         end=16,
         request_id="r",
@@ -121,6 +130,6 @@ def test_lookup_hashing_stops_at_key_end() -> None:
 
     LookupModule(ctx).lookup(key, tp_size=1)
 
-    ctx.token_hasher.compute_chunk_hashes.assert_called_once_with(
-        list(range(32)), end=16
+    ctx.token_hasher.compute_packed_chunk_hashes.assert_called_once_with(
+        pack_token_ids(range(32)), end=16
     )

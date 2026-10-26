@@ -8,13 +8,16 @@ import asyncio
 import torch
 
 # First Party
+from lmcache.inprocess.v1.protocol import (
+    get_remote_metadata_bytes,
+    init_remote_metadata_info,
+)
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.protocol import get_remote_metadata_bytes, init_remote_metadata_info
 
 logger = init_logger(__name__)
 
@@ -344,7 +347,7 @@ class RemoteConnector(metaclass=abc.ABCMeta):
             else:
                 # First failure encountered (None or Exception)
                 if isinstance(result, Exception):
-                    logger.warning(f"Exception during batched get: {result}")
+                    logger.warning("Exception during batched get: %s", result)
                 found_failure = True
 
         return memory_objs

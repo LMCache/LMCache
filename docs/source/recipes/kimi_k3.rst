@@ -17,6 +17,8 @@ Validated models
 
 - `moonshotai/Kimi-K3 <https://huggingface.co/moonshotai/Kimi-K3>`_
   (8× NVIDIA B300)
+- `moonshotai/Kimi-K3 <https://huggingface.co/moonshotai/Kimi-K3>`_ MXFP4
+  (8× AMD MI355X, ROCm 10, TP 8 / DCP 8, fp8 KV cache)
 
 .. tab-set::
    :sync-group: engine
@@ -44,12 +46,12 @@ Validated models
          (see :doc:`../getting_started/installation`); stable LMCache releases
          include K3 support starting from **0.5.3**.
 
-      As a Mamba / linear-attention hybrid, Kimi K3 needs the same three
-      settings as the other KDA / GDN hybrids: the ``align`` Mamba cache mode,
-      prefix caching, and a chunk size matched to vLLM's *unified block size*
-      ``N`` (see :ref:`mamba-block-size` for how ``N`` is determined). For
-      Kimi K3 at ``--tensor-parallel-size 8`` the unified block size is
-      ``N = 768``:
+      As a Mamba / linear-attention hybrid, Kimi K3 needs the same settings as
+      the other KDA / GDN hybrids: the ``align`` Mamba cache mode, prefix
+      caching, and ``--separate-object-groups`` on the LMCache server. The
+      chunk size is negotiated from vLLM's *unified block size* ``N`` (see
+      :ref:`mamba-block-size`). For Kimi K3 at ``--tensor-parallel-size 8``
+      the unified block size is ``N = 768``:
 
       .. list-table::
          :header-rows: 1
@@ -64,11 +66,11 @@ Validated models
 
       ``N`` depends on the tensor-parallel size (the KDA state is sharded
       across TP ranks while the MLA cache is not), so after changing
-      ``--tensor-parallel-size`` always re-read ``N`` from vLLM's
-      ``Setting attention block size to N tokens`` startup log line and
-      re-derive ``--chunk-size`` and ``--max-num-batched-tokens`` from it.
+      ``--tensor-parallel-size`` re-read ``N`` from vLLM's
+      ``Setting attention block size to N tokens`` startup log line.
 
-      Start the LMCache MP server (``--chunk-size`` = ``N`` = 768):
+      Start the LMCache MP server with an explicitly compatible minimum
+      (a lower minimum would negotiate to ``N = 768``):
 
       .. code-block:: bash
 
@@ -100,7 +102,6 @@ Validated models
              --reasoning-parser kimi_k3 \
              --enable-prefix-caching \
              --mamba-cache-mode align \
-             --max-num-batched-tokens 1500 \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.port":6555}}'
 
@@ -114,18 +115,10 @@ Validated models
         the recurrent state.
       - ``--separate-object-groups`` (server) is **required** for hybrid
         Mamba / linear-attention models: it gives the KDA layers their own
-        cache objects and is what lets ``--max-num-batched-tokens`` exceed
-        ``2N``.
-      - ``--chunk-size`` (server) must be a multiple of the unified block size
-        ``N = 768`` — ``--chunk-size N`` is the simplest choice. LMCache
-        raises at engine startup if it is not.
-      - ``--max-num-batched-tokens`` must be **at least** ``N`` (= ``768``); the
-        validated value is ``1500``. ``align`` snapshots the KDA state only on a
-        block boundary at the end of a scheduler step. Within ``[N, 2N)`` every
-        step advances exactly one block, snapshotting every boundary (finest
-        reuse); with ``--separate-object-groups`` values ``≥ 2N`` are allowed
-        too, trading coarser reuse for higher prefill throughput. See
-        :doc:`../mp/hybrid_models` for the full rationale.
+        cache objects.
+      - ``--chunk-size`` (server) is a minimum. The connector negotiates the
+        smallest multiple of ``N`` that is at least that value. See
+        :doc:`/mp/chunk_size_negotiation`.
       - The server's ``--port 6555`` must match ``lmcache.mp.port`` in the
         connector config.
 
@@ -144,13 +137,32 @@ Validated models
         stack can be validated without downloading the full checkpoint —
         **drop it to serve the real weights**.
       - ``--tensor-parallel-size 8`` shards the weights across eight GPUs.
-        Adjust it to your hardware — but note it changes ``N`` and the two
-        derived flags (see above).
+        Adjust it to your hardware — but note it changes ``N`` (see above).
 
       No attention-backend or ``--no-disable-hybrid-kv-cache-manager`` flag is
       needed; ``LMCacheMPConnector`` advertises hybrid support and vLLM
       auto-selects the KDA and MLA backends. For the generic LMCache + vLLM
       wiring (ports, remote hosts), see :doc:`../getting_started/quickstart`.
+
+      **AMD MI355X / ROCm 10 (TP 8, decode context parallel 8).** Validated
+      under a 70-concurrency agentic trace with a 1.8 TB L1:
+
+      - The ``+rocm7.2`` LMCache wheel loads on ROCm 10 (its native extensions
+        link ``libamdhip64.so.7``, which ROCm 10 still ships).
+      - With DCP 8 and fp8 KV the MLA group registers 12288 tokens per block;
+        ``--chunk-size 12288`` works, and a lower minimum negotiates to 12288.
+      - Set ``--l1-init-size-gb`` equal to ``--l1-size-gb`` for a terabyte-scale
+        L1. With the default lazy expansion the server keeps pinning host
+        memory while vLLM registers its KV caches, and the GPU mappings can
+        stall in the driver for minutes (heartbeats time out and the connector
+        drops into degraded mode). Eager pinning finishes before vLLM starts.
+      - Under deep queues a request can wait many minutes between its lookup
+        and its retrieve. Raise ``--l1-read-ttl-seconds`` and
+        ``--session-ttl-seconds`` above that delay (``7200`` here); with the
+        defaults (300 / 600) the prefetch read locks expire before the
+        retrieve, which fails with ``KEY_NOT_READABLE`` and is reported to vLLM
+        as ``invalid_block_ids`` -- fatal for a hybrid model with several KV
+        cache groups.
 
       If there are any issues with vLLM setup, please refer to the
       `vLLM Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_

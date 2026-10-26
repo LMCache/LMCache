@@ -9,10 +9,9 @@
 """
 
 # Standard
-from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 # Third Party
 import pytest
@@ -162,37 +161,38 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         [f"g{g}c{c}" for c in range(num_chunks)] for g in range(num_object_groups)
     ]
     ctx = MagicMock()
+    ctx.get_read_owners.return_value = None
     ctx.chunk_size = 256
     ctx.null_block_id = 0
     ctx.resolve_obj_keys.return_value = obj_keys
 
     read_calls: list[list[str]] = []
 
-    @contextmanager
-    def fake_read(keys):
+    def fake_read(keys, l1_owners=None):
         read_calls.append(list(keys))
-        yield [MagicMock(get_size=MagicMock(return_value=10)) for _ in keys]
+        return list(keys), [
+            MagicMock(get_size=MagicMock(return_value=10)) for _ in keys
+        ]
 
-    ctx.storage_manager.read_prefetched_results = MagicMock(side_effect=fake_read)
+    ctx.storage_manager.unsafe_read = MagicMock(side_effect=fake_read)
     module._ctx = ctx
 
     transfer_calls: list[tuple[int, list]] = []
 
     def fake_transfer(
-        cache_context,
         block_ids,
         memory_objs,
+        *,
         object_group_id,
         batch_size,
         skip_first_n_tokens,
         direction,
-        *,
         transfer_key,
         block_ids_host=(),
     ):
         transfer_calls.append((object_group_id, list(memory_objs)))
 
-    monkeypatch.setattr(mod, "transfer_kv_per_object_group", fake_transfer)
+    cache_context.transfer_object_group.side_effect = fake_transfer
     monkeypatch.setattr(mod, "downsample_and_stage_block_ids", lambda cc, b: b)
     monkeypatch.setattr(mod, "submit_callback_to_stream", lambda *a, **k: None)
     monkeypatch.setattr(mod, "torch_dev", MagicMock())
@@ -210,7 +210,10 @@ def _make_checkpoint_module(
     context.kv_layer_groups_manager.get_attn_desc = lambda: SimpleNamespace(
         num_chunks_in_sw=[-1, 1], group_kinds=("attention", "recurrent")
     )
-    module.get_and_touch_context_entry(1).cache_context = context
+    entry = module.get_and_touch_context_entry(1)
+    # Keep recording the copies made through the replacement context.
+    context.transfer_object_group = entry.cache_context.transfer_object_group
+    entry.cache_context = context
     module.context.chunk_size = 2
     module.context.null_block_id = -1
     module.context.session_manager.get.return_value = None
@@ -326,3 +329,88 @@ def test_retrieve_never_reads_aux_groups(monkeypatch):
     # the aux group is read by NOBODY and transferred by nobody.
     assert read_calls == [["g0c2"], [f"g1c{c}" for c in range(3)]]
     assert [g for g, _ in transfer_calls] == [0, 1]
+
+
+def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
+    module, reads, _ = _make_module(monkeypatch, 2, [-1, 1])
+    cache_context = module.get_and_touch_context_entry(1).cache_context
+    cache_context.hold_imported_event.return_value = 7
+    owners = {"g0c0": 10, "g0c1": 10, "g1c1": 20}
+    completion = [(10, ["g0c0", "g0c1"]), (20, ["g1c1"])]
+    module.context.get_read_owners.return_value = owners
+    module.context.storage_manager.prepare_read_completion.return_value = completion
+    callback = MagicMock()
+    monkeypatch.setattr(mod, "submit_callback_to_stream", callback)
+    cache_context.transfer_object_group.side_effect = RuntimeError(
+        "partly enqueued transfer"
+    )
+    _, ok = module.retrieve(
+        SimpleNamespace(request_id="req", cache_salt="salt"),
+        1,
+        [[1, 2], [0, 3]],
+        b"producer",
+    )
+    assert not ok
+    assert reads == [["g0c0", "g0c1"]]
+    module.context.storage_manager.prepare_read_completion.assert_called_once_with(
+        ["g0c0", "g0c1", "g1c1"], owners
+    )
+    assert callback.call_args_list == [
+        call(cache_context.cupy_stream, "release_imported_event", (1, 7)),
+        call(cache_context.cupy_stream, "finish_read_by_owner", completion),
+    ]
+    module.context.storage_manager.finish_read_prefetched.assert_not_called()
+
+
+# ------------------------------------------------------------------ #
+#  downsample_and_stage_block_ids (DSv4 sub-chunk SWA)
+# ------------------------------------------------------------------ #
+
+
+def _dsv4_swa_cache_context(chunk_tokens: int, sw_tokens: int, tpb: int):
+    """Fake context: slots_per_block == tpb so calculate_num_blocks = tokens/tpb."""
+
+    def calculate_num_blocks(num_tokens: int, kernel_group_idx: int) -> int:
+        del kernel_group_idx
+        return num_tokens // tpb
+
+    kgm = SimpleNamespace(
+        num_kernel_groups=1,
+        get_subchunk_sw_size_tokens=lambda kg: sw_tokens,
+    )
+    ctx = SimpleNamespace(
+        kv_layer_groups_manager=kgm,
+        lmcache_tokens_per_chunk=chunk_tokens,
+        calculate_num_blocks=calculate_num_blocks,
+        stage_block_ids=lambda ids: ids,
+    )
+    return ctx
+
+
+@pytest.mark.no_shared_allocator
+def test_downsample_keeps_last_window_of_each_chunk_dsv4_swa():
+    """DSv4 SWA: chunk 4096, window 128, tpb 32 → keep last 4 block ids / chunk."""
+    chunk, sw, tpb, n_chunks = 4096, 128, 32, 19
+    ctx = _dsv4_swa_cache_context(chunk, sw, tpb)
+    bpc = chunk // tpb  # 128
+    keep = sw // tpb  # 4
+    original = list(range(n_chunks * bpc))
+    out = mod.downsample_and_stage_block_ids(ctx, [list(original)])
+    assert len(out[0]) == n_chunks * keep
+    for c in range(n_chunks):
+        src = original[c * bpc : (c + 1) * bpc]
+        got = out[0][c * keep : (c + 1) * keep]
+        assert got == src[-keep:]
+    # Retrieve of the last object uses start_object_idx = n_chunks-1.
+    start = (n_chunks - 1) * keep
+    assert out[0][start:] == original[-keep:]
+
+
+@pytest.mark.no_shared_allocator
+def test_downsample_full_attention_keeps_every_block():
+    chunk, tpb, n_chunks = 4096, 128, 19
+    ctx = _dsv4_swa_cache_context(chunk, sw_tokens=chunk, tpb=tpb)
+    bpc = chunk // tpb
+    raw = [list(range(n_chunks * bpc))]
+    out = mod.downsample_and_stage_block_ids(ctx, [list(raw[0])])
+    assert out[0] == raw[0]

@@ -25,8 +25,8 @@ from vllm.config import KVTransferConfig  # noqa: E402
 from vllm.engine.arg_utils import EngineArgs  # noqa: E402
 
 # First Party
+from lmcache.inprocess.v1.cache_engine import LMCacheEngineBuilder  # noqa: E402
 from lmcache.integration.vllm.utils import ENGINE_NAME  # noqa: E402
-from lmcache.v1.cache_engine import LMCacheEngineBuilder  # noqa: E402
 
 
 def setup_env():

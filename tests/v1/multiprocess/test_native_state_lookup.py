@@ -98,7 +98,12 @@ class _PresenceStorage:
             l2_hit_cells=[Bitmap(len(row)) for row in rows],
         )
 
-    def finish_read_prefetched(self, keys: list[ObjectKey], read_locks: int) -> None:
+    def finish_read_prefetched(
+        self,
+        keys: list[ObjectKey],
+        read_locks: int,
+        l1_owners: dict[ObjectKey, int] | None = None,
+    ) -> None:
         """Release only locks actually acquired by a lookup."""
         for key in keys:
             assert self.locked[key] >= read_locks
@@ -154,7 +159,7 @@ def _groups() -> KVLayerGroupsManager:
 
 
 def _key(world_size: int = 1, tokens: tuple[int, ...] = TOKENS) -> IPCCacheServerKey:
-    return IPCCacheServerKey(
+    return IPCCacheServerKey.from_token_ids(
         model_name="native-state",
         world_size=world_size,
         worker_id=None,
@@ -230,6 +235,7 @@ def _lookup(
     )
     storage = _PresenceStorage(present)
     ctx = SimpleNamespace(
+        get_read_owners=lambda request_id: None,
         storage_manager=storage,
         token_hasher=hasher,
         layout_desc_registry=registry,

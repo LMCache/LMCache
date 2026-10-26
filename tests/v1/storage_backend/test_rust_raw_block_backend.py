@@ -23,6 +23,12 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.distributed.l2_adapters.raw_block import (
+    RawBlockCore,
+    RawBlockCoreConfig,
+    RawBlockKeySpec,
+    RawBlockPutManyResult,
+)
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -36,13 +42,7 @@ from lmcache.v1.storage_backend.plugins.rust_raw_block_backend import (
     _DEFAULT_META_VERSION,
     RustRawBlockBackend,
 )
-from lmcache.v1.storage_backend.raw_block import (
-    RawBlockCore,
-    RawBlockCoreConfig,
-    RawBlockKeySpec,
-    RawBlockPutManyResult,
-)
-from tests.v1.storage_backend.raw_block_test_utils import is_skip_safe_io_error
+from tests.v1.distributed.raw_block.test_utils import is_skip_safe_io_error
 
 
 def _has_ext() -> bool:
@@ -66,6 +66,10 @@ class _FakeRawBlockDevice:
 
     def size_bytes(self):
         return len(self._data)
+
+    def worker_error(self) -> str | None:
+        """Return no terminal error unless a failure test overrides this method."""
+        return None
 
     def pread_into(self, offset, out, payload_len, total_len=None):
         del total_len
@@ -479,7 +483,7 @@ def test_raw_block_core_logs_iouring_completion_errors(monkeypatch):
         )
 
         with patch(
-            "lmcache.v1.storage_backend.raw_block.core.logger.error"
+            "lmcache.v1.distributed.l2_adapters.raw_block.core.logger.error"
         ) as log_error:
             results = core._wait_iouring_results(
                 raw_dev,
@@ -2725,6 +2729,35 @@ def _make_raw_block_backend(
         loop=loop,
         dst_device="cpu",
     )
+
+
+@pytest.mark.no_shared_allocator
+def test_rust_raw_block_backend_skips_failed_worker_without_retaining_objects(
+    monkeypatch: pytest.MonkeyPatch,
+    loop_in_thread: asyncio.AbstractEventLoop,
+) -> None:
+    """Skipping a failed worker preserves the caller's object references."""
+    _install_fake_raw_block_device(monkeypatch, size_bytes=64 * 1024 * 1024)
+    allocator = AdHocMemoryAllocator(device="cpu")
+    backend = _make_raw_block_backend(
+        "/tmp/plugin-worker-failure", allocator, loop_in_thread
+    )
+    key = CacheEngineKey("test_model", 1, 0, 7001, torch.bfloat16)
+    memory_obj = _make_byte_obj(32)
+    try:
+        ref_count = memory_obj.get_ref_count()
+        with patch.object(
+            _FakeRawBlockDevice,
+            "worker_error",
+            return_value="io_uring worker submission failed: test error",
+        ):
+            assert backend.batched_submit_put_task([key], [memory_obj]) is None
+            assert not backend.contains(key)
+            assert not backend.exists_in_put_tasks(key)
+            assert memory_obj.get_ref_count() == ref_count
+    finally:
+        memory_obj.ref_count_down()
+        backend.close()
 
 
 def test_rust_raw_block_backend_batched_submit_rolls_back_refs_on_dispatch_failure(

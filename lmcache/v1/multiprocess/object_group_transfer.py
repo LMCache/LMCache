@@ -47,11 +47,13 @@ _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
 _HAS_TRANSFER_PHASE_TIMING: bool = hasattr(device_ops, "pop_completed_phase_timings")
 # Whether the copy engine can run the direct transfer at all: the compiled
 # extension exports ``execute_direct_copy_transfer`` (built against CUDA >=
-# 12.8, not HIP) and ``cudaMemcpyBatchAsync`` is usable on this runtime and
-# driver. Resolved once -- ``device_ops`` is native-bound during
-# ``import lmcache``, before this module is imported. ``batch_memcpy_supported``
-# and ``direct_copy_format_supported`` are native-only and exported together
-# with ``execute_direct_copy_transfer``, so the ``hasattr`` check guards them.
+# 12.8 or HIP >= 7.15) and ``cudaMemcpyBatchAsync`` / ``hipMemcpyBatchAsync``
+# is usable on this runtime and driver (on ROCm, only when opted in via
+# ``LMCACHE_ROCM_ENABLE_BATCH_MEMCPY``). Resolved once -- ``device_ops`` is
+# native-bound during ``import lmcache``, before this module is imported.
+# ``batch_memcpy_supported`` and ``direct_copy_format_supported`` are
+# native-only and exported together with ``execute_direct_copy_transfer``, so
+# the ``hasattr`` check guards them.
 _HAS_BATCH_MEMCPY_ASYNC: bool = (
     hasattr(device_ops, "execute_direct_copy_transfer")
     and device_ops.batch_memcpy_supported()
@@ -465,10 +467,11 @@ def run_direct_transfer(
     Direct-copy counterpart of :func:`_run_object_group_transfer_plan`: the
     same window skip / ``skip_first_n_tokens`` logic, but instead of staging
     each chunk through the GPU temp buffer and launching the block transfer
-    kernel, every (kv plane, layer, block) of a chunk becomes one entry of a
-    ``cudaMemcpyBatchAsync`` call between the pinned host object and the paged
-    buffer (``execute_direct_copy_transfer``, one call per chunk, single GIL
-    release for the whole group).
+    kernel, each (kv plane, block) of a chunk is copied straight between the
+    pinned host object and the paged buffer (``execute_direct_copy_transfer``,
+    single GIL release for the whole group): one 2-D copy over all layers when
+    the kernel group's layers sit at a constant pitch (vLLM's block-outermost
+    layouts), else one ``cudaMemcpyBatchAsync`` entry per layer.
 
     The caller must have checked :data:`_HAS_BATCH_MEMCPY_ASYNC` and
     :func:`direct_transfer_supported`.

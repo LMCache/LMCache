@@ -12,7 +12,6 @@ band -- these tests stand in for the fd transport with a
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
 import os
-import pickle
 import socket
 
 # Third Party
@@ -285,12 +284,13 @@ def test_wrap_rejects_unpermutable_noncontiguous(vmm_pool) -> None:
         VmmCudaIPCWrapper(base[::2])
 
 
-def test_pickle_strips_process_local_state(vmm_pool) -> None:
-    """The fd and registry references never travel with the pickle."""
+def test_wire_strips_process_local_state(vmm_pool) -> None:
+    """The fd and registry references never travel with the descriptor."""
     wrapper = VmmCudaIPCWrapper(vmm_pool.tensor(0, 1024))
     try:
         assert wrapper.fd_payload() is not None
-        clone = pickle.loads(pickle.dumps(wrapper))
+        clone = DeviceIPCWrapper.Deserialize(DeviceIPCWrapper.Serialize(wrapper))
+        assert isinstance(clone, VmmCudaIPCWrapper)
         assert clone.fd_payload() is None
         assert clone._opens == 0  # noqa: SLF001
         assert clone._export_id == wrapper._export_id  # noqa: SLF001
@@ -316,7 +316,7 @@ def test_to_tensor_without_resolver_raises(vmm_pool, clear_fd_resolver) -> None:
     set_vmm_fd_resolver(None)
     wrapper = VmmCudaIPCWrapper(vmm_pool.tensor(0, 1024))
     try:
-        clone = pickle.loads(pickle.dumps(wrapper))
+        clone = DeviceIPCWrapper.Deserialize(DeviceIPCWrapper.Serialize(wrapper))
         with pytest.raises(RuntimeError, match="resolver"):
             clone.to_tensor()
     finally:
@@ -422,6 +422,57 @@ def test_cross_process_round_trip_of_interior_view(clear_fd_resolver) -> None:
         pool.close()
 
 
+def test_cross_process_round_trip_of_dim0_padded_view(clear_fd_resolver) -> None:
+    """Regression for #5097 on the VMM path: a hybrid-model unified KV pool
+    view (blocks at a padded dim-0 stride) round-trips element for element,
+    and consumer writes never touch the inter-block padding. Strides are
+    distinct so the layout normalization never reorders dims.
+    """
+    pool = _VmmPool()
+    try:
+        flat = pool.tensor(0, pool.size // 4)
+        flat.fill_(7.0)
+        view = flat[512:].as_strided((4, 8, 16), (256, 16, 1))
+        view.copy_(
+            torch.arange(view.numel(), device=DEVICE, dtype=torch.float32).reshape(
+                view.shape
+            )
+        )
+        torch.cuda.synchronize()
+
+        wrapper = VmmCudaIPCWrapper(view)
+        payload = DeviceIPCWrapper.Serialize(wrapper)
+        fd_payload = wrapper.fd_payload()
+        assert fd_payload is not None
+        export_id, fd = fd_payload
+
+        parent_sock, child_sock = socket.socketpair()
+        ctx = get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe()
+        child = ctx.Process(target=_vmm_consumer, args=(child_conn, child_sock))
+        child.start()
+        try:
+            parent_conn.send_bytes(payload)
+            socket.send_fds(parent_sock, [export_id], [fd])
+            assert parent_conn.poll(120), "consumer died before reporting"
+            assert parent_conn.recv() is True  # consumer saw the exact pattern
+
+            torch.cuda.synchronize()
+            assert bool((view == -1.0).all().item())  # consumer wrote back
+            blocks = flat[512 : 512 + 4 * 256].view(4, 256)
+            assert bool((blocks[:, 128:] == 7.0).all().item())  # padding untouched
+            parent_conn.send("release")
+        finally:
+            child.join(timeout=60)
+            if child.is_alive():
+                child.kill()
+                child.join()
+        assert child.exitcode == 0
+        wrapper.close()
+    finally:
+        pool.close()
+
+
 # ---------------------------------------------------------------------------
 # Fabric kind (requires an IMEX channel; validates the blob path)
 # ---------------------------------------------------------------------------
@@ -448,7 +499,7 @@ def _fabric_consumer(conn: Connection) -> None:
 )
 def test_fabric_round_trip() -> None:
     """Fabric-kind wrappers need no fd channel: the 64-byte blob rides
-    the pickle and imports across processes on its own.
+    the descriptor and imports across processes on its own.
     """
     driver = _cuda.driver
     pool = _VmmPool(
