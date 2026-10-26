@@ -260,7 +260,7 @@ jobs:
       # pygrpc-native is optional, so only the native leg installs it.
       - name: Install pygrpc-native
         if: matrix.request_transport == 'grpc-native'
-        run: pip install pygrpc-native==0.1.0
+        run: pip install pygrpc-native==0.3.0
 
       # server_bench is model-agnostic (cpu_server_bench_test.sh never
       # touches any model — it only exercises the lmcache server's KV
