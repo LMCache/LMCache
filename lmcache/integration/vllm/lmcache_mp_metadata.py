@@ -17,6 +17,7 @@ import torch
 # First Party
 from lmcache.integration.vllm.utils import (
     apply_mm_hashes_to_token_ids,
+    apply_prompt_embeds_to_token_ids,
     extract_mm_features,
     extract_request_configs_from_request,
 )
@@ -126,9 +127,17 @@ class LMCacheMPRequestTracker:
         self.packed_tokens = bytearray()
         self.mm_adjusted_prompt_ids = []
         mm_hashes, mm_positions = extract_mm_features(request)
-        if mm_hashes and mm_positions:
-            prompt_ids = torch.tensor(request.prompt_token_ids)
-            apply_mm_hashes_to_token_ids(prompt_ids, mm_hashes, mm_positions)
+        prompt_embeds = getattr(request, "prompt_embeds", None)
+        if (mm_hashes and mm_positions) or prompt_embeds is not None:
+            prompt_ids = torch.tensor(request.all_token_ids[: self.num_prompt_tokens])
+            if mm_hashes and mm_positions:
+                apply_mm_hashes_to_token_ids(prompt_ids, mm_hashes, mm_positions)
+            if prompt_embeds is not None:
+                apply_prompt_embeds_to_token_ids(
+                    prompt_ids,
+                    prompt_embeds,
+                    getattr(request, "prompt_is_token_ids", None),
+                )
             self.mm_adjusted_prompt_ids = prompt_ids.tolist()
 
     ####
