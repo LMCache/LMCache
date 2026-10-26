@@ -138,8 +138,10 @@ Resharded 8 chunks from TP1 to TP2 for request <id>: wrote 224.0 MiB in 38.36 ms
 ```
 
 `free_lookup_locks` consumes without advancing. A cross-TP stage result has its
-A read locks released and the same-TP stage answers; a running reshard is
-waited for, so the release sees the locks it took. An exception in any
+A read locks released and the same-TP stage answers. A running cross-TP
+prefetch or reshard is waited for: the same-TP stage's locks left the
+prefetch controller with its result, so only this release can drop them, and
+it also sees the locks the reshard took. An exception in any
 stage, or a failed reshard, is logged and the same-TP stage answers, so the job
 always resolves and every lock it took is released. If a reshard fails
 mid-group, the destination objects reserved for that group stay reserved

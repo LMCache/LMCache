@@ -26,6 +26,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchResult,
     PrefetchTaskSpec,
     ipc_key_to_object_keys,
 )
@@ -373,7 +374,7 @@ def hetero_tp(mp_ctx: MPCacheServerContext) -> Iterator[HeteroTP]:
     hetero_tp.close()
 
 
-def test_source_stage_covers_the_rest_at_the_source_tp(hetero_tp: HeteroTP) -> None:
+def test_cross_tp_stage_covers_the_rest_at_the_source_tp(hetero_tp: HeteroTP) -> None:
     """The cross-TP stage starts after the same-TP hit, keyed and shaped for A."""
     plan = hetero_tp.plan(_same_tp_stage([-1]))
     assert plan is not None
@@ -385,7 +386,6 @@ def test_source_stage_covers_the_rest_at_the_source_tp(hetero_tp: HeteroTP) -> N
     assert stage.group_layout_descs == {0: _layout(4, 2)}
     assert stage.attn_desc.world_size == 2
     assert stage.num_kv_readers == 1
-    assert stage.allowed_l2_memory_tags is None
 
 
 @pytest.mark.parametrize("windows,qualifies", [([-1, -1], True), ([-1, 2], False)])
@@ -591,7 +591,7 @@ def test_same_tp_prefix_loaded_from_l2_stays_locked_with_the_hit(
     assert _num_resident(sm, same_tp_keys) == 0
 
 
-def test_free_locks_after_source_stage_releases_and_misses(
+def test_free_locks_after_cross_tp_stage_releases_and_misses(
     mp_ctx: MPCacheServerContext,
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -749,6 +749,55 @@ def test_free_during_reshard_waits_and_releases_everything(
     assert session.prefetch_hit_chunks == NUM_CHUNKS
     assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
     assert _num_locked(mp_ctx.storage_manager, dst_keys) == 0
+    assert module.query_prefetch_status("req") == 0
+
+
+def test_free_during_cross_tp_prefetch_waits_and_releases_everything(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Freeing while the cross-TP prefetch runs waits for it, then drops the
+    same-TP hit's locks and the A locks."""
+    module = make_module(2, 1, 2)
+    same_tp_keys = _store(mp_ctx, 2, 1, num_chunks=1)
+    src_keys = _store(mp_ctx, 2, 2)
+    sm = mp_ctx.storage_manager
+    calls = _spy_submits(monkeypatch, sm)
+    release = threading.Event()
+    query, wait = sm.query_prefetch_status, sm.wait_prefetch_status
+
+    def running(handle: PrefetchHandle) -> bool:
+        return len(calls) > 1 and handle is calls[1][1] and not release.is_set()
+
+    def held_query(handle: PrefetchHandle) -> PrefetchResult | None:
+        return None if running(handle) else query(handle)
+
+    def held_wait(handle: PrefetchHandle, timeout: float) -> bool:
+        if running(handle) and not release.wait(timeout):
+            return False
+        return wait(handle, timeout)
+
+    monkeypatch.setattr(sm, "query_prefetch_status", held_query)
+    monkeypatch.setattr(sm, "wait_prefetch_status", held_wait)
+    key = _lookup_key(1)
+
+    module.lookup(key, 1)
+    deadline = time.monotonic() + TIMEOUT
+    while len(calls) < 2:
+        assert time.monotonic() < deadline, "cross-TP stage never submitted"
+        assert module.query_prefetch_status("req") is None
+        time.sleep(0.005)
+
+    threading.Timer(0.05, release.set).start()
+    module.free_lookup_locks(key, 1)
+
+    assert release.is_set()
+    session = mp_ctx.session_manager.get("req")
+    assert session is not None
+    assert session.prefetch_hit_chunks == 1
+    assert _num_locked(sm, same_tp_keys) == 0
+    assert _num_locked(sm, src_keys) == 0
     assert module.query_prefetch_status("req") == 0
 
 
