@@ -760,7 +760,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 required_chunk_alignment=scheduler_block_size,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
-            # Successful eager requests awaiting all workers' final STORE reports.
+            # Eager requests awaiting all workers' final STORE reports.
             self._pending_eager_session_ends: set[str] = set()
             # Worker events aggregated per step, awaiting take_events().
             self._kv_cache_events: list[KVCacheEvent] = []
@@ -1646,7 +1646,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         Update KVConnector state from aggregated worker-side output.
 
-        Successful eager requests end their sessions only after all workers
+        Finished eager requests end their sessions only after all workers
         report finished_sending. Lazy offload retains its own receipt lifecycle.
         A STORE returning False still reports completion. A missing worker
         report retains the pending entry and lookup state for the connector's
@@ -1698,9 +1698,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         The connector may assumes responsibility for freeing the blocks
         asynchronously by returning True.
 
-        A successful eager producer keeps its LMCache session until the
-        aggregated finished_sending report, so a late STORE cannot recreate it.
-        Consumer, lazy-offload and aborted-request cleanup is unchanged.
+        A stopped, length-capped or aborted eager producer keeps its LMCache
+        session until the aggregated finished_sending report, so a late STORE
+        cannot recreate it. Requests finishing while loading remain on the
+        receive-owned cleanup path. Consumer and lazy cleanup is unchanged.
 
         Returns:
             True if the request is being saved/sent asynchronously and blocks
@@ -1730,7 +1731,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # vLLM parks a request that finishes while its retrieve is unreported
         # and frees it on the finished_recving report, asserting on any later
         # report, so the worker must not also report it in finished_sending.
-        if request.request_id in self._unreported_retrieves:
+        was_loading = request.request_id in self._unreported_retrieves
+        if was_loading:
             self._unreported_retrieves.remove(request.request_id)
             self._finished_while_loading.add(request.request_id)
 
@@ -1740,8 +1742,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if (
             not self.lazy_offload
             and self._can_store
+            and not was_loading
             and request.status
-            in (RequestStatus.FINISHED_STOPPED, RequestStatus.FINISHED_LENGTH_CAPPED)
+            in (
+                RequestStatus.FINISHED_STOPPED,
+                RequestStatus.FINISHED_LENGTH_CAPPED,
+                RequestStatus.FINISHED_ABORTED,
+            )
         ):
             self._pending_eager_session_ends.add(request.request_id)
             return True, (return_params or None)
