@@ -174,8 +174,9 @@ PrefetchTaskSpec(
   non-empty filter that matches no adapter is served from L1 on the loop
   thread.
 
-P2P serving passes `allowed_l2_memory_tags=frozenset()`: a peer lookup only
-locks what this node already holds in L1, and never recurses into this node's
-L2 adapters (including its own P2P adapters). Serving peers from local L2 is a
+P2P serving passes `allowed_l1_memory_tags=frozenset({(DRAM, LOCAL)})` and
+`allowed_l2_memory_tags=frozenset()`: a peer lookup only locks what this node
+already holds in its DRAM L1, the L1 registered with the transfer channel, and
+never recurses into this node's L2 adapters (including its own P2P adapters). Serving peers from local L2 is a
 follow-up: it moves P2P lookups onto the asynchronous L2 path, which interacts
 with the requester-side lookup timeouts.
