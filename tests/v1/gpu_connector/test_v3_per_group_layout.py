@@ -22,7 +22,7 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector import gpu_connectors
-from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV3
+from lmcache.inprocess.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV3
 from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 import lmcache.lmcache_native as lmcache_native
