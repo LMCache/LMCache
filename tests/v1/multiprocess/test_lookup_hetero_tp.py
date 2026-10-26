@@ -22,6 +22,7 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
@@ -47,6 +48,7 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
+from lmcache.v1.multiprocess.tp_reshard import HeteroTPFallback
 import lmcache.v1.memory_management as memory_management
 
 pytestmark = pytest.mark.no_shared_allocator
@@ -321,6 +323,48 @@ def test_reshard_leaves_no_read_locks(
 
     module.free_lookup_locks(key, dst_tp)
     assert _num_locked(mp_ctx.storage_manager, dst_keys) == 0
+
+
+@pytest.fixture
+def fallback(mp_ctx: MPCacheServerContext) -> Iterator[HeteroTPFallback]:
+    """A fallback over sources ``[1, 2]`` for a model registered at TP 4."""
+    mp_ctx.layout_desc_registry.register(MODEL, 4, _layout(4, 4), total_num_kv_heads=4)
+    fallback = HeteroTPFallback(
+        mp_ctx.layout_desc_registry, mp_ctx.storage_manager, [1, 2]
+    )
+    yield fallback
+    fallback.close()
+
+
+def test_plan_yields_sources_in_configured_order(fallback: HeteroTPFallback) -> None:
+    """Each source stage is at the next configured TP, with its own layout."""
+    plan = fallback.plan(
+        _lookup_key(4), [], AttnWindowDesc([-1], world_size=4), {0: _layout(4, 4)}
+    )
+    assert plan is not None
+
+    stages = list(iter(plan.next_source, None))
+
+    assert [
+        (s.key.world_size, s.attn_desc.world_size, s.group_layout_descs[0])
+        for s in stages
+    ] == [(1, 1, _layout(4, 1)), (2, 2, _layout(4, 2))]
+    assert all(s.num_kv_readers == 1 for s in stages)
+
+
+@pytest.mark.parametrize("windows,qualifies", [([-1, -1], True), ([-1, 2], False)])
+def test_plan_requires_full_attention(
+    fallback: HeteroTPFallback, windows: list[int], qualifies: bool
+) -> None:
+    """A model with a sliding-window group gets no cross-TP fallback."""
+    plan = fallback.plan(
+        _lookup_key(4),
+        [],
+        AttnWindowDesc(windows, world_size=4),
+        {0: _layout(4, 4), 1: _layout(4, 4)},
+    )
+
+    assert (plan is not None) == qualifies
 
 
 @pytest.mark.parametrize("sources", [[], [4], [3], [8]])

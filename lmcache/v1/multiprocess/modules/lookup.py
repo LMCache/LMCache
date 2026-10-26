@@ -44,29 +44,15 @@ from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.tp_reshard import (
-    L1Resharder,
-    ReshardTask,
-    is_valid_tp,
-    reshard_layout_desc,
+    HeteroTPFallback,
+    HeteroTPPlan,
+    SourceStage,
 )
 
 logger = init_logger(__name__)
 
 # Stateless, so one instance can serve every LookupModule.
 _DEFAULT_LOAD_POLICY = DefaultKVLoadPolicy({})
-
-
-def _flat_object_keys(
-    key: IPCCacheServerKey, chunk_hashes: list[bytes], num_object_groups: int
-) -> list[ObjectKey]:
-    """Return the object keys of ``chunk_hashes`` for every object group."""
-    return [
-        k
-        for group in ipc_key_to_object_keys(
-            key, chunk_hashes, list(range(num_object_groups))
-        )
-        for k in group
-    ]
 
 
 def resolve_prefetched_obj_keys(
@@ -124,31 +110,28 @@ class _HeteroTPState:
 
     See ``docs/design/v1/multiprocess/hetero_tp.md``. The lookup first runs
     at its own world size (the primary stage). If that finds no chunk, it
-    retries at each candidate source world size (a source stage); a hit there
-    is resharded into objects keyed and shaped for the lookup's own world
-    size, which a final L1-only prefetch then locks like any other hit.
+    runs each source stage ``plan`` gives it; a hit there is converted into
+    objects keyed and shaped for the lookup's own world size, which a final
+    L1-only prefetch then locks like any other hit.
 
     Attributes:
         key: The lookup's own key.
         suffix_hashes: Chunk hashes of the looked-up range.
         group_layout_descs: Per-object-group layouts at the lookup's own
             world size.
-        total_num_kv_heads: KV heads of the whole model.
-        candidates: Source world sizes not tried yet, in order.
-        source_world_size: World size of the running source stage, or
-            ``None`` during the primary stage.
+        plan: Source stages to try, and the conversion of a source hit.
+        in_source: Whether the running stage is a source stage.
         source_result: The source stage's result, kept while its hit is
-            resharded.
-        reshard: The background reshard of a source-stage hit; it resolves
-            to whether it submitted the final stage.
+            converted.
+        reshard: The background conversion of a source-stage hit; it
+            resolves to whether it submitted the final stage.
     """
 
     key: IPCCacheServerKey
     suffix_hashes: list[bytes]
     group_layout_descs: dict[int, MemoryLayoutDesc]
-    total_num_kv_heads: int
-    candidates: list[int]
-    source_world_size: int | None = None
+    plan: HeteroTPPlan
+    in_source: bool = False
     source_result: PrefetchResult | None = None
     reshard: Future[bool] | None = None
 
@@ -232,12 +215,11 @@ class LookupModule(DiscoverableModule):
     ) -> None:
         self._ctx = ctx
         self._load_policy = load_policy
-        self._hetero_tp_source_world_sizes = list(hetero_tp_source_world_sizes)
         self._prefetch_jobs: dict[str, _PrefetchJob] = {}
         self._prefetch_job_lock = threading.Lock()
-        self._resharder = L1Resharder(ctx.storage_manager)
-        # (KV heads, source world size) pairs already warned about.
-        self._warned_invalid_sources: set[tuple[int, int]] = set()
+        self._hetero_tp = HeteroTPFallback(
+            ctx.layout_desc_registry, ctx.storage_manager, hetero_tp_source_world_sizes
+        )
         self._setup_metrics()
 
     @property
@@ -261,7 +243,7 @@ class LookupModule(DiscoverableModule):
         Queued reshards still run: cancelling one would leave its source
         read locks held until their TTL.
         """
-        self._resharder.close()
+        self._hetero_tp.close()
 
     # -----------------------------------------------------------------
     # Handlers
@@ -932,13 +914,6 @@ class LookupModule(DiscoverableModule):
     ) -> _HeteroTPState | None:
         """Build the cross-TP fallback for a lookup, or ``None`` if it has none.
 
-        A lookup qualifies when source world sizes are configured, the engine
-        reported the model-wide KV head count (it does so only for
-        attention-only models whose world size equals their TP size), the
-        lookup's world size divides that head count, and no object group has
-        a sliding window. Candidates that do not divide the head count are
-        dropped.
-
         Args:
             key: The lookup's key.
             suffix_hashes: Chunk hashes of the looked-up range.
@@ -949,40 +924,10 @@ class LookupModule(DiscoverableModule):
         Returns:
             The fallback state, or ``None`` if the lookup does not qualify.
         """
-        if not self._hetero_tp_source_world_sizes:
+        plan = self._hetero_tp.plan(key, suffix_hashes, attn_desc, group_layout_descs)
+        if plan is None:
             return None
-        num_heads = self._ctx.layout_desc_registry.find_total_num_kv_heads(
-            key.model_name, key.world_size
-        )
-        if (
-            num_heads is None
-            or not is_valid_tp(num_heads, key.world_size)
-            or any(w >= 0 for w in attn_desc.num_chunks_in_sw)
-        ):
-            return None
-        candidates = []
-        for world_size in self._hetero_tp_source_world_sizes:
-            if world_size == key.world_size:
-                continue
-            if not is_valid_tp(num_heads, world_size):
-                if (num_heads, world_size) not in self._warned_invalid_sources:
-                    self._warned_invalid_sources.add((num_heads, world_size))
-                    logger.warning(
-                        "Skipping hetero TP source world size %d: %d KV heads",
-                        world_size,
-                        num_heads,
-                    )
-                continue
-            candidates.append(world_size)
-        if not candidates:
-            return None
-        return _HeteroTPState(
-            key=key,
-            suffix_hashes=suffix_hashes,
-            group_layout_descs=group_layout_descs,
-            total_num_kv_heads=num_heads,
-            candidates=candidates,
-        )
+        return _HeteroTPState(key, suffix_hashes, group_layout_descs, plan)
 
     def _advance_hetero_tp(
         self,
@@ -1016,62 +961,29 @@ class LookupModule(DiscoverableModule):
             is locked at the lookup's world size.
         """
         found, _ = fold_unfold_grouped(result.hit_cells, row_windows)
-        if state.source_world_size is None:
+        if not state.in_source:
             # A partial primary hit skips the fallback even if a source TP
             # holds a longer prefix; see "Known limitation" in hetero_tp.md.
-            if found > 0 or not advance or not state.candidates:
+            stage = state.plan.next_source() if found == 0 and advance else None
+            if stage is None:
                 job.hetero = None
                 return row_windows
-            self._submit_source_stage(job, state)
+            self._submit_source_stage(job, state, stage)
             return None
         if found > 0 and advance:
             state.source_result = result
-            self._submit_reshard(job, state, found)
+            state.reshard = state.plan.convert(
+                found, result, partial(self._submit_final_stage, job, state)
+            )
             return None
         if found > 0:
-            self._ctx.storage_manager.finish_read_prefetched(
-                _flat_object_keys(
-                    replace(state.key, world_size=cast(int, state.source_world_size)),
-                    state.suffix_hashes[:found],
-                    job.attn_desc.num_object_groups,
-                ),
-                read_locks=1,
-                l1_owners=result.l1_owners,
-            )
-        if advance and state.candidates:
-            self._submit_source_stage(job, state)
+            state.plan.release(found, result)
+        stage = state.plan.next_source() if advance else None
+        if stage is not None:
+            self._submit_source_stage(job, state, stage)
             return None
         job.hetero = None
         return ()
-
-    def _submit_reshard(
-        self, job: _PrefetchJob, state: _HeteroTPState, found: int
-    ) -> None:
-        """Hand a source-stage hit to the resharder, then submit the final stage.
-
-        Args:
-            job: The lookup's job.
-            state: ``job.hetero``, in a source stage with ``source_result``.
-            found: Leading chunks the source stage hit.
-        """
-        source = cast(int, state.source_world_size)
-        groups = list(range(job.attn_desc.num_object_groups))
-        hashes = state.suffix_hashes[:found]
-        task = ReshardTask(
-            src_keys=ipc_key_to_object_keys(
-                replace(state.key, world_size=source), hashes, groups
-            ),
-            dst_keys=ipc_key_to_object_keys(state.key, hashes, groups),
-            dst_layout_descs=state.group_layout_descs,
-            num_kv_heads=state.total_num_kv_heads,
-            src_tp=source,
-            dst_tp=state.key.world_size,
-            l1_owners=cast(PrefetchResult, state.source_result).l1_owners,
-            request_id=job.request_id,
-        )
-        state.reshard = self._resharder.submit(
-            task, partial(self._submit_final_stage, job, state)
-        )
 
     def _submit_final_stage(self, job: _PrefetchJob, state: _HeteroTPState) -> bool:
         """Submit the L1-only prefetch of a finished reshard.
@@ -1110,25 +1022,25 @@ class LookupModule(DiscoverableModule):
         """Return ``job``'s unconsumed reshard; call under ``_prefetch_job_lock``."""
         return job.hetero.reshard if job.hetero is not None else None
 
-    def _submit_source_stage(self, job: _PrefetchJob, state: _HeteroTPState) -> None:
-        """Submit the prefetch at the next candidate source world size."""
-        source = state.candidates.pop(0)
-        state.source_world_size = source
-        num_heads = state.total_num_kv_heads
+    def _submit_source_stage(
+        self, job: _PrefetchJob, state: _HeteroTPState, stage: SourceStage
+    ) -> None:
+        """Submit a source stage's prefetch and make it the job's stage.
+
+        Args:
+            job: The lookup's job.
+            state: ``job.hetero``.
+            stage: The source stage from ``state.plan``.
+        """
+        state.in_source = True
         self._swap_prefetch(
             job,
             *self._submit_prefetch(
-                replace(state.key, world_size=source),
+                stage.key,
                 state.suffix_hashes,
-                {
-                    gid: reshard_layout_desc(
-                        desc, num_heads, state.key.world_size, source
-                    )
-                    for gid, desc in state.group_layout_descs.items()
-                },
-                replace(job.attn_desc, world_size=source),
-                # Only the reshard reads the source objects.
-                1,
+                stage.group_layout_descs,
+                stage.attn_desc,
+                stage.num_kv_readers,
             ),
             state,
         )
