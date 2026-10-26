@@ -75,10 +75,10 @@ def bcast_obj(obj, src):
 
 def make_engine(rank, world, shard=True, max_cpu_gb=0.05, extra=None, unfull=False):
     # First Party
-    from lmcache.v1.cache_engine import LMCacheEngine
+    from lmcache.inprocess.v1.cache_engine import LMCacheEngine
     from lmcache.inprocess.v1.config import LMCacheEngineConfig
     from lmcache.inprocess.v1.metadata import LMCacheMetadata
-    from lmcache.v1.token_database import ChunkedTokenDatabase
+    from lmcache.inprocess.v1.token_database import ChunkedTokenDatabase
 
     config = LMCacheEngineConfig.from_defaults(
         chunk_size=CHUNK,

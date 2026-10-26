@@ -11,7 +11,7 @@ import torch
 
 # First Party
 from lmcache.inprocess.v1.config import LMCacheEngineConfig
-from lmcache.v1.lookup_client import lmcache_lookup_client as llc
+from lmcache.inprocess.v1.lookup_client import lmcache_lookup_client as llc
 from lmcache.inprocess.v1.metadata import LMCacheMetadata
 
 
