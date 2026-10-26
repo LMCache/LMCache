@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -34,7 +34,9 @@ msgid ""
 "**Pull mode (default, no collector).** When ``--otlp-endpoint`` is *not* "
 "set, the server publishes a Prometheus ``/metrics`` endpoint that "
 "Prometheus scrapes directly."
-msgstr "**拉取模式（默认，无收集器）。** 当 ``--otlp-endpoint`` *未* 设置时，服务器会发布一个 Prometheus ``/metrics`` 端点，Prometheus 直接抓取该端点。"
+msgstr ""
+"**拉取模式（默认，无收集器）。** 当 ``--otlp-endpoint`` *未* 设置时，服务器会发布一个 Prometheus "
+"``/metrics`` 端点，Prometheus 直接抓取该端点。"
 
 #: ../../source/mp/observability/metrics.rst:13
 msgid ""
@@ -49,30 +51,62 @@ msgid ""
 "(default 9090). See :ref:`mp-obs-metrics-endpoint` for the full "
 "breakdown. Either way, ``/metrics`` is empty until the first "
 "store/retrieve — drive some traffic before you go looking."
-msgstr "对于 ``lmcache server``，``/metrics`` 由 **HTTP 前端** 在 ``--http-port``（默认 **8080**）上提供，例如 ``http://<host>:8080/metrics`` — **不** 在 ``--prometheus-port`` 上。``--prometheus-port`` 被 ``lmcache server`` *忽略*：独立的 Prometheus HTTP 服务器被禁用，因为 HTTP 前端已经提供了 ``/metrics``。没有前端的入口点（``python -m lmcache.v1.multiprocess.server`` 和 ``lmcache trace replay``）没有 HTTP 前端，因此 *它们* 在 ``--prometheus-port``（默认 9090）上提供 ``/metrics``。有关详细信息，请参见 :ref:`mp-obs-metrics-endpoint`。无论如何，``/metrics`` 在第一次存储/检索之前是空的 — 在您查找之前先驱动一些流量。"
+msgstr ""
+"对于 ``lmcache server``，``/metrics`` 由 **HTTP 前端** 在 ``--http-port``（默认 "
+"**8080**）上提供，例如 ``http://<host>:8080/metrics`` — **不** 在 ``--prometheus-"
+"port`` 上。``--prometheus-port`` 被 ``lmcache server`` *忽略*：独立的 Prometheus "
+"HTTP 服务器被禁用，因为 HTTP 前端已经提供了 ``/metrics``。没有前端的入口点（``python -m "
+"lmcache.v1.multiprocess.server`` 和 ``lmcache trace replay``）没有 HTTP 前端，因此"
+" *它们* 在 ``--prometheus-port``（默认 9090）上提供 ``/metrics``。有关详细信息，请参见 :ref"
+":`mp-obs-metrics-endpoint`。无论如何，``/metrics`` 在第一次存储/检索之前是空的 — "
+"在您查找之前先驱动一些流量。"
 
 #: ../../source/mp/observability/metrics.rst:26
+msgid ""
+"The MP Coordinator follows the same embedded-HTTP pattern. In pull mode, "
+"``lmcache coordinator`` exposes ``/metrics`` on ``--port`` (default "
+"**9300**) and never starts a separate Prometheus server. Use the "
+"coordinator's ``--disable-metrics`` flag to disable metrics."
+msgstr ""
+"MP 协调器遵循相同的嵌入式 HTTP 模式。在拉取模式下，``lmcache coordinator`` 在 ``--port``（默认 "
+"**9300**）上公开 ``/metrics``，并且从不启动单独的 Prometheus 服务器。使用协调器的 ``--disable-"
+"metrics`` 标志可以禁用指标。"
+
+#: ../../source/mp/observability/metrics.rst:31
 msgid ""
 "**Push mode (OTLP).** When ``--otlp-endpoint`` is set, metrics are pushed"
 " to an OpenTelemetry Collector, which re-exposes them for Prometheus to "
 "scrape. See :doc:`index` for the bundled Collector + Prometheus + Grafana"
 " stack."
-msgstr "**推送模式 (OTLP)。** 当设置 ``--otlp-endpoint`` 时，指标会被推送到 OpenTelemetry Collector，后者会重新暴露这些指标供 Prometheus 抓取。有关捆绑的 Collector + Prometheus + Grafana 堆栈，请参见 :doc:`index`。"
+msgstr ""
+"**推送模式 (OTLP)。** 当设置 ``--otlp-endpoint`` 时，指标会被推送到 OpenTelemetry "
+"Collector，后者会重新暴露这些指标供 Prometheus 抓取。有关捆绑的 Collector + Prometheus + "
+"Grafana 堆栈，请参见 :doc:`index`。"
 
-#: ../../source/mp/observability/metrics.rst:30
+#: ../../source/mp/observability/metrics.rst:35
+msgid ""
+"The Coordinator also accepts ``--otlp-endpoint``. Its local ``/metrics`` "
+"route returns 404 in push mode, as it does when metrics are disabled."
+msgstr "协调器也接受 ``--otlp-endpoint``。在推送模式下，其本地 ``/metrics`` 路径返回 404，正如在禁用指标时一样。"
+
+#: ../../source/mp/observability/metrics.rst:38
 msgid ""
 "All metrics use the ``lmcache_mp.`` prefix (multiprocess). On Prometheus,"
 " dots are converted to underscores and counters get a ``_total`` suffix "
 "(e.g. ``lmcache_mp_l1_read_chunks_total``); histograms gain a unit suffix"
 " plus ``_sum`` / ``_count`` / ``_bucket`` (e.g. "
 "``lmcache_mp_l2_store_throughput_GB_per_second_sum``)."
-msgstr "所有指标使用 ``lmcache_mp.`` 前缀（多进程）。在 Prometheus 中，点被转换为下划线，计数器带有 ``_total`` 后缀（例如 ``lmcache_mp_l1_read_chunks_total``）；直方图增加单位后缀以及 ``_sum`` / ``_count`` / ``_bucket``（例如 ``lmcache_mp_l2_store_throughput_GB_per_second_sum``）。"
+msgstr ""
+"所有指标使用 ``lmcache_mp.`` 前缀（多进程）。在 Prometheus 中，点被转换为下划线，计数器带有 ``_total`` "
+"后缀（例如 ``lmcache_mp_l1_read_chunks_total``）；直方图增加单位后缀以及 ``_sum`` / "
+"``_count`` / ``_bucket``（例如 "
+"``lmcache_mp_l2_store_throughput_GB_per_second_sum``）。"
 
-#: ../../source/mp/observability/metrics.rst:39
+#: ../../source/mp/observability/metrics.rst:47
 msgid "Global Resource Attributes"
 msgstr "全局资源属性"
 
-#: ../../source/mp/observability/metrics.rst:41
+#: ../../source/mp/observability/metrics.rst:49
 msgid ""
 "Every metric and span exported by an MP server carries Resource-level "
 "attributes built at startup. These identify the process producing the "
@@ -82,31 +116,31 @@ msgstr ""
 "每个由 MP 服务器导出的指标和跨度都携带在启动时构建的资源级属性。这些属性标识生成遥测的进程，并与每个指标的属性（如 "
 "``cache_salt``\\ ）正交。"
 
-#: ../../source/mp/observability/metrics.rst:50
+#: ../../source/mp/observability/metrics.rst:58
 msgid "Attribute"
 msgstr "属性"
 
-#: ../../source/mp/observability/metrics.rst:51
+#: ../../source/mp/observability/metrics.rst:59
 msgid "CLI flag / config"
 msgstr "命令行标志 / 配置"
 
-#: ../../source/mp/observability/metrics.rst:52
+#: ../../source/mp/observability/metrics.rst:60
 msgid "Default when unset"
 msgstr "未设置时的默认值"
 
-#: ../../source/mp/observability/metrics.rst:53
+#: ../../source/mp/observability/metrics.rst:61
 msgid "``service.instance.id``"
 msgstr "``service.instance.id``"
 
-#: ../../source/mp/observability/metrics.rst:54
+#: ../../source/mp/observability/metrics.rst:62
 msgid "``--instance-id`` / ``MPServerConfig.instance_id``"
 msgstr "``--instance-id`` / ``MPServerConfig.instance_id``"
 
-#: ../../source/mp/observability/metrics.rst:55
+#: ../../source/mp/observability/metrics.rst:63
 msgid "Random UUID v4 minted at startup."
 msgstr "在启动时生成的随机 UUID v4。"
 
-#: ../../source/mp/observability/metrics.rst:57
+#: ../../source/mp/observability/metrics.rst:65
 msgid ""
 "Resource attributes attach to the ``MeterProvider`` / ``TracerProvider`` "
 "and propagate to every exported datapoint via OTLP. On Prometheus, SDK "
@@ -116,118 +150,138 @@ msgstr ""
 "资源属性附加到 ``MeterProvider`` / ``TracerProvider`` 并通过 OTLP 传播到每个导出的数据点。在 "
 "Prometheus 中，SDK 资源属性出现在 ``target_info`` 系列上，而不是每个时间序列上——这是标准的 OTel 行为。"
 
-#: ../../source/mp/observability/metrics.rst:63
+#: ../../source/mp/observability/metrics.rst:71
 msgid "L1 Metrics"
 msgstr "L1 指标"
 
-#: ../../source/mp/observability/metrics.rst:69
-#: ../../source/mp/observability/metrics.rst:107
-#: ../../source/mp/observability/metrics.rst:142
-#: ../../source/mp/observability/metrics.rst:164
-#: ../../source/mp/observability/metrics.rst:225
-#: ../../source/mp/observability/metrics.rst:271
-#: ../../source/mp/observability/metrics.rst:323
-#: ../../source/mp/observability/metrics.rst:357
+#: ../../source/mp/observability/metrics.rst:77
+#: ../../source/mp/observability/metrics.rst:115
+#: ../../source/mp/observability/metrics.rst:150
+#: ../../source/mp/observability/metrics.rst:172
+#: ../../source/mp/observability/metrics.rst:230
+#: ../../source/mp/observability/metrics.rst:276
 #: ../../source/mp/observability/metrics.rst:394
-#: ../../source/mp/observability/metrics.rst:439
-#: ../../source/mp/observability/metrics.rst:470
-#: ../../source/mp/observability/metrics.rst:540
+#: ../../source/mp/observability/metrics.rst:428
+#: ../../source/mp/observability/metrics.rst:479
+#: ../../source/mp/observability/metrics.rst:546
+#: ../../source/mp/observability/metrics.rst:635
+#: ../../source/mp/observability/metrics.rst:680
+#: ../../source/mp/observability/metrics.rst:711
+#: ../../source/mp/observability/metrics.rst:781
+#: ../../source/mp/observability/metrics.rst:912
+#: ../../source/mp/observability/metrics.rst:944
+#: ../../source/mp/observability/metrics.rst:987
+#: ../../source/mp/observability/metrics.rst:1020
 msgid "Metric"
 msgstr "指标"
 
-#: ../../source/mp/observability/metrics.rst:70
-#: ../../source/mp/observability/metrics.rst:108
-#: ../../source/mp/observability/metrics.rst:143
-#: ../../source/mp/observability/metrics.rst:165
-#: ../../source/mp/observability/metrics.rst:226
-#: ../../source/mp/observability/metrics.rst:272
-#: ../../source/mp/observability/metrics.rst:324
-#: ../../source/mp/observability/metrics.rst:358
+#: ../../source/mp/observability/metrics.rst:78
+#: ../../source/mp/observability/metrics.rst:116
+#: ../../source/mp/observability/metrics.rst:151
+#: ../../source/mp/observability/metrics.rst:173
+#: ../../source/mp/observability/metrics.rst:231
+#: ../../source/mp/observability/metrics.rst:277
 #: ../../source/mp/observability/metrics.rst:395
-#: ../../source/mp/observability/metrics.rst:440
-#: ../../source/mp/observability/metrics.rst:471
-#: ../../source/mp/observability/metrics.rst:541
+#: ../../source/mp/observability/metrics.rst:429
+#: ../../source/mp/observability/metrics.rst:480
+#: ../../source/mp/observability/metrics.rst:547
+#: ../../source/mp/observability/metrics.rst:636
+#: ../../source/mp/observability/metrics.rst:681
+#: ../../source/mp/observability/metrics.rst:712
+#: ../../source/mp/observability/metrics.rst:782
+#: ../../source/mp/observability/metrics.rst:837
+#: ../../source/mp/observability/metrics.rst:913
+#: ../../source/mp/observability/metrics.rst:945
+#: ../../source/mp/observability/metrics.rst:988
+#: ../../source/mp/observability/metrics.rst:1021
 msgid "Type"
 msgstr "类型"
 
-#: ../../source/mp/observability/metrics.rst:71
-#: ../../source/mp/observability/metrics.rst:109
-#: ../../source/mp/observability/metrics.rst:144
-#: ../../source/mp/observability/metrics.rst:166
-#: ../../source/mp/observability/metrics.rst:227
-#: ../../source/mp/observability/metrics.rst:273
-#: ../../source/mp/observability/metrics.rst:325
-#: ../../source/mp/observability/metrics.rst:359
+#: ../../source/mp/observability/metrics.rst:79
+#: ../../source/mp/observability/metrics.rst:117
+#: ../../source/mp/observability/metrics.rst:152
+#: ../../source/mp/observability/metrics.rst:174
+#: ../../source/mp/observability/metrics.rst:232
+#: ../../source/mp/observability/metrics.rst:278
 #: ../../source/mp/observability/metrics.rst:396
-#: ../../source/mp/observability/metrics.rst:441
-#: ../../source/mp/observability/metrics.rst:472
-#: ../../source/mp/observability/metrics.rst:542
+#: ../../source/mp/observability/metrics.rst:430
+#: ../../source/mp/observability/metrics.rst:481
+#: ../../source/mp/observability/metrics.rst:548
+#: ../../source/mp/observability/metrics.rst:637
+#: ../../source/mp/observability/metrics.rst:682
+#: ../../source/mp/observability/metrics.rst:713
+#: ../../source/mp/observability/metrics.rst:783
+#: ../../source/mp/observability/metrics.rst:914
+#: ../../source/mp/observability/metrics.rst:946
+#: ../../source/mp/observability/metrics.rst:989
+#: ../../source/mp/observability/metrics.rst:1022
 msgid "Description"
 msgstr "描述"
 
-#: ../../source/mp/observability/metrics.rst:72
+#: ../../source/mp/observability/metrics.rst:80
 msgid "``lmcache_mp.l1_read``"
 msgstr "``lmcache_mp.l1_read``"
 
-#: ../../source/mp/observability/metrics.rst:73
-#: ../../source/mp/observability/metrics.rst:76
-#: ../../source/mp/observability/metrics.rst:79
-#: ../../source/mp/observability/metrics.rst:171
-#: ../../source/mp/observability/metrics.rst:177
-#: ../../source/mp/observability/metrics.rst:183
-#: ../../source/mp/observability/metrics.rst:193
-#: ../../source/mp/observability/metrics.rst:196
-#: ../../source/mp/observability/metrics.rst:202
+#: ../../source/mp/observability/metrics.rst:81
+#: ../../source/mp/observability/metrics.rst:84
+#: ../../source/mp/observability/metrics.rst:87
+#: ../../source/mp/observability/metrics.rst:179
+#: ../../source/mp/observability/metrics.rst:185
+#: ../../source/mp/observability/metrics.rst:191
+#: ../../source/mp/observability/metrics.rst:198
+#: ../../source/mp/observability/metrics.rst:201
+#: ../../source/mp/observability/metrics.rst:207
 msgid "Counter (attr: ``cache_salt``)"
 msgstr "计数器（属性：\\ ``cache_salt``\\ ）"
 
-#: ../../source/mp/observability/metrics.rst:74
+#: ../../source/mp/observability/metrics.rst:82
 msgid "Number of chunks read from L1, grouped by tenant."
 msgstr "按租户分组的从 L1 读取的块数。"
 
-#: ../../source/mp/observability/metrics.rst:75
+#: ../../source/mp/observability/metrics.rst:83
 msgid "``lmcache_mp.l1_write``"
 msgstr "``lmcache_mp.l1_write``"
 
-#: ../../source/mp/observability/metrics.rst:77
+#: ../../source/mp/observability/metrics.rst:85
 msgid "Number of chunks written to L1, grouped by tenant."
 msgstr "按租户分组写入 L1 的块数。"
 
-#: ../../source/mp/observability/metrics.rst:78
+#: ../../source/mp/observability/metrics.rst:86
 msgid "``lmcache_mp.l1_evicted``"
 msgstr "``lmcache_mp.l1_evicted``"
 
-#: ../../source/mp/observability/metrics.rst:80
+#: ../../source/mp/observability/metrics.rst:88
 msgid "Number of chunks evicted by the EvictionController, grouped by tenant."
 msgstr "按租户分组的被 EvictionController 逐出的块数。"
 
-#: ../../source/mp/observability/metrics.rst:82
+#: ../../source/mp/observability/metrics.rst:90
 msgid "``lmcache_mp.l1_eviction_loop_ticks``"
 msgstr "``lmcache_mp.l1_eviction_loop_ticks``"
 
-#: ../../source/mp/observability/metrics.rst:83
-#: ../../source/mp/observability/metrics.rst:87
-#: ../../source/mp/observability/metrics.rst:168
-#: ../../source/mp/observability/metrics.rst:180
-#: ../../source/mp/observability/metrics.rst:187
-#: ../../source/mp/observability/metrics.rst:190
-#: ../../source/mp/observability/metrics.rst:229
-#: ../../source/mp/observability/metrics.rst:235
-#: ../../source/mp/observability/metrics.rst:244
+#: ../../source/mp/observability/metrics.rst:91
+#: ../../source/mp/observability/metrics.rst:95
+#: ../../source/mp/observability/metrics.rst:176
+#: ../../source/mp/observability/metrics.rst:188
+#: ../../source/mp/observability/metrics.rst:195
+#: ../../source/mp/observability/metrics.rst:234
+#: ../../source/mp/observability/metrics.rst:240
+#: ../../source/mp/observability/metrics.rst:249
+#: ../../source/mp/observability/metrics.rst:841
+#: ../../source/mp/observability/metrics.rst:857
 msgid "Counter"
 msgstr "计数器"
 
-#: ../../source/mp/observability/metrics.rst:84
+#: ../../source/mp/observability/metrics.rst:92
 msgid ""
 "L1 eviction-loop iterations (every cycle, regardless of whether the "
 "watermark was crossed). Driven by ``L1_EVICTION_LOOP_TICK``."
 msgstr "L1 逐出循环迭代（每个周期，无论水位线是否被跨越）。由 ``L1_EVICTION_LOOP_TICK`` 驱动。"
 
-#: ../../source/mp/observability/metrics.rst:86
+#: ../../source/mp/observability/metrics.rst:94
 msgid "``lmcache_mp.l1_eviction_loop_triggered``"
 msgstr "``lmcache_mp.l1_eviction_loop_triggered``"
 
-#: ../../source/mp/observability/metrics.rst:88
+#: ../../source/mp/observability/metrics.rst:96
 msgid ""
 "L1 eviction-loop iterations where ``usage >= watermark`` and the eviction"
 " policy actually ran. The two counters distinguish \"loop is alive\" from"
@@ -237,11 +291,11 @@ msgstr ""
 "L1 逐出循环迭代，其中 ``usage >= watermark`` "
 "且逐出策略实际运行。这两个计数器区分“循环仍在运行”和“逐出已触发”——在调试完成速度快于 1 Hz 轮询周期的短期基准测试时，这一点非常重要。"
 
-#: ../../source/mp/observability/metrics.rst:95
+#: ../../source/mp/observability/metrics.rst:103
 msgid "L1 Chunk Lifecycle Histograms"
 msgstr "L1 块生命周期直方图"
 
-#: ../../source/mp/observability/metrics.rst:97
+#: ../../source/mp/observability/metrics.rst:105
 msgid ""
 "Sampled (default 1%) chunk-level lifecycle tracking via "
 "``L1LifecycleSubscriber``. Only sampled chunks contribute to histograms; "
@@ -252,57 +306,64 @@ msgstr ""
 "通过 ``L1LifecycleSubscriber`` 进行采样的（默认 "
 "1%）块级生命周期跟踪。只有采样的块会对直方图产生贡献；上述计数器始终计算所有事件。采样是确定性的（基于哈希），因此相同的键总是会得到相同的决策，且没有内存开销。"
 
-#: ../../source/mp/observability/metrics.rst:110
+#: ../../source/mp/observability/metrics.rst:118
 msgid "``lmcache_mp.l1_chunk_lifetime``"
 msgstr "``lmcache_mp.l1_chunk_lifetime``"
 
-#: ../../source/mp/observability/metrics.rst:111
-#: ../../source/mp/observability/metrics.rst:114
-#: ../../source/mp/observability/metrics.rst:117
-#: ../../source/mp/observability/metrics.rst:120
-#: ../../source/mp/observability/metrics.rst:327
-#: ../../source/mp/observability/metrics.rst:330
-#: ../../source/mp/observability/metrics.rst:333
-#: ../../source/mp/observability/metrics.rst:361
-#: ../../source/mp/observability/metrics.rst:364
+#: ../../source/mp/observability/metrics.rst:119
+#: ../../source/mp/observability/metrics.rst:122
+#: ../../source/mp/observability/metrics.rst:125
+#: ../../source/mp/observability/metrics.rst:128
 #: ../../source/mp/observability/metrics.rst:398
 #: ../../source/mp/observability/metrics.rst:401
+#: ../../source/mp/observability/metrics.rst:404
+#: ../../source/mp/observability/metrics.rst:432
+#: ../../source/mp/observability/metrics.rst:435
+#: ../../source/mp/observability/metrics.rst:483
+#: ../../source/mp/observability/metrics.rst:639
+#: ../../source/mp/observability/metrics.rst:642
+#: ../../source/mp/observability/metrics.rst:845
+#: ../../source/mp/observability/metrics.rst:849
+#: ../../source/mp/observability/metrics.rst:853
+#: ../../source/mp/observability/metrics.rst:861
+#: ../../source/mp/observability/metrics.rst:865
+#: ../../source/mp/observability/metrics.rst:869
 msgid "Histogram"
 msgstr "直方图"
 
-#: ../../source/mp/observability/metrics.rst:112
+#: ../../source/mp/observability/metrics.rst:120
 msgid "Time from allocation to eviction per sampled chunk."
 msgstr "每个采样块从分配到逐出的时间。"
 
-#: ../../source/mp/observability/metrics.rst:113
+#: ../../source/mp/observability/metrics.rst:121
 msgid "``lmcache_mp.l1_chunk_idle_before_evict``"
 msgstr "``lmcache_mp.l1_chunk_idle_before_evict``"
 
-#: ../../source/mp/observability/metrics.rst:115
+#: ../../source/mp/observability/metrics.rst:123
 msgid "Time from last access to eviction per sampled chunk."
 msgstr "每个采样块从最后访问到逐出的时间。"
 
-#: ../../source/mp/observability/metrics.rst:116
+#: ../../source/mp/observability/metrics.rst:124
 msgid "``lmcache_mp.l1_chunk_reuse_gap``"
 msgstr "``lmcache_mp.l1_chunk_reuse_gap``"
 
-#: ../../source/mp/observability/metrics.rst:118
+#: ../../source/mp/observability/metrics.rst:126
 msgid "Time gap between consecutive touches (read or write) of the same chunk."
 msgstr "同一块的连续访问（读取或写入）之间的时间间隔。"
 
-#: ../../source/mp/observability/metrics.rst:119
+#: ../../source/mp/observability/metrics.rst:127
 msgid "``lmcache_mp.l1_chunk_evict_reuse_gap``"
 msgstr "``lmcache_mp.l1_chunk_evict_reuse_gap``"
 
-#: ../../source/mp/observability/metrics.rst:121
+#: ../../source/mp/observability/metrics.rst:129
 msgid "Time from eviction to next reuse (capped at 300 s)."
 msgstr "逐出到下次重用的时间（上限为 300 秒）。"
 
-#: ../../source/mp/observability/metrics.rst:124
+#: ../../source/mp/observability/metrics.rst:132
 msgid "StorageManager Real-Reuse Metrics"
 msgstr "存储管理器真实重用指标"
 
-#: ../../source/mp/observability/metrics.rst:126
+#: ../../source/mp/observability/metrics.rst:134
 msgid ""
 "Workload-level reuse histograms emitted by ``SMLifecycleSubscriber``, "
 "driven by caller-facing StorageManager events "
@@ -314,7 +375,7 @@ msgstr ""
 "``SM_READ_PREFETCHED_FINISHED``\\ ，\\ ``SM_WRITE_FINISHED``\\ "
 "）驱动。存储/预取控制器的内部读取锁释放被排除在外，因此信号仅反映用户驱动的访问。"
 
-#: ../../source/mp/observability/metrics.rst:132
+#: ../../source/mp/observability/metrics.rst:140
 msgid ""
 "Both histograms are tagged with ``cache_salt`` for per-tenant isolation."
 "  The per-salt access counter advances on every read and write of every "
@@ -325,27 +386,27 @@ msgstr ""
 "这两个直方图都带有 ``cache_salt`` 标签，以实现租户隔离。每个块的每次读取和写入都会使对应 ``cache_salt`` "
 "的访问计数器递增（无论是否采样），因此块间隔反映了真实的存储量；直方图本身仅记录通过（确定性、基于哈希的）采样门控的块的间隔。"
 
-#: ../../source/mp/observability/metrics.rst:145
+#: ../../source/mp/observability/metrics.rst:153
 msgid "``lmcache_mp.real_reuse_gap``"
 msgstr "``lmcache_mp.real_reuse_gap``"
 
-#: ../../source/mp/observability/metrics.rst:146
-#: ../../source/mp/observability/metrics.rst:151
+#: ../../source/mp/observability/metrics.rst:154
+#: ../../source/mp/observability/metrics.rst:159
 msgid "Histogram (tag: ``cache_salt``)"
 msgstr "直方图（标签：\\ ``cache_salt``\\ ）"
 
-#: ../../source/mp/observability/metrics.rst:147
+#: ../../source/mp/observability/metrics.rst:155
 msgid ""
 "Time gap between a chunk's last access (read or write) and its next read."
 "  Captures storage cost — how long a stored chunk sat between accesses.  "
 "Emitted only on read events."
 msgstr "块的最后一次访问（读取或写入）与下一次读取之间的时间间隔。捕获存储成本——一个存储块在访问之间静止了多久。仅在读取事件中发出。"
 
-#: ../../source/mp/observability/metrics.rst:150
+#: ../../source/mp/observability/metrics.rst:158
 msgid "``lmcache_mp.real_reuse_gap_objects``"
 msgstr "``lmcache_mp.real_reuse_gap_objects``"
 
-#: ../../source/mp/observability/metrics.rst:152
+#: ../../source/mp/observability/metrics.rst:160
 msgid ""
 "Per-``cache_salt`` access-counter gap between two reads of the same "
 "chunk.  Captures storage volume — how many chunk-accesses occurred while "
@@ -355,112 +416,104 @@ msgstr ""
 "同一块两次读取之间每 ``cache_salt`` "
 "访问计数器的增量。反映存储量——在该块等待下次读取期间发生了多少次块访问。仅对采样块的读取事件发出。"
 
-#: ../../source/mp/observability/metrics.rst:158
+#: ../../source/mp/observability/metrics.rst:166
 msgid "L2 Metrics"
 msgstr "L2 指标"
 
-#: ../../source/mp/observability/metrics.rst:167
+#: ../../source/mp/observability/metrics.rst:175
 msgid "``lmcache_mp.l2_store_submitted``"
 msgstr "``lmcache_mp.l2_store_submitted``"
 
-#: ../../source/mp/observability/metrics.rst:169
+#: ../../source/mp/observability/metrics.rst:177
 msgid "Number of L2 store requests submitted."
 msgstr "提交的 L2 存储请求数量。"
 
-#: ../../source/mp/observability/metrics.rst:170
+#: ../../source/mp/observability/metrics.rst:178
 msgid "``lmcache_mp.l2_store_submitted_objects``"
 msgstr "``lmcache_mp.l2_store_submitted_objects``"
 
-#: ../../source/mp/observability/metrics.rst:172
+#: ../../source/mp/observability/metrics.rst:180
 msgid "Number of chunks submitted for L2 store, grouped by tenant."
 msgstr "按租户分组的提交到 L2 存储的块数量。"
 
-#: ../../source/mp/observability/metrics.rst:173
+#: ../../source/mp/observability/metrics.rst:181
 msgid "``lmcache_mp.l2_store_completed``"
 msgstr "``lmcache_mp.l2_store_completed``"
 
-#: ../../source/mp/observability/metrics.rst:174
-#: ../../source/mp/observability/metrics.rst:199
+#: ../../source/mp/observability/metrics.rst:182
+#: ../../source/mp/observability/metrics.rst:204
 msgid "Counter (attr: ``l2_name``)"
 msgstr "计数器（属性：\\ ``l2_name``\\ ）"
 
-#: ../../source/mp/observability/metrics.rst:175
+#: ../../source/mp/observability/metrics.rst:183
 msgid "Number of L2 store requests completed, labeled by adapter type."
 msgstr "按适配器类型标记的完成的 L2 存储请求数量。"
 
-#: ../../source/mp/observability/metrics.rst:176
+#: ../../source/mp/observability/metrics.rst:184
 msgid "``lmcache_mp.l2_store_completed_objects``"
 msgstr "``lmcache_mp.l2_store_completed_objects``"
 
-#: ../../source/mp/observability/metrics.rst:178
+#: ../../source/mp/observability/metrics.rst:186
 msgid "Number of chunks successfully stored to L2, grouped by tenant."
 msgstr "按租户分组成功存储到 L2 的块数。"
 
-#: ../../source/mp/observability/metrics.rst:179
+#: ../../source/mp/observability/metrics.rst:187
 msgid "``lmcache_mp.l2_prefetch_lookup``"
 msgstr "``lmcache_mp.l2_prefetch_lookup``"
 
-#: ../../source/mp/observability/metrics.rst:181
+#: ../../source/mp/observability/metrics.rst:189
 msgid "Number of L2 prefetch lookup requests."
 msgstr "L2 预取查找请求的数量。"
 
-#: ../../source/mp/observability/metrics.rst:182
+#: ../../source/mp/observability/metrics.rst:190
 msgid "``lmcache_mp.l2_prefetch_lookup_objects``"
 msgstr "``lmcache_mp.l2_prefetch_lookup_objects``"
 
-#: ../../source/mp/observability/metrics.rst:184
+#: ../../source/mp/observability/metrics.rst:192
 msgid "Number of chunks submitted for L2 prefetch lookup, grouped by tenant."
 msgstr "按租户分组的提交用于 L2 预取查找的块数量。"
 
-#: ../../source/mp/observability/metrics.rst:186
-msgid "``lmcache_mp.l2_prefetch_hit``"
-msgstr "``lmcache_mp.l2_prefetch_hit``"
-
-#: ../../source/mp/observability/metrics.rst:188
-msgid "Number of prefix chunks found in L2 lookup."
-msgstr "在 L2 查找中找到的前缀块数量。"
-
-#: ../../source/mp/observability/metrics.rst:189
+#: ../../source/mp/observability/metrics.rst:194
 msgid "``lmcache_mp.l2_prefetch_load_submitted``"
 msgstr "``lmcache_mp.l2_prefetch_load_submitted``"
 
-#: ../../source/mp/observability/metrics.rst:191
+#: ../../source/mp/observability/metrics.rst:196
 msgid "Number of L2 prefetch load requests submitted."
 msgstr "提交的 L2 预取加载请求数量。"
 
-#: ../../source/mp/observability/metrics.rst:192
+#: ../../source/mp/observability/metrics.rst:197
 msgid "``lmcache_mp.l2_prefetch_load_submitted_objects``"
 msgstr "``lmcache_mp.l2_prefetch_load_submitted_objects``"
 
-#: ../../source/mp/observability/metrics.rst:194
+#: ../../source/mp/observability/metrics.rst:199
 msgid "Number of chunks submitted for L2 load, grouped by tenant."
 msgstr "按租户分组的提交用于 L2 加载的块数量。"
 
-#: ../../source/mp/observability/metrics.rst:195
+#: ../../source/mp/observability/metrics.rst:200
 msgid "``lmcache_mp.l2_prefetch_load_completed``"
 msgstr "``lmcache_mp.l2_prefetch_load_completed``"
 
-#: ../../source/mp/observability/metrics.rst:197
+#: ../../source/mp/observability/metrics.rst:202
 msgid "Number of chunks successfully loaded from L2, grouped by tenant."
 msgstr "按租户分组成功从 L2 加载的块数。"
 
-#: ../../source/mp/observability/metrics.rst:198
+#: ../../source/mp/observability/metrics.rst:203
 msgid "``lmcache_mp.l2_load_completed``"
 msgstr "``lmcache_mp.l2_load_completed``"
 
-#: ../../source/mp/observability/metrics.rst:200
+#: ../../source/mp/observability/metrics.rst:205
 msgid "Number of per-adapter L2 load requests completed, labeled by adapter type."
 msgstr "按适配器类型标记的每个适配器完成的 L2 加载请求数量。"
 
-#: ../../source/mp/observability/metrics.rst:201
+#: ../../source/mp/observability/metrics.rst:206
 msgid "``lmcache_mp.l2_evicted_objects``"
 msgstr "``lmcache_mp.l2_evicted_objects``"
 
-#: ../../source/mp/observability/metrics.rst:203
+#: ../../source/mp/observability/metrics.rst:208
 msgid "Number of chunks evicted from L2, grouped by tenant."
 msgstr "按租户分组的从 L2 逐出的块数量。"
 
-#: ../../source/mp/observability/metrics.rst:205
+#: ../../source/mp/observability/metrics.rst:210
 #, python-brace-format
 msgid ""
 "The ``l2_name``-labeled counters (``l2_store_completed`` and "
@@ -477,11 +530,11 @@ msgstr ""
 " 按需计算每个后端的 IOPS（加载的等效项也是如此）。没有单独导出 ``*_iops`` "
 "指标；保留原始计数器让仪表板用户可以选择自己的时间窗口。"
 
-#: ../../source/mp/observability/metrics.rst:212
+#: ../../source/mp/observability/metrics.rst:217
 msgid "Failure & Health Counters"
 msgstr "失败与健康计数器"
 
-#: ../../source/mp/observability/metrics.rst:214
+#: ../../source/mp/observability/metrics.rst:219
 msgid ""
 "Health-monitoring counters emitted on the dedicated ``lmcache_mp.health``"
 " OTel meter. Driven by the ``L1FailureMetricsSubscriber`` and "
@@ -495,11 +548,11 @@ msgstr ""
 "驱动，这两个订阅者在启用指标时会自动注册。所有三个计数器都携带 ``model_name``\\ （从每个 ``ObjectKey`` "
 "中提取），以便操作员可以在 Prometheus ``/metrics`` 端点上按模型进行切片。"
 
-#: ../../source/mp/observability/metrics.rst:228
+#: ../../source/mp/observability/metrics.rst:233
 msgid "``lmcache_mp.l1_allocation_failure``"
 msgstr "``lmcache_mp.l1_allocation_failure``"
 
-#: ../../source/mp/observability/metrics.rst:230
+#: ../../source/mp/observability/metrics.rst:235
 #, python-brace-format
 msgid ""
 "L1 memory allocation failures (OOM) during ``reserve_write``. Tagged by "
@@ -510,11 +563,11 @@ msgstr ""
 "在 ``reserve_write`` 期间的 L1 内存分配失败（OOM）。通过 ``during`` ∈ {``l1_store``, "
 "``l2_prefetch``} 标记，以区分用户发起的存储与预取触发的分配，以及 ``model_name``\\ 。"
 
-#: ../../source/mp/observability/metrics.rst:234
+#: ../../source/mp/observability/metrics.rst:239
 msgid "``lmcache_mp.l1_read_failure``"
 msgstr "``lmcache_mp.l1_read_failure``"
 
-#: ../../source/mp/observability/metrics.rst:236
+#: ../../source/mp/observability/metrics.rst:241
 #, python-brace-format
 msgid ""
 "L1 ``reserve_read`` failures. Tagged by ``during`` ∈ {``l2_store``, "
@@ -529,11 +582,11 @@ msgstr ""
 "``model_name``\\ 。\\ **后查找异常计数器**\\ ，而非缓存未命中计数器——在 MP 模式下，\\ "
 "``reserve_read`` 仅在查找成功后调用，因此任何非零值均表明存在查找/预留竞争或意外逐出，健康运行时该值应接近零。"
 
-#: ../../source/mp/observability/metrics.rst:243
+#: ../../source/mp/observability/metrics.rst:248
 msgid "``lmcache_mp.l2_prefetch_failure``"
 msgstr "``lmcache_mp.l2_prefetch_failure``"
 
-#: ../../source/mp/observability/metrics.rst:245
+#: ../../source/mp/observability/metrics.rst:250
 #, python-brace-format
 msgid ""
 "Chunks that L2 reported present at lookup but failed to land in L1. "
@@ -546,7 +599,7 @@ msgstr ""
 "``model_name``\\ 。\\ ``l1_oom`` 表示 L1 没有空间接收预取的对象；\\ ``not_found`` "
 "表示适配器在查找成功的情况下未返回数据（例如并发删除）。"
 
-#: ../../source/mp/observability/metrics.rst:251
+#: ../../source/mp/observability/metrics.rst:256
 msgid ""
 "A ``reason=serde_failure`` value will be added to ``l2_prefetch_failure``"
 " as an additive, non-breaking extension once L2 adapters distinguish "
@@ -556,7 +609,7 @@ msgstr ""
 "一旦 L2 适配器区分反序列化错误和缺失对象，将会将 ``reason=serde_failure`` 值作为附加的、非破坏性的扩展添加到 "
 "``l2_prefetch_failure`` 中——当这项功能上线时，无需进行仪表板迁移。"
 
-#: ../../source/mp/observability/metrics.rst:256
+#: ../../source/mp/observability/metrics.rst:261
 msgid ""
 "For the full design rationale (including which event types drive each "
 "counter and why ``lmcache_instance_id`` is deferred), see "
@@ -565,11 +618,11 @@ msgstr ""
 "有关完整的设计原理（包括哪些事件类型驱动每个计数器以及为何推迟 ``lmcache_instance_id``\\ ），请参阅源树中的 "
 "``docs/design/v1/mp_observability/METRICS.md``\\ 。"
 
-#: ../../source/mp/observability/metrics.rst:261
+#: ../../source/mp/observability/metrics.rst:266
 msgid "Lookup Hit-Rate Metrics"
 msgstr "查找命中率指标"
 
-#: ../../source/mp/observability/metrics.rst:263
+#: ../../source/mp/observability/metrics.rst:268
 msgid ""
 "Token-level counters whose ratio gives the fraction of tokens requested "
 "by a lookup that were served from either L1 or L2. L0 (GPU prefix cache) "
@@ -579,41 +632,139 @@ msgstr ""
 "令牌级计数器，其比值表示通过查找请求的令牌中有多少比例是从 L1 或 L2 提供的。L0（GPU 前缀缓存）被有意排除在外——它由 vLLM "
 "管理，无法从 LMCache 中观察到。"
 
-#: ../../source/mp/observability/metrics.rst:274
+#: ../../source/mp/observability/metrics.rst:279
 msgid "``lmcache_mp.lookup_requested``"
 msgstr "``lmcache_mp.lookup_requested``"
 
-#: ../../source/mp/observability/metrics.rst:275
-#: ../../source/mp/observability/metrics.rst:279
+#: ../../source/mp/observability/metrics.rst:280
+#: ../../source/mp/observability/metrics.rst:284
+#: ../../source/mp/observability/metrics.rst:288
+#: ../../source/mp/observability/metrics.rst:292
+#: ../../source/mp/observability/metrics.rst:296
+#: ../../source/mp/observability/metrics.rst:300
+#: ../../source/mp/observability/metrics.rst:303
+#: ../../source/mp/observability/metrics.rst:307
+#: ../../source/mp/observability/metrics.rst:311
 msgid "Counter (attrs: ``model_name``, ``cache_salt``)"
 msgstr "计数器（属性：\\ ``model_name``, ``cache_salt``\\ ）"
 
-#: ../../source/mp/observability/metrics.rst:276
+#: ../../source/mp/observability/metrics.rst:281
 msgid ""
 "Total tokens submitted for lookup (denominator of the L1+L2 token-level "
 "hit rate). Only chunk-aligned tokens are counted."
 msgstr "提交查找的总令牌数（L1+L2 令牌级命中率的分母）。仅计算与块对齐的令牌。"
 
-#: ../../source/mp/observability/metrics.rst:278
+#: ../../source/mp/observability/metrics.rst:283
 msgid "``lmcache_mp.lookup_hit``"
 msgstr "``lmcache_mp.lookup_hit``"
 
-#: ../../source/mp/observability/metrics.rst:280
+#: ../../source/mp/observability/metrics.rst:285
 msgid ""
 "Total tokens found in L1 or L2 during lookup (numerator of the L1+L2 "
 "token-level hit rate). Counts the contiguous prefix hit only."
 msgstr "在查找过程中在 L1 或 L2 中找到的总令牌数（L1+L2 令牌级命中率的分子）。仅计算连续前缀命中。"
 
-#: ../../source/mp/observability/metrics.rst:283
-msgid ""
-"Both counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``), "
-"so they always advance together per completed lookup. Early-exit lookups "
-"contribute ``0`` to both, and abandoned lookups contribute to neither."
-msgstr ""
-"这两个计数器由同一事件（\\ ``MP_LOOKUP_PREFETCH_END``\\ "
-"）驱动，因此它们在每次完成查找时总是一起增加。提前退出的查找对两者都贡献 ``0``\\ ，而放弃的查找则不对两者贡献。"
-
 #: ../../source/mp/observability/metrics.rst:287
+msgid "``lmcache_mp.lookup_hit_l1``"
+msgstr "``lmcache_mp.lookup_hit_l1``"
+
+#: ../../source/mp/observability/metrics.rst:289
+msgid ""
+"Of ``lookup_hit``: tokens L1 could serve on its own under each object "
+"group's attention-window rule."
+msgstr "关于 ``lookup_hit``：在每个对象组的注意力窗口规则下，L1 可以独立服务的令牌。"
+
+#: ../../source/mp/observability/metrics.rst:291
+msgid "``lmcache_mp.lookup_hit_l2``"
+msgstr "``lmcache_mp.lookup_hit_l2``"
+
+#: ../../source/mp/observability/metrics.rst:293
+msgid ""
+"Of ``lookup_hit``: tokens L2 added beyond the L1-servable prefix. ``l1 + "
+"l2 == lookup_hit`` per event."
+msgstr "关于 ``lookup_hit``：在 L1 可服务前缀之外添加的 L2 令牌。每个事件中 ``l1 + l2 == lookup_hit``。"
+
+#: ../../source/mp/observability/metrics.rst:295
+msgid "``lmcache_mp.lookup_hit_l1_keys``"
+msgstr "``lmcache_mp.lookup_hit_l1_keys``"
+
+#: ../../source/mp/observability/metrics.rst:297
+msgid ""
+"Hit keys L1 already held. One key per object group, kv rank and chunk, so"
+" the count is not divided by the TP world size."
+msgstr "L1 中已持有的命中键。每个对象组、KV 排名和块一个键，因此计数不按 TP 世界大小划分。"
+
+#: ../../source/mp/observability/metrics.rst:299
+msgid "``lmcache_mp.lookup_hit_l2_keys``"
+msgstr "``lmcache_mp.lookup_hit_l2_keys``"
+
+#: ../../source/mp/observability/metrics.rst:301
+msgid "Hit keys loaded from L2 into L1."
+msgstr "从 L2 加载到 L1 的命中键。"
+
+#: ../../source/mp/observability/metrics.rst:302
+#, fuzzy
+msgid "``lmcache_mp.lookup_prompt``"
+msgstr "``lmcache_mp.lookup_hit``"
+
+#: ../../source/mp/observability/metrics.rst:304
+msgid ""
+"Whole prompt length of each looked-up request, sub-chunk tail included "
+"(denominator of the request-level hit rate)."
+msgstr ""
+
+#: ../../source/mp/observability/metrics.rst:306
+#, fuzzy
+msgid "``lmcache_mp.lookup_request_hit``"
+msgstr "``lmcache_mp.lookup_requested``"
+
+#: ../../source/mp/observability/metrics.rst:308
+msgid ""
+"Prefix of the prompt served by the engine's prefix cache or LMCache "
+"(numerator of the request-level hit rate)."
+msgstr ""
+
+#: ../../source/mp/observability/metrics.rst:310
+msgid "``lmcache_mp.lookups``"
+msgstr "``lmcache_mp.lookups``"
+
+#: ../../source/mp/observability/metrics.rst:312
+msgid "Completed lookups (denominator for ``lookup_early_exit``)."
+msgstr "完成的查找（``lookup_early_exit`` 的分母）。"
+
+#: ../../source/mp/observability/metrics.rst:313
+msgid "``lmcache_mp.lookup_early_exit``"
+msgstr "``lmcache_mp.lookup_early_exit``"
+
+#: ../../source/mp/observability/metrics.rst:314
+msgid "Counter (attrs: ``model_name``, ``cache_salt``, ``reason``)"
+msgstr "计数器（属性：``model_name``，``cache_salt``，``reason``）"
+
+#: ../../source/mp/observability/metrics.rst:315
+msgid ""
+"Lookups that exited before a cache probe; ``reason`` is one of "
+"``no_gpu_context``, ``empty_chunk_hashes``, ``no_group_layout_descs``."
+msgstr ""
+"在缓存探测之前退出的查找；``reason`` 是 "
+"``no_gpu_context``、``empty_chunk_hashes``、``no_group_layout_descs`` 之一。"
+
+#: ../../source/mp/observability/metrics.rst:318
+#, fuzzy
+msgid ""
+"All lookup counters are driven by the same event "
+"(``MP_LOOKUP_PREFETCH_END``), so they always advance together per "
+"completed lookup. Early-exit lookups contribute ``0`` tokens to the "
+"lookup-level token counters, ``0`` keys to both key counters, and ``+1`` "
+"to ``lookups`` / ``lookup_early_exit``; they still advance the request-"
+"level counters (``lookup_prompt`` and ``lookup_request_hit``), which "
+"describe the request rather than the lookup. Abandoned lookups contribute"
+" to none of them."
+msgstr ""
+"所有查找计数器由同一个事件（``MP_LOOKUP_PREFETCH_END``）驱动，因此它们在每次完成查找时总是一起增加。提前退出的查找对所有四个令牌计数器贡献"
+" ``0`` 个令牌，对两个键计数器贡献 ``0`` 个键，并对 ``lookups`` / ``lookup_early_exit`` 贡献 "
+"``+1``，而被放弃的查找则不作贡献。"
+
+#: ../../source/mp/observability/metrics.rst:326
 msgid ""
 "The ``model_name`` and ``cache_salt`` attributes are captured at lookup "
 "time from ``IPCCacheServerKey`` so dashboards can compute per-model or "
@@ -625,15 +776,31 @@ msgstr ""
 "捕获，以便仪表板计算每个模型或每个租户的命中率。\\ ``cache_salt`` "
 "可能具有高基数（每个租户或隔离域一个条目）；若存储成本敏感，请在抓取时通过 ``metric_relabel_configs`` 丢弃它。"
 
-#: ../../source/mp/observability/metrics.rst:293
-msgid "**PromQL for hit rate:**"
-msgstr "**PromQL 查询命中率:**"
+#: ../../source/mp/observability/metrics.rst:332
+msgid "**PromQL for hit rate** (both ratios use the whole prompt as denominator):"
+msgstr ""
 
-#: ../../source/mp/observability/metrics.rst:306
+#: ../../source/mp/observability/metrics.rst:367
+msgid ""
+"**Tokens vs. keys on hybrid models.** The token split credits L1 only "
+"with the prefix L1 could serve without L2. On a hybrid model (full "
+"attention plus sliding-window or linear-attention layers), L1 may hold "
+"every full-attention key while L2 supplies only the few sliding-window "
+"keys that complete the prefix. The token counters then report the whole "
+"hit as L2, while the key counters show that most of the data came from "
+"L1. Use the token counters for \"how much of the hit depends on L2\" and "
+"the key counters for \"how much data L2 actually moved\"."
+msgstr ""
+"**混合模型中的令牌与键。** 令牌拆分仅将前缀 L1 的命中归功于 L1，而 L1 可以在没有 L2 "
+"的情况下服务。在混合模型（全注意力加上滑动窗口或线性注意力层）中，L1 可能持有每个全注意力键，而 L2 "
+"仅提供完成前缀所需的少量滑动窗口键。令牌计数器报告整个命中为 L2，而键计数器显示大部分数据来自 L1。使用令牌计数器来衡量“命中有多少依赖于 "
+"L2”，使用键计数器来衡量“L2 实际移动了多少数据”。"
+
+#: ../../source/mp/observability/metrics.rst:377
 msgid "L0 (GPU) Block Lifecycle Histograms"
 msgstr "L0 (GPU) 块生命周期直方图"
 
-#: ../../source/mp/observability/metrics.rst:308
+#: ../../source/mp/observability/metrics.rst:379
 msgid ""
 "Sampled (default 1%) GPU KV cache block lifecycle tracking via "
 "``L0LifecycleSubscriber``. Eviction is detected at reallocation time "
@@ -645,7 +812,7 @@ msgstr ""
 "块生命周期跟踪。在重新分配时检测逐出（当块被分配不同的令牌时）。采样使用带有 ``_skipped`` 集的随机选择（受限于有限数量的物理 GPU"
 " 块）。"
 
-#: ../../source/mp/observability/metrics.rst:314
+#: ../../source/mp/observability/metrics.rst:385
 #, python-brace-format
 msgid ""
 "All L0 histograms are emitted with ``instance_id`` and ``model_name`` "
@@ -659,35 +826,35 @@ msgstr ""
 "``lmcache_mp_l0_block_lifetime_seconds{instance_id=\\\"12345\\\",model_name"
 "=\\\"llama-7b\\\"}``\\ ）。"
 
-#: ../../source/mp/observability/metrics.rst:326
+#: ../../source/mp/observability/metrics.rst:397
 msgid "``lmcache_mp.l0_block_lifetime``"
 msgstr "``lmcache_mp.l0_block_lifetime``"
 
-#: ../../source/mp/observability/metrics.rst:328
+#: ../../source/mp/observability/metrics.rst:399
 msgid "Time from allocation to eviction per sampled GPU block."
 msgstr "每个采样的 GPU 块从分配到逐出的时间。"
 
-#: ../../source/mp/observability/metrics.rst:329
+#: ../../source/mp/observability/metrics.rst:400
 msgid "``lmcache_mp.l0_block_idle_before_evict``"
 msgstr "``lmcache_mp.l0_block_idle_before_evict``"
 
-#: ../../source/mp/observability/metrics.rst:331
+#: ../../source/mp/observability/metrics.rst:402
 msgid "Time from last access to eviction per sampled GPU block."
 msgstr "每个采样的 GPU 块从最后访问到逐出的时间。"
 
-#: ../../source/mp/observability/metrics.rst:332
+#: ../../source/mp/observability/metrics.rst:403
 msgid "``lmcache_mp.l0_block_reuse_gap``"
 msgstr "``lmcache_mp.l0_block_reuse_gap``"
 
-#: ../../source/mp/observability/metrics.rst:334
+#: ../../source/mp/observability/metrics.rst:405
 msgid "Time gaps between consecutive accesses of the same GPU block."
 msgstr "同一 GPU 块连续访问之间的时间间隔。"
 
-#: ../../source/mp/observability/metrics.rst:337
+#: ../../source/mp/observability/metrics.rst:408
 msgid "L0 ↔ L1 Throughput Histograms"
 msgstr "L0 ↔ L1 吞吐量直方图"
 
-#: ../../source/mp/observability/metrics.rst:339
+#: ../../source/mp/observability/metrics.rst:410
 #, python-brace-format
 msgid ""
 "Per-request throughput of GPU↔CPU copies via "
@@ -703,7 +870,7 @@ msgstr ""
 "GB/s 为单位。时间戳来自在 GPU cupy 流上发布的 ``MP_{STORE,RETRIEVE}_{START,END}`` "
 "事件，因此它们反映了真实的 GPU 流复制时间——而不是 Python/锁的开销。"
 
-#: ../../source/mp/observability/metrics.rst:347
+#: ../../source/mp/observability/metrics.rst:418
 #, python-brace-format
 msgid ""
 "All throughput histograms are emitted with ``engine_id`` (vLLM worker "
@@ -719,27 +886,276 @@ msgstr ""
 "``lmcache_mp_l0_l1_store_throughput_GB_per_second{engine_id=\"0\",device=\"cuda:3\",model_name"
 "=\"meta-llama/Llama-3.1-8B\"}``\\ ）。"
 
-#: ../../source/mp/observability/metrics.rst:360
+#: ../../source/mp/observability/metrics.rst:431
 msgid "``lmcache_mp.l0_l1_store_throughput``"
 msgstr "``lmcache_mp.l0_l1_store_throughput``"
 
-#: ../../source/mp/observability/metrics.rst:362
+#: ../../source/mp/observability/metrics.rst:433
 msgid "GPU→CPU (L0→L1) store throughput in GB/s per request."
 msgstr "每个请求的 GPU→CPU (L0→L1) 存储吞吐量（单位：GB/s）。"
 
-#: ../../source/mp/observability/metrics.rst:363
+#: ../../source/mp/observability/metrics.rst:434
 msgid "``lmcache_mp.l0_l1_load_throughput``"
 msgstr "``lmcache_mp.l0_l1_load_throughput``"
 
-#: ../../source/mp/observability/metrics.rst:365
+#: ../../source/mp/observability/metrics.rst:436
 msgid "CPU→GPU (L1→L0) load throughput in GB/s per request."
 msgstr "每个请求的 CPU→GPU (L1→L0) 加载吞吐量（GB/s）。"
 
-#: ../../source/mp/observability/metrics.rst:368
+#: ../../source/mp/observability/metrics.rst:440
+#, python-format
+msgid ""
+"On the store path the window opens before ``reserve_write`` runs on the "
+"CPU, so the store histogram also contains that CPU share. It was measured"
+" at well under 1% of the window, so no separate metric or correction is "
+"provided."
+msgstr ""
+"在存储路径上，窗口在 ``reserve_write`` 在 CPU 上运行之前打开，因此存储直方图也包含了该 CPU "
+"的份额。测量结果远低于窗口的 1%，因此没有提供单独的指标或修正。"
+
+#: ../../source/mp/observability/metrics.rst:448
+msgid "Transfer Phase Metrics (gather kernel vs DMA)"
+msgstr "传输阶段指标（收集内核与 DMA）"
+
+#: ../../source/mp/observability/metrics.rst:450
+msgid ""
+"The L0↔L1 histograms above give one number per request. A GPU↔CPU "
+"transfer, however, is two serialized GPU phases per batch step:"
+msgstr "上述 L0↔L1 直方图为每个请求提供一个数字。然而，GPU↔CPU 传输在每个批处理步骤中是两个串行的 GPU 阶段："
+
+#: ../../source/mp/observability/metrics.rst:453
+msgid ""
+"**kernel** — the gather/scatter kernel moving paged KV blocks ↔ GPU "
+"staging buffers (occupies SMs, bounded by GPU memory bandwidth);"
+msgstr "**内核** — 移动分页 KV 块 ↔ GPU 暂存缓冲区的聚集/散布内核（占用 SM，受限于显存带宽）；"
+
+#: ../../source/mp/observability/metrics.rst:455
+msgid ""
+"**staging** — the DMA copies moving GPU staging buffers ↔ pinned host "
+"memory (occupies copy engines, bounded by PCIe)."
+msgstr "**暂存** — DMA 复制将 GPU 暂存缓冲区 ↔ 固定主机内存（占用复制引擎，受限于 PCIe）。"
+
+#: ../../source/mp/observability/metrics.rst:458
+msgid ""
+"The native plan executor brackets each phase of each batch step with a "
+"pair of CUDA events on the transfer stream (no GPU-side synchronization);"
+" when a transfer ends the completed pairs are popped onto the event bus "
+"and ``TransferPhaseMetricsSubscriber`` turns them into the metrics below."
+" Recording is on whenever metrics or tracing consume the samples and "
+"costs nothing otherwise (``--disable-metrics`` without ``--enable-"
+"tracing``, or ``--disable-observability``)."
+msgstr ""
+"本地计划执行器在传输流的每个批处理步骤的每个阶段用一对 CUDA 事件进行括起来（没有 GPU "
+"端同步）；当传输结束时，已完成的事件对被推送到事件总线，``TransferPhaseMetricsSubscriber`` "
+"将它们转换为以下指标。只要指标或跟踪消耗样本，记录就会开启，否则不消耗任何成本（``--disable-metrics`` 在没有 "
+"``--enable-tracing`` 的情况下，或 ``--disable-observability``）。"
+
+#: ../../source/mp/observability/metrics.rst:466
+msgid ""
+"There is deliberately **no kernel throughput histogram**: a kernel "
+"section's elapsed is mostly the wait for the co-resident inference "
+"engine's SMs, so ``bytes / elapsed`` there reports contention, not a "
+"transfer rate (full rationale: "
+"``docs/design/v1/mp_observability/METRICS.md``)."
+msgstr ""
+"故意**没有内核吞吐量直方图**：内核部分的经过时间主要是等待共驻推理引擎的 SM，因此``bytes / "
+"elapsed``在这里报告的是争用，而不是传输速率（完整理由：``docs/design/v1/mp_observability/METRICS.md``）。"
+
+#: ../../source/mp/observability/metrics.rst:471
+msgid ""
+"All three metrics carry ``device_index`` (e.g. ``\"0\"``) and "
+"``direction`` (``\"d2h\"`` for stores, ``\"h2d\"`` for retrieves); the "
+"two counters additionally carry ``phase`` (``\"kernel\"`` / "
+"``\"staging\"``)."
+msgstr ""
+"所有三个指标都携带 ``device_index``（例如 ``\\\"0\\\"``）和 ``direction``（对于存储为 "
+"``\\\"d2h\\\"``，对于检索为 ``\\\"h2d\\\"``）；这两个计数器还额外携带 "
+"``phase``（``\\\"kernel\\\"`` / ``\\\"staging\\\"``）。"
+
+#: ../../source/mp/observability/metrics.rst:482
+msgid "``lmcache_mp.transfer_staging_throughput``"
+msgstr "``lmcache_mp.transfer_staging_throughput``"
+
+#: ../../source/mp/observability/metrics.rst:484
+msgid "DMA staging throughput in GB/s, one sample per batch step."
+msgstr "每批次步骤的 DMA 暂存吞吐量（以 GB/s 为单位），每个样本一个。"
+
+#: ../../source/mp/observability/metrics.rst:485
+msgid "``lmcache_mp.transfer_phase_bytes``"
+msgstr "``lmcache_mp.transfer_phase_bytes``"
+
+#: ../../source/mp/observability/metrics.rst:486
+#: ../../source/mp/observability/metrics.rst:494
+msgid "Counter (attr: ``phase``)"
+msgstr "计数器（属性：``phase``）"
+
+#: ../../source/mp/observability/metrics.rst:487
+msgid ""
+"Cumulative bytes moved per phase. Kernel-phase bytes are derived from the"
+" launches, so blocks skipped via ``skip_prefix_n_blocks`` (sliding "
+"windows, partial prefix hits) are not counted as moved; the staging phase"
+" counts the whole staged payload. The difference between the two is the "
+"payload that crossed PCIe without being consumed by the kernel."
+msgstr ""
+"每个阶段移动的累计字节数。内核阶段的字节是从启动中得出的，因此通过 ``skip_prefix_n_blocks`` "
+"跳过的块（滑动窗口、部分前缀命中）不计入移动；暂存阶段计算整个暂存负载。两者之间的差异是跨越 PCIe 而未被内核消耗的负载。"
+
+#: ../../source/mp/observability/metrics.rst:493
+msgid "``lmcache_mp.transfer_phase_elapsed``"
+msgstr "``lmcache_mp.transfer_phase_elapsed``"
+
+#: ../../source/mp/observability/metrics.rst:495
+msgid ""
+"Cumulative stream interval per phase: for ``staging`` the DMA itself, for"
+" ``kernel`` mostly the wait for the engine's SMs."
+msgstr "每个阶段的累积流间隔：对于 ``staging`` 是 DMA 本身，对于 ``kernel`` 主要是等待引擎的 SM。"
+
+#: ../../source/mp/observability/metrics.rst:498
+msgid ""
+"**What it answers:** is the DMA side (PCIe / pinned memory) healthy, and "
+"where does a slow transfer's time go? Use the counters for aggregate "
+"answers, because a mean over per-step histogram samples is not byte-"
+"weighted:"
+msgstr ""
+"**它回答了什么：** DMA 侧（PCIe / "
+"固定内存）是否健康，慢速传输的时间去哪里了？使用计数器获取汇总答案，因为逐步直方图样本的平均值不是按字节加权的："
+
+#: ../../source/mp/observability/metrics.rst:519
+msgid ""
+"A phase's elapsed time is stream-clocked from section start to end, so it"
+" includes any stream idle while the CPU enqueues that section's work. "
+"Samples are popped when the transfer's ``MP_*_END`` event is dispatched, "
+"i.e. shortly after the copy has actually finished on the GPU."
+msgstr ""
+"一个阶段的经过时间是从部分开始到结束的流时钟计时，因此它包括 CPU 在排队该部分工作时的任何流闲置。当传输的 ``MP_*_END`` "
+"事件被调度时，样本被弹出，即在 GPU 上的复制实际完成后不久。"
+
+#: ../../source/mp/observability/metrics.rst:525
+msgid "MP Transfer Counters (in-flight GPU copies)"
+msgstr "MP 传输计数器（正在进行的 GPU 复制）"
+
+#: ../../source/mp/observability/metrics.rst:527
+#, python-brace-format
+msgid ""
+"Submitted / finished counter pairs for the LMCache-driven GPU transfers, "
+"via ``MPTransferCountersSubscriber``. The "
+"``MP_{STORE,RETRIEVE}_SUBMITTED`` events are published CPU-synchronously "
+"right before a copy is enqueued; the ``MP_{STORE,RETRIEVE}_END`` events "
+"are published *from* the GPU cupy stream once the copy has actually run. "
+"Subtracting the two gives the number of transfers currently in flight on "
+"each GPU."
+msgstr ""
+"用于通过 ``MPTransferCountersSubscriber`` 进行 LMCache 驱动的 GPU 传输的提交/完成计数器对。 "
+"``MP_{STORE,RETRIEVE}_SUBMITTED`` 事件在复制被排队之前以 CPU 同步的方式发布；而 "
+"``MP_{STORE,RETRIEVE}_END`` 事件则在复制实际运行后从 GPU cupy 流中发布。将两者相减可以得到每个 GPU "
+"上当前正在进行的传输数量。"
+
+#: ../../source/mp/observability/metrics.rst:534
+msgid ""
+"All four counters carry exactly one attribute, ``device`` (e.g. "
+"``\"cuda:3\"``). This is deliberate: the ``SUBMITTED`` events carry no "
+"``engine_id`` or ``model_name``, so labeling the ``END`` side more richly"
+" would force a PromQL aggregation to line the two label sets back up "
+"before subtracting them. To slice GPU transfer activity by worker or "
+"model, use the L0 ↔ L1 throughput histograms or "
+"``lmcache_mp.num_chunks_loaded`` instead."
+msgstr ""
+"所有四个计数器都带有一个属性，``device``（例如``\"cuda:3\"``）。这是故意的：``SUBMITTED``事件不携带``engine_id``或``model_name``，因此更丰富地标记``END``侧将迫使PromQL聚合在减去之前将两个标签集重新对齐。要按工作者或模型切片GPU传输活动，请使用L0"
+" ↔ L1吞吐量直方图或``lmcache_mp.num_chunks_loaded``。"
+
+#: ../../source/mp/observability/metrics.rst:549
+msgid "``lmcache_mp.num_submitted_stores``"
+msgstr "``lmcache_mp.num_submitted_stores``"
+
+#: ../../source/mp/observability/metrics.rst:550
+#: ../../source/mp/observability/metrics.rst:554
+#: ../../source/mp/observability/metrics.rst:558
+#: ../../source/mp/observability/metrics.rst:562
+msgid "Counter (attr: ``device``)"
+msgstr "计数器（属性：``device``）"
+
+#: ../../source/mp/observability/metrics.rst:551
+msgid ""
+"GPU→CPU store transfers enqueued on the device stream, +1 per ``store()``"
+" call that reaches the copy."
+msgstr "设备流上排队的 GPU→CPU 存储传输，每次达到复制的 ``store()`` 调用 +1。"
+
+#: ../../source/mp/observability/metrics.rst:553
+msgid "``lmcache_mp.num_finished_stores``"
+msgstr "``lmcache_mp.num_finished_stores``"
+
+#: ../../source/mp/observability/metrics.rst:555
+msgid "GPU→CPU store transfers completed on the device stream, +1 per completion."
+msgstr "设备流上完成的 GPU→CPU 存储传输，每完成一次加 1。"
+
+#: ../../source/mp/observability/metrics.rst:557
+msgid "``lmcache_mp.num_submitted_retrieves``"
+msgstr "``lmcache_mp.num_submitted_retrieves``"
+
+#: ../../source/mp/observability/metrics.rst:559
+msgid ""
+"CPU→GPU retrieve transfers enqueued on the device stream, +1 per "
+"``retrieve()`` call that reaches the copy."
+msgstr "设备流上排队的 CPU→GPU 检索传输，每次达到复制的 ``retrieve()`` 调用增加 1。"
+
+#: ../../source/mp/observability/metrics.rst:561
+msgid "``lmcache_mp.num_finished_retrieves``"
+msgstr "``lmcache_mp.num_finished_retrieves``"
+
+#: ../../source/mp/observability/metrics.rst:563
+msgid ""
+"CPU→GPU retrieve transfers completed on the device stream, +1 per "
+"completion."
+msgstr "设备流上完成的 CPU→GPU 检索传输，每完成一次加 1。"
+
+#: ../../source/mp/observability/metrics.rst:566
+msgid "**PromQL for in-flight GPU copies:**"
+msgstr "**正在进行的 GPU 复制的 PromQL:**"
+
+#: ../../source/mp/observability/metrics.rst:582
+msgid ""
+"**What it answers:** how many GPU KV copies is each device carrying right"
+" now? A submitted count that climbs while finished lags means the copy "
+"queue is backing up on that GPU; the two tracking together means the "
+"device is keeping pace."
+msgstr ""
+"**它回答了什么：** 每个设备当前正在处理多少个 GPU KV 复制？一个提交的计数在完成延迟时上升，意味着该 GPU "
+"的复制队列正在积压；这两个指标一起跟踪意味着设备正在保持步伐。"
+
+#: ../../source/mp/observability/metrics.rst:589
+msgid ""
+"\"Finished\" counts a transfer *leaving* the device stream, not its "
+"success. A store that committed nothing (``stored_count == 0``) and a "
+"retrieve that missed both increment the finished counter. Counting only "
+"successes would strand a phantom in-flight transfer in the subtraction "
+"forever. Use ``lmcache_mp.num_chunks_loaded`` and the L0 ↔ L1 throughput "
+"histograms to measure what actually moved."
+msgstr ""
+"“完成”计数的是*离开*设备流的传输，而不是其成功与否。一个没有提交任何内容的存储（``stored_count == "
+"0``）和一个未命中检索都会增加完成计数器。仅计算成功会导致一个虚幻的在途传输在减法中永远滞留。使用``lmcache_mp.num_chunks_loaded``和L0"
+" ↔ L1吞吐量直方图来测量实际移动的内容。"
+
+#: ../../source/mp/observability/metrics.rst:598
+msgid ""
+"The derived in-flight retrieve count can drift upward on one fail-closed "
+"path. ``retrieve()`` publishes ``MP_RETRIEVE_SUBMITTED`` *before* its "
+"block-id underflow check, and that check returns early without publishing"
+" ``MP_RETRIEVE_END``, so each request hitting it permanently adds 1 to "
+"the difference. That path should never fire in healthy operation and logs"
+" at ERROR when it does — an in-flight floor that ratchets up alongside "
+"those log lines is the signature, not a stuck GPU. The store path "
+"publishes its sentinel *after* the equivalent check and is unaffected."
+msgstr ""
+"在一个故障关闭的路径上，派生的在途检索计数可能会向上漂移。``retrieve()`` 在其块 ID 下溢检查之前发布 "
+"``MP_RETRIEVE_SUBMITTED``，而该检查在没有发布 ``MP_RETRIEVE_END`` "
+"的情况下提前返回，因此每个命中它的请求都会永久性地将差值增加 1。该路径在正常操作中不应触发，并且在触发时记录为错误 — "
+"与这些日志行一起上升的在途底线是其特征，而不是卡住的 GPU。存储路径在等效检查之后发布其哨兵，并且不受影响。"
+
+#: ../../source/mp/observability/metrics.rst:609
 msgid "L1 ↔ L2 Throughput Histograms"
 msgstr "L1 ↔ L2 吞吐量直方图"
 
-#: ../../source/mp/observability/metrics.rst:370
+#: ../../source/mp/observability/metrics.rst:611
 msgid ""
 "Per-request throughput of L1↔L2 transfers via ``L2ThroughputSubscriber``."
 " The store path correlates ``L2_STORE_SUBMITTED`` → "
@@ -756,7 +1172,7 @@ msgstr ""
 " ``L2_LOAD_TASK_SUBMITTED`` → ``L2_LOAD_TASK_COMPLETED`` 事件；请求级别的 "
 "``L2_PREFETCH_LOAD_*`` 事件用于块计数器在适配器之间进行聚合，无法归因于特定的 ``l2_name``\\ 。"
 
-#: ../../source/mp/observability/metrics.rst:379
+#: ../../source/mp/observability/metrics.rst:620
 msgid ""
 "Timestamps span **submit → complete**, so the duration includes adapter "
 "queue, network, and disk I/O — the value is *bytes / end-to-end latency*,"
@@ -767,7 +1183,7 @@ msgstr ""
 "时间戳跨度为 **提交 → 完成**\\ ，因此持续时间包括适配器队列、网络和磁盘 I/O — 该值为字节 / "
 "端到端延迟，而非原始传输速率。使用这些直方图比较适配器类型并捕捉回归；当您需要纯粹的复制时间吞吐量时，请使用 L0↔L1 直方图。"
 
-#: ../../source/mp/observability/metrics.rst:385
+#: ../../source/mp/observability/metrics.rst:626
 #, python-brace-format
 msgid ""
 "All L1↔L2 throughput histograms carry a single ``l2_name`` OTel attribute"
@@ -782,27 +1198,27 @@ msgstr ""
 "``lmcache_mp_l2_store_throughput_GB_per_second{l2_name=\\\"nixl_store\\\"}``\\"
 " ）。"
 
-#: ../../source/mp/observability/metrics.rst:397
+#: ../../source/mp/observability/metrics.rst:638
 msgid "``lmcache_mp.l2_store_throughput``"
 msgstr "``lmcache_mp.l2_store_throughput``"
 
-#: ../../source/mp/observability/metrics.rst:399
+#: ../../source/mp/observability/metrics.rst:640
 msgid "L1→L2 store throughput in GB/s per request."
 msgstr "每个请求的 L1→L2 存储吞吐量（GB/s）。"
 
-#: ../../source/mp/observability/metrics.rst:400
+#: ../../source/mp/observability/metrics.rst:641
 msgid "``lmcache_mp.l2_load_throughput``"
 msgstr "``lmcache_mp.l2_load_throughput``"
 
-#: ../../source/mp/observability/metrics.rst:402
+#: ../../source/mp/observability/metrics.rst:643
 msgid "L2→L1 load throughput in GB/s per (request, adapter) pair."
 msgstr "每对（请求，适配器）的 L2→L1 加载吞吐量（单位：GB/s）。"
 
-#: ../../source/mp/observability/metrics.rst:404
+#: ../../source/mp/observability/metrics.rst:645
 msgid "**PromQL for average throughput (GB/s), per backend:**"
 msgstr "**每个后端的平均吞吐量（单位：GB/s）的 PromQL：**"
 
-#: ../../source/mp/observability/metrics.rst:418
+#: ../../source/mp/observability/metrics.rst:659
 msgid ""
 "``l2_store_throughput`` populates whenever chunks are written to L2. "
 "``l2_load_throughput`` only populates when chunks are read **from L2 into"
@@ -812,13 +1228,17 @@ msgid ""
 "stays empty even though store throughput is non-zero. Drive enough "
 "distinct data to force L1 eviction, or restart the server between store "
 "and load passes, to exercise the L2 load path."
-msgstr "``l2_store_throughput`` 在写入块到 L2 时填充。 ``l2_load_throughput`` 仅在从 L2 读取块到 L1 时填充——即在条目从 L1 逐出后进行的预取加载。如果您的工作集完全适合 L1（在小模型或较大 ``--l1-size-gb`` 的情况下很常见），查找将从 L1 提供服务，尽管存储吞吐量非零，但加载直方图将保持为空。驱动足够不同的数据以强制 L1 逐出，或在存储和加载过程之间重启服务器，以测试 L2 加载路径。"
+msgstr ""
+"``l2_store_throughput`` 在写入块到 L2 时填充。 ``l2_load_throughput`` 仅在从 L2 读取块到 "
+"L1 时填充——即在条目从 L1 逐出后进行的预取加载。如果您的工作集完全适合 L1（在小模型或较大 ``--l1-size-gb`` "
+"的情况下很常见），查找将从 L1 提供服务，尽管存储吞吐量非零，但加载直方图将保持为空。驱动足够不同的数据以强制 L1 "
+"逐出，或在存储和加载过程之间重启服务器，以测试 L2 加载路径。"
 
-#: ../../source/mp/observability/metrics.rst:428
+#: ../../source/mp/observability/metrics.rst:669
 msgid "Engine Counters"
 msgstr "引擎计数器"
 
-#: ../../source/mp/observability/metrics.rst:430
+#: ../../source/mp/observability/metrics.rst:671
 msgid ""
 "Worker-scoped counters tied to what the MP server delivers back to each "
 "vLLM worker via ``retrieve()``.  Labeled by ``worker_id`` (the vLLM "
@@ -828,15 +1248,15 @@ msgstr ""
 "与 MP 服务器通过 ``retrieve()`` 返回给每个 vLLM 工作线程相关的工作线程范围计数器。以 ``worker_id``\\ "
 "（vLLM 工作线程实例 ID）标记——与其他指标中可能出现的任何调度器范围 ID 不同。"
 
-#: ../../source/mp/observability/metrics.rst:442
+#: ../../source/mp/observability/metrics.rst:683
 msgid "``lmcache_mp.num_chunks_loaded``"
 msgstr "``lmcache_mp.num_chunks_loaded``"
 
-#: ../../source/mp/observability/metrics.rst:443
+#: ../../source/mp/observability/metrics.rst:684
 msgid "Counter (attrs: ``worker_id``, ``model_name``, ``cache_salt``)"
 msgstr "计数器（属性：\\ ``worker_id``, ``model_name``, ``cache_salt``\\ ）"
 
-#: ../../source/mp/observability/metrics.rst:444
+#: ../../source/mp/observability/metrics.rst:685
 msgid ""
 "Total number of LMCache chunks loaded into the engine, summed over all "
 "``retrieve()`` completions.  Sliceable per worker, per model, and per "
@@ -848,17 +1268,17 @@ msgstr ""
 "``cache_salt``\\ ）进行切片。\\ ``cache_salt`` 可能具有高基数；若存储成本敏感，请在抓取时通过 "
 "``metric_relabel_configs`` 丢弃它。"
 
-#: ../../source/mp/observability/metrics.rst:451
+#: ../../source/mp/observability/metrics.rst:692
 msgid "Observable Gauges"
 msgstr "可观察仪表"
 
-#: ../../source/mp/observability/metrics.rst:453
+#: ../../source/mp/observability/metrics.rst:694
 msgid ""
 "Point-in-time state snapshots registered via ``register_gauge`` (pull-"
 "based OTel observable gauges)."
 msgstr "通过 ``register_gauge`` 注册的即时状态快照（基于拉取的 OTel 可观察仪表）。"
 
-#: ../../source/mp/observability/metrics.rst:456
+#: ../../source/mp/observability/metrics.rst:697
 msgid ""
 "The three in-flight metrics carry two attributes that distinguish "
 "adapters even when more than one is registered with the same backend type"
@@ -867,7 +1287,7 @@ msgstr ""
 "这三个正在进行的指标携带两个属性，即使在与相同后端类型注册多个适配器时也能区分它们——与 "
 "``lmcache_mp.l2_store_completed`` 具有相同形状："
 
-#: ../../source/mp/observability/metrics.rst:460
+#: ../../source/mp/observability/metrics.rst:701
 msgid ""
 "``l2_name`` — the registered adapter type (e.g. ``\"fs\"``, "
 "``\"nixl_store\"``, ``\"mooncake_store\"``)."
@@ -875,48 +1295,49 @@ msgstr ""
 "``l2_name`` — 注册的适配器类型（例如 ``\"fs\"``, ``\"nixl_store\"``, "
 "``\"mooncake_store\"``\\ ）。"
 
-#: ../../source/mp/observability/metrics.rst:462
+#: ../../source/mp/observability/metrics.rst:703
 msgid "``adapter_index`` — position in the controller's adapter list."
 msgstr "``adapter_index`` — 控制器适配器列表中的位置。"
 
-#: ../../source/mp/observability/metrics.rst:464
+#: ../../source/mp/observability/metrics.rst:705
 msgid "Adapters with no in-flight work emit no datapoint for that scrape."
 msgstr "没有正在进行的工作的适配器不会为该抓取发出数据点。"
 
-#: ../../source/mp/observability/metrics.rst:473
+#: ../../source/mp/observability/metrics.rst:714
 msgid "``lmcache_mp.active_prefetch_jobs``"
 msgstr "``lmcache_mp.active_prefetch_jobs``"
 
-#: ../../source/mp/observability/metrics.rst:474
-#: ../../source/mp/observability/metrics.rst:478
-#: ../../source/mp/observability/metrics.rst:483
-#: ../../source/mp/observability/metrics.rst:544
-#: ../../source/mp/observability/metrics.rst:548
+#: ../../source/mp/observability/metrics.rst:715
+#: ../../source/mp/observability/metrics.rst:719
+#: ../../source/mp/observability/metrics.rst:724
+#: ../../source/mp/observability/metrics.rst:785
+#: ../../source/mp/observability/metrics.rst:789
+#: ../../source/mp/observability/metrics.rst:1004
 msgid "ObservableGauge"
 msgstr "可观察仪表"
 
-#: ../../source/mp/observability/metrics.rst:475
+#: ../../source/mp/observability/metrics.rst:716
 msgid ""
 "Number of prefetch jobs currently in-flight. A sustained high value may "
 "indicate slow L2 backends or polling delays."
 msgstr "当前正在进行的预取作业数量。持续的高值可能表示 L2 后端缓慢或轮询延迟。"
 
-#: ../../source/mp/observability/metrics.rst:477
+#: ../../source/mp/observability/metrics.rst:718
 msgid "``lmcache_mp.l1_memory_usage_bytes``"
 msgstr "``lmcache_mp.l1_memory_usage_bytes``"
 
-#: ../../source/mp/observability/metrics.rst:479
+#: ../../source/mp/observability/metrics.rst:720
 msgid ""
 "Bytes currently held in L1.  Rising without plateauing typically "
 "indicates a leak; saturating at the configured ``--l1-size-gb`` indicates"
 " working set exceeds capacity."
 msgstr "当前在 L1 中占用的字节数。持续上升而没有平台期通常表示存在泄漏；在配置的 ``--l1-size-gb`` 达到饱和时表示工作集超过了容量。"
 
-#: ../../source/mp/observability/metrics.rst:482
+#: ../../source/mp/observability/metrics.rst:723
 msgid "``lmcache_mp.l1_usage_ratio``"
 msgstr "``lmcache_mp.l1_usage_ratio``"
 
-#: ../../source/mp/observability/metrics.rst:484
+#: ../../source/mp/observability/metrics.rst:725
 msgid ""
 "L1 used/total ratio (``0.0``–``1.0``), sampled at scrape time from "
 "``L1Manager.get_memory_usage()``. Returns ``0.0`` when the gauge target "
@@ -929,15 +1350,15 @@ msgstr ""
 "采样。当仪表目标尚未连接或 ``total_bytes`` 为零时返回 ``0.0``\\ ，因此在抓取期间回调不会触发。与逐出水位线 (默认 "
 "``0.8``) 进行比较，以判断逐出循环是否低于或高于触发阈值。"
 
-#: ../../source/mp/observability/metrics.rst:490
+#: ../../source/mp/observability/metrics.rst:731
 msgid "``lmcache_mp.l2_usage_bytes``"
 msgstr "``lmcache_mp.l2_usage_bytes``"
 
-#: ../../source/mp/observability/metrics.rst:491
+#: ../../source/mp/observability/metrics.rst:732
 msgid "ObservableGauge (attr: ``l2_name``)"
 msgstr "可观察仪表 (属性: ``l2_name``)"
 
-#: ../../source/mp/observability/metrics.rst:492
+#: ../../source/mp/observability/metrics.rst:733
 msgid ""
 "Bytes currently held in each L2 adapter, sampled at scrape time from "
 "``adapter.get_usage()``.  One observation per configured adapter, tagged "
@@ -956,27 +1377,27 @@ msgstr ""
 "抛出异常的适配器会被静默跳过，而不会污染观测结果，因此某个 ``l2_name`` "
 "缺失数据点可能意味着“未配置”或“该次抓取时适配器发生错误”——请与 L2 存储/加载计数器交叉核对。"
 
-#: ../../source/mp/observability/metrics.rst:502
+#: ../../source/mp/observability/metrics.rst:743
 msgid "``lmcache_mp.num_inflight_l2_stores``"
 msgstr "``lmcache_mp.num_inflight_l2_stores``"
 
-#: ../../source/mp/observability/metrics.rst:503
-#: ../../source/mp/observability/metrics.rst:508
-#: ../../source/mp/observability/metrics.rst:513
+#: ../../source/mp/observability/metrics.rst:744
+#: ../../source/mp/observability/metrics.rst:749
+#: ../../source/mp/observability/metrics.rst:754
 msgid "ObservableGauge (attrs: ``l2_name``, ``adapter_index``)"
 msgstr "ObservableGauge (attrs: ``l2_name``, ``adapter_index``)"
 
-#: ../../source/mp/observability/metrics.rst:504
+#: ../../source/mp/observability/metrics.rst:745
 msgid ""
 "L2 store tasks currently executing, per adapter.  Sustained non-zero "
 "values indicate the adapter cannot keep up with the L1 → L2 write rate."
 msgstr "每个适配器当前正在执行的 L2 存储任务。 持续的非零值表明适配器无法跟上 L1 → L2 写入速率。"
 
-#: ../../source/mp/observability/metrics.rst:507
+#: ../../source/mp/observability/metrics.rst:748
 msgid "``lmcache_mp.num_inflight_l2_loads``"
 msgstr "``lmcache_mp.num_inflight_l2_loads``"
 
-#: ../../source/mp/observability/metrics.rst:509
+#: ../../source/mp/observability/metrics.rst:750
 msgid ""
 "L2 → L1 prefetch load tasks currently executing, per adapter. Pair with "
 "``num_inflight_l2_stores`` to see whether read or write traffic dominates"
@@ -985,11 +1406,11 @@ msgstr ""
 "每个适配器当前正在执行的 L2 → L1 预取加载任务。与 ``num_inflight_l2_stores`` "
 "配对，以查看给定后端是读流量还是写流量占主导。"
 
-#: ../../source/mp/observability/metrics.rst:512
+#: ../../source/mp/observability/metrics.rst:753
 msgid "``lmcache_mp.inflight_load_memory_usage_bytes``"
 msgstr "``lmcache_mp.inflight_load_memory_usage_bytes``"
 
-#: ../../source/mp/observability/metrics.rst:514
+#: ../../source/mp/observability/metrics.rst:755
 msgid ""
 "L1 bytes reserved by in-flight L2 → L1 prefetch loads, per adapter.  "
 "Rising in-flight bytes alongside rising ``l1_memory_usage_bytes`` is a "
@@ -1001,11 +1422,11 @@ msgstr ""
 "同步上升，则表明预取预留正在挤占可缓存数据的空间。每个适配器的字节归属遵循每个请求的 ``load_plan`` "
 "位图，因此跨适配器求和时不会重复计数。"
 
-#: ../../source/mp/observability/metrics.rst:522
+#: ../../source/mp/observability/metrics.rst:763
 msgid "EventBus Self-Monitoring"
 msgstr "事件总线自我监控"
 
-#: ../../source/mp/observability/metrics.rst:524
+#: ../../source/mp/observability/metrics.rst:765
 msgid ""
 "Health metrics for the EventBus itself, registered by "
 "``EventBusSelfMetricsSubscriber`` on the ``lmcache.event_bus`` OTel "
@@ -1017,7 +1438,7 @@ msgstr ""
 "``lmcache.event_bus`` OTel 计量器上注册。这些指标通过 ``EventBus`` 访问器直接观察总线状态，并在每次 "
 "OTel 抓取时报告——它们不是由事件驱动的，因此丢弃或失败的订阅者无法使其静默。"
 
-#: ../../source/mp/observability/metrics.rst:530
+#: ../../source/mp/observability/metrics.rst:771
 msgid ""
 "Use them to answer: is the EventBus keeping up with publishers, is "
 "anything being dropped, and are any subscriber callbacks raising? A non-"
@@ -1029,47 +1450,50 @@ msgstr ""
 "``dropped_events_total`` 或持续非零的 ``drain_lag_seconds`` 表明总线队列已达 ``--event-"
 "bus-queue-size`` 上限并正在进行尾部丢弃；请调大该参数值或排查慢速订阅者。"
 
-#: ../../source/mp/observability/metrics.rst:543
+#: ../../source/mp/observability/metrics.rst:784
 msgid "``lmcache_mp.event_bus.queue_depth``"
 msgstr "``lmcache_mp.event_bus.queue_depth``"
 
-#: ../../source/mp/observability/metrics.rst:545
+#: ../../source/mp/observability/metrics.rst:786
 msgid "Events currently queued in the EventBus (``len(_queue)`` at scrape time)."
 msgstr "事件总线中当前排队的事件（在抓取时的 ``len(_queue)``\\ ）。"
 
-#: ../../source/mp/observability/metrics.rst:547
+#: ../../source/mp/observability/metrics.rst:788
 msgid "``lmcache_mp.event_bus.drain_lag_seconds``"
 msgstr "``lmcache_mp.event_bus.drain_lag_seconds``"
 
-#: ../../source/mp/observability/metrics.rst:549
+#: ../../source/mp/observability/metrics.rst:790
 msgid ""
 "Seconds since the oldest queued event was published; ``0.0`` when empty."
 "  Rising values mean the drain thread is falling behind."
 msgstr "自最旧的排队事件发布以来的秒数；队列为空时为 ``0.0``\\ 。值持续上升意味着排空线程处理速度跟不上。"
 
-#: ../../source/mp/observability/metrics.rst:552
+#: ../../source/mp/observability/metrics.rst:793
 msgid "``lmcache_mp.event_bus.dropped_events_total``"
 msgstr "``lmcache_mp.event_bus.dropped_events_total``"
 
-#: ../../source/mp/observability/metrics.rst:553
+#: ../../source/mp/observability/metrics.rst:794
+#: ../../source/mp/observability/metrics.rst:952
+#: ../../source/mp/observability/metrics.rst:955
+#: ../../source/mp/observability/metrics.rst:1038
 msgid "ObservableCounter"
 msgstr "可观察计数器"
 
-#: ../../source/mp/observability/metrics.rst:554
+#: ../../source/mp/observability/metrics.rst:795
 msgid ""
 "Cumulative events dropped because the EventBus queue was at ``--event-"
 "bus-queue-size``."
 msgstr "因 EventBus 队列达到 ``--event-bus-queue-size`` 而累计丢弃的事件。"
 
-#: ../../source/mp/observability/metrics.rst:556
+#: ../../source/mp/observability/metrics.rst:797
 msgid "``lmcache_mp.event_bus.subscriber_exceptions``"
 msgstr "``lmcache_mp.event_bus.subscriber_exceptions``"
 
-#: ../../source/mp/observability/metrics.rst:557
+#: ../../source/mp/observability/metrics.rst:798
 msgid "ObservableCounter (attr: ``subscriber_name``)"
 msgstr "可观察计数器 (属性: ``subscriber_name``)"
 
-#: ../../source/mp/observability/metrics.rst:558
+#: ../../source/mp/observability/metrics.rst:799
 msgid ""
 "Cumulative exceptions raised by subscriber callbacks during EventBus "
 "dispatch, tagged by ``subscriber_name`` (the failing callback's owning "
@@ -1078,7 +1502,7 @@ msgstr ""
 "由事件总线分发期间由订阅者回调引发的累计异常，按 ``subscriber_name`` 标记（对于绑定方法为失败回调的拥有类，对于自由函数为 "
 "``__qualname__``\\ ）。"
 
-#: ../../source/mp/observability/metrics.rst:563
+#: ../../source/mp/observability/metrics.rst:804
 msgid ""
 "For the full design rationale and the in-process accessors that back each"
 " metric see ``docs/design/v1/mp_observability/METRICS.md`` and "
@@ -1088,24 +1512,498 @@ msgstr ""
 "``docs/design/v1/mp_observability/METRICS.md`` 和 "
 "``docs/design/v1/mp_observability/event-bus.md``\\ 。"
 
-#: ../../source/mp/observability/metrics.rst:568
+#: ../../source/mp/observability/metrics.rst:809
+#: ../../source/mp/observability/metrics.rst:831
+msgid "gRPC Runtime Metrics"
+msgstr "gRPC 运行时指标"
+
+#: ../../source/mp/observability/metrics.rst:811
+msgid ""
+"When metrics are enabled and the MP request transport is gRPC, LMCache "
+"also registers gRPC Python's OpenTelemetry observability plugin against "
+"the same OTel ``MeterProvider``. ZMQ mode does not register this plugin, "
+"so the existing LMCache EventBus metrics remain unchanged. The plugin is "
+"provided by ``grpcio-observability`` and is installed only on Linux, "
+"which is the platform currently supported by that upstream package. On "
+"non-Linux developer hosts the integration is skipped unless the package "
+"is available locally. Use ``--disable-grpc-metrics`` to suppress the "
+"integration explicitly while keeping LMCache's EventBus metrics enabled."
+msgstr ""
+"当启用指标且 MP 请求传输为 gRPC 时，LMCache 还会将 gRPC Python 的 OpenTelemetry "
+"可观察性插件注册到相同的 OTel ``MeterProvider``。ZMQ 模式不会注册此插件，因此现有的 LMCache EventBus "
+"指标保持不变。该插件由 ``grpcio-observability`` 提供，仅在 Linux 上安装，这是当前该上游包支持的平台。在非 "
+"Linux 开发主机上，除非本地可用该包，否则将跳过集成。使用 ``--disable-grpc-metrics`` 可以显式抑制集成，同时保持 "
+"LMCache 的 EventBus 指标启用。"
+
+#: ../../source/mp/observability/metrics.rst:821
+msgid ""
+"The plugin buffers its stats and flushes them from a Python thread, "
+"holding the GIL for the whole batch. With the upstream default of 0.5 "
+"seconds, each flush can stall requests for several milliseconds under "
+"load, so LMCache sets ``GRPC_PYTHON_CENSUS_EXPORT_BATCH_INTERVAL_SECS`` "
+"to ``0.05`` unless you have already set it."
+msgstr ""
+"该插件缓冲其统计信息并从 Python 线程中刷新它们，持有整个批次的 GIL。在上游默认值为 0.5 "
+"秒的情况下，每次刷新可能会在负载下使请求停滞几毫秒，因此 LMCache 将 "
+"``GRPC_PYTHON_CENSUS_EXPORT_BATCH_INTERVAL_SECS`` 设置为 "
+"``0.05``，除非您已经设置过该值。"
+
+#: ../../source/mp/observability/metrics.rst:827
+msgid ""
+"These metrics describe the gRPC transport itself, not cache hit/miss "
+"behavior. They use the upstream ``grpc.*`` namespace. On Prometheus, "
+"``.`` is converted to ``_`` and counters get a ``_total`` suffix."
+msgstr ""
+"这些指标描述的是 gRPC 传输本身，而不是缓存命中/未命中行为。它们使用上游的 ``grpc.*`` 命名空间。在 Prometheus "
+"中，``.`` 被转换为 ``_``，计数器会添加 ``_total`` 后缀。"
+
+#: ../../source/mp/observability/metrics.rst:835
+msgid "OTel metric name"
+msgstr "OTel 指标名称"
+
+#: ../../source/mp/observability/metrics.rst:836
+msgid "Prometheus name"
+msgstr "Prometheus 名称"
+
+#: ../../source/mp/observability/metrics.rst:838
+msgid "Unit"
+msgstr "单位"
+
+#: ../../source/mp/observability/metrics.rst:839
+msgid "``grpc.client.attempt.started``"
+msgstr "``grpc.client.attempt.started``"
+
+#: ../../source/mp/observability/metrics.rst:840
+msgid "``grpc_client_attempt_started_total``"
+msgstr "``grpc_client_attempt_started_total``"
+
+#: ../../source/mp/observability/metrics.rst:842
+#, python-brace-format
+msgid "``{attempt}``"
+msgstr "``{attempt}``"
+
+#: ../../source/mp/observability/metrics.rst:843
+msgid "``grpc.client.attempt.duration``"
+msgstr "``grpc.client.attempt.duration``"
+
+#: ../../source/mp/observability/metrics.rst:844
+msgid "``grpc_client_attempt_duration_seconds``"
+msgstr "``grpc_client_attempt_duration_seconds``"
+
+#: ../../source/mp/observability/metrics.rst:846
+#: ../../source/mp/observability/metrics.rst:862
+msgid "seconds"
+msgstr "秒"
+
+#: ../../source/mp/observability/metrics.rst:847
+msgid "``grpc.client.attempt.sent_total_compressed_message_size``"
+msgstr "``grpc.client.attempt.sent_total_compressed_message_size``"
+
+#: ../../source/mp/observability/metrics.rst:848
+msgid "``grpc_client_attempt_sent_total_compressed_message_size_bytes``"
+msgstr "``grpc_client_attempt_sent_total_compressed_message_size_bytes``"
+
+#: ../../source/mp/observability/metrics.rst:850
+#: ../../source/mp/observability/metrics.rst:854
+#: ../../source/mp/observability/metrics.rst:866
+#: ../../source/mp/observability/metrics.rst:870
+msgid "bytes"
+msgstr "字节"
+
+#: ../../source/mp/observability/metrics.rst:851
+msgid "``grpc.client.attempt.rcvd_total_compressed_message_size``"
+msgstr "``grpc.client.attempt.rcvd_total_compressed_message_size``"
+
+#: ../../source/mp/observability/metrics.rst:852
+msgid "``grpc_client_attempt_rcvd_total_compressed_message_size_bytes``"
+msgstr "``grpc_client_attempt_rcvd_total_compressed_message_size_bytes``"
+
+#: ../../source/mp/observability/metrics.rst:855
+msgid "``grpc.server.call.started``"
+msgstr "``grpc.server.call.started``"
+
+#: ../../source/mp/observability/metrics.rst:856
+msgid "``grpc_server_call_started_total``"
+msgstr "``grpc_server_call_started_total``"
+
+#: ../../source/mp/observability/metrics.rst:858
+#, python-brace-format
+msgid "``{call}``"
+msgstr "``{call}``"
+
+#: ../../source/mp/observability/metrics.rst:859
+msgid "``grpc.server.call.duration``"
+msgstr "``grpc.server.call.duration``"
+
+#: ../../source/mp/observability/metrics.rst:860
+msgid "``grpc_server_call_duration_seconds``"
+msgstr "``grpc_server_call_duration_seconds``"
+
+#: ../../source/mp/observability/metrics.rst:863
+msgid "``grpc.server.call.sent_total_compressed_message_size``"
+msgstr "``grpc.server.call.sent_total_compressed_message_size``"
+
+#: ../../source/mp/observability/metrics.rst:864
+msgid "``grpc_server_call_sent_total_compressed_message_size_bytes``"
+msgstr "``grpc_server_call_sent_total_compressed_message_size_bytes``"
+
+#: ../../source/mp/observability/metrics.rst:867
+msgid "``grpc.server.call.rcvd_total_compressed_message_size``"
+msgstr "``grpc.server.call.rcvd_total_compressed_message_size``"
+
+#: ../../source/mp/observability/metrics.rst:868
+msgid "``grpc_server_call_rcvd_total_compressed_message_size_bytes``"
+msgstr "``grpc_server_call_rcvd_total_compressed_message_size_bytes``"
+
+#: ../../source/mp/observability/metrics.rst:873
 msgid "Prometheus Scrape Configuration"
 msgstr "Prometheus 抓取配置"
 
-#: ../../source/mp/observability/metrics.rst:570
+#: ../../source/mp/observability/metrics.rst:875
 msgid ""
 "In **pull mode** (no ``--otlp-endpoint``), point Prometheus at the "
 "server's HTTP-frontend port — ``--http-port``, default **8080** — not at "
 "``--prometheus-port``:"
-msgstr "在 **拉取模式**（没有 ``--otlp-endpoint``）下，将 Prometheus 指向服务器的 HTTP 前端端口 — ``--http-port``，默认 **8080** — 而不是 ``--prometheus-port``："
+msgstr ""
+"在 **拉取模式**（没有 ``--otlp-endpoint``）下，将 Prometheus 指向服务器的 HTTP 前端端口 — "
+"``--http-port``，默认 **8080** — 而不是 ``--prometheus-port``："
 
-#: ../../source/mp/observability/metrics.rst:581
+#: ../../source/mp/observability/metrics.rst:886
 msgid ""
 "In **push mode** (``--otlp-endpoint`` set), the server does not expose "
 "``/metrics`` itself; scrape the OpenTelemetry Collector's Prometheus "
 "exporter instead. The bundled stack in ``examples/observability/`` wires "
 "this up for you — see :doc:`index`."
-msgstr "在 **推送模式** (设置了 ``--otlp-endpoint``) 下，服务器不会直接暴露 ``/metrics``；请改为抓取 OpenTelemetry Collector 的 Prometheus 导出器。``examples/observability/`` 中捆绑的堆栈为您配置了这一点 — 请参阅 :doc:`index`。"
+msgstr ""
+"在 **推送模式** (设置了 ``--otlp-endpoint``) 下，服务器不会直接暴露 ``/metrics``；请改为抓取 "
+"OpenTelemetry Collector 的 Prometheus 导出器。``examples/observability/`` "
+"中捆绑的堆栈为您配置了这一点 — 请参阅 :doc:`index`。"
+
+#: ../../source/mp/observability/metrics.rst:892
+msgid "Coordinator Metrics"
+msgstr "协调器指标"
+
+#: ../../source/mp/observability/metrics.rst:894
+msgid ""
+"Coordinator metrics use the ``lmcache_coordinator.`` prefix, so a series'"
+" origin is clear from its name even when the coordinator and the MP "
+"servers share one Prometheus.  The coordinator's resource carries "
+"``service.name=lmcache-mp-coordinator`` and ``service.instance.id`` set "
+"to the host name (the pod name under Kubernetes)."
+msgstr ""
+"协调器指标使用 ``lmcache_coordinator.`` 前缀，因此即使协调器和 MP 服务器共享一个 "
+"Prometheus，系列的来源也可以从其名称中清楚地看出。协调器的资源携带 ``service.name=lmcache-mp-"
+"coordinator`` 和 ``service.instance.id`` 设置为主机名（Kubernetes 下的 pod 名称）。"
+
+#: ../../source/mp/observability/metrics.rst:900
+msgid ""
+"The Key Directory gauges always emit one observation for each ``tier`` "
+"value, ``l1`` and ``l2``, including zero-valued observations for an empty"
+" tier.  A placement is one place a key is stored: L1 on one server, or "
+"one L2 backend. Placement bytes are the sum of the logical object sizes "
+"reported for those placements, not unique-object bytes, physical "
+"allocation, or storage capacity. The same object is therefore included "
+"once for every placement recorded for it."
+msgstr ""
+"Key Directory 指标始终为每个 ``tier`` 值（``l1`` 和 "
+"``l2``）发出一个观测值，包括空层的零值观测。一个放置是一个键存储的位置：在一台服务器上的 L1，或一个 L2 "
+"后端。放置字节是为这些放置报告的逻辑对象大小的总和，而不是唯一对象字节、物理分配或存储容量。因此，同一对象在为其记录的每个放置中都被包含一次。"
+
+#: ../../source/mp/observability/metrics.rst:915
+msgid "``lmcache_coordinator.key_directory.placements``"
+msgstr "``lmcache_coordinator.key_directory.placements``"
+
+#: ../../source/mp/observability/metrics.rst:916
+#: ../../source/mp/observability/metrics.rst:920
+msgid "ObservableGauge (attr: ``tier``)"
+msgstr "可观察仪表 (属性: ``tier``)"
+
+#: ../../source/mp/observability/metrics.rst:917
+msgid "Placements currently recorded in the Key Directory for each cache tier."
+msgstr "当前在每个缓存层的关键目录中记录的放置情况。"
+
+#: ../../source/mp/observability/metrics.rst:919
+msgid "``lmcache_coordinator.key_directory.placement_bytes``"
+msgstr "``lmcache_coordinator.key_directory.placement_bytes``"
+
+#: ../../source/mp/observability/metrics.rst:921
+msgid ""
+"Reported logical object bytes summed across the placements currently "
+"recorded in each cache tier."
+msgstr "报告的逻辑对象字节是当前记录在每个缓存层中的所有放置的总和。"
+
+#: ../../source/mp/observability/metrics.rst:924
+msgid ""
+"The same two gauges are also emitted under their previous names, "
+"``lmcache_mp.key_directory_placement_count`` and "
+"``lmcache_mp.key_directory_placement_size_bytes``, for one release so "
+"dashboards can migrate.  The previous names will be removed in the next "
+"release."
+msgstr ""
+"这两个指标在一个版本中也以其之前的名称 ``lmcache_mp.key_directory_placement_count`` 和 "
+"``lmcache_mp.key_directory_placement_size_bytes`` "
+"被发出，以便仪表板可以迁移。之前的名称将在下一个版本中被移除。"
+
+#: ../../source/mp/observability/metrics.rst:930
+msgid ""
+"The ingest metrics say whether the coordinator's view of the fleet is "
+"complete.  Two kinds of loss are counted separately: batches that never "
+"arrived (a skipped ``seq``), and events an MP server reports it dropped "
+"before sending (each batch carries the server's running count in "
+"``dropped_events``).  The first batch of a stream the coordinator was not"
+" already tracking counts no missing batches: earlier batches were sent "
+"before it was listening.  Fleet-wide counters drive alerts; the per-"
+"server gauges, one series per ``instance_id`` the coordinator currently "
+"tracks, show which server, and cover that server's current run."
+msgstr ""
+"摄取指标表明协调器对整个集群的视图是否完整。两种损失被单独计算：从未到达的批次（跳过的 ``seq``）和 MP "
+"服务器报告在发送之前丢弃的事件（每个批次携带服务器在 ``dropped_events`` "
+"中的运行计数）。协调器未跟踪的流的第一批次不计算缺失批次：早期批次在其开始监听之前已发送。全局计数器驱动警报；每个服务器的指标，每个 "
+"``instance_id`` 一系列，显示哪个服务器，并覆盖该服务器的当前运行情况。"
+
+#: ../../source/mp/observability/metrics.rst:947
+msgid "``lmcache_coordinator.ingest.event_batches_received``"
+msgstr "``lmcache_coordinator.ingest.event_batches_received``"
+
+#: ../../source/mp/observability/metrics.rst:948
+#: ../../source/mp/observability/metrics.rst:1000
+msgid "ObservableCounter (attr: ``result``)"
+msgstr "可观察计数器 (属性: ``result``)"
+
+#: ../../source/mp/observability/metrics.rst:949
+msgid ""
+"Cache-event batches received from MP servers: ``applied``, ``duplicate`` "
+"(seq already seen) or ``stale`` (older incarnation)."
+msgstr "来自 MP 服务器的缓存事件批次: ``applied``、``duplicate`` (序列已被看到) 或 ``stale`` (旧版本)。"
+
+#: ../../source/mp/observability/metrics.rst:951
+msgid "``lmcache_coordinator.ingest.event_batches_missing``"
+msgstr "``lmcache_coordinator.ingest.event_batches_missing``"
+
+#: ../../source/mp/observability/metrics.rst:953
+msgid "Batches that never arrived: skipped ``seq`` values."
+msgstr "未到达的批次：跳过了 ``seq`` 值。"
+
+#: ../../source/mp/observability/metrics.rst:954
+msgid "``lmcache_coordinator.ingest.events_dropped_by_servers``"
+msgstr "``lmcache_coordinator.ingest.events_dropped_by_servers``"
+
+#: ../../source/mp/observability/metrics.rst:956
+msgid ""
+"Cache events the MP servers reported dropping before they reached the "
+"coordinator."
+msgstr "在到达协调器之前，MP 服务器报告丢弃的缓存事件。"
+
+#: ../../source/mp/observability/metrics.rst:958
+msgid "``lmcache_coordinator.ingest.server_event_batches_missing``"
+msgstr "``lmcache_coordinator.ingest.server_event_batches_missing``"
+
+#: ../../source/mp/observability/metrics.rst:959
+#: ../../source/mp/observability/metrics.rst:962
+#: ../../source/mp/observability/metrics.rst:965
+#: ../../source/mp/observability/metrics.rst:991
+#: ../../source/mp/observability/metrics.rst:995
+#: ../../source/mp/observability/metrics.rst:1042
+msgid "ObservableGauge (attr: ``instance_id``)"
+msgstr "可观察仪表 (属性: ``instance_id``)"
+
+#: ../../source/mp/observability/metrics.rst:960
+msgid "Missing batches for one server's current run."
+msgstr "缺少一个服务器当前运行的批次。"
+
+#: ../../source/mp/observability/metrics.rst:961
+msgid "``lmcache_coordinator.ingest.server_events_dropped``"
+msgstr "``lmcache_coordinator.ingest.server_events_dropped``"
+
+#: ../../source/mp/observability/metrics.rst:963
+msgid "Dropped events for one server's current run."
+msgstr "一个服务器当前运行中丢失的事件。"
+
+#: ../../source/mp/observability/metrics.rst:964
+msgid "``lmcache_coordinator.ingest.server_view_incomplete``"
+msgstr "``lmcache_coordinator.ingest.server_view_incomplete``"
+
+#: ../../source/mp/observability/metrics.rst:966
+msgid ""
+"``1`` while the coordinator knows it is missing part of this server's "
+"cache.  Clears when the server restarts or leaves."
+msgstr "``1`` 当协调器知道该服务器的缓存缺失部分时。服务器重启或离开时清除。"
+
+#: ../../source/mp/observability/metrics.rst:968
+msgid "``lmcache_coordinator.ingest.batch_apply_failures``"
+msgstr "``lmcache_coordinator.ingest.batch_apply_failures``"
+
+#: ../../source/mp/observability/metrics.rst:969
+msgid "ObservableCounter (attrs: ``consumer``, ``op``)"
+msgstr "可观察计数器 (属性: ``consumer``, ``op``)"
+
+#: ../../source/mp/observability/metrics.rst:970
+msgid ""
+"A view or controller failed to apply a batch (``op=\"consume\"``) or a "
+"fence (``op=\"fence\"``); it now disagrees with the others."
+msgstr ""
+"视图或控制器未能应用批处理 (``op=\\\"consume\\\"``) 或栅栏 "
+"(``op=\\\"fence\\\"``)；它现在与其他组件不一致。"
+
+#: ../../source/mp/observability/metrics.rst:972
+msgid "``lmcache_coordinator.ingest.batches_delivered``"
+msgstr "``lmcache_coordinator.ingest.batches_delivered``"
+
+#: ../../source/mp/observability/metrics.rst:973
+#: ../../source/mp/observability/metrics.rst:976
+msgid "ObservableCounter (attr: ``consumer``)"
+msgstr "可观察计数器（属性：``consumer``）"
+
+#: ../../source/mp/observability/metrics.rst:974
+msgid "Admitted batches handed to each view or controller."
+msgstr "每个视图或控制器接收的已接纳批次。"
+
+#: ../../source/mp/observability/metrics.rst:975
+msgid "``lmcache_coordinator.ingest.batch_apply_time_seconds``"
+msgstr "``lmcache_coordinator.ingest.batch_apply_time_seconds``"
+
+#: ../../source/mp/observability/metrics.rst:977
+msgid ""
+"Time each view or controller spent applying those batches.  Divide its "
+"rate by the rate of ``batches_delivered`` for the average apply time per "
+"batch."
+msgstr "每个视图或控制器在应用这些批次上花费的时间。将其速率除以 ``batches_delivered`` 的速率，以获得每个批次的平均应用时间。"
+
+#: ../../source/mp/observability/metrics.rst:981
+msgid "The freshness metrics say how old the coordinator's view is."
+msgstr "新鲜度指标表示协调器视图的陈旧程度。"
+
+#: ../../source/mp/observability/metrics.rst:990
+msgid "``lmcache_coordinator.ingest.server_seconds_since_last_event``"
+msgstr "``lmcache_coordinator.ingest.server_seconds_since_last_event``"
+
+#: ../../source/mp/observability/metrics.rst:992
+msgid ""
+"Seconds since this server's last batch was applied.  High while the "
+"server still heartbeats means it has stopped sending events."
+msgstr "自上次应用此服务器的批处理以来的秒数。在服务器仍在发送心跳时，如果该值很高，则意味着它已停止发送事件。"
+
+#: ../../source/mp/observability/metrics.rst:994
+msgid "``lmcache_coordinator.ingest.server_event_delivery_delay_seconds``"
+msgstr "``lmcache_coordinator.ingest.server_event_delivery_delay_seconds``"
+
+#: ../../source/mp/observability/metrics.rst:996
+msgid ""
+"For this server's last applied batch, time from the server sending it to "
+"the coordinator applying it.  Measured across the two hosts' clocks, so "
+"clock skew shows up here."
+msgstr "对于该服务器最后应用的批次，从服务器发送到协调器应用的时间。测量两个主机时钟之间的差异，因此时钟偏差会在这里显示。"
+
+#: ../../source/mp/observability/metrics.rst:999
+msgid "``lmcache_coordinator.kafka.records_read``"
+msgstr "``lmcache_coordinator.kafka.records_read``"
+
+#: ../../source/mp/observability/metrics.rst:1001
+msgid ""
+"Records read from the Kafka topic: ``applied``, ``undecodable`` or "
+"``failed``.  Only with ``--event-transport kafka``."
+msgstr ""
+"从 Kafka 主题读取的记录：``applied``、``undecodable`` 或 ``failed``。仅在使用 ``--event-"
+"transport kafka`` 时可用。"
+
+#: ../../source/mp/observability/metrics.rst:1003
+msgid "``lmcache_coordinator.kafka.partitions_assigned``"
+msgstr "``lmcache_coordinator.kafka.partitions_assigned``"
+
+#: ../../source/mp/observability/metrics.rst:1005
+msgid ""
+"Topic partitions this coordinator holds.  Fewer than the topic has means "
+"another member of the consumer group holds the rest."
+msgstr "该协调器持有的主题分区。如果少于主题的分区数量，则意味着消费者组的其他成员持有其余分区。"
+
+#: ../../source/mp/observability/metrics.rst:1007
+msgid "``lmcache_coordinator.kafka.unread_records``"
+msgstr "``lmcache_coordinator.kafka.unread_records``"
+
+#: ../../source/mp/observability/metrics.rst:1008
+msgid "ObservableGauge (attr: ``partition``)"
+msgstr "可观察的计量仪表 (属性: ``partition``)"
+
+#: ../../source/mp/observability/metrics.rst:1009
+msgid ""
+"Records not yet read per partition.  Kafka's own lag tools cannot report "
+"this, because the coordinator never commits offsets."
+msgstr "每个分区尚未读取的记录。Kafka 自身的延迟工具无法报告这一点，因为协调器从未提交偏移量。"
+
+#: ../../source/mp/observability/metrics.rst:1012
+msgid ""
+"The liveness metrics say whether the coordinator's loops and controllers "
+"are still doing their work.  A failed pass of a background loop is logged"
+" and counted, and the loop keeps running."
+msgstr "存活指标表明协调器的循环和控制器是否仍在执行其工作。后台循环的失败执行会被记录和计数，并且循环会继续运行。"
+
+#: ../../source/mp/observability/metrics.rst:1023
+msgid "``lmcache_coordinator.background_loop.last_success_timestamp_seconds``"
+msgstr "``lmcache_coordinator.background_loop.last_success_timestamp_seconds``"
+
+#: ../../source/mp/observability/metrics.rst:1024
+#: ../../source/mp/observability/metrics.rst:1029
+msgid "ObservableGauge (attr: ``loop``)"
+msgstr "可观察的仪表 (属性: ``loop``)"
+
+#: ../../source/mp/observability/metrics.rst:1025
+msgid ""
+"Wall-clock time each loop (``health``, ``checkpoint``, ``eviction``) last"
+" finished a pass without an error.  More than three intervals ago means "
+"the loop has stopped making progress."
+msgstr ""
+"每个循环的墙钟时间 (``health``, ``checkpoint``, ``eviction``) "
+"最后一次完成没有错误的传递。超过三个间隔意味着循环已停止进展。"
+
+#: ../../source/mp/observability/metrics.rst:1028
+msgid "``lmcache_coordinator.background_loop.interval_seconds``"
+msgstr "``lmcache_coordinator.background_loop.interval_seconds``"
+
+#: ../../source/mp/observability/metrics.rst:1030
+msgid "Configured seconds between the loop's passes."
+msgstr "循环执行之间配置的秒数。"
+
+#: ../../source/mp/observability/metrics.rst:1031
+msgid "``lmcache_coordinator.background_loop.passes``"
+msgstr "``lmcache_coordinator.background_loop.passes``"
+
+#: ../../source/mp/observability/metrics.rst:1032
+msgid "ObservableCounter (attrs: ``loop``, ``result``)"
+msgstr "可观察计数器 (属性: ``loop``, ``result``)"
+
+#: ../../source/mp/observability/metrics.rst:1033
+msgid "Loop passes, ``ok`` or ``failed``."
+msgstr "循环传递，``ok`` 或 ``failed``。"
+
+#: ../../source/mp/observability/metrics.rst:1034
+msgid "``lmcache_coordinator.controller.up``"
+msgstr "``lmcache_coordinator.controller.up``"
+
+#: ../../source/mp/observability/metrics.rst:1035
+msgid "ObservableGauge (attr: ``controller``)"
+msgstr "可观察的计量仪表 (属性: ``controller``)"
+
+#: ../../source/mp/observability/metrics.rst:1036
+msgid "``1`` if the controller is running, ``0`` if it failed to start."
+msgstr "``1`` 表示控制器正在运行，``0`` 表示启动失败。"
+
+#: ../../source/mp/observability/metrics.rst:1037
+msgid "``lmcache_coordinator.event_loop.blocked_seconds``"
+msgstr "``lmcache_coordinator.event_loop.blocked_seconds``"
+
+#: ../../source/mp/observability/metrics.rst:1039
+msgid ""
+"Total time the coordinator's event loop was blocked.  Its rate is the "
+"fraction of time request handlers, heartbeats and loops were stalled."
+msgstr "协调器的事件循环被阻塞的总时间。其速率是请求处理程序、心跳和循环停滞的时间占总时间的比例。"
+
+#: ../../source/mp/observability/metrics.rst:1041
+msgid "``lmcache_coordinator.registry.server_seconds_since_heartbeat``"
+msgstr "``lmcache_coordinator.registry.server_seconds_since_heartbeat``"
+
+#: ../../source/mp/observability/metrics.rst:1043
+msgid "Seconds since each registered server's last heartbeat."
+msgstr "每个注册服务器最后一次心跳的秒数。"
 
 #~ msgid ""
 #~ "Metrics are collected via OpenTelemetry "
@@ -1121,4 +2019,35 @@ msgstr "在 **推送模式** (设置了 ``--otlp-endpoint``) 下，服务器不�
 
 #~ msgid "Add the LMCache server as a Prometheus scrape target:"
 #~ msgstr "将 LMCache 服务器添加为 Prometheus 抓取目标："
+
+#~ msgid "``lmcache_mp.l2_prefetch_hit``"
+#~ msgstr "``lmcache_mp.l2_prefetch_hit``"
+
+#~ msgid "Number of prefix chunks found in L2 lookup."
+#~ msgstr "在 L2 查找中找到的前缀块数量。"
+
+#~ msgid ""
+#~ "The Coordinator Key Directory gauges "
+#~ "always emit one observation for each "
+#~ "``tier`` value, ``l1`` and ``l2``, "
+#~ "including zero-valued observations for "
+#~ "an empty tier.  They describe the "
+#~ "directory's current placements.  Placement "
+#~ "bytes are the sum of the logical"
+#~ " object sizes reported for those "
+#~ "placements, not unique-object bytes, "
+#~ "physical allocation, or storage capacity.  "
+#~ "The same object is therefore included"
+#~ " once for every placement recorded "
+#~ "for it."
+#~ msgstr ""
+
+#~ msgid ""
+#~ "Placements currently recorded in the "
+#~ "Coordinator Key Directory for each cache"
+#~ " tier."
+#~ msgstr ""
+
+#~ msgid "**PromQL for hit rate:**"
+#~ msgstr "**PromQL 查询命中率:**"
 

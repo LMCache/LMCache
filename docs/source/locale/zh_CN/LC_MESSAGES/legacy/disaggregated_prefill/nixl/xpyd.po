@@ -1,0 +1,411 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:2
+msgid "XpYd"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/disaggregated_prefill`."
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:10
+msgid "X Prefiller, Y Decoder (XpYd) Example"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:12
+msgid ""
+"This example demonstrates how to run LMCache with disaggregated prefill "
+"using NIXL on a single node with multiple prefiller and decoder "
+"instances. This configuration allows for horizontal scaling of both the "
+"compute-intensive prefill operations and the decode operations, enabling "
+"better resource utilization and higher throughput."
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:15
+msgid "Architecture Overview"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:17
+msgid ""
+"The XpYd setup consists of multiple components that can be scaled "
+"independently:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:19
+msgid ""
+"**Multiple Prefiller Servers** - Handle the prefill phase of inference "
+"(initial prompt processing)"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:20
+msgid ""
+"**Multiple Decoder Servers** - Handle the decode phase of inference "
+"(token generation)"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:21
+msgid ""
+"**Proxy Server** - Coordinates requests between prefillers and decoders "
+"using round-robin load balancing"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:23
+msgid "Example 2p2d Architecture:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:54
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:56
+msgid "**LMCache**: Install with ``pip install lmcache``"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:57
+msgid ""
+"**NIXL**: Install from `NIXL GitHub repository <https://github.com/ai-"
+"dynamo/nixl>`_"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:58
+msgid ""
+"**Hardware**: At least 4 GPUs (2 for prefillers + 2 for decoders in 2p2d "
+"setup)"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:59
+msgid ""
+"**Model Access**: Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B "
+"Instruct"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:62
+msgid "Quick Start (2p2d Example)"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:64
+msgid "**Set your Hugging Face token**:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:70
+msgid "**Navigate to the example directory**:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:76
+msgid "**Run the example**:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:82
+msgid "The script will automatically:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:84
+msgid "Launch two decoder instances on port 8200 and 8201 (GPU 2 and GPU 3)"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:85
+msgid "Launch two prefiller instances on ports 7100 and 7101 (GPU 0 and GPU 1)"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:86
+msgid "Launch a proxy server on port 9100 with round-robin load balancing"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:87
+msgid "Wait for all servers to be ready"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:89
+msgid "Press ``Ctrl+C`` to stop all servers."
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:92
+msgid "Configuration"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:94
+msgid ""
+"**Important**: For correct KV cache transfer, ensure all processes use "
+"the same ``PYTHONHASHSEED`` to keep the hash of the KV cache consistent "
+"across processes:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:101
+msgid "Prefiller Configuration"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:103
+msgid ""
+"All prefillers share the same configuration via ``configs/lmcache-"
+"prefiller-config.yaml``:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:119
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:145
+msgid "Key settings:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:121
+msgid "``pd_role: \"sender\"`` - Configures these instances to send KV cache data"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:122
+msgid ""
+"``pd_buffer_size: 1073741824 # 1GB`` - Upper bound of PD transport buffer"
+" size (in bytes), aligned to chunk size"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:123
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:149
+msgid "``pd_buffer_device: \"cuda\"`` - Uses GPU memory for buffering"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:126
+msgid "Decoder Configuration"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:128
+msgid ""
+"The decoder(s) are configured via ``configs/lmcache-"
+"decoder-x-config.yaml``:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:147
+msgid ""
+"``pd_role: \"receiver\"`` - Configures these instances to receive KV "
+"cache data"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:148
+msgid ""
+"``pd_buffer_size: 2147483648 # 2GB`` - Upper bound of PD transport buffer"
+" size (in bytes), aligned to chunk size"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:152
+msgid "Components Deep Dive"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:155
+msgid "Proxy Server (disagg_proxy_server.py)"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:157
+msgid "The proxy server coordinates the multi-prefiller disaggregated workflow:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:159
+msgid "**Request Handling**: Receives client requests on port 9000"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:160
+msgid ""
+"**Load Balancing**: Distributes requests across multiple prefillers using"
+" round-robin"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:161
+msgid ""
+"**Prefill Coordination**: Sends requests to prefillers with "
+"``max_tokens=1``"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:162
+msgid "**Prefill Response**: Receives prefiller that says nixl transfer is done"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:163
+msgid "**Response Streaming**: Streams the full response from the decoder"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:164
+msgid "**Performance Monitoring**: Tracks Time-To-First-Token (TTFT) statistics"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:166
+msgid ""
+"Key features: - **Round-robin distribution**: Balances load across "
+"``--num-prefillers`` instances - **Fault tolerance**: Handles prefiller "
+"failures gracefully - **Monitoring**: Provides detailed TTFT statistics "
+"for each prefiller"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:171
+msgid "Supported endpoints: - ``/v1/completions`` - ``/v1/chat/completions``"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:176
+msgid "vLLM Server Launcher (disagg_vllm_launcher.sh)"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:178
+msgid ""
+"This script launches individual vLLM servers with appropriate "
+"configurations:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:180
+msgid "**Prefiller1 Launch Command**:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:196
+msgid "**Prefiller2 Launch Command**:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:212
+msgid "**Decoder1 Launch Command**:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:228
+msgid "**Decoder2 Launch Command**:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:244
+msgid ""
+"Key differences from 1p1d: - Each prefiller gets a unique "
+"``lmcache_rpc_port`` (producer1, producer2, etc.) - Each prefiller runs "
+"on a different GPU (CUDA_VISIBLE_DEVICES) - Different ports for each "
+"prefiller (7100, 7101, etc.) - Different ports for each decoder (7200, "
+"7201, etc.)"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:251
+msgid "Basic Test"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:253
+msgid "Once all servers are running, you can test with a simple curl command:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:265
+msgid "Performance Benchmarking"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:267
+msgid "For comprehensive performance testing, use vLLM's benchmark tool:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:276
+msgid ""
+"Expected performance improvements with 2p2d: - **Higher throughput**: "
+"Multiple prefillers can handle more concurrent requests - **Better "
+"TTFT**: Load balancing reduces queuing delays - **Improved utilization**:"
+" Better GPU utilization across multiple devices"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:281
+msgid "Sample benchmark results:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:308
+msgid "Log Files and Monitoring"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:310
+msgid "The example generates multiple log files for comprehensive monitoring:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:312
+msgid "``prefiller1.log`` - First prefiller server logs and errors"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:313
+msgid "``prefiller2.log`` - Second prefiller server logs and errors"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:314
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:315
+msgid "``decoder1.log`` - First decoder server logs and errors"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:316
+msgid "``proxy.log`` - Proxy server logs and TTFT statistics"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:318
+msgid "The proxy server provides detailed statistics for each prefiller:"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:334
+msgid ""
+"This helps identify performance differences between prefiller instances "
+"and optimize load balancing."
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:337
+msgid "Troubleshooting"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:340
+msgid "Common Issues"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:342
+msgid "**GPU Memory**: Ensure each GPU has sufficient memory for the model"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:343
+msgid "**NIXL Installation**: Verify NIXL is properly installed and accessible"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:344
+msgid "**Port Conflicts**: Check that all required ports are available"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:345
+msgid "**HF Token**: Ensure your Hugging Face token has access to Llama models"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:346
+msgid "**GPU Assignment**: Verify CUDA_VISIBLE_DEVICES assignments don't conflict"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:349
+msgid "Multi-Instance Specific Issues"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:351
+msgid ""
+"**Uneven Load**: Monitor prefiller statistics to ensure balanced "
+"distribution"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:352
+msgid ""
+"**Resource Contention**: Watch for GPU memory pressure with multiple "
+"instances"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:353
+msgid ""
+"**Network Bottlenecks**: Monitor NIXL transfer performance between "
+"instances"
+msgstr ""
+
+#: ../../source/legacy/disaggregated_prefill/nixl/xpyd.rst:354
+msgid "**Startup Timing**: Stagger prefiller launches to avoid resource conflicts"
+msgstr ""
+

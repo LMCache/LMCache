@@ -1,0 +1,587 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:4
+msgid "Chunk Statistics"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:11
+msgid ""
+"The chunk statistics feature provides insights into KV cache chunk reuse "
+"patterns, helping you understand cache efficiency and optimize your "
+"deployment."
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:14
+msgid "Overview"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:16
+msgid ""
+"Chunk statistics tracks and analyzes KV cache chunks to provide metrics "
+"on:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:18
+msgid ""
+"**Total chunks processed**: The total number of chunks that have been "
+"processed"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:19
+msgid "**Unique chunks**: The number of distinct chunks encountered"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:20
+msgid "**Duplicate chunks**: The number of repeated chunks"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:21
+msgid ""
+"**Reuse rate**: The ratio of duplicate chunks to total chunks, indicating"
+" cache efficiency"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:23
+msgid "This information is valuable for:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:25
+msgid "Understanding cache hit patterns"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:26
+msgid "Optimizing cache size and eviction policies"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:27
+msgid "Analyzing workload characteristics"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:28
+msgid "Capacity planning for production deployments"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:31
+msgid "Recording Strategies"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:33
+msgid ""
+"LMCache supports multiple recording strategies, each optimized for "
+"different use cases:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:36
+msgid "Memory Bloom Filter Strategy"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:38
+msgid ""
+"A memory-efficient strategy using Bloom filters for probabilistic "
+"duplicate detection."
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:40
+#: ../../source/legacy/production/observability/chunk_statistics.rst:69
+msgid "**Advantages:**"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:42
+msgid "Low memory footprint"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:43
+msgid "Fast lookup operations"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:44
+msgid "Suitable for large-scale deployments"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:46
+#: ../../source/legacy/production/observability/chunk_statistics.rst:75
+msgid "**Configuration:**"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:56
+#: ../../source/legacy/production/observability/chunk_statistics.rst:86
+msgid "**Environment Variables:**"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:65
+msgid "File Hash Strategy"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:67
+msgid ""
+"A file-based strategy that writes chunk hashes to disk for exact tracking"
+" and offline analysis."
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:71
+msgid "Exact duplicate detection (no false positives)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:72
+msgid "Persistent storage for offline analysis"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:73
+msgid "Automatic file rotation and cleanup"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:95
+msgid "Quick Start Guide"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:98
+msgid "Step 1: Enable Chunk Statistics"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:100
+msgid "Configure your LMCache instance with chunk statistics enabled:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:102
+msgid "**Using YAML Configuration:**"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:123
+msgid "**Using vLLM with LMCache:**"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:140
+msgid "Step 2: Access Statistics"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:142
+msgid "Retrieve statistics through the internal API server:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:149
+msgid "**Example Response:**"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:192
+msgid "Configuration Options"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:195
+msgid "Basic Configuration"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:197
+msgid "Basic Configuration Options"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:201
+#: ../../source/legacy/production/observability/chunk_statistics.rst:229
+#: ../../source/legacy/production/observability/chunk_statistics.rst:248
+msgid "Configuration Key"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:202
+#: ../../source/legacy/production/observability/chunk_statistics.rst:230
+#: ../../source/legacy/production/observability/chunk_statistics.rst:249
+msgid "Default Value"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:203
+#: ../../source/legacy/production/observability/chunk_statistics.rst:231
+#: ../../source/legacy/production/observability/chunk_statistics.rst:250
+msgid "Description"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:204
+msgid "``enable_chunk_statistics``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:205
+#: ../../source/legacy/production/observability/chunk_statistics.rst:211
+msgid "``false``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:206
+msgid "Enable chunk statistics tracking"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:207
+msgid "``chunk_statistics_strategy``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:208
+msgid "``memory_bloom_filter``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:209
+msgid "Recording strategy: ``memory_bloom_filter`` or ``file_hash``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:210
+msgid "``chunk_statistics_auto_start_statistics``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:212
+msgid "Automatically start statistics collection on initialization"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:213
+msgid "``chunk_statistics_auto_exit_timeout_hours``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:214
+msgid "``0.0``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:215
+msgid "Auto-stop after specified hours (0 = disabled)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:216
+msgid "``chunk_statistics_auto_exit_target_unique_chunks``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:217
+msgid "``0``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:218
+msgid "Auto-stop after reaching target unique chunks (0 = disabled)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:221
+msgid "Memory Bloom Filter Options"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:223
+#: ../../source/legacy/production/observability/chunk_statistics.rst:242
+msgid "Configure these options in the ``extra_config`` section:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:225
+msgid "Bloom Filter Configuration"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:232
+msgid "``chunk_statistics_mem_bf_expected_chunks``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:233
+msgid "``20000000``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:234
+msgid "Expected number of chunks for capacity planning"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:235
+msgid "``chunk_statistics_mem_bf_false_positive_rate``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:236
+msgid "``0.01``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:237
+msgid "Target false positive rate (1%)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:240
+msgid "File Hash Options"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:244
+msgid "File Hash Configuration"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:251
+msgid "``chunk_statistics_file_output_dir``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:252
+msgid "``/tmp/lmcache_chunk_statistics``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:253
+msgid "Directory for storing chunk hash files"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:254
+msgid "``chunk_statistics_file_rotation_size``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:255
+msgid "``104857600``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:256
+msgid "File size threshold for rotation (bytes, default 100MB)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:257
+msgid "``chunk_statistics_file_max_count``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:258
+msgid "``100``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:259
+msgid "Maximum number of files to keep"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:262
+msgid "Advanced Usage"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:265
+msgid "Programmatic Control"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:267
+msgid "Control statistics collection programmatically through the internal API:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:287
+msgid "Auto-Stop Configuration"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:289
+msgid "Configure automatic stopping based on time or chunk count:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:296
+msgid "Prometheus Metrics"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:298
+msgid ""
+"When using the internal API server, chunk statistics are exposed as "
+"Prometheus metrics:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:300
+msgid ""
+"``lmcache_chunk_statistics_total_chunks``: Total number of chunks "
+"processed"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:301
+msgid "``lmcache_chunk_statistics_unique_chunks``: Number of unique chunks"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:302
+msgid "``lmcache_chunk_statistics_reuse_rate``: Cache reuse rate (0.0 to 1.0)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:303
+msgid ""
+"``lmcache_chunk_statistics_bloom_filter_size_mb``: Bloom filter memory "
+"usage (MB)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:304
+msgid ""
+"``lmcache_chunk_statistics_bloom_filter_fill_rate``: Bloom filter fill "
+"rate (0.0 to 1.0)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:305
+msgid "``lmcache_chunk_statistics_file_count``: Number of hash files created"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:306
+msgid "``lmcache_chunk_statistics_current_file_size``: Current file size (bytes)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:309
+msgid "Offline Analysis"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:311
+msgid ""
+"For the file hash strategy, you can perform detailed offline analysis of "
+"collected chunk hash data."
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:314
+msgid "Using the Analysis Script"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:316
+msgid ""
+"LMCache provides a comprehensive analysis script at "
+"``examples/chunk_statistics/analyze_chunk_hashes.py`` that supports "
+"multiple analysis modes."
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:319
+msgid "Best Practices"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:321
+msgid "**Choose the Right Strategy:**"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:323
+msgid "Use **memory_bloom_filter** for real-time monitoring with minimal overhead"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:324
+msgid "Use **file_hash** when exact tracking is required or for offline analysis"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:326
+msgid "**Tune Bloom Filter Parameters:**"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:328
+msgid "Set ``expected_chunks`` based on your workload size"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:329
+msgid "Lower ``false_positive_rate`` increases memory usage but improves accuracy"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:331
+msgid "**Monitor Memory Usage:**"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:333
+msgid ""
+"Track ``bloom_filter_size_mb`` metric to ensure it fits in available "
+"memory"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:334
+msgid "Adjust ``expected_chunks`` if memory usage is too high"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:336
+msgid "**File Rotation:**"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:338
+msgid ""
+"Configure appropriate ``file_rotation_size`` to balance file size and "
+"count"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:339
+msgid "Set ``file_max_count`` to prevent unlimited disk usage"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:341
+msgid "**Production Deployment:**"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:343
+msgid "Enable auto-stop to prevent indefinite data collection"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:344
+msgid "Use internal API server for centralized metrics collection"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:345
+msgid "Integrate with your monitoring stack (Prometheus, Grafana, etc.)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:348
+msgid "Troubleshooting"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:351
+msgid "Statistics Not Updating"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:353
+msgid "**Issue:** Statistics remain at zero or don't update."
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:355
+#: ../../source/legacy/production/observability/chunk_statistics.rst:366
+#: ../../source/legacy/production/observability/chunk_statistics.rst:377
+msgid "**Solutions:**"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:357
+msgid "Verify ``enable_chunk_statistics`` is set to ``true``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:358
+msgid "Check that statistics collection is started (auto-start or manual start)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:359
+msgid "Ensure requests are being processed by the LMCache instance"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:362
+msgid "High Memory Usage"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:364
+msgid "**Issue:** Bloom filter consuming too much memory."
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:368
+msgid "Reduce ``chunk_statistics_mem_bf_expected_chunks``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:369
+msgid ""
+"Increase ``chunk_statistics_mem_bf_false_positive_rate`` (trade accuracy "
+"for memory)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:370
+msgid "Consider switching to ``file_hash`` strategy"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:373
+msgid "File System Full"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:375
+msgid "**Issue:** Disk space exhausted with file hash strategy."
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:379
+msgid "Reduce ``chunk_statistics_file_max_count``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:380
+msgid "Decrease ``chunk_statistics_file_rotation_size``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/chunk_statistics.rst:381
+msgid "Implement external log rotation or archival"
+msgstr ""
+

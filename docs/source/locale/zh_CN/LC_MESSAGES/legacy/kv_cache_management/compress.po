@@ -1,0 +1,101 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/kv_cache_management/compress.rst:4
+msgid "Compress and Decompress the KV cache"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/compress.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/compress.rst:11
+msgid "The ``compress`` interface is defined as the following:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/compress.rst:18
+msgid ""
+"These 2 functions compresses/decompresses the KV cache chunks specified "
+"by ``tokens`` using the given ``method`` in the storage ``location``. The"
+" controller returns an ``event_id`` and the number of tokens scheduled "
+"for compression or decompression."
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/compress.rst:22
+msgid "Example usage:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/compress.rst:24
+msgid ""
+"First, we need a yaml file ``example.yaml`` to properly configure the "
+"lmcache instance:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/compress.rst:42
+msgid "Second, we need to start the vllm/lmcache instance at port 8000:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/compress.rst:48
+msgid ""
+"Third, we need to start the lmcache controller at port 9000 and the "
+"monitor at port 9001:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/compress.rst:54
+msgid "Then we can send a request to vllm to see if it works properly:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/compress.rst:66
+msgid "Now we send a request to tokenize the prompt:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/compress.rst:77
+msgid "We should be able to see token ids in response:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/compress.rst:83
+msgid "After all, we issue a ``compress`` request:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/compress.rst:96
+#: ../../source/legacy/kv_cache_management/compress.rst:117
+msgid "The controller responds with a message similar to:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/compress.rst:102
+msgid ""
+"This indicates that 12 tokens are being compressed. The ``event_id`` can "
+"be used to query the status of the operation."
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/compress.rst:104
+msgid "Once the kv cache is compressed, we can use cachegen to decompress"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/compress.rst:123
+msgid ""
+"This indicates that 12 tokens are being decompressed. The ``event_id`` "
+"can be used to query the status of the operation."
+msgstr ""
+

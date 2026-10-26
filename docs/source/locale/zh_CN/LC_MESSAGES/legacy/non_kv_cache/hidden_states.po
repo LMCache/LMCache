@@ -1,0 +1,170 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:2
+msgid "Hidden states"
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:4
+msgid ""
+"The **HiddenStateStore** caches per-token *hidden-state* tensors "
+"(intermediate activations from an inference forward pass) alongside the "
+"KV cache, keyed by the same chunk keys. It exists to support any system "
+"where a downstream stage needs an upstream stage's intermediate "
+"activations for the cached prefix and cannot reconstruct them from KV "
+"alone — for example a vLLM-Omni ``thinker -> talker`` pipeline, where the"
+" talker consumes the thinker's hidden states for tokens whose KV the "
+"engine restored without re-running prefill."
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:14
+msgid ""
+"Without this store, restoring KV alone causes downstream stages to see "
+"truncated or wrong activations for the cached prefix. With it, the talker"
+" (or any equivalent consumer) gets a contiguous "
+"``[num_cached_prefix_tokens, hidden_dim]`` tensor matching the KV prefix "
+"LMCache restored."
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:21
+msgid "Enabling it"
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:23
+msgid "Set three keys in the LMCache YAML (``LMCACHE_CONFIG_FILE``):"
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:33
+msgid ""
+"``enable_hidden_state_cache`` — master switch. When ``false`` (the "
+"default), ``engine.hidden_state_store`` is ``None`` and integrators must "
+"skip all HS APIs on that worker."
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:36
+msgid ""
+"``max_hidden_state_cpu_size`` — pinned-CPU pool size in GiB, dedicated to"
+" hidden states. Must be ``> 0`` when the store is enabled. The pool is "
+"**independent** of the KV pool; HS allocator pressure never evicts KV."
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:40
+msgid ""
+"``hidden_state_layers`` — optional allowlist of ``layer_idx`` values "
+"accepted on ``store_hidden_states``. Leave unset to accept all layer "
+"indices. Use this only when you know exactly which hook indices the "
+"worker writes (e.g. matching a fork's hybrid multimodal hook list)."
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:47
+msgid "Using it from a worker"
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:49
+msgid "The store is exposed on the engine (not as engine-level methods):"
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:68
+msgid "Notes:"
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:70
+msgid ""
+"``token_ids`` is always the **full** prefix so chunk keys align with KV "
+"exactly. ``token_offset`` lets incremental callers (such as vLLM-Omni) "
+"pass only the newly computed rows in ``hidden_states`` without zero-"
+"padding the already-cached prefix."
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:74
+msgid ""
+"``layer_idx`` is the *storage* layer index. Callers that need several "
+"intermediate tensors per request (e.g. multimodal hook outputs *plus* the"
+" main text hidden state) call ``store_hidden_states`` once per distinct "
+"``layer_idx`` and retrieve per layer on restore."
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:79
+msgid ""
+"``retrieve_hidden_states`` is **prefix-strict**: it returns the longest "
+"contiguous CPU ``float32`` prefix where every chunk has both KV and HS "
+"for the requested ``layer_idx``, and stops at the first chunk where "
+"either is missing."
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:85
+msgid "Eviction model"
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:87
+msgid "The store implements a **coupled-but-asymmetric** eviction rule:"
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:89
+msgid ""
+"**KV evicted ⇒ HS evicted.** On every ``retrieve_hidden_states`` the "
+"store asks the KV ``StorageManager`` whether KV is still present for each"
+" chunk key. If KV is gone, the orphan HS entry is dropped and the "
+"returned prefix ends there."
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:93
+msgid ""
+"**HS evicted ⇏ KV evicted.** Pressure on the HS pinned pool only evicts "
+"HS entries (its own LRU), never KV."
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:95
+msgid "**Restore stops at first missing HS or KV chunk** for the requested layer."
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:99
+msgid "Design notes (user-visible)"
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:101
+msgid ""
+"**Separate pinned pool from KV.** KV tensors and hidden-state tensors "
+"have heterogeneous shapes and dtypes, so they get independent allocators."
+" ``max_hidden_state_cpu_size`` sizes the HS pool only."
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:105
+msgid ""
+"**Same chunk keys as KV.** The store reuses the engine's "
+"``TokenDatabase`` so HS chunks share the exact ``CacheEngineKey`` as the "
+"matching KV chunks. This is what enables the lazy coupled eviction check."
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:109
+msgid ""
+"**Lazy coupled-eviction check.** No callbacks or shared indices are "
+"required between KV and HS — the store asks "
+"``storage_manager.contains(key)`` per chunk on retrieve. Works uniformly "
+"for any backend that implements ``contains()``."
+msgstr ""
+
+#: ../../source/legacy/non_kv_cache/hidden_states.rst:114
+msgid ""
+"The full internal design (class layering, code paths, follow-up work) "
+"lives at :file:`docs/design/v1/hidden_state_store.md` in the source tree."
+msgstr ""
+

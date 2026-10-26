@@ -1,0 +1,218 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:2
+msgid "Basic Check Tool"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:9
+msgid ""
+"The LMCache Basic Check Tool is a testing and validation utility that "
+"helps you verify your LMCache installation, configuration, and "
+"functionality. It provides multiple testing modes to validate different "
+"components of the LMCache system."
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:12
+msgid "Overview"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:14
+msgid ""
+"The basic check tool (``lmcache.inprocess.v1.basic_check``) is designed "
+"to:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:16
+msgid "Test remote backend connectivity and functionality"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:17
+msgid "Validate storage manager operations"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:18
+msgid "Generate test keys for performance testing"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:19
+msgid "Verify configuration settings"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:20
+msgid "Provide diagnostic information for troubleshooting"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:23
+msgid "Available Check Modes"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:25
+msgid ""
+"The tool supports several check modes, each targeting specific "
+"functionality:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:28
+msgid "test_remote"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:30
+msgid "Tests the remote backend functionality including:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:32
+msgid "Connection establishment to remote backends (fs, etc.)"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:33
+msgid "put/get operations with data integrity validation"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:34
+msgid "put/get/exists operations with performance reports"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:36
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:51
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:67
+msgid "**Usage:**"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:43
+msgid "test_storage_manager"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:45
+msgid "Tests the storage manager operations including:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:47
+msgid "Configuration validation"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:48
+msgid "batched_put/get operations with data integrity validation"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:49
+msgid "batched_put/get/contains operations with performance reports"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:58
+msgid "gen (Key Generation)"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:60
+msgid "Generates test keys for performance testing and benchmarking:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:62
+msgid "Configurable number of keys and concurrency levels"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:63
+msgid "Memory-efficient batch processing"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:64
+msgid "Progress tracking and performance metrics"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:65
+msgid "Offset support for distributed testing"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:74
+msgid "Command Line Interface"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:77
+msgid "Basic Usage"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:84
+msgid "List Available Modes"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:91
+msgid "Command Line Options"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:95
+msgid "**Required.** Operation mode to run. Use ``list`` to see available modes."
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:99
+msgid ""
+"Model name for testing, just a part of key of persist kv-cache. Default: "
+"``/lmcache_test_model/``"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:103
+msgid "Number of keys to generate (gen mode only). Default: 100"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:107
+msgid "Concurrency level for operations (gen mode only). Default: 16"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:111
+msgid "Offset for key generation (gen mode only). Default: 0"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:114
+msgid "Configuration"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:116
+msgid ""
+"The basic check tool uses your existing LMCache configuration. You can "
+"specify configuration in several ways:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:119
+msgid "Environment Variable"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:127
+msgid "Example Configuration"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:129
+msgid "Here's an example configuration optimized for basic checks:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:142
+msgid "Examples"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/usage/basic_check.rst:144
+msgid "The ``examples/basic_check/`` directory contains comprehensive examples:"
+msgstr ""
+

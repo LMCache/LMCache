@@ -1,0 +1,333 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:4
+msgid "Example: Offload KV cache to CPU"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:11
+msgid "In this example, we will show you how to offload KV cache to CPU memory."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:14
+msgid ""
+"Besides CPU memory, LMCache also supports offloading KV cache to many "
+"different destinations. See "
+":ref:`legacy/getting_started/quickstart/offload_kv_cache:Supported "
+"offloading destinations` for more details."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:18
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:20
+msgid "Before you begin, make sure you have:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:22
+msgid ""
+"vLLM v1 with LMCache installed (see :doc:`Installation "
+"</getting_started/installation>`)"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:23
+msgid "A GPU that can run a LLM"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:27
+msgid "Use CPU offloading in offline inference"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:29
+msgid ""
+"This section demonstrates how to use CPU memory offloading in offline "
+"inference scenarios using LMCache with vLLM. The example script we use "
+"here is available in `vLLM examples <https://github.com/vllm-"
+"project/vllm/blob/main/examples/disaggregated/lmcache/cpu_offload_lmcache.py>`_."
+" See the `examples README <https://github.com/vllm-"
+"project/vllm/tree/main/examples/disaggregated/lmcache#1-cpu-offload-in-"
+"process>`_ to understand how to run the script for vLLM v1."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:33
+msgid "First, set up the necessary environment variables for LMCache:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:46
+msgid "Next, configure vLLM with LMCache integration:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:66
+msgid "Now you can run inference with automatic KV cache offloading:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:85
+msgid "When the inference is complete, clean up the LMCache backend:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:94
+msgid ""
+"During inference, LMCache will automatically handle storing and managing "
+"KV cache in CPU memory. You can monitor this through the logs, which will"
+" show messages like::"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:98
+msgid ""
+"This indicates that the KV cache has been successfully offloaded to CPU "
+"memory."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:101
+msgid "Adjust ``gpu_memory_utilization`` based on your GPU's available memory"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:102
+msgid ""
+"The CPU offloading buffer size can be adjusted through "
+"``LMCACHE_MAX_LOCAL_CPU_SIZE``"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:105
+msgid "Use CPU offloading in online inference"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:107
+msgid ""
+"This section demonstrates how to use CPU memory offloading in online "
+"serving scenarios."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:109
+msgid ""
+"First, create a configuration file named ``lmcache_config.yaml`` with the"
+" following content:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:118
+msgid ""
+"LMCache supports extensive configuration through a "
+"``lmcache_config.yaml`` file where you can customize chunk sizes, memory "
+"limits, storage backends, and more. We'll cover advanced configuration "
+"options in later examples. For now, let's run a minimal example with "
+"default configuration."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:120
+msgid ""
+"Launch the vLLM server with LMCache integration using environment "
+"variables. Here's an example command:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:132
+msgid "Key parameters explained:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:134
+msgid "``LMCACHE_CONFIG_FILE``: Path to the LMCache configuration file."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:135
+msgid "``--kv-transfer-config``: Configures LMCache integration"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:136
+msgid "``kv_connector``: Specifies the LMCache connector"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:137
+msgid "``kv_role``: Set to \"kv_both\" for both storing and loading KV cache"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:139
+msgid ""
+"Once the server is running, you can send requests to it using curl. "
+"Here's an example of how to send a request to the vLLM server with "
+"LMCache integration:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:152
+msgid "You should see the following logs:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:159
+msgid ""
+"Once you send the same curl request again, you should see the following "
+"logs:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:168
+msgid "Example: CPU offloading benefits"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:170
+msgid ""
+"This section demonstrates the performance benefits of using CPU "
+"offloading with LMCache. We'll use a script that generates multiple "
+"prompts and compare the performance with and without LMCache."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:173
+msgid "Prerequisites (Setup)"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:175
+msgid "A CUDA GPU. The example picks a model that fits the GPU automatically:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:177
+msgid ""
+"``Qwen/Qwen3-8B`` (bf16) when the GPU has ~36 GiB or more (e.g. A100-80G,"
+" H100)."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:178
+msgid ""
+"``Qwen/Qwen3-8B-FP8`` with ``kv_cache_dtype=\"fp8\"`` when the GPU has "
+"~24 GiB and supports native FP8 (Ada Lovelace / Hopper, ``sm_89+``; e.g. "
+"L4, L40, RTX 4090)."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:180
+msgid ""
+"``Qwen/Qwen3-1.7B`` as the fallback for smaller GPUs (~10 GiB and up), "
+"including Ampere 24 GiB cards (RTX A5000, RTX 3090) where FP8 is "
+"unsupported."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:183
+msgid ""
+"Sufficient CPU memory. The example clamps the LMCache pinned host buffer "
+"to fit your system RAM and ``RLIMIT_MEMLOCK`` (``ulimit -l``), so it also"
+" works on smaller hosts without manual tuning."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:188
+msgid "Example script"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:190
+msgid "Save the following script as ``cpu-offloading.py``:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:410
+msgid "Running the Example"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:412
+msgid "First, run the script without LMCache:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:418
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:433
+msgid "You'll see output like:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:424
+msgid ""
+"Without LMCache, there's no speedup between runs even if vLLM has prefix "
+"caching enabled. This is because the KV cache exceeds GPU memory and "
+"can't be reused."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:427
+msgid "Now, run with LMCache enabled:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:439
+msgid ""
+"The significant speedup in the second case demonstrates how LMCache "
+"effectively manages KV cache offloading to CPU memory. When the total "
+"size of KV cache exceeds GPU memory, LMCache allows you to store and "
+"reuse the cache from CPU memory, resulting in much faster subsequent "
+"generations for prompts with shared prefixes."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:445
+msgid "Supported offloading destinations"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:447
+msgid "LMCache now supports offloading KV cache to the following destinations:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:449
+msgid ":doc:`CPU memory <../../kv_cache/storage_backends/cpu_ram>`"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:450
+msgid ":doc:`Local file system <../../kv_cache/storage_backends/local_storage>`"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:451
+msgid ":doc:`Mooncake Storage <../../kv_cache/storage_backends/mooncake>`"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:452
+msgid ":doc:`InfiniStore <../../kv_cache/storage_backends/infinistore>`"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:453
+msgid ":doc:`Redis <../../kv_cache/storage_backends/redis>`"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:454
+msgid ":doc:`ValKey <../../kv_cache/storage_backends/valkey>`"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:457
+msgid "Troubleshooting"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:459
+msgid "If you encounter the following error:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:466
+msgid "You can resolve this issue using one of the following methods:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:468
+msgid "Set ``VLLM_WORKER_MULTIPROC_METHOD=spawn`` in the environment variables."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:469
+msgid ""
+"Or update the Python code to guard usage of vllm behind a if ``__name__ "
+"== '__main__':`` block."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/offload_kv_cache.rst:480
+msgid ""
+"For details, please refer to the `vLLM Troubleshooting Guide: Python "
+"multiprocessing "
+"<https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-"
+"multiprocessing>`_."
+msgstr ""
+

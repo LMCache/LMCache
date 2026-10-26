@@ -1,0 +1,184 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/platform/devices/mlu/index.rst:4
+msgid "Cambricon MLU Backend"
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:6
+msgid ""
+"The MLU backend implements the community ``DeviceSpec`` and ``DeviceOps``"
+" interfaces for multiprocess **engine-driven** transfers. It uses "
+"``torch_mlu`` tensor operations to move KV blocks between MLU memory and "
+"canonical host chunks."
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:12
+msgid "Requirements and selection"
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:14
+msgid ""
+"Install a matching Cambricon driver, Neuware runtime, PyTorch, and "
+"``torch_mlu`` distribution first. Build LMCache's common C++ extensions "
+"against that PyTorch installation, without GPU-specific extensions::"
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:20
+msgid ""
+"Use an environment with the repository's build dependencies installed. Do"
+" not replace the vendor's PyTorch version as part of this installation."
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:23
+msgid "Set these variables before starting the serving engine::"
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:28
+msgid ""
+"The backend probes ``torch_mlu`` at startup. Explicit selection fails if "
+"the runtime is missing or no MLU is available. A CPU-only LMCache server "
+"does not need ``LMCACHE_DEVICE_BACKEND=mlu``."
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:33
+msgid "Supported transfer contract"
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:35
+msgid ""
+"The MP serving adapter must pass real per-layer MLU tensors and an "
+"accurate ``kv_layout`` hint. The supported layouts are:"
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:38
+msgid "K/V-first NHD: ``[2, num_blocks, block_size, num_heads, head_size]``."
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:39
+msgid "K/V-first HND: ``[2, num_blocks, num_heads, block_size, head_size]``."
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:40
+msgid "MLA: ``[num_blocks, block_size, head_size]``."
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:42
+msgid ""
+"The vLLM adapter normalizes legacy MLU layout queries to HND, matching "
+"Cambricon's V1 FlashAttention allocation. Explicitly resolved layouts "
+"from newer vLLM versions retain their reported value."
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:46
+msgid ""
+"Host chunks use the same token-major layout as other community backends. "
+"Callers must synchronize the transfer stream before consuming host chunks"
+" or releasing their storage. Completion recorders wait synchronously for "
+"the supplied MLU queue before publishing completion. The zero handle "
+"denotes ``torch.mlu.default_stream()`` on the current device. A nonzero "
+"handle borrows the caller's stream; the caller retains ownership and must"
+" keep the stream alive until the call returns."
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:54
+msgid ""
+"The MP transfer context owns source and destination tensors until gather "
+"completion. Error recovery and request-level completion tracking belong "
+"to the shared context and worker adapter. This device backend does not "
+"modify those lifecycle mechanisms or establish end-to-end preemption "
+"safety."
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:59
+msgid ""
+"D2H copies into non-contiguous host slices also block. This preserves "
+"correctness for prefix skips on torch_mlu versions where an asynchronous "
+"strided D2H copy can return incorrect data even after synchronization."
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:63
+msgid ""
+"This backend does not add a vLLM-MLU serving connector. In particular, it"
+" does not implement the vendor connector's remote-allocation extensions. "
+"A serving adapter must use the community MP engine-driven interface. V1 "
+"support alone does not establish connector compatibility: the serving "
+"runtime must also provide the vLLM APIs used by the installed LMCache "
+"connector. A passing device transfer test does not validate those APIs. "
+"Serving adapters must finish pending gathers before KV block reuse, "
+"consume flush metadata before retrieval and forward, and wait for pending"
+" host-to-server commits before closing. Request-level completion receipts"
+" remain the responsibility of the shared worker adapter."
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:75
+msgid "Capability limits"
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:77
+msgid ""
+"Raw pointer transfers, the legacy in-process connector, LMCache-driven "
+"IPC, arbitrary host-memory registration, and native transfer kernels are "
+"not supported. Unsupported transfer entry points raise errors instead of "
+"treating MLU addresses as host pointers. ``auto`` selects "
+"``engine_driven``. This implementation makes no throughput or latency "
+"guarantee."
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:84
+msgid "Validation"
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:86
+msgid "Run the backend tests in the configured MLU environment::"
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:91
+msgid ""
+"The transfer matrix runs on both CPU and MLU. MLU cases skip when no "
+"usable runtime is present; skipped cases are not hardware validation. The"
+" tests exercise layout correctness and MP gather/scatter dispatch, not "
+"full model serving."
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:96
+msgid ""
+"For full serving validation, check KV bit equality across store and "
+"restore separately from generated tokens and log probabilities. Compare "
+"the warm request with native prefix reuse at the same hit length: full "
+"prefill and partial prefill may use different numerical paths. Repeated "
+"runs and an explicit synchronization control help distinguish numerical "
+"differences from stream-ordering failures; a log-probability tolerance "
+"alone does not establish transfer correctness."
+msgstr ""
+
+#: ../../source/platform/devices/mlu/index.rst:104
+msgid ""
+"Also match the batch timeline: co-scheduled requests, remaining query "
+"lengths, and batch order can change the model's numerical path. To "
+"isolate this effect, replay a captured timeline with identical prefix KV "
+"in an engine without an LMCache connector. Compare logits before sampling"
+" and replay fixed logits separately. Greedy decoding can produce "
+"different tokens when batch-dependent rounding changes two nearly tied "
+"logits; a fixed seed does not establish batch-invariant model "
+"computation."
+msgstr ""
+

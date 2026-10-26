@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"POT-Creation-Date: 2026-10-12 09:51+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -29,7 +29,9 @@ msgid ""
 " block device or pre-sized file using the Rust raw-device I/O bindings. "
 "It reuses the existing raw-block metadata checkpoint model and writes "
 "directly into the caller-provided load buffers during prefetch."
-msgstr "一个内置的 L2 适配器，通过 Rust 原始设备 I/O 接口将 KV 对象存储在原始块设备或预设大小文件的固定大小槽位中。它复用现有的原始块元数据检查点模型，并在预取期间直接写入调用方提供的加载缓冲区。"
+msgstr ""
+"一个内置的 L2 适配器，通过 Rust 原始设备 I/O 接口将 KV "
+"对象存储在原始块设备或预设大小文件的固定大小槽位中。它复用现有的原始块元数据检查点模型，并在预取期间直接写入调用方提供的加载缓冲区。"
 
 #: ../../source/mp/l2_storage/raw_block.rst:9
 msgid "**Required fields:**"
@@ -60,126 +62,474 @@ msgid "``use_odirect``: ``true`` or ``false`` (default ``true``)."
 msgstr "``use_odirect``: ``true`` 或 ``false``\\ （默认 ``true``\\ ）。"
 
 #: ../../source/mp/l2_storage/raw_block.rst:19
-msgid "``block_align``: Device alignment in bytes (default ``4096``)."
-msgstr "``block_align``: 设备对齐字节数（默认 ``4096``\\ ）。"
+msgid ""
+"``block_align``: Device alignment in bytes (default ``4096``). Must be a "
+"power of two."
+msgstr "``block_align``: 设备对齐字节数（默认 ``4096``\\\\ ）。必须是二的幂。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:20
+#: ../../source/mp/l2_storage/raw_block.rst:21
 msgid "``header_bytes``: Per-slot header reservation (default ``4096``)."
 msgstr "``header_bytes``: 每个槽位的头部预留大小（默认 ``4096``\\ ）。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:21
+#: ../../source/mp/l2_storage/raw_block.rst:22
 msgid ""
 "``meta_total_bytes``: Reserved metadata checkpoint region (default "
 "``256MiB``)."
 msgstr "``meta_total_bytes``: 保留的元数据检查点区域（默认 ``256MiB``\\ ）。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:22
+#: ../../source/mp/l2_storage/raw_block.rst:23
 msgid ""
 "``meta_magic`` / ``meta_version``: Metadata checkpoint identity/version "
 "knobs."
 msgstr "``meta_magic`` / ``meta_version``: 元数据检查点的标识符与版本号调节参数。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:23
+#: ../../source/mp/l2_storage/raw_block.rst:24
 msgid ""
 "``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` / "
 "``meta_enable_periodic`` / ``meta_verify_on_load``: Checkpoint and "
 "recovery controls carried over from the legacy raw-block backend."
-msgstr "``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` / ``meta_enable_periodic`` / ``meta_verify_on_load``: 从旧版原始块后端沿用的检查点与恢复控制参数。"
+msgstr ""
+"``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` / "
+"``meta_enable_periodic`` / ``meta_verify_on_load``: "
+"从旧版原始块后端沿用的检查点与恢复控制参数。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:26
+#: ../../source/mp/l2_storage/raw_block.rst:27
 msgid ""
 "``load_checkpoint_on_init``: Load an existing on-device metadata "
 "checkpoint during startup (default ``true``). Set to ``false`` to start "
 "with an empty in-memory index instead."
-msgstr "``load_checkpoint_on_init``: 在启动时加载现有的设备元数据检查点（默认值为 ``true``\\ ）。设置为 ``false`` 以从空的内存索引开始。"
-
-#: ../../source/mp/l2_storage/raw_block.rst:29
-msgid "``enable_zero_copy``: Try aligned direct-buffer I/O when possible."
-msgstr "``enable_zero_copy``: 尽可能尝试对齐的直接缓冲区 I/O。"
+msgstr ""
+"``load_checkpoint_on_init``: 在启动时加载现有的设备元数据检查点（默认值为 ``true``\\ ）。设置为 "
+"``false`` 以从空的内存索引开始。"
 
 #: ../../source/mp/l2_storage/raw_block.rst:30
+msgid ""
+"``enable_zero_copy``: Try aligned direct-buffer I/O when possible. With "
+"``io_engine=\"io_uring\"``, also try to register eligible L1 memory as "
+"fixed buffers."
+msgstr "``enable_zero_copy``: 尝试在可能的情况下使用对齐的直接缓冲区 I/O。使用 ``io_engine=\\\"io_uring\\\"`` 时，还尝试将符合条件的 L1 内存注册为固定缓冲区。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:33
 msgid ""
 "``io_engine``: Rust raw-block I/O engine. Valid values are ``\"posix\"`` "
 "(default synchronous ``pread``/``pwrite`` path), ``\"io_uring\"`` (direct"
 " Rust io_uring syscall path)."
-msgstr "``io_engine``: Rust 原始块 I/O 引擎。有效值为 ``\"posix\"``\\ （默认同步 ``pread``/``pwrite`` 路径），\\ ``\"io_uring\"``\\ （直接 Rust io_uring 系统调用路径）。"
+msgstr ""
+"``io_engine``: Rust 原始块 I/O 引擎。有效值为 ``\"posix\"``\\ （默认同步 "
+"``pread``/``pwrite`` 路径），\\ ``\"io_uring\"``\\ （直接 Rust io_uring 系统调用路径）。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:33
+#: ../../source/mp/l2_storage/raw_block.rst:36
 msgid ""
 "``use_uring_cmd``: Enable NVMe passthrough via io_uring command interface"
 " for direct device access. Requires ``io_engine=\"io_uring\"`` and NVMe "
 "character device node (e.g., ``/dev/ng0n1``)."
-msgstr "``use_uring_cmd``: 通过 io_uring 命令接口启用 NVMe 直通以直接访问设备。需要 ``io_engine=\"io_uring\"`` 和 NVMe 字符设备节点（例如，\\ ``/dev/ng0n1``\\ ）。"
+msgstr ""
+"``use_uring_cmd``: 通过 io_uring 命令接口启用 NVMe 直通以直接访问设备。需要 "
+"``io_engine=\"io_uring\"`` 和 NVMe 字符设备节点（例如，\\ ``/dev/ng0n1``\\ ）。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:36
+#: ../../source/mp/l2_storage/raw_block.rst:39
 msgid "``iouring_queue_depth``: Queue depth for ``io_engine=\"io_uring\"``."
 msgstr "``iouring_queue_depth``: ``io_engine=\"io_uring\"`` 的队列深度。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:37
+#: ../../source/mp/l2_storage/raw_block.rst:40
 msgid ""
 "``max_data_transfer_size``: Maximum data transfer size for "
 "``use_uring_cmd=true``. Large transfers are split into smaller chunks "
-"that fit within device limits."
-msgstr "``max_data_transfer_size``: ``use_uring_cmd=true`` 的最大数据传输大小。大数据传输会被拆分成适合设备限制的小块。"
+"that fit within device limits. When left unset (or ``<= 0``), it is auto-"
+"detected from the device's sysfs queue limits, bounded by both "
+"``max_hw_sectors_kb`` and ``max_segments * page_size`` (the NVMe "
+"passthrough path uses one scatter-gather segment per page)."
+msgstr "``max_data_transfer_size``: ``use_uring_cmd=true`` 的最大数据传输大小。大数据传输会被拆分成适合设备限制的小块。当未设置（或 ``<= 0``）时，将从设备的 sysfs 队列限制中自动检测，受 ``max_hw_sectors_kb`` 和 ``max_segments * page_size`` 的限制（NVMe 直通路径每页使用一个散布-聚集段）。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:40
+#: ../../source/mp/l2_storage/raw_block.rst:46
+msgid ""
+"``fdp_enabled``: Enables NVMe Flexible Data Placement (FDP) discovery and"
+" non-zero placement identifier registration. ``cache_salt`` values with "
+"``\":\"`` bucket prefixes use FDP placement by default. Requires "
+"``io_engine=\"io_uring\"`` and ``use_uring_cmd=true``."
+msgstr "``fdp_enabled``: 启用 NVMe 灵活数据放置 (FDP) 发现和非零放置标识符注册。带有 ``\\\":\\\"`` 桶前缀的 ``cache_salt`` 值默认使用 FDP 放置。需要 ``io_engine=\\\"io_uring\\\"`` 和 ``use_uring_cmd=true``。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:50
+msgid ""
+"``fdp_placement_ids``: Optional non-zero placement identifier list for KV"
+" data placement. If omitted, the adapter uses all device-reported non-"
+"zero identifiers except ``meta_checkpoint_placement_id``."
+msgstr "``fdp_placement_ids``: KV 数据放置的可选非零放置标识符列表。如果省略，适配器将使用所有设备报告的非零标识符，除了 ``meta_checkpoint_placement_id``。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:53
+msgid ""
+"``fdp_data_placement_policy``: KV data placement policy. ``\"none\"`` "
+"omits FDP directives for KV data writes. ``\"cache_salt_prefix\"`` "
+"assigns case-insensitive ``cache_salt`` prefixes to FDP placement "
+"identifiers. ``\"cache_salt_rank\"`` keeps that bucket isolation and "
+"further separates rank-local write streams within each bucket when "
+"identifiers are available. The default is ``\"cache_salt_prefix\"`` when "
+"``fdp_enabled=true``."
+msgstr "``fdp_data_placement_policy``: KV 数据放置策略。``\"none\"`` 忽略 KV 数据写入的 FDP 指令。``\"cache_salt_prefix\"`` 将不区分大小写的 ``cache_salt`` 前缀分配给 FDP 放置标识符。``\"cache_salt_rank\"`` 保持该桶的隔离，并在每个桶内进一步分隔标识符可用时的排名本地写入流。当 ``fdp_enabled=true`` 时，默认值为 ``\"cache_salt_prefix\"``。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:59
+msgid ""
+"``fdp_slot_reuse_policy``: Free-slot reuse policy. ``\"pid_affinity\"`` "
+"prefers a free slot last assigned to the same FDP placement identifier "
+"before falling back to any free slot. ``\"none\"`` disables affinity-"
+"based reuse. The default is ``\"pid_affinity\"`` when "
+"``fdp_enabled=true`` and ``\"none\"`` otherwise."
+msgstr "``fdp_slot_reuse_policy``: 空闲槽重用策略。 ``\"pid_affinity\"`` 优先选择最后分配给相同 FDP 放置标识符的空闲槽，然后再回退到任何空闲槽。 ``\"none\"`` 禁用基于亲和性的重用。当 ``fdp_enabled=true`` 时，默认值为 ``\"pid_affinity\"``，否则为 ``\"none\"``。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:64
+msgid ""
+"``meta_checkpoint_placement_id``: Optional non-zero placement identifier "
+"for metadata checkpoint payload/header writes. Omit it to keep checkpoint"
+" writes on default NVMe placement."
+msgstr "``meta_checkpoint_placement_id``: 元数据检查点负载/头写入的可选非零放置标识符。省略它以保持检查点写入在默认的 NVMe 放置上。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:67
 msgid ""
 "``num_store_workers`` / ``num_lookup_workers`` / ``num_load_workers``: "
 "Worker-thread counts for each operation type."
-msgstr "``num_store_workers`` / ``num_lookup_workers`` / ``num_load_workers``: 每种操作类型的工作线程数量。"
+msgstr ""
+"``num_store_workers`` / ``num_lookup_workers`` / ``num_load_workers``: "
+"每种操作类型的工作线程数量。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:43
+#: ../../source/mp/l2_storage/raw_block.rst:70
 msgid "**Notes:**"
 msgstr "**注意：**"
 
-#: ../../source/mp/l2_storage/raw_block.rst:45
+#: ../../source/mp/l2_storage/raw_block.rst:72
 msgid ""
 "``raw_block`` is a server-owned MP adapter. It does **not** support per-"
 "TP device-path mappings in MP mode."
 msgstr "``raw_block`` 是一个由服务端管理的 MP 适配器。它 **不** 支持 MP 模式下按 TP 粒度配置设备路径映射。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:47
+#: ../../source/mp/l2_storage/raw_block.rst:74
 msgid ""
 "``raw_block`` remains ``\"type\": \"raw_block\"`` for all supported "
 "engines."
 msgstr "``raw_block`` 在所有支持的引擎中保持 ``\"type\": \"raw_block\"``\\ 。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:48
+#: ../../source/mp/l2_storage/raw_block.rst:75
 msgid ""
 "``raw_block`` owns on-device slot allocation, checkpointing, and recovery"
 " through ``RawBlockCore``. Slot reclamation is driven by the "
 "shared/global L2 eviction controller or explicit ``delete()`` calls."
-msgstr "``raw_block`` 负责设备上的槽分配、检查点和通过 ``RawBlockCore`` 的恢复。槽回收由共享/全局 L2 逐出控制器或显式的 ``delete()`` 调用驱动。"
+msgstr ""
+"``raw_block`` 负责设备上的槽分配、检查点和通过 ``RawBlockCore`` 的恢复。槽回收由共享/全局 L2 "
+"逐出控制器或显式的 ``delete()`` 调用驱动。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:51
+#: ../../source/mp/l2_storage/raw_block.rst:78
 msgid ""
-"If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should "
-"be at least ``block_align``."
-msgstr "如果启用了 ``use_odirect``\\ ，则服务器的 ``--l1-align-bytes`` 应至少为 ``block_align``\\ 。"
+"POSIX restart recovery validates slot headers with an internal pool of 8 "
+"reader threads. Both regular ``io_uring`` and ``io_uring_cmd`` batch "
+"header reads up to ``iouring_queue_depth``."
+msgstr "POSIX 重启恢复使用 8 个内部读取线程验证槽头。常规的 ``io_uring`` 和 ``io_uring_cmd`` 批量读取头最多到 ``iouring_queue_depth``。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:53
+#: ../../source/mp/l2_storage/raw_block.rst:81
+msgid ""
+"``slot_bytes``, ``header_bytes``, and ``meta_total_bytes`` must be "
+"multiples of ``block_align``."
+msgstr "``slot_bytes``、``header_bytes`` 和 ``meta_total_bytes`` 必须是 ``block_align`` 的倍数。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:83
+msgid ""
+"If ``use_odirect`` or ``use_uring_cmd`` is enabled, the server's ``--l1"
+"-align-bytes`` must be at least ``block_align``."
+msgstr "如果启用了 ``use_odirect`` 或 ``use_uring_cmd``，则服务器的 ``--l1-align-bytes`` 必须至少为 ``block_align``。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:85
+msgid ""
+"With ``O_DIRECT``, raw-block I/O rejects offsets and total I/O lengths "
+"that are not multiples of ``block_align``. Misaligned write buffers use "
+"an aligned bounce buffer."
+msgstr "使用 ``O_DIRECT`` 时，原始块 I/O 会拒绝不是 ``block_align`` 倍数的偏移量和总 I/O 长度。未对齐的写缓冲区使用对齐的缓冲区。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:88
 msgid "``persist_enabled`` must remain ``true`` for this adapter."
 msgstr "``persist_enabled`` 对此适配器必须保持为 ``true``\\ 。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:54
+#: ../../source/mp/l2_storage/raw_block.rst:89
 msgid ""
 "For ``use_uring_cmd=true``, ``device_path`` must use the NVMe character "
 "device node (e.g., ``/dev/ng0n1``) instead of the block device node "
 "(``/dev/nvme0n1``). The character device provides direct NVMe command "
 "passthrough."
-msgstr "对于 ``use_uring_cmd=true``\\ ，\\ ``device_path`` 必须使用 NVMe 字符设备节点（例如，\\ ``/dev/ng0n1``\\ ），而不是块设备节点（\\ ``/dev/nvme0n1``\\ ）。字符设备提供直接的 NVMe 命令直通。"
+msgstr ""
+"对于 ``use_uring_cmd=true``\\ ，\\ ``device_path`` 必须使用 NVMe 字符设备节点（例如，\\ "
+"``/dev/ng0n1``\\ ），而不是块设备节点（\\ ``/dev/nvme0n1``\\ ）。字符设备提供直接的 NVMe 命令直通。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:58
+#: ../../source/mp/l2_storage/raw_block.rst:93
+msgid ""
+"For ``use_uring_cmd=true``, ``block_align`` must be a multiple of the "
+"NVMe namespace LBA size. An incompatible value is rejected when the "
+"device opens."
+msgstr "对于 ``use_uring_cmd=true``\\\\ ，\\\\ ``block_align`` 必须是 NVMe 命名空间 LBA 大小的倍数。当设备打开时，不兼容的值会被拒绝。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:95
 msgid "``use_uring_cmd`` requires ``io_engine=\"io_uring\"`` to be set."
 msgstr "``use_uring_cmd`` 需要设置 ``io_engine=\"io_uring\"``\\ 。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:59
+#: ../../source/mp/l2_storage/raw_block.rst:96
 msgid ""
 "When ``use_uring_cmd=true``, ``use_odirect`` is ignored for NVMe "
-"namespace character devices."
-msgstr "当 ``use_uring_cmd=true`` 时，NVMe 命名空间字符设备将忽略 ``use_odirect``\\ 。"
+"namespace character devices. FDP examples set ``use_odirect=false`` "
+"because ``io_uring_cmd`` uses NVMe passthrough rather than the POSIX "
+"write path."
+msgstr "当 ``use_uring_cmd=true`` 时，NVMe 命名空间字符设备会忽略 ``use_odirect``。FDP 示例将 ``use_odirect=false`` 设置为因为 ``io_uring_cmd`` 使用 NVMe 直通而不是 POSIX 写入路径。"
 
-#: ../../source/mp/l2_storage/raw_block.rst:62
+#: ../../source/mp/l2_storage/raw_block.rst:99
+msgid ""
+"FDP registers only non-zero placement identifiers. ``fdp_placement_ids`` "
+"is the KV data placement pool: if omitted, all discovered non-zero "
+"identifiers except ``meta_checkpoint_placement_id`` are used; if "
+"provided, every identifier must be reported by the device and must not "
+"contain 0."
+msgstr "FDP 仅注册非零放置标识符。 ``fdp_placement_ids`` 是 KV 数据放置池：如果省略，将使用所有发现的非零标识符，除了 ``meta_checkpoint_placement_id``；如果提供，则每个标识符必须由设备报告，并且不得包含 0。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:103
+msgid ""
+"``meta_checkpoint_placement_id`` must not overlap with "
+"``fdp_placement_ids``. Keeping metadata checkpoints and KV data on "
+"separate placement identifiers avoids mixing long-lived raw-block "
+"metadata with cache data buckets."
+msgstr "``meta_checkpoint_placement_id`` 不能与 ``fdp_placement_ids`` 重叠。将元数据检查点和 KV 数据放在不同的放置标识符上，可以避免将长期存在的原始块元数据与缓存数据桶混合。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:106
+msgid ""
+"With ``fdp_data_placement_policy=\"cache_salt_prefix\"``, ``cache_salt`` "
+"values containing ``\":\"`` are bucketed by the prefix before ``\":\"``. "
+"The bucket name is case-insensitive, so ``RAG:app1``, ``rag:app2``, and "
+"``rag:`` share the same bucket. Values without ``\":\"`` and values with "
+"an empty prefix use no FDP directive. Buckets are assigned exclusive FDP "
+"placement identifiers in first-seen order while identifiers are "
+"available."
+msgstr "使用 ``fdp_data_placement_policy=\"cache_salt_prefix\"`` 时，包含 ``\":\"`` 的 ``cache_salt`` 值会根据 ``\":\"`` 前的前缀进行分桶。桶名称不区分大小写，因此 ``RAG:app1``、``rag:app2`` 和 ``rag:`` 共享同一个桶。没有 ``\":\"`` 的值和前缀为空的值不使用任何 FDP 指令。桶在可用的情况下按首次出现的顺序分配独占的 FDP 放置标识符。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:112
+msgid ""
+"If the number of discovered cache-salt buckets exceeds the number of "
+"registered FDP placement identifiers, additional buckets continue to "
+"store with no FDP directive and the adapter emits one warning. "
+"``report_status()`` exposes a fallback count and a bounded bucket sample "
+"instead of retaining the complete fallback bucket set. Empty "
+"``cache_salt`` values also use default NVMe placement with no directive."
+msgstr "如果发现的缓存盐桶的数量超过注册的 FDP 放置标识符的数量，额外的桶将继续存储而不使用 FDP 指令，并且适配器会发出一个警告。 ``report_status()`` 会暴露一个回退计数和一个有限的桶样本，而不是保留完整的回退桶集。 空的 ``cache_salt`` 值也使用默认的 NVMe 放置而没有指令。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:118
+msgid ""
+"With ``fdp_data_placement_policy=\"cache_salt_rank\"``, placement is "
+"keyed by the case-insensitive ``cache_salt`` bucket prefix and the local "
+"rank encoded in ``kv_rank``. The suffix after ``\":\"`` remains part of "
+"the object key but does not affect FDP placement. For example, "
+"``batch:app-a`` and ``batch:app-b`` share the ``batch`` bucket: local "
+"rank 0 from both applications shares one placement identifier, local rank"
+" 1 shares another, and so on. Each bucket can use at most the detected "
+"visible GPU count worth of placement identifiers. Extra ranks, or buckets"
+" that cannot obtain an identifier, store with no FDP directive."
+msgstr "使用 ``fdp_data_placement_policy=\"cache_salt_rank\"`` 时，放置是通过不区分大小写的 ``cache_salt`` 桶前缀和编码在 ``kv_rank`` 中的本地排名进行键控的。 ``\":\"`` 后的后缀仍然是对象键的一部分，但不影响 FDP 放置。例如， ``batch:app-a`` 和 ``batch:app-b`` 共享 ``batch`` 桶：两个应用程序的本地排名 0 共享一个放置标识符，本地排名 1 共享另一个，以此类推。每个桶最多可以使用检测到的可见 GPU 数量的放置标识符。额外的排名或无法获得标识符的桶将以没有 FDP 指令的方式存储。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:127
+msgid ""
+"Sharing placement identifiers within a bucket can be intentional because "
+"the available FDP placement-identifier pool is finite. Operators can "
+"assign the same prefix to applications with similar cache lifetimes, or "
+"use a distinct prefix for each application when placement isolation is "
+"required. For example, ``app01:<suffix>`` through ``app16:<suffix>`` can "
+"provide 16 application buckets with eight rank streams each, consuming up"
+" to 128 placement identifiers when at least 128 identifiers are available"
+" and the adapter detects at least eight visible GPUs. Applications using "
+"the same prefix share the placement identifiers for equal local ranks "
+"instead of receiving separate sets."
+msgstr "在一个桶内共享放置标识符可能是有意为之，因为可用的 FDP 放置标识符池是有限的。操作员可以将相同的前缀分配给具有相似缓存生命周期的应用程序，或者在需要放置隔离时为每个应用程序使用不同的前缀。例如，``app01:<suffix>`` 到 ``app16:<suffix>`` 可以提供 16 个应用程序桶，每个桶有八个排名流，当至少有 128 个标识符可用且适配器检测到至少八个可见 GPU 时，最多消耗 128 个放置标识符。使用相同前缀的应用程序会共享相同本地排名的放置标识符，而不是接收单独的集合。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:137
+msgid ""
+"Bucket-to-placement assignments are process-local. Restart recovery does "
+"not need them for correctness because ``cache_salt`` is part of the "
+"object key, but first-seen FDP placement assignments may change after "
+"adapter restart."
+msgstr "桶到放置的分配是进程本地的。重启恢复不需要它们来保证正确性，因为 ``cache_salt`` 是对象键的一部分，但首次看到的 FDP 放置分配在适配器重启后可能会发生变化。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:140
+msgid ""
+"Slot affinity is process-local and is not stored in metadata checkpoints."
+" After recovery, free slots have no recorded affinity until they are "
+"reused."
+msgstr "插槽亲和性是进程本地的，并且不会存储在元数据检查点中。恢复后，空闲插槽没有记录的亲和性，直到它们被重新使用。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:142
+msgid ""
+"Store and retrieve requests must use the same ``cache_salt`` to address "
+"the same object. This is the normal LMCache key identity rule; FDP "
+"placement is a write directive and is not used to locate data on reads."
+msgstr "存储和检索请求必须使用相同的 ``cache_salt`` 来访问相同的对象。这是正常的 LMCache 键标识规则；FDP 放置是一个写指令，并不用于读取时定位数据。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:145
+msgid ""
+"Metadata checkpoint writes use ``meta_checkpoint_placement_id`` when "
+"configured, otherwise they use default NVMe placement with no directive."
+msgstr "元数据检查点写入在配置时使用 ``meta_checkpoint_placement_id``，否则使用默认的 NVMe 放置，没有指令。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:148
+msgid "**Fixed-buffer registration and memlock:**"
+msgstr "**固定缓冲区注册和内存锁定：**"
+
+#: ../../source/mp/l2_storage/raw_block.rst:150
+msgid ""
+"With ``io_engine=\"io_uring\"`` and ``enable_zero_copy=true``, the "
+"adapter registers the stable L1 memory range during initialization. An "
+"anonymous ``MixedMemoryAllocator`` exposes its full arena; "
+"``LazyMemoryAllocator`` exposes only the currently pinned prefix. POSIX "
+"shared-memory arenas do not expose an eligible range. Registration uses "
+"regions no larger than 1 GiB and does not grow when the lazy allocator "
+"expands."
+msgstr "使用 ``io_engine=\"io_uring\"`` 和 ``enable_zero_copy=true``，适配器在初始化期间注册稳定的 L1 内存范围。一个匿名的 ``MixedMemoryAllocator`` 暴露其完整的区域；``LazyMemoryAllocator`` 仅暴露当前固定的前缀。POSIX 共享内存区域不暴露合适的范围。注册使用的区域不超过 1 GiB，并且在懒惰分配器扩展时不会增长。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:157
+msgid ""
+"The kernel charges registered buffers against ``RLIMIT_MEMLOCK`` unless "
+"the process has ``CAP_IPC_LOCK``. The default lazy initial prefix is 20 "
+"GiB, so allow at least that much locked memory, plus headroom for other "
+"registrations and locked memory. Splitting the prefix into 1 GiB regions "
+"does not reduce the total memlock requirement. See the Linux "
+"`io_uring_register(2) manual <https://man7.org/linux/man-"
+"pages/man2/io_uring_register.2.html>`_."
+msgstr "内核会将注册的缓冲区计入 ``RLIMIT_MEMLOCK``，除非进程具有 ``CAP_IPC_LOCK``。默认的懒惰初始前缀为 20 GiB，因此至少要允许这么多的锁定内存，以及其他注册和锁定内存的余量。将前缀拆分为 1 GiB 的区域不会减少总的 memlock 要求。请参阅 Linux `io_uring_register(2) 手册 <https://man7.org/linux/man-pages/man2/io_uring_register.2.html>`_。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:164
+msgid ""
+"For a Bash-launched server, inspect the soft and hard limits in KiB and "
+"set the soft limit before starting the server from the same shell:"
+msgstr "对于通过 Bash 启动的服务器，请检查 KiB 中的软限制和硬限制，并在从同一 shell 启动服务器之前设置软限制："
+
+#: ../../source/mp/l2_storage/raw_block.rst:174
+msgid ""
+"If the hard limit is too low, raise it through the service, container, or"
+" login configuration. A systemd service can use "
+"``LimitMEMLOCK=infinity``; a Docker container can use ``--ulimit "
+"memlock=-1:-1``. Apply the setting to the process running the LMCache "
+"server, then restart it. Registration is attempted once during adapter "
+"initialization."
+msgstr "如果硬限制过低，请通过服务、容器或登录配置提高它。systemd 服务可以使用 ``LimitMEMLOCK=infinity``；Docker 容器可以使用 ``--ulimit memlock=-1:-1``。将设置应用于运行 LMCache 服务器的进程，然后重启它。注册在适配器初始化期间尝试一次。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:180
+msgid ""
+"If registration fails, the adapter logs a warning and continues with "
+"ordinary io_uring. The adapter can therefore remain healthy even when "
+"fixed buffers are inactive. Check "
+"``RawBlockL2Adapter.report_status()[\"core\"]`` for:"
+msgstr "如果注册失败，适配器会记录一个警告，并继续使用普通的 io_uring。因此，即使固定缓冲区处于非活动状态，适配器仍然可以保持健康。检查 ``RawBlockL2Adapter.report_status()[\\\"core\\\"]`` 以获取："
+
+#: ../../source/mp/l2_storage/raw_block.rst:184
+msgid ""
+"``fixed_buffers_registered``: ``true`` only after successful kernel "
+"registration."
+msgstr "``fixed_buffers_registered``: ``true`` 仅在成功的内核注册后才为真。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:186
+msgid ""
+"``fixed_buffer_registered_bytes``: Total bytes in the registered regions;"
+" ``0`` when no buffers are registered. This is the registered range size,"
+" not the final L1 capacity or the number of bytes transferred."
+msgstr "``fixed_buffer_registered_bytes``: 注册区域中的总字节数；当没有注册缓冲区时为 ``0``。这是注册范围的大小，而不是最终的 L1 容量或传输的字节数。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:190
+msgid ""
+"Both fields also appear under each raw-block adapter in :doc:`GET /status"
+" <../http_api>`:"
+msgstr "这两个字段也出现在每个原始块适配器下 :doc:`GET /status <../http_api>`："
+
+#: ../../source/mp/l2_storage/raw_block.rst:201
+msgid "For a successfully registered 20 GiB prefix, the result is:"
+msgstr "对于成功注册的 20 GiB 前缀，结果为："
+
+#: ../../source/mp/l2_storage/raw_block.rst:210
+msgid ""
+"Failed or skipped registration reports ``false`` and ``0``, as does a "
+"closed adapter. Successful registration does not mean every request uses "
+"fixed I/O: requests outside the registered prefix or crossing a region "
+"boundary still use ordinary io_uring. When comparing performance, verify "
+"these fields and keep ``enable_zero_copy`` enabled in both cases to "
+"isolate registration from direct-buffer I/O."
+msgstr "注册失败或被跳过时，报告为 ``false`` 和 ``0``，关闭的适配器也是如此。成功注册并不意味着每个请求都使用固定的 I/O：在注册前缀之外或跨越区域边界的请求仍然使用普通的 io_uring。在比较性能时，请验证这些字段，并在两种情况下都保持 ``enable_zero_copy`` 启用，以将注册与直接缓冲区 I/O 隔离。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:217
 msgid "**Configuration examples:**"
 msgstr "**配置示例：**"
+
+#: ../../source/mp/l2_storage/raw_block.rst:242
+msgid "**Failure handling and shutdown:**"
+msgstr "**故障处理和关闭：**"
+
+#: ../../source/mp/l2_storage/raw_block.rst:244
+msgid ""
+"Recoverable ``io_uring`` submission errors (``EAGAIN``, ``EINTR``, "
+"``EBUSY``) retry after completion progress or 1–100 ms exponential "
+"backoff. Permanent errors, or 30 seconds without submission or completion"
+" progress, mark the worker unhealthy and stop new native I/O. The core "
+"status exposes the failure reason as ``worker_error``."
+msgstr "可恢复的 ``io_uring`` 提交错误（``EAGAIN``、``EINTR``、``EBUSY``）在完成进度后或 1–100 毫秒的指数退避后重试。永久错误或 30 秒内没有提交或完成进度将标记工作线程为不健康，并停止新的本地 I/O。核心状态将失败原因暴露为 ``worker_error``。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:250
+msgid ""
+"After a known worker failure, new prefetch tasks report failure through "
+"their normal task results and new stores are skipped. The adapter still "
+"publishes completion results and notifications so controllers can release"
+" locks and buffers; the serving engine can recompute missing data instead"
+" of receiving a synchronous storage exception. Valid hits from L1 or "
+"other L2 adapters remain usable. The legacy non-MP raw-block backend also"
+" skips new stores after worker failure."
+msgstr "在已知的工作线程故障后，新预取任务通过其正常的任务结果报告故障，并跳过新的存储。适配器仍然发布完成结果和通知，以便控制器可以释放锁和缓冲区；服务引擎可以重计算缺失的数据，而不是接收同步存储异常。来自 L1 或其他 L2 适配器的有效命中仍然可用。传统的非 MP 原始块后端在工作线程故障后也会跳过新的存储。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:258
+msgid ""
+"Already-accepted I/O retains its buffers until completion or successful "
+"cancellation. Close and destructor cleanup release the Python GIL while "
+"waiting, but can still block indefinitely if accepted I/O cannot finish "
+"or be cancelled. The 30-second submission retry budget is not a shutdown "
+"timeout."
+msgstr "已接受的 I/O 在完成或成功取消之前会保留其缓冲区。关闭和析构清理在等待时会释放 Python GIL，但如果已接受的 I/O 无法完成或取消，仍可能无限期阻塞。30 秒的提交重试预算不是关闭超时。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:263
+msgid "**Hardware-gated FDP status validation:**"
+msgstr "**硬件门控的 FDP 状态验证：**"
+
+#: ../../source/mp/l2_storage/raw_block.rst:265
+msgid ""
+"FDP live-device validation is opt-in because it requires an FDP-capable "
+"NVMe namespace character device. The status probe opens the character "
+"device through the Rust raw-block binding and calls "
+"``fetch_fdp_status()`` with a read-only file descriptor. It does not "
+"issue writes, initialize the MP adapter layout, write KV data, or verify "
+"the MP adapter's cache-salt placement policy."
+msgstr "FDP 实时设备验证是可选的，因为它需要一个支持 FDP 的 NVMe 命名空间字符设备。状态探测通过 Rust 原始块绑定打开字符设备，并使用只读文件描述符调用 ``fetch_fdp_status()``。它不会发出写入、初始化 MP 适配器布局、写入 KV 数据或验证 MP 适配器的 cache-salt 放置策略。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:276
+msgid ""
+"When the variable is not set, the test skips. If the configured device, "
+"kernel, or controller does not support the FDP status query, the test "
+"skips with the underlying capability error. A passing status probe only "
+"confirms that the live device can answer the FDP status query; full "
+"adapter initialization and KV write placement on hardware are separate "
+"validations."
+msgstr "当变量未设置时，测试将跳过。如果配置的设备、内核或控制器不支持 FDP 状态查询，测试将因底层能力错误而跳过。通过的状态探测仅确认实时设备可以回答 FDP 状态查询；完整的适配器初始化和硬件上的 KV 写入位置是单独的验证。"
+
+#~ msgid ""
+#~ "``max_data_transfer_size``: Maximum data transfer"
+#~ " size for ``use_uring_cmd=true``. Large "
+#~ "transfers are split into smaller chunks"
+#~ " that fit within device limits."
+#~ msgstr ""
+#~ "``max_data_transfer_size``: ``use_uring_cmd=true`` "
+#~ "的最大数据传输大小。大数据传输会被拆分成适合设备限制的小块。"
+
+#~ msgid "``enable_zero_copy``: Try aligned direct-buffer I/O when possible."
+#~ msgstr "``enable_zero_copy``: 尽可能尝试对齐的直接缓冲区 I/O。"
+
+#~ msgid ""
+#~ "POSIX restart recovery validates slot "
+#~ "headers with an internal pool of 8"
+#~ " reader threads. Regular ``io_uring`` "
+#~ "batches header reads up to "
+#~ "``iouring_queue_depth``, while ``io_uring_cmd`` "
+#~ "keeps serial validation."
+#~ msgstr ""
 

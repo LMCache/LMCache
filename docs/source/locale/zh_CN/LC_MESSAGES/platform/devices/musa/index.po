@@ -1,0 +1,197 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/platform/devices/musa/index.rst:2
+msgid "musa-aiter with LMCache on MUSA"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:4
+msgid ""
+"This guide shows how to install ``musa-aiter`` and use its optional "
+"LMCache KV-transfer adapter with vLLM on MUSA."
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:8
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:10
+msgid "Use a machine or container with:"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:12
+msgid "MUSA runtime and TorchMUSA installed."
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:13
+msgid "A Python environment that can import ``torch`` and ``torch.musa``."
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:14
+msgid ""
+"LMCache source available on ``PYTHONPATH`` or installed in the "
+"environment."
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:15
+msgid "vLLM installed with MUSA support."
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:17
+msgid "Verify the MUSA runtime first:"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:31
+msgid "Step 1: Activate the target environment"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:33
+msgid "Activate the same Python environment that will run vLLM and LMCache:"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:42
+msgid "Step 2: Install LMCache"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:44
+msgid "For source-tree validation, add LMCache to ``PYTHONPATH``:"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:51
+msgid "For a normal editable install, install LMCache from the repository root:"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:58
+msgid ""
+"Use ``NO_NATIVE_EXT=1`` when you only need the Python path and do not "
+"want to rebuild LMCache native extensions in the test environment."
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:62
+msgid "Step 3: Install musa-aiter"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:64
+msgid "Install from a local ``musa-aiter`` source checkout:"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:72
+msgid ""
+"Verify the installed package and LMCache ABI entry point from outside the"
+" source checkout so Python imports the installed package, not the current"
+" working tree:"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:86
+msgid "Expected result:"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:93
+msgid "Step 4: Enable LMCache's optional MUSA native transfer"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:95
+msgid ""
+"LMCache does not require ``musa-aiter`` for correctness. The default "
+"torch fallback path still works when native transfer is disabled. Enable "
+"the optional native path explicitly:"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:102
+msgid "Disable it for a correctness baseline:"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:108
+msgid ""
+"Stage 4 MUSA handle support is merged. Prefer the LMCache-driven handle "
+"path when TorchMUSA provides the required memory and event IPC APIs:"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:116
+msgid ""
+"This path lets the LMCache server access registered MUSA KV-cache tensors"
+" through device handles and avoids worker-side gather/scatter copies. The"
+" ``auto`` mode still selects ``engine_driven`` for MUSA, so request "
+"``lmcache_driven`` explicitly to use the handle path. If the required "
+"TorchMUSA IPC APIs are unavailable, use the engine-driven compatibility "
+"path instead:"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:128
+msgid "Step 5: Create an LMCache config"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:130
+msgid "Example local CPU offload config:"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:143
+msgid "Step 6: Run vLLM with LMCache"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:145
+msgid "Example vLLM server command:"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:169
+msgid "Step 7: Validate cache store and hit"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:171
+msgid ""
+"Send two repeated long-prompt requests. The first request should store KV"
+" chunks; the second request should hit and retrieve them from LMCache."
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:195
+msgid "Look for LMCache logs like:"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:204
+msgid "Troubleshooting"
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:206
+msgid ""
+"If ``musa_aiter`` import fails, reinstall it in the exact environment "
+"that launches vLLM."
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:208
+msgid ""
+"If ``native_lmcache_kv_transfer_abi_version`` is missing, the installed "
+"package does not provide the LMCache native adapter ABI expected by "
+"LMCache."
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:210
+msgid ""
+"If native transfer fails but ``LMCACHE_MUSA_NATIVE_KV_TRANSFER=0`` "
+"passes, the issue is isolated to ``musa-aiter`` or the native input "
+"layout/contiguity requirements."
+msgstr ""
+
+#: ../../source/platform/devices/musa/index.rst:212
+msgid ""
+"If vLLM startup fails with low free memory, lower ``--gpu-memory-"
+"utilization`` or choose a less busy device with ``MUSA_VISIBLE_DEVICES``."
+msgstr ""
+

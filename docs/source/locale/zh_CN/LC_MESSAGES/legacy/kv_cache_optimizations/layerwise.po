@@ -1,0 +1,306 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:2
+msgid "Layerwise KV Transfer"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:9
+msgid ""
+"The storage and loading of KV Cache on a layer granularity is a key "
+"optimization that allows for forward pass to \"stagger\" through its "
+"computation as each layer's KV Cache is received instead of only waiting "
+"to begin after the entire loading"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:11
+msgid ""
+"CacheBlend is implemented on top of the layerwise codepath in order to "
+"pipeline recompute and loading to mask the latency of loading KV Cache."
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:13
+msgid "Basic Codepath"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:30
+msgid "Architecture Overview"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:32
+msgid "**CacheEngine**"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:33
+msgid "The main orchestrator containing two primary generators:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:35
+msgid ""
+"**Retrieval Generator** (N + 2 yields): Handles layer-by-layer KV cache "
+"loading with on-demand memory allocation"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:36
+msgid ""
+"**Storage Generator** (N + 1 yields): Manages layer-by-layer KV cache "
+"saving with upfront CPU memory allocation"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:38
+msgid "**LayerwiseGPUConnector**"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:39
+msgid "Manages GPU-CPU memory transfers with dedicated CUDA streams:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:41
+msgid ""
+"**Load GPU Buffer**: Temporary GPU memory for CPU→GPU transfers "
+"(``use_gpu: true``)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:42
+msgid ""
+"**Store GPU Buffer**: Temporary GPU memory for GPU→CPU transfers "
+"(``use_gpu: true``)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:43
+msgid ""
+"**Nested Generators**: ``batched_to_gpu()`` and ``batched_from_gpu()`` "
+"handle actual memory operations"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:45
+msgid "**StorageManager**"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:46
+msgid "Handles persistent storage operations:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:48
+msgid ""
+"``layerwise_batched_get()``: Asynchronous retrieval with ``.result()`` "
+"for request-level concurrency"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:49
+msgid "``batched_put()``: Stores memory objects to persistent backends"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:52
+msgid "Execution Flow"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:54
+msgid "The layerwise pipeline follows a numbered execution sequence:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:56
+msgid "**1. start_load_kv()**"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:57
+msgid "Initializes Retrieval Generator via ``lmcache_engine.retrieve_layer()``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:58
+msgid "Performs setup (1st ``next()``) and loads layer 0 (2nd ``next()``)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:59
+msgid "Creates ``layerwise_retrievers`` list for ongoing layer processing"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:61
+msgid "**2. wait_for_layer_load()** (repeated for each layer)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:62
+msgid "Advances Retrieval Generator via ``next()`` to process layer i"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:63
+msgid ""
+"Triggers ``StorageManager.layerwise_batched_get()`` for async cache "
+"retrieval"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:64
+msgid ""
+"Calls GPU Load Generator's ``batched_to_gpu()`` to transfer memory "
+"objects to GPU"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:65
+msgid ""
+"**Last request in batch**: Synchronizes "
+"``current_stream.wait_stream(load_stream)``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:67
+msgid "**3. save_kv_layer()** (repeated for each layer)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:68
+msgid ""
+"**First call only**: Creates Storage Generator with upfront CPU memory "
+"allocation"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:69
+msgid "Advances Storage Generator via ``next()`` to process layer i"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:70
+msgid ""
+"Calls GPU Store Generator's ``batched_from_gpu()`` to transfer GPU data "
+"to CPU"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:71
+msgid ""
+"**First request in batch**: Synchronizes "
+"``store_stream.wait_stream(current_stream)``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:73
+msgid "**4. wait_for_save()**"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:74
+msgid "Finalizes Storage Generator with last ``next()`` call"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:75
+msgid "Completes all ``StorageManager.batched_put()`` operations"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:76
+msgid "Performs GPU Store Generator cleanup"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:79
+msgid "Key Optimizations"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:81
+msgid "**Pipelined Memory Operations**"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:82
+msgid "The system overlaps layer N+1 computation with layer N storage."
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:84
+msgid "**Stream Synchronization**"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:85
+msgid "Three CUDA streams coordinate operations:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:87
+msgid "``current_stream``: vLLM's forward pass computation"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:88
+msgid "``load_stream``: KV cache loading operations"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:89
+msgid "``store_stream``: KV cache storing operations"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:91
+msgid "**Batch-Level Coordination**"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:92
+msgid "Multiple requests are processed together with specialized synchronization:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:94
+msgid ""
+"**First request**: Provides store stream synchronization to prevent GPU "
+"buffer corruption"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:95
+msgid ""
+"**Last request**: Provides load stream synchronization to ensure KV cache"
+" availability"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:97
+msgid "**Memory Allocation Strategies**"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:98
+msgid "**Retrieval**: Layer-by-layer allocation"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:99
+msgid "**Storage**: Upfront allocation for all layers"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:101
+msgid "**Cache Key Management**"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:102
+msgid ""
+"Multi-layer cache engine keys use ``split_layers(N)`` to create per-layer"
+" kubernetes_deployment"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:105
+msgid "Configuration"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:107
+msgid "Enable layerwise caching by setting:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:113
+msgid ""
+"The system automatically selects appropriate layerwise GPU connectors "
+"based on configuration:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:115
+msgid "``VLLMPagedMemLayerwiseGPUConnector``: For standard layerwise operations"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_optimizations/layerwise.rst:116
+msgid "``VLLMBufferLayerwiseGPUConnector``: When blending is enabled"
+msgstr ""
+

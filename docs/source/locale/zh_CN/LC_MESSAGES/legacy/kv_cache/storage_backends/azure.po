@@ -1,0 +1,132 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:2
+msgid "Azure Blob Storage Backend"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:4
+msgid ""
+"LMCache can offload KV cache to Azure Blob Storage via an async-native "
+"connector (parity with the S3 backend, no NIXL dependency). The connector"
+" is selected by an ``azure://`` ``remote_url``."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:9
+msgid "Optional Packages"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:11
+msgid ""
+"The Azure SDKs are optional dependencies and are imported lazily, so "
+"install them only when you use this backend:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:21
+msgid "URL Format"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:27
+msgid ""
+"The container name is the only value carried in the URL. The storage "
+"account and credentials are supplied via ``extra_config``."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:31
+msgid "Example Configuration"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:46
+msgid "Configuration Parameters (in extra_config)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:48
+msgid ""
+"**azure_account_url**: Storage account URL, e.g. "
+"``https://<account>.blob.core.windows.net``. Required unless "
+"``azure_connection_string`` is provided."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:51
+msgid ""
+"**azure_connection_string**: Full Azure Storage connection string. When "
+"set, it is used on its own and the other fields are ignored."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:53
+msgid ""
+"**azure_account_key**: Storage account shared key (paired with "
+"``azure_account_url``)."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:55
+msgid ""
+"**azure_sas_token**: Shared Access Signature token (paired with "
+"``azure_account_url``)."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:59
+msgid "Authentication"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:61
+msgid "Exactly one credential path is resolved, most-explicit-first:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:63
+msgid "**azure_connection_string** — if set, it wins."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:64
+msgid "**azure_account_url + azure_account_key** — shared-key auth."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:65
+msgid "**azure_account_url + azure_sas_token** — SAS-token auth."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:66
+msgid ""
+"**azure_account_url** only — falls back to ``DefaultAzureCredential`` "
+"(managed identity, environment variables, Azure CLI login, etc.), which "
+"requires the ``azure-identity`` package."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:70
+msgid ""
+"``azure_account_url`` is required for every path except the connection-"
+"string case."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:74
+msgid "Notes"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:76
+msgid "Only full chunks are stored; set ``save_unfull_chunk: False``."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/azure.rst:77
+msgid ""
+"Keys are flattened into one blob per chunk (same flat layout as the S3 "
+"backend)."
+msgstr ""
+

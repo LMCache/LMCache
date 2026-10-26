@@ -1,0 +1,238 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/production/observability/frontend.rst:4
+msgid "LMCache Frontend"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/frontend_dashboard`."
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:11
+msgid ""
+"LMCache Frontend is a monitoring and proxy service for LMCache clusters, "
+"providing a web interface for cluster management and HTTP request "
+"proxying to cluster nodes."
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:15
+msgid "LMCache Frontend Dashboard"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:21
+msgid "Features"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:23
+msgid "**Cluster Monitoring**: Web-based dashboard for visualizing cluster status"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:24
+msgid ""
+"**Request Proxying**: HTTP proxy service to forward requests to any "
+"cluster node"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:25
+msgid ""
+"**Flexible Configuration**: Support for both IP:port and Unix domain "
+"sockets"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:26
+msgid "**Plugin System**: Integration with LMCache plugin framework"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:30
+msgid "Installation"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:32
+msgid "Install from PyPI:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:38
+msgid "Or install from source:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:48
+msgid "Quick Start"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:51
+msgid "Starting the Service"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:59
+msgid "Command Line Options"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:65
+msgid "Option"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:66
+msgid "Description"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:67
+msgid "``--port``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:68
+msgid "Service port (default: 8000)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:69
+msgid "``--host``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:70
+msgid "Bind host address (default: 0.0.0.0)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:71
+msgid "``--config``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:72
+msgid "Path to configuration file"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:73
+msgid "``--nodes``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:74
+msgid "Direct node configuration (JSON string)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:77
+msgid ""
+"After starting the service, access the dashboard at "
+"``http://localhost:8080/``."
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:81
+msgid "Configuration"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:84
+msgid "Node Configuration"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:86
+msgid "Create a ``config.json`` file with node definitions:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:103
+msgid ""
+"The ``port`` field can be configured as either an integer port number or "
+"a string path for Unix domain sockets."
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:108
+msgid "LMCache Plugin Integration"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:110
+msgid ""
+"To start the frontend via the LMCache plugin framework, add the following"
+" to your ``lmcache.yaml``:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:127
+msgid "Proxying Requests"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:129
+msgid "Proxy requests using the format:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:135
+msgid "Examples:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:148
+msgid ""
+"The ``POST /run_script`` example above requires the target node to opt in"
+" with ``run_script_api_enabled: true`` (see the sample config above). "
+"Without it the endpoint returns ``404`` — it executes caller-supplied "
+"code in-process and is therefore disabled by default."
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:155
+msgid "Contributing"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:157
+msgid ""
+"LMCache Frontend is an open-source project and we welcome contributions "
+"from the community! Whether you want to fix bugs, add new features, "
+"improve documentation, or share ideas, your contributions are "
+"appreciated."
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:161
+msgid "Ways to contribute:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:163
+msgid ""
+"**Report Issues**: Found a bug or have a feature request? Open an issue "
+"on GitHub."
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:165
+msgid ""
+"**Submit Pull Requests**: Fork the repository, make your changes, and "
+"submit a PR."
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:167
+msgid "**Improve Documentation**: Help us make the docs clearer and more helpful."
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:168
+msgid ""
+"**Share Feedback**: Let us know how you're using LMCache Frontend and "
+"what could be improved."
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:171
+msgid "Join us in making LMCache Frontend better for everyone!"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:175
+msgid "More Information"
+msgstr ""
+
+#: ../../source/legacy/production/observability/frontend.rst:177
+msgid ""
+"For more details, visit the `LMCache Frontend GitHub repository "
+"<https://github.com/LMCache/lmcache_frontend>`_."
+msgstr ""
+

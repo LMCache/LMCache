@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -29,7 +29,9 @@ msgid ""
 "(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
 "for better feature support and performance. For the MP mode equivalent of"
 " this page, see :doc:`/mp/l2_storage/fs`."
-msgstr "此页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/l2_storage/fs`。"
+msgstr ""
+"此页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` "
+"以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/l2_storage/fs`。"
 
 #: ../../source/kv_cache/storage_backends/fs.rst:9
 msgid ""
@@ -44,16 +46,14 @@ msgstr ""
 
 #: ../../source/kv_cache/storage_backends/fs.rst:15
 msgid ""
-"This backend is different from :doc:`local_storage`. Local disk "
+"This backend is different from "
+":doc:`/legacy/kv_cache/storage_backends/local_storage`. Local disk "
 "offloading is a per-process local tier configured through ``local_disk``."
 " ``FSConnector`` is a remote backend configured through "
 "``remote_storage_plugins`` or the legacy ``remote_url`` field, so it "
 "participates in the same remote backend path as Redis, S3, Mooncake, and "
 "other remote connectors."
-msgstr ""
-"该后端与 :doc:`local_storage` 不同。本地磁盘卸载是通过 ``local_disk`` 配置的按进程本地层。\\ "
-"``FSConnector`` 是通过 ``remote_storage_plugins`` 或旧版 ``remote_url`` "
-"字段配置的远程后端，因此它与 Redis、S3、Mooncake 及其他远程连接器共用同一远程后端路径。"
+msgstr "该后端与 :doc:`/legacy/kv_cache/storage_backends/local_storage` 不同。本地磁盘卸载是通过 ``local_disk`` 配置的每个进程本地层。``FSConnector`` 是通过 ``remote_storage_plugins`` 或遗留的 ``remote_url`` 字段配置的远程后端，因此它参与与 Redis、S3、Mooncake 和其他远程连接器相同的远程后端路径。"
 
 #: ../../source/kv_cache/storage_backends/fs.rst:22
 msgid "When to use it"
@@ -305,7 +305,7 @@ msgid ""
 "vLLM with LMCache enabled:"
 msgstr "使用上述任一配置编写 ``fs.yaml`` 后，以 LMCache 模式启动 vLLM："
 
-#: ../../source/kv_cache/storage_backends/fs.rst:192
+#: ../../source/kv_cache/storage_backends/fs.rst:191
 msgid ""
 "Then send the same long-prefix request twice. The first request stores "
 "chunks in the filesystem backend. The second request should report "

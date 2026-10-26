@@ -1,0 +1,374 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:4
+msgid "Standalone Starter"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:11
+msgid ""
+"The LMCache Standalone Starter allows you to run LMCacheEngine as a "
+"standalone service without vLLM or GPU dependencies. This is particularly"
+" useful for:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:13
+msgid "Testing and development environments"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:14
+msgid "CPU-only or P2P backend deployments"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:17
+msgid "Quick Start"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:20
+msgid "Basic Usage"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:35
+msgid "CPU-Only Mode"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:46
+msgid "Remote P2P Mode"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:47
+msgid "TO be added"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:50
+msgid "Configuration Section"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:52
+msgid ""
+"The standalone starter supports multiple configuration sources with the "
+"following priority order:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:54
+msgid "**Command-line arguments** (highest priority)"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:55
+msgid "**Environment variables** (e.g., ``LMCACHE_CHUNK_SIZE=512``)"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:56
+msgid ""
+"**Configuration file** (specified by ``--config`` or "
+"``LMCACHE_CONFIG_FILE``)"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:57
+msgid "**Default values** (lowest priority)"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:59
+msgid ""
+"Use hyphenated options for starter parameters such as ``--model-name`` "
+"and ``--kv-shape``. Engine configuration overrides use ``--key=value`` "
+"with the configuration field name, for example ``--chunk_size=512``."
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:64
+msgid "Parameter Details"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:66
+msgid "**KV Cache Shape Specification**"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:68
+msgid ""
+"The ``--kvcache-shape-spec`` parameter supports multi-layer group "
+"configurations:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:70
+msgid "Format: ``(shape_string):dtype:layer_count;[...]``"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:71
+msgid "shape_string: comma-separated shape (e.g., '2,2,256,4,16')"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:72
+msgid ""
+"Examples: - Single group: ``(2,2,256,4,16):float16:2`` - Multiple groups:"
+" ``(2,2,256,4,16):float16:2;(3,2,256,4,4):float32:3``"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:76
+msgid "**Device Support**"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:78
+msgid "``--device=cpu``: CPU-only mode (default)"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:79
+msgid "``--device=cuda``: CUDA GPU acceleration"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:80
+msgid "``--device=xpu``: XPU GPU acceleration"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:82
+msgid "**MLA (Multi-Level Attention)**"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:84
+msgid "``--use-mla``: Enable MLA for improved attention performance"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:85
+msgid "Requires compatible model and configuration"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:88
+msgid "Command-Line Parameters"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:91
+msgid "Basic Parameters"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:107
+msgid "Usage Examples"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:110
+msgid "Custom Configuration"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:121
+msgid "Multi-Layer Group Configuration"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:133
+msgid "GPU device"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:147
+msgid "MLA Configuration"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:159
+msgid "Internal API Server"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:161
+msgid ""
+"The standalone starter includes an internal API server for monitoring and"
+" management:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:174
+msgid "Troubleshooting"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:177
+msgid "Common Issues"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:179
+msgid ""
+"**Issue**: \"No config file specified\" **Solution**: Set "
+"``LMCACHE_CONFIG_FILE`` or use ``--config`` parameter"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:182
+msgid ""
+"**Issue**: \"Failed to connect to controller\" **Solution**: Start "
+"controller first: ``python -m lmcache.inprocess.v1.api_server``"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:185
+msgid ""
+"**Issue**: \"Invalid KV shape specification\" **Solution**: Check format:"
+" ``(shape):dtype:layer_count``, e.g., ``(2,2,256,4,16):float16:2``"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:188
+msgid ""
+"**Issue**: \"Device not available\" **Solution**: Verify device support: "
+"use ``--device=cpu`` if GPU not available"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:191
+msgid ""
+"**Issue**: \"MLA configuration error\" **Solution**: Ensure compatible "
+"model and check ``--use-mla`` parameter"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:195
+msgid "Debug Mode"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:197
+msgid "Enable debug logging for troubleshooting:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:205
+msgid "Advanced Debugging"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:207
+msgid "For detailed layer group information:"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:217
+msgid "Performance Tuning"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:220
+msgid "Memory Configuration"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:231
+msgid "Layer Group Optimization"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:242
+msgid "GPU Acceleration"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:253
+msgid "MLA Performance"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:265
+msgid "Best Practices"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:267
+msgid "**Use configuration files** for production deployments"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:268
+msgid "**Set appropriate cache sizes** based on available memory"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:269
+msgid "**Enable internal API** for monitoring and management"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:270
+msgid "**Monitor logs** for performance and error tracking"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:271
+msgid "**Use multi-layer group configurations** for complex model architectures"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:272
+msgid "**Enable MLA** for improved attention performance on supported hardware"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:273
+msgid "**Choose appropriate device** based on available resources (CPU/GPU/XPU)"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:274
+msgid "**Validate KV shape specifications** before deployment"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:275
+msgid "**Test with debug logging** when configuring new layer groups"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:276
+msgid "**Optimize chunk sizes** for specific hardware configurations"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:279
+msgid "Multi-Layer Group Best Practices"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:281
+msgid "Use consistent chunk sizes across layer groups for optimal performance"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:282
+msgid "Group layers with similar precision requirements together"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:283
+msgid "Validate shape specifications in development environment first"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:284
+msgid "Monitor memory usage when using multiple layer groups"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:287
+msgid "MLA Configuration Tips"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:289
+msgid "Enable MLA only on supported hardware configurations"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:290
+msgid "Use bfloat16 or float16 precision for best MLA performance"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:291
+msgid "Test MLA performance impact before production deployment"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:292
+msgid "Monitor attention performance metrics with MLA enabled"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:295
+msgid "Related Documentation"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:297
+msgid ":doc:`/getting_started/quickstart`"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:298
+msgid ":doc:`../../api_reference/configurations`"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:299
+msgid ":doc:`/legacy/kv_cache/storage_backends/index`"
+msgstr ""
+
+#: ../../source/legacy/getting_started/quickstart/standalone_starter.rst:300
+msgid ":doc:`../../kv_cache_management/index`"
+msgstr ""
+

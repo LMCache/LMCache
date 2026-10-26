@@ -1,0 +1,317 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:4
+msgid "Controller APIs"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/http_api`."
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:11
+msgid ""
+"These APIs are specific to the LMCache Controller component. They provide"
+" visibility into registered instances, workers, and key statistics."
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:17
+msgid "Endpoints"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:20
+msgid "``GET /controller/key-stats`` — Key Statistics"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:22
+msgid "Get key statistics across all instances and workers."
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:24
+#: ../../source/legacy/internal_api_server/controller_apis.rst:95
+msgid "**Method**: ``GET``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:25
+msgid "**Path**: ``/controller/key-stats``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:26
+msgid "**Parameters**: None"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:27
+#: ../../source/legacy/internal_api_server/controller_apis.rst:106
+msgid "**Response**: ``application/json``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:33
+msgid "**Example Response** (HTTP 200):"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:55
+#: ../../source/legacy/internal_api_server/controller_apis.rst:180
+msgid "**Error Response** (controller not available, HTTP 503):"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:63
+msgid "**Response Schema**:"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:66
+#: ../../source/legacy/internal_api_server/controller_apis.rst:77
+#: ../../source/legacy/internal_api_server/controller_apis.rst:191
+msgid "Field"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:66
+#: ../../source/legacy/internal_api_server/controller_apis.rst:77
+#: ../../source/legacy/internal_api_server/controller_apis.rst:100
+#: ../../source/legacy/internal_api_server/controller_apis.rst:191
+msgid "Type"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:66
+#: ../../source/legacy/internal_api_server/controller_apis.rst:77
+#: ../../source/legacy/internal_api_server/controller_apis.rst:100
+#: ../../source/legacy/internal_api_server/controller_apis.rst:191
+msgid "Description"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:68
+msgid "``total_key_count``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:68
+#: ../../source/legacy/internal_api_server/controller_apis.rst:69
+#: ../../source/legacy/internal_api_server/controller_apis.rst:70
+#: ../../source/legacy/internal_api_server/controller_apis.rst:80
+#: ../../source/legacy/internal_api_server/controller_apis.rst:81
+#: ../../source/legacy/internal_api_server/controller_apis.rst:103
+#: ../../source/legacy/internal_api_server/controller_apis.rst:194
+#: ../../source/legacy/internal_api_server/controller_apis.rst:196
+#: ../../source/legacy/internal_api_server/controller_apis.rst:200
+msgid "int"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:68
+msgid "Total number of KV keys across all instances"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:69
+msgid "``total_instance_count``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:69
+msgid "Total number of registered instances"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:70
+msgid "``total_worker_count``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:70
+msgid "Total number of workers across all instances"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:71
+msgid "``instances``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:71
+msgid "list"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:71
+msgid "Per-instance breakdown (see below)"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:74
+msgid "**Instance Schema**:"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:79
+#: ../../source/legacy/internal_api_server/controller_apis.rst:102
+#: ../../source/legacy/internal_api_server/controller_apis.rst:193
+msgid "``instance_id``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:79
+#: ../../source/legacy/internal_api_server/controller_apis.rst:102
+#: ../../source/legacy/internal_api_server/controller_apis.rst:193
+#: ../../source/legacy/internal_api_server/controller_apis.rst:195
+#: ../../source/legacy/internal_api_server/controller_apis.rst:197
+msgid "str"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:79
+msgid "Unique identifier of the instance"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:80
+#: ../../source/legacy/internal_api_server/controller_apis.rst:200
+msgid "``key_count``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:80
+msgid "Number of KV keys held by this instance"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:81
+msgid "``worker_count``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:81
+msgid "Number of workers in this instance"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:86
+msgid "``GET /controller/workers`` — Worker Information"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:88
+msgid ""
+"Get worker information with flexible query parameters. Behavior depends "
+"on the combination of parameters:"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:91
+msgid "**No parameters**: List all registered workers across all instances."
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:92
+msgid "**``instance_id`` only**: List all workers for a specific instance."
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:93
+msgid ""
+"**``instance_id`` and ``worker_id``**: Get detailed info about a specific"
+" worker."
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:96
+msgid "**Path**: ``/controller/workers``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:97
+msgid "**Parameters**:"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:100
+msgid "Name"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:102
+msgid "(Optional) Instance ID to filter workers"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:103
+#: ../../source/legacy/internal_api_server/controller_apis.rst:194
+msgid "``worker_id``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:103
+msgid ""
+"(Optional) Worker ID for specific worker details (requires "
+"``instance_id``)"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:119
+msgid "**Example Response** (list workers):"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:149
+msgid "**Example Response** (single worker):"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:164
+msgid "**Error Response** (worker not found, HTTP 404):"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:172
+msgid "**Error Response** (instance not found, HTTP 404):"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:188
+msgid "**Worker Response Schema**:"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:193
+msgid "Instance this worker belongs to"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:194
+msgid "Worker index within the instance"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:195
+msgid "``ip``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:195
+msgid "Worker IP address"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:196
+msgid "``port``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:196
+msgid "Worker port number"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:197
+msgid "``peer_init_url``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:197
+msgid "(Optional) Peer initialization URL"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:198
+msgid "``registration_time``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:198
+#: ../../source/legacy/internal_api_server/controller_apis.rst:199
+msgid "float"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:198
+msgid "Unix timestamp of worker registration"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:199
+msgid "``last_heartbeat_time``"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:199
+msgid "Unix timestamp of last heartbeat"
+msgstr ""
+
+#: ../../source/legacy/internal_api_server/controller_apis.rst:200
+msgid "Number of KV keys held by this worker"
+msgstr ""
+
