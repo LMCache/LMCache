@@ -682,12 +682,16 @@ def test_tail_free_orders_only_its_own_servers_end(
 def test_failed_predecessor_is_not_a_successful_ack(
     make_adapter: AdapterFactory,
     phase: str,
-    caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A failed RPC cannot authorize END, including an already-completed failure."""
     adapter, (client,) = make_adapter()
-    monkeypatch.setattr(adapter_module.logger, "propagate", True)
+    errors: list[str] = []
+    monkeypatch.setattr(
+        adapter_module.logger,
+        "error",
+        lambda message, *args: errors.append(message % args),
+    )
     if phase == "free":
         client.free_ack = MessagingFuture()
         adapter.free_lookup_locks(pack_token_ids(range(256)), 0, 128, "r")
@@ -702,7 +706,7 @@ def test_failed_predecessor_is_not_a_successful_ack(
             client.status.set_exception(RuntimeError("failed query"))
     adapter.end_session("r")
     assert not client.ends
-    assert "Cannot order END_SESSION" in caplog.text
+    assert any("Cannot order END_SESSION" in message for message in errors)
 
 
 @pytest.mark.parametrize("first_already_done", [False, True])
