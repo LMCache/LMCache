@@ -119,8 +119,10 @@ Source: ``lmcache/v1/multiprocess/config.py``
        package (``pip install "lmcache[grpc-native]"``), which the
        ``lmcache/vllm-openai`` and ``lmcache/standalone`` images include.
        All three serve the same clients over TCP.
-       In ``native`` mode the grpcio runtime metrics only cover
-       out-of-tree services. Used only with ``--transport grpc``.
+       In ``native`` mode the native front reports the call count and
+       duration metrics itself (pygrpc-native 0.3.0 or later), under the
+       same names, but not the message size ones. Used only with
+       ``--transport grpc``.
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.
