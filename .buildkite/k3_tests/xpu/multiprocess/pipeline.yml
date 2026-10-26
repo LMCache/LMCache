@@ -116,12 +116,13 @@ steps:
 
       # Gemma3-270M has a 512-token sliding window plus full-attention layers.
       # Keep chunks smaller than the window to exercise multi-chunk SWA lookup.
-      # Reuse the Gemma4 HMA workload with an ungated BF16 model override.
-      # Compare aggregate scores: XPU cold and cached prefills are not bit-exact.
-      - label: ":xpu: lm_eval_swa / engine_driven / {{matrix.transport}}"
+      # Compare GPU APC against LMCache with identical cached-prefix boundaries;
+      # cold prefill is only for warming caches, not the numerical reference.
+      - label: ":xpu: hma_swa_correctness / engine_driven / {{matrix.transport}}"
         command: |
           export MODEL="unsloth/gemma-3-270m-it"
           export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+          export VLLM_KV_LOAD_FAILURE_POLICY="fail"
           export ENGINE_DRIVEN_TRANSPORT="{{matrix.transport}}"
           case "{{matrix.transport}}" in
             inline) export L1_USE_LAZY="true" ;;
@@ -129,11 +130,12 @@ steps:
           esac
           export ENFORCE_EAGER="1"
           export CHUNK_SIZE="64"
+          export VLLM_BLOCK_SIZE="64"
           export MAX_MODEL_LEN="8192"
-          export NUM_CONCURRENT="256"
-          export LIMIT="1000"
-          export SCORE_TOLERANCE="0.05"
-          .buildkite/k3_tests/xpu/multiprocess/run.sh hma_lm_eval_gemma4
+          export VLLM_DISABLE_PREFIX_CACHING="false"
+          export BATCH_INVARIANT="0"
+          export SEPARATE_OBJECT_GROUPS="1"
+          .buildkite/k3_tests/xpu/multiprocess/run.sh hma_swa_correctness
         matrix:
           setup:
             transport:
