@@ -10,7 +10,7 @@ registers on the ``valkey-sync://`` scheme as a backward-compat alias).
 
 Design choices:
 - The glide client lifecycle and worker thread pool live in the shared
-  :class:`~lmcache.v1.storage_backend.valkey.worker_pool.ValkeyWorkerPool`,
+  :class:`~lmcache.v1.distributed.l2_adapters.valkey.worker_pool.ValkeyWorkerPool`,
   which is also used by the MP-mode ``ValkeyL2Adapter`` so both paths
   share one implementation of zero-copy GET/SET/EXISTS/DELETE.
 - Direct ``memoryview`` access to pinned CPU memory — no shared-memory
@@ -39,16 +39,16 @@ import asyncio
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
-from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
-from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.valkey.worker_pool import (
+from lmcache.v1.distributed.l2_adapters.valkey.worker_pool import (
     DEFAULT_CONNECTION_TIMEOUT_SECS,
     DEFAULT_REQUEST_TIMEOUT_SECS,
     GET_MISS,
     ValkeyWorkerPool,
 )
+from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
+from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
+from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
 

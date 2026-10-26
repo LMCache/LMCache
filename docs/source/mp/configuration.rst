@@ -292,11 +292,11 @@ The HTTP frontend is included when running ``lmcache server``.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
-   * - ``--http-api-key-file``
+   * - ``--api-key-file``
      - unset
      - Read a bearer API key from a file. Repeat the option to accept multiple
-       keys during rotation. ``LMCACHE_HTTP_API_KEY_FILE`` and
-       ``LMCACHE_HTTP_API_KEY`` provide environment alternatives. All sources
+       keys during rotation. ``LMCACHE_API_KEY_FILE`` and
+       ``LMCACHE_API_KEY`` provide environment alternatives. All sources
        are cumulative. When none are set, authentication is disabled. ``/``
        and ``/healthcheck`` remain public when authentication is enabled.
 

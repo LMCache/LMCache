@@ -10,6 +10,6 @@ adapter).
 """
 
 # First Party
-from lmcache.v1.storage_backend.valkey.worker_pool import ValkeyWorkerPool
+from lmcache.v1.distributed.l2_adapters.valkey.worker_pool import ValkeyWorkerPool
 
 __all__ = ["ValkeyWorkerPool"]

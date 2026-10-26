@@ -113,11 +113,11 @@ def ready(value: Any) -> MessagingFuture[Any]:
 
 def make_key(num_tokens: int = 256) -> IPCCacheServerKey:
     """Return a LOOKUP key for request ``r``."""
-    return IPCCacheServerKey(
+    return IPCCacheServerKey.from_token_ids(
         model_name="model",
         world_size=1,
         worker_id=None,
-        token_ids=tuple(range(num_tokens)),
+        token_ids=range(num_tokens),
         start=0,
         end=num_tokens,
         request_id="r",

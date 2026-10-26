@@ -58,14 +58,26 @@ x-pod-2xpu: &pod-2xpu
 steps:
   - group: ":xpu: Multiprocess (1-pod)"
     steps:
-      - label: ":xpu: lm_eval"
+      - label: ":xpu: lm_eval_full_attn / engine_driven / {{matrix.transport}}"
         command: |
+          export MODEL="Qwen/Qwen3-1.7B"
           export LMCACHE_MP_TRANSFER_MODE="engine_driven"
-          export L1_USE_LAZY="false"
+          case "{{matrix.transport}}" in
+            inline) export L1_USE_LAZY="true" ;;
+            shm) export L1_USE_LAZY="false" ;;
+          esac
           export ENFORCE_EAGER="1"
           export VLLM_USE_STANDALONE_COMPILE="0"
           export CPU_BUFFER_SIZE="80"
+          export NUM_CONCURRENT="64"
+          export BATCH_INVARIANT="1"
+          export VERIFY_LMCACHE_RETRIEVAL="true"
           .buildkite/k3_tests/xpu/multiprocess/run.sh lm_eval
+        matrix:
+          setup:
+            transport:
+              - "inline"
+              - "shm"
         timeout_in_minutes: 45
         retry: *flaky-retry
         agents: { queue: "intel-xpu" }

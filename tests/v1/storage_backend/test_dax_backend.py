@@ -19,6 +19,7 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.distributed.l2_adapters.dax.core import DaxCore
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
@@ -26,7 +27,6 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.dax.core import DaxCore
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.plugins.dax_backend import DaxBackend
 import lmcache.lmcache_native as lmcache_native
