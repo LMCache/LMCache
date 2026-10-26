@@ -21,9 +21,13 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.internal_api import L1ReadReservation
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.storage_controllers.write_policy import OrderedWritePolicy
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import (
+    L1ReadTransferCompletion,
+    StorageManager,
+)
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.trace import codecs
 from lmcache.v1.mp_observability.trace import decorator as trace_decorator
@@ -527,3 +531,37 @@ def test_delete_reports_a_key_as_skipped_while_any_copy_is_locked(
     assert store.delete_l1_keys(keys) == (0, 1)
     managers[locked_index].finish_read(keys)
     assert store.delete_l1_keys(keys) == (1, 0)
+
+
+def test_partial_read_pin_preserves_other_owner_generation(
+    storage_factory: StorageFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing original lease rejects that copy but settles the valid pin."""
+    store, (first, second), _policy = storage_factory((8192, 8192))
+    clock = [1.0]
+    monkeypatch.setattr("lmcache.v1.distributed.l1_manager.monotonic", lambda: clock[0])
+    stale: dict[ObjectKey, int] = {}
+    peer: dict[ObjectKey, int] = {}
+    live: dict[ObjectKey, int] = {}
+    second.reserve_write([key(2)], [False], LAYOUT)
+    second.finish_write_and_reserve_read([key(2)], read_generations=stale)
+    clock[0] += second.config.read_ttl_seconds + 1
+    second.reserve_read([key(2)], read_generations=peer)
+    first.reserve_write([key(1)], [False], LAYOUT)
+    first.finish_write_and_reserve_read([key(1)], read_generations=live)
+    claims = (
+        L1ReadReservation(key(1), live[key(1)], first.l1_manager_id, 1),
+        L1ReadReservation(key(2), stale[key(2)], second.l1_manager_id, 1),
+    )
+    completion = store.prepare_read_generation_completion(claims)
+    assert set(store.pin_read_buffers(completion, "copy")) == {key(1)}
+    payload = ("copy", completion)
+    # The immutable receipt remains usable after native msgpack transport.
+    decoded = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(payload), type=L1ReadTransferCompletion
+    )
+    store.finish_read_transfer(decoded)
+    assert first.delete([key(1)]) == {key(1): L1Error.SUCCESS}
+    assert second.delete([key(2)]) == {key(2): L1Error.KEY_IS_LOCKED}
+    second.finish_read([key(2)], read_generations=peer)
+    assert second.delete([key(2)]) == {key(2): L1Error.SUCCESS}

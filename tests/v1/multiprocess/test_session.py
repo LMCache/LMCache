@@ -362,6 +362,78 @@ class TestSessionManagerRemoveReturnsSession:
         assert mgr.remove("no-such-id") is None
 
 
+@pytest.mark.parametrize("readers", [1, 3])
+def test_worker_claims_and_free_partition_original_shares(
+    session: Session, readers: int
+) -> None:
+    """MLA instances share a KV worker ID, but cannot exceed their reservation."""
+    key = IPCCacheServerKey.from_token_ids(
+        "model",
+        1,
+        None,
+        range(4),
+        end=4,
+        request_id=session.request_id,
+        num_kv_readers=readers,
+    )
+    obj = ObjectKey(b"chunk", "model", 0)
+    session.begin_lookup(key, (-1,))
+    session.record_prefetch_result(1, (0,), {obj: 3}, read_generations={obj: 9})
+    worker = replace(key, worker_id=0)
+    for instance_id in range(readers):
+        claims = session.claim_worker_read(worker, instance_id, [obj])
+        assert claims is not None and len(claims) == 1
+        assert claims[0].generation == 9 and claims[0].count == 1
+        assert session.claim_worker_read(worker, instance_id, [obj]) is None
+    assert session.claim_worker_read(worker, readers + 1, [obj]) is None
+    assert session.claim_free_reads(key, [obj]) == ()
+
+
+def test_worker_disjoint_ranges_and_free_preserve_per_key_counts(
+    session: Session,
+) -> None:
+    key = IPCCacheServerKey.from_token_ids(
+        "model",
+        1,
+        None,
+        range(8),
+        end=8,
+        request_id=session.request_id,
+        num_kv_readers=2,
+    )
+    keys = [ObjectKey(b"head", "model", 0), ObjectKey(b"tail", "model", 0)]
+    session.begin_lookup(key, (-1,))
+    session.record_prefetch_result(2, (0,), read_generations=dict.fromkeys(keys, 9))
+    worker = replace(key, worker_id=0)
+    assert session.claim_worker_read(worker, 11, keys[:1]) is not None
+    # An overlapping retry must not partly consume the still-unclaimed tail.
+    assert session.claim_worker_read(worker, 11, keys) is None
+    assert session.claim_worker_read(worker, 11, keys[1:]) is not None
+    claims = session.claim_free_reads(key, keys + keys)
+    assert {claim.key: claim.count for claim in claims} == dict.fromkeys(keys, 1)
+    assert session.claim_free_reads(key, keys) == ()
+    assert session.claim_worker_read(worker, 12, keys) is None
+
+
+def test_free_claim_excludes_late_workers(session: Session) -> None:
+    key = IPCCacheServerKey.from_token_ids(
+        "model",
+        1,
+        None,
+        range(4),
+        end=4,
+        request_id=session.request_id,
+        num_kv_readers=2,
+    )
+    obj = ObjectKey(b"chunk", "model", 0)
+    session.begin_lookup(key, (-1,))
+    session.record_prefetch_result(1, (0,), read_generations={obj: 9})
+    claims = session.claim_free_reads(key, [obj, obj])
+    assert len(claims) == 1 and claims[0].count == 2
+    assert session.claim_worker_read(replace(key, worker_id=0), 11, [obj]) is None
+    assert session.claim_free_reads(key, [obj]) == ()
+
+
 @pytest.mark.parametrize("mismatched_tokens", [False, True])
 def test_abandoned_claim_matches_packed_identity_once(
     session: Session, mismatched_tokens: bool

@@ -5,6 +5,7 @@
 from collections.abc import Iterator
 from dataclasses import replace
 from threading import Event
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 import time
 
@@ -13,6 +14,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import device_ops
 from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -27,8 +29,15 @@ from lmcache.v1.mp_observability.event import Event as CacheEvent
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as transfer
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    LMCacheDrivenTransferModule,
+)
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.session import SessionManager
+import lmcache.v1.distributed.l1_manager as l1_manager_module
+
+
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 LookupFixture = tuple[LookupModule, StorageManager, IPCCacheServerKey, ObjectKey]
@@ -209,6 +218,209 @@ def test_removed_session_cannot_release_another_reader(lookup) -> None:
     with sm.read_prefetched_results([obj_key]) as objects:
         assert objects is not None
     module.free_lookup_locks(new, 1)
+
+
+@pytest.fixture
+def retriever(lookup, monkeypatch: pytest.MonkeyPatch):
+    """Use real lookup storage with only the device stream/backend simulated."""
+    lookup_module, sm, _key, obj_key = lookup
+    ctx = lookup_module.context
+    ctx.resolve_obj_keys.return_value = [[obj_key]]
+    cache = MagicMock()
+    cache.calculate_num_blocks.return_value = 1
+    cache.kv_layer_groups_manager = SimpleNamespace(
+        num_object_groups=1,
+        num_kernel_groups=1,
+        get_attn_desc=lambda: AttnWindowDesc([-1]),
+    )
+    backend = MagicMock()
+    monkeypatch.setattr(transfer.DeviceHostFuncDispatcher, "start", lambda self: None)
+    monkeypatch.setattr(device_ops, "drain_recorded_completions", lambda: [])
+    module = LMCacheDrivenTransferModule(ctx)
+    entry = SimpleNamespace(
+        cache_context=cache, model_name="model", event_backend=backend
+    )
+    monkeypatch.setattr(
+        module, "get_and_touch_context_entry", MagicMock(return_value=entry)
+    )
+    pending = []
+
+    def submit(_stream, kind, payload):
+        if kind == "finish_read_transfer":
+            pending.append(payload)
+
+    monkeypatch.setattr(transfer, "torch_dev", MagicMock())
+    monkeypatch.setattr(
+        transfer, "downsample_and_stage_block_ids", lambda _cache, ids: ids
+    )
+    monkeypatch.setattr(transfer, "submit_callback_to_stream", submit)
+    monkeypatch.setattr("lmcache.v1.distributed.l1_manager.monotonic", lambda: 1.0)
+    yield module, cache, backend, pending
+    for receipt in pending:
+        sm.finish_read_transfer(receipt)
+    module.close()
+
+
+@pytest.mark.parametrize("free_copy", [True, False])
+def test_free_and_transfer_complete_only_their_own_same_generation_reads(
+    lookup, retriever, free_copy: bool
+) -> None:
+    """FREE(A) plus completion(A) cannot remove B, and FREE(B) must not leak A."""
+    lookup_module, sm, key, obj_key = lookup
+    module, _cache, _backend, pending = retriever
+    peer = replace(key, request_id="B")
+    start_lookup(lookup_module, key)
+    start_lookup(lookup_module, peer)
+    assert module.retrieve(replace(key, worker_id=0), 11, [[0]], b"event")[1]
+    lookup_module.free_lookup_locks(key if free_copy else peer, 1)
+    lookup_module.free_lookup_locks(key if free_copy else peer, 1)
+    assert sm.delete_l1_keys([obj_key]) == (0, 1)
+    receipt = pending.pop()
+    sm.finish_read_transfer(receipt)
+    sm.finish_read_transfer(receipt)
+    if free_copy:
+        assert sm.delete_l1_keys([obj_key]) == (0, 1)
+        lookup_module.free_lookup_locks(peer, 1)
+    assert sm.unsafe_read([obj_key]) == ([], [])
+    sm.clear()
+    assert sm.get_l1_usage()[0] == 0
+
+
+def test_free_wins_before_retrieve_without_reading_peer(lookup, retriever) -> None:
+    lookup_module, sm, key, obj_key = lookup
+    module, cache, _backend, _pending = retriever
+    peer = replace(key, request_id="B")
+    start_lookup(lookup_module, key)
+    start_lookup(lookup_module, peer)
+    lookup_module.free_lookup_locks(key, 1)
+    assert not module.retrieve(replace(key, worker_id=0), 11, [[0]], b"event")[1]
+    cache.transfer_object_group.assert_not_called()
+    assert sm.delete_l1_keys([obj_key]) == (0, 1)
+    lookup_module.free_lookup_locks(peer, 1)
+    assert sm.unsafe_read([obj_key]) == ([], [])
+    sm.clear()
+    assert sm.get_l1_usage()[0] == 0
+
+
+def test_mla_workers_failure_and_free_share_one_ownership_ledger(
+    lookup, retriever
+) -> None:
+    """Three TP instances share one KV rank; a failed worker claims only once."""
+    lookup_module, sm, original, obj_key = lookup
+    module, _cache, _backend, pending = retriever
+    key = replace(original, num_kv_readers=3)
+    peer = replace(original, request_id="B")
+    start_lookup(lookup_module, key)
+    start_lookup(lookup_module, peer)
+    worker = replace(key, worker_id=0)
+    assert module.retrieve(worker, 11, [[0]], b"event")[1]
+    assert not module.retrieve(worker, 11, [[0]], b"event")[1]
+    entry = module.get_and_touch_context_entry.return_value
+    module.get_and_touch_context_entry.return_value = None
+    assert module.retrieve(worker, 12, [[0]], b"event") == (b"", False)
+    assert module.retrieve(worker, 12, [[0]], b"event") == (b"", False)
+    module.get_and_touch_context_entry.return_value = entry
+    lookup_module.free_lookup_locks(key, 3)
+    sm.finish_read_transfer(pending.pop())
+    assert sm.delete_l1_keys([obj_key]) == (0, 1)
+    lookup_module.free_lookup_locks(peer, 1)
+    assert sm.unsafe_read([obj_key]) == ([], [])
+    sm.clear()
+    assert sm.get_l1_usage()[0] == 0
+
+
+@pytest.mark.parametrize("failure_stage", ["event", "callback"])
+def test_failed_completion_publication_drains_before_unpin(
+    lookup, retriever, monkeypatch: pytest.MonkeyPatch, failure_stage: str
+) -> None:
+    """Even after FREE, the source stays resident until fallback sync completes."""
+    lookup_module, sm, key, obj_key = lookup
+    module, cache, backend, _pending = retriever
+    start_lookup(lookup_module, key)
+
+    def synchronize():
+        monkeypatch.setattr(l1_manager_module, "monotonic", lambda: 1000.0)
+        lookup_module.free_lookup_locks(key, 1)
+        assert sm.delete_l1_keys([obj_key]) == (0, 1)
+
+    cache.stream.synchronize.side_effect = synchronize
+    if failure_stage == "event":
+        backend.record_event.side_effect = RuntimeError("publication failed")
+    else:
+        original_submit = transfer.submit_callback_to_stream
+
+        def submit(stream, kind, payload):
+            if kind == "finish_read_transfer":
+                raise RuntimeError("publication failed")
+            original_submit(stream, kind, payload)
+
+        monkeypatch.setattr(transfer, "submit_callback_to_stream", submit)
+    with pytest.raises(RuntimeError, match="publication failed"):
+        module.retrieve(replace(key, worker_id=0), 11, [[0]], b"event")
+    cache.stream.synchronize.assert_called_once()
+    assert sm.unsafe_read([obj_key]) == ([], [])
+    sm.clear()
+    assert sm.get_l1_usage()[0] == 0
+
+
+def test_failed_sync_preserves_source_until_copy_is_known_complete(
+    lookup, retriever, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lookup_module, sm, key, obj_key = lookup
+    module, cache, _backend, _pending = retriever
+    start_lookup(lookup_module, key)
+    attempted = []
+
+    def submit(_stream, kind, payload):
+        if kind == "finish_read_transfer":
+            attempted.append(payload)
+            raise RuntimeError("publication failed")
+
+    monkeypatch.setattr(transfer, "submit_callback_to_stream", submit)
+    cache.stream.synchronize.side_effect = RuntimeError("sync failed")
+    with pytest.raises(RuntimeError, match="sync failed"):
+        module.retrieve(replace(key, worker_id=0), 11, [[0]], b"event")
+    monkeypatch.setattr(l1_manager_module, "monotonic", lambda: 1000.0)
+    lookup_module.free_lookup_locks(key, 1)
+    assert sm.delete_l1_keys([obj_key]) == (0, 1)
+    # The fake copy is now quiescent; production must not assume this after failure.
+    sm.finish_read_transfer(attempted.pop())
+    assert sm.unsafe_read([obj_key]) == ([], [])
+    sm.clear()
+    assert sm.get_l1_usage()[0] == 0
+
+
+def test_failed_original_pin_retires_claim_without_releasing_new_reader(
+    lookup, retriever, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lookup_module, sm, key, obj_key = lookup
+    module, cache, _backend, pending = retriever
+    start_lookup(lookup_module, key)
+    monkeypatch.setattr(l1_manager_module, "monotonic", lambda: 1000.0)
+    peer = replace(key, request_id="B")
+    start_lookup(lookup_module, peer)
+    assert not module.retrieve(replace(key, worker_id=0), 11, [[0]], b"event")[1]
+    cache.transfer_object_group.assert_not_called()
+    lookup_module.free_lookup_locks(key, 1)
+    sm.finish_read_transfer(pending.pop())
+    assert sm.delete_l1_keys([obj_key]) == (0, 1)
+    lookup_module.free_lookup_locks(peer, 1)
+    assert sm.unsafe_read([obj_key]) == ([], [])
+    sm.clear()
+    assert sm.get_l1_usage()[0] == 0
+
+
+def test_transfer_receipt_survives_session_removal(lookup, retriever) -> None:
+    lookup_module, sm, key, obj_key = lookup
+    module, _cache, _backend, pending = retriever
+    start_lookup(lookup_module, key)
+    assert module.retrieve(replace(key, worker_id=0), 11, [[0]], b"event")[1]
+    lookup_module.end_session(key.request_id)
+    assert sm.delete_l1_keys([obj_key]) == (0, 1)
+    sm.finish_read_transfer(pending.pop())
+    assert sm.unsafe_read([obj_key]) == ([], [])
+    sm.clear()
+    assert sm.get_l1_usage()[0] == 0
 
 
 @pytest.mark.parametrize("prefix_missing", [False, True])

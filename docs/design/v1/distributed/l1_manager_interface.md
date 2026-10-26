@@ -20,6 +20,17 @@ without changes on the caller side.
   acquired generation per key. `finish_read` checks that captured map before
   releasing a lock; absent or stale entries cannot release a newer generation.
   Omitting the map retains ordinary key-only completion.
+- `pin_read_buffers` validates the captured generation and holds a resident
+  source buffer independently of the read TTL. `finish_read_transfer` removes
+  that unique transfer tag and releases its original share at most once.
+  Normal `delete`, `clear`, eviction and temporary-object cleanup preserve
+  pinned buffers. Forced deletion still requires the caller to quiesce I/O.
+- A generation identifies the shared lock lifetime, not an individual reader.
+  Before pinning, the caller must exclusively claim the original read share;
+  it must not release that share separately through `finish_read`. The dense
+  MP path uses Session claims so FREE releases only shares not already given
+  to a worker. Completion uses its immutable original owner/generation receipt
+  even if the Session has been removed.
 - It is `runtime_checkable`; `L1Manager` declares it explicitly
   (`class L1Manager(L1ManagerInterface)`) so the contract is visible at the
   implementation site, not only at the call sites.

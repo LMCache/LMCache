@@ -99,6 +99,49 @@ That window is the L2 lookup latency, not the L2 load time as before; see
 `tests/v1/distributed/test_l1_manager.py` (`TestStaging*` classes) and
 `tests/v1/distributed/test_prefetch_controller.py::TestConcurrentPrefetchSameKeys`.
 
+## Asynchronous resident reads
+
+A lookup read generation rejects completion from an expired lifetime, but
+neither its TTL nor its shared reader count proves that a device copy has
+finished. `pin_read_buffers` validates the lookup's original generation and
+retains each source buffer under a unique transfer tag. `finish_read_transfer`
+removes that pin after the stream finishes. If the original generation has
+expired, it does not decrement a later reader's count. Duplicate tag completion
+is harmless. Normal deletion and temporary-object cleanup respect these pins;
+`force=True` retains its explicit unsafe semantics and requires quiescent I/O.
+
+The MP Session arbitrates cancellation and transfer ownership. It starts with
+the actual read count per retained ObjectKey. A worker claims one share per
+key before pinning; FREE atomically takes only the remaining shares. Both
+successful and unregistered-worker RETRIEVE use that ledger. Per-key claims
+allow disjoint head/tail requests while rejecting repeated or overlapping
+claims by the same worker instance. MLA instances can share a KV worker ID,
+so the existing `(instance_id, worker_id)` wire identity distinguishes them.
+Claims cannot exceed that Session's original reservation. A changed instance
+ID does not provide proof of stable physical-rank identity across restarts.
+
+The completion receipt contains only immutable original owner/key/generation
+groups and the transfer tag. It does not consult mutable Session state. Pins
+rejected through the documented L1 error results retire their claimed original
+shares immediately; successful pins remain until stream completion. If
+recording or publishing completion fails, the handler synchronizes first and
+then completes the tag. Failed synchronization keeps the pins in place.
+An unexpected exception from an L1 implementation after partial pinning does
+not prove which copies or claims completed: known tag pins can settle, while
+unvisited reader shares may remain until their TTL. The concrete L1's pin
+operation returns ordinary failures as `L1Error` and performs no device calls.
+
+This protocol has no lookup-attempt ID in a RETRIEVE or FREE message. Identical
+lookups reusing a request ID cannot distinguish a late message from an earlier
+attempt solely from its model/token/range fields. Original-generation checks
+and per-instance claims are not a replacement for an attempt ID or a client
+ordering guarantee.
+
+Public contract tests live in `test_l1_interface.py`, `test_multi_l1.py`,
+`test_session.py` and `test_lookup_lock_generation.py`. The latter runs actual
+lookup, FREE and RETRIEVE handlers against real CPU L1/L2 storage while
+controlling only device completion ordering.
+
 ## Lookup read-lock cleanup
 
 Each shared read-lock lifetime has a process-local generation. Acquisition after expiry or after the reader count reaches zero creates a fresh generation, including when the same object key is recreated. Prefetch captures this value at L1 acquisition or L2 admission; its cleanup and the session's `free_lookup_locks` release only matching generations. A missing session cannot authorize key-only cleanup.
