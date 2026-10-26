@@ -7,6 +7,9 @@ runs it before detection, and CUDA-IPC callers use it standalone.
 """
 
 # mypy: disable-error-code="union-attr"
+# Standard
+from collections.abc import Sequence
+
 # Third Party
 import torch
 
@@ -15,6 +18,40 @@ from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 
 logger = init_logger(__name__)
+
+
+def normalize_declared_tensor(
+    tensor: torch.Tensor, axes: Sequence[str]
+) -> tuple[torch.Tensor, list[str]]:
+    """Recover physical axis order while preserving semantic singleton axes.
+
+    Args:
+        tensor: Tensor view with validated producer axes.
+        axes: Roles in tensor indexing order.
+
+    Returns:
+        A zero-copy physical view and the roles permuted with it. Contiguous
+        named singleton dimensions are preserved. Structural SINGLETON axes
+        are squeezed so existing five-dimensional kernels can consume RBLN.
+
+    Raises:
+        ValueError: Unsupported strides or padding on an axis other than BLOCK.
+    """
+    axes = list(axes)
+    for i in range(len(axes) - 1, -1, -1):
+        if axes[i] == "SINGLETON":
+            tensor = tensor.squeeze(i)
+            del axes[i]
+    if tensor.is_contiguous():
+        return tensor, axes
+    perm = sorted(range(tensor.ndim), key=lambda i: tensor.stride(i), reverse=True)
+    result = tensor.permute(perm)
+    ordered_axes = [axes[i] for i in perm]
+    if not result.is_contiguous():
+        _validate_dim0_padded_layout(result)
+        if ordered_axes[0] != "BLOCK":
+            raise ValueError("Declared padded KV cache must have BLOCK outermost")
+    return result, ordered_axes
 
 
 def _get_expected_shape(stride: tuple[int, ...], num_elems: int) -> tuple[int, ...]:

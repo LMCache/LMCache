@@ -14,6 +14,8 @@ from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
+from lmcache.v1.gpu_connector.kv_format.declared import normalize_declared_caches
+from lmcache.v1.gpu_connector.kv_format.types import TensorLayoutHints
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     assert_is_vllm_flash_attn_or_flash_infer,
@@ -39,6 +41,24 @@ logger = init_logger(__name__)
 
 
 class GPUConnectorInterface(metaclass=abc.ABCMeta):
+    layout_hints: LayoutHints
+
+    def set_tensor_layouts(self, layouts: TensorLayoutHints) -> None:
+        """Install registration axes before any KV pointer initialization.
+
+        Args:
+            layouts: Producer declarations in the registered layer order.
+
+        Raises:
+            NotImplementedError: This connector does not consume layout hints.
+        """
+        if not hasattr(self, "layout_hints"):
+            raise NotImplementedError(
+                f"{type(self).__name__} does not consume producer tensor layouts"
+            )
+        self.registered_tensor_layouts = layouts
+        self.layout_hints = {**self.layout_hints, "tensor_layouts": layouts}
+
     @abc.abstractmethod
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         # FIXME (Yihua): We shouldn't put start and end here since
@@ -138,7 +158,14 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
             # non-contiguous logical view (NHD) that must be permuted back to
             # the physical (HND) shape for correct kernel indexing.
             # attempt_permute_to_contiguous_view is a no-op when already contiguous.
-            self.kvcaches = attempt_permute_to_contiguous_view(self.kvcaches)
+            registered = getattr(self, "registered_tensor_layouts", None)
+            if registered is not None:
+                self.kvcaches, transformed = normalize_declared_caches(
+                    self.kvcaches, registered
+                )
+                self.layout_hints = {**self.layout_hints, "tensor_layouts": transformed}
+            else:
+                self.kvcaches = attempt_permute_to_contiguous_view(self.kvcaches)
 
 
 class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):

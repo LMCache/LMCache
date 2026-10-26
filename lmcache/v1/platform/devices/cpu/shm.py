@@ -75,6 +75,7 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
     #: ``torch.device.type`` this wrapper handles. Kept as a class-level
     #: constant so external tooling / tests can introspect the binding
     #: without instantiating the wrapper.
+    supports_view_metadata: ClassVar[bool] = True
     device_type: ClassVar[str] = "cpu"
 
     # POSIX shared-memory name (``/lmcache_...``) -- leading ``/`` is

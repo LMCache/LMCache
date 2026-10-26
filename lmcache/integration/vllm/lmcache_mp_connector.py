@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 import math
 import sys
@@ -63,6 +63,10 @@ from lmcache.integration.vllm.kv_cache_groups import (
     get_tokens_per_block,
     is_scratch_spec,
 )
+from lmcache.integration.vllm.kv_cache_layout import (
+    TensorLayout,
+    encode_tensor_layouts,
+)
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
@@ -84,6 +88,7 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.utils import CacheRemoveEvent
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 
 try:
     # First Party
@@ -901,34 +906,26 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         Args:
             kv_caches: dictionary of layer names, kv cache
         """
-        logger.info("Registering kv caches!")
-        kv_cache_config = getattr(self, "_kv_cache_config", None)
-        # Must precede both group-info creation and transfer registration so
-        # they see the same edited views.
-        layout_hints = vllm_layout_hints(self._vllm_config)
-        kv_caches = apply_kv_cache_group_edits(
-            kv_cache_config, kv_caches, layout_hints=layout_hints
-        )
-        engine_group_infos = create_engine_group_infos_from_vllm(
-            kv_cache_config,
-            kv_caches,
-            layout_hints=layout_hints,
-            dcp_size=self._dcp_size,
-        )
-        self.worker_adapter.register_kv_caches(
-            kv_caches,
-            engine_group_infos=engine_group_infos,
-            layout_hints=layout_hints,
-        )
-        if self.dispatcher is not None:
-            dispatch(
-                self.dispatcher,
-                "register",
-                kv_caches=kv_caches,
-                kv_cache_config=kv_cache_config,
-                vllm_config=self._vllm_config,
-            )
-        return
+        self._register_kv_caches(kv_caches, vllm_layout_hints(self._vllm_config))
+
+    def register_kv_caches_with_layouts(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        layouts: Mapping[str, TensorLayout],
+    ) -> None:
+        """Register producer-declared axes through the MP transfer path.
+
+        Args:
+            kv_caches: Per-layer tensors before connector normalization.
+            layouts: Producer declarations; absent entries keep legacy detection.
+
+        Raises:
+            ValueError: Invalid metadata or an unsupported declared layout/edit.
+        """
+        hints = vllm_layout_hints(self._vllm_config)
+        if layouts:
+            hints["tensor_layouts"] = encode_tensor_layouts(kv_caches, layouts)
+        self._register_kv_caches(kv_caches, hints)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
@@ -2013,3 +2010,45 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "[KVConnector] Cleaned up request_tracker for request %s",
                 request_id,
             )
+
+    def _register_kv_caches(
+        self, kv_caches: dict[str, torch.Tensor], layout_hints: LayoutHints
+    ) -> None:
+        logger.info("Registering kv caches!")
+        kv_cache_config = getattr(self, "_kv_cache_config", None)
+        # Must precede both group-info creation and transfer registration so
+        # they see the same edited views.
+        original_caches = kv_caches
+        kv_caches = apply_kv_cache_group_edits(
+            kv_cache_config, kv_caches, layout_hints=layout_hints
+        )
+        declarations = layout_hints.get("tensor_layouts")
+        if declarations is not None:
+            for (name, tensor), axes in zip(
+                original_caches.items(), declarations["axes"], strict=True
+            ):
+                if axes is not None and kv_caches[name] is not tensor:
+                    raise ValueError(
+                        f"Producer layout for {name!r} cannot describe an opaque "
+                        "KV cache group edit; spec-aware axis conversion is required"
+                    )
+        engine_group_infos = create_engine_group_infos_from_vllm(
+            kv_cache_config,
+            kv_caches,
+            layout_hints=layout_hints,
+            dcp_size=self._dcp_size,
+        )
+        self.worker_adapter.register_kv_caches(
+            kv_caches,
+            engine_group_infos=engine_group_infos,
+            layout_hints=layout_hints,
+        )
+        if self.dispatcher is not None:
+            dispatch(
+                self.dispatcher,
+                "register",
+                kv_caches=kv_caches,
+                kv_cache_config=kv_cache_config,
+                vllm_config=self._vllm_config,
+            )
+        return

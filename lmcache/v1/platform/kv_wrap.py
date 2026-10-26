@@ -12,6 +12,7 @@ them without importing the vLLM integration package.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Collection
 from logging import DEBUG
 from typing import Any
 
@@ -44,11 +45,15 @@ def _layer_shape_and_dtype(value: Any) -> tuple[object, str]:
     return tuple(tuple(p.shape) for p in value), str(tuple(p.dtype for p in value))
 
 
-def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
+def wrap_kv_caches(
+    kv_caches: dict[str, torch.Tensor], *, preserve_views: Collection[str] = ()
+) -> KVCache:
     """Wrap every KV cache value for IPC transport.
 
     Args:
         kv_caches: Mapping from layer name to worker-owned KV cache value.
+        preserve_views: Layers with producer axis metadata. Their IPC metadata
+            must describe the registered view, rather than wrapper normalization.
 
     Returns:
         The list of per-layer IPC wrappers, ready for the msgspec wire.
@@ -76,8 +81,28 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
     # are skipped via the duck-typed ``shm_name`` check.
     wrappers: KVCache = []
     try:
-        for value in kv_caches.values():
-            wrappers.append(wrap_one_kv_cache(value))
+        for name, value in kv_caches.items():
+            original_view = (
+                (tuple(value.shape), tuple(value.stride()), int(value.storage_offset()))
+                if name in preserve_views
+                else None
+            )
+            wrapper = wrap_one_kv_cache(value)
+            wrappers.append(wrapper)
+            if original_view is not None:
+                if not wrapper.supports_view_metadata:
+                    raise NotImplementedError(
+                        f"{type(wrapper).__name__} cannot preserve producer "
+                        "tensor views; use engine-driven transfer"
+                    )
+                shape, stride, offset = original_view
+                # CPU SHM migration can mutate the source tensor's view as well
+                # as its storage. Keep the producer's axes valid on both ends.
+                value.as_strided_(shape, stride, offset)
+                wrapper.shape = shape
+                wrapper.stride = stride
+                # Raw/VMM handles already include data_ptr's displacement in
+                # their allocation offset. Preserve each wrapper's origin.
     except BaseException:
         _release_partial_kv_wrappers(wrappers)
         raise

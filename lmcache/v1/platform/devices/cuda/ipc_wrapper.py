@@ -164,6 +164,7 @@ def _resolve_vmm_fd(export_id: bytes) -> int:
 class CudaIPCWrapper(DeviceIPCWrapper):
     #: ``torch.device.type`` this wrapper handles. Kept as a class-level
     #: constant so external tooling / tests can introspect the binding.
+    supports_view_metadata: ClassVar[bool] = True
     device_type: ClassVar[str] = "cuda"
 
     @classmethod
@@ -277,6 +278,7 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
     #: Same ``torch.device.type`` as ``CudaIPCWrapper``; exposed on
     #: :attr:`~lmcache.v1.platform.devices.cuda.CudaDeviceSpec.ipc_wrapper_cls`
     #: under isolated IPC, instantiated directly by the TRT-LLM adapter.
+    supports_view_metadata: ClassVar[bool] = True
     device_type: ClassVar[str] = "cuda"
 
     @classmethod
@@ -487,6 +489,7 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
     #: Same ``torch.device.type`` as the other CUDA wrappers; exposed on
     #: :attr:`~lmcache.v1.platform.devices.cuda.CudaDeviceSpec.ipc_wrapper_cls`
     #: when the ``use_vmm_api`` switch is on.
+    supports_view_metadata: ClassVar[bool] = True
     device_type: ClassVar[str] = "cuda"
 
     @classmethod

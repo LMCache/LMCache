@@ -25,6 +25,7 @@ from lmcache.v1.gpu_connector.kv_format import (
     get_spec,
     get_spec_class,
 )
+from lmcache.v1.gpu_connector.kv_format.declared import tensor_axes
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
@@ -237,7 +238,9 @@ def normalize_and_discover_per_layer_formats(
     # Detect the whole structure once. A format that isn't a per-layer list (a
     # cross-layer tensor, or a K/V-split) is single-format -- return it whole.
     extracted_shapes = extract_kv_cache_shapes(kv_caches)
-    if len(extracted_shapes) == 1:
+    declared = layout_hints is not None and "tensor_layouts" in layout_hints
+    axes_per_layer = tensor_axes(layout_hints or {}, len(kv_caches))
+    if len(extracted_shapes) == 1 and not declared:
         whole_format, whole_normalized = detect_format(
             kv_caches, serving_engine, layout_hints
         )
@@ -257,12 +260,27 @@ def normalize_and_discover_per_layer_formats(
     for indices in groups:
         layers_by_shape: dict[Hashable, list[int]] = {}
         for i in indices:
-            layers_by_shape.setdefault(structure_keys[i], []).append(i)
+            axes = axes_per_layer[i]
+            cache = kv_caches[i]
+            stride = (
+                cache.stride()
+                if axes is not None and isinstance(cache, torch.Tensor)
+                else None
+            )
+            key = (structure_keys[i], tuple(axes) if axes is not None else None, stride)
+            layers_by_shape.setdefault(key, []).append(i)
         for same_shape_indices in layers_by_shape.values():
+            group_hints = layout_hints
+            if declared:
+                group_hints = (layout_hints or {}).copy()
+                group_hints["tensor_layouts"] = {
+                    "version": 1,
+                    "axes": [axes_per_layer[i] for i in same_shape_indices],
+                }
             fmt, normalized = detect_format(
                 [kv_caches[i] for i in same_shape_indices],
                 serving_engine,
-                layout_hints,
+                group_hints,
             )
             for sub_idx, layer_idx in enumerate(same_shape_indices):
                 detected[layer_idx] = (normalized[sub_idx], fmt)

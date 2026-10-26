@@ -459,7 +459,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
         discoverable_kv_caches = cast(DiscoverableKVCache, kv_caches)
         normalized_kv_caches: DiscoverableKVCache
         self.engine_kv_format, normalized_kv_caches = normalize_kv_and_discover_format(
-            discoverable_kv_caches, EngineType.VLLM
+            discoverable_kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
         )
         self.num_layers = get_num_layers(normalized_kv_caches, self.engine_kv_format)
         self.num_blocks = get_num_blocks(normalized_kv_caches, self.engine_kv_format)

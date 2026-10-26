@@ -26,6 +26,13 @@ KVLayoutName = Literal["NHD", "HND", "BLHNC", "BLNHC"]
 KV_LAYOUT_NAMES: tuple[str, ...] = get_args(KVLayoutName)
 
 
+class TensorLayoutHints(TypedDict):
+    """Versioned, data-only axes in registered layer order; None is unspecified."""
+
+    version: int
+    axes: list[list[str] | None]
+
+
 class LayoutHints(TypedDict, total=False):
     """Hints passed from a serving engine to LMCache during KV cache
     registration (``REGISTER_KV_CACHE``).
@@ -55,6 +62,10 @@ class LayoutHints(TypedDict, total=False):
             rank distinguishes MLA ``[NB, BS, HS]`` from independent
             components ``[NB, BS, NH, HS]``.
         head_dim: Per-head dimension. Used by TRT-LLM (same).
+        tensor_layouts: Producer-declared axes of each registered tensor,
+            before LMCache normalization. Entries follow registration order;
+            missing declarations are represented by None. Version 1 uses
+            vLLM axis names, without importing vLLM on the MP server.
     """
 
     kv_layout: KVLayoutName
@@ -62,3 +73,4 @@ class LayoutHints(TypedDict, total=False):
     tokens_per_block: int
     kv_list_layout: Literal["k_v", "unified"]
     head_dim: int
+    tensor_layouts: TensorLayoutHints
