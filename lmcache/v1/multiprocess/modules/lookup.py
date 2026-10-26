@@ -234,11 +234,7 @@ class LookupModule(DiscoverableModule):
         }
 
     def close(self) -> None:
-        """Stop the reshard threads after every submitted reshard finishes.
-
-        Queued reshards still run: cancelling one would leave its source
-        read locks held until their TTL.
-        """
+        """Stop the reshard threads; see :meth:`L1Resharder.close`."""
         self._hetero_tp.close()
 
     # -----------------------------------------------------------------
@@ -552,9 +548,10 @@ class LookupModule(DiscoverableModule):
         session (hit length, lock model, L1 owners). If that result has not
         been consumed yet it is handed over here first. While the prefetch
         is still running nothing is released: its locks still belong to the
-        prefetch controller and expire with the read-lock TTL. A running
-        cross-TP reshard is the exception: this call blocks until it finishes
-        (no timeout), so the locks it took are released too.
+        prefetch controller and expire with the read-lock TTL. A cross-TP
+        lookup past its same-TP stage is the exception: this call blocks
+        (no timeout) until its running prefetch or reshard finishes, then
+        releases every lock the lookup took.
 
         Args:
             key: Cache key whose read locks should be released.
@@ -779,8 +776,9 @@ class LookupModule(DiscoverableModule):
             advance_hetero: Whether a cross-TP lookup may submit its next
                 stage. ``free_lookup_locks`` passes False because the request
                 is being released, so the current result is final; it also
-                blocks until a running reshard finishes, so the release sees
-                the locks the reshard took.
+                blocks until a running cross-TP prefetch or reshard finishes,
+                so the release sees the same-TP stage's locks and the ones the
+                reshard took.
 
         Returns:
             The hit chunk count, or None while the lookup is still running:
@@ -810,6 +808,17 @@ class LookupModule(DiscoverableModule):
         else:
             with self._prefetch_job_lock:
                 handle, row_windows = job.handle, job.row_windows
+                cross_tp_running = (
+                    not advance_hetero
+                    and job.hetero is not None
+                    and job.hetero.phase == "cross_tp"
+                )
+            if cross_tp_running:
+                # The same-TP stage's locks left the prefetch controller with
+                # its result, so only this call can release them: wait for the
+                # cross-TP prefetch, which always publishes a result.
+                while not self._ctx.storage_manager.wait_prefetch_status(handle, 1.0):
+                    pass
             queried = self._ctx.storage_manager.query_prefetch_status(handle)
             if queried is None:
                 return None
@@ -1001,7 +1010,6 @@ class LookupModule(DiscoverableModule):
                 stage.attn_desc,
             ),
             num_kv_readers=stage.num_kv_readers,
-            allowed_l2_memory_tags=stage.allowed_l2_memory_tags,
         )
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec, external_request_id=stage.key.request_id

@@ -26,7 +26,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, cast
+from typing import cast
 import threading
 import time
 
@@ -39,7 +39,6 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
-    MemoryTags,
     ObjectKey,
     PrefetchResult,
     ipc_key_to_object_keys,
@@ -311,7 +310,7 @@ class L1Resharder:
             max_workers=_RESHARD_WORKERS, thread_name_prefix="hetero-tp-reshard"
         )
         # Running reshard writing each destination key.
-        self._writers: dict[ObjectKey, Future[Any]] = {}
+        self._writers: dict[ObjectKey, Future[ReshardResult]] = {}
         self._writers_lock = threading.Lock()
 
     def submit(self, task: ReshardTask) -> Future[ReshardResult]:
@@ -351,7 +350,9 @@ class L1Resharder:
         """
         self._executor.shutdown(wait=True)
 
-    def _drop_writer(self, keys: list[ObjectKey], future: Future[Any]) -> None:
+    def _drop_writer(
+        self, keys: list[ObjectKey], future: Future[ReshardResult]
+    ) -> None:
         """Unregister ``future`` as the writer of ``keys`` once it is done."""
         with self._writers_lock:
             for k in keys:
@@ -361,7 +362,7 @@ class L1Resharder:
     def _run(
         self,
         task: ReshardTask,
-        writers: set[Future[Any]],
+        writers: set[Future[ReshardResult]],
         queued_at: float,
     ) -> ReshardResult:
         """Wait for ``writers``, reshard ``task`` and log its cost.
@@ -514,8 +515,6 @@ class PrefetchStage:
         group_layout_descs: Per-object-group layouts at ``key``'s world size.
         attn_desc: Attention windows at ``key``'s world size.
         num_kv_readers: Read locks to take per object.
-        allowed_l2_memory_tags: L2 tags the prefetch may load from; ``None``
-            allows all, an empty set restricts it to L1.
     """
 
     key: IPCCacheServerKey
@@ -523,7 +522,6 @@ class PrefetchStage:
     group_layout_descs: dict[int, MemoryLayoutDesc]
     attn_desc: AttnWindowDesc
     num_kv_readers: int
-    allowed_l2_memory_tags: frozenset[MemoryTags] | None = None
 
 
 class HeteroTPPlan:
@@ -710,9 +708,5 @@ class HeteroTP:
         return HeteroTPPlan(same_tp, num_heads, source, self._resharder)
 
     def close(self) -> None:
-        """Stop the reshard threads after every submitted reshard finishes.
-
-        Queued reshards still run: cancelling one would leave its source
-        read locks held until their TTL.
-        """
+        """Stop the reshard threads; see :meth:`L1Resharder.close`."""
         self._resharder.close()
