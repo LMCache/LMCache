@@ -33,16 +33,23 @@ the relevant validation. The submitting human must then review the new diff and
 explicitly mark the PR ready again. An earlier human review does not cover later
 AI-generated changes.
 
-AI-assisted PRs must include a self-contained HTML reviewer explainer, attached
-or linked directly in the PR description rather than posted as a separate
-comment. Upload a single `.html` file directly; do not archive one file in a
-zip. Keep it synchronized with the current head. It must use diagrams and
+AI-assisted PRs must include a self-contained HTML reviewer explainer. The AI
+tool must publish it to a reviewer-accessible URL that renders in the browser
+with one click, then place that URL directly in the PR description. A GitHub
+attachment that forces a download is not sufficient. Do not post a separate
+comment or archive one HTML file in a zip. Use the project's approved static
+preview publisher; never create or enable Pages, a repository, a branch, a
+gist, or another hosting resource in a contributor's account without explicit
+authorization. If no approved publisher is configured, keep the PR in draft
+and report the missing preview location to the human submitter.
+
+Keep the explainer synchronized with the current head. It must use diagrams and
 concrete code references to explain the change, the affected end-to-end call
 chains and responsibility boundaries, and why each added or changed test is
 necessary. Also cover compatibility, risks, validation gaps, and reviewer
 attention points. Do not include secrets, machine-local paths, inaccessible
 artifacts, or dependencies on local assets; use embedded CSS and diagrams so
-the downloaded file works on its own.
+the page works on its own.
 
 ## Python Environment
 

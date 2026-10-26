@@ -89,8 +89,15 @@ reviewer can open without repository context or local assets. Include:
 
 Use embedded CSS and SVG diagrams. Remove secrets, machine-local paths, and
 inaccessible links. Keep the file outside the repository unless the user asks
-to commit it. Attach or link the `.html` file directly in the PR description,
-not in a separate comment. Do not archive a single HTML file in a zip.
+to commit it. Automatically publish it with the project's approved static
+preview publisher and put the resulting one-click browser-viewable URL directly
+in the PR description. Verify that the URL renders the page rather than forcing
+a download. Do not post a separate comment or archive one HTML file in a zip.
+
+Never create or enable Pages, a repository, a branch, a gist, or another hosting
+resource in a contributor's account without explicit authorization. If no
+project-approved publisher is configured, keep the PR in draft and report that
+blocker to the human submitter instead of improvising personal hosting.
 
 ### 6. Draft the PR
 

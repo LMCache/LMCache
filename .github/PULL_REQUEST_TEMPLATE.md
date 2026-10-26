@@ -8,7 +8,7 @@
 **Special notes for your reviewers**:
 
 **AI-generated PR explainer** (required when AI-generated code is included):
-<!-- Link the current .html file here. Do not post a separate comment or zip one file. -->
+<!-- Link the current one-click browser preview here. Download-only links are not sufficient. -->
 
 **If applicable**:
 
