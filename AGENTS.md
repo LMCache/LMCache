@@ -34,14 +34,11 @@ explicitly mark the PR ready again. An earlier human review does not cover later
 AI-generated changes.
 
 AI-assisted PRs must include a self-contained HTML reviewer explainer. The AI
-tool must publish it to a reviewer-accessible URL that renders in the browser
-with one click, then place that URL directly in the PR description. A GitHub
-attachment that forces a download is not sufficient. Do not post a separate
-comment or archive one HTML file in a zip. Use the project's approved static
-preview publisher; never create or enable Pages, a repository, a branch, a
-gist, or another hosting resource in a contributor's account without explicit
-authorization. If no approved publisher is configured, keep the PR in draft
-and report the missing preview location to the human submitter.
+tool must upload it to a reviewer-accessible URL and place that URL directly in
+the PR description. A GitHub attachment that downloads the file is acceptable.
+Do not post a separate comment or archive one HTML file in a zip. Do not create
+or enable Pages, a repository, a branch, a gist, or another hosting resource
+for the explainer.
 
 Keep the explainer synchronized with the current head. It must use diagrams and
 concrete code references to explain the change, the affected end-to-end call

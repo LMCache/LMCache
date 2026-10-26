@@ -148,13 +148,10 @@ must be self-contained and include:
 - compatibility and performance risks, validation evidence, missing coverage, and focused
   questions for reviewers.
 
-The AI tool must publish the `.html` file to the project-approved static preview service and
-put the resulting one-click browser-viewable URL directly in the PR description. A link that
-forces reviewers to download the file is not sufficient. Do not post a separate comment or
-wrap one HTML file in a zip archive. The AI tool must not silently create Pages, repositories,
-branches, gists, or other hosting resources in a contributor's account. If the project has no
-approved publisher, keep the PR in draft and ask the human submitter for the approved preview
-location.
+The AI tool must upload the `.html` file and put its link directly in the PR description. A
+GitHub attachment that downloads the HTML for local viewing is acceptable. Do not post a
+separate comment or wrap one HTML file in a zip archive. Do not create or enable Pages,
+another repository, a branch, a gist, or a different hosting resource for the explainer.
 
 Embed CSS, SVG diagrams, and other assets in the file; remove secrets, machine-local paths,
 and links to artifacts reviewers cannot access. The explainer supplements the PR description
