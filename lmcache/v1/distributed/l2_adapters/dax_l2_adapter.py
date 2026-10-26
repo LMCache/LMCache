@@ -35,6 +35,11 @@ from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     register_l2_adapter_type,
 )
+from lmcache.v1.distributed.l2_adapters.dax.core import (
+    DaxCore,
+    DaxPutFromPtrResult,
+    DaxReadReservation,
+)
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
@@ -44,11 +49,6 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
-from lmcache.v1.storage_backend.dax.core import (
-    DaxCore,
-    DaxPutFromPtrResult,
-    DaxReadReservation,
-)
 
 logger = init_logger(__name__)
 

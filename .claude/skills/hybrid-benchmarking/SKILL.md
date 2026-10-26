@@ -135,11 +135,9 @@ B→C ≈ no change (0 % hit, saturated); C→D TTFT collapses + decode rises (h
 
 ## Family turnkey configs
 
-**Mamba/GDN** (Qwen3.5/3.6, …): every run uses `--mamba-cache-mode align
---max-num-batched-tokens 2N-1`, where N is the unified block size (vLLM logs `Setting attention
-block size to N tokens`; also set server `--chunk-size N`). **Use 2N-1, not N** — at exactly N a
-decoding request consumes the per-step budget, so a new request's block-aligned prefill rounds
-to 0 tokens → serial execution (Running:1, ~7× slower; verified by single-variable A/B). Also
+**Mamba/GDN** (Qwen3.5/3.6, …): every run uses `--mamba-cache-mode align`; the server needs
+`--separate-object-groups`, and its `--chunk-size` is a minimum that negotiates up to a multiple of
+the unified block size N (vLLM logs `Setting attention block size to N tokens`). Also
 `--max-num-seqs ≤ #Mamba cache blocks` vLLM reports, or CUDA-graph capture fails.
 
 **DeepSeek-V4 sparse-MLA + fp8**: `export CUDA_HOME=/usr/local/cuda-<ver>
@@ -170,7 +168,7 @@ set → nothing for LMCache to serve); large `--l1-size-gb` (full per-token stat
 - Deterministic decode-bound: `--ignore-eos --ldqa-max-output-length <N>`.
 - Pools: `--max-model-len auto`; `lmcache server --l1-size-gb <GB> --eviction-trigger-watermark 0.95` (start early to pre-pin).
 - LMCache wiring: `--kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.port":5560,"lmcache.mp.mq_timeout":900}}'`.
-- Mamba/GDN: `--mamba-cache-mode align --max-num-batched-tokens 2N-1`, server `--chunk-size N`.
+- Mamba/GDN: `--mamba-cache-mode align`, server `--separate-object-groups`.
 - DeepSeek sparse-MLA: `CUDA_HOME` set; `--kv-cache-dtype fp8_ds_mla --tokenizer-mode deepseek_v4 --enable-expert-parallel`; util ≈0.35.
 - Hit rate: vLLM `:8000/metrics` (`prefix_cache_*` GPU-local, `external_prefix_cache_*` LMCache).
 - Teardown: by PID; verify GPUs ~0 MiB.

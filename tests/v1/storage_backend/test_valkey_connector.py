@@ -24,11 +24,14 @@ import torch
 
 # First Party
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.distributed.l2_adapters.valkey.worker_pool import (
+    GET_MISS,
+    ValkeyWorkerPool,
+)
 from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.connector import CreateConnector
-from lmcache.v1.storage_backend.valkey.worker_pool import GET_MISS, ValkeyWorkerPool
 
 # Local
 from ...conftest import MockSyncGlideClient
