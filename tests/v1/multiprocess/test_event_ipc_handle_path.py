@@ -2,7 +2,9 @@
 """Tests for platform event IPC use in the LMCache-driven handle path."""
 
 # Standard
+from collections.abc import Callable
 from contextlib import nullcontext
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -14,7 +16,17 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L1ReadReservation
+from lmcache.v1.distributed.storage_manager import (
+    L1ReadGenerationCompletion,
+    L1ReadTransferCompletion,
+)
+from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
+from lmcache.v1.multiprocess.session import Session
+from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 
 class _FakeEventBackend:
@@ -62,9 +74,13 @@ class _NoopDispatcher:
     """Record registrations instead of starting native callback threads."""
 
     payload_types: dict[str, object] = {}
+    handlers: dict[str, Callable[[Any], None]] = {}
 
-    def register(self, kind: str, handler: object, payload_type: object) -> None:
+    def register(
+        self, kind: str, handler: Callable[[Any], None], payload_type: object
+    ) -> None:
         _NoopDispatcher.payload_types[kind] = payload_type
+        _NoopDispatcher.handlers[kind] = handler
 
     def start(self) -> None:
         return None
@@ -72,6 +88,12 @@ class _NoopDispatcher:
 
 class _FakeStorageManager:
     """Minimal storage surface used by the server handle-path test."""
+
+    def __init__(self, objects: dict[ObjectKey, MemoryObj]) -> None:
+        self.objects = objects
+        self.pin_calls: list[tuple[L1ReadGenerationCompletion, str]] = []
+        self.read_completions: list[L1ReadTransferCompletion] = []
+        self.unpinned_releases: list[tuple[L1ReadReservation, ...]] = []
 
     def finish_write(self, keys: list[object]) -> None:
         return None
@@ -93,11 +115,35 @@ class _FakeStorageManager:
     ) -> dict[object, object]:
         return {}
 
-    def prepare_read_completion(self, keys, l1_owners=None):
-        return []
+    def prepare_read_generation_completion(
+        self, reservations: tuple[L1ReadReservation, ...]
+    ) -> L1ReadGenerationCompletion:
+        """Preserve this fixture's captured owner/key/generation receipt."""
+        assert all(item.owner == 0 and item.count == 1 for item in reservations)
+        if not reservations:
+            return ()
+        return ((0, tuple((item.key, item.generation) for item in reservations)),)
 
-    def unsafe_read(self, keys, l1_owners=None):
-        return [], []
+    def pin_read_buffers(
+        self, completion: L1ReadGenerationCompletion, tag: str
+    ) -> dict[ObjectKey, MemoryObj]:
+        """Record the pin before any device transfer completion is dispatched."""
+        self.pin_calls.append((completion, tag))
+        return {
+            key: self.objects[key]
+            for _owner, reservations in completion
+            for key, _generation in reservations
+        }
+
+    def finish_read_reservations(
+        self, reservations: tuple[L1ReadReservation, ...]
+    ) -> None:
+        """Record pre-pin failure cleanup so the test can reject unexpected errors."""
+        self.unpinned_releases.append(reservations)
+
+    def finish_read_transfer(self, completion: L1ReadTransferCompletion) -> None:
+        """Record receipt release only when its stream callback is dispatched."""
+        self.read_completions.append(completion)
 
 
 def _resolved_future(result: object) -> MessagingFuture[object]:
@@ -183,8 +229,9 @@ def test_worker_exports_events_through_platform_backend(
     assert all(call[-1] == device for call in backend.calls[3:])
 
 
+@pytest.mark.parametrize("cached", [False, True])
 def test_server_store_and_retrieve_delegate_event_ordering(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, cached: bool
 ) -> None:
     """Server imports, waits, records, and exports through the event backend."""
     # First Party
@@ -226,7 +273,29 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         lambda stream: nullcontext(),
     )
 
-    storage_manager = _FakeStorageManager()
+    obj_key = ObjectKey(b"chunk", "model", 0)
+    memory_obj = MagicMock(spec=MemoryObj)
+    memory_obj.get_size.return_value = 1
+    storage_manager = _FakeStorageManager({obj_key: memory_obj} if cached else {})
+    key = IPCCacheServerKey.from_token_ids(
+        model_name="model",
+        world_size=1,
+        worker_id=0,
+        token_ids=(1,),
+        start=0,
+        end=1,
+        request_id="request",
+    )
+    session = Session(
+        key.request_id, TokenHasher(chunk_size=1, hash_algorithm="blake3")
+    )
+    session.begin_lookup(key.no_worker_id_version(), (-1,))
+    session.record_prefetch_result(
+        int(cached),
+        (0,),
+        {obj_key: 0} if cached else {},
+        read_generations={obj_key: 7} if cached else {},
+    )
     callbacks: list[tuple[str, object]] = []
     monkeypatch.setattr(
         lmcache_driven_transfer,
@@ -244,13 +313,16 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         chunk_size=1,
         null_block_id=0,
         storage_manager=storage_manager,
+        session_manager=SimpleNamespace(get=lambda request_id: session),
         get_read_owners=lambda request_id: None,
         event_bus=SimpleNamespace(
             publish=lambda event: None,
             publish_on_stream=lambda stream, event: None,
             has_subscribers=lambda event_type: False,
         ),
-        resolve_obj_keys=lambda key, group_ids: [[]],
+        resolve_obj_keys=lambda key, group_ids: [
+            [obj_key] if cached and key.end else []
+        ],
     )
     module = lmcache_driven_transfer.LMCacheDrivenTransferModule(
         cast(Any, server_context)
@@ -284,15 +356,13 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         "get_and_touch_context_entry",
         lambda instance_id: entry,
     )
-    key = SimpleNamespace(request_id="request", cache_salt="", worker_id=0)
-
-    assert module.store(key, 1, [[]], b"store-producer") == (
+    assert module.store(replace(key, end=0), 1, [[]], b"store-producer") == (
         b"completion-handle",
         True,
     )
-    assert module.retrieve(key, 1, [[]], b"retrieve-producer") == (
+    assert module.retrieve(key, 1, [[0]] if cached else [[]], b"retrieve-producer") == (
         b"completion-handle",
-        False,
+        cached,
     )
 
     imported_handles = [call[1] for call in backend.calls if call[0] == "import"]
@@ -303,14 +373,23 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     # Each import is held and its release is queued on the transfer stream
     # right behind the wait; the callback payload decodes as registered.
     assert held == [("remote", handle) for handle in imported_handles]
-    assert callbacks == [
+    assert callbacks[:2] == [
         ("release_imported_event", (1, 0)),
         ("release_imported_event", (1, 1)),
     ]
+    completion: L1ReadGenerationCompletion = ((0, ((obj_key, 7),)),) if cached else ()
+    assert len(storage_manager.pin_calls) == 1
+    assert storage_manager.pin_calls[0][0] == completion
+    transfer_tag = storage_manager.pin_calls[0][1]
+    expected_reads = [(transfer_tag, completion)] if cached else []
+    assert callbacks[2:] == [("finish_read_transfer", item) for item in expected_reads]
+    assert storage_manager.unpinned_releases == []
+    assert storage_manager.read_completions == []
     for kind, payload in callbacks:
         decoder = msgspec.msgpack.Decoder(type=_NoopDispatcher.payload_types[kind])
-        module._release_imported_event(decoder.decode(msgspec.msgpack.encode(payload)))
+        _NoopDispatcher.handlers[kind](decoder.decode(msgspec.msgpack.encode(payload)))
     assert released == [0, 1]
+    assert storage_manager.read_completions == expected_reads
     assert sum(call[0] == "record" for call in backend.calls) == 2
     assert sum(call[0] == "export" for call in backend.calls) == 2
     for index, call in enumerate(backend.calls):
