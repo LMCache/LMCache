@@ -40,6 +40,10 @@ from lmcache.v1.kv_layer_groups import (
     KVLayerGroupInfo,
     parse_kvcache_shape_spec,
 )
+from lmcache.v1.multiprocess.custom_types import (
+    RegisterEngineDrivenContextResponse,
+    RegisterKVCacheResponse,
+)
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -952,23 +956,26 @@ class TestClientMultiWorker:
             tensor_refs.extend(weakref.ref(t) for t in buffers.kv_caches.values())
             return buffers
 
-        ready: MessagingFuture[None] = MessagingFuture()
-        ready.set_result(None)
+        unregister_ready: MessagingFuture[None] = MessagingFuture()
+        unregister_ready.set_result(None)
         timed_out = MagicMock()
         timed_out.result.side_effect = TimeoutError
         transport = MagicMock()
-        register = (
-            transport.register_kv_cache
-            if transfer_mode == "lmcache_driven"
-            else transport.register_kv_cache_engine_driven_context
-        )
-        unregister = (
-            transport.unregister_kv_cache
-            if transfer_mode == "lmcache_driven"
-            else transport.unregister_kv_cache_engine_driven_context
-        )
-        register.side_effect = [ready, timed_out]
-        unregister.return_value = ready
+        if transfer_mode == "lmcache_driven":
+            register_ready: MessagingFuture[RegisterKVCacheResponse] = MessagingFuture()
+            register_ready.set_result(RegisterKVCacheResponse())
+            register = transport.register_kv_cache
+            unregister = transport.unregister_kv_cache
+            register.side_effect = [register_ready, timed_out]
+        else:
+            engine_register_ready: MessagingFuture[
+                RegisterEngineDrivenContextResponse
+            ] = MessagingFuture()
+            engine_register_ready.set_result(RegisterEngineDrivenContextResponse())
+            register = transport.register_kv_cache_engine_driven_context
+            unregister = transport.unregister_kv_cache_engine_driven_context
+            register.side_effect = [engine_register_ready, timed_out]
+        unregister.return_value = unregister_ready
         context = MagicMock()
         monkeypatch.setattr(zmq, "Context", lambda: context)
         monkeypatch.setattr(RequestClientFactory, "create", lambda *a, **kw: transport)
@@ -1405,11 +1412,13 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     raw_future = ObservedFuture()
     if not times_out:
         raw_future.set_result((b"completion-handle", True))
-    ready: MessagingFuture[None] = MessagingFuture()
-    ready.set_result(None)
+    register_ready: MessagingFuture[RegisterKVCacheResponse] = MessagingFuture()
+    register_ready.set_result(RegisterKVCacheResponse())
+    unregister_ready: MessagingFuture[None] = MessagingFuture()
+    unregister_ready.set_result(None)
     transport = MagicMock()
-    transport.register_kv_cache.return_value = ready
-    transport.unregister_kv_cache.return_value = ready
+    transport.register_kv_cache.return_value = register_ready
+    transport.unregister_kv_cache.return_value = unregister_ready
     transport.store.return_value = raw_future
     transport.retrieve.return_value = raw_future
     monkeypatch.setattr(zmq, "Context", MagicMock)
