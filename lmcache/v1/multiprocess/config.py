@@ -150,7 +150,7 @@ class MPServerConfig:
     own layout. Takes effect only for engines that report their KV head count:
     attention-only, non-MLA vLLM models without PP, DCP or multiple servers,
     under LMCache-driven transfer, and only for models without sliding-window
-    layers."""
+    layers. Both TP sizes must divide the model's KV head count."""
 
     kv_load_policy: str = "DEFAULT"
     """Per-request choice between serving a lookup and letting the engine
