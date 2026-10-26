@@ -15,10 +15,11 @@ engine-specific rule, so it is not supported.
 :class:`L1Resharder` runs such a reshard against the storage manager: it
 reads read-locked source objects and writes the destination objects into L1,
 read-locked for the lookup's readers, on its own threads. :class:`HeteroTP`
-decides whether a lookup may complete its hit from another TP size, and its
-:class:`HeteroTPPlan` describes the source prefetch, runs the reshard and
-merges its hit into the lookup's result, so the lookup itself never deals
-with heads or TP sizes.
+decides whether a lookup may complete its hit from another TP size and, if
+so, runs the rest of the lookup in the background: wait for the same-TP
+stage, prefetch the rest at the source TP size, reshard that hit and merge
+it. The lookup only waits for one future, so it never deals with stages,
+heads or TP sizes.
 """
 
 # Standard
@@ -40,9 +41,13 @@ from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
+    PrefetchHandle,
     PrefetchResult,
+    PrefetchTaskSpec,
+    ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
+from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -53,6 +58,9 @@ logger = init_logger(__name__)
 # Concurrent reshards. The copies are torch CPU copies, which release the GIL,
 # so a few lookups can reshard in parallel.
 _RESHARD_WORKERS = 4
+# Concurrent cross-TP lookups. Each holds a thread while it waits for its
+# prefetches, so this bounds the lookups in flight, not CPU use.
+_LOOKUP_WORKERS = 32
 
 
 def _kernel_group_tensors(obj: MemoryObj) -> list[torch.Tensor]:
@@ -529,7 +537,7 @@ class HeteroTPPlan:
     """How one lookup completes its hit from objects stored at another TP size.
 
     Created by :meth:`HeteroTP.plan` from the lookup's same-TP stage. After the
-    same-TP stage hits its first ``k`` chunks, the lookup submits
+    same-TP stage hits its first ``k`` chunks, :class:`HeteroTP` submits
     :meth:`cross_tp_stage` for the rest; if that hits, :meth:`convert` reshards
     the hit into the lookup's own TP size in L1, and :meth:`merge` appends it
     to the same-TP stage's result. Call them in that order, at most once each.
@@ -663,8 +671,13 @@ class HeteroTP:
         source_world_size: int | None,
     ) -> None:
         self._registry = registry
+        self._sm = storage_manager
         self._source_world_size = source_world_size
         self._resharder = L1Resharder(storage_manager)
+        # Threads start on first use, as in L1Resharder.
+        self._lookups = ThreadPoolExecutor(
+            max_workers=_LOOKUP_WORKERS, thread_name_prefix="hetero-tp-lookup"
+        )
         # KV head counts the source world size was already warned about.
         self._warned_heads: set[int] = set()
 
@@ -708,6 +721,173 @@ class HeteroTP:
             return None
         return HeteroTPPlan(same_tp, num_heads, source, self._resharder)
 
+    def submit(
+        self,
+        same_tp: PrefetchStage,
+        handle: PrefetchHandle,
+        row_windows: tuple[int, ...],
+    ) -> Future[PrefetchResult] | None:
+        """Complete a lookup's hit from the source TP size, in the background.
+
+        Takes over the same-TP stage's result: once it finishes, a partial
+        hit keeps its locks, the rest is prefetched at the source TP size,
+        and a hit there is resharded into L1 and appended. A failed cross-TP
+        stage is logged and answers with the same-TP hit.
+
+        Args:
+            same_tp: The lookup's same-TP stage.
+            handle: Handle of ``same_tp``'s prefetch, already submitted. Its
+                result belongs to the returned future; do not query it.
+            row_windows: Sliding window of each row ``same_tp`` was submitted
+                with.
+
+        Returns:
+            A future resolving to the lookup's result, over the same rows as
+            the same-TP stage, with every hit chunk read-locked; it never
+            raises. ``None`` if the lookup does not qualify (see
+            :meth:`plan`), and the caller keeps ``handle``.
+        """
+        plan = self.plan(same_tp)
+        if plan is None:
+            return None
+        return self._lookups.submit(self._complete, same_tp, plan, handle, row_windows)
+
     def close(self) -> None:
-        """Stop the reshard threads; see :meth:`L1Resharder.close`."""
+        """Stop the lookup and reshard threads after every submitted one finishes.
+
+        Must run while the storage manager still serves prefetches: a running
+        lookup waits for its own. See :meth:`L1Resharder.close`.
+        """
+        self._lookups.shutdown(wait=True)
         self._resharder.close()
+
+    def _complete(
+        self,
+        same_tp: PrefetchStage,
+        plan: HeteroTPPlan,
+        handle: PrefetchHandle,
+        row_windows: tuple[int, ...],
+    ) -> PrefetchResult:
+        """Wait for the same-TP stage, then fill its miss from the source TP.
+
+        Args:
+            same_tp: The lookup's same-TP stage.
+            plan: Its cross-TP plan.
+            handle: Handle of ``same_tp``'s prefetch.
+            row_windows: Sliding window of each row of ``same_tp``.
+
+        Returns:
+            The same-TP result, with the resharded chunks appended.
+        """
+        result = self._wait(handle)
+        found, _ = fold_unfold_grouped(result.hit_cells, row_windows)
+        if found == len(same_tp.chunk_hashes):
+            return result
+        try:
+            return self._complete_from_source(plan, found, result)
+        except Exception:
+            # The same-TP locks are still held, so its hit stays a valid
+            # answer.
+            logger.exception(
+                "Cross-TP stage failed for request %s; answering with the same-TP hit",
+                same_tp.key.request_id,
+            )
+            return result
+
+    def _complete_from_source(
+        self, plan: HeteroTPPlan, start: int, same_tp: PrefetchResult
+    ) -> PrefetchResult:
+        """Prefetch chunks ``start`` on at the source TP, reshard and merge.
+
+        Args:
+            plan: The lookup's cross-TP plan.
+            start: Chunks the same-TP stage hit.
+            same_tp: The same-TP stage's result.
+
+        Returns:
+            ``same_tp`` with the resharded chunks appended.
+
+        Raises:
+            Exception: A failure to start the reshard propagates, after the
+                source locks are released.
+        """
+        cross_tp = plan.cross_tp_stage(start)
+        handle, row_windows = self._submit_stage(cross_tp)
+        result = self._wait(handle)
+        found, _ = fold_unfold_grouped(result.hit_cells, row_windows)
+        if found == 0:
+            return same_tp
+        try:
+            reshard = plan.convert(found, result)
+        except Exception:
+            # The source objects are this call's to release until a reshard
+            # owns them.
+            self._release_stage(cross_tp, found, result)
+            raise
+        return plan.merge(same_tp, reshard.result())
+
+    def _submit_stage(
+        self, stage: PrefetchStage
+    ) -> tuple[PrefetchHandle, tuple[int, ...]]:
+        """Submit a stage's prefetch.
+
+        Args:
+            stage: The stage to submit.
+
+        Returns:
+            The prefetch handle and the per-row windows to fold its result
+            with.
+        """
+        spec = PrefetchTaskSpec(
+            key_groups=ipc_key_to_grouped_object_keys(
+                stage.key,
+                stage.chunk_hashes,
+                list(range(stage.attn_desc.num_object_groups)),
+                stage.group_layout_descs,
+                stage.attn_desc,
+            ),
+            num_kv_readers=stage.num_kv_readers,
+        )
+        handle = self._sm.submit_prefetch_task(
+            spec, external_request_id=stage.key.request_id
+        )
+        return handle, tuple(row.sliding_window_size for row in spec.key_groups)
+
+    def _wait(self, handle: PrefetchHandle) -> PrefetchResult:
+        """Block until a prefetch finishes and take its result.
+
+        Args:
+            handle: The prefetch.
+
+        Returns:
+            Its result.
+        """
+        # A prefetch always publishes a result; the timeout only bounds each
+        # wait on the condition variable.
+        while not self._sm.wait_prefetch_status(handle, 1.0):
+            pass
+        return cast(PrefetchResult, self._sm.query_prefetch_status(handle))
+
+    def _release_stage(
+        self, stage: PrefetchStage, found: int, result: PrefetchResult
+    ) -> None:
+        """Drop the read locks a stage took on its first ``found`` chunks.
+
+        Args:
+            stage: The finished stage.
+            found: Leading chunks it hit.
+            result: Its result.
+        """
+        self._sm.finish_read_prefetched(
+            [
+                k
+                for group in ipc_key_to_object_keys(
+                    stage.key,
+                    stage.chunk_hashes[:found],
+                    list(range(stage.attn_desc.num_object_groups)),
+                )
+                for k in group
+            ],
+            read_locks=stage.num_kv_readers,
+            l1_owners=result.l1_owners,
+        )

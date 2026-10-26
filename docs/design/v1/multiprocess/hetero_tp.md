@@ -90,8 +90,8 @@ Without the hint the cross-TP stage is off.
 
 The work splits so that `LookupModule` never deals with heads or TP sizes:
 
-- `tp_reshard.PrefetchStage` is one prefetch: key, chunk hashes, layouts,
-  `num_kv_readers` and the allowed L2 tiers.
+- `tp_reshard.PrefetchStage` is one prefetch: key, chunk hashes, layouts
+  and `num_kv_readers`.
 - `tp_reshard.HeteroTP.plan` decides whether a lookup qualifies (a source TP
   configured and different from the lookup's, head count reported, both TP
   sizes divide it, no sliding window) and returns a per-lookup
@@ -100,9 +100,11 @@ The work splits so that `LookupModule` never deals with heads or TP sizes:
   `k` on (key, layouts and windows at the source TP); `convert` reshards a
   source hit through `L1Resharder`; `merge` appends the resharded chunks to
   the same-TP stage's result.
-- `LookupModule` runs the stages: it submits each as an ordinary prefetch and
-  swaps the job's `handle` and `row_windows` together when a stage is
-  replaced.
+- `HeteroTP.submit` runs the stages in order on a background thread
+  (`hetero-tp-lookup`, 32 threads) and returns one future of the merged
+  result. `LookupModule` submits the same-TP stage as an ordinary prefetch,
+  hands its handle to `HeteroTP.submit`, and from then on waits only for
+  that future.
 
 1. **Same-TP stage** (B keys, all chunks, every tier): a full hit is final.
    Otherwise its locks stay held, as part of the answer, and the cross-TP
@@ -123,11 +125,14 @@ read-locked `num_kv_readers` times, plus one result with its L1 owners. The
 reshard leaves the same, so no further prefetch is needed to lock the new
 objects.
 
-Stages advance inside `query_prefetch_status` / `wait_prefetch_status`.
-The copy runs in `L1Resharder`, on its own thread pool (4 threads) rather
-than the request handler's thread, because it grows with the hit.
-`query_prefetch_status` returns None while it runs, and `wait_prefetch_status`
-waits for it, with `timeout` covering every stage. A reshard whose
+The stages run as one sequential function rather than being advanced by the
+engine's polls, so the lookup keeps no stage state:
+`query_prefetch_status` returns None until the future is done, and
+`wait_prefetch_status` waits on it, with `timeout` covering every stage. Each
+lookup holds a thread while it waits for its prefetches, so the pool size
+bounds the cross-TP lookups in flight; a lookup past that queues before its
+cross-TP stage. The copy runs in `L1Resharder`, on its own thread pool (4
+threads), which bounds concurrent copies. A reshard whose
 destination keys another running reshard is writing waits for that one and
 writes only the rest; otherwise it would find the keys reserved and the
 second lookup of a prefix would miss. Each reshard logs its cost (Qwen3-0.6B,
@@ -137,13 +142,13 @@ second lookup of a prefix would miss. Each reshard logs its cost (Qwen3-0.6B,
 Resharded 8 chunks from TP1 to TP2 for request <id>: wrote 224.0 MiB in 38.36 ms (queued 0.20 ms, waited 0.00 ms on 0 other reshards)
 ```
 
-`free_lookup_locks` consumes without advancing. A cross-TP stage result has its
-A read locks released and the same-TP stage answers. A running cross-TP
-prefetch or reshard is waited for: the same-TP stage's locks left the
-prefetch controller with its result, so only this release can drop them, and
-it also sees the locks the reshard took. An exception in any
-stage, or a failed reshard, is logged and the same-TP stage answers, so the job
-always resolves and every lock it took is released. If a reshard fails
+`free_lookup_locks` on a cross-TP lookup waits (no timeout) for the future:
+the same-TP stage's locks left the prefetch controller with its result, so
+only this release can drop them, and it also sees the locks the reshard took.
+A free that arrives early therefore still runs the cross-TP stage and the
+reshard, and releases their locks right after. An exception in the cross-TP
+stage, or a failed reshard, is logged and the same-TP stage answers, so the
+future always resolves and every lock it took is released. If a reshard fails
 mid-group, the destination objects reserved for that group stay reserved
 until the write TTL, because the storage manager cannot abandon a
 reservation.
@@ -182,7 +187,7 @@ operator sets it. A lookup whose own TP equals it skips the cross-TP stage.
 ## Later: a PD source
 
 The cross-TP stage is the single extension point for native PD. Two things
-change there, and the stage machine does not:
+change there, inside `HeteroTP`, and `LookupModule` does not:
 
 - **Where A comes from.** From the request (the PD coordinator knows which P
   served it) or from a P2P RPC that asks the peer for its layout, instead of

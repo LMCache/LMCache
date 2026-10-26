@@ -6,7 +6,6 @@ from concurrent.futures import Future
 from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Literal, cast
 import threading
 import time
 
@@ -41,12 +40,7 @@ from lmcache.v1.multiprocess.kv_load_policy import (
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
-from lmcache.v1.multiprocess.tp_reshard import (
-    HeteroTP,
-    HeteroTPPlan,
-    PrefetchStage,
-    ReshardResult,
-)
+from lmcache.v1.multiprocess.tp_reshard import HeteroTP, PrefetchStage
 
 logger = init_logger(__name__)
 
@@ -104,35 +98,6 @@ def resolve_prefetched_obj_keys(
 
 
 @dataclass
-class _HeteroTPStages:
-    """Stages of a lookup that completes its hit from another TP size.
-
-    See ``docs/design/v1/multiprocess/hetero_tp.md``. The same-TP stage looks
-    up the lookup's own keys on every tier. If it hits fewer than all chunks,
-    its locks are kept and the cross-TP stage looks up the rest at the source
-    TP size; a hit there is resharded into the lookup's own layout in L1,
-    read-locked, and appended to the same-TP stage's result.
-
-    Attributes:
-        plan: The cross-TP stage, the reshard and the merge.
-        same_tp: The same-TP stage.
-        phase: The running stage: ``"same_tp"`` or ``"cross_tp"``.
-        same_tp_result: The same-TP stage's result, once it finished early.
-        same_tp_windows: The row windows ``same_tp_result`` folds with.
-        cross_tp: The cross-TP stage, once submitted.
-        reshard: The running reshard of a cross-TP stage hit.
-    """
-
-    plan: HeteroTPPlan
-    same_tp: PrefetchStage
-    phase: Literal["same_tp", "cross_tp"] = "same_tp"
-    same_tp_result: PrefetchResult | None = None
-    same_tp_windows: tuple[int, ...] = ()
-    cross_tp: PrefetchStage | None = None
-    reshard: Future[ReshardResult] | None = None
-
-
-@dataclass
 class _PrefetchJob:
     handle: PrefetchHandle
     # Sliding window of each submitted key row, in row order; empty when no
@@ -163,13 +128,9 @@ class _PrefetchJob:
     # Names the ``lookup()`` branch that returned before submitting a prefetch
     # task; empty on the normal path.
     early_exit_reason: str = ""
-    # Set while a cross-TP lookup may still replace ``handle``. A new
-    # stage swaps ``handle``, ``row_windows`` and ``hetero`` together under
-    # the module's ``_prefetch_job_lock``. Otherwise ``hetero`` is cleared
-    # only by the thread that took the current stage's result, which the
-    # storage manager hands out once; a failed reshard's result is claimed by
-    # clearing ``hetero`` under the lock.
-    hetero: _HeteroTPStages | None = None
+    # Set when the lookup completes its hit from another TP size: the future
+    # owns ``handle``'s result and resolves to the merged one.
+    hetero: Future[PrefetchResult] | None = None
 
 
 class LookupModule(DiscoverableModule):
@@ -234,7 +195,7 @@ class LookupModule(DiscoverableModule):
         }
 
     def close(self) -> None:
-        """Stop the reshard threads; see :meth:`L1Resharder.close`."""
+        """Stop the cross-TP lookup threads; see :meth:`HeteroTP.close`."""
         self._hetero_tp.close()
 
     # -----------------------------------------------------------------
@@ -403,10 +364,21 @@ class LookupModule(DiscoverableModule):
             )
             return
 
-        same_tp = PrefetchStage(
-            key, suffix_hashes, group_layout_descs, attn_desc, num_kv_readers
+        spec = PrefetchTaskSpec(
+            key_groups=ipc_key_to_grouped_object_keys(
+                key,
+                suffix_hashes,
+                list(range(attn_desc.num_object_groups)),
+                group_layout_descs,
+                attn_desc,
+            ),
+            num_kv_readers=num_kv_readers,
         )
-        handle, row_windows = self._submit_stage(same_tp)
+        handle = self._ctx.storage_manager.submit_prefetch_task(
+            spec,
+            external_request_id=key.request_id,
+        )
+        row_windows = tuple(row.sliding_window_size for row in spec.key_groups)
         self._register_prefetch_job(
             _PrefetchJob(
                 handle=handle,
@@ -425,7 +397,17 @@ class LookupModule(DiscoverableModule):
                 ),
                 model_name=model_name,
                 cache_salt=key.cache_salt,
-                hetero=self._hetero_tp_stages(same_tp),
+                hetero=self._hetero_tp.submit(
+                    PrefetchStage(
+                        key,
+                        suffix_hashes,
+                        group_layout_descs,
+                        attn_desc,
+                        num_kv_readers,
+                    ),
+                    handle,
+                    row_windows,
+                ),
             )
         )
 
@@ -441,10 +423,8 @@ class LookupModule(DiscoverableModule):
         removed once a non-None result is returned (exactly-once
         semantics).
 
-        With a cross-TP source configured, a finished stage can make this
-        call submit the next stage and return None. A cross-TP stage hit is
-        resharded into L1 on a background thread; until it finishes this
-        call returns None.
+        A lookup that completes its hit from another TP size is in progress
+        until its cross-TP stage and reshard finish.
 
         Args:
             request_id: The external request ID passed in the lookup key.
@@ -478,10 +458,6 @@ class LookupModule(DiscoverableModule):
         progress, so the caller does not have to busy-poll. The job entry is
         removed once a non-None result is returned (exactly-once semantics).
 
-        With a cross-TP source configured, the wait follows each stage the
-        lookup submits, and the background reshard; ``timeout`` covers all of
-        them.
-
         Args:
             request_id: The external request ID passed in the lookup key.
             timeout: Maximum number of seconds to wait for the prefetch.
@@ -499,29 +475,12 @@ class LookupModule(DiscoverableModule):
             )
             return 0
 
-        deadline = time.monotonic() + timeout
-        remaining = timeout
-        while True:
-            with self._prefetch_job_lock:
-                handle = job.handle
-                reshard = self._pending_reshard(job)
-            if reshard is not None:
-                # The finished cross-TP stage's handle never completes again;
-                # the reshard is what submits the next prefetch.
-                if not wait_futures([reshard], remaining).done:
-                    return None
-            elif not self._ctx.storage_manager.wait_prefetch_status(handle, remaining):
+        if job.hetero is not None:
+            if not wait_futures([job.hetero], timeout).done:
                 return None
-            result = self.query_prefetch_status(request_id)
-            # A cross-TP lookup started a reshard or swapped in a new
-            # prefetch: wait for that too.
-            with self._prefetch_job_lock:
-                moved = job.handle is not handle or (
-                    self._pending_reshard(job) is not None
-                )
-            if result is not None or not moved:
-                return result
-            remaining = max(0.0, deadline - time.monotonic())
+        elif not self._ctx.storage_manager.wait_prefetch_status(job.handle, timeout):
+            return None
+        return self.query_prefetch_status(request_id)
 
     @request_handler(HandlerType.BLOCKING)
     def free_lookup_locks(
@@ -548,10 +507,11 @@ class LookupModule(DiscoverableModule):
         session (hit length, lock model, L1 owners). If that result has not
         been consumed yet it is handed over here first. While the prefetch
         is still running nothing is released: its locks still belong to the
-        prefetch controller and expire with the read-lock TTL. A cross-TP
-        lookup past its same-TP stage is the exception: this call blocks
-        (no timeout) until its running prefetch or reshard finishes, then
-        releases every lock the lookup took.
+        prefetch controller and expire with the read-lock TTL. A lookup that
+        completes its hit from another TP size is the exception: its
+        same-TP locks already left the prefetch controller, so this call
+        blocks (no timeout) until the lookup finishes, then releases every
+        lock it took.
 
         Args:
             key: Cache key whose read locks should be released.
@@ -578,7 +538,7 @@ class LookupModule(DiscoverableModule):
                 job = self._prefetch_jobs.get(key.request_id)
             if (
                 job is not None
-                and self._consume_prefetch_result(job, advance_hetero=False) is None
+                and self._consume_prefetch_result(job, block_on_hetero=True) is None
             ):
                 logger.warning(
                     "free_lookup_locks for request %s while its prefetch is "
@@ -760,7 +720,7 @@ class LookupModule(DiscoverableModule):
         )
 
     def _consume_prefetch_result(
-        self, job: _PrefetchJob, advance_hetero: bool = True
+        self, job: _PrefetchJob, block_on_hetero: bool = False
     ) -> int | None:
         """Hand a finished prefetch result over to the request's session.
 
@@ -773,89 +733,37 @@ class LookupModule(DiscoverableModule):
 
         Args:
             job: The lookup's job.
-            advance_hetero: Whether a cross-TP lookup may submit its next
-                stage. ``free_lookup_locks`` passes False because the request
-                is being released, so the current result is final; it also
-                blocks until a running cross-TP prefetch or reshard finishes,
-                so the release sees the same-TP stage's locks and the ones the
-                reshard took.
+            block_on_hetero: Wait for a running cross-TP lookup instead of
+                returning None.
 
         Returns:
-            The hit chunk count, or None while the lookup is still running:
-            its prefetch has not finished, a reshard is running, or a
-            cross-TP stage just submitted the next one (the job is kept so a
-            later call can resolve it).
+            The hit chunk count, or None while the prefetch is still running
+            (the job is kept so a later call can resolve it).
         """
-        with self._prefetch_job_lock:
-            reshard = self._pending_reshard(job)
-        if reshard is not None and advance_hetero and not reshard.done():
-            return None
-        row_windows: tuple[int, ...]
-        if reshard is not None:
-            # Append the reshard's hit to the same-TP stage, whose locks are
-            # still held. Nothing else hands this result out once, so the
-            # consumer that clears ``hetero`` owns it.
-            resharded = reshard.result()
+        result: PrefetchResult | None
+        if job.hetero is not None:
+            if not (block_on_hetero or job.hetero.done()):
+                return None
+            result = job.hetero.result()
+            # The future hands its result to every caller; the first one to
+            # drop the job is the one that consumes it.
             with self._prefetch_job_lock:
-                state = job.hetero
-                if state is None or state.reshard is not reshard:
+                if self._prefetch_jobs.get(job.request_id) is not job:
                     return None
-                job.hetero = None
-            result = state.plan.merge(
-                cast(PrefetchResult, state.same_tp_result), resharded
-            )
-            row_windows = state.same_tp_windows
+                del self._prefetch_jobs[job.request_id]
         else:
-            with self._prefetch_job_lock:
-                handle, row_windows = job.handle, job.row_windows
-                cross_tp_running = (
-                    not advance_hetero
-                    and job.hetero is not None
-                    and job.hetero.phase == "cross_tp"
-                )
-            if cross_tp_running:
-                # The same-TP stage's locks left the prefetch controller with
-                # its result, so only this call can release them: wait for the
-                # cross-TP prefetch, which always publishes a result.
-                while not self._ctx.storage_manager.wait_prefetch_status(handle, 1.0):
-                    pass
-            queried = self._ctx.storage_manager.query_prefetch_status(handle)
-            if queried is None:
-                return None
-            result = queried
-        state = job.hetero
-        if state is not None:
-            try:
-                answer = self._advance_hetero_tp(
-                    job, state, result, row_windows, advance_hetero
-                )
-            except Exception:
-                # RPC boundary: a failed cross-TP stage must still answer the
-                # lookup, or the job never resolves and its session is never
-                # released. Answer with the stage whose locks are held.
-                logger.exception(
-                    "Cross-TP stage failed for request %s; answering with the "
-                    "same-TP hit",
-                    job.request_id,
-                )
-                job.hetero = None
-                if state.phase == "cross_tp":
-                    answer = (
-                        cast(PrefetchResult, state.same_tp_result),
-                        state.same_tp_windows,
-                    )
-                else:
-                    answer = result, row_windows
-            if answer is None:
-                return None
-            result, row_windows = answer
-        if row_windows:
-            found_count, _retain = fold_unfold_grouped(result.hit_cells, row_windows)
+            result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        if result is None:
+            return None
+        if job.row_windows:
+            found_count, _retain = fold_unfold_grouped(
+                result.hit_cells, job.row_windows
+            )
             l1_found_count, _l1_retain = fold_unfold_grouped(
-                result.l1_hit_cells, row_windows
+                result.l1_hit_cells, job.row_windows
             )
         else:
-            # Nothing was submitted (early exit), so nothing is locked.
+            # Nothing was submitted (early exit), so nothing can be hit.
             found_count = 0
             l1_found_count = 0
 
@@ -919,134 +827,6 @@ class LookupModule(DiscoverableModule):
         """Return the number of active prefetch jobs (thread-safe)."""
         with self._prefetch_job_lock:
             return len(self._prefetch_jobs)
-
-    def _hetero_tp_stages(self, same_tp: PrefetchStage) -> _HeteroTPStages | None:
-        """Return the cross-TP stages of a lookup, or ``None`` if it has none.
-
-        Args:
-            same_tp: The lookup's same-TP stage, already submitted.
-
-        Returns:
-            The stages, or ``None`` if the lookup cannot use another TP size.
-        """
-        plan = self._hetero_tp.plan(same_tp)
-        if plan is None:
-            return None
-        return _HeteroTPStages(plan, same_tp)
-
-    def _advance_hetero_tp(
-        self,
-        job: _PrefetchJob,
-        state: _HeteroTPStages,
-        result: PrefetchResult,
-        row_windows: tuple[int, ...],
-        advance: bool,
-    ) -> tuple[PrefetchResult, tuple[int, ...]] | None:
-        """Move a lookup to its next cross-TP stage after a stage finished.
-
-        Same-TP stage: a full hit, or ``advance`` False, makes it final;
-        otherwise its locks are kept and the cross-TP stage is submitted for
-        the rest. Cross-TP stage: a hit is handed to a background reshard,
-        whose result ``_consume_prefetch_result`` appends to the same-TP
-        stage's; a miss, or ``advance`` False, releases the source locks and
-        answers with the same-TP stage.
-
-        Args:
-            job: The lookup's job.
-            state: ``job.hetero``.
-            result: The finished stage's result, already taken from the
-                storage manager.
-            row_windows: The windows ``result`` was submitted with.
-            advance: Whether a new stage may be submitted.
-
-        Returns:
-            ``None`` if a new stage replaced ``job.handle`` or a reshard
-            started (the lookup is still running); otherwise the result that
-            answers the lookup and the row windows to fold it with.
-        """
-        found, _ = fold_unfold_grouped(result.hit_cells, row_windows)
-        if state.phase == "same_tp":
-            if found == len(state.same_tp.chunk_hashes) or not advance:
-                job.hetero = None
-                return result, row_windows
-            state.same_tp_result, state.same_tp_windows = result, row_windows
-            cross_tp = state.plan.cross_tp_stage(found)
-            handle, windows = self._submit_stage(cross_tp)
-            with self._prefetch_job_lock:
-                job.handle, job.row_windows = handle, windows
-                state.phase, state.cross_tp = "cross_tp", cross_tp
-            return None
-        if found > 0 and advance:
-            try:
-                reshard = state.plan.convert(found, result)
-            except Exception:
-                # The A objects are this call's to release until a reshard
-                # owns them.
-                self._release_stage(cast(PrefetchStage, state.cross_tp), found, result)
-                raise
-            with self._prefetch_job_lock:
-                state.reshard = reshard
-            return None
-        self._release_stage(cast(PrefetchStage, state.cross_tp), found, result)
-        job.hetero = None
-        return cast(PrefetchResult, state.same_tp_result), state.same_tp_windows
-
-    def _pending_reshard(self, job: _PrefetchJob) -> Future[ReshardResult] | None:
-        """Return ``job``'s running reshard; call under ``_prefetch_job_lock``."""
-        return job.hetero.reshard if job.hetero is not None else None
-
-    def _submit_stage(
-        self, stage: PrefetchStage
-    ) -> tuple[PrefetchHandle, tuple[int, ...]]:
-        """Submit a stage's prefetch.
-
-        Args:
-            stage: The stage to submit.
-
-        Returns:
-            The prefetch handle and the per-row windows to fold its result
-            with.
-        """
-        spec = PrefetchTaskSpec(
-            key_groups=ipc_key_to_grouped_object_keys(
-                stage.key,
-                stage.chunk_hashes,
-                list(range(stage.attn_desc.num_object_groups)),
-                stage.group_layout_descs,
-                stage.attn_desc,
-            ),
-            num_kv_readers=stage.num_kv_readers,
-        )
-        handle = self._ctx.storage_manager.submit_prefetch_task(
-            spec, external_request_id=stage.key.request_id
-        )
-        return handle, tuple(row.sliding_window_size for row in spec.key_groups)
-
-    def _release_stage(
-        self, stage: PrefetchStage, found: int, result: PrefetchResult
-    ) -> None:
-        """Drop the read locks a stage took on its first ``found`` chunks.
-
-        Args:
-            stage: The finished stage.
-            found: Leading chunks it hit.
-            result: Its result.
-        """
-        if found == 0:
-            return
-        self._ctx.storage_manager.finish_read_prefetched(
-            [
-                k
-                for group in ipc_key_to_object_keys(
-                    stage.key,
-                    stage.chunk_hashes[:found],
-                    list(range(stage.attn_desc.num_object_groups)),
-                )
-                for k in group
-            ],
-            read_locks=stage.num_kv_readers,
-            l1_owners=result.l1_owners,
-        )
 
     def _setup_metrics(self) -> None:
         """Register OTel observable gauges for lookup module metrics."""
