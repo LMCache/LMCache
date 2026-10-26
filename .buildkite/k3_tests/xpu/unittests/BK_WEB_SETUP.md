@@ -23,8 +23,12 @@ The Buildkite checkout must match the GitHub Actions source commit; candidate
 validation refuses PR-base pre-merges so tests and wheel use the same revision.
 The temporary directory remains available for the lifetime of the job pod.
 Ordinary Buildkite runs still install LMCache from source. Only when
-both nightly Buildkite builds pass does the nightly record its digest on
-`buildkite_latest_tested_vllm`; failures keep the previous pin.
+both nightly Buildkite builds pass does the nightly derive a PR image from the
+candidate, install the tested wheel, `requirements/test.txt`, and MP extras
+(`lm-eval[api]`, pandas, matplotlib), then uninstall LMCache while retaining
+dependencies. This derived image, without another UT/MP
+run or dependency version lock, is pinned on `buildkite_latest_tested_vllm`;
+failures keep the previous pin.
 Both XPU pipelines print the installed vLLM version in the Buildkite job log
 after setting up LMCache, rather than relying on the image tag.
 The same verified run also records the upstream vLLM XPU base image digest on
