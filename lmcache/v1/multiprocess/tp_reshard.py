@@ -7,9 +7,10 @@ are contiguous and innermost, so the heads a rank needs are a slice of the
 last dimension. This module maps the heads of a destination rank at one TP
 size onto the source ranks at another TP size and copies those slices.
 
-Rank-to-head assignment follows vLLM's ``QKVParallelLinear``: with
-``replicas = max(1, tp // num_kv_heads)``, rank ``r`` holds KV-head shard
-``r // replicas`` of size ``max(1, num_kv_heads // tp)``.
+The TP size must divide the KV head count, so rank ``r`` holds the
+contiguous heads ``[r * n, (r + 1) * n)`` with ``n = num_kv_heads // tp``.
+A TP size larger than the head count replicates heads across ranks by an
+engine-specific rule, so it is not supported.
 """
 
 # Standard
@@ -24,29 +25,22 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 
 def _check_tp(num_kv_heads: int, tp: int) -> None:
     if not is_valid_tp(num_kv_heads, tp):
-        raise ValueError(
-            f"tp={tp} must divide num_kv_heads={num_kv_heads} or be a multiple of it"
-        )
-
-
-def _replicas(num_kv_heads: int, tp: int) -> int:
-    return max(1, tp // num_kv_heads)
+        raise ValueError(f"tp={tp} must divide num_kv_heads={num_kv_heads}")
 
 
 def is_valid_tp(num_kv_heads: int, tp: int) -> bool:
-    """Return whether vLLM can shard ``num_kv_heads`` KV heads over ``tp`` ranks.
+    """Return whether ``num_kv_heads`` KV heads split evenly over ``tp`` ranks.
 
     Args:
         num_kv_heads: Total KV heads of the model.
         tp: Tensor-parallel size.
 
     Returns:
-        True if both are positive and ``tp`` divides ``num_kv_heads`` or is a
-        multiple of it.
+        True if both are positive and ``tp`` divides ``num_kv_heads``.
     """
     if num_kv_heads < 1 or tp < 1:
         return False
-    return num_kv_heads % tp == 0 or tp % num_kv_heads == 0
+    return num_kv_heads % tp == 0
 
 
 def local_kv_heads(num_kv_heads: int, tp: int) -> int:
@@ -57,14 +51,13 @@ def local_kv_heads(num_kv_heads: int, tp: int) -> int:
         tp: Tensor-parallel size.
 
     Returns:
-        ``max(1, num_kv_heads // tp)``.
+        ``num_kv_heads // tp``.
 
     Raises:
-        ValueError: If ``tp`` neither divides nor is a multiple of
-            ``num_kv_heads``.
+        ValueError: If ``tp`` does not divide ``num_kv_heads``.
     """
     _check_tp(num_kv_heads, tp)
-    return max(1, num_kv_heads // tp)
+    return num_kv_heads // tp
 
 
 def kv_head_range(num_kv_heads: int, tp: int, rank: int) -> tuple[int, int]:
@@ -85,7 +78,7 @@ def kv_head_range(num_kv_heads: int, tp: int, rank: int) -> tuple[int, int]:
     if not 0 <= rank < tp:
         raise ValueError(f"rank={rank} out of range for tp={tp}")
     n = local_kv_heads(num_kv_heads, tp)
-    return (rank // _replicas(num_kv_heads, tp)) * n, n
+    return rank * n, n
 
 
 @dataclass(frozen=True)
@@ -110,8 +103,7 @@ def plan_head_reshard(
 ) -> list[HeadCopy]:
     """Plan the copies that build one destination rank's heads.
 
-    Every destination head is covered exactly once. Among replicated source
-    ranks the lowest rank is used.
+    Every destination head is covered exactly once.
 
     Args:
         num_kv_heads: Total KV heads of the model.
@@ -128,16 +120,15 @@ def plan_head_reshard(
     """
     dst_first, dst_n = kv_head_range(num_kv_heads, dst_tp, dst_rank)
     src_n = local_kv_heads(num_kv_heads, src_tp)
-    src_replicas = _replicas(num_kv_heads, src_tp)
     copies = []
     head = dst_first
     while head < dst_first + dst_n:
-        shard = head // src_n
-        src_first = shard * src_n
+        src_rank = head // src_n
+        src_first = src_rank * src_n
         n = min(src_first + src_n, dst_first + dst_n) - head
         copies.append(
             HeadCopy(
-                src_rank=shard * src_replicas,
+                src_rank=src_rank,
                 src_head=head - src_first,
                 dst_head=head - dst_first,
                 num_heads=n,

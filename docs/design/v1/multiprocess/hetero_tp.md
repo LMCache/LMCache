@@ -55,21 +55,28 @@ alone and 15-73 ms under 12 concurrent requests. Each reshard logs its cost
 
 ## Head mapping
 
-This follows vLLM's `QKVParallelLinear`, with H the model's KV head count and
-`replicas = max(1, tp // H)`. Rank `r` holds `max(1, H // tp)` heads, starting
-at `(r // replicas) * max(1, H // tp)`. `tp_reshard.plan_head_reshard` walks a
-destination rank's heads and takes each one from the lowest source rank that
-holds it (replicas are identical).
+An object does not record which KV heads it holds. With H the model's KV
+head count, both TP sizes must divide H, and rank `r` holds the contiguous
+heads `[r * H/tp, (r + 1) * H/tp)`. `tp_reshard.plan_head_reshard` walks a
+destination rank's heads and takes each one from the source rank that holds
+it.
 
 ```
-H=8, A=2, B=4: b=3 <- a=1 heads 2..3         (one source per destination)
-H=8, A=4, B=2: b=1 <- a=2 heads 0..1, a=3 heads 0..1   (gather)
-H=2, A=4, B=1: b=0 <- a=0 head 0, a=2 head 0  (replicated source)
+H=8, A=2, B=4: b=3 <- a=1 heads 2..3                  (one source per destination)
+H=8, A=4, B=2: b=1 <- a=2 heads 0..1, a=3 heads 0..1  (gather)
 ```
 
-H is not derivable from a rank's shape once ranks replicate heads, so vLLM
-sends it as the `total_num_kv_heads` layout hint. vLLM sends the hint only
-when the reshard is valid:
+A TP size larger than H is not supported, by choice. The engine then
+replicates heads across ranks, and which ranks share a head is the engine's
+own rule (vLLM's `QKVParallelLinear` groups adjacent ranks). Contiguous
+splitting is the only assumption this design makes about the writer; adding
+a replication rule would tie the store format to one engine. Such a lookup
+gets no fallback and misses as before.
+
+vLLM sends H as the `total_num_kv_heads` layout hint. The shape alone cannot
+tell a rank holding one of H = tp heads from one holding a replicated head,
+so the hint is what rules the second case out. vLLM sends the hint only when
+the reshard is valid:
 
 - **Model:** not MLA, not hybrid, not attention-free (`vllm_layout_hints`).
 - **Deployment:** server world size equal to TP and DCP=1
@@ -126,6 +133,7 @@ the operator lists the TP sizes of the other engines.
 ## Constraints (phase 1)
 
 - Attention-only, non-MLA models without sliding-window object groups.
+- Both TP sizes divide the model's KV head count.
 - LMCache-driven transfer. The engine-driven registration does not send the
   head-count hint, so the fallback is off there.
 - The fallback runs only when the primary stage finds no chunk at all.
@@ -136,8 +144,7 @@ The e2e test is native PD on one node: two servers, a coordinator, NIXL P2P,
 `chunk_size=256`, and a 2064-token prompt. Results:
 
 - Qwen3-0.6B (8 KV heads): every ordered pair in {1, 2, 4, 8}.
-- Qwen2.5-1.5B (2 KV heads, replicated at TP4): every ordered pair in
-  {1, 2, 4}.
+- Qwen2.5-1.5B (2 KV heads): TP1 to TP2 and TP2 to TP1.
 - Every pair hit 2048/2064 tokens on D.
 - The first-token top-5 logprobs on D matched a cold D run within the
   same-TP noise, and top-1 was the same token.
