@@ -601,6 +601,29 @@ class KVLayerGroupsManager:
             return self._lmcache_tokens_per_chunk
         return sw_size_tokens
 
+    def get_kernel_group_window_chunks(self, kernel_group_idx: int) -> int:
+        """Trailing LMCache chunks one kernel group needs for a cache hit.
+
+        Uses the same rule as :meth:`get_attn_desc`, per kernel group instead
+        of per object group: ``-1`` for full attention, otherwise the sliding
+        window (or recurrent-state window) rounded up to whole chunks.
+        ``full_sw_kv`` widens attention groups to full attention but keeps a
+        recurrent group's window.
+
+        Args:
+            kernel_group_idx: 0-based kernel group index.
+
+        Returns:
+            ``-1`` or a window of at least one chunk.
+        """
+        group = self._kernel_groups[kernel_group_idx]
+        if group.sw_size_tokens == -1:
+            return -1
+        if self._full_sw_kv and not group.recurrent_state:
+            return -1
+        chunk_size = self._lmcache_tokens_per_chunk
+        return max(1, (group.sw_size_tokens + chunk_size - 1) // chunk_size)
+
     def get_attn_desc(self) -> AttnWindowDesc:
         """Return the cross-chunk attention windows of all object groups.
 
