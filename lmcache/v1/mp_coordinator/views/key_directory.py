@@ -588,7 +588,8 @@ class KeyDirectory(View):
 
         Call once at startup. Blend fingerprints are re-derived, so
         :meth:`enable_blend_lookup` must run first for restored chunks to
-        be fragment-matchable.
+        be fragment-matchable. A capture rejected with ``ValueError`` or
+        ``TypeError`` leaves the directory empty.
 
         Args:
             state: A :meth:`capture` value.
@@ -596,7 +597,9 @@ class KeyDirectory(View):
         Raises:
             ValueError: If the directory already holds keys, or the
                 captured state contains an invalid placement tier, or the
-                reverse index cites a key position that does not exist.
+                reverse index cites a key position that does not exist, or a
+                captured value is malformed.
+            TypeError: If a captured field has the wrong type.
         """
         captured_keys = cast(
             "list[tuple[object, float, int, list[object]]]", state["keys"]
@@ -610,56 +613,62 @@ class KeyDirectory(View):
                     f"{len(self._directory)} keys, "
                     f"{len(self._l1_keys_by_instance)} instances)"
                 )
-            key_table = []
-            for encoded_key, last_access, access_count, placements in captured_keys:
-                key = decode_key(encoded_key)
-                key_table.append(key)
-                decoded_placements = [_decode_placement(p) for p in placements]
-                invalid_tiers = [
-                    placement.tier
-                    for placement in decoded_placements
-                    if placement.tier not in (Tier.L1, Tier.L2)
-                ]
-                if invalid_tiers:
-                    raise ValueError(
-                        "captured placements must use tier l1 or l2, got "
-                        f"{invalid_tiers[0]}"
-                    )
-                self._directory[key] = _KeyRecord(
-                    placements=decoded_placements,
-                    last_access=last_access,
-                    access_count=access_count,
-                )
-                for placement in decoded_placements:
-                    self._adjust_placement_stats(
-                        placement,
-                        count_delta=1,
-                        size_bytes_delta=placement.size_bytes,
-                    )
-                self._add_token_binding(key)
-            for chunk_hash, token_offset, raw_tokens in bindings:
-                binding = self._token_bindings.get(chunk_hash)
-                if binding is None:
-                    # Content no surviving key references: nothing owns it.
-                    continue
-                token_ids = np.frombuffer(
-                    raw_tokens, dtype=_CAPTURED_TOKEN_DTYPE
-                ).astype(_TOKEN_DTYPE, copy=False)
-                token_ids.flags.writeable = False
-                binding.token_ids = token_ids
-                binding.token_offset = token_offset
-                for held in binding.keys:
-                    self._claim_binding(chunk_hash, binding, held)
-            for instance_id, positions_ in l1_by_instance.items():
-                for position in positions_:
-                    if not 0 <= position < len(key_table):
+            try:
+                key_table = []
+                for encoded_key, last_access, access_count, placements in captured_keys:
+                    key = decode_key(encoded_key)
+                    key_table.append(key)
+                    decoded_placements = [_decode_placement(p) for p in placements]
+                    invalid_tiers = [
+                        placement.tier
+                        for placement in decoded_placements
+                        if placement.tier not in (Tier.L1, Tier.L2)
+                    ]
+                    if invalid_tiers:
                         raise ValueError(
-                            f"{instance_id!r} cites key position {position} "
-                            f"of {len(key_table)}"
+                            "captured placements must use tier l1 or l2, got "
+                            f"{invalid_tiers[0]}"
                         )
-                self._l1_keys_by_instance[instance_id] = {
-                    key_table[position] for position in positions_
-                }
+                    self._directory[key] = _KeyRecord(
+                        placements=decoded_placements,
+                        last_access=last_access,
+                        access_count=access_count,
+                    )
+                    for placement in decoded_placements:
+                        self._adjust_placement_stats(
+                            placement,
+                            count_delta=1,
+                            size_bytes_delta=placement.size_bytes,
+                        )
+                    self._add_token_binding(key)
+                for chunk_hash, token_offset, raw_tokens in bindings:
+                    binding = self._token_bindings.get(chunk_hash)
+                    if binding is None:
+                        # Content no surviving key references: nothing owns it.
+                        continue
+                    token_ids = np.frombuffer(
+                        raw_tokens, dtype=_CAPTURED_TOKEN_DTYPE
+                    ).astype(_TOKEN_DTYPE, copy=False)
+                    token_ids.flags.writeable = False
+                    binding.token_ids = token_ids
+                    binding.token_offset = token_offset
+                    for held in binding.keys:
+                        self._claim_binding(chunk_hash, binding, held)
+                for instance_id, positions_ in l1_by_instance.items():
+                    for position in positions_:
+                        if not 0 <= position < len(key_table):
+                            raise ValueError(
+                                f"{instance_id!r} cites key position {position} "
+                                f"of {len(key_table)}"
+                            )
+                    self._l1_keys_by_instance[instance_id] = {
+                        key_table[position] for position in positions_
+                    }
+            except (ValueError, TypeError):
+                # load_checkpoint() skips the section and boots on: a partial
+                # restore would leave placements that no fence ever reaches.
+                self._clear()
+                raise
 
     def stats(self) -> DirectoryStats:
         """Return a point-in-time summary of directory contents.
@@ -694,6 +703,20 @@ class KeyDirectory(View):
             )
 
     # -- Internals (call with self._lock held) --------------------------------
+
+    def _clear(self) -> None:
+        """Return to the empty state :meth:`restore` starts from."""
+        self._directory.clear()
+        for tier_stats in self._placement_stats.values():
+            tier_stats.count = 0
+            tier_stats.size_bytes = 0
+        self._l1_keys_by_instance.clear()
+        self._token_bindings.clear()
+        if self._blend_lookup_enabled:
+            self._blend_index = BlendIndex(
+                chunk_size=cast(int, self._blend_chunk_size),
+                probe_stride=self._blend_probe_stride,
+            )
 
     def _apply_entry(
         self,
