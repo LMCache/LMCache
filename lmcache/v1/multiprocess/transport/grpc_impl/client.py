@@ -7,8 +7,8 @@ from __future__ import annotations
 # Standard
 from dataclasses import dataclass
 from typing import Any, Callable
-import functools
 from urllib.parse import urlparse
+import functools
 import socket
 import threading
 import time

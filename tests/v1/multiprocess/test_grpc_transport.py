@@ -881,7 +881,7 @@ def test_second_server_cannot_bind_a_served_port(grpc_server_mode: str) -> None:
             transport="grpc",
             host="127.0.0.1",
             port=0,
-            grpc_server_mode=grpc_server_mode,
+            grpc_server_mode=cast(Any, grpc_server_mode),
         ),
     )
     try:
@@ -892,7 +892,7 @@ def test_second_server_cannot_bind_a_served_port(grpc_server_mode: str) -> None:
                     transport="grpc",
                     host="127.0.0.1",
                     port=first.bound_port,
-                    grpc_server_mode=grpc_server_mode,
+                    grpc_server_mode=cast(Any, grpc_server_mode),
                 ),
             )
     finally:
@@ -905,10 +905,10 @@ def test_client_reports_a_zmq_server_instead_of_waiting() -> None:
     already in flight."""
     router = zmq.Context.instance().socket(zmq.ROUTER)
     port = router.bind_to_random_port("tcp://127.0.0.1")
-    client = GrpcMultiprocessClient(f"grpc://127.0.0.1:{port}")
+    client = GrpcMultiprocessClient(f"grpc://127.0.0.1:{port}")  # type: ignore[abstract]
     try:
         in_flight = client.noop()
-        stream = client.subscribe_kv_events(0)
+        stream = client.subscribe_kv_events(1, "model", 0, 16)
         with pytest.raises(ConnectionError, match="speaks ZMQ"):
             in_flight.result(timeout=10)
         with pytest.raises(ConnectionError, match="speaks ZMQ"):
