@@ -54,7 +54,7 @@ permissions:
 jobs:
     build-musa-artifacts:
         name: Build MUSA wheel
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         outputs:
             musa_version: ${{ steps.prepare.outputs.version }}
         steps:

@@ -8,3 +8,9 @@ RUN PYTHON="$(command -v python3)" bash /tmp/install_xpu_dpcpp_compiler.sh \
     && python3 -m pip install uv
 
 ENV BASH_ENV=/opt/intel/oneapi/setvars.sh
+
+RUN --mount=type=bind,source=requirements,target=/tmp/requirements \
+    uv pip install --no-cache \
+        -r /tmp/requirements/common.txt \
+        -r /tmp/requirements/test.txt \
+        'lm-eval[api]' pandas matplotlib

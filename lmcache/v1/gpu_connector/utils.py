@@ -8,15 +8,15 @@
 # mypy: disable-error-code="union-attr,call-overload"
 # Standard
 from collections.abc import Hashable, Sequence
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 
 # Third Party
 import torch
 
 # First Party
+from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, lmcache_deprecate
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.kv_format import (
     concrete_shape,
     describe_shape,
@@ -28,13 +28,6 @@ from lmcache.v1.gpu_connector.kv_format import (
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
-
-# First Party
-from lmcache import device_ops
 
 logger = init_logger(__name__)
 
@@ -55,35 +48,6 @@ def assert_contiguous(tensor: torch.Tensor) -> None:
         raise ValueError(f"expected storage_offset 0, got {tensor.storage_offset()}")
     if not tensor.is_contiguous():
         raise ValueError("tensor is not contiguous")
-
-
-def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
-    """
-    Check if the GPU Connector needs to create an intermediate
-    buffer on the GPU
-    """
-    if lmcache_config.enable_pd:
-        return False
-    else:
-        return True
-
-
-def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
-    """
-    Assert that a GPU Connector is a layerwise connector.
-    """
-    # Import at runtime to avoid circular dependency
-    # First Party
-    from lmcache.v1.gpu_connector import gpu_connectors, xpu_connectors
-
-    valid_connectors = (
-        gpu_connectors.VLLMPagedMemLayerwiseGPUConnector,
-        gpu_connectors.VLLMBufferLayerwiseGPUConnector,
-        xpu_connectors.VLLMPagedMemLayerwiseXPUConnector,
-        xpu_connectors.VLLMBufferLayerwiseXPUConnector,
-    )
-
-    assert isinstance(gpu_connector, valid_connectors)
 
 
 def get_engine_kv_shape_description(

@@ -47,6 +47,7 @@ from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
@@ -599,7 +600,7 @@ class KVClient:
             model_name=self.model_name,
             world_size=1,
             worker_id=0,
-            token_ids=tuple(token_ids),
+            token_bytes=pack_token_ids(token_ids),
             start=0,
             end=chunks * CHUNK_SIZE,
             request_id=request_id,
