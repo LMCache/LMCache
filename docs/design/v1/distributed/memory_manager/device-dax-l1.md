@@ -221,7 +221,9 @@ the arena has been unmapped the path is no longer known and a repeat raises the
 
 `add_device` rejects a range that overlaps one already mapped from the same
 physical device, including through aliases, and `remove_device` rejects the
-primary arena (the initial device in pure Device-DAX mode). An arena is
+primary arena (the initial device in pure Device-DAX mode). The storage manager
+applies the same range test across tiers through `owns_range`, so L1 and DAX
+L2 may map disjoint ranges of one device. An arena is
 identified by the `(device_path, offset_in_bytes)` pair exactly as supplied when
 it was added; status and removal take the same pair, with the offset defaulting
 to 0, and a pair that matches nothing is a 404.

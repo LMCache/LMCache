@@ -31,7 +31,7 @@ import threading
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, MemoryTags, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -156,6 +156,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     def __init__(
         self,
         native_client: Any,
+        memory_tags: MemoryTags,
         max_capacity_gb: float = 0,
         type_name: str = "",
         extra_status: dict[str, Any] | None = None,
@@ -167,6 +168,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             native_client: Pybind-wrapped C++ connector client exposing
                 ``event_fd``, ``submit_batch_*``, ``drain_completions`` and
                 ``close``.
+            memory_tags: Memory tags of the connector's storage medium.
             max_capacity_gb: Capacity in GiB used for L2 usage accounting.
                 Zero disables the capacity limit.
             type_name: Stable adapter type label for status reporting.
@@ -186,6 +188,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._type_name: str = type_name or type(native_client).__name__
         self._extra_status: dict[str, Any] = dict(extra_status or {})
         self._pad_buffers_to_alignment = pad_buffers_to_alignment
+        self._memory_tags = memory_tags
 
         # 3 distinct cross-platform notifiers for the L2 adapter
         # interface
@@ -446,6 +449,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # ---------------------------------------------------------------
     # Cleanup
     # ---------------------------------------------------------------
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags given at construction."""
+        return self._memory_tags
 
     def close(self) -> None:
         self._stop.set()

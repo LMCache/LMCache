@@ -180,7 +180,7 @@ Common Issues
 **Solution**: Set ``LMCACHE_CONFIG_FILE`` or use ``--config`` parameter
 
 **Issue**: "Failed to connect to controller"
-**Solution**: Start controller first: ``python -m lmcache.v1.api_server``
+**Solution**: Start controller first: ``python -m lmcache.inprocess.v1.api_server``
 
 **Issue**: "Invalid KV shape specification"
 **Solution**: Check format: ``(shape):dtype:layer_count``, e.g., ``(2,2,256,4,16):float16:2``

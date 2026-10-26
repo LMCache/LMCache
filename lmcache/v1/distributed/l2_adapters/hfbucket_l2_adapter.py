@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import MemoryResidency, MemorySegment, MemoryTags
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -40,14 +41,14 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
-from lmcache.v1.platform import create_event_notifier
-from lmcache.v1.storage_backend.connector.hfbucket_connector import (
+from lmcache.v1.distributed.l2_adapters.hfbucket_client import (
     HFBucketClient,
     HFBucketClientInterface,
     HFBucketLocation,
     encode_hfbucket_object_name,
     parse_hfbucket_handle,
 )
+from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
@@ -467,6 +468,10 @@ class HFBucketL2Adapter(L2AdapterInterface):
             "current_size_bytes": usage.total_bytes_used,
             "max_capacity_bytes": usage.total_capacity_bytes,
         }
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this adapter: remote storage."""
+        return MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
 
     def close(self) -> None:
         if self._closed:

@@ -19,7 +19,7 @@ from lmcache.v1.storage_backend.remote_backend import RemoteBackend  # noqa: F40
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.cache_controller.worker import LMCacheWorker
+    from lmcache.inprocess.v1.cache_controller.worker import LMCacheWorker
 
 logger = init_logger(__name__)
 

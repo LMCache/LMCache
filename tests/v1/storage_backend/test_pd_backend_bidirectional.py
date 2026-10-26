@@ -298,7 +298,7 @@ class TestNixlChannelBatchedRead:
     def test_batched_read_calls_nixl_read(self):
         """batched_read uses NIXL READ operation."""
         # First Party
-        from lmcache.v1.transfer_channel.nixl_channel import NixlChannel
+        from lmcache.inprocess.v1.transfer_channel.nixl_channel import NixlChannel
 
         # Create a mock channel
         channel = MagicMock(spec=NixlChannel)

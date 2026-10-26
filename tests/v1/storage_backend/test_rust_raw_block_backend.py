@@ -23,6 +23,12 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.distributed.l2_adapters.raw_block import (
+    RawBlockCore,
+    RawBlockCoreConfig,
+    RawBlockKeySpec,
+    RawBlockPutManyResult,
+)
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -36,13 +42,7 @@ from lmcache.v1.storage_backend.plugins.rust_raw_block_backend import (
     _DEFAULT_META_VERSION,
     RustRawBlockBackend,
 )
-from lmcache.v1.storage_backend.raw_block import (
-    RawBlockCore,
-    RawBlockCoreConfig,
-    RawBlockKeySpec,
-    RawBlockPutManyResult,
-)
-from tests.v1.storage_backend.raw_block_test_utils import is_skip_safe_io_error
+from tests.v1.distributed.raw_block.test_utils import is_skip_safe_io_error
 
 
 def _has_ext() -> bool:
@@ -483,7 +483,7 @@ def test_raw_block_core_logs_iouring_completion_errors(monkeypatch):
         )
 
         with patch(
-            "lmcache.v1.storage_backend.raw_block.core.logger.error"
+            "lmcache.v1.distributed.l2_adapters.raw_block.core.logger.error"
         ) as log_error:
             results = core._wait_iouring_results(
                 raw_dev,
