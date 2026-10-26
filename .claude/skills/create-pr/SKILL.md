@@ -75,7 +75,24 @@ Run `/pre-pr-check --scope branch` and address or report its findings before
 continuing. A clean agent review does not replace the submitting human's own
 line-by-line review.
 
-### 5. Draft the PR
+### 5. Generate the reviewer explainer
+
+For AI-assisted code changes, generate a self-contained HTML file that a
+reviewer can open without repository context or local assets. Include:
+
+- a visual overview and explanations of meaningful code changes;
+- end-to-end call chains, ownership boundaries, and extension points;
+- a test map explaining the necessity and regression target of each changed
+  test;
+- compatibility and performance risks, validation evidence, gaps, and focused
+  reviewer questions.
+
+Use embedded CSS and SVG diagrams. Remove secrets, machine-local paths, and
+inaccessible links. Keep the file outside the repository unless the user asks
+to commit it. Attach it to the PR, or use a reviewer-accessible stable link; if
+raw HTML is not accepted, attach a zip containing it.
+
+### 6. Draft the PR
 
 - **Title**: Use `--title` from arguments if provided. Otherwise, generate a concise title (under 70 chars) summarizing the change.
 - **Body**: Fill in the PR template sections based on the changes. Focus on:
@@ -86,7 +103,7 @@ line-by-line review.
 
 Show the drafted title and body to the user and ask for confirmation before creating the PR.
 
-### 6. Create the PR
+### 7. Create the PR
 
 Use the `mcp__github__create_pull_request` tool:
 - `owner`: upstream repo owner
@@ -97,9 +114,9 @@ Use the `mcp__github__create_pull_request` tool:
 - `body`: the PR body
 - `draft`: true
 
-### 7. Report
+### 8. Report
 
-Print the PR URL so the user can review it.
+Print the PR URL and the HTML explainer location so the user can review both.
 
 ## Important Notes
 
@@ -110,3 +127,6 @@ Print the PR URL so the user can review it.
 - Always create the PR as a draft. Never mark it ready for review; only the
   submitting human may do that after completing the PR template's self-review
   checklist.
+- On every later AI-assisted code update, convert the PR back to draft first,
+  then refresh the title, description, and HTML explainer for the new head.
+  Never treat an earlier human review as covering later AI-generated changes.

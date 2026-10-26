@@ -26,6 +26,23 @@ changed line, run the relevant validation, confirm that the PR description and
 test evidence are current, and explicitly decide that the change is ready.
 Pure agent submissions without this human review are not allowed.
 
+Every time AI-assisted code is added to an existing pull request, move the PR
+back to draft before requesting review. Refresh the title and description for
+the new head, regenerate the reviewer HTML explainer described below, and rerun
+the relevant validation. The submitting human must then review the new diff and
+explicitly mark the PR ready again. An earlier human review does not cover later
+AI-generated changes.
+
+AI-assisted PRs must include a self-contained HTML reviewer explainer, attached
+to the PR or linked from a reviewer-accessible location. Keep it synchronized
+with the current head. It must use diagrams and concrete code references to
+explain the change, the affected end-to-end call chains and responsibility
+boundaries, and why each added or changed test is necessary. Also cover
+compatibility, risks, validation gaps, and reviewer attention points. Do not
+include secrets, machine-local paths, inaccessible artifacts, or dependencies
+on local assets; use embedded CSS and diagrams so the downloaded file works on
+its own.
+
 ## Python Environment
 
 We recommend using [uv](https://docs.astral.sh/uv/) to manage Python environments and dependencies:
@@ -216,6 +233,18 @@ Hard rules (details: `docs/coding_standards.md` Section 10):
 - Narrow `try/except` with specific types; `logger.exception` inside `except` blocks.
 - Comments explain why, never narrate the change; TODOs carry a GitHub handle.
 - Reuse existing helpers; no speculative config options or abstractions.
+- Design for an open-source ecosystem: use clear interfaces, polymorphism, or
+  inheritance when real implementations vary; use plugin discovery or dynamic
+  scanning when independently maintained implementations should remain
+  decoupled. Do not add abstractions without a concrete extension need.
+- Keep responsibility boundaries explicit and coupling directional. Outside
+  `lmcache/integration/<engine>/`, code must remain inference-engine and model
+  agnostic. Middle-layer orchestration and contracts must remain accelerator,
+  storage-backend, and transport agnostic; concrete behavior belongs behind the
+  corresponding platform, storage, or transfer interface.
+- On non-critical paths, prefer explicit typed structures and direct dispatch.
+  Avoid opaque data structures, reflection, or metaprogramming unless they solve
+  a demonstrated requirement and are documented and tested.
 
 ## Code Review Rules
 

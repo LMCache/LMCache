@@ -126,6 +126,34 @@ Only the submitting human should mark the PR ready. For AI-assisted changes, the
 understand and be able to defend the change end to end; a review performed only by the agent
 that wrote the change does not satisfy this gate.
 
+#### AI-assisted update loop
+
+For a PR containing AI-generated code, the same gate applies after every AI-assisted update,
+not just when the PR is first opened:
+
+1. Move the PR back to draft before asking reviewers to look at the new code.
+2. Re-evaluate and refresh the PR title and description against the new head, including
+   claims, validation results, compatibility notes, and known gaps.
+3. Regenerate the HTML reviewer explainer and replace its attachment or link in the PR.
+4. Rerun relevant checks, then have the submitting human review every new or changed line.
+5. Mark the PR ready again only after the checklist reflects that latest human review.
+
+The HTML explainer should help a reviewer who has no prior context understand the change. It
+must be self-contained and include:
+
+- a visual overview and a file-by-file explanation of the meaningful code changes;
+- end-to-end call-chain diagrams, including ownership boundaries and extension points;
+- a test map explaining what regression each test protects and why the test belongs at that
+  level;
+- compatibility and performance risks, validation evidence, missing coverage, and focused
+  questions for reviewers.
+
+Attach the `.html` file to the PR or provide a stable link that every reviewer can open. If
+the hosting surface does not accept raw HTML, attach a `.zip` containing the HTML. Embed CSS,
+SVG diagrams, and other assets in the file; remove secrets, machine-local paths, and links to
+artifacts reviewers cannot access. The explainer supplements the PR description and source
+diff; it does not replace either one.
+
 ### 6. What CI runs on your PR
 
 Opening or updating a PR triggers a set of GitHub Actions workflows, plus a DCO check and a

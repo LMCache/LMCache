@@ -7,6 +7,9 @@
 
 **Special notes for your reviewers**:
 
+**AI-generated PR explainer** (required when AI-generated code is included):
+<!-- Attach the current self-contained HTML file, or link a reviewer-accessible artifact. -->
+
 **If applicable**:
 
 - [ ] this PR contains user facing changes - docs added
@@ -15,11 +18,14 @@
 <details>
 <summary>Before marking ready for review</summary>
 
-- [ ] I reviewed every changed line, including generated or agent-assisted changes.
+- [ ] I reviewed every changed line since the latest update, including generated or
+      agent-assisted changes.
 - [ ] I ran the relevant local checks and recorded the commands and results above.
 - [ ] I confirmed the description matches the final diff and documents any missing coverage
       or compatibility concerns.
 - [ ] I confirmed every commit has a DCO `Signed-off-by` trailer.
 - [ ] I stated whether AI assistance was used in **Special notes for your reviewers**.
+- [ ] If AI-generated code is included, this PR is a draft and its title, description, and
+      HTML explainer all match the current head.
 
 </details>
