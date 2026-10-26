@@ -14,6 +14,8 @@ import time
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L1ReadReservation
+from lmcache.v1.distributed.l1_manager import validate_read_locks
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE, num_packed_tokens
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -55,7 +57,8 @@ class Session:
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
     _lookup_generation: int = field(default=0, repr=False)
-    _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
+    _unclaimed_reads: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
+    _claimed_worker_reads: set[tuple[int, int, ObjectKey]] = field(
         default_factory=set, repr=False
     )
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -165,7 +168,8 @@ class Session:
             self.prefetch_read_generations = {}
             self.prefetch_group_windows = group_windows
             self._lookup_generation += 1
-            self._failed_retrieve_releases.clear()
+            self._unclaimed_reads.clear()
+            self._claimed_worker_reads.clear()
             self._prefetch_owners.clear()
 
     def record_prefetch_result(
@@ -182,6 +186,14 @@ class Session:
             self.prefetch_locked_gids = locked_gids
             self._prefetch_owners = dict(l1_owners) if l1_owners is not None else {}
             self.prefetch_read_generations = read_generations or {}
+            count = (
+                validate_read_locks(self.lookup_ipc_key.require_num_kv_readers())
+                if self.lookup_ipc_key is not None
+                else 0
+            )
+            self._unclaimed_reads = {
+                key: count for key in self.prefetch_read_generations
+            }
 
     def get_read_generations(self, keys: list[ObjectKey]) -> dict[ObjectKey, int]:
         """Snapshot the lookup's original lock generations for cleanup."""
@@ -229,55 +241,103 @@ class Session:
                 self._lookup_generation,
             )
 
-    def claim_failed_retrieve_release(
+    def claim_worker_read(
         self,
-        instance_id: int,
         key: IPCCacheServerKey,
-        lookup_generation: int,
-    ) -> bool:
-        """Atomically claim one failed worker's prepared lock release.
+        instance_id: int,
+        keys: list[ObjectKey],
+        *,
+        lookup_generation: int | None = None,
+    ) -> tuple[L1ReadReservation, ...] | None:
+        """Transfer one share per key to a worker, excluding subsequent FREE.
 
-        A scheduler lookup acquires read locks for every KV worker (or one
-        reader count per TP worker for MLA), while RETRIEVE responses are
-        per worker instance.  When a worker has lost its GPU registration,
-        only that instance's share may be released.  Claiming after key
-        resolution makes duplicate failed RETRIEVEs idempotent without
-        consuming the claim when resolution itself fails.
+        MLA TP instances share a KV worker ID, so the existing protocol's
+        instance ID distinguishes their shares. A repeated/overlapping call
+        from one instance cannot claim twice; disjoint ranges remain valid.
 
-        ``False`` is also returned when the session cannot prove ownership of
-        the requested range.  In that case it is safer to leave the lock to
-        its TTL than to decrement a concurrent request's anonymous L1 count.
+        Args:
+            key: Worker request matching this lookup's model and token identity.
+            instance_id: Worker incarnation carried by the RETRIEVE protocol.
+            keys: Exact retained objects this worker will consume or abandon.
+            lookup_generation: Optional epoch captured before key resolution.
+
+        Returns:
+            Immutable original reservations, or None if any share is unavailable.
+            The owner must settle every returned share, including failed pins.
         """
-        if key.worker_id is None:
-            return False
-
         with self._lock:
-            lookup_key = self.lookup_ipc_key
-            if lookup_key is None or lookup_generation != self._lookup_generation:
-                return False
-
-            same_lookup = (
-                key.model_name == lookup_key.model_name
-                and key.world_size == lookup_key.world_size
-                and key.token_bytes == lookup_key.token_bytes
-                and key.cache_salt == lookup_key.cache_salt
-                and key.start >= lookup_key.start
-                and key.end <= lookup_key.end
+            if (
+                not self._matches_lookup(key)
+                or key.worker_id is None
+                or not 0 <= key.worker_id < key.world_size
+                or (
+                    lookup_generation is not None
+                    and lookup_generation != self._lookup_generation
+                )
+            ):
+                return None
+            unique_keys = list(dict.fromkeys(keys))
+            if any(
+                self._unclaimed_reads.get(obj_key, 0) == 0
+                or (instance_id, key.worker_id, obj_key) in self._claimed_worker_reads
+                for obj_key in unique_keys
+            ):
+                return None
+            claimed = tuple(
+                L1ReadReservation(
+                    obj_key,
+                    self.prefetch_read_generations[obj_key],
+                    self._prefetch_owners.get(obj_key),
+                    1,
+                )
+                for obj_key in unique_keys
             )
-            if not same_lookup:
-                return False
+            for obj_key in unique_keys:
+                self._unclaimed_reads[obj_key] -= 1
+                self._claimed_worker_reads.add((instance_id, key.worker_id, obj_key))
+            return claimed
 
-            owner = (
-                lookup_generation,
-                instance_id,
-                key.worker_id,
-                key.start,
-                key.end,
-            )
-            if owner in self._failed_retrieve_releases:
-                return False
-            self._failed_retrieve_releases.add(owner)
-            return True
+    def claim_free_reads(
+        self, key: IPCCacheServerKey, keys: list[ObjectKey]
+    ) -> tuple[L1ReadReservation, ...]:
+        """Take only lookup shares not already transferred to a worker.
+
+        Args:
+            key: Cancellation request with this lookup's model/token identity.
+            keys: Resolved objects in the canceled ranges, possibly overlapping.
+
+        Returns:
+            Original per-key shares to release exactly once. A repeated FREE
+            returns no shares. Already claimed transfers retain their ownership.
+        """
+        with self._lock:
+            if not self._matches_lookup(key):
+                return ()
+            claims = []
+            for obj_key in dict.fromkeys(keys):
+                count = self._unclaimed_reads.pop(obj_key, 0)
+                if count:
+                    claims.append(
+                        L1ReadReservation(
+                            obj_key,
+                            self.prefetch_read_generations[obj_key],
+                            self._prefetch_owners.get(obj_key),
+                            count,
+                        )
+                    )
+            return tuple(claims)
+
+    def _matches_lookup(self, key: IPCCacheServerKey) -> bool:
+        lookup = self.lookup_ipc_key
+        return (
+            lookup is not None
+            and self.prefetch_hit_chunks >= 0
+            and key.request_id == self.request_id
+            and key.model_name == lookup.model_name
+            and key.world_size == lookup.world_size
+            and key.token_bytes == lookup.token_bytes
+            and key.cache_salt == lookup.cache_salt
+        )
 
 
 class SessionManager:

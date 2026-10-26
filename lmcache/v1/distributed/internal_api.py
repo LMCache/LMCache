@@ -31,6 +31,23 @@ L1OperationResult = tuple[L1Error, "MemoryObj | None"]
 
 
 @dataclass(frozen=True)
+class L1ReadReservation:
+    """Read shares transferred out of a lookup's cancellation authority.
+
+    Attributes:
+        key: Exact object whose reader count was acquired.
+        generation: Original shared L1 read-lock generation.
+        owner: Original L1 manager, or None for the single-L1 configuration.
+        count: Number of shares exclusively owned by this receipt.
+    """
+
+    key: ObjectKey
+    generation: int
+    owner: int | None
+    count: int
+
+
+@dataclass(frozen=True)
 class L1MemoryDesc:
     """Describe the contiguous L1 memory arena exposed to external backends.
 
@@ -285,6 +302,25 @@ class L1ManagerInterface(Protocol):
 
     def unsafe_read(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1OperationResult]:
         """Return already read-locked objects without new locks."""
+        ...
+
+    def pin_read_buffers(
+        self,
+        keys: list[ObjectKey],
+        read_generations: dict[ObjectKey, int],
+        tag: str,
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Atomically validate original leases and pin buffers for a unique transfer.
+
+        Pins survive read TTL expiry and FREE until finish_read_transfer. A stale
+        generation must return KEY_NOT_READABLE without exposing the buffer.
+        """
+        ...
+
+    def finish_read_transfer(
+        self, keys: list[ObjectKey], tag: str
+    ) -> dict[ObjectKey, L1Error]:
+        """Release only this transfer's pins and original reservations, at most once."""
         ...
 
     def finish_read(
