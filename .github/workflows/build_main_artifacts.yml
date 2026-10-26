@@ -27,7 +27,7 @@ jobs:
                 include:
                     - arch: amd64
                       cibw_arch: x86_64
-                      runner: ubuntu-latest
+                      runner: ubuntu-24.04
                       artifact: release-artifacts
                     - arch: arm64
                       cibw_arch: aarch64

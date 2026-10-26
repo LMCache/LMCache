@@ -12,7 +12,7 @@ The command exercises the full store / retrieve data path:
       2. QUERY_PREFETCH_STATUS — poll by request_id until done
       3. RETRIEVE — for the hit portion (if any)
       4. STORE    — for the miss portion
-      5. CHECKSUM — verify KV cache integrity via HTTP API
+      5. CHECKSUM — verify retrieved chunks in reader buffers
 
 Usage examples::
 
@@ -163,6 +163,7 @@ def _build_cases(
             sequence_id_offset=args.start + index,
             sequence_id_stride=concurrency,
             interval_seconds=args.interval,
+            num_tokens=config.num_tokens,
             stop=stop,
         )
         for index in range(concurrency)
@@ -272,7 +273,7 @@ def _emit_server_bench_metrics(
     result_section.add("checksum_fail", "Checksum FAIL", total_checksum_fail)
     if result.completed_runs > 0:
         pass_rate = total_checksum_ok / result.completed_runs * 100
-        result_section.add("pass_rate", "Pass rate (%)", round(pass_rate, 2))
+        result_section.add("pass_rate", "Checksum pass rate (%)", round(pass_rate, 2))
     if result.elapsed_seconds > 0:
         result_section.add("elapsed_s", "Elapsed (s)", round(result.elapsed_seconds, 3))
         result_section.add(

@@ -13,6 +13,7 @@ import uuid
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.security.api_key import add_api_key_args
 from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleSpec,
     parse_server_module_specs,
@@ -57,6 +58,9 @@ class MPServerConfig:
     and hands only the handlers to worker threads. ``native`` does the HTTP/2
     and gRPC framing in Rust, off the GIL, and needs the
     ``pygrpc-native`` package. Only used by gRPC transport."""
+
+    api_key_files: list[str] = field(default_factory=list)
+    """Key files shared by authentication-enabled HTTP and request entry points."""
 
     hash_algorithm: str = "blake3"
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
@@ -361,6 +365,7 @@ def add_mp_server_args(
     Returns:
         The same parser with MP server arguments added.
     """
+    add_api_key_args(parser)
     mp_group = parser.add_argument_group(
         "MP Server", "Configuration for the multiprocess cache server"
     )
@@ -638,6 +643,7 @@ def parse_args_to_mp_server_config(
         max_cpu_workers=max_cpu,
         grpc_server_workers=args.grpc_server_workers,
         grpc_server_mode=args.grpc_server_mode,
+        api_key_files=args.api_key_file,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
@@ -758,16 +764,6 @@ def add_http_frontend_args(
         type=int,
         default=8080,
         help="Port to bind the HTTP server. Default is 8080.",
-    )
-    http_group.add_argument(
-        "--http-api-key-file",
-        action="append",
-        default=[],
-        metavar="PATH",
-        help="Read an HTTP bearer API key from PATH. Repeat this option to "
-        "accept multiple keys during rotation. The environment alternatives "
-        "are LMCACHE_HTTP_API_KEY_FILE and LMCACHE_HTTP_API_KEY. "
-        "Authentication is disabled when no key source is configured.",
     )
     return parser
 
