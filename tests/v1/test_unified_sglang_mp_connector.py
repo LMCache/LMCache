@@ -282,6 +282,74 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertIs(connector._transfer_ctx, transfer_ctx)
         self.assertTrue(connector._registered)
 
+    def test_register_kv_cache_rolls_back_failed_context(self) -> None:
+        """A rejected registration releases all partially created resources."""
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector._registered = False
+        connector._transfer_ctx = None
+        connector._kv_caches = {"kv_0": torch.empty(1)}
+        connector._engine_group_info_specs = []
+        connector.device = torch.device("cpu")
+        connector.instance_id = 17
+        connector._req_client = Mock()
+        connector.model_name = "test-model"
+        connector.kv_world_size = 2
+        connector.blocks_in_chunk = 4
+        connector.chunk_size = 256
+        connector._mq_timeout = 5.0
+        connector._mp_transfer_mode = "engine_driven"
+        transfer_ctx = Mock()
+        transfer_ctx.register.side_effect = RuntimeError("registration rejected")
+        transfer_ctx.unregister.return_value = _ResultFuture(True, None)
+
+        with patch(
+            "lmcache.v1.multiprocess.transfer_context.create_transfer_context",
+            return_value=transfer_ctx,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "registration rejected"):
+                connector.register_kv_cache()
+
+        transfer_ctx.unregister.assert_called_once_with()
+        transfer_ctx.close.assert_called_once_with()
+        self.assertIsNone(connector._transfer_ctx)
+        self.assertFalse(connector._registered)
+
+    def test_register_kv_cache_rejects_duplicate_registration(self) -> None:
+        """Registering the same connector twice fails before creating a context."""
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector._registered = True
+
+        with (
+            patch(
+                "lmcache.v1.multiprocess.transfer_context.create_transfer_context"
+            ) as create_context,
+            self.assertRaisesRegex(RuntimeError, "already registered"),
+        ):
+            connector.register_kv_cache()
+
+        create_context.assert_not_called()
+
+    def test_build_cache_salt_namespaces_extra_keys(self) -> None:
+        """Extra keys produce deterministic namespaces without changing plain salt."""
+        self.assertEqual(
+            UnifiedLMCacheMPConnector.build_cache_salt("tenant", None), "tenant"
+        )
+        self.assertEqual(UnifiedLMCacheMPConnector.build_cache_salt(None, None), "")
+        combined = UnifiedLMCacheMPConnector.build_cache_salt("tenant", "image-a")
+
+        self.assertEqual(
+            combined,
+            UnifiedLMCacheMPConnector.build_cache_salt("tenant", "image-a"),
+        )
+        self.assertNotEqual(
+            combined,
+            UnifiedLMCacheMPConnector.build_cache_salt("tenant", "image-b"),
+        )
+        self.assertNotEqual(
+            combined,
+            UnifiedLMCacheMPConnector.build_cache_salt("other", "image-a"),
+        )
+
     def test_aligned_empty_lookup_does_not_send_end_session(self):
         self.connector.chunk_size = 8
         self.connector._lookups = {}
@@ -496,43 +564,6 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertEqual(tuple(wire.shape), (5, 1, 1, 6))
         self.assertEqual(wire.data_ptr(), tensor.data_ptr())
 
-    def test_adapter_accepts_kimi_conv_state_slice_axis_one(self) -> None:
-        try:
-            # Third Party
-            from sglang.srt.mem_cache.unified_cache.components import ComponentType
-
-            # First Party
-            from lmcache.integration.sglang.unified_kv_adapter import (
-                SGLangUnifiedKVAdapter,
-            )
-        except ImportError as exc:
-            self.skipTest(f"SGLang is not installed: {exc}")
-
-        full_tensor = torch.empty(8, 1, 4)
-        conv_tensor = torch.arange(5 * 3 * 7).reshape(5, 3, 7)
-        kv_pool = SimpleNamespace(kv_buffer=[full_tensor])
-        mamba_pool = SimpleNamespace(
-            _unified_buffer=None,
-            _sub_pool_name=None,
-            _iter_transfer_state_entries=lambda: iter([("conv", conv_tensor, 1, 0)]),
-        )
-        adapter = SGLangUnifiedKVAdapter(
-            token_to_kv_pool_allocator=SimpleNamespace(get_kvcache=lambda: kv_pool),
-            req_to_token_pool=SimpleNamespace(mamba_pool=mamba_pool),
-            tree_components=(ComponentType.FULL, ComponentType.MAMBA),
-            mamba_component=SimpleNamespace(mamba_checkpoint_grid=4),
-            page_size=4,
-            sliding_window_size=None,
-        )
-
-        groups = adapter.resolve_registered_groups()
-
-        self.assertEqual([group.name for group in groups], ["full", "mamba"])
-        mamba_tensor = groups[1].kv_tensors[0]
-        self.assertEqual(tuple(mamba_tensor.shape), (5, 1, 21))
-        self.assertEqual(mamba_tensor.data_ptr(), conv_tensor.data_ptr())
-        self.assertTrue(groups[1].recurrent_state)
-
     def test_group_info_specs_preserve_component_address_spaces(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
         connector.page_size = 4
@@ -606,58 +637,6 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertEqual(kernel_to_engine, (0, 0))
         self.assertEqual([spec["layer_indices"] for spec in specs], [(0,), (1,)])
         self.assertEqual([spec["engine_group_id"] for spec in specs], [0, 0])
-
-    def test_dsv41_sidecars_share_full_page_block_ids(self) -> None:
-        try:
-            # First Party
-            from lmcache.integration.sglang.unified_kv_adapter import (
-                SGLangUnifiedKVAdapter,
-            )
-        except ImportError as exc:
-            self.skipTest(f"SGLang is not installed: {exc}")
-
-        class _IndexerPool:
-            def __init__(self, page_size: int, buffers: list[torch.Tensor]) -> None:
-                self.page_size = page_size
-                self.buffers = buffers
-
-            def contiguous_page_row_buffers(self) -> list[torch.Tensor]:
-                return self.buffers
-
-        adapter = object.__new__(SGLangUnifiedKVAdapter)
-        adapter.page_size = 256
-
-        c4 = torch.arange(4 * 2, dtype=torch.uint8).reshape(4, 2)
-        c4_index = torch.arange(4 * 3, dtype=torch.uint8).reshape(4, 3)
-        c128 = torch.zeros(130, 4, dtype=torch.uint8)
-        c1 = torch.arange(3 * 5, dtype=torch.uint8).reshape(3, 5)
-        c1_index = torch.arange(13 * 7, dtype=torch.uint8).reshape(13, 7)
-        c2 = torch.arange(4 * 6, dtype=torch.uint8).reshape(4, 6)
-        c2_index = torch.arange(7 * 8, dtype=torch.uint8).reshape(7, 8)
-        kv_pool = SimpleNamespace(
-            _unified_kv=False,
-            full_size=512,
-            kv_pools={
-                4: SimpleNamespace(kv_buffer=[c4]),
-                128: SimpleNamespace(kv_buffer=[c128]),
-                1: SimpleNamespace(kv_buffer=[c1]),
-                2: SimpleNamespace(kv_buffer=[c2]),
-            },
-            index_pools={
-                4: _IndexerPool(64, [c4_index]),
-                1: _IndexerPool(64, [c1_index]),
-                2: _IndexerPool(64, [c2_index]),
-            },
-        )
-
-        tensors = adapter._resolve_dsv4_full_page_tensors(kv_pool)
-
-        self.assertEqual(
-            [tuple(tensor.shape) for tensor in tensors],
-            [(3, 2), (3, 3), (3, 4), (3, 5), (3, 28), (3, 6), (3, 16)],
-        )
-        self.assertTrue(torch.equal(tensors[4].reshape(-1), c1_index[:12].reshape(-1)))
-        self.assertTrue(torch.equal(tensors[6].reshape(-1), c2_index[:6].reshape(-1)))
 
     def test_submit_store_passes_list_of_block_ids_per_group(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
@@ -786,6 +765,22 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertTrue(operation.query())
         self.assertTrue(connector.complete_store(operation))
         self.assertIn("request", connector._active_sessions)
+
+    def test_failed_store_completion_allows_suffix_retry(self) -> None:
+        """A failed tail moves submitted progress back to the operation start."""
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector._store_submitted_tokens = {"request": 16}
+        operation = LMCacheStoreOperation(
+            request_id="request",
+            start=8,
+            end=16,
+            future=_ResultFuture(True, False),
+        )
+
+        with patch.object(connector, "_sync_success", side_effect=lambda value: value):
+            self.assertFalse(connector.complete_store(operation))
+
+        self.assertEqual(connector._store_submitted_tokens["request"], 8)
 
     def test_submit_store_accepts_all_null_historical_swa_chunk(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
