@@ -54,5 +54,6 @@ API-key verifier.
 
 During the gRPC-only rollout, ZMQ retains its existing unauthenticated wire
 behavior. Server keys still protect HTTP with ZMQ selected; startup emits a
-warning, not an error. ZMQ clients ignore shared key environment variables,
-but reject explicit credentials rather than claiming to authenticate them.
+warning, not an error. ZMQ clients ignore shared key environment variables.
+Explicit credentials are also ignored with a warning so callers can share configuration
+across transports without implying that ZMQ requests are authenticated.

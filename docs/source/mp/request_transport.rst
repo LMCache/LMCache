@@ -88,7 +88,8 @@ transport, the server continues to start and warns that only HTTP is protected;
 ZMQ requests remain unauthenticated until ZMQ authentication is implemented.
 ZMQ clients ignore the shared key environment variables so existing engines
 can inherit an HTTP-protected server's environment. Explicitly passing
-``api_key`` to a ZMQ client is rejected rather than silently ignored.
+``api_key`` to a ZMQ client emits a warning and is ignored, preserving shared
+configuration compatibility without implying that ZMQ requests are authenticated.
 
 .. code-block:: bash
 

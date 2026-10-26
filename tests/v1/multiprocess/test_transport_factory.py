@@ -12,7 +12,12 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
-from lmcache.v1.multiprocess.transport import grpc_impl, server_factory, zmq_impl
+from lmcache.v1.multiprocess.transport import (
+    factory,
+    grpc_impl,
+    server_factory,
+    zmq_impl,
+)
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 
@@ -56,10 +61,34 @@ def test_factory_selects_zmq_by_scheme(
     create.assert_called_once_with(normalized_url, context=context)
 
 
-def test_factory_rejects_zmq_api_key_until_supported() -> None:
-    """A configured credential cannot be silently ignored on another transport."""
-    with pytest.raises(ValueError, match="not yet supported by ZMQ"):
-        RequestClientFactory.create("tcp://localhost:5555", api_key="secret")
+@pytest.mark.parametrize(
+    "server_url",
+    ["tcp://localhost:5555", "ipc:///tmp/lmcache.sock", "inproc://lmcache"],
+)
+@pytest.mark.parametrize("api_key", ["", "http-only-secret"])
+def test_factory_warns_and_ignores_explicit_zmq_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    server_url: str,
+    api_key: str,
+) -> None:
+    """Shared explicit credentials do not prevent creating a legacy ZMQ client."""
+    create = MagicMock()
+    context = object()
+    monkeypatch.setattr(zmq_impl, "create_request_client", create)
+    factory.logger.addHandler(caplog.handler)
+    try:
+        result = RequestClientFactory.create(
+            server_url, context=context, api_key=api_key
+        )
+    finally:
+        factory.logger.removeHandler(caplog.handler)
+
+    assert result is create.return_value
+    create.assert_called_once_with(server_url, context=context)
+    assert "Ignoring api_key for ZMQ" in caplog.text
+    assert "ZMQ requests remain unauthenticated" in caplog.text
+    assert "http-only-secret" not in caplog.text
 
 
 @pytest.mark.parametrize("variable", KEY_ENV_VARS)
