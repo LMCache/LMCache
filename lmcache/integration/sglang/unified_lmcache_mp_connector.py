@@ -554,6 +554,7 @@ class UnifiedLMCacheMPConnector:
                 layout_hints={"kv_list_layout": "unified"},
                 engine_group_infos=engine_group_infos,
                 engine_type=EngineType.SGLANG,
+                lmcache_chunk_tokens=self.chunk_size,
             )
         except Exception:
             try:
@@ -609,7 +610,7 @@ class UnifiedLMCacheMPConnector:
         # First Party
         from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
-        return IPCCacheServerKey(
+        return IPCCacheServerKey.from_token_ids(
             model_name=self.model_name,
             world_size=self.kv_world_size,
             worker_id=worker_id,
@@ -617,7 +618,7 @@ class UnifiedLMCacheMPConnector:
             # TP ranks in a PP stage to one object, so lookup must reserve one
             # read lock for every rank that retrieves that object.
             num_kv_readers=self.num_kv_readers,
-            token_ids=tuple(operation.token_ids),
+            token_ids=operation.token_ids,
             start=start,
             end=end,
             request_id=operation.request_id,

@@ -9,6 +9,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.v1.pin_monitor import PinMonitor
 from lmcache.observability import LMCStatsMonitor
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
@@ -28,7 +29,6 @@ from lmcache.v1.memory_management import (
     _free_cpu_memory,
     _read_hugepage_info,
 )
-from lmcache.v1.pin_monitor import PinMonitor
 
 HUGEPAGE_SIZE = 2 * 1024 * 1024  # MAP_HUGE_2MB
 

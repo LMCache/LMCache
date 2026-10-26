@@ -62,6 +62,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev
+from lmcache.inprocess.v1.transfer_channel.transfer_utils import get_correct_device
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
@@ -82,7 +83,6 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 from lmcache.v1.storage_backend.path_sharder import PathSharder
-from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
 if TYPE_CHECKING:
     # First Party

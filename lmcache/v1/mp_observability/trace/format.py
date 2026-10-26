@@ -42,7 +42,10 @@ FORMAT_VERSION: int = 1
 #: the trace subsystem, independent of the LMCache package version,
 #: because ``lmcache.__version__`` bumps cover many changes irrelevant
 #: to the trace contract.
-TRACE_SCHEMA_VERSION: int = 1
+#:
+#: Version 2: ``StorageManager.submit_prefetch_task`` no longer takes
+#: ``skip_l2``, and ``PrefetchTaskSpec`` carries memory-tag filters.
+TRACE_SCHEMA_VERSION: int = 2
 
 
 class Header(msgspec.Struct, tag="header", omit_defaults=True):
