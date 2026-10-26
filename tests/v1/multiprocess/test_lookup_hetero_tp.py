@@ -353,8 +353,8 @@ def test_reshard_locks_once_per_kv_reader(
     assert _num_locked(sm, dst_keys) == 0
 
 
-def _local_stage(windows: list[int]) -> PrefetchStage:
-    """The local stage of a TP-4 lookup over chunk hashes ``a`` and ``b``."""
+def _same_tp_stage(windows: list[int]) -> PrefetchStage:
+    """The same-TP stage of a TP-4 lookup over chunk hashes ``a`` and ``b``."""
     return PrefetchStage(
         key=_lookup_key(4),
         chunk_hashes=[b"a", b"b"],
@@ -374,11 +374,11 @@ def hetero_tp(mp_ctx: MPCacheServerContext) -> Iterator[HeteroTP]:
 
 
 def test_source_stage_covers_the_rest_at_the_source_tp(hetero_tp: HeteroTP) -> None:
-    """The source stage starts after the local hit, keyed and shaped for A."""
-    plan = hetero_tp.plan(_local_stage([-1]))
+    """The cross-TP stage starts after the same-TP hit, keyed and shaped for A."""
+    plan = hetero_tp.plan(_same_tp_stage([-1]))
     assert plan is not None
 
-    stage = plan.source_stage(1)
+    stage = plan.cross_tp_stage(1)
 
     assert stage.key.world_size == 2
     assert stage.chunk_hashes == [b"b"]
@@ -393,7 +393,7 @@ def test_plan_requires_full_attention(
     hetero_tp: HeteroTP, windows: list[int], qualifies: bool
 ) -> None:
     """A model with a sliding-window group gets no cross-TP lookup."""
-    assert (hetero_tp.plan(_local_stage(windows)) is not None) == qualifies
+    assert (hetero_tp.plan(_same_tp_stage(windows)) is not None) == qualifies
 
 
 @pytest.mark.parametrize("source", [None, 4, 3, 8])
@@ -477,7 +477,7 @@ def test_lookup_tp_above_head_count_keeps_normal_miss(
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
-def test_full_local_hit_skips_source_stage(
+def test_full_same_tp_hit_skips_cross_tp_stage(
     mp_ctx: MPCacheServerContext,
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -499,12 +499,12 @@ def test_full_local_hit_skips_source_stage(
     assert _num_locked(mp_ctx.storage_manager, dst_keys) == 0
 
 
-def test_partial_local_hit_reshards_only_the_rest(
+def test_partial_same_tp_hit_reshards_only_the_rest(
     mp_ctx: MPCacheServerContext,
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A local hit of chunk 0 is kept; only chunk 1 is looked up at A and
+    """A same-TP hit of chunk 0 is kept; only chunk 1 is looked up at A and
     resharded; the answer locks both chunks once, with no lock left over."""
     module = make_module(2, 1, 2)
     src_keys = _store(mp_ctx, 2, 2)
@@ -525,17 +525,17 @@ def test_partial_local_hit_reshards_only_the_rest(
 
 
 @pytest.mark.parametrize("source_hits", [False, True])
-def test_partial_local_hit_survives_a_missing_or_freed_source(
+def test_partial_same_tp_hit_survives_a_missing_or_freed_source(
     mp_ctx: MPCacheServerContext,
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
     source_hits: bool,
 ) -> None:
     """With the source missing, or freed before its reshard starts, the
-    lookup answers with its local hit and holds exactly its locks."""
+    lookup answers with its same-TP hit and holds exactly its locks."""
     module = make_module(2, 1, 2)
     src_keys = _store(mp_ctx, 2, 2) if source_hits else []
-    local_keys = _store(mp_ctx, 2, 1, num_chunks=1)
+    same_tp_keys = _store(mp_ctx, 2, 1, num_chunks=1)
     calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
     key = _lookup_key(1)
 
@@ -543,7 +543,7 @@ def test_partial_local_hit_survives_a_missing_or_freed_source(
     if source_hits:
         deadline = time.monotonic() + TIMEOUT
         while len(calls) < 2:
-            assert time.monotonic() < deadline, "source stage never submitted"
+            assert time.monotonic() < deadline, "cross-TP stage never submitted"
             assert module.query_prefetch_status("req") is None
             time.sleep(0.005)
         assert mp_ctx.storage_manager.wait_prefetch_status(calls[1][1], TIMEOUT)
@@ -553,33 +553,33 @@ def test_partial_local_hit_survives_a_missing_or_freed_source(
         assert session.prefetch_hit_chunks == 1
     else:
         assert _poll(module, "req") == 1
-        assert _num_locked(mp_ctx.storage_manager, local_keys) == len(local_keys)
+        assert _num_locked(mp_ctx.storage_manager, same_tp_keys) == len(same_tp_keys)
         module.free_lookup_locks(key, 1)
 
     assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
-    assert _num_locked(mp_ctx.storage_manager, local_keys) == 0
+    assert _num_locked(mp_ctx.storage_manager, same_tp_keys) == 0
 
 
 @pytest.mark.parametrize("mp_ctx", [True], indirect=True)
-def test_local_prefix_loaded_from_l2_stays_locked_with_the_hit(
+def test_same_tp_prefix_loaded_from_l2_stays_locked_with_the_hit(
     mp_ctx: MPCacheServerContext,
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A local prefix loaded from L2 is temporary in L1; the local stage's
+    """A same-TP prefix loaded from L2 is temporary in L1; the same-TP stage's
     locks are part of the answer, so it is still there to be served."""
     # MockL2Adapter never completes loads of multi-tensor objects.
     monkeypatch.setattr(sys.modules[__name__], "KERNEL_GROUP_LAYERS", (2,))
     sm = mp_ctx.storage_manager
     module = make_module(4, 2, 4)
-    local_keys = _store(mp_ctx, 4, 2, num_chunks=1)
+    same_tp_keys = _store(mp_ctx, 4, 2, num_chunks=1)
     adapter = sm.l2_adapters()[0][1]
     assert isinstance(adapter, MockL2Adapter)
     deadline = time.monotonic() + TIMEOUT
-    while not all(adapter.debug_has_key(k) for k in local_keys):
-        assert time.monotonic() < deadline, "local prefix never reached L2"
+    while not all(adapter.debug_has_key(k) for k in same_tp_keys):
+        assert time.monotonic() < deadline, "same-TP prefix never reached L2"
         time.sleep(0.005)
-    assert sm.delete_l1_keys(local_keys) == (len(local_keys), 0)
+    assert sm.delete_l1_keys(same_tp_keys) == (len(same_tp_keys), 0)
     _store(mp_ctx, 4, 4)
     key = _lookup_key(2)
 
@@ -588,7 +588,7 @@ def test_local_prefix_loaded_from_l2_stays_locked_with_the_hit(
     assert _poll(module, "req") == NUM_CHUNKS
     _assert_holds(mp_ctx, _keys(mp_ctx, 2), 4, 2)
     module.free_lookup_locks(key, 2)
-    assert _num_resident(sm, local_keys) == 0
+    assert _num_resident(sm, same_tp_keys) == 0
 
 
 def test_free_locks_after_source_stage_releases_and_misses(
@@ -596,8 +596,8 @@ def test_free_locks_after_source_stage_releases_and_misses(
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Freeing a lookup whose source stage hit drops A locks and answers with
-    the local hit (none here)."""
+    """Freeing a lookup whose cross-TP stage hit drops A locks and answers with
+    the same-TP hit (none here)."""
     module = make_module(2, 1, 2)
     src_keys = _store(mp_ctx, 2, 2)
     calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
@@ -606,12 +606,12 @@ def test_free_locks_after_source_stage_releases_and_misses(
     module.lookup(key, 1)
     deadline = time.monotonic() + TIMEOUT
     while len(calls) < 2:
-        assert time.monotonic() < deadline, "source stage never submitted"
+        assert time.monotonic() < deadline, "cross-TP stage never submitted"
         assert module.query_prefetch_status("req") is None
         time.sleep(0.005)
     source_handle = calls[1][1]
     assert mp_ctx.storage_manager.wait_prefetch_status(source_handle, TIMEOUT)
-    # The finished source stage holds its A objects until someone settles it.
+    # The finished cross-TP stage holds its A objects until someone settles it.
     assert _num_locked(mp_ctx.storage_manager, src_keys) == len(src_keys)
 
     module.free_lookup_locks(key, 1)
@@ -632,7 +632,7 @@ def test_reshard_failure_resolves_as_miss(
     monkeypatch: pytest.MonkeyPatch,
     use_wait: bool,
 ) -> None:
-    """A failing reshard answers with the local hit (none here), drops A locks."""
+    """A failing reshard answers with the same-TP hit (none here), drops A locks."""
     module = make_module(2, 1, 2)
     src_keys = _store(mp_ctx, 2, 2)
 
@@ -657,7 +657,7 @@ def test_wait_follows_stage_chain_in_one_call(
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One wait covers the local stage, the source stage and the reshard."""
+    """One wait covers the same-TP stage, the cross-TP stage and the reshard."""
     module = make_module(2, 1, 2)
     _store(mp_ctx, 2, 2)
     calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
@@ -665,7 +665,7 @@ def test_wait_follows_stage_chain_in_one_call(
     module.lookup(_lookup_key(1), 1)
 
     assert module.wait_prefetch_status("req", TIMEOUT) == NUM_CHUNKS
-    # Source stage: A keys, one reader. The reshard locks its own objects,
+    # Cross-TP stage: A keys, one reader. The reshard locks its own objects,
     # so no further prefetch follows.
     assert len(calls) == 2
     source_spec = calls[1][0]
@@ -678,7 +678,7 @@ def test_wait_follows_stage_chain_in_one_call(
 
 
 def _start_reshard(module: LookupModule, entered: threading.Event) -> None:
-    """Poll until the lookup's source-stage hit is handed to the reshard."""
+    """Poll until the lookup's cross-TP stage hit is handed to the reshard."""
     deadline = time.monotonic() + TIMEOUT
     while not entered.is_set():
         assert time.monotonic() < deadline, "reshard never started"
@@ -796,7 +796,7 @@ def test_reshard_failure_after_locking_releases_its_locks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A reshard that fails after locking some objects answers with the
-    local hit (none here) and leaves no object locked."""
+    same-TP hit (none here) and leaves no object locked."""
     module = make_module(2, 2, 1)
     src_keys = _store(mp_ctx, 2, 1)
     dst_keys = _keys(mp_ctx, 2)

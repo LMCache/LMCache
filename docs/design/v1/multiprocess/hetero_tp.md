@@ -32,11 +32,11 @@ for the engine. Everything after that (retrieve, free accounting, the GPU
 kernel) sees an ordinary B-keyed hit.
 
 ```
-D lookup (B keys, c0..cn)  ── local stage, L1/L2/P2P ───▶ hit c0..ck-1, num_kv_readers locks
-D lookup (A keys, ck..cn)  ── source stage, L1/L2/P2P ──▶ hit ck..cm-1: A objects in D L1, 1 lock each
+D lookup (B keys, c0..cn)  ── same-TP stage, L1/L2/P2P ────▶ hit c0..ck-1, num_kv_readers locks
+D lookup (A keys, ck..cn)  ── cross-TP stage, L1/L2/P2P ──▶ hit ck..cm-1: A objects in D L1, 1 lock each
 reshard                    ── A objects ─▶ B objects in D L1 (head-slice copies),
                               admitted with num_kv_readers locks; release A read locks
-answer                     ── local hit + resharded hit = c0..cm-1
+answer                     ── same-TP hit + resharded hit = c0..cm-1
 retrieve                   ── unchanged
 ```
 
@@ -72,7 +72,7 @@ replicates heads across ranks, and which ranks share a head is the engine's
 own rule (vLLM's `QKVParallelLinear` groups adjacent ranks). Contiguous
 splitting is the only assumption this design makes about the writer; adding
 a replication rule would tie the store format to one engine. Such a lookup
-gets no source stage and misses as before.
+gets no cross-TP stage and misses as before.
 
 vLLM sends H as the `total_num_kv_heads` layout hint. The shape alone cannot
 tell a rank holding one of H = tp heads from one holding a replicated head,
@@ -84,7 +84,7 @@ the reshard is valid:
   (`LMCacheMPWorkerAdapter.register_kv_caches`). PP, DCP or several servers
   make server ranks differ from TP ranks.
 
-Without the hint the source stage is off.
+Without the hint the cross-TP stage is off.
 
 ## Lookup stages
 
@@ -96,27 +96,27 @@ The work splits so that `LookupModule` never deals with heads or TP sizes:
   configured and different from the lookup's, head count reported, both TP
   sizes divide it, no sliding window) and returns a per-lookup
   `HeteroTPPlan`.
-- `HeteroTPPlan.source_stage(k)` gives the source stage for the chunks from
+- `HeteroTPPlan.cross_tp_stage(k)` gives the cross-TP stage for the chunks from
   `k` on (key, layouts and windows at the source TP); `convert` reshards a
   source hit through `L1Resharder`; `merge` appends the resharded chunks to
-  the local stage's result.
+  the same-TP stage's result.
 - `LookupModule` runs the stages: it submits each as an ordinary prefetch and
   swaps the job's `handle` and `row_windows` together when a stage is
   replaced.
 
-1. **Local stage** (B keys, all chunks, every tier): a full hit is final.
-   Otherwise its locks stay held, as part of the answer, and the source
+1. **Same-TP stage** (B keys, all chunks, every tier): a full hit is final.
+   Otherwise its locks stay held, as part of the answer, and the cross-TP
    stage is submitted.
-2. **Source stage** (A keys, chunks k..n, layouts from `reshard_layout_desc`,
+2. **Cross-TP stage** (A keys, chunks k..n, layouts from `reshard_layout_desc`,
    `num_kv_readers=1`): a hit is resharded on a background thread. A miss
-   releases its locks and the local stage answers.
+   releases its locks and the same-TP stage answers.
 3. **Reshard**: each B object it writes is admitted with `num_kv_readers`
    read locks in one step (`StorageManager.finish_write_and_reserve_read`),
    so eviction cannot take it before retrieve. A B object another writer
    admitted first is locked as found (`StorageManager.reserve_read`). The
    hit ends at the first chunk with an object neither (out of L1 memory, or
    still being written); locks past it are released. The lookup answers
-   with the local result plus these chunks, counted as L2 hits.
+   with the same-TP result plus these chunks, counted as L2 hits.
 
 The retrieve path needs exactly what a prefetch leaves: every hit object
 read-locked `num_kv_readers` times, plus one result with its L1 owners. The
@@ -137,10 +137,10 @@ second lookup of a prefix would miss. Each reshard logs its cost (Qwen3-0.6B,
 Resharded 8 chunks from TP1 to TP2 for request <id>: wrote 224.0 MiB in 38.36 ms (queued 0.20 ms, waited 0.00 ms on 0 other reshards)
 ```
 
-`free_lookup_locks` consumes without advancing. A source-stage result has its
-A read locks released and the local stage answers; a running reshard is
+`free_lookup_locks` consumes without advancing. A cross-TP stage result has its
+A read locks released and the same-TP stage answers; a running reshard is
 waited for, so the release sees the locks it took. An exception in any
-stage, or a failed reshard, is logged and the local stage answers, so the job
+stage, or a failed reshard, is logged and the same-TP stage answers, so the job
 always resolves and every lock it took is released. If a reshard fails
 mid-group, the destination objects reserved for that group stay reserved
 until the write TTL, because the storage manager cannot abandon a
@@ -167,27 +167,27 @@ lmcache server ... --hetero-tp-source-world-size 1
 ```
 
 The TP size the other engine stores at. Phase 1 has no discovery: the
-operator sets it. A lookup whose own TP equals it skips the source stage.
+operator sets it. A lookup whose own TP equals it skips the cross-TP stage.
 
 ## Constraints (phase 1)
 
 - Attention-only, non-MLA models without sliding-window object groups.
 - Both TP sizes divide the model's KV head count.
 - LMCache-driven transfer. The engine-driven registration does not send the
-  head-count hint, so the source stage is off there.
+  head-count hint, so the cross-TP stage is off there.
 - One source TP per server.
 
 ## Later: a PD source
 
-The source stage is the single extension point for native PD. Two things
+The cross-TP stage is the single extension point for native PD. Two things
 change there, and the stage machine does not:
 
 - **Where A comes from.** From the request (the PD coordinator knows which P
   served it) or from a P2P RPC that asks the peer for its layout, instead of
   the static config value.
-- **Which tiers the source stage reads.** PD pulls from P only, so the
-  source stage is restricted to the P2P adapter's `REMOTE` tag through its
-  `allowed_l2_memory_tags`. The local stage stays on every tier.
+- **Which tiers the cross-TP stage reads.** PD pulls from P only, so the
+  cross-TP stage is restricted to the P2P adapter's `REMOTE` tag through its
+  `allowed_l2_memory_tags`. The same-TP stage stays on every tier.
 
 **TODO (PD): take the source TP from `kv_transfer_params`, not from config.**
 In vLLM PD the proxy already carries P's `kv_transfer_params` (returned by
