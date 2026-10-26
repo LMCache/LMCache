@@ -8,7 +8,8 @@
 **Special notes for your reviewers**:
 
 **AI-generated PR explainer** (required when AI-generated code is included):
-<!-- Link the current .html attachment here. Do not post a separate comment or zip one file. -->
+<!-- Link the current .html attachment here. It must provide complete English and Chinese
+views with a one-click language switch. Do not post a separate comment or zip one file. -->
 
 **If applicable**:
 
@@ -26,6 +27,6 @@
 - [ ] I confirmed every commit has a DCO `Signed-off-by` trailer.
 - [ ] I stated whether AI assistance was used in **Special notes for your reviewers**.
 - [ ] If AI-generated code is included, this PR is a draft and its title, description, and
-      HTML explainer all match the current head.
+      bilingual HTML explainer all match the current head.
 
 </details>

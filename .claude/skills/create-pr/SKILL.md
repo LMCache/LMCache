@@ -87,6 +87,13 @@ reviewer can open without repository context or local assets. Include:
 - compatibility and performance risks, validation evidence, gaps, and focused
   reviewer questions.
 
+Put complete English and Chinese versions in the same HTML file, with a visible
+one-click language switch. Keep both views semantically synchronized across
+code changes, call chains, test rationale, risks, evidence, gaps, and reviewer
+questions. The switch must work from a downloaded local file without a server,
+build step, external assets, or an online translation service. Do not create
+separate language-specific files or rely on automatic browser translation.
+
 Use embedded CSS and SVG diagrams. Remove secrets, machine-local paths, and
 inaccessible links. Keep the file outside the repository unless the user asks
 to commit it. Upload the `.html` file and put its link directly in the PR

@@ -48,6 +48,12 @@ attention points. Do not include secrets, machine-local paths, inaccessible
 artifacts, or dependencies on local assets; use embedded CSS and diagrams so
 the page works on its own.
 
+The same HTML file must provide complete English and Chinese explanations with
+a visible one-click language switch. Both language views must cover the same
+code changes, call chains, test rationale, risks, and reviewer questions; do
+not ship a partial translation or separate language-specific files. The switch
+must work locally without a server, build step, or external translation service.
+
 ## Python Environment
 
 We recommend using [uv](https://docs.astral.sh/uv/) to manage Python environments and dependencies:

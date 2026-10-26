@@ -157,6 +157,12 @@ Embed CSS, SVG diagrams, and other assets in the file; remove secrets, machine-l
 and links to artifacts reviewers cannot access. The explainer supplements the PR description
 and source diff; it does not replace either one.
 
+The single HTML file must contain complete English and Chinese versions with a visible
+one-click language switch. Keep the two versions synchronized: each must explain the same
+code changes, call chains, test rationale, compatibility and performance risks, validation
+gaps, and reviewer questions. The switch must work when the downloaded file is opened
+locally, without a server, build step, external assets, or an online translation service.
+
 ### 6. What CI runs on your PR
 
 Opening or updating a PR triggers a set of GitHub Actions workflows, plus a DCO check and a
