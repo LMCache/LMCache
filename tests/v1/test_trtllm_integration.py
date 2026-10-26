@@ -284,7 +284,7 @@ class TestAccessorsTRTLLM:
 class TestTRTLLMGPUConnector:
     def test_construct(self) -> None:
         # First Party
-        from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
+        from lmcache.inprocess.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
         device = torch.device(f"{torch_device_type}:0")
         c = TRTLLMGPUConnector(
@@ -302,7 +302,7 @@ class TestTRTLLMGPUConnector:
 
     def test_get_shape(self) -> None:
         # First Party
-        from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
+        from lmcache.inprocess.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
         device = torch.device(f"{torch_device_type}:0")
         c = TRTLLMGPUConnector(
@@ -319,7 +319,7 @@ class TestTRTLLMGPUConnector:
 
     def test_register_kv_caches_with_4d_tensor(self) -> None:
         # First Party
-        from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
+        from lmcache.inprocess.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
         device = torch.device(f"{torch_device_type}:0")
         nh, bs, hs = 2, 16, 64
@@ -349,7 +349,7 @@ class TestTRTLLMGPUConnector:
 
     def test_batched_store_respects_kernel_object_limit(self) -> None:
         # First Party
-        from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
+        from lmcache.inprocess.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
         device = torch.device(f"{torch_device_type}:0")
         num_chunks = 5
@@ -380,7 +380,7 @@ class TestTRTLLMGPUConnector:
         ends = [(i + 1) * chunk_size for i in range(num_chunks)]
 
         with patch(
-            "lmcache.v1.gpu_connector.gpu_connectors."
+            "lmcache.inprocess.v1.gpu_connector.gpu_connectors."
             "device_ops.multi_layer_block_kv_transfer"
         ) as transfer:
             c.batched_from_gpu(

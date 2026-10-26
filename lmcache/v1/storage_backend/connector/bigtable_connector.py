@@ -10,15 +10,17 @@ import inspect
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, TTLCache
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.distributed.l2_adapters.bigtable_config import BigtablePluginConfig
+from lmcache.v1.distributed.l2_adapters.bigtable_sharder import (
+    BigtablePayloadSharder,
+)
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 # Local
-from .bigtable_config import BigtablePluginConfig
 from .bigtable_schema import BigtableSchema
-from .bigtable_sharder import BigtablePayloadSharder
 
 logger = init_logger(__name__)
 

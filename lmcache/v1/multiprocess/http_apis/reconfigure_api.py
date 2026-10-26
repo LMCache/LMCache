@@ -13,10 +13,13 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 # First Party
 from lmcache.v1.distributed.l2_adapters.reconfiguration import L2ReconfigureError
 from lmcache.v1.multiprocess.http_apis.reconfigure_schemas import (
+    OFFSET_ERROR,
     SIZE_ERROR,
+    OffsetRequest,
     SizeRequest,
     get_engine_from_request,
     reconfigure_error_response,
+    resolve_offset_bytes,
     resolve_size_bytes,
     validation_error_response,
 )
@@ -55,6 +58,7 @@ class DaxAddRequest(BaseModel):
     adapter_index: int = 0
     device_path: str
     size: SizeRequest
+    offset: OffsetRequest | None = None
 
 
 class DaxRemoveRequest(BaseModel):
@@ -66,6 +70,7 @@ class DaxRemoveRequest(BaseModel):
     device_path: str
     mode: Literal["migrate", "evict", "drain"] = "migrate"
     force: bool = False
+    offset: OffsetRequest | None = None
 
 
 class DaxResizeRequest(BaseModel):
@@ -78,6 +83,14 @@ class DaxResizeRequest(BaseModel):
     size: SizeRequest
     mode: Literal["migrate", "evict"] = "migrate"
     force: bool = False
+    offset: OffsetRequest | None = None
+
+
+def _dax_offset_bytes(offset: OffsetRequest | None) -> int | JSONResponse:
+    try:
+        return 0 if offset is None else resolve_offset_bytes(offset)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": OFFSET_ERROR})
 
 
 def _get_storage_manager(request: Request) -> _StorageManagerLike | JSONResponse:
@@ -169,22 +182,30 @@ def _dax_operation_payload(
                 size_bytes = resolve_size_bytes(add_body.size)
             except ValueError:
                 return JSONResponse(status_code=400, content={"error": SIZE_ERROR})
+            offset_bytes = _dax_offset_bytes(add_body.offset)
+            if isinstance(offset_bytes, JSONResponse):
+                return offset_bytes
             return (
                 add_body.adapter_index,
                 {
                     "device_path": add_body.device_path,
                     "size_bytes": size_bytes,
+                    "offset_bytes": offset_bytes,
                 },
             )
 
         if operation == "remove":
             remove_body = DaxRemoveRequest.model_validate(payload)
+            offset_bytes = _dax_offset_bytes(remove_body.offset)
+            if isinstance(offset_bytes, JSONResponse):
+                return offset_bytes
             return (
                 remove_body.adapter_index,
                 {
                     "device_path": remove_body.device_path,
                     "mode": remove_body.mode,
                     "force": remove_body.force,
+                    "offset_bytes": offset_bytes,
                 },
             )
 
@@ -194,6 +215,9 @@ def _dax_operation_payload(
                 size_bytes = resolve_size_bytes(resize_body.size)
             except ValueError:
                 return JSONResponse(status_code=400, content={"error": SIZE_ERROR})
+            offset_bytes = _dax_offset_bytes(resize_body.offset)
+            if isinstance(offset_bytes, JSONResponse):
+                return offset_bytes
             return (
                 resize_body.adapter_index,
                 {
@@ -201,6 +225,7 @@ def _dax_operation_payload(
                     "size_bytes": size_bytes,
                     "mode": resize_body.mode,
                     "force": resize_body.force,
+                    "offset_bytes": offset_bytes,
                 },
             )
     except ValidationError as exc:
