@@ -2,16 +2,13 @@
 """LookupModule: lookup, prefetch polling, and session lifecycle."""
 
 # Standard
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Sequence, cast
 import threading
 import time
-
-# Third Party
-import torch
 
 # First Party
 from lmcache.logging import init_logger
@@ -28,7 +25,6 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -48,10 +44,9 @@ from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.tp_reshard import (
-    copy_heads,
+    L1Resharder,
+    ReshardTask,
     is_valid_tp,
-    local_kv_heads,
-    plan_head_reshard,
     reshard_layout_desc,
 )
 
@@ -59,19 +54,6 @@ logger = init_logger(__name__)
 
 # Stateless, so one instance can serve every LookupModule.
 _DEFAULT_LOAD_POLICY = DefaultKVLoadPolicy({})
-
-# Concurrent cross-TP reshards. The copies are torch CPU copies, which release
-# the GIL, so a few lookups can reshard in parallel.
-_RESHARD_WORKERS = 4
-
-
-def _kernel_group_tensors(obj: MemoryObj) -> list[torch.Tensor]:
-    """Return one tensor view per kernel group of a memory object."""
-    # get_tensor is None only for an invalidated object; callers hold a read
-    # lock or a write reservation, which keeps the object valid.
-    return cast(
-        list[torch.Tensor], [obj.get_tensor(i) for i in range(len(obj.get_shapes()))]
-    )
 
 
 def _flat_object_keys(
@@ -253,15 +235,7 @@ class LookupModule(DiscoverableModule):
         self._hetero_tp_source_world_sizes = list(hetero_tp_source_world_sizes)
         self._prefetch_jobs: dict[str, _PrefetchJob] = {}
         self._prefetch_job_lock = threading.Lock()
-        # Threads start on first use, so lookups without a fallback cost nothing.
-        self._reshard_executor = ThreadPoolExecutor(
-            max_workers=_RESHARD_WORKERS, thread_name_prefix="hetero-tp-reshard"
-        )
-        # Destination keys each running reshard writes. A later reshard of
-        # the same keys waits for it instead of finding them reserved and
-        # reporting a miss.
-        self._reshard_writers: dict[ObjectKey, Future[bool]] = {}
-        self._reshard_writers_lock = threading.Lock()
+        self._resharder = L1Resharder(ctx.storage_manager)
         # (KV heads, source world size) pairs already warned about.
         self._warned_invalid_sources: set[tuple[int, int]] = set()
         self._setup_metrics()
@@ -287,7 +261,7 @@ class LookupModule(DiscoverableModule):
         Queued reshards still run: cancelling one would leave its source
         read locks held until their TTL.
         """
-        self._reshard_executor.shutdown(wait=True)
+        self._resharder.close()
 
     # -----------------------------------------------------------------
     # Handlers
@@ -1073,98 +1047,45 @@ class LookupModule(DiscoverableModule):
     def _submit_reshard(
         self, job: _PrefetchJob, state: _HeteroTPState, found: int
     ) -> None:
-        """Start the background reshard of a source-stage hit.
-
-        Off the request thread because the copy grows with the hit. The
-        reshard first waits for running reshards that write any of its
-        destination keys; those were registered earlier, so waits never form
-        a cycle.
+        """Hand a source-stage hit to the resharder, then submit the final stage.
 
         Args:
             job: The lookup's job.
             state: ``job.hetero``, in a source stage with ``source_result``.
             found: Leading chunks the source stage hit.
         """
-        dst_keys = _flat_object_keys(
-            state.key, state.suffix_hashes[:found], job.attn_desc.num_object_groups
+        source = cast(int, state.source_world_size)
+        groups = list(range(job.attn_desc.num_object_groups))
+        hashes = state.suffix_hashes[:found]
+        task = ReshardTask(
+            src_keys=ipc_key_to_object_keys(
+                replace(state.key, world_size=source), hashes, groups
+            ),
+            dst_keys=ipc_key_to_object_keys(state.key, hashes, groups),
+            dst_layout_descs=state.group_layout_descs,
+            num_kv_heads=state.total_num_kv_heads,
+            src_tp=source,
+            dst_tp=state.key.world_size,
+            l1_owners=cast(PrefetchResult, state.source_result).l1_owners,
+            request_id=job.request_id,
         )
-        with self._reshard_writers_lock:
-            writers = {
-                self._reshard_writers[k] for k in dst_keys if k in self._reshard_writers
-            }
-            reshard = self._reshard_executor.submit(
-                self._reshard_and_finalize,
-                job,
-                state,
-                found,
-                writers,
-                time.monotonic(),
-            )
-            mine = [k for k in dst_keys if k not in self._reshard_writers]
-            for k in mine:
-                self._reshard_writers[k] = reshard
-        state.reshard = reshard
-        reshard.add_done_callback(partial(self._drop_reshard_writer, mine))
+        state.reshard = self._resharder.submit(
+            task, partial(self._submit_final_stage, job, state)
+        )
 
-    def _drop_reshard_writer(
-        self, keys: list[ObjectKey], reshard: Future[bool]
-    ) -> None:
-        """Unregister ``reshard`` as the writer of ``keys`` once it is done."""
-        with self._reshard_writers_lock:
-            for k in keys:
-                if self._reshard_writers.get(k) is reshard:
-                    del self._reshard_writers[k]
+    def _submit_final_stage(self, job: _PrefetchJob, state: _HeteroTPState) -> bool:
+        """Submit the L1-only prefetch of a finished reshard.
 
-    def _reshard_and_finalize(
-        self,
-        job: _PrefetchJob,
-        state: _HeteroTPState,
-        found: int,
-        writers: set[Future[bool]],
-        queued_at: float,
-    ) -> bool:
-        """Reshard a source-stage hit, then submit the final L1-only stage.
-
-        Runs on a reshard thread. A failed reshard still submits the final
-        stage, which reports whatever reached L1 (usually nothing).
+        Runs on a reshard thread, also after a failed reshard: the final
+        stage then reports whatever reached L1 (usually nothing).
 
         Args:
             job: The lookup's job.
-            state: ``job.hetero``, in a source stage with ``source_result``.
-            found: Leading chunks the source stage hit.
-            writers: Running reshards that write some of the same destination
-                keys; this one waits for them, then writes only the rest.
-            queued_at: ``time.monotonic()`` when the reshard was submitted.
+            state: ``job.hetero``.
 
         Returns:
             Whether the final stage was submitted and swapped into ``job``.
         """
-        dequeued = time.monotonic()
-        wait_futures(writers)
-        started = time.monotonic()
-        try:
-            nbytes = self._reshard_into_l1(
-                state,
-                job.attn_desc.num_object_groups,
-                found,
-                cast(PrefetchResult, state.source_result).l1_owners,
-            )
-            logger.info(
-                "Resharded %d chunks from TP%d to TP%d for request %s: wrote "
-                "%.1f MiB in %.2f ms (queued %.2f ms, waited %.2f ms on %d "
-                "other reshards)",
-                found,
-                state.source_world_size,
-                state.key.world_size,
-                job.request_id,
-                nbytes / (1 << 20),
-                (time.monotonic() - started) * 1e3,
-                (dequeued - queued_at) * 1e3,
-                (started - dequeued) * 1e3,
-                len(writers),
-            )
-        except Exception:
-            logger.exception("Cross-TP reshard failed for request %s", job.request_id)
         try:
             # L1-only: the reshard just wrote these objects to L1; looking
             # past them in L2 would only repeat the primary stage's miss.
@@ -1271,74 +1192,6 @@ class LookupModule(DiscoverableModule):
         """
         with self._prefetch_job_lock:
             job.handle, job.row_windows, job.hetero = handle, row_windows, hetero
-
-    def _reshard_into_l1(
-        self,
-        state: _HeteroTPState,
-        num_object_groups: int,
-        found: int,
-        l1_owners: dict[ObjectKey, int],
-    ) -> int:
-        """Rebuild the first ``found`` chunks as objects of the lookup's TP.
-
-        Reads the read-locked source objects, writes destination objects
-        keyed for ``state.key.world_size``, and releases the source locks.
-        Destination keys that cannot be reserved (already resident, or out of
-        memory) are skipped; the final L1 prefetch reports the shorter hit.
-
-        Args:
-            state: The fallback, in a source stage.
-            num_object_groups: Object groups per chunk.
-            found: Leading chunks the source stage hit and read-locked.
-            l1_owners: L1 owners of the source objects, from the stage's
-                result.
-
-        Returns:
-            Bytes written into destination objects.
-
-        Raises:
-            Exception: An allocation or copy error propagates. The source
-                read locks are released either way; destination objects
-                reserved for the failing group stay reserved until the write
-                TTL, since the storage manager has no way to abandon them.
-        """
-        sm = self._ctx.storage_manager
-        src_ws, dst_ws = cast(int, state.source_world_size), state.key.world_size
-        groups = list(range(num_object_groups))
-        hashes = state.suffix_hashes[:found]
-        src_keys = ipc_key_to_object_keys(
-            replace(state.key, world_size=src_ws), hashes, groups
-        )
-        dst_keys = ipc_key_to_object_keys(state.key, hashes, groups)
-        flat_src = [k for group in src_keys for k in group]
-        nbytes = 0
-        with sm.read_prefetched_results(flat_src, l1_owners) as src_objs:
-            if src_objs is None:
-                # The context already released the locks it took.
-                return 0
-            num_heads = state.total_num_kv_heads
-            plans = [
-                plan_head_reshard(num_heads, src_ws, dst_ws, b) for b in range(dst_ws)
-            ]
-            dst_heads = local_kv_heads(num_heads, dst_ws)
-            src_by_key = dict(zip(flat_src, src_objs, strict=True))
-            for gid, (g_src, g_dst) in enumerate(zip(src_keys, dst_keys, strict=True)):
-                reserved = sm.reserve_write(g_dst, state.group_layout_descs[gid])
-                for chunk in range(found):
-                    srcs = {
-                        a: _kernel_group_tensors(src_by_key[g_src[chunk * src_ws + a]])
-                        for a in range(src_ws)
-                    }
-                    for b in range(dst_ws):
-                        obj = reserved.get(g_dst[chunk * dst_ws + b])
-                        if obj is not None:
-                            dst = _kernel_group_tensors(obj)
-                            copy_heads(dst, srcs, plans[b], dst_heads)
-                            nbytes += sum(t.nbytes for t in dst)
-                if reserved:
-                    sm.finish_write_by_owner(sm.prepare_write_completion(reserved))
-        sm.finish_read_prefetched(flat_src, read_locks=1, l1_owners=l1_owners)
-        return nbytes
 
     def _setup_metrics(self) -> None:
         """Register OTel observable gauges for lookup module metrics."""

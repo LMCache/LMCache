@@ -99,9 +99,10 @@ are swapped together when a stage is replaced.
 3. **Final stage** (B keys, `allowed_l2_memory_tags=frozenset()`): its result
    is the lookup's result.
 
-Stages advance inside `query_prefetch_status` / `wait_prefetch_status`. The
-reshard runs on `LookupModule`'s own thread pool (4 threads), not on the
-request handler's thread, because its copy grows with the hit:
+Stages advance inside `query_prefetch_status` / `wait_prefetch_status`.
+`LookupModule` only sequences them; the copy itself runs in
+`tp_reshard.L1Resharder`, on its own thread pool (4 threads) rather than the
+request handler's thread, because it grows with the hit.
 `query_prefetch_status` returns None while it runs, and `wait_prefetch_status`
 waits for it, with `timeout` covering every stage. A reshard whose
 destination keys another running reshard is writing waits for that one and

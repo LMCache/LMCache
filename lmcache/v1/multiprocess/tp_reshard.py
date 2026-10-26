@@ -11,16 +11,46 @@ The TP size must divide the KV head count, so rank ``r`` holds the
 contiguous heads ``[r * n, (r + 1) * n)`` with ``n = num_kv_heads // tp``.
 A TP size larger than the head count replicates heads across ranks by an
 engine-specific rule, so it is not supported.
+
+:class:`L1Resharder` runs such a reshard against the storage manager: it
+reads read-locked source objects and writes the destination objects into L1
+on its own threads.
 """
 
 # Standard
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass
+from functools import partial
+from typing import Any, Callable, TypeVar, cast
+import threading
+import time
 
 # Third Party
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.memory_management import MemoryObj
+
+logger = init_logger(__name__)
+
+# Concurrent reshards. The copies are torch CPU copies, which release the GIL,
+# so a few lookups can reshard in parallel.
+_RESHARD_WORKERS = 4
+
+_T = TypeVar("_T")
+
+
+def _kernel_group_tensors(obj: MemoryObj) -> list[torch.Tensor]:
+    """Return one tensor view per kernel group of a memory object."""
+    # get_tensor is None only for an invalidated object; callers hold a read
+    # lock or a write reservation, which keeps the object valid.
+    return cast(
+        list[torch.Tensor], [obj.get_tensor(i) for i in range(len(obj.get_shapes()))]
+    )
 
 
 def _check_tp(num_kv_heads: int, tp: int) -> None:
@@ -200,3 +230,192 @@ def copy_heads(
             d = copy.dst_head * head_elems
             n = copy.num_heads * head_elems
             dst_t[..., d : d + n].copy_(src_t[..., s : s + n])
+
+
+@dataclass(frozen=True)
+class ReshardTask:
+    """Reshard of the leading chunks of one request from one TP size to another.
+
+    Key lists are per object group, chunk-major and rank-minor, as
+    ``ipc_key_to_object_keys`` returns them, and cover the same chunks.
+
+    Attributes:
+        src_keys: Source object keys, each read-locked once by a prefetch.
+        dst_keys: Destination object keys.
+        dst_layout_descs: Layout of one destination object, per object group.
+        num_kv_heads: KV heads of the whole model.
+        src_tp: TP size of the source objects.
+        dst_tp: TP size of the destination objects.
+        l1_owners: L1 owners of the source objects, from the prefetch result.
+        request_id: Request the reshard serves; used only for logging.
+    """
+
+    src_keys: list[list[ObjectKey]]
+    dst_keys: list[list[ObjectKey]]
+    dst_layout_descs: dict[int, MemoryLayoutDesc]
+    num_kv_heads: int
+    src_tp: int
+    dst_tp: int
+    l1_owners: dict[ObjectKey, int]
+    request_id: str
+
+
+class L1Resharder:
+    """Reshard read-locked source objects into new L1 objects off the caller's thread.
+
+    The copy grows with the hit, so it runs on a small thread pool instead of
+    the request thread. Two reshards that write some of the same destination
+    keys (two lookups of one prefix) are serialized: the later one waits for
+    the earlier, then writes only the keys still free, since a key reserved
+    by the earlier one cannot be reserved again.
+
+    Args:
+        storage_manager: Storage manager holding both the source and the
+            destination objects.
+    """
+
+    def __init__(self, storage_manager: StorageManager) -> None:
+        self._sm = storage_manager
+        # Threads start on first use, so a server that never reshards pays
+        # nothing.
+        self._executor = ThreadPoolExecutor(
+            max_workers=_RESHARD_WORKERS, thread_name_prefix="hetero-tp-reshard"
+        )
+        # Running reshard writing each destination key.
+        self._writers: dict[ObjectKey, Future[Any]] = {}
+        self._writers_lock = threading.Lock()
+
+    def submit(self, task: ReshardTask, then: Callable[[], _T]) -> Future[_T]:
+        """Reshard ``task`` on a reshard thread, then call ``then`` there.
+
+        The source read locks are released whether or not the reshard
+        succeeds. A failed reshard is logged and ``then`` still runs, so the
+        caller learns what reached L1 the same way in both cases. Destination
+        keys that cannot be reserved (already resident, or out of memory) are
+        skipped.
+
+        Args:
+            task: The reshard to run.
+            then: Called on the reshard thread once the reshard is done.
+
+        Returns:
+            A future resolving to ``then``'s result, or raising its exception.
+        """
+        dst_keys = [k for group in task.dst_keys for k in group]
+        with self._writers_lock:
+            writers = {self._writers[k] for k in dst_keys if k in self._writers}
+            future = self._executor.submit(
+                self._run, task, then, writers, time.monotonic()
+            )
+            mine = [k for k in dst_keys if k not in self._writers]
+            for k in mine:
+                self._writers[k] = future
+        future.add_done_callback(partial(self._drop_writer, mine))
+        return future
+
+    def close(self) -> None:
+        """Stop the reshard threads after every submitted reshard finishes.
+
+        Queued reshards still run: cancelling one would leave its source
+        read locks held until their TTL.
+        """
+        self._executor.shutdown(wait=True)
+
+    def _drop_writer(self, keys: list[ObjectKey], future: Future[Any]) -> None:
+        """Unregister ``future`` as the writer of ``keys`` once it is done."""
+        with self._writers_lock:
+            for k in keys:
+                if self._writers.get(k) is future:
+                    del self._writers[k]
+
+    def _run(
+        self,
+        task: ReshardTask,
+        then: Callable[[], _T],
+        writers: set[Future[Any]],
+        queued_at: float,
+    ) -> _T:
+        """Wait for ``writers``, reshard ``task``, log its cost, call ``then``.
+
+        Args:
+            task: The reshard to run.
+            then: Called once the reshard is done or has failed.
+            writers: Running reshards that write some of the same destination
+                keys; this one writes only what they left free.
+            queued_at: ``time.monotonic()`` when the reshard was submitted.
+
+        Returns:
+            ``then``'s result.
+        """
+        dequeued = time.monotonic()
+        # Writers were registered before this reshard, so waits never cycle.
+        wait_futures(writers)
+        started = time.monotonic()
+        try:
+            nbytes = self._reshard(task)
+            logger.info(
+                "Resharded %d chunks from TP%d to TP%d for request %s: wrote "
+                "%.1f MiB in %.2f ms (queued %.2f ms, waited %.2f ms on %d "
+                "other reshards)",
+                len(task.src_keys[0]) // task.src_tp,
+                task.src_tp,
+                task.dst_tp,
+                task.request_id,
+                nbytes / (1 << 20),
+                (time.monotonic() - started) * 1e3,
+                (dequeued - queued_at) * 1e3,
+                (started - dequeued) * 1e3,
+                len(writers),
+            )
+        except Exception:
+            logger.exception("Cross-TP reshard failed for request %s", task.request_id)
+        return then()
+
+    def _reshard(self, task: ReshardTask) -> int:
+        """Write the destination objects of ``task`` and release its sources.
+
+        Args:
+            task: The reshard to run.
+
+        Returns:
+            Bytes written into destination objects.
+
+        Raises:
+            Exception: An allocation or copy error propagates. The source
+                read locks are released either way; destination objects
+                reserved for the failing group stay reserved until the write
+                TTL, since the storage manager has no way to abandon them.
+        """
+        sm = self._sm
+        src_tp, dst_tp = task.src_tp, task.dst_tp
+        flat_src = [k for group in task.src_keys for k in group]
+        nbytes = 0
+        with sm.read_prefetched_results(flat_src, task.l1_owners) as src_objs:
+            if src_objs is None:
+                # The context already released the locks it took.
+                return 0
+            plans = [
+                plan_head_reshard(task.num_kv_heads, src_tp, dst_tp, b)
+                for b in range(dst_tp)
+            ]
+            dst_heads = local_kv_heads(task.num_kv_heads, dst_tp)
+            src_by_key = dict(zip(flat_src, src_objs, strict=True))
+            for gid, (g_src, g_dst) in enumerate(
+                zip(task.src_keys, task.dst_keys, strict=True)
+            ):
+                reserved = sm.reserve_write(g_dst, task.dst_layout_descs[gid])
+                for chunk in range(len(g_src) // src_tp):
+                    srcs = {
+                        a: _kernel_group_tensors(src_by_key[g_src[chunk * src_tp + a]])
+                        for a in range(src_tp)
+                    }
+                    for b in range(dst_tp):
+                        obj = reserved.get(g_dst[chunk * dst_tp + b])
+                        if obj is not None:
+                            dst = _kernel_group_tensors(obj)
+                            copy_heads(dst, srcs, plans[b], dst_heads)
+                            nbytes += sum(t.nbytes for t in dst)
+                if reserved:
+                    sm.finish_write_by_owner(sm.prepare_write_completion(reserved))
+        sm.finish_read_prefetched(flat_src, read_locks=1, l1_owners=task.l1_owners)
+        return nbytes
