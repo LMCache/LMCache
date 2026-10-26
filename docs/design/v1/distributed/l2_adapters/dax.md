@@ -15,7 +15,7 @@ storage backend.
 
 ## Components
 
-`lmcache/v1/storage_backend/dax/core.py` defines `DaxCore[KeyT]`. The core owns
+`lmcache/v1/distributed/l2_adapters/dax/core.py` defines `DaxCore[KeyT]`. The core owns
 the mapped DAX arena, fixed-size slot allocation, in-memory index, LRU order,
 in-flight writes, external lock refcounts, active read borrow counts, close
 coordination, and direct `ctypes.memmove` copies.
@@ -32,10 +32,10 @@ pools for store, lookup, and load operations, and uses one or more
 `lmcache/v1/multiprocess/http_apis/reconfigure_api.py` exposes runtime
 reconfiguration endpoints:
 
-- `GET /reconfigure/dax/status`
-- `POST /reconfigure/dax/add`
-- `POST /reconfigure/dax/remove`
-- `POST /reconfigure/dax/resize`
+- `GET /reconfigure/dax/l2/status`
+- `POST /reconfigure/dax/l2/add`
+- `POST /reconfigure/dax/l2/remove`
+- `POST /reconfigure/dax/l2/resize`
 
 The HTTP layer routes `backend`, `operation`, and adapter-specific JSON payloads
 into the generic L2 adapter reconfiguration API on `StorageManager`.
@@ -86,15 +86,24 @@ Lookup and load:
 
 The DAX facade keeps the event fds and worker pools stable. Runtime hotplug only
 mutates the device pool behind the facade, so `StoreController`,
-`PrefetchController`, and the vLLM MP connector do not need ZMQ protocol changes
+`PrefetchController`, and the vLLM MP connector do not need request-protocol changes
 or poll-set re-registration.
 
 Add:
 
-1. Validate `hotplug_enabled`, path, and size.
-2. Map a new `DaxCore[ObjectKey]`.
+1. Validate `hotplug_enabled`, path, size, and `offset_bytes` (default 0).
+   The storage manager rejects a range that overlaps one mapped by any L1 or
+   other L2 owner on the same physical device.
+2. Map a new `DaxCore[ObjectKey]` over `[offset, offset + size)`; the core
+   checks the range against the device size and alignment before `mmap`.
 3. Append a `DaxDeviceEntry(state="active")`.
 4. Return per-device status. Existing KV entries stay on their current devices.
+
+A range is identified by `(device_path, offset_bytes)`. Re-adding the same
+range at the same size, including through an alias, returns its existing entry;
+an overlapping range is a 409. Disjoint ranges of one device may back several
+entries. Use the returned `device_path` and `offset_bytes` for remove or
+resize; the alias is not registered as another path.
 
 Remove with migration:
 
@@ -109,7 +118,8 @@ Remove with migration:
 Resize:
 
 - Grow remaps the same core to a larger size after active reads and writes
-  drain. No KV payload movement is needed.
+  drain. No KV payload movement is needed. The grown range is checked against
+  sibling entries and other L1 or L2 owners like an add.
 - Shrink first proves that every live slot fits below the new slot count. If
   not, the out-of-range keys must migrate to another active device or the
   request fails. Shrink never silently evicts data.

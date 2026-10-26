@@ -3,7 +3,7 @@
 from contextlib import nullcontext
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Callable
+from typing import Any, Callable
 from unittest.mock import MagicMock
 import threading
 import time
@@ -124,7 +124,7 @@ def _new_context(
 ) -> AsyncEngineDrivenTransferContext:
     monkeypatch.setattr(async_engine_driven, "torch_dev", _FakeTorchDev(gather_gate))
     _install_fake_gather(monkeypatch)
-    ctx = AsyncEngineDrivenTransferContext(commit_workers=max_inflight)
+    ctx = AsyncEngineDrivenTransferContext(1, MagicMock(), commit_workers=max_inflight)
     ctx._engine_driven_context = (
         _FakeStoreContext(commit_impl=commit_impl)  # type: ignore[assignment]
     )
@@ -139,7 +139,7 @@ def test_submit_store_returns_pending_future_until_gather_and_commit(
         monkeypatch, gather_gate=gather_gate, commit_impl=lambda _c: True
     )
     future = ctx.submit_store(
-        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+        "r1", object(), {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
     )
     assert not future.query()
     gather_gate.set()
@@ -155,13 +155,58 @@ def test_create_recorded_event_uses_local_device_event(
     event = fake_torch_dev.Event.return_value
     stream = fake_torch_dev.current_stream.return_value
     monkeypatch.setattr(async_engine_driven, "torch_dev", fake_torch_dev)
-    ctx = AsyncEngineDrivenTransferContext()
+    ctx = AsyncEngineDrivenTransferContext(1, MagicMock())
     ctx._engine_driven_context = MagicMock()
 
     assert ctx.create_recorded_event() is event
     fake_torch_dev.Event.assert_called_once_with()
     event.record.assert_called_once_with(stream)
     ctx.close()
+
+
+def test_submit_retrieve_waits_for_event_before_scatter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retrieve must wait for the producer event before scattering KV data."""
+    gather_gate = threading.Event()
+    monkeypatch.setattr(async_engine_driven, "torch_dev", _FakeTorchDev(gather_gate))
+    transfer = MagicMock()
+    transfer.prepare_retrieve.return_value = [torch.zeros(1)]
+    monkeypatch.setattr(
+        worker_transfer,
+        "create_engine_driven_context",
+        lambda *_args, **_kwargs: transfer,
+    )
+    call_order: list[str] = []
+    event = MagicMock()
+    event.wait.side_effect = lambda: call_order.append("wait")
+    monkeypatch.setattr(
+        worker_transfer,
+        "scatter_cpu_to_paged_kv",
+        lambda *_args, **_kwargs: call_order.append("scatter"),
+    )
+    kv_caches = {
+        "layer_0": torch.zeros(2, 4, 4, 2, 8, dtype=torch.float32),
+    }
+    ctx = AsyncEngineDrivenTransferContext(1, MagicMock())
+    ctx.register(
+        kv_caches,
+        model_name="test",
+        world_size=1,
+        blocks_in_chunk=4,
+        mq_timeout=1.0,
+        layout_hints={"kv_layout": "NHD"},
+    )
+
+    try:
+        future = ctx.submit_retrieve(
+            "request", "key", kv_caches, [[0, 1, 2, 3]], event, 4
+        )
+
+        assert future.result(timeout=1) is True
+        assert call_order == ["wait", "scatter"]
+    finally:
+        ctx.close()
 
 
 def test_submit_store_commit_waits_for_gather_done(
@@ -176,7 +221,7 @@ def test_submit_store_commit_waits_for_gather_done(
 
     ctx = _new_context(monkeypatch, gather_gate=gather_gate, commit_impl=_commit)
     future = ctx.submit_store(
-        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+        "r1", object(), {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
     )
     assert not commit_called.wait(timeout=0.05)
     gather_gate.set()
@@ -196,7 +241,7 @@ def test_close_drains_inflight_async_store(monkeypatch: pytest.MonkeyPatch) -> N
 
     ctx = _new_context(monkeypatch, gather_gate=gather_gate, commit_impl=_commit)
     future = ctx.submit_store(
-        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+        "r1", object(), {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
     )
     closed = threading.Event()
 
@@ -225,7 +270,7 @@ def test_commit_failure_sets_false_and_logs(
     monkeypatch.setattr(async_engine_driven.logger, "exception", log_exception)
     ctx = _new_context(monkeypatch, gather_gate=gather_gate, commit_impl=_commit)
     future = ctx.submit_store(
-        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+        "r1", object(), {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
     )
     gather_gate.set()
     assert future.result(timeout=1) is False
@@ -259,7 +304,7 @@ def test_sync_engine_driven_context_returns_resolved_future(
     fake = _RecordingTorchDev()
     monkeypatch.setattr(worker_transfer, "torch_dev", fake)
     _install_fake_gather(monkeypatch)
-    ctx = EngineDrivenTransferContext()
+    ctx = EngineDrivenTransferContext(1, MagicMock())
     ctx._engine_driven_context = (
         _FakeStoreContext(commit_impl=lambda _c: True)  # type: ignore[assignment]
     )
@@ -267,7 +312,6 @@ def test_sync_engine_driven_context_returns_resolved_future(
     future = ctx.submit_store(
         "r1",
         object(),
-        1,
         {"k": torch.zeros(1)},
         [[0]],
         _FakeEvent(threading.Event()),
@@ -277,14 +321,15 @@ def test_sync_engine_driven_context_returns_resolved_future(
     # Sync path resolves inline.
     assert future.query()
     assert future.result(timeout=1) is True
-    assert fake.synchronize_calls >= 1
+    # CPU copies complete inline without synchronizing the global accelerator.
+    assert fake.synchronize_calls == 0
     # flush_inflight_stores is the inherited base no-op; must not raise.
     ctx.flush_inflight_stores()
     ctx.close()
 
 
 def test_sync_engine_driven_context_has_no_async_resources() -> None:
-    ctx = EngineDrivenTransferContext()
+    ctx = EngineDrivenTransferContext(1, MagicMock())
     assert not hasattr(ctx, "_copy_stream")
     assert not hasattr(ctx, "_commit_executor")
     assert not hasattr(ctx, "_inflight_semaphore")
@@ -301,12 +346,12 @@ def test_build_engine_driven_context_dispatches_on_capability(
     monkeypatch.setattr(
         async_engine_driven, "torch_dev", _FakeTorchDev(threading.Event())
     )
-    capable = worker_transfer._build_engine_driven_context()
+    capable = worker_transfer._build_engine_driven_context(1, MagicMock())
     assert isinstance(capable, AsyncEngineDrivenTransferContext)
     capable.close()
 
     monkeypatch.setattr(worker_transfer, "_supports_async_primitives", lambda: False)
-    fallback = worker_transfer._build_engine_driven_context()
+    fallback = worker_transfer._build_engine_driven_context(1, MagicMock())
     assert isinstance(fallback, EngineDrivenTransferContext)
     assert not isinstance(fallback, AsyncEngineDrivenTransferContext)
     fallback.close()
@@ -344,13 +389,13 @@ def test_flush_inflight_stores_waits_for_pending_gather(
     )
     _install_fake_gather(monkeypatch)
 
-    ctx = AsyncEngineDrivenTransferContext(commit_workers=1)
+    ctx = AsyncEngineDrivenTransferContext(1, MagicMock(), commit_workers=1)
     ctx._engine_driven_context = (
         _FakeStoreContext(commit_impl=lambda _c: True)  # type: ignore[assignment]
     )
 
     ctx.submit_store(
-        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+        "r1", object(), {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
     )
 
     # Wait until the background thread has started (entered stream()), proving
@@ -403,7 +448,6 @@ def test_commit_store_serialized_by_commit_lock(
         ctx.submit_store(
             f"r{i}",
             object(),
-            1,
             {"k": torch.zeros(1)},
             [[0]],
             _FakeEvent(gather_gate),
@@ -444,7 +488,7 @@ def test_prepare_store_runs_on_background_thread_not_forward_thread(
     monkeypatch.setattr(async_engine_driven, "torch_dev", _FakeTorchDev(gather_gate))
     _install_fake_gather(monkeypatch)
 
-    ctx = AsyncEngineDrivenTransferContext(commit_workers=1)
+    ctx = AsyncEngineDrivenTransferContext(1, MagicMock(), commit_workers=1)
     ctx._engine_driven_context = _FakeStoreContext(  # type: ignore[assignment]
         commit_impl=lambda _c: True,
         prepare_impl=_slow_prepare,
@@ -454,7 +498,7 @@ def test_prepare_store_runs_on_background_thread_not_forward_thread(
 
     def _submit() -> None:
         ctx.submit_store(
-            "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+            "r1", object(), {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
         )
         submit_returned.set()
 
@@ -474,4 +518,138 @@ def test_prepare_store_runs_on_background_thread_not_forward_thread(
     # Now release prepare_store and let the background work complete.
     prepare_gate.set()
     t.join(timeout=1)
+    ctx.close()
+
+
+def _multigroup_async_context(
+    monkeypatch: pytest.MonkeyPatch,
+    gather_gate: threading.Event,
+    *,
+    torch_dev: object | None = None,
+) -> tuple[AsyncEngineDrivenTransferContext, list[Any]]:
+    """Async context with two registered groups over a real inline context."""
+    # First Party
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
+    from lmcache.v1.multiprocess.transfer_context.inline import (
+        EngineDrivenContextInline,
+    )
+
+    monkeypatch.setattr(
+        async_engine_driven, "torch_dev", torch_dev or _FakeTorchDev(gather_gate)
+    )
+    _install_fake_gather(monkeypatch)
+    ctx = AsyncEngineDrivenTransferContext(1, MagicMock(), commit_workers=2)
+    ctx._group_states = [
+        worker_transfer._GroupState(
+            layer_names=[f"layer_{gid}"],
+            engine_kv_format=MagicMock(),
+            blocks_in_chunk=1,
+            blocks_per_window=1,
+            layout_desc=MemoryLayoutDesc(
+                shapes=[torch.Size([2, 1, 1, 1])], dtypes=[torch.float32]
+            ),
+        )
+        for gid in range(2)
+    ]
+    inline = EngineDrivenContextInline(
+        metadata=MagicMock(), req_client=MagicMock(), mq_timeout=0.1
+    )
+    committed: list[Any] = []
+    monkeypatch.setattr(inline, "prepare_store", lambda _k, _i: None)
+
+    def _commit(_k: object, _i: int, chunks: object) -> bool:
+        committed.append(chunks)
+        return True
+
+    monkeypatch.setattr(inline, "commit_store", _commit)
+    ctx._engine_driven_context = inline  # type: ignore[assignment]
+    return ctx, committed
+
+
+def test_multigroup_store_runs_off_the_forward_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The multi-group store resolves only after its copy-stream gather
+    completes, and commits only non-null chunks, gathered into pinned
+    staging that is returned to the pool afterwards."""
+    gather_gate = threading.Event()
+    ctx, committed = _multigroup_async_context(monkeypatch, gather_gate)
+    kv = {"layer_0": torch.zeros(1), "layer_1": torch.zeros(1)}
+
+    # Group 0's chunk 0 is all null (block 0) and is not stored.
+    future = ctx.submit_store(
+        "r1", object(), kv, [[0, 5], [6, 7]], _FakeEvent(gather_gate), 1
+    )
+    assert not future.query()
+    gather_gate.set()
+    assert future.result(timeout=1) is True
+
+    assert len(committed) == 1
+    groups = committed[0]
+    assert [indices for indices, _ in groups] == [[1], [0, 1]]
+    assert all(torch.equal(t, torch.ones(2, 1, 1, 1)) for _, ts in groups for t in ts)
+    pooled = ctx._staging_pool[((2, 1, 1, 1), torch.float32)]
+    assert len(pooled) == 3
+    ctx.close()
+
+
+def test_multigroup_store_over_shm_gathers_into_server_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gather_gate = threading.Event()
+    gather_gate.set()
+    ctx, _ = _multigroup_async_context(monkeypatch, gather_gate)
+    slots = [torch.zeros(2, 1, 1, 1) for _ in range(2)]
+    shm = MagicMock()
+    shm.prepare_store_grouped.return_value = (slots, [1, 0], [0, 1])
+    shm.commit_store.return_value = True
+    ctx._engine_driven_context = shm  # type: ignore[assignment]
+    kv = {"layer_0": torch.zeros(1), "layer_1": torch.zeros(1)}
+
+    future = ctx.submit_store(
+        "r1", object(), kv, [[0, 5], [6, 0]], _FakeEvent(gather_gate), 1
+    )
+    assert future.result(timeout=1) is True
+    assert shm.prepare_store_grouped.call_args.args[2] == ((0,), (1,))
+    assert all(torch.equal(s, torch.ones(2, 1, 1, 1)) for s in slots)
+    shm.commit_store.assert_called_once()
+    assert ctx._staging_pool == {}
+    ctx.close()
+
+
+def test_flush_inflight_stores_waits_for_pending_multigroup_gather(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gather_gate = threading.Event()
+    gather_started = threading.Event()
+
+    class _BlockingFakeTorchDev(_FakeTorchDev):
+        def stream(self, stream: object) -> object:
+            gather_started.set()
+            gather_gate.wait(timeout=2)
+            return super().stream(stream)
+
+    ctx, _ = _multigroup_async_context(
+        monkeypatch, gather_gate, torch_dev=_BlockingFakeTorchDev(gather_gate)
+    )
+    kv = {"layer_0": torch.zeros(1), "layer_1": torch.zeros(1)}
+    future = ctx.submit_store(
+        "r1", object(), kv, [[5], [6]], _FakeEvent(gather_gate), 1
+    )
+    # The background store has started but not yet recorded its gather event.
+    assert gather_started.wait(timeout=1)
+
+    flushed = threading.Event()
+
+    def _flush() -> None:
+        ctx.flush_inflight_stores()
+        flushed.set()
+
+    t = threading.Thread(target=_flush, daemon=True)
+    t.start()
+    assert not flushed.wait(timeout=0.05)
+    gather_gate.set()
+    t.join(timeout=2)
+    assert flushed.is_set()
+    assert future.result(timeout=1) is True
     ctx.close()

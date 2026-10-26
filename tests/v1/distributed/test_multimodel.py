@@ -108,8 +108,8 @@ class TestStoreControllerMultimodel:
             sm = make_storage_manager()
             adapter = sm._l2_adapters[0]
 
-            ret_a = sm.reserve_write(keys_a, layout_a, mode="new")
-            ret_b = sm.reserve_write(keys_b, layout_b, mode="new")
+            ret_a = sm.reserve_write(keys_a, layout_a)
+            ret_b = sm.reserve_write(keys_b, layout_b)
             for i, k in enumerate(keys_a):
                 ret_a[k].tensor.fill_(float(i + 1))
             for i, k in enumerate(keys_b):

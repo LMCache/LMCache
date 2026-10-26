@@ -1,4 +1,4 @@
-# CI base image: CUDA + Python + uv + build deps.
+# CI base image: CUDA + Python + uv + build deps + CPU runtime libraries.
 # No vLLM or LMCache — those are installed per-job by setup-env.sh.
 #
 # Built automatically by setup-cluster.sh and imported into K3s containerd.
@@ -11,10 +11,11 @@ ENV PATH="/opt/venv/bin:${PATH}"
 
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
-    && apt-get update -y \
-    && apt-get install -y --no-install-recommends \
+    && apt-get update -y -o Acquire::Retries=3 \
+    && apt-get install -y -o Acquire::Retries=3 --no-install-recommends \
         ccache software-properties-common git curl sudo jq lsof \
         python3 python3-dev python3-venv python3-pip tzdata libxcb1-dev \
+        libnuma1 ffmpeg \
         libcudart12 \
     && ldconfig \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \

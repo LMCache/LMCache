@@ -12,11 +12,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.storage_backend.abstract_backend import (
-    AllocatorBackendInterface,
-    StoragePluginInterface,
-)
-from lmcache.v1.storage_backend.raw_block import (
+from lmcache.v1.distributed.l2_adapters.raw_block import (
     DEFAULT_IOURING_QUEUE_DEPTH,
     RawBlockCore,
     RawBlockCoreConfig,
@@ -26,6 +22,10 @@ from lmcache.v1.storage_backend.raw_block import (
     normalize_raw_block_io_engine,
     round_up,
     validate_raw_block_io_options,
+)
+from lmcache.v1.storage_backend.abstract_backend import (
+    AllocatorBackendInterface,
+    StoragePluginInterface,
 )
 
 if TYPE_CHECKING:
@@ -411,10 +411,31 @@ class RustRawBlockBackend(StoragePluginInterface):
         transfer_spec: Any = None,  # noqa: ARG002
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> list[Future] | None:
+        """Schedule writes unless the native io_uring worker has failed.
+
+        Args:
+            keys: Cache keys corresponding to ``objs``.
+            objs: Memory objects retained until their writes finish.
+            transfer_spec: Unused transfer metadata.
+            on_complete_callback: Callback for each successfully stored key.
+
+        Returns:
+            Scheduled futures, or None when no writes are needed or the native
+            worker has failed. Worker failure skips writes without retaining
+            objects or raising to the caller.
+
+        Raises:
+            RuntimeError: If no event loop exists.
+        """
         del transfer_spec
         loop = self.loop
         if loop is None:
             raise RuntimeError("RustRawBlockBackend requires an asyncio event loop")
+        try:
+            self._core.raise_if_failed()
+        except RuntimeError:
+            logger.exception("Skipping raw-block store after native worker failure")
+            return None
 
         pending: list[tuple[CacheEngineKey, RawBlockKeySpec, MemoryObj]] = []
         for key, obj in zip(keys, objs, strict=False):

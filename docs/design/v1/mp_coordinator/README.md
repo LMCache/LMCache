@@ -31,6 +31,7 @@ shape.
 | `DELETE /instances/{id}` | mp → coordinator | deregister (idempotent, 204) |
 | `GET /instances` | operator/tools | list the fleet |
 | `GET /healthz` | k8s probe | liveness |
+| `PUT /config/chunk-size` | mp → coordinator | bind token hashing and blend lookup to the fleet's negotiated chunk size |
 | `PUT/GET /quota/config` | operator | fleet-wide quota configuration |
 | `PUT/GET/DELETE /quota/{cache_salt}` | operator | per-tenant byte budgets |
 | `GET /quota` | operator | fleet-wide usage summary |
@@ -69,6 +70,8 @@ lmcache/v1/mp_coordinator/
     event_broadcaster.py  # fans admitted events to the registered consumers
     event_source.py     # source lifecycle/status contract
     http_event_source.py  # non-durable POST /events push source
+    kafka_event_source.py  # durable Kafka pull source (poll thread -> gate)
+    stream_position.py  # StreamPosition: the checkpoint's own read cursor
   discovery.py          # Registry + package scan, shared by views and controllers
   views/                # read models of the fleet: what is cached, and how much
     __init__.py         # build_views: scans this package
@@ -81,6 +84,7 @@ lmcache/v1/mp_coordinator/
     __init__.py         # build_controllers: scans this package + named ones
     base.py             # Controller: construction + run(); views only
     eviction_controller.py  # the fleet L2 control loop: quota + usage + LRU + pins
+    eviction_http_api.py    # the /quota, /cache/pins and /cache/delete endpoints it owns
     prefetch_manager.py # dispatches warm prefetch to a named MP server
   http_routes.py        # HttpRoutes: a controller registering its own endpoints
   http_apis/
@@ -88,8 +92,7 @@ lmcache/v1/mp_coordinator/
     dependencies.py     # shared FastAPI dependencies (registry, key directory, ...)
     instances_api.py    # /instances REST resource
     health_api.py       # /healthz
-    quota_api.py        # /quota/config, /quota/{cache_salt}, /quota
-    cache_api.py        # /cache/prefetches, /cache/pins, /cache/delete
+    cache_api.py        # /cache/prefetches
     events_api.py       # /events (fleet cache-event ingest)
     directory_api.py    # /directory/lookup, /directory/blend-lookup, /directory/keys, ...
     instances_usage_api.py  # /instances/usage, /instances/{id}/usage
@@ -105,11 +108,23 @@ sequenceDiagram
     participant API as POST /instances
     participant Reg as InstanceRegistry
 
-    C->>API: POST /instances {instance_id, ip, http_port}
+    C->>API: POST /instances {instance_id, ip, http_port, chunk_size?}
     API->>API: validate JSON body
     API->>Reg: register(MPInstance(...))
     API-->>C: 200 {instance_id, re_registered}
 ```
+
+Chunk size is a fleet invariant. Before an MP server reports chunk-size
+negotiation success, it calls `PUT /config/chunk-size`; the coordinator updates
+its `TokenHasher` and optional `BlendIndex` first. Repeating the same binding is
+idempotent, while a different value is rejected. An MP server also includes the
+value on later registrations once finalization has completed, so a restarted
+coordinator restores the same binding.
+
+A finalized MP server can serve another model only when its chunk size is a
+multiple of that model's required alignment. Otherwise, preconfigure a common
+multiple or use a separate MP server. MP servers using different final chunk
+sizes also need separate coordinators.
 
 Heartbeat is `PUT /instances/{id}/heartbeat` → `registry.update_heartbeat`; a
 404 tells the client to re-register. The health loop (in `app.py`, started by
@@ -184,10 +199,19 @@ through this layer, which decides **what** is admitted and **who** sees
 it. It holds no cache state itself. See [ingest.md](ingest.md).
 
 - `event_source.py` — common source lifecycle/status contract.
-- `http_event_source.py` — `HttpCacheEventSource`, today's non-durable
-  `POST /events` push adapter. Future durable sources use the same
-  `EventGate.ingest_batches` method but own their transport lifecycle
-  separately.
+- `http_event_source.py` — `HttpCacheEventSource`, the non-durable
+  `POST /events` push adapter.
+- `kafka_event_source.py` — `KafkaCacheEventSource`, the durable pull
+  adapter: a poll thread reads the fleet's Kafka topic and offers each
+  record to the same `EventGate.ingest_batches`. Selected by
+  `--event-transport kafka` in place of the HTTP source; a coordinator
+  runs exactly one.
+- `stream_position.py` — `StreamPosition`, checkpointed beside the state
+  it describes: the cursor a restarted `KafkaCacheEventSource` seeks each
+  partition to. It is the only cursor — the consumer group never commits
+  — so the resume point moves only when a checkpoint is written, and the
+  offset in a checkpoint always describes the state stored beside it. A
+  partition it has never seen falls back to `auto.offset.reset`.
 - `event_gate.py` — the admission point for every source. Owns the
   per-emitter stream cursor: incarnation fencing (a restart voids the
   emitter's L1 facts), `seq` dedup, and gap detection. Scan sources
@@ -301,6 +325,14 @@ The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
   directory, usage view, and LRU are rebuilt only from the cache-event
   stream, so after a coordinator restart they start empty and refill as
   events arrive — quotas under-report until they do.
+
+## Observability
+
+Every answer the coordinator gives is derived from the cache-event stream,
+so its observability is organized around ingest fidelity, freshness, and
+control-loop liveness rather than request rates. Metrics catalog,
+`/status`, cardinality rules, and phasing: see
+[observability.md](observability.md).
 
 ## Running
 

@@ -970,7 +970,7 @@ class TestBigtableConnector:
     def test_bigtable_config_defaults(self):
         """Verify that Bigtable configuration defaults are consistent."""
         # First Party
-        from lmcache.v1.storage_backend.connector.bigtable_config import (
+        from lmcache.v1.distributed.l2_adapters.bigtable_config import (
             BigtablePluginConfig,
         )
 

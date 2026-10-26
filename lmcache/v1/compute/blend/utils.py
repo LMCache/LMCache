@@ -12,9 +12,9 @@ from lmcache.v1.compute.models.utils import VLLMModelTracker
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.cache_engine import LMCacheEngine
+    from lmcache.inprocess.v1.cache_engine import LMCacheEngine
+    from lmcache.inprocess.v1.gpu_connector import GPUConnectorInterface
     from lmcache.v1.config import LMCacheEngineConfig
-    from lmcache.v1.gpu_connector import GPUConnectorInterface
 
 logger = init_logger(__name__)
 
@@ -35,7 +35,7 @@ class LMCBlenderBuilder:
         """
 
         if instance_id not in cls._blenders:
-            logger.info(f"Creating blender for {instance_id}")
+            logger.info("Creating blender for %s", instance_id)
             vllm_model = VLLMModelTracker.get_model(instance_id)
             blender = LMCBlender(
                 cache_engine=cache_engine,
@@ -46,7 +46,8 @@ class LMCBlenderBuilder:
             cls._blenders[instance_id] = blender
         else:
             logger.info(
-                f"Blender for {instance_id} already exists, returning the original one."
+                "Blender for %s already exists, returning the original one.",
+                instance_id,
             )
         return cls._blenders[instance_id]
 

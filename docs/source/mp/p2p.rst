@@ -186,6 +186,17 @@ Once both nodes have registered, a prefix first served on node 2 will be served
 from node 2's cache when the same prefix later arrives on node 3 — read over
 RDMA instead of recomputed.
 
+.. note::
+
+   ``kv_load_failure_policy`` is a vLLM connector setting that LMCache passes
+   through unchanged; LMCache's own L2 adapters do not currently read or
+   enforce it. A genuine L2 load failure (a peer unreachable, an object
+   backend erroring out, etc.) and an ordinary cache miss are not
+   distinguished internally — both fall through to recompute, regardless of
+   what ``kv_load_failure_policy`` is set to. If your deployment needs load
+   failures to surface as an error rather than silently recompute, that
+   distinction is not yet implemented at the connector boundary.
+
 Running on a single node (testing & debugging)
 ----------------------------------------------
 
@@ -226,9 +237,10 @@ coordinator. This is the recommended way to develop and debug P2P.
    CUDA_VISIBLE_DEVICES=1 vllm serve <model> --port 8001 \
        --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"lmcache.mp.port":6556}}'
 
-The two servers must differ in **every** port: ZMQ (``--port``), HTTP
-(``--http-port``), and the P2P transfer endpoint (``--p2p-advertise-url``).
-Give each a distinct ``--instance-id`` so they are easy to tell apart.
+The two servers must differ in **every** port: request transport
+(``--port``), HTTP (``--http-port``), and the P2P transfer endpoint
+(``--p2p-advertise-url``). Give each a distinct ``--instance-id`` so they are
+easy to tell apart.
 
 To test the path, send a long prompt to vLLM **A** (port ``8000``) and then the
 *same* prompt to vLLM **B** (port ``8001``). B has never seen the prompt and its

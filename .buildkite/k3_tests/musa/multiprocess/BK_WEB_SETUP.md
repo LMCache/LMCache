@@ -164,7 +164,7 @@ the container. The SGLang image is fixed for the gating step; the step can be
 - LMCache builds its common native extensions with the MUSA build profile.
 - LMCache selects the `musa` device backend.
 - The MUSA-compatible unit-test allowlist passes, excluding benchmark tests,
-  CUDA/XPU/SGLang markers, and known optional Triton/NIXL modules.
+  CUDA/XPU markers, and known optional Triton/NIXL modules.
 - The shared multiprocess `lm_eval` runner launches LMCache and vLLM on MUSA,
   exercises a cold and warm workload, and validates repeatability.
 - vLLM baseline, LMCache cold, and LMCache warm completions are identical;

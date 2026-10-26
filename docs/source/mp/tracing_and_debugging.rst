@@ -91,7 +91,7 @@ Before replaying, ``lmcache trace info`` prints a one-screen summary:
     Trace file: /tmp/run.lct
       level:                storage
       format_version:       1
-      trace_schema_version: 1
+      trace_schema_version: 2
       duration:             226.691s
       sm_config_digest:     0f685d8a...
       total_records:        1318
@@ -219,6 +219,10 @@ available on ``lmcache trace replay``:
    * - ``--disable-metrics``
      - Skip OTel metrics init and metrics subscribers. Useful to
        avoid binding the Prometheus port when you only want logs.
+   * - ``--disable-grpc-metrics``
+     - Skip gRPC Python runtime metrics while keeping LMCache metrics enabled.
+       By default, the MP server enables these metrics only for
+       ``--transport grpc``.
    * - ``--disable-logging``
      - Skip logging subscribers.
    * - ``--enable-tracing``
