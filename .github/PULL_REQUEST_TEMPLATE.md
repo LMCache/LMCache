@@ -9,7 +9,10 @@
 
 **AI-generated PR explainer** (required when AI-generated code is included):
 <!-- Link the current .html attachment here. It must provide complete English and Chinese
-views with a one-click language switch. Do not post a separate comment or zip one file. -->
+views with a one-click language switch, detailed annotated code and call-chain explanations,
+and multiple substantive diagrams for non-trivial changes. Use controlled animation or a
+step-through view when it materially clarifies the flow. Do not post a separate comment or
+zip one file. -->
 
 **If applicable**:
 
@@ -28,5 +31,7 @@ views with a one-click language switch. Do not post a separate comment or zip on
 - [ ] I stated whether AI assistance was used in **Special notes for your reviewers**.
 - [ ] If AI-generated code is included, this PR is a draft and its title, description, and
       bilingual HTML explainer all match the current head.
+- [ ] The HTML explainer is detailed enough for a reviewer without prior context, and its
+      diagrams, optional motion, code walkthrough, and test rationale match the implementation.
 
 </details>

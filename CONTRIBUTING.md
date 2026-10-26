@@ -148,6 +148,20 @@ must be self-contained and include:
 - compatibility and performance risks, validation evidence, missing coverage, and focused
   questions for reviewers.
 
+Write the explainer at the depth of a reviewer-facing technical article, not a decorative
+summary. A non-trivial PR should normally include at least three substantive visuals: a
+before/after architecture view, an end-to-end sequence or data-flow view, and a
+responsibility/extension-boundary or test-coverage view. Tie diagrams and annotated code
+walkthroughs to real symbols, files, inputs, outputs, state transitions, error paths, and
+owners. Explain motivation, important alternatives, compatibility and performance effects,
+fallback or rollout behavior, remaining gaps, and a concrete suggested review order.
+
+When motion would materially clarify a call chain or state transition, add a lightweight
+animated or step-through diagram with visible pause, replay, or step controls. It must have
+a complete static fallback, respect `prefers-reduced-motion`, avoid distracting auto-looping,
+and work offline. Screenshots and decorative graphics do not count as substantive visuals;
+small or documentation-only changes may use fewer diagrams when the explainer states why.
+
 The AI tool must upload the `.html` file and put its link directly in the PR description. A
 GitHub attachment that downloads the HTML for local viewing is acceptable. Do not post a
 separate comment or wrap one HTML file in a zip archive. Do not create or enable Pages,
@@ -162,6 +176,8 @@ one-click language switch. Keep the two versions synchronized: each must explain
 code changes, call chains, test rationale, compatibility and performance risks, validation
 gaps, and reviewer questions. The switch must work when the downloaded file is opened
 locally, without a server, build step, external assets, or an online translation service.
+Translate diagram labels, captions, animation controls, alt text, and reviewer guidance in
+addition to the prose.
 
 ### 6. What CI runs on your PR
 
