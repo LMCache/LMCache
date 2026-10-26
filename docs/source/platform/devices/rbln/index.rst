@@ -37,8 +37,8 @@ As on GPUs, start an LMCache server and point vLLM-RBLN at it with
 
 .. code-block:: bash
 
-   lmcache server --port 6555 --l1-size-gb 32 --chunk-size N \
-       --supported-transfer-mode engine_driven
+   lmcache server --port 6555 --l1-size-gb 32 --eviction-policy LRU \
+       --chunk-size N --supported-transfer-mode engine_driven
 
    vllm serve <model> \
        --model-impl vllm \
