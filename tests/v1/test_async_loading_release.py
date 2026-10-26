@@ -16,6 +16,7 @@ The objects below count pins and references; the release loop at the end of
 
 # Standard
 from types import SimpleNamespace
+from typing import Any
 import asyncio
 
 # Third Party
@@ -23,10 +24,10 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import CacheEngineKey
 from lmcache.inprocess.v1.cache_engine import LMCacheEngine
 from lmcache.inprocess.v1.event_manager import EventManager, EventStatus, EventType
-from lmcache.v1.storage_backend.storage_manager import StorageManager
+from lmcache.inprocess.v1.storage_backend.storage_manager import StorageManager
+from lmcache.utils import CacheEngineKey
 
 CHUNK = 256
 
@@ -84,7 +85,8 @@ def loop():
 
 
 def make_engine(event_manager: EventManager) -> LMCacheEngine:
-    engine = LMCacheEngine.__new__(LMCacheEngine)
+    # Any: the test replaces typed attributes with stand-ins.
+    engine: Any = LMCacheEngine.__new__(LMCacheEngine)
     engine.event_manager = event_manager
     engine.async_loading = True
     engine.lookup_pins = {}
