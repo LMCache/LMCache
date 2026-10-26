@@ -22,10 +22,11 @@ from lmcache.v1.mp_coordinator.persistence.metadata import MetadataWriteError
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 _GB = 1024**3
+_TOKENS = [1, 2, 3, 4, 5, 6, 7, 8]
 _PIN_BODY = {
     "model_name": "m",
     "world_size": 1,
-    "token_ids": [1, 2, 3, 4, 5, 6, 7, 8],
+    "token_ids": _TOKENS,
     "cache_salt": "alice",
 }
 
@@ -54,7 +55,7 @@ def _controller(client: TestClient) -> FleetEvictionController:
 
 def _pinned_keys(client: TestClient):
     keys, _ = resolve_object_keys(
-        client.app.state.ctx.token_hasher, "m", 1, _PIN_BODY["token_ids"], "alice"
+        client.app.state.ctx.token_hasher, "m", 1, _TOKENS, "alice"
     )
     return keys
 
