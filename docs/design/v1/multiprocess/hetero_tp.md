@@ -87,9 +87,18 @@ Without the hint the fallback is off.
 
 ## Lookup stages
 
-`LookupModule` holds the fallback as `_HeteroTPState` on the prefetch job.
-Each stage is an ordinary prefetch, and the job's `handle` and `row_windows`
-are swapped together when a stage is replaced.
+The work splits so that `LookupModule` never deals with heads or TP sizes:
+
+- `tp_reshard.HeteroTPFallback.plan` decides whether a lookup qualifies
+  (head count reported, TP sizes divide it, no sliding window) and returns a
+  per-lookup `HeteroTPPlan`.
+- `HeteroTPPlan.next_source` gives each source stage as a `SourceStage`
+  (key, layouts and windows at the source TP); `convert` reshards a source
+  hit through `L1Resharder`; `release` drops a source hit's locks when the
+  lookup stops early.
+- `LookupModule` runs the stages: it submits each as an ordinary prefetch and
+  swaps the job's `handle` and `row_windows` together when a stage is
+  replaced.
 
 1. **Primary stage** (B keys): if it finds no chunk and a candidate remains,
    the next stage is submitted. A partial hit is final.
@@ -100,9 +109,8 @@ are swapped together when a stage is replaced.
    is the lookup's result.
 
 Stages advance inside `query_prefetch_status` / `wait_prefetch_status`.
-`LookupModule` only sequences them; the copy itself runs in
-`tp_reshard.L1Resharder`, on its own thread pool (4 threads) rather than the
-request handler's thread, because it grows with the hit.
+The copy runs in `L1Resharder`, on its own thread pool (4 threads) rather
+than the request handler's thread, because it grows with the hit.
 `query_prefetch_status` returns None while it runs, and `wait_prefetch_status`
 waits for it, with `timeout` covering every stage. A reshard whose
 destination keys another running reshard is writing waits for that one and
