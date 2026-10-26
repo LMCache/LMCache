@@ -85,3 +85,21 @@ def test_cgroup_dir_of_an_exited_container_raises_file_not_found(
     monkeypatch.setattr(docker.subprocess, "run", fake)
     with pytest.raises(FileNotFoundError):
         docker.cgroup_dir("exited")
+
+
+CONTAINER = {"network": "host", "ipc": "host", "ulimit_memlock": -1}
+
+
+def test_run_args_use_the_configured_ipc_by_default() -> None:
+    args = docker.run_args("n", "r", "img", CONTAINER, [], {}, None, [], [])
+    assert "--ipc=host" in args
+    assert not any(a.startswith("--shm-size") for a in args)
+
+
+def test_run_args_with_shm_gb_give_a_private_shm_of_that_size() -> None:
+    args = docker.run_args(
+        "n", "r", "img", CONTAINER, [], {}, None, [], [], shm_gb=1600
+    )
+    assert "--ipc=private" in args and "--shm-size=1600g" in args
+    assert "--ipc=host" not in args
+    assert args[-1] == "img"

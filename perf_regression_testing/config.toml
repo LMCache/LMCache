@@ -248,6 +248,9 @@ model = "trinity"
 # be a multiple of it.
 image_target = "serving"
 vllm_scratch = [{ path = "<root>/l2", min_free_gb = 6000, cap_gb = 6000 }]
+# vLLM maps its CPU tier in /dev/shm, and the host's has about 1000 GiB free:
+# vllm_shm_gb gives the container a private one (no LMCache here to share IPC).
+vllm_shm_gb = 1600
 
 [deployments.vllm_native.vllm_args]
 # Per-rank fs dirs are <root_dir>_r<rank>, so root_dir sits inside the scratch.

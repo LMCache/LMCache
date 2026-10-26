@@ -33,6 +33,7 @@ def run_args(
     seccomp: str | None = None,
     cap_drop: tuple[str, ...] = (),
     memory_gb: int | None = None,
+    shm_gb: int | None = None,
 ) -> list[str]:
     """Build the ``docker run`` options shared by every runner container.
 
@@ -51,6 +52,8 @@ def run_args(
         cap_drop: Linux capabilities to drop (``--cap-drop``).
         memory_gb: Memory limit in GiB, swap included, or None for none. The
             cgroup charges the page cache of the container's files to it.
+        shm_gb: Size in GiB of a private ``/dev/shm``, in place of
+            ``container['ipc']``; None keeps that IPC mode.
 
     Returns:
         ``docker run`` arguments up to and including the image.
@@ -63,7 +66,6 @@ def run_args(
         "--label",
         f"prt.run={run_id}",
         f"--network={container['network']}",
-        f"--ipc={container['ipc']}",
         "--ulimit",
         f"memlock={container['ulimit_memlock']}",
         "--user",
@@ -71,6 +73,10 @@ def run_args(
         "-e",
         "HOME=/tmp",
     ]
+    if shm_gb is None:
+        args.append(f"--ipc={container['ipc']}")
+    else:
+        args += ["--ipc=private", f"--shm-size={shm_gb}g"]
     if gpus is not None:
         args += ["--gpus", '"device=' + ",".join(map(str, gpus)) + '"']
     for d in devices:

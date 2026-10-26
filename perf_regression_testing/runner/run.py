@@ -272,9 +272,10 @@ def wipe_scratch(spec: RunSpec) -> None:
 def remove_shm_regions(out: Path) -> list[str]:
     """Unlink the CPU offload regions this run's vLLM created in /dev/shm.
 
-    vLLM unlinks them only on a clean exit, and a leftover region (800 GiB
-    for vllm_native) makes the next run fail to allocate. Only paths named
-    in this run's vllm.log are removed: other vLLMs share the host.
+    vLLM unlinks them only on a clean exit, and a leftover region makes the
+    next run fail to allocate. Only paths named in this run's vllm.log are
+    removed: other vLLMs share the host. A container with a private
+    ``/dev/shm`` (``vllm_shm_gb``) leaves nothing here.
 
     Args:
         out: Run dir holding ``vllm.log``.
@@ -434,6 +435,7 @@ def build_commands(
                 else ()
             ),
             memory_gb=spec.vllm_memory_gb,
+            shm_gb=spec.vllm_shm_gb,
         )
         + [
             "vllm",
