@@ -88,26 +88,42 @@ class DevDaxTPRankPlacement:
 
 @dataclass(frozen=True)
 class DaxCoordinatedL1RankPlacementConfig:
-    """Place TP=1..8, PP=1, with all ranks local to one LMCache server.
+    """Physical regions only; KV rank count is supplied by engine registration."""
 
-    Configure physical DAX payload placement, not engine tensor parallelism.
-    ``tp_size`` is the expected rank count, checked against runtime registration.
-    The enclosing backend config uses the JSON field name ``rank_placement``.
-
-    ``rank % len(regions)`` selects a region. Ranks sharing a region receive
-    disjoint slices; a remainder smaller than one GiB per rank is unused.
-    The first region supplies both metadata offset and reservation size for the
-    common index; the reservation is not multiplied by TP size.
-    Invalid topology, alignment or overlapping ranges raises ``ValueError``.
-    """
-
-    tp_size: int
     regions: tuple[DevDaxTPRegion, ...]
 
     def __post_init__(self) -> None:
-        tp_size = _integer(self.tp_size, "tp_size", 1)
-        if tp_size > 8:
-            raise ValueError("rank_placement supports local TP=1..8 with PP=1")
+        if not isinstance(self.regions, (list, tuple)) or not self.regions:
+            raise ValueError("rank_placement regions must be a nonempty list")
+        # Validate physical bounds independently of the engine's rank count.
+        validated = DevDaxRankPlacement(len(self.regions), self.regions)
+        object.__setattr__(self, "regions", validated.regions)
+
+    def resolve(self, kv_world_size: int) -> "DevDaxRankPlacement":
+        """Validate engine KV world size and derive its physical rank slices."""
+        return DevDaxRankPlacement(kv_world_size, self.regions)
+
+
+@dataclass(frozen=True)
+class DevDaxRankPlacement:
+    """Engine-resolved KV rank count and validated physical placement.
+
+    ``rank % len(regions)`` selects a region. Ranks sharing a region receive
+    disjoint whole-GiB slices. This runtime object is not the JSON config.
+    """
+
+    kv_world_size: int
+    regions: tuple[DevDaxTPRegion, ...]
+
+    @property
+    def payload_size_bytes(self) -> int:
+        """Return total mapped capacity after whole-GiB rank partitioning."""
+        return sum(p.payload_size_GiB << 30 for p in self.placements())
+
+    def __post_init__(self) -> None:
+        kv_world_size = _integer(self.kv_world_size, "kv_world_size", 1)
+        if kv_world_size > 8:
+            raise ValueError("rank_placement supports kv_world_size=1..8")
         if not isinstance(self.regions, (list, tuple)):
             raise ValueError("rank_placement regions must be a list")
         try:
@@ -117,10 +133,10 @@ class DaxCoordinatedL1RankPlacementConfig:
             )
         except TypeError as error:
             raise ValueError(f"invalid rank_placement region: {error}") from error
-        if not 1 <= len(regions) <= tp_size or any(
+        if not 1 <= len(regions) <= kv_world_size or any(
             not isinstance(item, DevDaxTPRegion) for item in regions
         ):
-            raise ValueError("rank_placement requires 1..tp_size valid regions")
+            raise ValueError("rank_placement requires 1..kv_world_size valid regions")
         if regions[0].metadata_offset_bytes is None:
             raise ValueError("rank_placement regions[0] requires metadata_offset_bytes")
         if regions[0].metadata_reservation_bytes is None:
@@ -135,13 +151,13 @@ class DaxCoordinatedL1RankPlacementConfig:
                         "only regions[0] supplies the common metadata arena"
                     )
         reservation_bytes = int(regions[0].metadata_reservation_bytes)
-        object.__setattr__(self, "tp_size", tp_size)
+        object.__setattr__(self, "kv_world_size", kv_world_size)
         object.__setattr__(self, "regions", regions)
         # Validate even before device access. Runtime repeats this comparison
         # using st_rdev so symlinks/alternate names cannot hide overlap.
         ranges: dict[str, list[tuple[int, int]]] = {}
         for index, region in enumerate(regions):
-            ranks = len(range(index, tp_size, len(regions)))
+            ranks = len(range(index, kv_world_size, len(regions)))
             if region.payload_size_GiB < ranks:
                 raise ValueError(
                     "rank_placement needs at least one GiB per assigned rank"
@@ -164,10 +180,10 @@ class DaxCoordinatedL1RankPlacementConfig:
     def placements(self) -> tuple[DevDaxTPRankPlacement, ...]:
         """Return deterministic rank slices without accessing devices or CUDA."""
         result = []
-        for rank in range(self.tp_size):
+        for rank in range(self.kv_world_size):
             region_index = rank % len(self.regions)
             region = self.regions[region_index]
-            ranks = len(range(region_index, self.tp_size, len(self.regions)))
+            ranks = len(range(region_index, self.kv_world_size, len(self.regions)))
             ordinal = rank // len(self.regions)
             size_gib = region.payload_size_GiB // ranks
             result.append(
@@ -185,9 +201,9 @@ class DaxCoordinatedL1RankPlacementConfig:
     def layout_digest(self) -> bytes:
         """Fence topology and offsets across hosts, excluding local path names."""
         value = {
-            # Preserve the v1 schema identifier across the rank_placement rename.
+            # Preserve persisted v1 schema and field names across config renames.
             "schema": "devdax_tp_payload_v1",
-            "tp_size": self.tp_size,
+            "tp_size": self.kv_world_size,
             # Keep the v1 digest field name so this config rename does not
             # invalidate existing shared arenas. It encodes reserved bytes.
             "metadata_stride_bytes": self.regions[0].metadata_reservation_bytes,
@@ -204,12 +220,15 @@ class DaxCoordinatedL1RankPlacementConfig:
         Plain rank integers are not encoded ObjectKey ranks and are rejected.
         """
         if isinstance(kv_rank, bool) or not isinstance(kv_rank, int):
-            raise ValueError("rank_placement requires an encoded local TP kv_rank")
+            raise ValueError("rank_placement requires an encoded local kv_rank")
         rank = (kv_rank >> 16) & 0xFF
-        expected = (self.tp_size << 24) | (rank << 16) | (self.tp_size << 8) | rank
-        if kv_rank != expected or rank >= self.tp_size:
+        expected = (
+            (self.kv_world_size << 24) | (rank << 16) | (self.kv_world_size << 8) | rank
+        )
+        if kv_rank != expected or rank >= self.kv_world_size:
             raise ValueError(
-                "rank_placement requires an encoded local TP kv_rank matching tp_size"
+                "rank_placement requires an encoded local kv_rank "
+                "matching kv_world_size"
             )
         return rank
 
@@ -223,6 +242,9 @@ class DevDaxOwnerRankSlots:
     first_slot: int
     slot_count: int
     mapping_offset_bytes: int
+    group: int
+    stride_bytes: int
+    logical_offset_bytes: int
 
 
 class DevDaxPayloadMapping(NamedTuple):
@@ -248,42 +270,38 @@ class DevDaxPayloadGeometry:
     participant_0_slot_count: int
     owner_rank_slot_counts: tuple[int, ...]
     slot_ranges: tuple[DevDaxOwnerRankSlots, ...]
+    group_slot_bytes: tuple[int, ...]
 
 
 def resolve_payload_mappings(
-    config: "DaxCoordinatedL1Config",
+    placement: DevDaxRankPlacement,
 ) -> list[DevDaxPayloadMapping]:
-    """Resolve payload ranges without accessing devices or CUDA.
-
-    Args:
-        config: Validated DAX-Coordinated L1 configuration.
-
-    Returns:
-        Device path, payload offset and capacity in bytes for each TP rank,
-        or one range when TP placement is not configured.
-    """
+    """Return device ranges for an engine-resolved KV rank placement."""
     return [
         DevDaxPayloadMapping(
             p.devdax_path, p.payload_offset_bytes, p.payload_size_GiB << 30
         )
-        for p in config.rank_placement.placements()
+        for p in placement.placements()
     ]
 
 
 def resolve_payload_geometry(
-    config: "DaxCoordinatedL1Config", model_payload_bytes: int
+    config: "DaxCoordinatedL1Config",
+    model_payload_bytes: int | tuple[int, ...],
+    placement: DevDaxRankPlacement,
 ) -> DevDaxPayloadGeometry:
     """Carve the selected ownership policy from the configured payload.
 
-    ``model_payload_bytes`` is the complete object size of the one
-    homogeneous PR1 model layout. Slots are cache-line aligned and the
+    ``model_payload_bytes`` contains sizes in object-group order, or one size.
+    Each group gets an equal count of slots with its own cache-line stride. The
     unusable byte tail is deliberately left outside the allocator. Equal
     ownership leaves slots not divisible by the participant count unused;
     participant-0 ownership can use every complete slot.
 
     Args:
         config: Validated DAX-Coordinated L1 configuration.
-        model_payload_bytes: Complete model object size in bytes.
+        model_payload_bytes: Registered object-group sizes in bytes.
+        placement: Engine-resolved KV rank placement.
 
     Returns:
         Slot geometry and this participant's ownership range.
@@ -291,17 +309,23 @@ def resolve_payload_geometry(
     Raises:
         ValueError: If the payload range cannot hold the required slots.
     """
-    if model_payload_bytes <= 0:
+    sizes = (
+        (model_payload_bytes,)
+        if isinstance(model_payload_bytes, int)
+        else tuple(model_payload_bytes)
+    )
+    if not sizes or any(size <= 0 for size in sizes):
         raise ValueError("model payload bytes must be positive")
-    slot_bytes = _align_up(model_payload_bytes, config.DEVDAX_CACHE_LINE_BYTES)
-    capacities = [mapping.size_bytes for mapping in resolve_payload_mappings(config)]
+    strides = tuple(_align_up(size, config.DEVDAX_CACHE_LINE_BYTES) for size in sizes)
+    capacities = [mapping.size_bytes for mapping in resolve_payload_mappings(placement)]
     owners = config.participant_count if config.ownership_mode == "equal" else 1
-    rank_slots = tuple(size // slot_bytes // owners * owners for size in capacities)
-    if any(count < owners for count in rank_slots):
+    group_counts = tuple(size // sum(strides) // owners * owners for size in capacities)
+    rank_slots = tuple(count * len(strides) for count in group_counts)
+    if any(count < owners for count in group_counts):
         raise ValueError("payload range cannot hold one model slot per participant")
     slot_count = sum(rank_slots)
-    used = slot_count * slot_bytes
-    if used > config.payload_size_bytes:
+    used = sum(group_counts) * sum(strides)
+    if used > sum(capacities):
         raise ValueError("configured payload slots exceed payload_size_GiB capacity")
     first_count = slot_count // owners
     owner_begin = min(config.participant_id, owners) * first_count
@@ -310,25 +334,35 @@ def resolve_payload_geometry(
     slot_ranges = []
     begin = 0
     for owner in range(owners):
-        for rank, count in enumerate(per_owner_rank_slots):
-            slot_ranges.append(
-                DevDaxOwnerRankSlots(
-                    owner=owner,
-                    rank=rank,
-                    first_slot=begin,
-                    slot_count=count,
-                    mapping_offset_bytes=owner * count * slot_bytes,
+        logical_base = 0
+        for rank, total in enumerate(group_counts):
+            count = total // owners
+            group_base = 0
+            for group, stride in enumerate(strides):
+                offset = group_base + owner * count * stride
+                slot_ranges.append(
+                    DevDaxOwnerRankSlots(
+                        owner=owner,
+                        rank=rank,
+                        first_slot=begin,
+                        slot_count=count,
+                        mapping_offset_bytes=offset,
+                        group=group,
+                        stride_bytes=stride,
+                        logical_offset_bytes=logical_base + offset,
+                    )
                 )
-            )
-            begin += count
+                begin += count
+                group_base += total * stride
+            logical_base += capacities[rank]
     return DevDaxPayloadGeometry(
-        model_payload_bytes=model_payload_bytes,
-        payload_slot_bytes=slot_bytes,
+        model_payload_bytes=max(sizes),
+        payload_slot_bytes=max(strides),
         payload_slot_count=slot_count,
         owner_slot_begin=owner_begin,
         owner_slot_count=owner_count,
         payload_bytes_used=used,
-        payload_bytes_unused=config.payload_size_bytes - used,
+        payload_bytes_unused=sum(capacities) - used,
         rank_slot_counts=rank_slots,
         participant_0_slot_count=first_count,
         owner_rank_slot_counts=(
@@ -337,4 +371,5 @@ def resolve_payload_geometry(
             else (0,) * len(rank_slots)
         ),
         slot_ranges=tuple(slot_ranges),
+        group_slot_bytes=strides,
     )

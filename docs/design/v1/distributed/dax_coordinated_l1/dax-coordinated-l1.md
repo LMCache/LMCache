@@ -40,17 +40,14 @@ DAX-Coordinated L1 backend fails with a rebuild instruction.
 `DaxCoordinatedL1Config` lives in `lmcache/v1/distributed/config.py` and parses
 JSON through `from_json()`. The local `--l1-devdax-path` must match
 `rank_placement.regions[0].devdax_path`.
-For TP=1, a configuration looks like this; replace the qualification placeholder
-with the SHA-256 digest of the actual hardware qualification record:
+For example, a configuration looks like this:
 
 ```json
 {
   "region_id": "lab-shared-range-1",
   "region_epoch": 1,
   "participant_id": 0,
-  "hardware_qualification_digest": "<64 hex characters>",
   "rank_placement": {
-    "tp_size": 1,
     "regions": [
       {
         "devdax_path": "/dev/dax0.0",
@@ -62,143 +59,155 @@ with the SHA-256 digest of the actual hardware qualification record:
     ]
   },
   "ownership_mode": "equal",
-  "visibility_mode": "x86_clflush_64b_v1",
+  "visibility_mode": "x86_clflushopt_bulk_v1",
   "skip_payload_flush": false
 }
 ```
 
 All participants must agree on participant count, region/epoch, layout, ownership, shared ranges,
-visibility mode and qualification digest. Participant IDs differ; device paths
+and visibility mode. Participant IDs differ; device paths
 may be host-local aliases of the same physical range. Payload flush policy,
 attach memcheck, timeout and logging are host-local settings.
 
+### Required settings
+
+| Setting | Meaning |
+| --- | --- |
+| `region_id` | Operator-assigned name for the shared arena; all participants must match the stored identity. |
+| `region_epoch` | Positive fencing epoch stored in the shared arena; all participants must match. Changing it does not reset existing metadata. |
+| `participant_id` | Unique MP server ID from `0` to `participant_count - 1`; participant 0 initializes unformatted metadata, while peers wait and attach. |
+| `rank_placement` | For 1..8 KV ranks; all device paths, metadata reservations and payload ranges live in `regions`; see [KV rank placement](#kv-rank-placement) |
+
+### Optional settings
+
 | Setting | Default / meaning |
 | --- | --- |
-| `region_id` | Required operator-assigned name for the shared arena; all participants must match the stored identity. |
-| `hardware_qualification_digest` | Required SHA-256 hex digest of the hardware validation record, identical across participants; does not automatically verify DDIO or UC. |
-| `participant_count` | `2`; supports `2` or `4`, one unique ID per MP server |
-| `participant_id` | Required unique MP server ID from `0` to `participant_count - 1`; participant 0 initializes unformatted metadata, while peers wait and attach. |
+| `participant_count` | `2`; sets the maximum number of MP participants sharing the arena. Supports `2` or `4`, with one unique participant ID per MP server. |
 | `ownership_mode` | `equal`; alternatively `participant_0_all` |
 | `buckets_per_level` | `[200003, 200009, 200017, 200023, 200029]`; one to eight positive level sizes |
-| `visibility_mode` | `x86_clflush_64b_v1`; alternatively `x86_clflushopt_bulk_v1` |
-| `skip_payload_flush` | `false`; qualified opt-in to skip STORE and RETRIEVE payload cache maintenance |
-| `memcheck_on_attach` | `false`; opt-in full-index diagnostic scan with all participants quiesced |
+| `visibility_mode` | `x86_clflushopt_bulk_v1` (default): flush/invalidate payload cache lines with CLFLUSHOPT and one SFENCE per batch. `x86_clflush_64b_v1`: use CLFLUSH and MFENCE per payload range. Metadata synchronization is unchanged. With payload maintenance enabled, bulk mode reduces fence overhead and is generally faster for large batches; `skip_payload_flush=true` skips this work in both modes. |
+| `skip_payload_flush` | `false` (default): flush payload after GPU-to-DAX DMA and refresh it before DAX-to-GPU DMA. `true`: skip both operations, reducing CPU cache-maintenance overhead and generally improving effective payload transfer performance; DMA bytes and completion synchronization are unchanged. Recommended `true` to fully utilize the media’s transfer performance once all prerequisites are satisfied, including qualified DDIO non-allocating writes, UC coverage of the entire payload on every host.
+| `reformat` | `false` (default). Set `"reformat": true` in this JSON on participant 0 only to erase existing cache metadata or layout. Ensure that Stop all participants first, then start participant 0 with `"reformat": true` and wait for initialization before starting peers. Active peers are not detected, so user ensure all participants are terminated. |
+| `memcheck_on_attach` | `false` (default). Set to `true` to check metadata integrity before reuse after an abnormal shutdown or when corruption is suspected. Scans the full index while all participants have paused cache operations; does not repair corruption. Success: no dedicated check-result message; attach continues and logs `Device-DAX model payload geometry: ...`. Failure: attach is rejected with `RuntimeError: DAX-Coordinated L1 region requires recovery before attach`; no bucket/slot details are reported. |
 | `per_transfer_logging` | `false`; completed STORE/RETRIEVE bytes, latency and GB/s |
-| `rank_placement` | Required for TP=1..8; all device paths, metadata reservations and payload ranges live in `regions`; see [TP support](#tp-support) |
+| `read_view_cache_max_entries` | `8192`; host-local descriptor cache limit. `0` disables retention without changing payload capacity. |
+| `hardware_qualification_digest` | Optional identifier for an operator-managed hardware qualification record; used to check that a participant references the same record as the shared arena. Does not validate hardware settings. |
 
-- Llama or Qwen3 model names, one homogeneous object group and one runtime
-  `[K/V, layers, tokens, hidden]` layout. Qwen3.5 and other model names
-  outside the allowlist, as well as multiple object groups, are rejected.
-- Explicit `rank_placement.tp_size` supports local TP=1..8 with one
-  shared index and a designated payload slice per rank.
-
-## Model registration and layout
+## Layout registration process
 
 ```text
 Server startup
-  -> DaxCoordinatedL1Client -> payload mmap + GPU registration
+  -> DaxCoordinatedL1Client -> validate DAX region configuration
 REGISTER_KV_CACHE
   -> LMCacheDrivenTransferModule.register_kv_cache()
   -> if storage_manager.uses_dax_coordinated_l1
   -> storage_manager.dax_coordinated_l1_backend.client.initialize_model_layouts()
-  -> resolve model profile and slot geometry -> metadata mmap -> format or attach
+  -> resolve engine KV world size, rank slices and model geometry
+  -> payload mmap + GPU registration -> metadata mmap -> format or attach
   -> stores / reads
 ```
 
-The registered `MemoryLayoutDesc` shape and dtype determine object bytes;
-there is no model-size table. The exact model name, KV world size, chunk size
-and runtime layout bind the profile. Identical re-registration is idempotent;
-a different profile is rejected even if it has the same byte size.
+Participant 0 initializes metadata if it is not already formatted, or explicitly
+reformats it when `reformat=true`.
+Other participants retry attachment on subsequent requests until
+initialization completes.
+
+New participants must register the same model identifier, KV world size,
+chunk size, and tensor layouts as the initializer. Attach also validates
+the metadata format, participant count, region identity, slot geometry,
+ownership, and mapping bounds. Matching values preserve the existing
+state; incompatible metadata is rejected without modification.
+Changes that invalidate the existing layout require all participants
+to stop and the region to be explicitly reformatted.
+
+Storage size is calculated from the tensor shapes and dtypes registered by
+the engine. Compressed KV and sliding-window state are stored according to
+their actual tensor sizes.
+The configured payload regions (payload_offset_bytes, payload_size_GiB) provide the storage space.
+Each region is partitioned into its assigned rank slices; the total number of slices across
+all regions equals the engine-reported KV world size.
+Each slice contains a separate pool for every registered object group.
+Slots have a fixed size within each pool. Group pools in the same
+rank slice have equal slot counts and independent free lists; unused
+capacity cannot be borrowed across pools.
+
+An object group (ObjectGroupInfo, defined by KVLayerGroupsManager) is a set of
+KV tensors registered as one storage and retrieval unit.
+
+For Qwen3 with full attention, the K/V tensors form one object group per KV
+rank. The following example uses one payload region and engine-reported KV
+world size 2 (vLLM TP2, PP1, DCP1). Each rank stores its own KV-head shard;
+each slot holds one chunk's K and V tensors across the registered layers.
 
 ```text
-slot_bytes = align_up(object_bytes, 64)
-rank_slot_count = floor(rank_payload_bytes / slot_bytes)
-equal:             round each rank's count down to a multiple of participant_count; divide equally
-participant_0_all: use all complete slots; nonzero participants own zero
-slot_count = sum(rank_slot_counts)  # TP=1 has one payload slice
+Payload region (payload_offset_bytes, payload_size_GiB)
++------------------------------------------------------------------+
+| KV rank slice 0                                                  |
+|                                                                  |
+|  Object group 0 pool: K + V for KV rank 0                         |
+|  [ slot 0 ][ slot 1 ][ slot 2 ] ... [ slot N-1 ]                   |
+|                                                                  |
++------------------------------------------------------------------+
+| KV rank slice 1                                                  |
+|                                                                  |
+|  Object group 0 pool: K + V for KV rank 1                         |
+|  [ slot 0 ][ slot 1 ][ slot 2 ] ... [ slot N-1 ]                   |
+|                                                                  |
++------------------------------------------------------------------+
+KV world size = 2; each GPU accesses its own KV rank slice.
 ```
 
-DAX-Coordinated L1 validates the participant count, region identity, slot geometry
-and layout compatibility before attaching to existing metadata. Incompatible
-metadata is rejected without modification. Changes that invalidate the existing
-layout require all participants to stop and the region to be explicitly
-reformatted. No live upgrade or automatic recovery is provided.
-The payload is mapped separately. The superblock binds region/epoch, geometry,
-layout and qualification digests; bucket and slot generation links validate
-object identity in both directions.
+For DSV4 Flash-0731 with `separate_object_groups=true`, group 0 contains
+compressed KV and indexer data needed across the cached history; group 1 contains
+sliding-window KV and compressor state needed for the recent window.
 
-Participant 0 formats metadata without the format magic and publishes that magic
-last, after the initialized metadata is visible. Nonzero participants retry attach
-until formatting completes. Payload mappings and GPU registrations remain alive
-across these retries; closing before attach releases them as well. Attachment
-is serialized with model registration and shutdown within each MP,
-so a concurrent retry cannot replace a core that already holds reservations.
-At every TP size, the model-dependent metadata extent must fit the first
-region's reservation before metadata mmap. Existing formatted metadata must match the expected
-profile; incompatible regions are rejected rather than overwritten.
+The following example has one payload region and engine-reported KV world size
+1 (vLLM TP2, PP1, DCP1). Both GPUs read the same stored KV shard:
 
-Attach always validates the superblock magic/version, region/epoch and layout
-contract, participant ownership and mapping bounds. `memcheck_on_attach=true`
-additionally scans all bucket states and bucket/slot links; use it only while
-all participants are quiesced, since concurrent updates can appear inconsistent.
-The default skips this scan to allow attachment during normal traffic. Explicit
-`memcheck()` calls and per-operation state/generation checks remain available.
+```text
+Payload region (payload_offset_bytes, payload_size_GiB)
++------------------------------------------------------------------+
+| KV rank slice 0 (KV world size = 1)                               |
+|                                                                  |
+|  Object group 0 pool: compressed KV + indexer data                |
+|  Full-history data                                               |
+|  [ slot 0 ][ slot 1 ][ slot 2 ] ... [ slot N-1 ]                   |
+|                                                                  |
+|  Object group 1 pool: sliding-window KV + compressor state         |
+|  Recent-window data                                              |
+|  [       slot 0       ][       slot 1       ] ... [ slot N-1 ]     |
+|                                                                  |
+|  Same slot count N; slot sizes differ between groups.             |
++------------------------------------------------------------------+
+```
 
-## TP support
+With `separate_object_groups=false`, these tensors form one object group and
+use one pool within the rank slice.
 
-TP=1 and TP>1 use the same client and lifecycle methods, with one native index
-and one logical slot namespace. Configure rank placement inside the JSON passed
-to `--dax-coordinated-l1-config-json`:
+## KV rank placement
 
-| JSON field | Requirement and behavior |
-| --- | --- |
-| `rank_placement` | Required for local TP=1..8 with PP=1. |
-| `rank_placement.tp_size` | Integer from 1 to 8, checked against the KV world size at registration. Set the engine's tensor parallelism separately. |
-| `rank_placement.regions` | Ordered device paths and payload ranges; 1 to `tp_size` entries. TP=1 has exactly one region. Regions may use disjoint ranges of one device or separate devices. |
-| `regions[0].metadata_offset_bytes` | Required metadata start, including an explicit `0` for the device beginning. |
-| `regions[0].metadata_reservation_bytes` | Required positive, page-aligned reservation size; 1 GiB in these examples. |
-| `regions[].payload_offset_bytes` / `payload_size_GiB` | Required payload start and capacity per region, independent of `--l1-size-gb`. |
+Users who know the physical topology of their memory pool can place
+payload regions on selected devices or address ranges. KV ranks are
+assigned to these regions in round-robin order, distributing rank-specific
+accesses across the configured regions and allowing independent transfers
+to proceed in parallel.
 
-The first region alone supplies both metadata fields. Later regions must omit
-both fields (or use `null`); even a second metadata offset of `0` is rejected.
-This rule also applies when multiple regions name the same device.
+KV world size comes from the engine; configure only physical regions.
+Rank `r` uses `regions[r % len(regions)]`; ranks sharing a region receive
+equal, disjoint whole-GiB slices. Only `regions[0]` declares metadata.
 
-`rank % len(regions)` selects a region; ranks sharing a region receive disjoint,
-equal whole-GiB payload slices. For two 256 GiB regions A and B:
+### Example: two payload regions
 
-| TP | Rank placement |
-| --- | --- |
-| 2 | rank 0 → A (256 GiB); rank 1 → B (256 GiB) |
-| 4 | rank 0/2 → A (128 GiB each); rank 1/3 → B (128 GiB each) |
-
-As in the existing MP key scheme, the same token chunk has the same
-`chunk_hash` across ranks; `ObjectKey.kv_rank` distinguishes each rank's KV
-object. The shared index hashes the complete key, including `kv_rank`.
-
-The client validates the rank encoded by `ObjectKey.ComputeKVRank`. New
-allocations use that rank's free list; reads and deletion follow the
-global slot ID in the shared index. An address table maps slots to local payload
-addresses. Each object stays contiguous; a full slice does not borrow space
-from another rank.
-
-The common index starts at `regions[0].metadata_offset_bytes` and reserves
-`regions[0].metadata_reservation_bytes` once, independent of TP size.
-The homogeneous KV layout determines one common slot size; bucket counts
-cover all ranks together. To assign each rank an explicit offset on one device,
-provide exactly `tp_size` regions: `regions[i]` then belongs to rank `i`.
-This TP=2 example uses two disjoint ranges of `/dev/dax0.0` at offsets
-[30, 94) and [256, 320) GiB. Its no-flush setting assumes the deployment has qualified DDIO
-non-allocating writes and UC coverage for every payload range on all hosts:
+For Qwen3 with PP=1, DCP=1 and one MP server per host, this JSON supports
+TP2 or TP4 (KV world size 2 or 4). The two configurations cannot share the
+same initialized arena; switching between them requires reformatting.
 
 ```json
 {
   "region_id": "lab-shared-range-1",
   "region_epoch": 1,
   "participant_id": 0,
-  "hardware_qualification_digest": "<64 hex characters>",
-  "skip_payload_flush": true,
   "rank_placement": {
-    "tp_size": 2,
     "regions": [
       {
         "devdax_path": "/dev/dax0.0",
@@ -213,43 +222,106 @@ non-allocating writes and UC coverage for every payload range on all hosts:
         "payload_size_GiB": 64
       }
     ]
-  }
+  },
+  "skip_payload_flush": true
 }
 ```
 
-| Rank | Device | Payload offsets (GiB) |
+- `rank_placement`: required; supports KV world size 1..8 with PP=1 and all
+  ranks local to one MP server per host. All ranks and groups share one index.
+- `regions`: 1..KV world size entries. Hosts must identify the same physical
+  ranges; local device paths may differ.
+- `metadata_offset_bytes` / `metadata_reservation_bytes`: here, reserve 1 GiB
+  starting at offset 0. Only the first region declares these fields; omit them
+  or use `null` in later regions. The reservation must be positive, page-aligned,
+  large enough for runtime metadata, and disjoint from payload.
+- `payload_offset_bytes` / `payload_size_GiB`: here, allocate 64 GiB per region
+  starting at 30 GiB and 256 GiB, independently of `--l1-size-gb`.
+  [Ownership](#ownership) applies within each rank slice.
+
+Both regions are on `/dev/dax0.0`. For TP1, remove the second region from
+the JSON, leaving 64 GiB total. TP2 and TP4 use both regions (128 GiB total).
+The following allocation is before participant ownership is applied:
+
+| Qwen3 configuration | Region 0: [30, 94) GiB | Region 1: [256, 320) GiB |
 | --- | --- | --- |
-| 0 | `/dev/dax0.0` | [30, 94) |
-| 1 | `/dev/dax0.0` | [256, 320) |
+| TP1 / KV world size 1 | rank 0: 64 GiB | Remove from JSON |
+| TP2 / KV world size 2 | rank 0: 64 GiB | rank 1: 64 GiB |
+| TP4 / KV world size 4 | rank 0: [30, 62), rank 2: [62, 94); 32 GiB each | rank 1: [256, 288), rank 3: [288, 320); 32 GiB each |
 
-Each rank receives 64 GiB (128 GiB total) before participant ownership is applied. Only the
-first entry declares metadata; repeating the device path does not create
-additional metadata arenas. Replace the qualification placeholder for the
-deployment.
+### Example: DSV4 TP2 with one KV rank
 
-The metadata reservation is `[metadata_offset_bytes,
-metadata_offset_bytes + metadata_reservation_bytes)` on the first device.
-No payload may overlap it. Only the device-aligned, model-dependent metadata
-size is mapped and initialized, not the entire reservation.
+Use two hosts, each with two GPUs and one MP server, running the same model
+revision, runtime and LMCache source. TP=2, PP=1 and DCP=1 give KV world size 1.
 
-For existing JSON, move the top-level `devdax_path`, `metadata_offset_bytes`,
-`payload_offset_bytes` and `payload_size_GiB` into the region configuration.
-Move `rank_placement.metadata_reservation_bytes` into `regions[0]` as well.
-Old locations are rejected rather than silently ignored. An unchanged TP>1
-placement retains its v1 layout digest. Former TP=1 arenas require fresh ranges
-or an offline reset because TP=1 now includes the placement digest too.
+Save the following as `dax.json` on host A, using ranges reserved for your
+deployment. `skip_payload_flush=true` requires the
+[no-flush prerequisites](#cross-host-kv-cache-coherency).
 
-Each worker transfers through its existing MP GPU and CUDA stream to its slice;
-CUDA device ordinals need not equal TP ranks. Portable CUDA registration and the
-STORE/RETRIEVE completion ordering below apply to every rank. Shutdown drains all
-visible CUDA devices before releasing reservations and mappings.
+```json
+{
+  "region_id": "dsv4-kv1-example",
+  "region_epoch": 1,
+  "participant_id": 0,
+  "participant_count": 2,
+  "rank_placement": {
+    "regions": [
+      {
+        "devdax_path": "/dev/dax0.0",
+        "metadata_offset_bytes": 5368709120,
+        "metadata_reservation_bytes": 536870912,
+        "payload_offset_bytes": 118111600640,
+        "payload_size_GiB": 8
+      }
+    ]
+  },
+  "skip_payload_flush": true
+}
+```
 
-The common [host ownership policy](#ownership) applies
-within each rank slice. All TP ranks must be local to one LMCache server per
-host, with PP=1. Both hosts must agree on TP size, model layout and physical
-placement; local device paths may differ. The persistent layout digest rejects
-incompatible configurations. Reconfiguration requires fresh reserved ranges or
-an operator-managed reset.
+On host B, copy the same JSON and change only `participant_id` to `1` (the
+local device path may differ if it identifies the same shared range).
+
+Start one MP server per host in its own terminal, then start A's vLLM engine
+before B's so participant 0 can register the layout and format fresh metadata.
+Cross-host cache sharing uses shared DAX metadata and payload, not these network
+ports.
+
+```bash
+python -m lmcache.cli.main server \
+  --host 127.0.0.1 --port 18820 \
+  --http-host 127.0.0.1 --http-port 19820 \
+  --chunk-size 256 --l1-size-gb 8 --no-l1-use-lazy \
+  --shm-name '' --eviction-policy noop \
+  --l1-devdax-path /dev/dax0.0 \
+  --separate-object-groups \
+  --dax-coordinated-l1-config-json "$(cat dax.json)"
+```
+
+In a second terminal on each host, set `DSV4_MODEL_DIR` to the local checkpoint
+directory. Use the same model path inside both runtimes: the MP connector uses
+the model name/path for cache identity. `--served-model-name` sets the API model
+name and does not change cache identity.
+
+```bash
+export DSV4_MODEL_DIR=/models/DeepSeek-V4-Flash-0731
+vllm serve "$DSV4_MODEL_DIR" \
+  --served-model-name deepseek-ai/DeepSeek-V4-Flash-0731 \
+  --host 127.0.0.1 --port 19420 \
+  --tensor-parallel-size 2 --enable-expert-parallel --disable-custom-all-reduce \
+  --kv-cache-dtype fp8_ds_mla \
+  --trust-remote-code --block-size 256 \
+  --max-model-len 8192 --max-num-seqs 1 --max-num-batched-tokens 1024 \
+  --gpu-memory-utilization 0.95 \
+  --enforce-eager --seed 42 --no-enable-prefix-caching \
+  --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_connector_extra_config":{"lmcache.mp.host":"tcp://127.0.0.1","lmcache.mp.port":18820,"lmcache.mp.mq_timeout":1800,"lmcache.mp.mp_transfer_mode":"lmcache_driven"}}'
+```
+
+For remote reuse, send identical prompt token IDs and `cache_salt` to A and B,
+waiting for A's STORE completion before B's request. With 1,056 input tokens,
+expect 1,024 external-cache hit tokens on B and zero GPU prefix-cache hits.
+Output-token equivalence has not fully passed validation; mismatches remain
+unresolved, so cache hits alone do not establish inference correctness.
 
 ## Cross-Host KV Cache Coherency
 
@@ -369,7 +441,7 @@ Ownership in this backend defines where an MP participant may reclaim KV Cache p
 
 Participants are MP processes, each with a unique participant ID. `equal`
 divides allocation rights among all participants; `participant_0_all` gives
-participant 0 all allocation rights. With TP enabled, this policy is applied within each rank slice. In both modes, all participants can read objects in peer-owned slots under the
+participant 0 all allocation rights. This policy is applied within each KV rank slice. In both modes, all participants can read objects in peer-owned slots under the
 shared reader protocol.
 
 For example, with `participant_count=4` and `ownership_mode="equal"`, 128 GiB of usable slot capacity gives each MP participant a 32 GiB allocation budget. This division stores no KV data by itself. With `participant_0_all`, nonzero participants can read
@@ -398,20 +470,12 @@ runtime allocation is limited to the usable capacity of complete slots.
 
 ### Current limitations
 
-- Hardware testing exercised Qwen3-8B with FP8 KV at TP=1. Other Llama/Qwen3
-  models meeting the [same layout constraints](#activation-and-configuration) are
-  expected to work, but were not hardware-validated in these experiments.
-  Each arena supports one model profile and homogeneous KV object group;
-  changing the registered model or layout requires a fresh or explicitly
-  reformatted arena.
-- Up to four MP participants, with `participant_count` configured as either 2 or 4.
-  TP=1 or configured local TP=2..8 with PP=1.
-  All TP ranks on a host must use one LMCache server.
-- Allocation is limited to each participant's designated slots for the target
-  TP rank. Free capacity belonging to another participant or rank cannot be
-  borrowed when that slice is full.
-- Cache reuse covers complete chunks only. A trailing partial chunk must be
-  computed by the serving engine.
+- Each arena supports one model/layout profile with an ordered list of object groups.
+- Now up to 4 MP participants are supported.
+  KV world size must be 1..8 with PP=1.
+- Allocation is limited to each participant's defined slots.
+  Free capacity belonging to another participant cannot be borrowed
+  when that slice is full.
 - L2 adapters, hybrid DRAM overflow, GDS L1, lazy allocation and POSIX SHM
   cannot be combined with this backend. Runtime L2 attachment is also rejected.
 - Automatic eviction, force deletion and global `clear()` are unsupported.
@@ -429,7 +493,7 @@ controller handles L2 only; shared DAX L1 eviction remains a separate extension.
 This PR defers those reporting changes to minimize common-code modifications: it retains per-MP owner capacity declarations and L1 object events with `shared=False`. A follow-up PR would be updating the common capacity and event reporting paths together, with capacity and visibility.
 
 Repository tests cover opt-in builds, configuration/model geometry, native
-layout/lifecycle/contention, TP routing and mocked device-range/CUDA-registration
+layout/lifecycle/contention, KV rank routing and mocked device-range/CUDA-registration
 failures. They are in `tests/v1/distributed/test_dax_coordinated_l1.py` and
 `tests/v1/distributed/test_dax_coordinated_l1_native.py`.
 Device identity and CUDA registration are mocked; native tests use shared

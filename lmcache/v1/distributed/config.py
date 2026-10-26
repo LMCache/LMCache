@@ -239,8 +239,8 @@ class DaxCoordinatedL1Config:
     participant_id: int
     """Unique participant ID in [0, participant_count)."""
 
-    hardware_qualification_digest: str
-    """Hex SHA-256 of the hardware qualification record."""
+    hardware_qualification_digest: str | None = None
+    """Optional nonzero SHA-256 record identifier; None skips its attach check."""
 
     participant_count: int = 2
     """Shared region participants: 2 or 4, using a Peterson tournament."""
@@ -250,6 +250,12 @@ class DaxCoordinatedL1Config:
     Requires DDIO non-allocating writes, UC payload memory on every host,
     DMA-only payload use, cleared pre-existing cache lines, and qualified
     cross-host completion ordering; none is configured or verified here.
+    """
+
+    reformat: bool = False
+    """Reformat once per client after runtime registration, participant 0 only.
+    All participants must be stopped before restarting with this option.
+    Leaving it enabled reformats again on the next process start.
     """
 
     memcheck_on_attach: bool = False
@@ -264,10 +270,11 @@ class DaxCoordinatedL1Config:
     """Bucket count for each lookup level, included in the layout digest."""
 
     visibility_mode: Literal["x86_clflush_64b_v1", "x86_clflushopt_bulk_v1"] = (
-        "x86_clflush_64b_v1"
+        "x86_clflushopt_bulk_v1"
     )
-    """Qualified visibility contract.
-    Bulk mode uses CLFLUSHOPT for payload lines followed by one SFENCE.
+    """Persisted visibility contract; legacy arenas require their original mode.
+    The default requires CLFLUSHOPT on every participant CPU. Bulk mode flushes
+    payload lines with CLFLUSHOPT followed by one SFENCE per batch.
     """
 
     per_transfer_logging: bool = False
@@ -301,10 +308,13 @@ class DaxCoordinatedL1Config:
         for name in (
             "skip_payload_flush",
             "memcheck_on_attach",
+            "reformat",
             "per_transfer_logging",
         ):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"DAX-Coordinated L1 {name} must be a boolean")
+        if self.reformat and self.participant_id != 0:
+            raise ValueError("DAX-Coordinated L1 reformat requires participant 0")
         if (
             type(self.read_view_cache_max_entries) is not int
             or self.read_view_cache_max_entries < 0
@@ -338,16 +348,18 @@ class DaxCoordinatedL1Config:
             "x86_clflushopt_bulk_v1",
         ):
             raise ValueError("unsupported DAX-Coordinated L1 visibility mode")
-        if len(self.hardware_qualification_digest) != 64:
-            raise ValueError(
-                "DAX-Coordinated L1 hardware qualification digest must be SHA-256 hex"
-            )
-        try:
-            bytes.fromhex(self.hardware_qualification_digest)
-        except ValueError as error:
-            raise ValueError(
-                "DAX-Coordinated L1 hardware qualification digest is not hex"
-            ) from error
+        digest = self.hardware_qualification_digest
+        if digest is not None:
+            if not isinstance(digest, str) or len(digest) != 64:
+                raise ValueError("hardware qualification digest must be SHA-256 hex")
+            try:
+                decoded = bytes.fromhex(digest)
+            except ValueError as error:
+                raise ValueError("hardware qualification digest is not hex") from error
+            if len(decoded) != 32 or decoded == bytes(32):
+                raise ValueError(
+                    "hardware qualification digest must be nonzero SHA-256 hex"
+                )
 
     def validate_composition(
         self,
@@ -415,7 +427,7 @@ class DaxCoordinatedL1Config:
     @property
     def payload_size_bytes(self) -> int:
         """Return the configured binary-GiB capacity in bytes."""
-        return sum(p.payload_size_GiB << 30 for p in self.rank_placement.placements())
+        return sum(r.payload_size_GiB << 30 for r in self.rank_placement.regions)
 
     @property
     def owner_payload_size_bytes(self) -> int:

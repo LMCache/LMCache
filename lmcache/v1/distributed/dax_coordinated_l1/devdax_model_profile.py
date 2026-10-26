@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""PR1 model admission and fixed-slot sizing for DAX-Coordinated L1."""
+"""Runtime model layouts and fixed-slot sizing for DAX-Coordinated L1."""
 
 # Standard
 from dataclasses import dataclass
@@ -23,7 +23,7 @@ _LLAMA_MODEL_PATTERN = re.compile(
 
 @dataclass(frozen=True)
 class DevDaxModelProfile:
-    """One admitted homogeneous model layout for the PR1 fixed-slot arena."""
+    """Registered layouts with one fixed-stride pool per object group."""
 
     model_name: str
     model_family: str
@@ -32,20 +32,22 @@ class DevDaxModelProfile:
     payload_bytes: int
     layout_digest: bytes
     dtype_names: tuple[str, ...]
+    group_payload_bytes: tuple[int, ...]
 
 
 def classify_devdax_model_family(model_name: str) -> str:
-    """Return the supported PR1 family for an exact serving model name.
+    """Return a diagnostic family label for an exact serving model name.
 
     Args:
         model_name: Exact model ID or local model path supplied by the serving
             engine.
 
     Returns:
-        ``"llama"`` or ``"qwen3"``.
+        ``"llama"``, ``"qwen3"``, or ``"runtime"`` for other names.
 
     Raises:
-        ValueError: If the name is empty or is outside the PR1 allowlist.
+        ValueError: If the name is empty. Layout admission does not depend
+            on this label.
     """
     normalized = model_name.strip()
     if not normalized:
@@ -56,10 +58,7 @@ def classify_devdax_model_family(model_name: str) -> str:
         return "qwen3"
     if any(_LLAMA_MODEL_PATTERN.search(segment) for segment in segments):
         return "llama"
-    raise ValueError(
-        "DAX-Coordinated L1 PR1 supports only Llama and Qwen3 model names; "
-        f"got {model_name!r}"
-    )
+    return "runtime"
 
 
 def resolve_devdax_model_profile(
@@ -67,14 +66,12 @@ def resolve_devdax_model_profile(
     kv_world_size: int,
     chunk_size: int,
     layout_descs: list[MemoryLayoutDesc],
-    *,
-    expected_kv_world_size: int = 1,
 ) -> DevDaxModelProfile:
-    """Validate and size one runtime-registered PR1 model layout.
+    """Validate runtime object groups and size their payload pools.
 
     The serving engine and LMCache remain the sources of truth for chunk size
     and dtype. Device-DAX does not load model configuration or maintain a table
-    of model-size constants: it sizes the fixed slot from the complete runtime
+    of model-size constants: it sizes each group's fixed slot from its runtime
     ``MemoryLayoutDesc`` registered for the GPU cache.
 
     Args:
@@ -83,81 +80,65 @@ def resolve_devdax_model_profile(
             LMCache server.
         chunk_size: LMCache tokens per object.
         layout_descs: Runtime layouts, one per LMCache object group.
-        expected_kv_world_size: Explicit local TP size from the placement
-            configuration. Defaults to the existing TP=1 contract.
 
     Returns:
-        An immutable model profile containing the complete object byte size
+        An immutable model profile containing the largest object byte size
         and a stable cross-host layout digest.
 
     Raises:
-        ValueError: If the model family, rank count, chunk size, object-group
-            count, or runtime layout is outside the PR1 contract.
+        ValueError: If the rank count, chunk size, object groups, or runtime layout
+            cannot be represented safely by the fixed-slot arena.
     """
     family = classify_devdax_model_family(model_name)
-    if not 1 <= expected_kv_world_size <= 8:
-        raise ValueError("DAX-Coordinated L1 supports local TP=1..8/PP=1")
-    if kv_world_size != expected_kv_world_size:
-        rank_description = (
-            "one KV rank"
-            if expected_kv_world_size == 1
-            else f"{expected_kv_world_size} KV ranks"
-        )
-        raise ValueError(
-            "DAX-Coordinated L1 requires "
-            f"{rank_description} "
-            f"(TP={expected_kv_world_size}/PP=1 with one LMCache server); "
-            f"got {kv_world_size}"
-        )
+    if (
+        isinstance(kv_world_size, bool)
+        or not isinstance(kv_world_size, int)
+        or not 1 <= kv_world_size <= 8
+    ):
+        raise ValueError("DAX-Coordinated L1 supports kv_world_size=1..8")
     if chunk_size <= 0:
         raise ValueError("DAX-Coordinated L1 chunk_size must be positive")
-    if len(layout_descs) != 1:
-        raise ValueError(
-            "DAX-Coordinated L1 PR1 requires one homogeneous object group; "
-            f"got {len(layout_descs)}"
-        )
+    if not layout_descs:
+        raise ValueError("DAX-Coordinated L1 requires at least one object group")
 
-    layout = layout_descs[0]
-    if not layout.shapes or len(layout.shapes) != len(layout.dtypes):
-        raise ValueError("DAX-Coordinated L1 received an invalid model layout")
-    if len(layout.shapes) != 1 or len(layout.shapes[0]) != 4:
-        raise ValueError(
-            "DAX-Coordinated L1 PR1 requires one standard "
-            "[K/V, layers, tokens, hidden] KV layout"
-        )
-    shape = layout.shapes[0]
-    # vLLM can expose the same complete KV payload in either of two runtime
-    # representations. Older layouts use kv_size=2 with the per-K/V hidden
-    # dimension, while current NHD layouts use kv_size=1 and fold K/V into a
-    # doubled hidden dimension. The runtime MemoryLayoutDesc remains the byte
-    # sizing authority, so admit both representations and bind their exact
-    # shape into the persistent layout digest.
-    if shape[0] not in (1, 2):
-        raise ValueError(
-            "DAX-Coordinated L1 PR1 requires a complete packed or separate "
-            f"K/V payload (layout dimension 0 must be 1 or 2); got {shape[0]}"
-        )
-    if shape[2] != chunk_size:
-        raise ValueError(
-            "DAX-Coordinated L1 runtime layout token dimension must match "
-            f"LMCache chunk_size={chunk_size}; got {shape[2]}"
-        )
-    if any(dimension <= 0 for dimension in shape):
-        raise ValueError("DAX-Coordinated L1 model layout dimensions must be positive")
-    payload_bytes = get_size_bytes(layout.shapes, layout.dtypes)
-    if payload_bytes <= 0:
-        raise ValueError("DAX-Coordinated L1 model payload must be positive")
-    # Native reservation arguments and on-media payload lengths are uint32_t.
-    # Reject before mapping or formatting an arena that cannot serve writes.
-    if payload_bytes > (1 << 32) - 1:
-        raise ValueError(
-            "DAX-Coordinated L1 model payload must fit the native "
-            f"uint32 byte length (maximum {(1 << 32) - 1}); got {payload_bytes}"
-        )
+    group_payload_bytes = []
+    for layout in layout_descs:
+        if not layout.shapes or len(layout.shapes) != len(layout.dtypes):
+            raise ValueError("DAX-Coordinated L1 received an invalid model layout")
+        offset = 0
+        for shape, dtype in zip(layout.shapes, layout.dtypes, strict=True):
+            if len(shape) != 4 or shape[0] not in (1, 2):
+                raise ValueError(
+                    "DAX-Coordinated L1 requires [K/V, layers, slots, hidden] "
+                    "layouts with dimension 0 equal to 1 or 2"
+                )
+            if any(dimension <= 0 for dimension in shape):
+                raise ValueError(
+                    "DAX-Coordinated L1 model layout dimensions must be positive"
+                )
+            # Slots can be compressed or windowed; they need not equal tokens.
+            # TensorMemoryObj concatenates bytes without inter-tensor padding.
+            if offset % dtype.itemsize:
+                raise ValueError(
+                    "DAX-Coordinated L1 tensor offset is not dtype aligned"
+                )
+            offset += get_size_bytes([shape], [dtype])
+        # Native reservation arguments and on-media lengths are uint32_t.
+        if offset > (1 << 32) - 1:
+            raise ValueError(
+                "DAX-Coordinated L1 model payload must fit the native "
+                f"uint32 byte length (maximum {(1 << 32) - 1}); got {offset}"
+            )
+        group_payload_bytes.append(offset)
 
-    dtype_names = tuple(str(dtype) for dtype in layout.dtypes)
+    # Keep the maximum for diagnostics; geometry uses every group's size.
+    payload_bytes = max(group_payload_bytes)
+    dtype_names = tuple(
+        str(dtype) for layout in layout_descs for dtype in layout.dtypes
+    )
     canonical = {
-        "schema": 1,
+        "schema": 2,
+        "allocation": "group_fixed_slot_pools_v1",
         "model_name": model_name,
         "model_family": family,
         "kv_world_size": kv_world_size,
@@ -165,8 +146,9 @@ def resolve_devdax_model_profile(
         "layouts": [
             {
                 "shapes": [list(shape) for shape in layout.shapes],
-                "dtypes": list(dtype_names),
+                "dtypes": [str(dtype) for dtype in layout.dtypes],
             }
+            for layout in layout_descs
         ],
     }
     layout_digest = sha256(
@@ -180,4 +162,5 @@ def resolve_devdax_model_profile(
         payload_bytes=payload_bytes,
         layout_digest=layout_digest,
         dtype_names=dtype_names,
+        group_payload_bytes=tuple(group_payload_bytes),
     )

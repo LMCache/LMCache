@@ -63,6 +63,7 @@ from lmcache.v1.distributed.dax_coordinated_l1.devdax_l1_backend import (
 )
 from lmcache.v1.distributed.dax_coordinated_l1.devdax_layout import (
     DaxCoordinatedL1RankPlacementConfig,
+    DevDaxRankPlacement,
     DevDaxTPRegion,
     resolve_payload_geometry,
     resolve_payload_mappings,
@@ -126,7 +127,7 @@ def _config_values(**overrides: object) -> dict[str, object]:
         if name in overrides:
             region[name] = overrides.pop(name)
     values: dict[str, object] = {
-        "rank_placement": {"tp_size": 1, "regions": [region]},
+        "rank_placement": {"regions": [region]},
         "region_id": "qualification-range",
         "region_epoch": 1,
         "participant_id": 0,
@@ -182,7 +183,6 @@ def _configs(payload_offset: int = 4096, payload_gib: int = 1) -> tuple:
     return (
         DaxCoordinatedL1Config(
             rank_placement=DaxCoordinatedL1RankPlacementConfig(
-                1,
                 (
                     DevDaxTPRegion(
                         "/dev/null",
@@ -213,10 +213,10 @@ def _emulate_mapping(monkeypatch: pytest.MonkeyPatch, size: int) -> None:
     monkeypatch.setattr(
         devdax_region,
         "resolve_payload_mappings",
-        lambda config: [
+        lambda placement: [
             devdax_region.DevDaxPayloadMapping(
-                config.devdax_path,
-                int(config.rank_placement.regions[0].payload_offset_bytes),
+                placement.regions[0].devdax_path,
+                int(placement.regions[0].payload_offset_bytes),
                 size,
             )
         ],
@@ -290,9 +290,9 @@ def _payload_values(
         results = {}
 
 
-def _rank_placement(tp_size: int = 4) -> DaxCoordinatedL1RankPlacementConfig:
-    return DaxCoordinatedL1RankPlacementConfig(
-        tp_size,
+def _rank_placement(kv_world_size: int = 4) -> DevDaxRankPlacement:
+    return DevDaxRankPlacement(
+        kv_world_size,
         (
             DevDaxTPRegion(
                 "/dev/dax0.0",
@@ -302,13 +302,13 @@ def _rank_placement(tp_size: int = 4) -> DaxCoordinatedL1RankPlacementConfig:
                 metadata_reservation_bytes=_GIB,
             ),
             DevDaxTPRegion("/dev/dax1.0", 4 * _GIB, 2),
-        )[: min(tp_size, 2)],
+        )[: min(kv_world_size, 2)],
     )
 
 
 def _with_metadata_reservation(
-    placement: DaxCoordinatedL1RankPlacementConfig, size: int
-) -> DaxCoordinatedL1RankPlacementConfig:
+    placement: DevDaxRankPlacement, size: int
+) -> DevDaxRankPlacement:
     return replace(
         placement,
         regions=(
@@ -319,7 +319,7 @@ def _with_metadata_reservation(
 
 
 def _config(
-    rank_placement: DaxCoordinatedL1RankPlacementConfig,
+    rank_placement: DevDaxRankPlacement,
     participant: int = 0,
     **kwargs: Any,
 ) -> DaxCoordinatedL1Config:
@@ -329,7 +329,7 @@ def _config(
         participant_id=participant,
         hardware_qualification_digest="ab" * 32,
         buckets_per_level=[17, 19, 23],
-        rank_placement=rank_placement,
+        rank_placement=DaxCoordinatedL1RankPlacementConfig(rank_placement.regions),
         **kwargs,
     )
 
@@ -348,6 +348,26 @@ def _client(config: DaxCoordinatedL1Config) -> DaxCoordinatedL1Client:
 
 def _layout() -> MemoryLayoutDesc:
     return MemoryLayoutDesc([torch.Size([2, 1, 256, 1024])], [torch.bfloat16])
+
+
+def _flash_layouts(separate: bool) -> list[MemoryLayoutDesc]:
+    """Runtime descriptor fixture, without allocating model weights or KV pools."""
+    shapes = [
+        [1, 22, 128, 584],
+        [1, 21, 128, 584],
+        [1, 21, 64, 584],
+        [1, 21, 8, 2048],
+        [1, 21, 64, 132],
+        [1, 21, 8, 512],
+        [1, 20, 2, 584],
+        [1, 20, 128, 1024],
+    ]
+    dtypes = [torch.float32 if i in (3, 5, 7) else torch.uint8 for i in range(8)]
+    groups = [[0, 1, 3, 5, 7], [2, 4, 6]] if separate else [list(range(8))]
+    return [
+        MemoryLayoutDesc([torch.Size(shapes[i]) for i in ids], [dtypes[i] for i in ids])
+        for ids in groups
+    ]
 
 
 def _key(rank: int, world: int = 4, chunk: int = 1) -> ObjectKey:
@@ -596,7 +616,9 @@ def test_invalid_offsets_are_rejected_at_configuration_creation(
         )
 
 
-@pytest.mark.parametrize("field_name", ["skip_payload_flush", "memcheck_on_attach"])
+@pytest.mark.parametrize(
+    "field_name", ["skip_payload_flush", "memcheck_on_attach", "reformat"]
+)
 def test_host_local_policies_are_explicit_opt_in_booleans(field_name: str) -> None:
     """Payload flush bypass and attach diagnostics require explicit opt-in."""
     default = _base_config()
@@ -714,7 +736,7 @@ def test_oversized_model_is_rejected_before_metadata_mapping(
     assert not client.initialized
     region.map_metadata.assert_not_called()
     client.close()
-    region.close.assert_called_once()
+    region.close.assert_not_called()
 
 
 def test_storage_manager_exposes_dax_backend_without_binding_model(
@@ -871,7 +893,11 @@ def test_device_dax_payload_range_overflow_is_rejected_before_mmap(
     )
 
     with pytest.raises(ValueError, match="payload offset range exceeds"):
-        DaxCoordinatedL1Region(dax_coordinated_l1_config, memory_config)
+        DaxCoordinatedL1Region(
+            dax_coordinated_l1_config,
+            memory_config,
+            dax_coordinated_l1_config.rank_placement.resolve(1),
+        )
     assert mmap_calls == []
 
 
@@ -885,7 +911,11 @@ def test_gpu_dma_registration_fails_closed_without_pageable_fallback(
 
     _registration(monkeypatch, calls, [], lambda _: False)
     with pytest.raises(RuntimeError, match="refusing pageable or CPU-staged"):
-        DaxCoordinatedL1Region(dax_coordinated_l1_config, memory_config)
+        DaxCoordinatedL1Region(
+            dax_coordinated_l1_config,
+            memory_config,
+            dax_coordinated_l1_config.rank_placement.resolve(1),
+        )
     assert len(calls) == 1
     assert calls[0][0] != 0
     assert calls[0][1] == 4096
@@ -893,7 +923,11 @@ def test_gpu_dma_registration_fails_closed_without_pageable_fallback(
     unpinned: list[int] = []
 
     _registration(monkeypatch, calls, unpinned)
-    region = DaxCoordinatedL1Region(dax_coordinated_l1_config, memory_config)
+    region = DaxCoordinatedL1Region(
+        dax_coordinated_l1_config,
+        memory_config,
+        dax_coordinated_l1_config.rank_placement.resolve(1),
+    )
     with closing(region):
         assert region.cuda_registered
         pointer, size, alignment = region.get_memory_desc()
@@ -929,7 +963,11 @@ def test_gpu_dma_registration_is_segmented_and_rolls_back(
     unpinned: list[int] = []
 
     _registration(monkeypatch, pinned, unpinned)
-    region = DaxCoordinatedL1Region(dax_coordinated_l1_config, memory_config)
+    region = DaxCoordinatedL1Region(
+        dax_coordinated_l1_config,
+        memory_config,
+        dax_coordinated_l1_config.rank_placement.resolve(1),
+    )
     with closing(region):
         assert region.cuda_registered
         base, size, _alignment = region.get_memory_desc()
@@ -946,7 +984,11 @@ def test_gpu_dma_registration_is_segmented_and_rolls_back(
 
     _registration(monkeypatch, pinned, unpinned, lambda n: n != 2)
     with pytest.raises(RuntimeError, match="segment offset"):
-        DaxCoordinatedL1Region(dax_coordinated_l1_config, memory_config)
+        DaxCoordinatedL1Region(
+            dax_coordinated_l1_config,
+            memory_config,
+            dax_coordinated_l1_config.rank_placement.resolve(1),
+        )
     assert unpinned == [pinned[0][0]]
 
 
@@ -959,7 +1001,9 @@ def test_metadata_binding_reuses_registered_payload_and_rejects_overlap(
     pinned: list[tuple[int, int]] = []
     unpinned: list[int] = []
     _registration(monkeypatch, pinned, unpinned)
-    with closing(DaxCoordinatedL1Region(config, memory)) as region:
+    with closing(
+        DaxCoordinatedL1Region(config, memory, config.rank_placement.resolve(1))
+    ) as region:
         descriptor = region.get_memory_desc()
         assert region.size == 0
         with pytest.raises(ValueError, match="exceeds metadata_reservation_bytes"):
@@ -975,15 +1019,15 @@ def test_metadata_binding_reuses_registered_payload_and_rejects_overlap(
     assert unpinned == [descriptor[0]]
 
 
-@pytest.mark.parametrize("tp_size", [1, 3, 8])
+@pytest.mark.parametrize("kv_world_size", [1, 3, 8])
 @pytest.mark.parametrize("participants", [2, 4])
 @pytest.mark.parametrize("ownership", ["equal", "participant_0_all"])
 def test_slot_ranges_partition_rank_mappings(
-    tp_size: int, participants: int, ownership: str
+    kv_world_size: int, participants: int, ownership: str
 ) -> None:
     """All MPs agree on disjoint physical ranges and owner-contiguous slot IDs."""
-    rank_placement = DaxCoordinatedL1RankPlacementConfig(
-        tp_size,
+    rank_placement = DevDaxRankPlacement(
+        kv_world_size,
         (
             DevDaxTPRegion(
                 "/dev/dax0.0",
@@ -993,7 +1037,7 @@ def test_slot_ranges_partition_rank_mappings(
                 metadata_reservation_bytes=_GIB,
             ),
             DevDaxTPRegion("/dev/dax1.0", 4 * _GIB, 7),
-        )[: min(tp_size, 2)],
+        )[: min(kv_world_size, 2)],
     )
     configs = [
         _config(
@@ -1004,9 +1048,11 @@ def test_slot_ranges_partition_rank_mappings(
         )
         for pid in range(participants)
     ]
-    geometries = [resolve_payload_geometry(config, 192) for config in configs]
+    geometries = [
+        resolve_payload_geometry(config, 192, rank_placement) for config in configs
+    ]
     geometry = geometries[0]
-    mappings = resolve_payload_mappings(configs[0])
+    mappings = resolve_payload_mappings(rank_placement)
     owners = participants if ownership == "equal" else 1
     owner_slots = geometry.payload_slot_count // owners
     assert geometry.payload_slot_count % owners == 0
@@ -1017,15 +1063,15 @@ def test_slot_ranges_partition_rank_mappings(
         owner_slots if pid < owners else 0 for pid in range(participants)
     ]
     assert [config.owner_payload_size_bytes for config in configs] == [
-        sum(mapping.size_bytes for mapping in mappings) // owners if pid < owners else 0
+        configs[pid].payload_size_bytes // owners if pid < owners else 0
         for pid in range(participants)
     ]
-    assert len(mappings) == tp_size
+    assert len(mappings) == kv_world_size
     assert all(g.slot_ranges == geometry.slot_ranges for g in geometries)
     assert geometry.participant_0_slot_count == geometry.owner_slot_count
     assert sum(g.owner_slot_count for g in geometries) == geometry.payload_slot_count
     cursor = 0
-    physical_ends = [0] * tp_size
+    physical_ends = [0] * kv_world_size
     for slots in geometry.slot_ranges:
         assert slots.first_slot == cursor
         assert slots.mapping_offset_bytes == physical_ends[slots.rank]
@@ -1114,12 +1160,12 @@ def test_each_rank_gets_one_disjoint_contiguous_slice(
 
 def test_metadata_reservation_config_preserves_existing_arena_digest() -> None:
     """The renamed JSON key keeps the reservation and shared v1 identity."""
-    values = asdict(_rank_placement())
+    values = {"regions": asdict(_rank_placement())["regions"]}
     values["regions"][0]["metadata_reservation_bytes"] = "0x40000000"
     config_values = asdict(_config(_rank_placement()))
     config_values["rank_placement"] = values
     config = DaxCoordinatedL1Config.from_json(json.dumps(config_values))
-    rank_placement = config.rank_placement
+    rank_placement = config.rank_placement.resolve(4)
     assert rank_placement is not None
     assert rank_placement.regions[0].metadata_reservation_bytes == _GIB
     # Digest from the same placement before the configuration field was renamed.
@@ -1136,7 +1182,7 @@ def test_metadata_reservation_config_preserves_existing_arena_digest() -> None:
 @pytest.mark.parametrize("region_count", [1, 2])
 def test_only_first_region_needs_metadata_offset(region_count: int) -> None:
     """Payload-only regions omit the offset; zero is an explicit valid first offset."""
-    values = asdict(_rank_placement())
+    values = {"regions": asdict(_rank_placement())["regions"]}
     values["regions"] = list(values["regions"][:region_count])
     values["regions"][0]["payload_size_GiB"] = 4
     for region in values["regions"][1:]:
@@ -1160,7 +1206,7 @@ def test_only_first_region_needs_metadata_offset(region_count: int) -> None:
 def test_first_region_requires_explicit_metadata_settings(
     field_name: str, omit: bool
 ) -> None:
-    values = asdict(_rank_placement())
+    values = {"regions": asdict(_rank_placement())["regions"]}
     if omit:
         values["regions"][0].pop(field_name)
     else:
@@ -1175,7 +1221,7 @@ def test_first_region_requires_explicit_metadata_settings(
 def test_later_region_rejects_metadata_offset(
     offset: int | str, region_index: int
 ) -> None:
-    values = asdict(_rank_placement())
+    values = {"regions": asdict(_rank_placement())["regions"]}
     values["regions"] = list(values["regions"])
     values["regions"].append(asdict(DevDaxTPRegion("/dev/dax2.0", 4 * _GIB, 2)))
     values["regions"][region_index]["metadata_offset_bytes"] = offset
@@ -1231,7 +1277,7 @@ def test_removed_top_level_placement_fields_are_rejected(field_name: str) -> Non
 
 
 def test_documented_configs_parse_and_match_l1_device() -> None:
-    """Both complete JSON examples remain valid public CLI configurations."""
+    """Complete JSON examples remain valid regardless of documentation order."""
     doc = Path(__file__).resolve().parents[3] / (
         "docs/design/v1/distributed/dax_coordinated_l1/dax-coordinated-l1.md"
     )
@@ -1249,8 +1295,8 @@ def test_documented_configs_parse_and_match_l1_device() -> None:
             ]
         )
         assert parsed.l1_manager_config.dax_coordinated_l1_config == config
-        worlds.append(config.rank_placement.tp_size)
-    assert worlds == [1, 2]
+        worlds.append(len(config.rank_placement.regions))
+    assert sorted(worlds) == [1, 1, 2]
 
 
 def test_rank_placement_is_required_and_owns_no_metadata_reservation() -> None:
@@ -1262,7 +1308,7 @@ def test_rank_placement_is_required_and_owns_no_metadata_reservation() -> None:
         DaxCoordinatedL1Config.from_json(
             json.dumps(_config_values(rank_placement=None))
         )
-    placement = asdict(_rank_placement())
+    placement = {"regions": asdict(_rank_placement())["regions"]}
     placement["metadata_reservation_bytes"] = _GIB
     with pytest.raises(ValueError, match="metadata_reservation_bytes"):
         DaxCoordinatedL1Config.from_json(
@@ -1306,8 +1352,9 @@ def test_preflight_rejects_entire_plan_before_mapping(
     rank_placement = _rank_placement()
     if failure == "metadata_reservation":
         rank_placement = _with_metadata_reservation(rank_placement, 4096)
-    with pytest.raises(ValueError):
-        _client(_config(rank_placement))
+    with closing(_client(_config(rank_placement))) as client:
+        with pytest.raises(ValueError):
+            client.initialize_model_layouts(_MODEL, 4, 256, [_layout()])
     assert mapped == []
 
 
@@ -1318,18 +1365,17 @@ def test_tp_native_cross_participant_payload_routing_and_lifecycle(
 ) -> None:
     """Both hosts use rank-specific bytes and preserve native lifecycle rules."""
     rank_placement, pinned, unpinned = emulated_devices
-    rank_placement = replace(rank_placement, tp_size=world)
+    rank_placement = replace(rank_placement, kv_world_size=world)
     owner = _client(_config(rank_placement, ownership_mode=ownership))
     reader = _client(_config(rank_placement, 1, ownership_mode=ownership))
     keys = [_key(r, world) for r in range(world)]
     expected = {key: rank + 10 for rank, key in enumerate(keys)}
     with closing(owner), closing(reader):
-        startup_pins = list(pinned)
-        assert len(startup_pins) == 2 * world
-        assert reader.report_status()["cuda_registered"]
+        assert pinned == []
+        assert not reader.report_status()["cuda_registered"]
         for _ in range(2):
             assert not reader.initialize_model_layouts(_MODEL, world, 256, [_layout()])
-        assert pinned == startup_pins
+        assert len(pinned) == world
         assert unpinned == []
         assert owner.initialize_model_layouts(_MODEL, world, 256, [_layout()])
         # Read retries attach independently after participant 0 formats.
@@ -1337,7 +1383,7 @@ def test_tp_native_cross_participant_payload_routing_and_lifecycle(
             item.result == Raw.NOT_FOUND for item in reader.reserve_read(keys).values()
         )
         assert reader.initialized
-        assert pinned == startup_pins
+        assert len(pinned) == 2 * world
         assert unpinned == []
         _payload_values(owner.reserve_write(keys, _layout()), expected)
         _assert_success(owner.finish_write(keys))
@@ -1402,7 +1448,7 @@ def test_deferred_attach_and_reregistration_preserve_read_reservation(
 ) -> None:
     """Concurrent registration must not replace the core holding a peer read."""
     placement, _, _ = emulated_devices
-    placement = replace(placement, tp_size=2)
+    placement = replace(placement, kv_world_size=2)
     with (
         closing(_client(_config(placement))) as owner,
         closing(_client(_config(placement, 1))) as reader,
@@ -1463,7 +1509,7 @@ def test_client_attach_honors_memcheck_policy(
 ) -> None:
     """The client must enable or bypass the native scan of a damaged index."""
     placement, _, _ = emulated_devices
-    placement = replace(placement, tp_size=2)
+    placement = replace(placement, kv_world_size=2)
     config = _config(placement)
     with closing(_client(config)) as owner:
         assert owner.initialize_model_layouts(_MODEL, 2, 256, [_layout()])
@@ -1508,7 +1554,7 @@ def test_finished_peer_reads_bound_views_and_release_deleted_slots(
 ) -> None:
     """Cached descriptors stay bounded without retaining native read ownership."""
     rank_placement, _, _ = emulated_devices
-    rank_placement = replace(rank_placement, tp_size=2)
+    rank_placement = replace(rank_placement, kv_world_size=2)
     owner = _client(_config(rank_placement))
     reader = _client(_config(rank_placement, 1, read_view_cache_max_entries=8))
     view_refs = []
@@ -1569,7 +1615,7 @@ def test_peer_cannot_overwrite_published_owner_payload(
 ) -> None:
     """Both idle and actively read objects remain immutable across participants."""
     rank_placement, _, _ = emulated_devices
-    rank_placement = replace(rank_placement, tp_size=2)
+    rank_placement = replace(rank_placement, kv_world_size=2)
     owner = _client(_config(rank_placement))
     peer = _client(_config(rank_placement, 1))
     key = _key(0, 2)
@@ -1638,14 +1684,14 @@ def test_payload_usage_tracks_reservations_and_preserves_slot_ownership(
 
 @pytest.mark.parametrize("ownership", ["equal", "participant_0_all"])
 @pytest.mark.parametrize("participant", [0, 1])
-def test_dax_coordinated_capacity_uses_owner_budget_and_tp_partition_tails(
+def test_dax_coordinated_capacity_separates_configured_budget_and_partition_tails(
     emulated_devices: tuple, ownership: str, participant: int
 ) -> None:
-    """Configured capacity excludes peer ownership and unassigned TP tails."""
+    """Config retains full regions; resolved geometry excludes partition tails."""
     placement, _, _ = emulated_devices
     rank_placement = replace(
         placement,
-        tp_size=6,
+        kv_world_size=6,
         regions=tuple(
             replace(r, payload_size_GiB=4, payload_offset_bytes=4 * _GIB)
             for r in placement.regions
@@ -1659,8 +1705,15 @@ def test_dax_coordinated_capacity_uses_owner_budget_and_tp_partition_tails(
         dax_coordinated_l1_config=dax_coordinated_l1_config,
     )
     expected = (
+        4 * _GIB if ownership == "equal" else (8 * _GIB if participant == 0 else 0)
+    )
+    assert dax_coordinated_l1_config.payload_size_bytes == 8 * _GIB
+    assert rank_placement.payload_size_bytes == 6 * _GIB
+    geometry = resolve_payload_geometry(dax_coordinated_l1_config, 64, rank_placement)
+    runtime_capacity = (
         3 * _GIB if ownership == "equal" else (6 * _GIB if participant == 0 else 0)
     )
+    assert geometry.owner_slot_count * 64 == runtime_capacity
     assert get_configured_capacity_bytes(config) == {L1BackendType.DEVDAX: expected}
     client = _client(dax_coordinated_l1_config)
     with closing(client):
@@ -1739,7 +1792,7 @@ def test_configured_capacity_does_not_allow_allocation_past_real_slots(
 ) -> None:
     """A larger declared budget cannot bypass slot exhaustion or prevent reuse."""
     rank_placement, _, _ = emulated_devices
-    rank_placement = replace(rank_placement, tp_size=2)
+    rank_placement = replace(rank_placement, kv_world_size=2)
     config = _config(
         rank_placement,
         ownership_mode=ownership,
@@ -1951,7 +2004,7 @@ def test_read_view_cache_rejects_replaced_generation_at_same_address(
 ) -> None:
     """Slot generations distinguish reuse even when bucket generations coincide."""
     placement, _, _ = emulated_devices
-    placement = replace(placement, tp_size=2)
+    placement = replace(placement, kv_world_size=2)
     config = replace(
         _config(placement, skip_payload_flush=True), buckets_per_level=[1, 1, 1]
     )
@@ -2056,7 +2109,7 @@ def test_common_client_reopens_persisted_rank_payloads(
     config = _config(
         replace(
             rank_placement,
-            tp_size=world,
+            kv_world_size=world,
             regions=rank_placement.regions[: min(world, 2)],
         )
     )
@@ -2064,6 +2117,8 @@ def test_common_client_reopens_persisted_rank_payloads(
     writer = _client(config)
     expected = {key: rank + 21 for rank, key in enumerate(keys)}
     with closing(writer):
+        assert writer.get_l1_memory_desc().ptr == 0
+        assert writer.initialize_model_layouts(_MODEL, world, 256, [_layout()])
         descriptor = writer.get_l1_memory_desc()
         if world == 1:
             assert descriptor.ptr != 0
@@ -2100,7 +2155,7 @@ def test_full_rank_does_not_borrow_other_ranks_slots(
 ) -> None:
     """One exhausted rank cannot spill; delete and close return its slots."""
     rank_placement, _, _ = emulated_devices
-    rank_placement = replace(rank_placement, tp_size=2)
+    rank_placement = replace(rank_placement, kv_world_size=2)
     client = _client(
         _config(rank_placement, ownership_mode=ownership, skip_payload_flush=True)
     )
@@ -2174,8 +2229,9 @@ def test_later_rank_registration_failure_unpins_without_formatting(
         return len(pinned) != 3
 
     monkeypatch.setattr(devdax_region.current_device_spec, "pin_memory", fail_third)
-    with pytest.raises(RuntimeError, match="cudaHostRegister failed"):
-        _client(_config(rank_placement))
+    with closing(_client(_config(rank_placement))) as client:
+        with pytest.raises(RuntimeError, match="cudaHostRegister failed"):
+            client.initialize_model_layouts(_MODEL, 4, 256, [_layout()])
     assert unpinned == [pointer for pointer, _, _ in reversed(pinned[:2])]
     with open(rank_placement.regions[0].devdax_path, "rb") as stream:
         assert stream.read(64) == bytes(64)
@@ -2244,10 +2300,12 @@ def test_close_before_metadata_ready_releases_startup_registrations(
     """A waiting or unused participant releases mappings and pinning on close."""
     placement, pinned, unpinned = emulated_devices
     client = _client(_config(placement, 1))
-    assert len(pinned) == placement.tp_size
-    assert client.report_status()["cuda_registered"]
+    assert pinned == []
+    assert not client.report_status()["cuda_registered"]
     if bind_layout:
         assert not client.initialize_model_layouts(_MODEL, 4, 256, [_layout()])
+        assert len(pinned) == placement.kv_world_size
+        assert client.report_status()["cuda_registered"]
     assert not client.initialized
     assert unpinned == []
     client.close()
@@ -2278,7 +2336,7 @@ def test_existing_magic_requires_matching_epoch_before_attach(
                     client.initialize_model_layouts(_MODEL, 4, 256, [_layout()])
             assert not client.initialized
             assert client.report_status()["cuda_registered"]
-            assert pinned == startup_pins
+            assert len(pinned) == len(startup_pins) + 4
             assert unpinned == []
             with open(placement.regions[0].devdax_path, "rb") as stream:
                 assert stream.read(4096) == header
@@ -2316,3 +2374,362 @@ def test_zero_read_view_cache_limit_preserves_reads_without_retaining_views(
         assert reader.report_status()["active_read_reservations"] == 0
         del first, second
         _assert_success(owner.delete([key]))
+
+
+@pytest.mark.parametrize("separate", [False, True])
+def test_runtime_mixed_layout_sizes_and_group_identity(separate: bool) -> None:
+    """Mixed dtypes and compressed/windowed slots determine geometry, not names."""
+    layouts = _flash_layouts(separate)
+    model = "deepseek-ai/DeepSeek-V4-Flash-0731"
+    profile = resolve_devdax_model_profile(model, 1, 256, layouts)
+    sizes = (15420416, 985664) if separate else (16406080,)
+    assert profile.group_payload_bytes == sizes
+    assert profile.payload_bytes == max(sizes)
+    assert resolve_devdax_model_profile("/models/local-checkpoint", 1, 256, layouts)
+    reversed_layouts = [
+        MemoryLayoutDesc(list(reversed(d.shapes)), list(reversed(d.dtypes)))
+        for d in reversed(layouts)
+    ]
+    changed = resolve_devdax_model_profile(model, 1, 256, reversed_layouts)
+    assert changed.payload_bytes == profile.payload_bytes
+    assert changed.layout_digest != profile.layout_digest
+
+
+@pytest.mark.parametrize(
+    "layouts,match",
+    [
+        ([], "at least one"),
+        ([MemoryLayoutDesc([], [])], "invalid model layout"),
+        ([MemoryLayoutDesc([torch.Size([1, 1, 0, 4])], [torch.uint8])], "positive"),
+        (
+            [MemoryLayoutDesc([torch.Size([1, 1, 4])], [torch.uint8])],
+            "slots, hidden",
+        ),
+        (
+            [
+                MemoryLayoutDesc(
+                    [torch.Size([1, 1, 1, 1]), torch.Size([1, 1, 1, 1])],
+                    [torch.uint8, torch.float32],
+                )
+            ],
+            "dtype aligned",
+        ),
+    ],
+)
+def test_invalid_runtime_group_layouts_fail_before_allocation(
+    layouts: list[MemoryLayoutDesc], match: str
+) -> None:
+    """Malformed or unaligned mixed tensor views cannot bind an arena."""
+    with pytest.raises(ValueError, match=match):
+        resolve_devdax_model_profile("local-model", 1, 256, layouts)
+
+
+@pytest.mark.parametrize("separate", [False, True])
+def test_mixed_groups_survive_peer_reads_and_reopen(
+    emulated_devices: tuple, separate: bool
+) -> None:
+    """A read-only peer reconstructs every typed tensor from registration alone."""
+    placement, _, _ = emulated_devices
+    config = _config(placement)
+    layouts = _flash_layouts(separate)
+    model = "deepseek-ai/DeepSeek-V4-Flash-0731"
+    keys = [
+        replace(_key(0), model_name=model, object_group_id=gid)
+        for gid in range(len(layouts))
+    ]
+    with closing(_client(config)) as writer:
+        assert writer.initialize_model_layouts(model, 4, 256, layouts)
+        for gid, (key, desc) in enumerate(zip(keys, layouts, strict=True)):
+            obj = writer.reserve_write([key], desc)[key].memory_obj
+            assert obj is not None
+            for index in range(len(desc.shapes)):
+                tensor = obj.get_tensor(index)
+                assert tensor is not None
+                tensor.fill_(10 * gid + index + 1)
+                del tensor
+            del obj
+        _assert_success(writer.finish_write(keys))
+        expected_bytes = sum(
+            (
+                sum(
+                    shape.numel() * dtype.itemsize
+                    for shape, dtype in zip(desc.shapes, desc.dtypes, strict=True)
+                )
+                + 63
+            )
+            // 64
+            * 64
+            for desc in layouts
+        )
+        assert writer.get_memory_usage()[0] == expected_bytes
+        # New participants, including a reopened reader, have never written.
+        for _ in range(2):
+            with closing(_client(replace(config, participant_id=1))) as reader:
+                assert reader.initialize_model_layouts(model, 4, 256, layouts)
+                for gid, (key, desc) in enumerate(zip(keys, layouts, strict=True)):
+                    obj = reader.reserve_read([key])[key].memory_obj
+                    assert obj is not None
+                    for index, (shape, dtype) in enumerate(
+                        zip(desc.shapes, desc.dtypes, strict=True)
+                    ):
+                        tensor = obj.get_tensor(index)
+                        assert tensor is not None
+                        assert tensor.shape == shape and tensor.dtype == dtype
+                        assert torch.all(tensor == 10 * gid + index + 1)
+                        del tensor
+                    del obj
+                _assert_success(reader.finish_read(keys))
+        assert writer.memcheck()
+        _assert_success(writer.delete(keys))
+        assert writer.get_memory_usage()[0] == 0
+
+
+def test_group_write_validation_is_atomic(emulated_devices: tuple) -> None:
+    """Wrong group IDs and swapped group layouts cannot reserve partial batches."""
+    placement, _, _ = emulated_devices
+    layouts = _flash_layouts(True)
+    with closing(_client(_config(placement))) as client:
+        assert client.initialize_model_layouts(_MODEL, 4, 256, layouts)
+        valid = _key(0)
+        for gid in (-1, 2):
+            with pytest.raises(ValueError, match="object_group_id"):
+                invalid = replace(valid, object_group_id=gid)
+                client.reserve_write([valid, invalid], layouts[0])
+            assert client.report_status()["active_write_reservations"] == 0
+        other_group = replace(valid, object_group_id=1)
+        with pytest.raises(ValueError, match="write layout"):
+            client.reserve_write([valid, other_group], layouts[0])
+        assert client.report_status()["active_write_reservations"] == 0
+        with pytest.raises(ValueError, match="different model"):
+            client.initialize_model_layouts(_MODEL, 4, 256, list(reversed(layouts)))
+        _assert_success(client.reserve_write([other_group], layouts[1]))
+        _assert_success(client.finish_write([other_group]))
+        assert client.reserve_read([valid])[valid].result == Raw.NOT_FOUND
+        _assert_success(client.delete([other_group]))
+
+
+@pytest.mark.parametrize("kv_world_size", [1, 2, 8])
+@pytest.mark.parametrize("participants", [2, 4])
+@pytest.mark.parametrize("ownership", ["equal", "participant_0_all"])
+def test_group_pool_offsets_partition_rank_and_owner_capacity(
+    kv_world_size: int, participants: int, ownership: str
+) -> None:
+    """Variable strides keep logical/physical extents disjoint on every rank."""
+    config = _base_config(
+        participant_count=participants,
+        ownership_mode=ownership,
+        rank_placement={
+            "regions": [
+                {
+                    "devdax_path": "/dev/dax0.0",
+                    "metadata_offset_bytes": 0,
+                    "metadata_reservation_bytes": _GIB,
+                    "payload_offset_bytes": 30 * _GIB,
+                    "payload_size_GiB": 8 * kv_world_size,
+                }
+            ],
+        },
+    )
+    placement = config.rank_placement.resolve(kv_world_size)
+    sizes = (985664, 15420416)
+    geometry = resolve_payload_geometry(config, sizes, placement)
+    owners = participants if ownership == "equal" else 1
+    count = (8 * _GIB // sum(sizes) // owners) * owners
+    assert geometry.group_slot_bytes == sizes
+    assert geometry.payload_slot_count == kv_world_size * count * 2
+    assert geometry.payload_bytes_used == kv_world_size * count * sum(sizes)
+    logical_extents = []
+    for rank in range(kv_world_size):
+        ranges = [r for r in geometry.slot_ranges if r.rank == rank]
+        physical = sorted(
+            (
+                r.mapping_offset_bytes,
+                r.mapping_offset_bytes + r.slot_count * r.stride_bytes,
+            )
+            for r in ranges
+        )
+        assert physical[0][0] == 0
+        assert all(a[1] == b[0] for a, b in zip(physical, physical[1:], strict=False))
+        assert physical[-1][1] == count * sum(sizes) <= 8 * _GIB
+        for r in ranges:
+            assert r.logical_offset_bytes == rank * 8 * _GIB + r.mapping_offset_bytes
+            assert r.stride_bytes == sizes[r.group]
+            assert r.slot_count == count // owners
+            logical_extents.append(
+                (
+                    r.logical_offset_bytes,
+                    r.logical_offset_bytes + r.slot_count * r.stride_bytes,
+                )
+            )
+    logical_extents.sort()
+    assert all(
+        a[1] <= b[0] for a, b in zip(logical_extents, logical_extents[1:], strict=False)
+    )
+    for pid in range(participants):
+        peer_geometry = resolve_payload_geometry(
+            replace(config, participant_id=pid), sizes, placement
+        )
+        assert peer_geometry.slot_ranges == geometry.slot_ranges
+        owned = [r for r in geometry.slot_ranges if r.owner == pid]
+        assert sum(r.slot_count for r in owned) == peer_geometry.owner_slot_count
+        if owned:
+            assert owned[0].first_slot == peer_geometry.owner_slot_begin
+            assert (
+                owned[-1].first_slot + owned[-1].slot_count
+                == peer_geometry.owner_slot_begin + peer_geometry.owner_slot_count
+            )
+
+
+@pytest.mark.parametrize("world", [1, 2, 8])
+def test_rank_placement_uses_runtime_world_without_json_setting(world: int) -> None:
+    config = DaxCoordinatedL1Config.from_json(json.dumps(_config_values()))
+    placement = config.rank_placement.resolve(world)
+    assert placement.kv_world_size == world
+    assert len(placement.placements()) == world
+    assert "kv_world_size" not in asdict(config.rank_placement)
+    assert "tp_size" not in asdict(config.rank_placement)
+    with pytest.raises(ValueError, match="configuration object"):
+        replace(config, rank_placement=placement)
+
+
+@pytest.mark.parametrize("field", ["tp_size", "kv_world_size"])
+def test_rank_placement_rejects_user_world_size(field: str) -> None:
+    values = _config_values()
+    placement = cast(dict[str, object], values["rank_placement"])
+    placement[field] = 1
+    with pytest.raises(ValueError, match=field):
+        DaxCoordinatedL1Config.from_json(json.dumps(values))
+
+
+@pytest.mark.parametrize("owner_world,peer_world", [(2, 4), (4, 2)])
+def test_runtime_world_mismatch_rejects_peer_without_mutating_arena(
+    emulated_devices: tuple, owner_world: int, peer_world: int
+) -> None:
+    placement, pinned, unpinned = emulated_devices
+    config = _config(placement)
+    original_config = asdict(config)
+    with closing(_client(config)) as owner:
+        assert pinned == []
+        assert owner.initialize_model_layouts(_MODEL, owner_world, 256, [_layout()])
+        assert asdict(config) == original_config
+        key = _key(0, owner_world)
+        _payload_values(owner.reserve_write([key], _layout()), {key: 77})
+        _assert_success(owner.finish_write([key]))
+        with open(placement.regions[0].devdax_path, "rb") as stream:
+            header = stream.read(4096)
+        with closing(_client(replace(config, participant_id=1))) as peer:
+            with pytest.raises(RuntimeError, match="contract mismatch"):
+                peer.initialize_model_layouts(_MODEL, peer_world, 256, [_layout()])
+            assert not peer.initialized
+        with open(placement.regions[0].devdax_path, "rb") as stream:
+            assert stream.read(4096) == header
+        with closing(_client(replace(config, participant_id=1))) as peer:
+            assert peer.initialize_model_layouts(_MODEL, owner_world, 256, [_layout()])
+            observed = _payload_values(peer.reserve_read([key]))
+            assert torch.all(observed[key] == 77)
+            _assert_success(peer.finish_read([key]))
+        assert owner.memcheck()
+    assert sorted(unpinned) == sorted(pointer for pointer, _, _ in pinned)
+
+
+@pytest.mark.parametrize("world", [0, 9, True, 1.5])
+def test_invalid_engine_world_is_rejected_before_mapping(world: object) -> None:
+    with closing(_client(_base_config())) as client:
+        with pytest.raises(ValueError, match="kv_world_size"):
+            client.initialize_model_layouts(_MODEL, world, 256, [_layout()])
+        assert not client.report_status()["cuda_registered"]
+
+
+def test_unregistered_runtime_lookup_is_miss_without_mapping() -> None:
+    with closing(_client(_base_config())) as client:
+        key = _key(0, 1)
+        assert client.report_status()["is_healthy"]
+        assert client.reserve_read([key])[key].result == Raw.NOT_FOUND
+        assert not client.report_status()["cuda_registered"]
+        assert client.get_l1_memory_desc().ptr == 0
+
+
+def test_runtime_world_rejects_more_regions_than_ranks() -> None:
+    placement = DaxCoordinatedL1RankPlacementConfig(_rank_placement().regions)
+    with closing(_client(replace(_base_config(), rank_placement=placement))) as client:
+        with pytest.raises(ValueError, match="valid regions"):
+            client.initialize_model_layouts(_MODEL, 1, 256, [_layout()])
+        assert not client.report_status()["cuda_registered"]
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_qualification_digest_is_optional(explicit_null: bool) -> None:
+    values = _config_values()
+    values.pop("hardware_qualification_digest")
+    if explicit_null:
+        values["hardware_qualification_digest"] = None
+    config = DaxCoordinatedL1Config.from_json(json.dumps(values))
+    assert config.hardware_qualification_digest is None
+
+
+@pytest.mark.parametrize("digest", ["", "x" * 64, "0" * 64, "ab" * 31, 123, " " * 64])
+def test_explicit_qualification_digest_must_be_valid(digest: object) -> None:
+    with pytest.raises(ValueError, match="qualification digest"):
+        DaxCoordinatedL1Config.from_json(
+            json.dumps(_config_values(hardware_qualification_digest=digest))
+        )
+
+
+def test_omitted_digest_reads_existing_qualified_arena(emulated_devices: tuple) -> None:
+    placement, _, _ = emulated_devices
+    config = _config(placement)
+    key = _key(0)
+    with closing(_client(config)) as owner:
+        assert owner.initialize_model_layouts(_MODEL, 4, 256, [_layout()])
+        _payload_values(owner.reserve_write([key], _layout()), {key: 55})
+        _assert_success(owner.finish_write([key]))
+        peer_config = replace(
+            config, participant_id=1, hardware_qualification_digest=None
+        )
+        with closing(_client(peer_config)) as peer:
+            assert peer.initialize_model_layouts(_MODEL, 4, 256, [_layout()])
+            observed = _payload_values(peer.reserve_read([key]))
+            assert torch.all(observed[key] == 55)
+            _assert_success(peer.finish_read([key]))
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_visibility_default_bulk_and_explicit_legacy(legacy: bool) -> None:
+    values = _config_values()
+    if legacy:
+        values["visibility_mode"] = "x86_clflush_64b_v1"
+    config = DaxCoordinatedL1Config.from_json(json.dumps(values))
+    assert config.visibility_mode == (
+        "x86_clflush_64b_v1" if legacy else "x86_clflushopt_bulk_v1"
+    )
+
+
+def test_reformat_rejects_nonzero_participant() -> None:
+    with pytest.raises(ValueError, match="reformat requires participant 0"):
+        _base_config(participant_id=1, reformat=True)
+
+
+def test_reformat_discards_old_keys_once_and_preserves_new_keys(
+    emulated_devices: tuple,
+) -> None:
+    """Explicit reset replaces an old epoch, but repeated registration is safe."""
+    placement, _, _ = emulated_devices
+    placement = replace(placement, kv_world_size=2)
+    config = _config(placement)
+    old_key = _key(0, 2, chunk=1)
+    new_key = _key(0, 2, chunk=2)
+    with closing(_client(config)) as client:
+        assert client.initialize_model_layouts(_MODEL, 2, 256, [_layout()])
+        _payload_values(client.reserve_write([old_key], _layout()), {old_key: 11})
+        _assert_success(client.finish_write([old_key]))
+    reset_config = replace(config, region_epoch=2, reformat=True)
+    with closing(_client(reset_config)) as client:
+        assert client.initialize_model_layouts(_MODEL, 2, 256, [_layout()])
+        assert client.reserve_read([old_key])[old_key].result == Raw.NOT_FOUND
+        _payload_values(client.reserve_write([new_key], _layout()), {new_key: 22})
+        _assert_success(client.finish_write([new_key]))
+        assert client.initialize_model_layouts(_MODEL, 2, 256, [_layout()])
+        assert client.reserve_read([new_key])[new_key].result == Raw.SUCCESS
+    with closing(_client(replace(reset_config, reformat=False))) as client:
+        assert client.initialize_model_layouts(_MODEL, 2, 256, [_layout()])
+        assert client.reserve_read([new_key])[new_key].result == Raw.SUCCESS

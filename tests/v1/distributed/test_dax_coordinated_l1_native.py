@@ -42,6 +42,7 @@ def _parameters(
     payload_bytes: int = 64,
     payload_capacity: int | None = None,
     participant_count: int = 2,
+    qualification: bytes = bytes([6]) * 32,
 ) -> Any:
     return lmcache_native.dax_coordinated_l1_parameters(
         19,
@@ -54,7 +55,7 @@ def _parameters(
         if participant_0_slots is None
         else participant_0_slots,
         bytes([5]) * 32,
-        bytes([6]) * 32,
+        qualification,
         bytes([7]) * 32,
         slot_count * payload_bytes if payload_capacity is None else payload_capacity,
         participant_count,
@@ -269,7 +270,7 @@ def test_compact_superblock_keeps_metadata_cache_line_aligned() -> None:
     assert all(offset % 64 == 0 for offset in offsets)
 
 
-@pytest.mark.parametrize("version", [0, 1, 0xFFFFFFFF])
+@pytest.mark.parametrize("version", [0, 1, 3, 0xFFFFFFFF])
 def test_unsupported_format_is_rejected_without_modifying_region(version: int) -> None:
     """Attaching an unsupported format must leave the region untouched."""
     pair = _make_pair()
@@ -685,3 +686,149 @@ def test_participant_count_mismatch_rejects_attach_without_writes() -> None:
         with pytest.raises(ValueError, match="ownership boundary"):
             _attach(address, size, 4, parameters)
         assert bytes(mapping) == before
+
+
+def test_group_pools_preserve_offsets_capacity_and_peer_readers() -> None:
+    """Independent group exhaustion/reuse cannot alias another owner's bytes."""
+    parameters = lmcache_native.dax_coordinated_l1_parameters(
+        19,
+        [17, 19],
+        256,
+        8,
+        4096,
+        1,
+        4,
+        bytes([5]) * 32,
+        bytes([6]) * 32,
+        bytes([7]) * 32,
+        1280,
+        2,
+        1280,
+    )
+    metadata_size = parameters.layout.required_metadata_bytes
+    with mmap.mmap(-1, metadata_size + 1280) as mapping, ExitStack() as stack:
+        address = ctypes.addressof(ctypes.c_char.from_buffer(mapping))
+        payload = address + metadata_size
+        lmcache_native.format_dax_coordinated_l1_region(
+            address, metadata_size, parameters
+        )
+        ranges = [
+            (0, 2, payload, 0, 0, 64, 0),
+            (2, 2, payload + 256, 0, 1, 256, 256),
+            (4, 2, payload + 128, 0, 0, 64, 128),
+            (6, 2, payload + 768, 0, 1, 256, 768),
+        ]
+
+        def attach(participant: int) -> Any:
+            return stack.enter_context(
+                closing(
+                    _attach(
+                        address,
+                        metadata_size,
+                        participant,
+                        parameters,
+                        payload_ranges=ranges,
+                    )
+                )
+            )
+
+        writer, peer = attach(0), attach(1)
+        keys = [bytes([n]) * 32 for n in range(11, 16)]
+        a = writer.reserve_write(keys[0], 64, 1, 0, 0)
+        b = writer.reserve_write(keys[1], 64, 1, 0, 0)
+        assert a.result == b.result == Result.SUCCESS
+        assert (a.payload_offset, b.payload_offset) == (0, 64)
+        assert (
+            writer.reserve_write(keys[2], 64, 1, 0, 0).result
+            == Result.NO_LOCAL_PAYLOAD_SLOT
+        )
+        assert writer.reserve_write(keys[2], 65, 1, 0, 0).result == Result.INVALID_STATE
+        c = writer.reserve_write(keys[2], 256, 2, 0, 1)
+        assert c.result == Result.SUCCESS and c.payload_offset == 256
+        for item, value in [(a, 11), (b, 12), (c, 13)]:
+            ctypes.memset(payload + item.payload_offset, value, item.payload_length)
+        assert writer.finish_writes([a.token, b.token, c.token]) == [Result.SUCCESS] * 3
+        status = writer.report_status()
+        assert status.payload_capacity_bytes == 640 and status.used_payload_bytes == 384
+        assert status.free_slots_by_rank == [1]
+        reads = peer.reserve_reads(keys[:3], 1)
+        assert all(item.result == Result.SUCCESS for item in reads)
+        for item, value in zip(reads, [11, 12, 13], strict=True):
+            assert (
+                ctypes.string_at(payload + item.payload_offset, item.payload_length)
+                == bytes([value]) * item.payload_length
+            )
+        assert writer.delete_key(keys[0]).result == Result.ACTIVE_READER
+        assert (
+            peer.finish_reads([item.token for item in reads], [1] * 3)
+            == [Result.SUCCESS] * 3
+        )
+        assert writer.delete_key(keys[0]).result == Result.SUCCESS
+        reused = writer.reserve_write(keys[3], 64, 1, 0, 0)
+        assert reused.result == Result.SUCCESS
+        assert (
+            reused.payload_offset == a.payload_offset
+            and reused.slot_generation != a.slot_generation
+        )
+        assert writer.finish_writes([reused.token]) == [Result.SUCCESS]
+        writer.close()
+        reopened = attach(0)
+        read = reopened.reserve_reads([keys[2]], 1)[0]
+        assert read.result == Result.SUCCESS and read.payload_offset == 256
+        assert reopened.finish_reads([read.token], [1]) == [Result.SUCCESS]
+        remote = peer.reserve_write(keys[4], 256, 2, 0, 1)
+        assert remote.result == Result.SUCCESS and remote.payload_offset == 768
+        assert peer.finish_writes([remote.token]) == [Result.SUCCESS]
+        assert peer.report_status().used_payload_bytes == 256
+        assert reopened.memcheck() and peer.memcheck()
+
+        before = bytes(mapping)
+        bad_ranges = list(ranges)
+        bad_ranges[1] = (2, 2, payload, 0, 1, 256, 0)
+        with pytest.raises(ValueError, match="overlapping"):
+            _attach(address, metadata_size, 0, parameters, payload_ranges=bad_ranges)
+        assert bytes(mapping) == before
+
+
+@pytest.mark.parametrize("stored", [bytes(32), bytes([6]) * 32])
+@pytest.mark.parametrize("requested", [bytes(32), bytes([6]) * 32, bytes([8]) * 32])
+def test_optional_qualification_attach_preserves_header(
+    stored: bytes, requested: bytes
+) -> None:
+    parameters = _parameters(qualification=stored)
+    value = _make_pair(parameters=parameters)
+    with closing(value.mapping), closing(value.core_0), closing(value.core_1):
+        address = ctypes.addressof(ctypes.c_char.from_buffer(value.mapping))
+        header = bytes(value.mapping[:384])
+        expected = _parameters(qualification=requested)
+        if requested == bytes(32) or requested == stored:
+            with closing(_attach(address, value.metadata_size, 1, expected)) as peer:
+                assert peer.memcheck()
+        else:
+            with pytest.raises(RuntimeError, match="contract mismatch"):
+                _attach(address, value.metadata_size, 1, expected)
+        assert bytes(value.mapping[:384]) == header
+
+
+def test_omitted_qualification_keeps_geometry_and_checksum_checks(
+    pair: _CorePair,
+) -> None:
+    address = ctypes.addressof(ctypes.c_char.from_buffer(pair.mapping))
+    with pytest.raises(RuntimeError, match="contract mismatch"):
+        _attach(
+            address,
+            pair.metadata_size,
+            1,
+            _parameters(qualification=bytes(32), visibility=1),
+        )
+    # Corrupt the stored checksum, then attach without a qualification identifier.
+    # The checksum is the uint64 before payload_used_bytes and the 16 reserved bytes.
+    original = pair.mapping[352]
+    pair.mapping[352] = original ^ 1
+    try:
+        with pytest.raises(RuntimeError, match="contract mismatch"):
+            _attach(
+                address, pair.metadata_size, 1, _parameters(qualification=bytes(32))
+            )
+    finally:
+        pair.mapping[352] = original

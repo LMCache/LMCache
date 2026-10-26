@@ -77,7 +77,8 @@ struct alignas(64) Superblock {
   Digest hardware_qualification_digest;
   Digest region_id_digest;
   std::uint64_t checksum;
-  std::array<std::uint8_t, 24> reserved;
+  std::uint64_t payload_used_bytes;
+  std::array<std::uint8_t, 16> reserved;
 };
 
 struct alignas(64) ParticipantEntry {

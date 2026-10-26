@@ -30,6 +30,7 @@ from lmcache.v1.distributed.dax_coordinated_l1.devdax_key_codec import (
 )
 from lmcache.v1.distributed.dax_coordinated_l1.devdax_layout import (
     DevDaxPayloadGeometry,
+    DevDaxRankPlacement,
     resolve_payload_geometry,
 )
 from lmcache.v1.distributed.dax_coordinated_l1.devdax_model_profile import (
@@ -134,14 +135,15 @@ class DaxCoordinatedL1Client:
         dax_coordinated_l1_config: DaxCoordinatedL1Config,
         memory_config: L1MemoryManagerConfig,
     ) -> None:
-        """Map and GPU-register configured payloads before model registration.
+        """Defer payload mapping until engine KV world size is registered.
 
         Args:
             dax_coordinated_l1_config: Participant, region, and qualification contract.
             memory_config: Device path, range size, and payload alignment.
         """
+        self._reformat_pending = dax_coordinated_l1_config.reformat
         self._config = dax_coordinated_l1_config
-        self._rank_placement = dax_coordinated_l1_config.rank_placement
+        self._rank_placement: DevDaxRankPlacement | None = None
         self._closed = False
         self._lifecycle_lock = RLock()
         self._memory_config = memory_config
@@ -153,12 +155,12 @@ class DaxCoordinatedL1Client:
         self._write_contexts: dict[ObjectKey, _ReservationContext] = {}
         self._read_contexts: dict[ObjectKey, list[_ReservationContext]] = {}
         self._layouts: dict[int, MemoryLayoutDesc] = {}
+        self._group_layouts: list[MemoryLayoutDesc] = []
         self._read_views: OrderedDict[
             tuple[ObjectKey, int, int, int, int, int, bool], MemoryObj
         ] = OrderedDict()
         self._read_view_hits = 0
         self._read_view_misses = 0
-        self._region = DaxCoordinatedL1Region(self._config, memory_config)
 
     @property
     def initialized(self) -> bool:
@@ -185,12 +187,31 @@ class DaxCoordinatedL1Client:
                 kv_world_size,
                 chunk_size,
                 layout_descs,
-                expected_kv_world_size=self._rank_placement.tp_size,
             )
+            registered = [
+                MemoryLayoutDesc(list(desc.shapes), list(desc.dtypes))
+                for desc in layout_descs
+            ]
+            known_layouts: dict[int, MemoryLayoutDesc] = {}
+            for desc in registered:
+                identifier = layout_id(desc)
+                if identifier in known_layouts and known_layouts[identifier] != desc:
+                    raise ValueError("DAX-Coordinated L1 layout ID collision")
+                known_layouts[identifier] = desc
             if self._model_profile is None:
-                geometry = resolve_payload_geometry(self._config, profile.payload_bytes)
+                placement = self._config.rank_placement.resolve(kv_world_size)
+                geometry = resolve_payload_geometry(
+                    self._config, profile.group_payload_bytes, placement
+                )
+                region = DaxCoordinatedL1Region(
+                    self._config, self._memory_config, placement
+                )
+                self._rank_placement = placement
+                self._region = region
                 self._model_profile = profile
                 self._geometry = geometry
+                self._group_layouts = registered
+                self._layouts.update(known_layouts)
             elif profile != self._model_profile:
                 raise ValueError(
                     "DAX-Coordinated L1 is already bound to a different model "
@@ -325,16 +346,41 @@ class DaxCoordinatedL1Client:
             raise ValueError(
                 "write payload exceeds the initialized Device-DAX slot geometry"
             )
+        # Validate the entire batch before attaching or reserving any slot.
+        # Keep the existing single-tensor partial-chunk write contract.
+        for key in keys:
+            registered = self._group_layouts[key.object_group_id]
+            if layout_desc == registered:
+                continue
+            if (
+                len(self._group_layouts) == 1
+                and len(registered.shapes) == len(layout_desc.shapes) == 1
+                and layout_desc.dtypes == registered.dtypes
+                and len(layout_desc.shapes[0]) == 4
+                and layout_desc.shapes[0][:2] == registered.shapes[0][:2]
+                and layout_desc.shapes[0][3] == registered.shapes[0][3]
+                and 0 < layout_desc.shapes[0][2] <= registered.shapes[0][2]
+            ):
+                continue
+            raise ValueError("write layout differs from registered object group")
         if not self.initialized and not self._attach_geometry(geometry):
             raise RuntimeError("DAX-Coordinated L1 attach is not ready")
         region, core = self._require_initialized()
         stable_layout_id = layout_id(layout_desc)
-        self._layouts[stable_layout_id] = layout_desc
+        known = self._layouts.get(stable_layout_id)
+        if known is not None and known != layout_desc:
+            raise ValueError("DAX-Coordinated L1 layout ID collision")
+        self._layouts[stable_layout_id] = MemoryLayoutDesc(
+            list(layout_desc.shapes), list(layout_desc.dtypes)
+        )
         output: dict[ObjectKey, DevDaxReservationResult] = {}
+        assert self._rank_placement is not None
         for key in keys:
             rank = self._rank_placement.rank_from_kv_rank(key.kv_rank)
             digest = key_digest(key, self._layout_digest)
-            native = core.reserve_write(digest, payload_length, stable_layout_id, rank)
+            native = core.reserve_write(
+                digest, payload_length, stable_layout_id, rank, key.object_group_id
+            )
             result = _raw_result(native.result)
             if result is not RawResult.SUCCESS:
                 output[key] = DevDaxReservationResult(result)
@@ -427,8 +473,7 @@ class DaxCoordinatedL1Client:
         """
         status: dict[str, int | str | bool] = {
             "is_healthy": not self._closed
-            and self._region is not None
-            and self._region.cuda_registered,
+            and (self._region is None or self._region.cuda_registered),
             "cuda_registered": self._region is not None
             and self._region.cuda_registered,
             "initialized": self.initialized,
@@ -461,6 +506,8 @@ class DaxCoordinatedL1Client:
                 "owner_slot_begin": geometry.owner_slot_begin,
                 "owner_slot_count": geometry.owner_slot_count,
                 "payload_slot_bytes": geometry.payload_slot_bytes,
+                "payload_used_bytes": native.used_payload_bytes,
+                "owner_payload_capacity_bytes": native.payload_capacity_bytes,
                 "payload_slot_count": geometry.payload_slot_count,
                 "payload_slot_free": native.free_slots,
                 "payload_slot_used": native.used_slots,
@@ -472,8 +519,11 @@ class DaxCoordinatedL1Client:
                 "payload_offset_bytes": region.payload_mapping_offset,
             }
         )
-        status["payload_size_GiB"] = self._config.payload_size_bytes >> 30
-        status["payload_size_bytes"] = self._config.payload_size_bytes
+        assert self._rank_placement is not None
+        status["payload_size_GiB"] = self._rank_placement.payload_size_bytes >> 30
+        status["payload_size_bytes"] = self._rank_placement.payload_size_bytes
+        for group, stride in enumerate(geometry.group_slot_bytes):
+            status[f"object_group_{group}_slot_bytes"] = stride
         for rank, free in enumerate(native.free_slots_by_rank):
             total = geometry.owner_rank_slot_counts[rank]
             status[f"rank_{rank}_payload_slot_free"] = free
@@ -491,15 +541,19 @@ class DaxCoordinatedL1Client:
         geometry = self._geometry
         if geometry is None:
             return 0, self._config.owner_payload_size_bytes
-        used_slots = self._core.report_status().used_slots if self._core else 0
-        return (
-            used_slots * geometry.payload_slot_bytes,
-            geometry.owner_slot_count * geometry.payload_slot_bytes,
+        if self._core is not None:
+            native = self._core.report_status()
+            return native.used_payload_bytes, native.payload_capacity_bytes
+        capacity = sum(
+            r.slot_count * r.stride_bytes
+            for r in geometry.slot_ranges
+            if r.owner == self._config.participant_id
         )
+        return 0, capacity
 
     def get_l1_memory_desc(self) -> L1MemoryDesc:
         """Describe the complete mapped shared range."""
-        if self._rank_placement.tp_size > 1:
+        if self._model_profile is None or self._model_profile.kv_world_size > 1:
             return L1MemoryDesc(
                 ptr=0, size=0, align_bytes=self._memory_config.align_bytes
             )
@@ -557,6 +611,7 @@ class DaxCoordinatedL1Client:
             self._memory_config.align_bytes,
             model_profile.layout_digest,
         )
+        assert self._rank_placement is not None
         digest = sha256(
             digest + b"shared-index" + self._rank_placement.layout_digest()
         ).digest()
@@ -570,10 +625,13 @@ class DaxCoordinatedL1Client:
             self._visibility_mode_code(self._config.visibility_mode),
             geometry.participant_0_slot_count,
             digest,
-            bytes.fromhex(self._config.hardware_qualification_digest),
+            bytes.fromhex(self._config.hardware_qualification_digest)
+            if self._config.hardware_qualification_digest is not None
+            else bytes(32),
             sha256(self._config.region_id.encode("utf-8")).digest(),
-            self._config.payload_size_bytes,
+            self._rank_placement.payload_size_bytes,
             self._config.participant_count,
+            geometry.payload_bytes_used,
         )
 
         region = self._region
@@ -581,7 +639,9 @@ class DaxCoordinatedL1Client:
             raise RuntimeError("DAX-Coordinated L1 client is closed")
         region.map_metadata(parameters.layout.required_metadata_bytes)
         payload_ranges = region.payload_ranges(geometry)
-        if not dax_coordinated_l1_is_formatted(region.base_address):
+        if self._reformat_pending or not dax_coordinated_l1_is_formatted(
+            region.base_address
+        ):
             if self._config.participant_id != 0:
                 logger.info(
                     "Device-DAX metadata is not formatted yet; participant "
@@ -589,9 +649,18 @@ class DaxCoordinatedL1Client:
                     self._config.participant_id,
                 )
                 return False
+            if self._reformat_pending:
+                logger.warning(
+                    "Reformatting DAX-Coordinated L1 metadata: region=%s epoch=%d; "
+                    "existing cache entries are discarded. All other participants "
+                    "must be stopped; this is not verified by the runtime.",
+                    self._config.region_id,
+                    self._config.region_epoch,
+                )
             format_dax_coordinated_l1_region(
                 region.base_address, region.size, parameters
             )
+            self._reformat_pending = False
         # The ready magic is published last by the formatter. The constructor
         # additionally validates epoch, model digest and the complete geometry.
         core = DevDaxBucketIndexCore(
@@ -654,11 +723,14 @@ class DaxCoordinatedL1Client:
         """Validate the whole TP batch before reserving or releasing any slot."""
         if self._closed:
             raise RuntimeError("DAX-Coordinated L1 client is closed")
+        if self._rank_placement is None:
+            return
         for key in keys:
             self._rank_placement.rank_from_kv_rank(key.kv_rank)
-            if key.object_group_id != 0:
+            group_count = len(self._group_layouts) or 1
+            if not 0 <= key.object_group_id < group_count:
                 raise ValueError(
-                    "TP DAX-Coordinated L1 requires homogeneous object group 0"
+                    "key object_group_id is outside registered object groups"
                 )
             if self._model_profile and key.model_name != self._model_profile.model_name:
                 raise ValueError("TP key model differs from registered model")
@@ -674,15 +746,18 @@ class DaxCoordinatedL1Client:
             "kv_world_size": profile.kv_world_size,
             "chunk_size": profile.chunk_size,
             "model_payload_bytes": profile.payload_bytes,
+            "model_object_group_count": len(profile.group_payload_bytes),
             "model_layout_digest": profile.layout_digest.hex(),
             "model_dtypes": ",".join(profile.dtype_names),
         }
-        status["tp_size"] = self._rank_placement.tp_size
+        for group_id, payload_bytes in enumerate(profile.group_payload_bytes):
+            status[f"object_group_{group_id}_payload_bytes"] = payload_bytes
+        assert self._rank_placement is not None
         status["payload_region_count"] = len(self._rank_placement.regions)
         status["tp_layout_digest"] = self._rank_placement.layout_digest().hex()
         status["payload_unused_partition_bytes"] = (
             sum(r.payload_size_GiB << 30 for r in self._rank_placement.regions)
-            - self._config.payload_size_bytes
+            - self._rank_placement.payload_size_bytes
         )
         for placement in self._rank_placement.placements():
             prefix = f"rank_{placement.rank}_"

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -44,6 +45,8 @@ struct CoreStatus {
   std::vector<std::uint64_t> free_slots_by_rank;
   std::uint64_t free_slots{0};
   std::uint64_t used_slots{0};
+  std::uint64_t used_payload_bytes{0};
+  std::uint64_t payload_capacity_bytes{0};
   std::uint64_t active_read_reservations{0};
   std::uint64_t active_write_reservations{0};
 };
@@ -56,9 +59,11 @@ struct FormatParameters {
   std::uint64_t payload_alignment{0};
   std::uint32_t visibility_mode{kVisibilityX86Clflush64BV1};
   std::uint64_t payload_region_size{0};
+  std::uint64_t payload_used_bytes{0};
   std::uint64_t participant_0_slot_count{0};
   std::uint32_t participant_count{2};
   Digest layout_profile_digest{};
+  // Zero means no qualification identifier check on attach.
   Digest hardware_qualification_digest{};
   Digest region_id_digest{};
 
@@ -82,9 +87,18 @@ struct FormatParameters {
   }
 
   LayoutDescription layout() const {
-    return calculate_layout(buckets_per_level, payload_slot_count,
-                            payload_slot_bytes, payload_alignment,
-                            participant_count);
+    auto result = calculate_layout(buckets_per_level, payload_slot_count,
+                                   payload_slot_bytes, payload_alignment,
+                                   participant_count);
+    if (payload_used_bytes != 0) {
+      if (payload_used_bytes > result.required_payload_bytes ||
+          payload_used_bytes % kCacheLineBytes != 0 ||
+          payload_slot_count > payload_used_bytes / kCacheLineBytes) {
+        throw std::invalid_argument("invalid grouped payload capacity");
+      }
+      result.required_payload_bytes = payload_used_bytes;
+    }
+    return result;
   }
 };
 
@@ -99,7 +113,7 @@ class IndexCore {
  public:
   IndexCore(std::uintptr_t base_address, std::uint64_t region_size,
             std::uint32_t participant_id, const FormatParameters& expected,
-            const std::vector<std::array<std::uint64_t, 4>>& payload_ranges,
+            const std::vector<std::vector<std::uint64_t>>& payload_ranges,
             bool skip_payload_flush = false, bool memcheck_on_attach = false);
   ~IndexCore();
 
@@ -109,7 +123,8 @@ class IndexCore {
   ReservationResult reserve_write(const Digest& key_digest,
                                   std::uint32_t payload_length,
                                   std::uint32_t layout_id,
-                                  std::uint32_t allocation_rank = 0);
+                                  std::uint32_t allocation_rank = 0,
+                                  std::uint32_t allocation_group = 0);
   std::vector<OperationResult> finish_writes(
       const std::vector<std::uint64_t>& tokens);
   ReservationResult finish_write_and_reserve_read(std::uint64_t token,
@@ -135,6 +150,9 @@ class IndexCore {
     std::uint64_t count;
     std::uintptr_t address;
     std::uint32_t rank;
+    std::uint32_t group;
+    std::uint64_t stride;
+    std::uint64_t logical_offset;
   };
   struct LogicalTarget {
     bool found{false};
@@ -161,7 +179,8 @@ class IndexCore {
   ReservationResult reserve_allocate(const Digest& key_digest,
                                      std::uint32_t payload_length,
                                      std::uint32_t layout_id,
-                                     std::uint32_t allocation_rank);
+                                     std::uint32_t allocation_rank,
+                                     std::uint32_t allocation_group);
   ReservationResult make_reservation_result(
       std::uint64_t token, const BucketIdentityLine& identity) const;
 
@@ -212,7 +231,9 @@ class IndexCore {
   std::vector<bool> local_bucket_claimed_;
   std::vector<std::uint32_t> local_reader_counts_;
   std::vector<PayloadRange> payload_ranges_;
-  std::vector<std::deque<std::uint64_t>> free_slots_;
+  using PoolKey = std::pair<std::uint32_t, std::uint32_t>;
+  std::map<PoolKey, std::deque<std::uint64_t>> free_slots_;
+  std::map<PoolKey, std::uint64_t> pool_strides_;
   std::unordered_map<std::uint64_t, WriteReservation> write_reservations_;
   std::unordered_map<std::uint64_t, ReadReservation> read_reservations_;
   std::uint64_t next_token_{1};

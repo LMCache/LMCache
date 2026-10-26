@@ -67,9 +67,6 @@ Superblock make_superblock(const FormatParameters& parameters,
                            std::uint64_t region_size,
                            const LayoutDescription& layout) {
   parameters.owner_range(0);  // Validate ownership before touching the mapping.
-  if (parameters.hardware_qualification_digest == Digest{}) {
-    throw std::invalid_argument("hardware qualification digest is required");
-  }
   if ((parameters.layout_profile_digest == Digest{}) ||
       (parameters.region_id_digest == Digest{})) {
     throw std::invalid_argument("layout and region digests are required");
@@ -117,6 +114,7 @@ Superblock make_superblock(const FormatParameters& parameters,
   header.reader_activity_offset = layout.reader_activity_offset;
   header.payload_header_offset = layout.payload_header_offset;
   header.payload_data_offset = 0;
+  header.payload_used_bytes = layout.required_payload_bytes;
   header.layout_profile_digest = parameters.layout_profile_digest;
   header.hardware_qualification_digest =
       parameters.hardware_qualification_digest;
@@ -202,7 +200,7 @@ std::uint64_t bucket_id_for_level(const Superblock& superblock,
 IndexCore::IndexCore(
     std::uintptr_t base_address, std::uint64_t region_size,
     std::uint32_t participant_id, const FormatParameters& expected,
-    const std::vector<std::array<std::uint64_t, 4>>& payload_ranges,
+    const std::vector<std::vector<std::uint64_t>>& payload_ranges,
     bool skip_payload_flush, bool memcheck_on_attach)
     : base_(reinterpret_cast<std::uint8_t*>(base_address)),
       superblock_(reinterpret_cast<Superblock*>(base_address)),
@@ -215,21 +213,58 @@ IndexCore::IndexCore(
   // Logical slots remain owner-contiguous; their payload may span devices.
   // The caller fences this address-independent placement in the layout digest.
   std::uint64_t end = 0;
+  std::uint64_t used_bytes = 0;
   for (const auto& range : payload_ranges) {
-    const auto [begin, count, address, rank] = range;
+    if (range.size() != 4 && range.size() != 7) {
+      throw std::invalid_argument("payload range must have 4 or 7 fields");
+    }
+    const auto begin = range[0], count = range[1], address = range[2],
+               rank = range[3];
+    const auto group = range.size() == 7 ? range[4] : 0;
+    const auto stride =
+        range.size() == 7 ? range[5] : superblock_->payload_slot_bytes;
+    const auto offset = range.size() == 7 ? range[6] : begin * stride;
     if (begin != end || count == 0 ||
         count > superblock_->payload_slot_count - end || rank >= 8 ||
-        address == 0 || address % kCacheLineBytes != 0 ||
-        count > (std::numeric_limits<std::uintptr_t>::max() - address) /
-                    superblock_->payload_slot_bytes) {
+        group > std::numeric_limits<std::uint32_t>::max() || stride == 0 ||
+        stride % kCacheLineBytes != 0 ||
+        stride > superblock_->payload_slot_bytes ||
+        offset % kCacheLineBytes != 0 || address == 0 ||
+        address % kCacheLineBytes != 0 ||
+        count >
+            (std::numeric_limits<std::uintptr_t>::max() - address) / stride ||
+        offset > superblock_->payload_region_size_bytes ||
+        count > (superblock_->payload_region_size_bytes - offset) / stride) {
       throw std::invalid_argument("invalid payload placement range");
     }
+    const auto bytes = count * stride;
+    if (bytes > superblock_->payload_used_bytes - used_bytes) {
+      throw std::invalid_argument(
+          "payload ranges exceed configured used bytes");
+    }
+    for (const auto& previous : payload_ranges_) {
+      const auto previous_bytes = previous.count * previous.stride;
+      if ((offset < previous.logical_offset + previous_bytes &&
+           previous.logical_offset < offset + bytes) ||
+          (address < previous.address + previous_bytes &&
+           previous.address < address + bytes)) {
+        throw std::invalid_argument("overlapping payload placement ranges");
+      }
+    }
+    const PoolKey key{static_cast<std::uint32_t>(rank),
+                      static_cast<std::uint32_t>(group)};
+    const auto [it, inserted] = pool_strides_.emplace(key, stride);
+    if (!inserted && it->second != stride) {
+      throw std::invalid_argument("inconsistent group stride across owners");
+    }
     payload_ranges_.push_back(
-        {begin, count, address, static_cast<std::uint32_t>(rank)});
-    free_slots_.resize(std::max(free_slots_.size(), std::size_t(rank + 1)));
+        {begin, count, address, key.first, key.second, stride, offset});
+    free_slots_[key];
     end += count;
+    used_bytes += bytes;
   }
-  if (end != superblock_->payload_slot_count) {
+  if (end != superblock_->payload_slot_count ||
+      used_bytes != superblock_->payload_used_bytes) {
     throw std::invalid_argument("payload placement must cover every slot");
   }
   bit_words_per_participant_ = (superblock_->payload_slot_count + 511) / 512;
@@ -272,8 +307,14 @@ void IndexCore::validate_superblock(std::uint64_t region_size,
         "unsupported DAX-Coordinated L1 format version; stop all participants "
         "and explicitly reformat the region");
   }
-  const auto canonical =
-      make_superblock(expected, region_size, expected.layout());
+  auto canonical = make_superblock(expected, region_size, expected.layout());
+  if (expected.hardware_qualification_digest == Digest{}) {
+    // Omission relaxes only the qualification identifier comparison. Retain
+    // the stored bytes and validate their checksum along with every other field.
+    canonical.hardware_qualification_digest =
+        superblock_->hardware_qualification_digest;
+    canonical.checksum = superblock_checksum(canonical);
+  }
   if (std::memcmp(superblock_, &canonical, sizeof(Superblock)) != 0) {
     throw std::runtime_error(
         "DAX-Coordinated L1 layout or digest contract mismatch");
@@ -330,8 +371,7 @@ PayloadSlotHeader* IndexCore::payload_header(std::uint64_t slot_id) const {
 void* IndexCore::payload_address(std::uint64_t slot_id) const {
   const auto& range = payload_range(slot_id);
   return reinterpret_cast<void*>(range.address +
-                                 (slot_id - range.begin) *
-                                     superblock_->payload_slot_bytes);
+                                 (slot_id - range.begin) * range.stride);
 }
 
 const IndexCore::PayloadRange& IndexCore::payload_range(
@@ -353,7 +393,7 @@ PackedBitWord* IndexCore::activity_word(std::uint32_t participant_id,
 
 void IndexCore::rebuild_local_slot_state() {
   std::lock_guard<std::mutex> lock(local_mutex_);
-  for (auto& slots : free_slots_) slots.clear();
+  for (auto& [key, slots] : free_slots_) slots.clear();
   for (std::uint64_t slot = owner_slot_begin_;
        slot < owner_slot_begin_ + owner_slot_count_; ++slot) {
     auto* header = payload_header(slot);
@@ -362,7 +402,8 @@ void IndexCore::rebuild_local_slot_state() {
       throw std::runtime_error("owned payload slot header is corrupt");
     }
     if (header->allocation_state == PayloadAllocationState::kFree) {
-      free_slots_[payload_range(slot).rank].push_back(slot);
+      const auto& range = payload_range(slot);
+      free_slots_[{range.rank, range.group}].push_back(slot);
     }
   }
 }
@@ -436,11 +477,13 @@ IndexCore::LogicalTarget IndexCore::find_lowest_logical_target(
 
 ReservationResult IndexCore::make_reservation_result(
     std::uint64_t token, const BucketIdentityLine& identity) const {
+  const auto& range = payload_range(identity.global_payload_slot_id);
   return {OperationResult::kSuccess,
           token,
           identity.global_payload_slot_id,
           identity.bucket_generation,
-          identity.global_payload_slot_id * superblock_->payload_slot_bytes,
+          range.logical_offset +
+              (identity.global_payload_slot_id - range.begin) * range.stride,
           identity.payload_length,
           identity.layout_id,
           identity.slot_generation};
@@ -449,10 +492,11 @@ ReservationResult IndexCore::make_reservation_result(
 ReservationResult IndexCore::reserve_write(const Digest& key_digest,
                                            std::uint32_t payload_length,
                                            std::uint32_t layout_id,
-                                           std::uint32_t allocation_rank) {
-  if (closed_ || payload_length == 0 ||
-      payload_length > superblock_->payload_slot_bytes ||
-      allocation_rank >= free_slots_.size()) {
+                                           std::uint32_t allocation_rank,
+                                           std::uint32_t allocation_group) {
+  const auto pool = pool_strides_.find({allocation_rank, allocation_group});
+  if (closed_ || payload_length == 0 || pool == pool_strides_.end() ||
+      payload_length > pool->second) {
     return {OperationResult::kInvalidState};
   }
   auto target = find_lowest_logical_target(key_digest);
@@ -461,13 +505,14 @@ ReservationResult IndexCore::reserve_write(const Digest& key_digest,
     return {OperationResult::kWriterBusy};
   }
   return reserve_allocate(key_digest, payload_length, layout_id,
-                          allocation_rank);
+                          allocation_rank, allocation_group);
 }
 
 ReservationResult IndexCore::reserve_allocate(const Digest& key_digest,
                                               std::uint32_t payload_length,
                                               std::uint32_t layout_id,
-                                              std::uint32_t allocation_rank) {
+                                              std::uint32_t allocation_rank,
+                                              std::uint32_t allocation_group) {
   // New allocation after key lookup reports no logical target:
   // No local payload slot -> NoLocalPayloadSlot.
   // Otherwise, probe candidate buckets starting at level 0:
@@ -492,7 +537,7 @@ ReservationResult IndexCore::reserve_allocate(const Digest& key_digest,
   //                 publishes payload and READY, then releases the lock.
   // All levels exhausted -> WriterBusy if any claim failed, else NoFreeBucket.
   // The three-retry budget is shared across levels and is never reset here.
-  auto& slots = free_slots_[allocation_rank];
+  auto& slots = free_slots_.at({allocation_rank, allocation_group});
   {
     std::lock_guard<std::mutex> lock(local_mutex_);
     if (slots.empty()) {
@@ -597,6 +642,9 @@ bool IndexCore::mapping_is_valid(std::uint64_t bucket_id,
                                  const BucketIdentityLine& identity,
                                  const PayloadSlotHeader& header) const {
   return identity.global_payload_slot_id < superblock_->payload_slot_count &&
+         identity.payload_length > 0 &&
+         identity.payload_length <=
+             payload_range(identity.global_payload_slot_id).stride &&
          header.allocation_state == PayloadAllocationState::kAllocated &&
          header.slot_generation == identity.slot_generation &&
          header.back_bucket_id == bucket_id &&
@@ -790,7 +838,8 @@ void IndexCore::reclaim_slot(std::uint64_t bucket_id, std::uint64_t slot_id,
   publish_range(header, sizeof(PayloadSlotHeader));
   {
     std::lock_guard<std::mutex> lock(local_mutex_);
-    free_slots_[payload_range(slot_id).rank].push_back(slot_id);
+    const auto& range = payload_range(slot_id);
+    free_slots_[{range.rank, range.group}].push_back(slot_id);
   }
   release_bucket(bucket_id);
 }
@@ -1063,10 +1112,22 @@ ReservationResult IndexCore::delete_key(const Digest& key_digest) {
 CoreStatus IndexCore::report_status() {
   CoreStatus status{};
   std::lock_guard<std::mutex> lock(local_mutex_);
-  for (const auto& slots : free_slots_) {
-    status.free_slots_by_rank.push_back(slots.size());
+  std::uint64_t free_bytes = 0;
+  for (const auto& [key, slots] : free_slots_) {
+    status.free_slots_by_rank.resize(
+        std::max(status.free_slots_by_rank.size(), std::size_t(key.first + 1)));
+    status.free_slots_by_rank[key.first] += slots.size();
     status.free_slots += slots.size();
+    free_bytes += slots.size() * pool_strides_.at(key);
   }
+  for (const auto& range : payload_ranges_) {
+    const auto begin = std::max(range.begin, owner_slot_begin_);
+    const auto end = std::min(range.begin + range.count,
+                              owner_slot_begin_ + owner_slot_count_);
+    if (end > begin)
+      status.payload_capacity_bytes += (end - begin) * range.stride;
+  }
+  status.used_payload_bytes = status.payload_capacity_bytes - free_bytes;
   status.used_slots = owner_slot_count_ - status.free_slots;
   status.active_read_reservations = read_reservations_.size();
   status.active_write_reservations = write_reservations_.size();

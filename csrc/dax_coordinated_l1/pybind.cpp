@@ -64,6 +64,9 @@ PYBIND11_MODULE(lmcache_dax_coordinated_l1, module) {
       .def_readonly("free_slots_by_rank", &CoreStatus::free_slots_by_rank)
       .def_readonly("free_slots", &CoreStatus::free_slots)
       .def_readonly("used_slots", &CoreStatus::used_slots)
+      .def_readonly("used_payload_bytes", &CoreStatus::used_payload_bytes)
+      .def_readonly("payload_capacity_bytes",
+                    &CoreStatus::payload_capacity_bytes)
       .def_readonly("active_read_reservations",
                     &CoreStatus::active_read_reservations)
       .def_readonly("active_write_reservations",
@@ -72,7 +75,7 @@ PYBIND11_MODULE(lmcache_dax_coordinated_l1, module) {
   py::class_<IndexCore>(module, "DevDaxBucketIndexCore")
       .def(py::init<std::uintptr_t, std::uint64_t, std::uint32_t,
                     const FormatParameters&,
-                    const std::vector<std::array<std::uint64_t, 4>>&, bool,
+                    const std::vector<std::vector<std::uint64_t>>&, bool,
                     bool>(),
            py::arg("base_address"), py::arg("region_size"),
            py::arg("participant_id"), py::arg("expected"),
@@ -82,14 +85,15 @@ PYBIND11_MODULE(lmcache_dax_coordinated_l1, module) {
           "reserve_write",
           [](IndexCore& core, const py::bytes& key_digest,
              std::uint32_t payload_length, std::uint32_t layout_id,
-             std::uint32_t allocation_rank) {
+             std::uint32_t allocation_rank, std::uint32_t allocation_group) {
             const auto digest = bytes_to_digest(key_digest, "key digest");
             py::gil_scoped_release release;
             return core.reserve_write(digest, payload_length, layout_id,
-                                      allocation_rank);
+                                      allocation_rank, allocation_group);
           },
           py::arg("key_digest"), py::arg("payload_length"),
-          py::arg("layout_id"), py::arg("allocation_rank") = 0)
+          py::arg("layout_id"), py::arg("allocation_rank") = 0,
+          py::arg("allocation_group") = 0)
       .def("finish_writes", &IndexCore::finish_writes,
            py::call_guard<py::gil_scoped_release>())
       .def("finish_write_and_reserve_read",
@@ -152,7 +156,8 @@ PYBIND11_MODULE(lmcache_dax_coordinated_l1, module) {
          std::uint64_t payload_alignment, std::uint32_t visibility_mode,
          std::uint64_t participant_0_slot_count, const py::bytes& layout_digest,
          const py::bytes& hardware_digest, const py::bytes& region_id_digest,
-         std::uint64_t payload_region_size, std::uint32_t participant_count) {
+         std::uint64_t payload_region_size, std::uint32_t participant_count,
+         std::uint64_t payload_used_bytes) {
         FormatParameters parameters{};
         parameters.region_epoch = region_epoch;
         parameters.buckets_per_level = buckets_per_level;
@@ -161,6 +166,7 @@ PYBIND11_MODULE(lmcache_dax_coordinated_l1, module) {
         parameters.payload_alignment = payload_alignment;
         parameters.visibility_mode = visibility_mode;
         parameters.payload_region_size = payload_region_size;
+        parameters.payload_used_bytes = payload_used_bytes;
         parameters.participant_0_slot_count = participant_0_slot_count;
         parameters.participant_count = participant_count;
         parameters.layout_profile_digest =
@@ -176,7 +182,8 @@ PYBIND11_MODULE(lmcache_dax_coordinated_l1, module) {
       py::arg("payload_alignment"), py::arg("visibility_mode"),
       py::arg("participant_0_slot_count"), py::arg("layout_digest"),
       py::arg("hardware_digest"), py::arg("region_id_digest"),
-      py::arg("payload_region_size"), py::arg("participant_count") = 2);
+      py::arg("payload_region_size"), py::arg("participant_count") = 2,
+      py::arg("payload_used_bytes") = 0);
 
   module.def(
       "dax_coordinated_l1_is_formatted",

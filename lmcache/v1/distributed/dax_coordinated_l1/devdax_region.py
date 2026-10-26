@@ -25,6 +25,7 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.dax_coordinated_l1.devdax_layout import (
     DevDaxPayloadGeometry,
     DevDaxPayloadMapping,
+    DevDaxRankPlacement,
     resolve_payload_mappings,
 )
 from lmcache.v1.memory_management import (
@@ -137,6 +138,7 @@ class _PayloadViewRange:
     size_bytes: int
     rank: int
     mapping_offset_bytes: int
+    stride_bytes: int = 0
 
 
 class DaxCoordinatedL1Region:
@@ -146,6 +148,7 @@ class DaxCoordinatedL1Region:
         self,
         dax_coordinated_l1_config: DaxCoordinatedL1Config,
         memory_config: L1MemoryManagerConfig,
+        rank_placement: DevDaxRankPlacement,
     ) -> None:
         """Validate configured ranges, map payloads and register them for GPU DMA.
 
@@ -165,14 +168,15 @@ class DaxCoordinatedL1Region:
             raise ValueError(
                 "DAX-Coordinated L1 alignment must be a power of two >= 64"
             )
-        rank_placement = dax_coordinated_l1_config.rank_placement
-        self._portable = rank_placement.tp_size > 1
+        if not isinstance(rank_placement, DevDaxRankPlacement):
+            raise ValueError("engine KV world size must be registered before mapping")
+        self._portable = rank_placement.kv_world_size > 1
         metadata_region = rank_placement.regions[0]
         metadata_path = metadata_region.devdax_path
         assert metadata_region.metadata_offset_bytes is not None
         assert metadata_region.metadata_reservation_bytes is not None
         self._mapping_offset = int(metadata_region.metadata_offset_bytes)
-        payloads = resolve_payload_mappings(dax_coordinated_l1_config)
+        payloads = resolve_payload_mappings(rank_placement)
         self._metadata_path = metadata_path
         self._metadata_alignment = _read_devdax_alignment(metadata_path)
         self._metadata_reservation = int(metadata_region.metadata_reservation_bytes)
@@ -311,10 +315,11 @@ class DaxCoordinatedL1Region:
     def payload_ranges(
         self,
         geometry: DevDaxPayloadGeometry,
-    ) -> list[tuple[int, int, int, int]]:
+    ) -> list[tuple[int, int, int, int, int, int, int]]:
         """Bind owner-contiguous logical slots to rank-specific physical ranges.
 
-        Return native tuples (first slot, slot count, local address, rank).
+        Return native tuples (first slot, count, address, rank, group, stride,
+        logical byte offset).
         Each rank retains the original equal or participant-0-only ownership.
         Process addresses are local; the placement digest fences the shared plan.
 
@@ -333,14 +338,18 @@ class DaxCoordinatedL1Region:
                     slots.slot_count,
                     self._tensor(slots.rank).data_ptr() + slots.mapping_offset_bytes,
                     slots.rank,
+                    slots.group,
+                    slots.stride_bytes,
+                    slots.logical_offset_bytes,
                 )
             )
             self._payload_ranges.append(
                 _PayloadViewRange(
-                    logical_offset_bytes=slots.first_slot * geometry.payload_slot_bytes,
-                    size_bytes=slots.slot_count * geometry.payload_slot_bytes,
+                    logical_offset_bytes=slots.logical_offset_bytes,
+                    size_bytes=slots.slot_count * slots.stride_bytes,
                     rank=slots.rank,
                     mapping_offset_bytes=slots.mapping_offset_bytes,
+                    stride_bytes=slots.stride_bytes,
                 )
             )
         return native
@@ -354,7 +363,7 @@ class DaxCoordinatedL1Region:
         """Create a non-owning view from the native logical payload offset.
 
         Raises ValueError if the view crosses a placement boundary. A remote
-        layout unknown locally is represented as bytes, as in the TP=1 path.
+        layout unknown locally is represented as bytes, as in the single-KV-rank path.
         """
         for view_range in self._payload_ranges:
             relative = payload_offset - view_range.logical_offset_bytes
@@ -362,6 +371,13 @@ class DaxCoordinatedL1Region:
                 0 <= relative
                 and payload_length > 0
                 and relative + payload_length <= view_range.size_bytes
+                and (
+                    view_range.stride_bytes == 0
+                    or (
+                        relative % view_range.stride_bytes == 0
+                        and payload_length <= view_range.stride_bytes
+                    )
+                )
             ):
                 begin = view_range.mapping_offset_bytes + relative
                 raw_data = self._tensor(view_range.rank)[begin : begin + payload_length]
@@ -376,7 +392,7 @@ class DaxCoordinatedL1Region:
             shape=shapes[0],
             dtype=dtypes[0],
             address=payload_offset,
-            phy_size=payload_length,
+            phy_size=view_range.stride_bytes or payload_length,
             ref_count=1,
             fmt=MemoryFormat.KV_2LTD,
             shapes=shapes,
