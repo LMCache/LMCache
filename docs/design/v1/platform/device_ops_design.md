@@ -184,9 +184,9 @@ class DeviceOps:
   ```text
   gather_paged_kv_to_cpu / scatter_cpu_to_paged_kv        (tensors only)
     └─ device_ops.multi_layer_block_kv_transfer(KV tensors, chunk tensors, ...)
-          ├─ DeviceOps             → torch baseline         (CPU, HPU, Neuron)
-          ├─ MUSA / RBLN / MLU overrides → their tensor paths
-          └─ CUDA / XPU / NPU overrides → address kernel    (CUDA/ROCm, XPU, Ascend)
+          ├─ DeviceOps                            → torch baseline   (CPU, HPU, SUPA)
+          ├─ MUSA / RBLN / MLU / Neuron overrides → their tensor paths
+          └─ CUDA / XPU / NPU overrides           → address kernel   (CUDA/ROCm, XPU, Ascend)
   ```
 
   The LMCache-driven callers (`object_group_transfer`, the TRT-LLM connector)
@@ -541,4 +541,4 @@ module names and directories.
 | MUSA | `MusaDeviceOps` | pointer tensors + transfer overrides | none | **low** |
 | MLU | `MluDeviceOps` | tensor-only block transfer + stream recorders | none | **low** |
 | HPU | `HpuDeviceOps` | none (inherits baseline) | none | **trivial** |
-| Neuron | `NeuronDeviceOps` | none (inherits baseline) | none | **trivial** |
+| Neuron | `NeuronDeviceOps` | tensor-only block transfer | none | **low** |

@@ -76,9 +76,9 @@ class NpuDeviceOps(DeviceOps):
 
     def __init__(self) -> None:
         super().__init__()
-        # The compiled address-taking block kernel. It stays None only before
-        # ensure_native() runs or when the extension is not installed, and the
-        # torch baseline then serves block transfers.
+        # The compiled address-taking block kernel, set by ensure_native().
+        # A missing plugin makes ensure_native() raise rather than fall back,
+        # so it is None only on an instance that has not been initialized.
         self._block_transfer_kernel: Callable[..., None] | None = None
 
     def ensure_native(self) -> None:
@@ -129,10 +129,13 @@ class NpuDeviceOps(DeviceOps):
         engine_kv_format: lmcache_native.EngineKVFormat,
         skip_prefix_n_blocks: int,
     ) -> None:
-        """Run the block transfer on the compiled Ascend kernel when it is bound.
+        """Run the block transfer on the compiled Ascend kernel.
 
         Operands follow :meth:`DeviceOps.multi_layer_block_kv_transfer`.
-        If the extension is not loaded, the torch baseline serves.
+        :meth:`DeviceSpec.get_ops` binds the kernel before returning this
+        backend, and a missing plugin raises :class:`ImportError` there
+        instead of falling back. Only an instance that has not run
+        :meth:`ensure_native` uses the torch baseline.
         """
         args = (
             paged_buffer_ptrs_tensor,
