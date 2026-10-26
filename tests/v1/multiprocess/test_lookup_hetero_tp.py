@@ -32,7 +32,8 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import L1WriteCompletion, StorageManager
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
@@ -555,7 +556,7 @@ def test_concurrent_lookups_of_one_prefix_both_hit(
     entered, release = threading.Event(), threading.Event()
     prepare = sm.prepare_write_completion
 
-    def gated(reserved: dict) -> object:
+    def gated(reserved: dict[ObjectKey, MemoryObj]) -> L1WriteCompletion:
         if not entered.is_set():
             entered.set()
             assert release.wait(TIMEOUT)

@@ -2,8 +2,10 @@
 
 A decode engine at TP=B can serve KV that a prefill engine stored at TP=A.
 Two cases are covered: each engine has its own LMCache server joined by P2P
-(native PD, RFC #5969), or both engines share one server. This document
-covers phase 1: attention-only, non-MLA vLLM models.
+(the native PD data path of RFC #5969, `lmcache_driven` mode), or both
+engines share one server. RFC #5969 leaves asymmetric TP open; this design
+keeps the store in each rank's native layout and reshards on D. This
+document covers phase 1: vLLM to vLLM, attention-only, non-MLA models.
 
 ## Problem
 

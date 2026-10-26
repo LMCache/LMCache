@@ -199,6 +199,7 @@ class TestVllmLayoutHints:
         assert vllm_layout_hints(config) == {"kv_layout": "HND"}
 
     def test_attention_only_model_reports_kv_heads(self) -> None:
+        """A plain attention model reports its model-wide KV head count."""
         config = make_vllm_config("LBHNC", make_model_config(kv_heads=2))
         assert vllm_layout_hints(config) == {
             "kv_layout": "HND",
@@ -213,6 +214,7 @@ class TestVllmLayoutHints:
     def test_no_kv_heads_without_head_split(
         self, model_config: SimpleNamespace
     ) -> None:
+        """MLA and hybrid models do not split by KV head, so no count."""
         config = make_vllm_config("LBHNC", model_config)
         assert "total_num_kv_heads" not in vllm_layout_hints(config)
 

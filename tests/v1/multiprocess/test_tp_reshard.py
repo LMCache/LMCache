@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+"""Head-slice reshard plans checked against vLLM's KV head sharding."""
+
 # Third Party
 import pytest
 import torch
@@ -30,12 +32,14 @@ def _shard(full: torch.Tensor, h: int, tp: int, rank: int) -> torch.Tensor:
     return full[..., first * HEAD_ELEMS : (first + n) * HEAD_ELEMS].clone()
 
 
-def test_replicated_ranks_share_heads():
+def test_replicated_ranks_share_heads() -> None:
+    """With more ranks than heads, consecutive ranks hold the same head."""
     assert [kv_head_range(2, 8, r) for r in range(8)] == [(0, 1)] * 4 + [(1, 1)] * 4
     assert [kv_head_range(8, 2, r) for r in range(2)] == [(0, 4), (4, 4)]
 
 
-def test_invalid_tp_rejected():
+def test_invalid_tp_rejected() -> None:
+    """TP sizes vLLM cannot shard the heads over are rejected."""
     assert not is_valid_tp(8, 3)
     assert not is_valid_tp(0, 1)
     with pytest.raises(ValueError):
@@ -47,7 +51,8 @@ def test_invalid_tp_rejected():
 @pytest.mark.parametrize("h", HEAD_COUNTS)
 @pytest.mark.parametrize("src_tp", TP_SIZES)
 @pytest.mark.parametrize("dst_tp", TP_SIZES)
-def test_reshard_rebuilds_destination_shards(h, src_tp, dst_tp):
+def test_reshard_rebuilds_destination_shards(h: int, src_tp: int, dst_tp: int) -> None:
+    """Every destination rank is rebuilt exactly from the source ranks."""
     if not (is_valid_tp(h, src_tp) and is_valid_tp(h, dst_tp)):
         pytest.skip("vLLM rejects this TP size")
     full = _full_kv(h)
@@ -61,7 +66,8 @@ def test_reshard_rebuilds_destination_shards(h, src_tp, dst_tp):
         assert torch.equal(out, expected)
 
 
-def test_layout_desc_scales_last_dim():
+def test_layout_desc_scales_last_dim() -> None:
+    """Only the head dimension of a layout changes with the TP size."""
     desc = MemoryLayoutDesc(
         shapes=[torch.Size((2, 28, 256, 4 * 128))], dtypes=[torch.bfloat16]
     )
