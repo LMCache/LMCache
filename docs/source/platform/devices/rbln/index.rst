@@ -32,12 +32,13 @@ Use an environment with the repository's build dependencies installed.
 Running vLLM-RBLN with LMCache
 ------------------------------
 
-Usage is the same as on GPUs: start an LMCache server and point vLLM-RBLN at
-it with ``LMCacheMPConnector``. With ``N`` as the vLLM block size:
+As on GPUs, start an LMCache server and point vLLM-RBLN at it with
+``LMCacheMPConnector``. With ``N`` as the vLLM block size:
 
 .. code-block:: bash
 
-   lmcache server --port 6555 --l1-size-gb 32 --chunk-size N
+   lmcache server --port 6555 --l1-size-gb 32 --chunk-size N \
+       --supported-transfer-mode engine_driven
 
    vllm serve <model> \
        --model-impl vllm \
@@ -52,8 +53,12 @@ it with ``LMCacheMPConnector``. With ``N`` as the vLLM block size:
            }
        }'
 
-Two settings are specific to RBLN:
+Three settings are specific to RBLN:
 
+* ``--supported-transfer-mode engine_driven`` on the server. The server
+  defaults to ``lmcache_driven``, which does not register the engine-driven
+  handlers the RBLN worker calls. ``auto`` also works, as it enables both
+  paths.
 * ``--model-impl vllm``. KV connectors work only with vLLM's model
   implementation. With the default ``auto``, vLLM-RBLN can choose a model
   path that never hands its KV caches to a connector.
@@ -86,9 +91,11 @@ Any other layout raises ``ValueError``.
 Capability limits
 -----------------
 
-LMCache-driven MP transfer is not supported. Requesting ``lmcache_driven``
-(``--supported-transfer-mode`` on the server, ``LMCACHE_MP_TRANSFER_MODE`` on
-the worker) fails at validation, and ``auto`` resolves to ``engine_driven``.
+LMCache-driven MP transfer is not supported. On the worker, setting
+``LMCACHE_MP_TRANSFER_MODE=lmcache_driven`` fails at validation, and ``auto``
+(the default) resolves to ``engine_driven``. The server does not check the
+device: started with ``--supported-transfer-mode lmcache_driven`` (its
+default), it runs but cannot serve an RBLN worker.
 
 Validation
 ----------
