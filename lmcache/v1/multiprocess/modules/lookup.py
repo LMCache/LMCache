@@ -1043,6 +1043,8 @@ class LookupModule(DiscoverableModule):
         """
         found, _ = fold_unfold_grouped(result.hit_cells, row_windows)
         if state.source_world_size is None:
+            # A partial primary hit skips the fallback even if a source TP
+            # holds a longer prefix; see "Known limitation" in hetero_tp.md.
             if found > 0 or not advance or not state.candidates:
                 job.hetero = None
                 return row_windows

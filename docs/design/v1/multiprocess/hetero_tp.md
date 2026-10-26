@@ -136,7 +136,29 @@ the operator lists the TP sizes of the other engines.
 - Both TP sizes divide the model's KV head count.
 - LMCache-driven transfer. The engine-driven registration does not send the
   head-count hint, so the fallback is off there.
-- The fallback runs only when the primary stage finds no chunk at all.
+- The fallback runs only when the primary stage finds no chunk at all. See
+  [Known limitation](#known-limitation-partial-primary-hit).
+
+## Known limitation: partial primary hit
+
+If D already holds the first k chunks at TP=B, the primary stage finds k
+chunks, the lookup reports k, and D recomputes the rest, even when the
+source TP holds the whole prefix:
+
+```
+P store (A keys):  [c0][c1][c2][c3]
+D L1 (B keys):     [c0]                 shared system prompt
+D lookup:          primary hits c0 -> no fallback -> 1 chunk hit, c1..c3 recomputed
+```
+
+A common source of the B chunk is an earlier reshard: request 1 leaves its
+B objects in D's L1, and request 2 with the same system prompt hits them.
+vLLM's prefix cache on D hides this while it still holds those blocks,
+because the lookup then starts after them.
+
+Phase 1 does not handle this; it is the next change. The fix: on a partial
+primary hit, look up chunks k..n at the source TP, reshard only those, and
+return one combined hit.
 
 ## Verification
 
@@ -154,6 +176,7 @@ The e2e test is native PD on one node: two servers, a coordinator, NIXL P2P,
 
 | Phase | Content |
 | --- | --- |
+| next | Fall back on a partial primary hit ([Known limitation](#known-limitation-partial-primary-hit)). |
 | 2 | GDN and Mamba2 recurrent groups, and hybrid subpaged attention. This needs a per-kernel-group shard description (segments sharded along one axis), because GDN conv is `[q\|k\|v]_local` and ssm splits by v heads. chunk_size must be a multiple of both engines' block sizes, which can differ by TP in hybrids. |
 | 3 | Move the reshard copy to the GPU if its logged cost matters on the PD handoff. |
 
@@ -161,9 +184,7 @@ The e2e test is native PD on one node: two servers, a coordinator, NIXL P2P,
 
 1. Source TP discovery: should a peer advertise its layouts (P2P RPC or
    coordinator metadata) instead of using static config?
-2. Should a partial hit at B also try the source TPs? A shared system-prompt
-   chunk at B currently hides a long prefix at A.
-3. After a reshard, keep the A copies in D's L1 for later TP=A readers, or
+2. After a reshard, keep the A copies in D's L1 for later TP=A readers, or
    drop them?
-4. The NIXL load does not compare the remote object size with the local
+3. The NIXL load does not compare the remote object size with the local
    buffer (`P2PL2Adapter.submit_load_task`). Fix it separately.
