@@ -538,7 +538,10 @@ module names and directories.
 | CUDA | `CudaDeviceOps` | pointer tensors + native ops via `bind_native(cuda_ops)` | `csrc/cuda/` | **low** |
 | HIP/ROCm | handled by `CudaDeviceOps` | same; ROCm builds `cuda_ops` via hipify | `csrc/cuda/` | N/A |
 | XPU | `XpuDeviceOps` | 12 via `bind_native(xpu_ops)` + 24 torch | existing SYCL | **low** |
+| NPU | `NpuDeviceOps` | pointer tensors + block transfer + stream recorders + memcpy; native ops via `bind_native(lmcache_ascend.ops)` | external `lmcache_ascend` plugin | **low** |
 | MUSA | `MusaDeviceOps` | pointer tensors + transfer overrides | none | **low** |
 | MLU | `MluDeviceOps` | tensor-only block transfer + stream recorders | none | **low** |
+| RBLN | `RblnDeviceOps` | tensor-only block transfer | none | **low** |
 | HPU | `HpuDeviceOps` | none (inherits baseline) | none | **trivial** |
+| SUPA | `SupaDeviceOps` | none (inherits baseline) | none | **trivial** |
 | Neuron | `NeuronDeviceOps` | tensor-only block transfer | none | **low** |
