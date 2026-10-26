@@ -23,7 +23,13 @@ if TYPE_CHECKING:
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -36,9 +42,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
-from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.platform import EventNotifier, create_event_notifier
-from lmcache.v1.storage_backend.raw_block import (
+from lmcache.v1.distributed.l2_adapters.raw_block import (
     DEFAULT_IOURING_QUEUE_DEPTH,
     RawBlockCore,
     RawBlockCoreConfig,
@@ -48,6 +52,8 @@ from lmcache.v1.storage_backend.raw_block import (
     normalize_raw_block_placement_ids,
     validate_raw_block_io_options,
 )
+from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import EventNotifier, create_event_notifier
 
 logger = init_logger(__name__)
 
@@ -596,6 +602,10 @@ class RawBlockL2Adapter(L2AdapterInterface):
         self._lookup_pool: ThreadPoolExecutor
         self._load_pool: ThreadPoolExecutor
         self._fdp_lock = threading.Lock()
+        self._memory_tags = MemoryTags(
+            MemorySegment.STORAGE,
+            MemoryResidency.REMOTE if config.shared else MemoryResidency.LOCAL,
+        )
         self._fdp_data_placement_policy = config.fdp_data_placement_policy
         self._fdp_slot_reuse_policy = config.fdp_slot_reuse_policy
         self._fdp_cache_salt_bucket_placements: dict[str, int] = {}
@@ -857,6 +867,10 @@ class RawBlockL2Adapter(L2AdapterInterface):
             logger.warning(
                 "RawBlockL2Adapter listener recovery bootstrap failed: %s", e
             )
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return local storage tags; remote when the adapter is shared."""
+        return self._memory_tags
 
     def close(self) -> None:
         """Wait for worker pools, close the core, and close eventfds."""

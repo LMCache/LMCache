@@ -175,22 +175,33 @@ def test_grpc_server_workers_are_parsed():
     assert _parse_mp(["--grpc-server-workers", "7"]).grpc_server_workers == 7
 
 
+def test_api_key_files_share_one_option_and_legacy_alias() -> None:
+    """The MP configuration carries one cumulative file list for all entry points."""
+    config = _parse_mp(
+        [
+            "--api-key-file",
+            "current-key",
+            "--http-api-key-file",
+            "next-key",
+            "--grpc-server-mode",
+            "aio",
+        ]
+    )
+    assert config.api_key_files == ["current-key", "next-key"]
+    assert config.grpc_server_mode == "aio"
+
+
 def test_server_module_flags_are_parsed():
     config = _parse_mp(
         [
             "--server-module",
-            (
-                '{"module_path":"my_pkg.server_module",'
-                '"factory_name":"build_extra_modules",'
-                '"config":{"mode":"test"}}'
-            ),
+            ('{"module_path":"my_pkg.server_module","config":{"mode":"test"}}'),
         ]
     )
 
     assert len(config.server_modules) == 1
     spec = config.server_modules[0]
     assert spec.module_path == "my_pkg.server_module"
-    assert spec.factory_name == "build_extra_modules"
     assert spec.config == {"mode": "test"}
 
 
@@ -396,7 +407,7 @@ def test_deprecated_flags_log_warning():
     # lmcache's ``init_logger`` sets ``propagate = False``, so pytest's
     # ``caplog`` (root-logger based) cannot see the records. Attach a local
     # handler to the named logger instead (established pattern, see
-    # tests/v1/test_v1_adapter_state_desync.py).
+    # tests/inprocess/integration/vllm/test_v1_adapter_state_desync.py).
     records: list[logging.LogRecord] = []
 
     class _ListHandler(logging.Handler):

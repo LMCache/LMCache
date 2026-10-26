@@ -12,11 +12,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.storage_backend.abstract_backend import (
-    AllocatorBackendInterface,
-    StoragePluginInterface,
-)
-from lmcache.v1.storage_backend.raw_block import (
+from lmcache.v1.distributed.l2_adapters.raw_block import (
     DEFAULT_IOURING_QUEUE_DEPTH,
     RawBlockCore,
     RawBlockCoreConfig,
@@ -26,6 +22,10 @@ from lmcache.v1.storage_backend.raw_block import (
     normalize_raw_block_io_engine,
     round_up,
     validate_raw_block_io_options,
+)
+from lmcache.v1.storage_backend.abstract_backend import (
+    AllocatorBackendInterface,
+    StoragePluginInterface,
 )
 
 if TYPE_CHECKING:

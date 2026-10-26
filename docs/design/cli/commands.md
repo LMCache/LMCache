@@ -183,8 +183,8 @@ Checksum:                                OK
 **`bench server`** -- end-to-end sanity test for a running LMCache MP cache
 server (ZMQ + HTTP). For each sequence in ``[--start, --end)`` the tool runs a
 cold pass (``LOOKUP`` miss → ``STORE``) and a warm pass (``LOOKUP`` hit →
-``RETRIEVE``), then cross-checks per-chunk checksums against the server's HTTP
-API. Exercises the full RPC path
+``RETRIEVE``), then verifies the retrieved data using per-chunk checksums.
+Exercises the full RPC path
 (``REGISTER_KV_CACHE → GET_CHUNK_SIZE → LOOKUP → QUERY_PREFETCH_STATUS →
 RETRIEVE → STORE → END_SESSION``).
 
@@ -400,5 +400,3 @@ lmcache/cli/
 | **1** | **`server`** (done), `ping kvcache`, `kvcache clear`, `kvcache end-session`, `describe kvcache` |
 | **2** | `ping engine`, `query engine`, `query kvcache`, `bench engine`, `bench server`, `bench l2`, `describe engine`, corpora |
 | **3** | `kvcache evict` (future) |
-
-Existing `lmcache_server` entry point kept as a deprecated alias for 2 minor releases.

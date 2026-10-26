@@ -31,12 +31,12 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.utils import CacheRemoveEvent, CacheStoreEvent
 from lmcache.v1.multiprocess.custom_types import (
-    KV_EVENT_CAPABILITY,
     KVEventBatch,
     KVEventRecord,
 )
 from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.ipc_policy import (
     is_isolated_ipc,
@@ -46,12 +46,28 @@ from lmcache.v1.platform.ipc_policy import (
     set_use_vmm_api,
 )
 
+# Test helpers
+from tests.v1.mp_scheduler_adapter_test_utils import (
+    make_request_client,
+    make_scheduler_adapter,
+    ready_future,
+)
+
 
 class FakeMQClient:
     """MessageQueueClient double that records close calls."""
 
     def __init__(self, *_args, **_kwargs) -> None:
         self.closed = False
+
+    def get_experimental(self):
+        """Advertise no optional server capabilities."""
+        # First Party
+        from lmcache.v1.multiprocess.futures import MessagingFuture
+
+        future: MessagingFuture = MessagingFuture()
+        future.set_result([])
+        return future
 
     def close(self) -> None:
         """Record that the client was closed."""
@@ -88,13 +104,11 @@ def _parallel_strategy(
 def _event_adapter(
     fake_adapter: tuple,
     parallel_strategy: ParallelStrategy | None = None,
-    advertised: bool = True,
+    extra_config: dict | None = None,
 ) -> tuple[LMCacheMPWorkerAdapter, MagicMock, list[Callable]]:
     """Use cancellable streams at the stubbed network boundary."""
     _, client, _ = fake_adapter
-    client.get_experimental.return_value.result.return_value = (
-        [KV_EVENT_CAPABILITY] if advertised else []
-    )
+    client.get_experimental.return_value.result.return_value = []
     senders = []
     ready = threading.Event()
 
@@ -129,14 +143,29 @@ def _event_adapter(
 
     client.subscribe_kv_events.side_effect = subscribe
     adapter = _make_worker_adapter(
+        extra_config=extra_config,
         enable_kv_events=True,
         parallel_strategy=parallel_strategy,
     )
     assert adapter.get_kv_events() == []
     strategy = parallel_strategy or _parallel_strategy()
-    if KV_EVENT_CAPABILITY in adapter.experimental and strategy.is_kv_event_subscriber:
+    if strategy.is_kv_event_subscriber:
         assert ready.wait(5)
     return adapter, client, senders
+
+
+def _own_reporting_adapter(
+    fake_adapter: tuple, extra_config: dict | None = None
+) -> LMCacheMPWorkerAdapter:
+    """Build a worker whose server has the KV event stream disabled.
+
+    The worker always subscribes; the server's first batch carries
+    ``enabled=False``, after which the worker reports its own completed
+    stores as KV events.
+    """
+    adapter, _, senders = _event_adapter(fake_adapter, extra_config=extra_config)
+    senders[-1](KVEventBatch(False, 7, 0, False, []))
+    return adapter
 
 
 def _event_record(kind: str = "stored", chunk: bytes = b"chunk") -> KVEventRecord:
@@ -156,7 +185,7 @@ def _complete_event_store(adapter: LMCacheMPWorkerAdapter) -> None:
     adapter.transfer_ctx.submit_store.return_value.query.return_value = True
     adapter.transfer_ctx.submit_store.return_value.result.return_value = True
     size = adapter.lmcache_tokens_per_chunk
-    op = replace(_op([[0]]), token_ids=list(range(size)), end=size)
+    op = replace(_op([[0]]), token_bytes=pack_token_ids(range(size)), end=size)
     adapter.submit_store_request("own-store", op, None)
     adapter.get_finished({"own-store"})
 
@@ -276,7 +305,9 @@ def _make_scheduler_adapter(
 
 def _op(block_ids: list[list[int]]) -> LoadStoreOp:
     """Build a minimal four-token ``LoadStoreOp`` over *block_ids*."""
-    return LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=block_ids, start=0, end=4)
+    return LoadStoreOp(
+        token_bytes=pack_token_ids([1, 2, 3, 4]), block_ids=block_ids, start=0, end=4
+    )
 
 
 def test_get_lmcache_chunk_size_uses_plain_query_without_alignment() -> None:
@@ -393,18 +424,8 @@ def fake_adapter(monkeypatch):
 def test_scheduler_reset_cache_clears_every_server_without_force(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reset sends non-forced CLEAR and preserves local lookup state."""
+    """Reset sends non-forced CLEAR to every server within one budget."""
     adapter, clients = _make_scheduler_adapter(["server-a", "server-b"])
-    lookup_state = {
-        "_pending_lookups": {"req-1"},
-        "_unacked_lookups": {"req-1": MagicMock()},
-        "_lookup_status": {"req-1": {}},
-        "_finished_lookup_results": {"req-1": 256},
-        "_per_server_hits": {"req-1": {"server-a": 1}},
-        "_lookup_params": {"req-1": ([1, 2, 3, 4], "", None)},
-    }
-    for name, value in lookup_state.items():
-        setattr(adapter, name, value)
     futures = {server: MagicMock(name=f"future[{server}]") for server in clients}
     for server, client in clients.items():
         client.clear.return_value = futures[server]
@@ -419,8 +440,21 @@ def test_scheduler_reset_cache_clears_every_server_without_force(
         futures[server].result.assert_called_once_with(
             timeout=expected_timeouts[server]
         )
-    for name, value in lookup_state.items():
-        assert getattr(adapter, name) is value
+
+
+def test_scheduler_reset_cache_keeps_lookups_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lookup submitted before a reset still resolves after it."""
+    client = make_request_client(chunk_size=256)
+    adapter = make_scheduler_adapter(monkeypatch, {"server-a": client}, 16)
+    assert adapter.maybe_submit_lookup_request("req-1", list(range(512)))
+
+    assert adapter.reset_cache() is True
+
+    client.query_prefetch_status.return_value = ready_future(2)
+    client.lookup.return_value.set_result(None)
+    assert adapter.check_lookup_result("req-1") == 512
 
 
 @pytest.mark.parametrize(
@@ -804,7 +838,9 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
     fake_future = MagicMock()
     transfer_ctx.submit_store.return_value = fake_future
     adapter.transfer_ctx = transfer_ctx
-    op = LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=[[0]], start=0, end=4)
+    op = LoadStoreOp(
+        token_bytes=pack_token_ids([1, 2, 3, 4]), block_ids=[[0]], start=0, end=4
+    )
 
     adapter.submit_store_request(
         "req-1",
@@ -838,7 +874,7 @@ def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypat
     transfer_ctx.submit_store.return_value = fake_future
     adapter.transfer_ctx = transfer_ctx
     op = LoadStoreOp(
-        token_ids=[1, 2, 3, 4],
+        token_bytes=pack_token_ids([1, 2, 3, 4]),
         block_ids=[[0, 1], [10, 11]],
         start=0,
         end=4,
@@ -861,41 +897,46 @@ def test_store_kv_events_are_reported_after_successful_store(
     # First Party
     from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
-    adapter = _make_worker_adapter(enable_kv_events=True)
-    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
-    transfer_ctx = MagicMock()
-    store_future = MagicMock()
-    store_future.query.return_value = True
-    store_future.result.return_value = True
-    transfer_ctx.submit_store.return_value = store_future
-    adapter.transfer_ctx = transfer_ctx
+    adapter = _own_reporting_adapter(fake_adapter)
+    try:
+        monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+        transfer_ctx = MagicMock()
+        store_future = MagicMock()
+        store_future.query.return_value = True
+        store_future.result.return_value = True
+        transfer_ctx.submit_store.return_value = store_future
+        adapter.transfer_ctx = transfer_ctx
 
-    chunk_size = adapter.lmcache_tokens_per_chunk
-    token_ids = list(range(chunk_size * 2))
-    op = LoadStoreOp(
-        token_ids=token_ids,
-        block_ids=[[1]],
-        start=chunk_size,
-        end=chunk_size * 2,
-    )
-    adapter.submit_store_request("req-1", op, event=None)
+        chunk_size = adapter.lmcache_tokens_per_chunk
+        token_ids = list(range(chunk_size * 2))
+        op = LoadStoreOp(
+            token_bytes=pack_token_ids(token_ids),
+            block_ids=[[1]],
+            start=chunk_size,
+            end=chunk_size * 2,
+        )
+        adapter.submit_store_request("req-1", op, event=None)
 
-    assert adapter.get_kv_events() == []
+        assert adapter.get_kv_events() == []
 
-    adapter.get_finished({"req-1"})
-    events = adapter.get_kv_events()
-    expected_hashes = TokenHasher(chunk_size=chunk_size).compute_chunk_hashes(
-        token_ids,
-        end=chunk_size * 2,
-    )
+        adapter.get_finished({"req-1"})
+        events = adapter.get_kv_events()
+        expected_hashes = TokenHasher(
+            chunk_size=chunk_size
+        ).compute_packed_chunk_hashes(
+            pack_token_ids(token_ids),
+            end=chunk_size * 2,
+        )
 
-    assert len(events) == 1
-    assert events[0].block_hashes == [expected_hashes[1]]
-    assert events[0].parent_block_hash == expected_hashes[0]
-    assert events[0].token_ids == token_ids[chunk_size : chunk_size * 2]
-    assert events[0].block_size == chunk_size
-    assert events[0].medium == "CPU"
-    assert adapter.get_kv_events() == []
+        assert len(events) == 1
+        assert events[0].block_hashes == [expected_hashes[1]]
+        assert events[0].parent_block_hash == expected_hashes[0]
+        assert events[0].token_ids == token_ids[chunk_size : chunk_size * 2]
+        assert events[0].block_size == chunk_size
+        assert events[0].medium == "CPU"
+        assert adapter.get_kv_events() == []
+    finally:
+        adapter.shutdown()
 
 
 def test_store_kv_events_are_discarded_after_failed_store(
@@ -903,27 +944,30 @@ def test_store_kv_events_are_discarded_after_failed_store(
     monkeypatch,
 ):
     """Failed MP stores must not emit cache-store events."""
-    adapter = _make_worker_adapter(enable_kv_events=True)
+    adapter = _own_reporting_adapter(fake_adapter)
     monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
-    transfer_ctx = MagicMock()
-    store_future = MagicMock()
-    store_future.query.return_value = True
-    store_future.result.return_value = False
-    transfer_ctx.submit_store.return_value = store_future
-    adapter.transfer_ctx = transfer_ctx
+    try:
+        transfer_ctx = MagicMock()
+        store_future = MagicMock()
+        store_future.query.return_value = True
+        store_future.result.return_value = False
+        transfer_ctx.submit_store.return_value = store_future
+        adapter.transfer_ctx = transfer_ctx
 
-    chunk_size = adapter.lmcache_tokens_per_chunk
-    op = LoadStoreOp(
-        token_ids=list(range(chunk_size)),
-        block_ids=[[0]],
-        start=0,
-        end=chunk_size,
-    )
-    adapter.submit_store_request("req-1", op, event=None)
+        chunk_size = adapter.lmcache_tokens_per_chunk
+        op = LoadStoreOp(
+            token_bytes=pack_token_ids(range(chunk_size)),
+            block_ids=[[0]],
+            start=0,
+            end=chunk_size,
+        )
+        adapter.submit_store_request("req-1", op, event=None)
 
-    adapter.get_finished({"req-1"})
+        adapter.get_finished({"req-1"})
 
-    assert adapter.get_kv_events() == []
+        assert adapter.get_kv_events() == []
+    finally:
+        adapter.shutdown()
 
 
 @pytest.mark.parametrize("store_result", [True, False, None])
@@ -932,114 +976,124 @@ def test_lazy_store_kv_events_preserve_completion_and_failure_reporting(
     store_result: bool | None,
 ) -> None:
     """Only successful stores emit events; every lazy store reports completion."""
-    adapter = _make_worker_adapter(
-        extra_config={"lmcache.mp.lazy_offload": True},
-        enable_kv_events=True,
+    adapter = _own_reporting_adapter(
+        fake_adapter, extra_config={"lmcache.mp.lazy_offload": True}
     )
-    adapter.transfer_ctx = MagicMock()
-    future = adapter.transfer_ctx.submit_store.return_value
-    future.query.return_value = True
-    future.result.return_value = store_result
-    chunk_size = adapter.lmcache_tokens_per_chunk
-    op = LoadStoreOp(
-        token_ids=list(range(chunk_size)),
-        block_ids=[[0]],
-        start=0,
-        end=chunk_size,
-    )
-    adapter.submit_store_request("req-1", op, event=None)
-    assert adapter.get_kv_events() == []
-    if store_result is None:
-        # Lose server health while the store is pending.
-        FakeHeartbeatThread.instances[-1].health_event.clear()
+    try:
+        adapter.transfer_ctx = MagicMock()
+        future = adapter.transfer_ctx.submit_store.return_value
+        future.query.return_value = True
+        future.result.return_value = store_result
+        chunk_size = adapter.lmcache_tokens_per_chunk
+        op = LoadStoreOp(
+            token_bytes=pack_token_ids(range(chunk_size)),
+            block_ids=[[0]],
+            start=0,
+            end=chunk_size,
+        )
+        adapter.submit_store_request("req-1", op, event=None)
+        assert adapter.get_kv_events() == []
+        if store_result is None:
+            # Lose server health while the store is pending.
+            FakeHeartbeatThread.instances[-1].health_event.clear()
 
-    adapter.get_finished_with_lazy_offload()
+        adapter.get_finished_with_lazy_offload()
 
-    assert len(adapter.get_kv_events()) == (1 if store_result else 0)
-    assert adapter.get_kv_events() == []
-    assert adapter.get_completed_store_requests() == {"req-1": 1}
-    assert adapter.get_completed_store_requests() is None
-    assert adapter.get_failed_store_requests() == (None if store_result else {"req-1"})
-    assert adapter.get_failed_store_requests() is None
+        assert len(adapter.get_kv_events()) == (1 if store_result else 0)
+        assert adapter.get_kv_events() == []
+        assert adapter.get_completed_store_requests() == {"req-1": 1}
+        assert adapter.get_completed_store_requests() is None
+        assert adapter.get_failed_store_requests() == (
+            None if store_result else {"req-1"}
+        )
+        assert adapter.get_failed_store_requests() is None
+    finally:
+        adapter.shutdown()
 
 
 @pytest.mark.parametrize("lazy_offload", [False, True])
 @pytest.mark.parametrize("enable_kv_events", [False, True])
 def test_kv_event_buffer_metrics(
-    fake_adapter: object,
+    fake_adapter: tuple,
     lazy_offload: bool,
     enable_kv_events: bool,
 ) -> None:
     """A stalled drain is visible; failed/pending stores do not count as events."""
-    adapter = _make_worker_adapter(
-        extra_config={"lmcache.mp.lazy_offload": lazy_offload},
-        enable_kv_events=enable_kv_events,
-    )
-    adapter.transfer_ctx = MagicMock()
-    future = adapter.transfer_ctx.submit_store.return_value
-    future.result.return_value = True
-    chunk_size = adapter.lmcache_tokens_per_chunk
-    op = LoadStoreOp(
-        token_ids=list(range(chunk_size * 2)),
-        block_ids=[[0, 1]],
-        start=0,
-        end=chunk_size * 2,
-    )
+    extra_config: dict[str, object] = {"lmcache.mp.lazy_offload": lazy_offload}
+    if enable_kv_events:
+        adapter = _own_reporting_adapter(fake_adapter, extra_config=extra_config)
+    else:
+        adapter = _make_worker_adapter(
+            extra_config=extra_config, enable_kv_events=False
+        )
+    try:
+        adapter.transfer_ctx = MagicMock()
+        future = adapter.transfer_ctx.submit_store.return_value
+        future.result.return_value = True
+        chunk_size = adapter.lmcache_tokens_per_chunk
+        op = LoadStoreOp(
+            token_bytes=pack_token_ids(range(chunk_size * 2)),
+            block_ids=[[0, 1]],
+            start=0,
+            end=chunk_size * 2,
+        )
 
-    def metrics() -> tuple[float, ...]:
-        if not enable_kv_events:
-            return (0, 0, 0)
-        labels = {"model_name": "test-model", "worker_id": "0"}
-        values = []
-        for metric, name in (
-            (adapter_mod._KV_EVENTS_BUFFERED, "buffered"),
-            (adapter_mod._KV_EVENTS_GENERATED, "generated_total"),
-            (adapter_mod._KV_EVENTS_DRAINED, "drained_total"),
-        ):
-            sample_name = f"vllm:lmcache_mp_kv_events_{name}"
-            values.append(
-                next(
-                    sample.value
-                    for family in metric.collect()
-                    for sample in family.samples
-                    if sample.name == sample_name and sample.labels == labels
+        def metrics() -> tuple[float, ...]:
+            if not enable_kv_events:
+                return (0, 0, 0)
+            labels = {"model_name": "test-model", "worker_id": "0"}
+            values = []
+            for metric, name in (
+                (adapter_mod._KV_EVENTS_BUFFERED, "buffered"),
+                (adapter_mod._KV_EVENTS_GENERATED, "generated_total"),
+                (adapter_mod._KV_EVENTS_DRAINED, "drained_total"),
+            ):
+                sample_name = f"vllm:lmcache_mp_kv_events_{name}"
+                values.append(
+                    next(
+                        sample.value
+                        for family in metric.collect()
+                        for sample in family.samples
+                        if sample.name == sample_name and sample.labels == labels
+                    )
                 )
-            )
-        return tuple(values)
+            return tuple(values)
 
-    def finish() -> None:
-        if lazy_offload:
-            adapter.get_finished_with_lazy_offload()
-        else:
-            adapter.get_finished(set())
+        def finish() -> None:
+            if lazy_offload:
+                adapter.get_finished_with_lazy_offload()
+            else:
+                adapter.get_finished(set())
 
-    buffered, generated, drained = metrics()
-    count = 0
-    for request_id in ("first", "second"):
+        buffered, generated, drained = metrics()
+        count = 0
+        for request_id in ("first", "second"):
+            future.query.return_value = False
+            adapter.submit_store_request(request_id, op, event=None)
+            finish()
+            assert metrics() == (buffered + count, generated + count, drained)
+            future.query.return_value = True
+            finish()
+            count += 2 if enable_kv_events else 0
+            assert metrics() == (buffered + count, generated + count, drained)
+
+        future.result.return_value = False
+        adapter.submit_store_request("failed", op, event=None)
+        finish()
+        assert metrics() == (buffered + count, generated + count, drained)
+
         future.query.return_value = False
-        adapter.submit_store_request(request_id, op, event=None)
+        adapter.submit_store_request("interrupted", op, event=None)
+        FakeHeartbeatThread.instances[-1].health_event.clear()
         finish()
         assert metrics() == (buffered + count, generated + count, drained)
-        future.query.return_value = True
-        finish()
-        count += 2 if enable_kv_events else 0
-        assert metrics() == (buffered + count, generated + count, drained)
 
-    future.result.return_value = False
-    adapter.submit_store_request("failed", op, event=None)
-    finish()
-    assert metrics() == (buffered + count, generated + count, drained)
-
-    future.query.return_value = False
-    adapter.submit_store_request("interrupted", op, event=None)
-    FakeHeartbeatThread.instances[-1].health_event.clear()
-    finish()
-    assert metrics() == (buffered + count, generated + count, drained)
-
-    assert len(adapter.get_kv_events()) == count
-    assert metrics() == (buffered, generated + count, drained + count)
-    assert adapter.get_kv_events() == []
-    assert metrics() == (buffered, generated + count, drained + count)
+        assert len(adapter.get_kv_events()) == count
+        assert metrics() == (buffered, generated + count, drained + count)
+        assert adapter.get_kv_events() == []
+        assert metrics() == (buffered, generated + count, drained + count)
+    finally:
+        adapter.shutdown()
 
 
 def test_store_kv_events_use_hash_algorithm_extra_config(
@@ -1086,7 +1140,7 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
     transfer_ctx.submit_retrieve.return_value = fake_future
     adapter.transfer_ctx = transfer_ctx
     op = LoadStoreOp(
-        token_ids=[1, 2, 3, 4],
+        token_bytes=pack_token_ids([1, 2, 3, 4]),
         block_ids=[[0]],
         start=0,
         end=4,
@@ -1133,7 +1187,7 @@ def test_batched_submit_rejects_mismatched_parallel_lists(
 
 def test_load_store_op_accepts_per_group_block_ids():
     op = LoadStoreOp(
-        token_ids=[1, 2, 3, 4],
+        token_bytes=pack_token_ids([1, 2, 3, 4]),
         block_ids=[[0, 1], [10, 11]],
         start=0,
         end=4,
@@ -1300,7 +1354,9 @@ def test_store_keeps_event_until_future_finishes(fake_adapter):
 
     event = FakeCudaEvent()
     event_ref = weakref.ref(event)
-    op = LoadStoreOp(token_ids=[1, 2], block_ids=[[7]], start=0, end=2)
+    op = LoadStoreOp(
+        token_bytes=pack_token_ids([1, 2]), block_ids=[[7]], start=0, end=2
+    )
 
     adapter.submit_store_request("req-1", op, event)
     del event
@@ -1330,7 +1386,9 @@ def test_retrieve_keeps_event_until_future_finishes(fake_adapter):
 
     event = FakeCudaEvent()
     event_ref = weakref.ref(event)
-    op = LoadStoreOp(token_ids=[1, 2], block_ids=[[7]], start=0, end=2)
+    op = LoadStoreOp(
+        token_bytes=pack_token_ids([1, 2]), block_ids=[[7]], start=0, end=2
+    )
 
     adapter.submit_retrieve_request("req-1", op, event)
     del event
@@ -2032,13 +2090,56 @@ def test_one_publisher_per_server(
         adapter.shutdown()
 
 
-def test_unadvertised_channel_keeps_completed_store_reporting(
+@pytest.mark.parametrize("failure", ["ended", "read_error", "subscribe_error"])
+def test_kv_event_reconnect_is_delayed_and_shutdown_stops_receiver(
+    fake_adapter: tuple,
+    failure: str,
+) -> None:
+    """Broken subscriptions retry at a bounded rate and leave no receiver behind."""
+    _, client, _ = fake_adapter
+    attempts: list[float] = []
+    receivers: list[threading.Thread] = []
+    retried = threading.Event()
+
+    def read(closed: threading.Event) -> KVEventBatch:
+        if failure == "read_error":
+            raise ConnectionError("stream disconnected")
+        raise StopIteration
+
+    def subscribe(*args: object, **kwargs: object) -> MessagingStream[KVEventBatch]:
+        attempts.append(time.monotonic())
+        receivers.append(threading.current_thread())
+        if len(attempts) >= 2:
+            retried.set()
+        if failure == "subscribe_error":
+            raise ConnectionError("server unavailable")
+        return MessagingStream(read, lambda: None)
+
+    client.subscribe_kv_events.side_effect = subscribe
+    adapter = _make_worker_adapter(enable_kv_events=True)
+    try:
+        assert adapter.get_kv_events() == []
+        assert retried.wait(5), "receiver did not retry the subscription"
+    finally:
+        adapter.shutdown()
+
+    assert attempts[1] - attempts[0] >= 0.9
+    assert all(not receiver.is_alive() for receiver in receivers)
+
+
+def test_disabled_server_stream_keeps_completed_store_reporting(
     fake_adapter: tuple,
 ) -> None:
-    adapter, _, senders = _event_adapter(fake_adapter, advertised=False)
+    """The worker always subscribes; a server whose event log is off answers
+    the first batch with enabled=False, and the worker falls back to reporting
+    its own completed stores without resubscribing."""
+    adapter, client, senders = _event_adapter(fake_adapter)
     try:
+        assert len(senders) == 1
+        senders[-1](KVEventBatch(False, 7, 0, False, []))
         _complete_event_store(adapter)
         assert isinstance(adapter.get_kv_events()[0], CacheStoreEvent)
-        assert not senders
+        assert len(senders) == 1
+        assert client.subscribe_kv_events.call_count == 1
     finally:
         adapter.shutdown()

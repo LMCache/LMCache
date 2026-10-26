@@ -617,7 +617,7 @@ if [ "$(uname -s)" = "Linux" ]; then
   # torchcodec supports FFmpeg 4-8; the distro's ffmpeg package provides a
   # compatible libavutil. Detect via ldconfig so we match whichever
   # soname (56..60) the runner already ships.
-  if ! ldconfig -p 2>/dev/null | grep -q 'libavutil\.so'; then
+  if ! ldconfig -p 2>/dev/null | grep 'libavutil\.so' >/dev/null; then
     MISSING_PKGS+=(ffmpeg)
   fi
   if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
@@ -635,11 +635,11 @@ if [ "$(uname -s)" = "Linux" ]; then
 
   # Do not let a missing runtime library turn into a misleading native
   # operator error from vLLM during worker initialization.
-  if ! ldconfig -p 2>/dev/null | grep -q 'libnuma\.so\.1'; then
+  if ! ldconfig -p 2>/dev/null | grep 'libnuma\.so\.1' >/dev/null; then
     echo "❌ Required runtime library libnuma.so.1 is unavailable"
     false
   fi
-  if ! ldconfig -p 2>/dev/null | grep -q 'libavutil\.so'; then
+  if ! ldconfig -p 2>/dev/null | grep 'libavutil\.so' >/dev/null; then
     echo "❌ Required FFmpeg runtime library libavutil.so is unavailable"
     false
   fi
@@ -689,14 +689,14 @@ if [ "${EXPECTED_TRANSPORT}" = "lmcache_driven" ]; then
   fi
   echo "✅ Transport mode confirmed: lmcache-driven (IPC handle path)"
 elif [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
-  if ! grep -q "Using shm non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
+  if ! grep -q "Using shm engine-driven transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
     echo "❌ Expected shm transport but server strategy line not found in log"
     tail -50 "${LMCACHE_LOG}"
     false
   fi
   echo "✅ Transport mode confirmed: shm"
 elif [ "${EXPECTED_TRANSPORT}" = "inline" ]; then
-  if ! grep -q "Using safe inline non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
+  if ! grep -q "Using safe inline engine-driven transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
     echo "❌ Expected inline transport but server strategy line not found in log"
     tail -50 "${LMCACHE_LOG}"
     false

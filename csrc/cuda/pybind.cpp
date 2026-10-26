@@ -48,16 +48,6 @@ PYBIND11_MODULE(cuda_ops, m) {
       py::arg("block_size") = 0, py::arg("head_size") = 0,
       py::arg("skip_prefix_n_tokens") = 0, py::arg("block_stride_elems") = 0,
       py::call_guard<py::gil_scoped_release>());
-  m.def("multi_layer_kv_transfer_unilateral",
-        [](torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
-           const torch::Tensor& slot_mapping,
-           const torch::Device& paged_memory_device, const int page_buffer_size,
-           int direction, int engine_kv_format) {
-          return multi_layer_kv_transfer_unilateral(
-              key_value, key_value_ptrs, slot_mapping, paged_memory_device,
-              page_buffer_size, static_cast<TransferDirection>(direction),
-              static_cast<EngineKVFormat>(engine_kv_format));
-        });
   m.def(
       "single_layer_kv_transfer",
       [](torch::Tensor& lmc_key_value_cache,
@@ -71,18 +61,6 @@ PYBIND11_MODULE(cuda_ops, m) {
       py::arg("lmc_key_value_cache"), py::arg("vllm_key_value_cache"),
       py::arg("slot_mapping"), py::arg("direction"),
       py::arg("engine_kv_format"), py::arg("token_major") = false);
-  m.def(
-      "single_layer_kv_transfer_sgl",
-      [](torch::Tensor& lmc_key_value_cache, torch::Tensor& sgl_key_cache,
-         torch::Tensor& sgl_value_cache, torch::Tensor& slot_mapping,
-         int direction, const bool token_major = false) {
-        return single_layer_kv_transfer_sgl(
-            lmc_key_value_cache, sgl_key_cache, sgl_value_cache, slot_mapping,
-            static_cast<TransferDirection>(direction), token_major);
-      },
-      py::arg("lmc_key_value_cache"), py::arg("sgl_key_cache"),
-      py::arg("sgl_value_cache"), py::arg("slot_mapping"), py::arg("direction"),
-      py::arg("token_major") = false);
   m.def("load_and_reshape_flash", &load_and_reshape_flash);
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def(

@@ -10,6 +10,7 @@ import torch
 
 # First Party
 from lmcache import torch_device_type
+from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format.detectors.base import (
     EngineDetector,
@@ -21,6 +22,8 @@ from lmcache.v1.gpu_connector.kv_format.types import (
     LayoutHints,
 )
 import lmcache.lmcache_native as lmcache_native
+
+logger = init_logger(__name__)
 
 
 def resolve_vllm_kv_layout(
@@ -103,7 +106,23 @@ class VLLM_Detector(EngineDetector):
             and first_tensor.shape[0] == 2
             and first_tensor.shape[3] == 1
         ):
+            if first_tensor.shape[1] == 2:
+                logger.warning(
+                    "RBLN KV cache shape %s fits both the K/V-first and the "
+                    "blocks-first layout (num_blocks == 2); assuming K/V-first.",
+                    tuple(first_tensor.shape),
+                )
             return lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS, kv_caches
+        # vLLM-RBLN's default attention kernels allocate the same layout
+        # blocks-first. NB == 2 matches the branch above too, which keeps the
+        # K/V-first reading and warns.
+        if (
+            list_depth == 1
+            and tensor_ndim == 6
+            and first_tensor.shape[1] == 2
+            and first_tensor.shape[3] == 1
+        ):
+            return lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_ONE_BS_HS, kv_caches
         if list_depth == 1 and tensor_ndim == 5:
             if first_tensor.shape[0] == 2:  # K/V axis first
                 if is_hnd:
