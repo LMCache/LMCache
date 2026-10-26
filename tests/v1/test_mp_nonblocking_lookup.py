@@ -493,11 +493,115 @@ def test_cleanup_discards_old_status_before_request_id_reuse(
     adapter.cleanup_lookup_result("r")
     assert adapter.check_lookup_result("r") == 0
     client.replies.append(ready(0))
-    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    assert not adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    assert adapter.check_lookup_result("r") is None
     client.status.set_result(4)
+    assert adapter.check_lookup_result("r") is None
+    assert len(client.lookups) == 1
+    assert adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
     assert resolved(adapter) == 0
     assert len(client.lookups) == 2 and client.queries == ["r", "r"]
     assert not client.frees
+
+
+def test_replacement_waits_for_the_old_unequal_hit_tail_ack(
+    make_adapter: AdapterFactory,
+) -> None:
+    """APC retry cannot let a prior tail release run against its new session."""
+    adapter, clients = make_adapter(count=2)
+    clients[0].free_ack = MessagingFuture()
+    submit(adapter, clients)
+    clients[0].status.set_result(4)
+    clients[1].status.set_result(2)
+    assert resolved(adapter) == 128
+    adapter.cleanup_lookup_result("r")
+    for _ in range(3):
+        assert not adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+        assert adapter.check_lookup_result("r") is None
+    assert [len(client.lookups) for client in clients] == [1, 1]
+    clients[0].free_ack.set_result(None)
+    assert adapter.check_lookup_result("r") is None
+    assert [len(client.lookups) for client in clients] == [1, 1]
+    for client in clients:
+        client.replies.append(ready(0))
+    assert adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    assert resolved(adapter) == 0
+    assert [len(client.lookups) for client in clients] == [2, 2]
+
+
+def test_failed_cleanup_makes_replacement_a_miss_without_ordering_end(
+    make_adapter: AdapterFactory,
+) -> None:
+    """A failed FREE is neither a replacement permit nor an END permit."""
+    adapter, (client,) = make_adapter()
+    client.free_ack = MessagingFuture()
+    adapter.free_lookup_locks(pack_token_ids(range(256)), 0, 128, "r")
+    assert not adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    assert adapter.check_lookup_result("r") is None
+    client.free_ack.set_exception(RuntimeError("free outcome unknown"))
+    for _ in range(3):
+        assert adapter.check_lookup_result("r") == 0
+        assert not adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    adapter.end_session("r")
+    assert not client.lookups and not client.ends
+
+
+def test_replacement_deadline_does_not_discard_late_end_responsibility(
+    make_adapter: AdapterFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bounded scheduler wait fails closed, while a late ACK can still order END."""
+    now = [10.0]
+    monkeypatch.setattr(adapter_module.time, "monotonic", lambda: now[0])
+    adapter, (client,) = make_adapter(timeout=5)
+    client.free_ack = MessagingFuture()
+    adapter.free_lookup_locks(pack_token_ids(range(256)), 0, 128, "r")
+    for timestamp in (10.0, 12.0, 14.9):
+        now[0] = timestamp
+        assert not adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+        assert adapter.check_lookup_result("r") is None
+    now[0] = 15.1
+    assert adapter.check_lookup_result("r") == 0
+    assert not adapter.is_healthy
+    # A heartbeat recovery and late ACK must not revive an already missed retry.
+    HEARTBEATS[0].health_event.set()
+    client.free_ack.set_result(None)
+    assert not adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    assert adapter.check_lookup_result("r") == 0
+    adapter.end_session("r")
+    assert not client.lookups and client.ends == ["r"]
+
+
+@pytest.mark.parametrize("cancel", ["cleanup", "end"])
+def test_cancelling_a_deferred_replacement_keeps_old_rpc_obligations(
+    make_adapter: AdapterFactory, cancel: str
+) -> None:
+    """Cancellation removes unsent work, not the old server's cleanup order."""
+    adapter, (client,) = make_adapter()
+    client.free_ack = MessagingFuture()
+    adapter.free_lookup_locks(pack_token_ids(range(256)), 0, 128, "r")
+    assert not adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    assert adapter.check_lookup_result("r") is None
+    if cancel == "cleanup":
+        adapter.cleanup_lookup_result("r")
+        assert adapter.check_lookup_result("r") == 0
+        adapter.end_session("r")
+    else:
+        adapter.end_session("r")
+        adapter.cleanup_lookup_result("r")
+    assert adapter.check_lookup_result("r") == 0
+    assert not client.lookups and not client.ends
+    client.free_ack.set_result(None)
+    assert not client.lookups and client.ends == ["r"]
+
+
+def test_already_acknowledged_cleanup_does_not_delay_replacement(
+    make_adapter: AdapterFactory,
+) -> None:
+    """No extra scheduler tick is needed when the previous handler has replied."""
+    adapter, (client,) = make_adapter()
+    adapter.free_lookup_locks(pack_token_ids(range(256)), 0, 128, "r")
+    assert adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    assert len(client.lookups) == 1
 
 
 @pytest.mark.parametrize("reply", [None, 2])
