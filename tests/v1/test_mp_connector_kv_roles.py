@@ -462,6 +462,25 @@ def test_lookup_retrieve_and_cleanup(
     assert not receiving
 
 
+def test_cached_token_stats_without_lookup(
+    connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
+) -> None:
+    """Aborted while waiting, so it never reached a lookup."""
+    scheduler, _ = connectors
+    request = _request()
+    request.kv_transfer_params = {"cached_token_stats": True}
+    request.status = RequestStatus.FINISHED_ABORTED
+    _, params = scheduler.request_finished(request, [])
+    assert params == {
+        "cached_token_stats": {
+            "num_vllm_cached_tokens": 0,
+            "num_lmcache_cached_tokens": 0,
+            "num_lmcache_extra_cached_tokens": 0,
+        }
+    }
+    assert scheduler.request_trackers == {}
+
+
 @pytest.mark.parametrize("num_groups,legacy_api", [(1, False), (2, False), (2, True)])
 @pytest.mark.parametrize("retrieve_success", [False, True])
 def test_receive_failure_reporting(
