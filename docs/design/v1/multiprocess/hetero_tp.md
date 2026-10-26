@@ -27,17 +27,16 @@ so P and D read and write the same key.
 The store path is unchanged. A lookup at TP=B first counts what it already
 hits with its own keys, on every tier. For the chunks after that prefix it
 looks up the source TP's keys, pulls those objects unchanged, and copies
-their head slices into B-keyed, B-shaped objects in its own L1. Everything
-after that (the final lock, retrieve, free accounting, the GPU kernel) sees
-an ordinary B-keyed hit.
+their head slices into B-keyed, B-shaped objects in its own L1, read-locked
+for the engine. Everything after that (retrieve, free accounting, the GPU
+kernel) sees an ordinary B-keyed hit.
 
 ```
 D lookup (B keys, c0..cn)  ── local stage, L1/L2/P2P ───▶ hit c0..ck-1, num_kv_readers locks
 D lookup (A keys, ck..cn)  ── source stage, L1/L2/P2P ──▶ hit ck..cm-1: A objects in D L1, 1 lock each
-reshard                    ── A objects ─▶ B objects in D L1 (head-slice copies)
-                              release A read locks
-D lookup (B keys, c0..cn)  ── final stage, L1 only ─────▶ hit c0..cm-1, num_kv_readers locks
-                              release local stage locks
+reshard                    ── A objects ─▶ B objects in D L1 (head-slice copies),
+                              admitted with num_kv_readers locks; release A read locks
+answer                     ── local hit + resharded hit = c0..cm-1
 retrieve                   ── unchanged
 ```
 
@@ -99,22 +98,30 @@ The work splits so that `LookupModule` never deals with heads or TP sizes:
   `HeteroTPPlan`.
 - `HeteroTPPlan.source_stage(k)` gives the source stage for the chunks from
   `k` on (key, layouts and windows at the source TP); `convert` reshards a
-  source hit through `L1Resharder`.
+  source hit through `L1Resharder`; `merge` appends the resharded chunks to
+  the local stage's result.
 - `LookupModule` runs the stages: it submits each as an ordinary prefetch and
   swaps the job's `handle` and `row_windows` together when a stage is
   replaced.
 
 1. **Local stage** (B keys, all chunks, every tier): a full hit is final.
-   Otherwise its locks stay held and the source stage is submitted.
+   Otherwise its locks stay held, as part of the answer, and the source
+   stage is submitted.
 2. **Source stage** (A keys, chunks k..n, layouts from `reshard_layout_desc`,
-   `num_kv_readers=1`): a hit is resharded on a background thread, which
-   then submits the final stage. A miss releases its locks and the local
-   stage answers.
-3. **Final stage** (B keys, all chunks, `allowed_l2_memory_tags=frozenset()`):
-   its result is the lookup's result. The local stage's locks are released
-   only after it, because it locks the same prefix again: a temporary
-   object loaded from L2 by the local stage is deleted once fully unlocked,
-   so an earlier release would lose it.
+   `num_kv_readers=1`): a hit is resharded on a background thread. A miss
+   releases its locks and the local stage answers.
+3. **Reshard**: each B object it writes is admitted with `num_kv_readers`
+   read locks in one step (`StorageManager.finish_write_and_reserve_read`),
+   so eviction cannot take it before retrieve. A B object another writer
+   admitted first is locked as found (`StorageManager.reserve_read`). The
+   hit ends at the first chunk with an object neither (out of L1 memory, or
+   still being written); locks past it are released. The lookup answers
+   with the local result plus these chunks, counted as L2 hits.
+
+The retrieve path needs exactly what a prefetch leaves: every hit object
+read-locked `num_kv_readers` times, plus one result with its L1 owners. The
+reshard leaves the same, so no further prefetch is needed to lock the new
+objects.
 
 Stages advance inside `query_prefetch_status` / `wait_prefetch_status`.
 The copy runs in `L1Resharder`, on its own thread pool (4 threads) rather
@@ -132,16 +139,20 @@ Resharded 8 chunks from TP1 to TP2 for request <id>: wrote 224.0 MiB in 38.36 ms
 
 `free_lookup_locks` consumes without advancing. A source-stage result has its
 A read locks released and the local stage answers; a running reshard is
-waited for, so the release sees the final stage's locks. An exception in any
+waited for, so the release sees the locks it took. An exception in any
 stage, or a failed reshard, is logged and the local stage answers, so the job
 always resolves and every lock it took is released. If a reshard fails
 mid-group, the destination objects reserved for that group stay reserved
 until the write TTL, because the storage manager cannot abandon a
 reservation.
 
-## After a reshard: only B stays
+## After a reshard: only B stays, in L1
 
 D keeps only the converted B objects; the A copies it pulled are dropped.
+The B objects are admitted as prefetched, not as written, so they are not
+stored to D's L2: they are derived copies, and the A originals still exist
+at the source. After L1 evicts them, a later lookup reshards again.
+
 Nothing in the lookup deletes them: the default prefetch policy marks every
 object loaded from L2 (P2P included) temporary, so L1 deletes it when the
 reshard releases its read lock. A objects that were already in L1, written by
@@ -178,6 +189,19 @@ change there, and the stage machine does not:
   source stage is restricted to the P2P adapter's `REMOTE` tag through its
   `allowed_l2_memory_tags`. The local stage stays on every tier.
 
+**TODO (PD): take the source TP from `kv_transfer_params`, not from config.**
+In vLLM PD the proxy already carries P's `kv_transfer_params` (returned by
+P's connector in `request_finished`) into D's request. The plan:
+
+1. P's `LMCacheMPConnector.request_finished` adds its KV world size to the
+   returned params; today it returns only `num_lmcache_extra_cached_tokens`.
+2. The proxy forwards the params to D unchanged, as it already does.
+3. D's connector passes the value in the lookup RPC, and `HeteroTP.plan`
+   uses it instead of `--hetero-tp-source-world-size`.
+
+The same channel can name the P instance, which xPyD needs: the P2P peer
+is a static `peer_mq_server_url` today.
+
 ## Verification
 
 The e2e test is native PD on one node: two servers, a coordinator, NIXL P2P,
@@ -186,6 +210,9 @@ The e2e test is native PD on one node: two servers, a coordinator, NIXL P2P,
 - Qwen3-0.6B (8 KV heads): every ordered pair in {1, 2, 4, 8}.
 - Qwen2.5-1.5B (2 KV heads): TP1 to TP2 and TP2 to TP1.
 - Every pair hit 2048/2064 tokens on D.
+- TP1 to TP2 and TP2 to TP1 with D's LMCache already holding the first 2 of
+  8 chunks at B (vLLM prefix cache reset): D hit 2048 tokens and resharded
+  only the other 6 chunks.
 - The first-token top-5 logprobs on D matched a cold D run within the
   same-TP noise, and top-1 was the same token.
 - Controls with a deliberately broken plan produced garbage text.
