@@ -21,7 +21,7 @@ from lmcache.inprocess.v1.cache_controller.controller_manager import (
     LMCacheControllerManager,
 )
 from lmcache.inprocess.v1.cache_controller.message import RegisterMsg, RegisterRetMsg
-from lmcache.inprocess.v1.rpc_utils import get_ip
+from lmcache.v1.rpc_utils import get_ip
 
 ADVERTISE_HOST = "lmcache-controller.default.svc.cluster.local"
 
