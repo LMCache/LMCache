@@ -48,9 +48,9 @@ logger = init_logger(__name__)
 
 
 #: ``_submit_prefix_leg`` result: ``(handle, prefix_gids, row_windows,
-#: n_chunks, no_gpu_context)``.
+#: n_chunks, no_gpu_context, admitted)``.
 _PrefixLegSubmit = tuple[
-    PrefetchHandle | None, tuple[int, ...], tuple[int, ...], int, bool
+    PrefetchHandle | None, tuple[int, ...], tuple[int, ...], int, bool, bool
 ]
 
 
@@ -70,6 +70,7 @@ class _CBUnifiedJob:
     prefix_lock_gids: tuple = ()  # the gids the prefix keys cover (lock model)
     prefix_windows: tuple = ()  # per-row cross-chunk windows (fold input)
     prefix_num_chunks: int = 0  # chunks in the submitted prefix key list
+    prefix_admitted: bool = True  # declined replacements retain the old result
     prefix_chunks: int | None = None  # stashed when the prefix poll completes
     retained_chunks: list[int] | None = None  # SEGMENTED_PREFIX: full gapped set
     sparse_started: bool = False  # prefix done -> sparse leg submitted/skipped
@@ -340,11 +341,13 @@ class LookupMixin:
             tp_size: Tensor-parallel size for MLA multi-reader locking.
 
         Returns:
-            ``(handle, prefix_gids, row_windows, n_chunks, no_gpu_context)``.
+            ``(handle, prefix_gids, row_windows, n_chunks, no_gpu_context, admitted)``.
             ``row_windows`` holds the sliding window of each submitted key
             row, in row order. ``handle`` is None when there is no GPU context
             or no full chunk (the poll then reports 0 coverage);
             ``no_gpu_context`` is True only for the former.
+            ``admitted`` is False when no session lookup was started; polling
+            must not replace that session's retained ownership with an empty result.
         """
         rid = key.request_id
         model_name, world_size = key.model_name, key.world_size
@@ -359,7 +362,7 @@ class LookupMixin:
                 model_name,
                 world_size,
             )
-            return None, (), (), 0, True
+            return None, (), (), 0, True, False
         read, layouts, attn_desc = resolved
         layout_desc = layouts[read.attn_gid]
 
@@ -367,7 +370,7 @@ class LookupMixin:
             key.token_bytes
         )
         if not chunk_hashes:
-            return None, (), (), 0, False
+            return None, (), (), 0, False, False
 
         # Build the metadata dict only when a subscriber is listening.
         if self._event_bus.has_subscribers(EventType.MP_LOOKUP):
@@ -401,7 +404,8 @@ class LookupMixin:
         row_windows = tuple(row.sliding_window_size for row in spec.key_groups)
         session = self._ctx.session_manager.get_or_create(rid)
         session.set_tokens(key.token_bytes)
-        session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
+        if not session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw)):
+            return None, (), (), 0, False, False
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec,
             external_request_id=rid,
@@ -412,6 +416,7 @@ class LookupMixin:
             row_windows,
             len(chunk_hashes),
             False,
+            True,
         )
 
     def _poll_prefix_leg(
@@ -453,10 +458,11 @@ class LookupMixin:
             leading, retained = 0, ([] if segmented else None)
         # Publish the lock model so free_lookup_locks releases exactly what
         # this leg locked.
-        session = self._ctx.session_manager.get_or_create(rid)
-        session.record_prefetch_result(
-            leading, job.prefix_lock_gids, owners, read_generations=read_generations
-        )
+        if job.prefix_admitted:
+            session = self._ctx.session_manager.get_or_create(rid)
+            session.record_prefetch_result(
+                leading, job.prefix_lock_gids, owners, read_generations=read_generations
+            )
         self._event_bus.publish(
             Event(
                 event_type=EventType.CB_PREFIX_LOOKUP_END,
@@ -513,6 +519,7 @@ class LookupMixin:
                 prefix_windows,
                 prefix_n_chunks,
                 prefix_no_ctx,
+                prefix_admitted,
             ) = self._submit_prefix_leg(key, tp_size)
             # With a coordinator the fleet directory is the only match source;
             # skip the local matcher.
@@ -542,6 +549,7 @@ class LookupMixin:
                 prefix_windows=prefix_windows,
                 prefix_num_chunks=prefix_n_chunks,
                 no_gpu_context=prefix_no_ctx,
+                prefix_admitted=prefix_admitted,
             )
             job.segmented = use_segmented
             job.coord_submitted = self._submit_coordinator_match(key)

@@ -12,13 +12,20 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
+from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
+    ObjectKey,
+    PrefetchHandle,
+    PrefetchResult,
+)
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.rpc import get_rpc_spec
+from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
+from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 # Test helpers
@@ -137,6 +144,7 @@ def _make_free_locks_ctx(
     session = ctx.session_manager.get_or_create.return_value
     ctx.session_manager.get.return_value = session
     session.get_read_generations.return_value = {}
+    session.get_abandoned_prefetch.return_value = None
     session.prefetch_hit_chunks = hit_chunks
     session.prefetch_locked_gids = tuple(locked_gids)
     session.lookup_ipc_key = _free_locks_key(1024, start=lookup_start, end=1024)
@@ -182,10 +190,19 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
     )
 
 
-def _released_chunks(finish_read_mock: MagicMock) -> set[tuple[int, bytes]]:
+def _released_chunks(
+    finish_read_mock: MagicMock,
+    *,
+    l1_owners: dict[ObjectKey, int] | None = None,
+    read_generations: dict[ObjectKey, int] | None = None,
+) -> set[tuple[int, bytes]]:
     """Collect (object_group_id, chunk_hash) pairs released by the module."""
     (obj_keys,), kwargs = finish_read_mock.call_args
-    assert kwargs == {"read_locks": 1, "l1_owners": None, "read_generations": {}}
+    assert kwargs == {
+        "read_locks": 1,
+        "l1_owners": l1_owners,
+        "read_generations": read_generations or {},
+    }
     return {(k.object_group_id, k.chunk_hash) for k in obj_keys}
 
 
@@ -286,6 +303,23 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
 
     hashes = [b"h2", b"h3"]  # the stale range [2, 4)
     ctx = _make_free_locks_ctx(hashes, windows=[1, -1], hit_chunks=8)
+    old = _free_locks_key(1024, start=512, end=1024)
+    session = Session(
+        old.request_id, TokenHasher(chunk_size=256, hash_algorithm="blake3")
+    )
+    kv_rank = ObjectKey.ComputeKVRank(1, 0, 1, 0)
+    original_generations = {
+        ObjectKey(chunk, "testmodel", kv_rank, group): 11
+        for group, chunk in ((0, b"h3"), (1, b"h2"), (1, b"h3"))
+    }
+    original_owners = {key: 0 for key in original_generations}
+    session.begin_lookup(old, (1, -1))
+    session.record_prefetch_result(
+        4, (0, 1), original_owners, read_generations=original_generations
+    )
+    session.begin_lookup(_free_locks_key(1024, start=0, end=1024), (1, -1))
+    session.record_prefetch_result(8, (0, 1))
+    ctx.session_manager.get.return_value = session
     module = LookupModule(ctx)
 
     # Primary range empty; only the stale range [512, 1024) is released.
@@ -293,7 +327,11 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
         _free_locks_key(1024, start=0, end=0), 1, extra_ranges=((512, 1024),)
     )
 
-    released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
+    released = _released_chunks(
+        ctx.storage_manager.finish_read_prefetched,
+        l1_owners=original_owners,
+        read_generations=original_generations,
+    )
     # Window 1 with hit=4 (the range end): only chunk 3; full attention:
     # chunks 2-3 (floored to the range start).
     assert released == {(0, b"h3"), (1, b"h2"), (1, b"h3")}

@@ -2,6 +2,7 @@
 """Tests for Session and SessionManager."""
 
 # Standard
+from dataclasses import replace
 import threading
 import time
 
@@ -9,6 +10,7 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import Session, SessionManager
 from lmcache.v1.multiprocess.token_codec import pack_token_ids, unpack_token_ids
@@ -358,3 +360,60 @@ class TestSessionManagerRemoveReturnsSession:
         """remove() on a non-existent request_id should return None."""
         mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         assert mgr.remove("no-such-id") is None
+
+
+@pytest.mark.parametrize("mismatched_tokens", [False, True])
+def test_abandoned_claim_matches_packed_identity_once(
+    session: Session, mismatched_tokens: bool
+) -> None:
+    """Wrong tokens do not consume an original reservation or release a peer."""
+    old = IPCCacheServerKey.from_token_ids(
+        model_name="model",
+        world_size=1,
+        worker_id=None,
+        token_ids=list(range(8)),
+        start=4,
+        end=8,
+        request_id=session.request_id,
+    )
+    obj = ObjectKey(b"tail", "model", 0)
+    assert session.begin_lookup(old, (-1,))
+    session.record_prefetch_result(2, (0,), {obj: 3}, read_generations={obj: 7})
+    retry = replace(old, start=0)
+    assert session.begin_lookup(retry, (-1,))
+    if mismatched_tokens:
+        other = replace(retry, token_bytes=pack_token_ids(list(range(1, 9))))
+        assert session.get_abandoned_prefetch(other, 4, 8) is None
+    reservation = session.get_abandoned_prefetch(retry, 4, 8)
+    assert reservation is not None
+    assert reservation.key is old
+    assert reservation.l1_owners == {obj: 3}
+    assert reservation.read_generations == {obj: 7}
+    assert session.claim_abandoned_prefetch(reservation)
+    assert not session.claim_abandoned_prefetch(reservation)
+    assert session.get_abandoned_prefetch(retry, 4, 8) is None
+
+
+def test_declined_retry_preserves_an_unclaimed_reservation(session: Session) -> None:
+    """Looking up a snapshot does not consume it or admit another replacement."""
+    old = IPCCacheServerKey.from_token_ids(
+        model_name="model",
+        world_size=1,
+        worker_id=None,
+        token_ids=list(range(8)),
+        start=4,
+        end=8,
+        request_id=session.request_id,
+    )
+    obj = ObjectKey(b"tail", "model", 0)
+    assert session.begin_lookup(old, (-1,))
+    session.record_prefetch_result(2, (0,), read_generations={obj: 7})
+    retry = replace(old, start=0)
+    assert session.begin_lookup(retry, (-1,))
+    assert not session.begin_lookup(retry, (-1,))
+    reservation = session.get_abandoned_prefetch(retry, 4, 8)
+    assert reservation is not None
+    assert session.get_abandoned_prefetch(retry, 4, 8) is reservation
+    assert reservation.read_generations == {obj: 7}
+    assert session.claim_abandoned_prefetch(reservation)
+    assert session.begin_lookup(retry, (-1,))

@@ -58,11 +58,42 @@ share the server thread pool, so with `max_cpu_workers > 1` a release sent at
 shrink time could land *after* the replacement's `begin_lookup`. Instead the
 connector keeps the stale range and passes it as `extra_ranges` on the
 request's next `free_lookup_locks` — sent from `update_state_after_alloc`,
-strictly after the replacement lookup's result was consumed, so there is
-nothing left to race. Each extra range ends at its own lookup's hit boundary
+after the replacement lookup's result was consumed. Each extra range ends at
+its own lookup's hit boundary
 and resolves self-contained: full-attention groups release `[start, end)`,
 sliding-window groups translate from the range's `end`, never from the
 replacement lookup's hit.
+
+The server preserves one `AbandonedPrefetch` snapshot before replacing the
+session's active lookup. It carries the original packed-token identity,
+attention windows, owner routing and read-lock generations. Resolving an old
+range against the replacement's metadata could either leak its locks or
+release another reader. Cleanup therefore resolves keys from the old snapshot,
+then atomically claims that snapshot once. A key-resolution failure leaves it
+available for retry; a failure after claiming may have partially released
+locks and must not authorize a second decrement. Unreleased locks in that
+unknown outcome expire through the read TTL.
+
+Only one abandoned reservation is retained per session. Until it is claimed,
+another lookup is declined with a cache miss, without replacing the retained
+reservation or reporting the previous lookup's hit. Both the ordinary lookup
+and CacheBlend prefix leg honor this admission result.
+
+`extra_ranges` describes only the abandoned APC lookup. A full-prompt bounded
+SWA replay also frees its current last chunk, but that range is tracked
+separately and sent through the ordinary FREE key's `start`/`end`. Its numeric
+interval may equal the abandoned range; this does not make them the same
+reservation.
+
+This ownership snapshot does not order an ordinary tail FREE from an earlier
+lookup against a replacement LOOKUP. The scheduler adapter must wait for the
+earlier RPC's acknowledgment before issuing the replacement; backend handlers
+alone cannot infer the attempt from a reused request ID and identical wire
+key. The client fence (LMCache #6063) is a required dependency for the APC
+replacement path. Raw handler replays that bypass that order remain unsupported;
+ordinary FREE does not carry wire-level attempt isolation. This guarantee
+applies to APC retries after a final prefetch result, not arbitrary replacement
+of a still-running background prefetch.
 
 Pinning the covered blocks instead is implemented on the `core/skip-apc-pin`
 branch. Non-pin won: no block-pool pressure, no coupling to vLLM's

@@ -28,6 +28,18 @@ from lmcache.v1.periodic_thread import (
 logger = init_logger(__name__)
 
 
+@dataclass(frozen=True)
+class AbandonedPrefetch:
+    """The completed reservation superseded by an APC full-prefix retry."""
+
+    key: IPCCacheServerKey
+    hit_chunks: int
+    locked_gids: tuple[int, ...]
+    group_windows: tuple[int, ...]
+    l1_owners: dict[ObjectKey, int]
+    read_generations: dict[ObjectKey, int]
+
+
 @dataclass
 class Session:
     """Tracks accumulated token IDs and computed chunk hashes for a request.
@@ -53,6 +65,8 @@ class Session:
     prefetch_read_generations: dict[ObjectKey, int] = field(default_factory=dict)
     prefetch_group_windows: tuple[int, ...] = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
+    # One APC shrink is supported until its original reservation is released.
+    _abandoned_prefetch: AbandonedPrefetch | None = field(default=None, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
     _lookup_generation: int = field(default=0, repr=False)
     _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
@@ -156,9 +170,36 @@ class Session:
         self,
         key: IPCCacheServerKey,
         group_windows: tuple[int, ...],
-    ) -> None:
-        """Record a new lookup and reset its per-lookup release state."""
+    ) -> bool:
+        """Start a lookup while preserving a completed APC-shrink reservation.
+
+        Args:
+            key: Lookup key. A full-prefix retry replaces a nonzero APC start.
+            group_windows: Attention windows of the admitted lookup.
+
+        Returns:
+            Whether the lookup was admitted. While an abandoned reservation
+            awaits cleanup, reject further lookups without overwriting it.
+            Callers must report a cache miss instead of submitting prefetch.
+        """
         with self._lock:
+            if self._abandoned_prefetch is not None:
+                return False
+            old_key = self.lookup_ipc_key
+            if (
+                old_key is not None
+                and old_key.start > 0
+                and key.start == 0
+                and self.prefetch_read_generations
+            ):
+                self._abandoned_prefetch = AbandonedPrefetch(
+                    old_key,
+                    self.prefetch_hit_chunks,
+                    self.prefetch_locked_gids,
+                    self.prefetch_group_windows,
+                    self._prefetch_owners.copy(),
+                    self.prefetch_read_generations.copy(),
+                )
             self.lookup_ipc_key = key
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
@@ -167,6 +208,7 @@ class Session:
             self._lookup_generation += 1
             self._failed_retrieve_releases.clear()
             self._prefetch_owners.clear()
+            return True
 
     def record_prefetch_result(
         self,
@@ -191,6 +233,55 @@ class Session:
                 for k in keys
                 if k in self.prefetch_read_generations
             }
+
+    def get_abandoned_prefetch(
+        self, key: IPCCacheServerKey, start: int, end: int
+    ) -> AbandonedPrefetch | None:
+        """Find the original APC reservation without consuming its release.
+
+        Args:
+            key: Cleanup identity, including packed tokens, model and salt.
+            start: The abandoned lookup's original APC boundary.
+            end: Client hit boundary, no larger than this server's old hit.
+
+        Returns:
+            Matching ownership, or None. Resolve its keys, then call
+            claim_abandoned_prefetch before attempting any release.
+        """
+        with self._lock:
+            pending = self._abandoned_prefetch
+            if pending is not None:
+                old = pending.key
+                if (
+                    old.request_id != key.request_id
+                    or old.model_name != key.model_name
+                    or old.world_size != key.world_size
+                    or old.worker_id != key.worker_id
+                    or old.token_bytes != key.token_bytes
+                    or old.cache_salt != key.cache_salt
+                    or start != old.start
+                    or not start < end <= pending.hit_chunks * self.hasher.chunk_size
+                    or end % self.hasher.chunk_size
+                ):
+                    pending = None
+            return pending
+
+    def claim_abandoned_prefetch(self, reservation: AbandonedPrefetch) -> bool:
+        """Authorize one release attempt after its object keys have resolved.
+
+        Args:
+            reservation: Snapshot returned by get_abandoned_prefetch.
+
+        Returns:
+            Whether this caller owns the release. Once claimed, a partially
+            failed release cannot be retried: its outcome may be unknown and
+            unreleased locks must expire instead of consuming another reader.
+        """
+        with self._lock:
+            if self._abandoned_prefetch is not reservation:
+                return False
+            self._abandoned_prefetch = None
+            return True
 
     def get_prefetch_owners(self) -> dict[ObjectKey, int]:
         """Snapshot the L1 owners whose read locks this session's lookup retained."""

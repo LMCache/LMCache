@@ -189,13 +189,14 @@ class TestPrefixLegNoGpuContext:
         eng = _make_engine()
         eng._resolve_cb_read_layouts = MagicMock(return_value=None)
 
-        handle, gids, windows, n_chunks, no_gpu_context = _bind(
+        handle, gids, windows, n_chunks, no_gpu_context, admitted = _bind(
             eng, "_submit_prefix_leg"
         )(self._key(), 2)
 
         assert handle is None
         assert (gids, windows, n_chunks) == ((), (), 0)
         assert no_gpu_context is True
+        assert admitted is False
         # The prefix span still opens, so the poll's END has a partner.
         assert [e[0] for e in _published(eng)] == [EventType.CB_PREFIX_LOOKUP_START]
 
@@ -214,19 +215,22 @@ class TestPrefixLegNoGpuContext:
         eng._ctx = MagicMock()
         eng._ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
 
-        handle, _, _, _, no_gpu_context = _bind(eng, "_submit_prefix_leg")(
+        handle, _, _, _, no_gpu_context, admitted = _bind(eng, "_submit_prefix_leg")(
             self._key(), 2
         )
 
         assert handle is None
         assert no_gpu_context is False
+        assert admitted is False
 
 
 class TestPollPrefixLegEvent:
     def test_prefix_end_reports_zero_coverage_without_handle(self):
         eng = _make_engine()
         eng._ctx = MagicMock()
-        job = SimpleNamespace(prefix_handle=None, prefix_lock_gids=())
+        job = SimpleNamespace(
+            prefix_handle=None, prefix_lock_gids=(), prefix_admitted=False
+        )
 
         leading, retained = _bind(eng, "_poll_prefix_leg")(job, "req-p", False)
 
@@ -235,6 +239,7 @@ class TestPollPrefixLegEvent:
         assert event_type is EventType.CB_PREFIX_LOOKUP_END
         assert metadata == {"prefix_chunks": 0}
         assert sid == "req-p"
+        eng._ctx.session_manager.get_or_create.assert_not_called()
 
 
 class TestCoordinatorMatchTimeoutEvent:
