@@ -63,12 +63,12 @@ Note: LMCache DeviceOps is currently stateless and follows a strict one-device-p
 
 ### 3.2 Base class — contract + torch baseline
 
-`lmcache/v1/platform/base_device_ops.py`:
+`lmcache/v1/platform/base/device_ops.py`:
 
 ```python
 from __future__ import annotations
+from collections.abc import Collection
 from typing import TYPE_CHECKING, ClassVar
-import inspect
 
 from lmcache.v1.platform import ops_types, torch_ops
 from lmcache.v1.platform.ops_types import (
@@ -99,19 +99,19 @@ class DeviceOps:
         """Subclasses override to import compiled module + call bind_native.
         Base is a no-op (pure torch). Guarded by _native_bound."""
 
-    def bind_native(self, module: object) -> None:
+    def bind_native(self, module: object, *, skip: Collection[str] = ()) -> None:
         """Rebind ops and types on *self* from a compiled native module.
-        Walks vars(DeviceOps): functions -> instance callables,
-        types -> instance type aliases. Class body is the SSOT."""
-        for name, member in vars(DeviceOps).items():
-            if name.startswith("_") or name == "ensure_native":
+        Walks the module's public symbols, so native-only symbols are bound
+        too. Names in *skip* keep the class method."""
+        for name in dir(module):
+            if name.startswith("_") or name in skip:
                 continue
             native_sym = getattr(module, name, None)
             if native_sym is None:
                 continue
-            if isinstance(member, type):
+            if isinstance(native_sym, type):
                 setattr(self, name, native_sym)
-            elif callable(member):
+            elif callable(native_sym):
                 setattr(self, name, native_sym)
         ekf = getattr(module, "EngineKVFormat", None)
         if ekf is not None:
@@ -127,11 +127,12 @@ class DeviceOps:
 
 ### 3.3 Key design decisions
 
-- **No `OPS` constant.** Op names are derived dynamically from the class body
-  via `inspect.isfunction(member)`, excluding `_`-prefixed names and
-  infrastructure methods (`ensure_native`, `bind_native`). This keeps the class
-  body as the single source of truth — add a method and it is automatically
-  part of the contract and eligible for native rebinding.
+- **No `OPS` constant.** The class body is the op contract: every public
+  instance method other than `ensure_native` and `bind_native` is an op, and
+  `tests/v1/platform/test_device_ops.py` derives the op list from it with
+  `inspect.isfunction`. `bind_native` does not consult that list. It shadows
+  whatever the native module exports except the names in `skip`, so a module
+  can also add native-only symbols.
 
 - **`bind_native` is public** so subclasses call `self.bind_native(module)` in
   their `ensure_native()` override. It sets native callables and types as

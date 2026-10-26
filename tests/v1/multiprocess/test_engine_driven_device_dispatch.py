@@ -234,12 +234,7 @@ def test_gather_without_out_uses_backend_allocation(
 def test_cuda_kv_roundtrips_through_registered_host_memory() -> None:
     """Gather/scatter must work on slot views of a ``pin_memory``-registered
     pool, as used by ``EngineDrivenContextShm``."""
-    native = pytest.importorskip("lmcache.cuda_ops")
-    if (
-        lmcache.device_ops.multi_layer_block_kv_transfer
-        is not native.multi_layer_block_kv_transfer
-    ):
-        pytest.skip("requires the native CUDA transfer backend")
+    pytest.importorskip("lmcache.cuda_ops")
     source = {
         f"layer.{i}": (
             torch.arange(2 * 6 * 4 * 2 * 8).reshape(2, 6, 4, 2, 8) + i * 1024
