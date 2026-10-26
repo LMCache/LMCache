@@ -636,11 +636,12 @@ class TestStorageManagerL2Prefetch:
 
         sm.close()
 
-    def test_warm_skip_l2_is_noop(self, l2_storage_manager_config, basic_layout):
-        """``mode=WARM`` + ``skip_l2=True`` submits no controller request.
+    def test_warm_without_l2_is_noop(self, l2_storage_manager_config, basic_layout):
+        """``mode=WARM`` with no allowed L2 adapter submits no controller request.
 
-        Regression: the WARM branch must honor ``skip_l2`` (it previously
-        ignored it, issuing L2 lookup/load work and mutating L1). The returned
+        Regression: the WARM branch must honor an empty
+        ``allowed_l2_memory_tags`` (it previously ignored it, issuing L2
+        lookup/load work and mutating L1). The returned
         :class:`PrefetchHandle` is the public signal — no request id to track
         and no L2-sourced indices; since the controller is the only path that
         loads from L2, this also means L1 is left untouched.
@@ -654,11 +655,15 @@ class TestStorageManagerL2Prefetch:
         sm.clear()
 
         handle = sm.submit_prefetch_task(
-            single_row_spec(keys, basic_layout, lock_mode=PrefetchLockMode.NO_LOCK),
-            skip_l2=True,
+            single_row_spec(
+                keys,
+                basic_layout,
+                lock_mode=PrefetchLockMode.NO_LOCK,
+                allowed_l2_memory_tags=frozenset(),
+            )
         )
 
-        # skip_l2 honored: nothing was loaded from L2, and the L1-only result
+        # No L2 allowed: nothing was loaded from L2, and the L1-only result
         # is available as soon as the submit returns.
         assert handle.total_requested_keys == len(keys)
         found = sm.query_prefetch_status(handle)
@@ -667,10 +672,11 @@ class TestStorageManagerL2Prefetch:
 
         sm.close()
 
-    def test_sparse_skip_l2_locks_only_l1(
+    def test_sparse_without_l2_locks_only_l1(
         self, l2_storage_manager_config, basic_layout
     ):
-        """``policy=SPARSE`` + ``skip_l2=True`` submits no controller request.
+        """``policy=SPARSE`` with no allowed L2 adapter submits no controller
+        request.
 
         Only L1-resident keys are locked and reported found; keys present only
         in L2 are reported as misses.
@@ -684,11 +690,15 @@ class TestStorageManagerL2Prefetch:
         assert (deleted, skipped) == (1, 0)
 
         handle = sm.submit_prefetch_task(
-            single_row_spec(all_keys, basic_layout, fetching_policy="full"),
-            skip_l2=True,
+            single_row_spec(
+                all_keys,
+                basic_layout,
+                fetching_policy="full",
+                allowed_l2_memory_tags=frozenset(),
+            )
         )
 
-        # skip_l2 honored: the L2-only key is a miss.
+        # No L2 allowed: the L2-only key is a miss.
         found = sm.query_prefetch_status(handle)
         assert found is not None
         assert [row.get_indices_list() for row in found.hit_cells] == [[0, 2]]

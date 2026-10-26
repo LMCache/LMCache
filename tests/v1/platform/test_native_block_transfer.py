@@ -263,12 +263,30 @@ def test_tensor_operands_lower_to_kernel_launches(
         list(range(8)),
         [8, 9],
     ]
+    # A skip inside the first launch leaves the later launches whole.
     assert [launch.skip for launch in kernel.launches] == [1, 0]
     for launch in kernel.launches:
         assert launch.paged.dtype == torch.int64
         assert launch.paged.tolist() == layer_addresses
         assert launch.block_ids.dtype == torch.int64
         assert launch.direction == direction
+
+
+@pytest.mark.parametrize(("ops_cls", "module_name"), _NATIVE_BACKENDS)
+def test_skip_spanning_launches_carries_into_later_launches(
+    monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
+) -> None:
+    """A skip past the first launch's blocks continues into the next launch."""
+    ops, kernel = _native_ops(monkeypatch, ops_cls, module_name)
+    paged, fmt, desc = _paged_kv(num_blocks=10)
+    chunks = cast(list[torch.Tensor], [_host_chunk(0x1000 * (i + 1)) for i in range(5)])
+
+    ops.multi_layer_block_kv_transfer(
+        paged, chunks, list(range(10)), CPU, H2D, desc, _CHUNK_TOKENS, fmt, 9
+    )
+
+    # Launch 1 holds blocks 0-7 (all skipped); launch 2 holds 8-9 (one skipped).
+    assert [launch.skip for launch in kernel.launches] == [8, 1]
 
 
 @pytest.mark.parametrize(("ops_cls", "module_name"), _NATIVE_BACKENDS)

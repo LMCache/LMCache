@@ -118,8 +118,8 @@ def transfer_with_address_kernel(
         shape_desc: Paged-buffer shape descriptor.
         lmcache_chunk_size: Tokens per chunk.
         engine_kv_format: Engine KV layout.
-        skip_prefix_n_blocks: Leading blocks to skip, applied to the first
-            kernel launch.
+        skip_prefix_n_blocks: Leading blocks to skip across the whole
+            transfer; each launch skips the part that falls inside it.
     """
     if not all(isinstance(chunk, torch.Tensor) for chunk in lmcache_objects_ptrs):
         # LMCache-driven callers still pass addresses they batched
@@ -170,16 +170,18 @@ def transfer_with_address_kernel(
         range(0, len(chunk_addresses), MAX_CHUNKS_PER_LAUNCH)
     ):
         start = launch * blocks_per_launch
+        launch_block_ids = block_id_tensor[start : start + blocks_per_launch]
         kernel(
             paged_addresses,
             chunk_addresses[first : first + MAX_CHUNKS_PER_LAUNCH],
-            block_id_tensor[start : start + blocks_per_launch],
+            launch_block_ids,
             device,
             direction,
             shape_desc,
             lmcache_chunk_size,
             engine_kv_format,
-            skip_prefix_n_blocks if launch == 0 else 0,
+            # A skip longer than one launch carries into the next launches.
+            max(0, min(skip_prefix_n_blocks - start, len(launch_block_ids))),
         )
 
     if unpinned:
