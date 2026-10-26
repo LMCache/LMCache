@@ -413,18 +413,6 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
-    elif format_spec.requires_blocked_scale_repacking:
-        _transfer_per_layer_blocked_scale(
-            normalized,
-            object_tensors,
-            block_ids,
-            n_block_ids,
-            blocks_per_object,
-            block_size,
-            format_spec,
-            is_d2h,
-            skip_prefix_n_blocks,
-        )
     elif format_spec.is_mla:
         _transfer_per_layer_mla(
             normalized,
@@ -850,6 +838,9 @@ def _transfer_per_layer_mla(
         return
 
     is_flat = format_spec.is_pbs_fused
+    # Blocked-scale pages are not token-major, so a whole-block copy would
+    # leave the chunk rows non-canonical; repack values and scales instead.
+    is_blocked_scale = format_spec.requires_blocked_scale_repacking
     target_device = layer_tensors[0].device
     if is_flat:
         token_offsets = torch.arange(block_size, dtype=torch.long, device=target_device)
@@ -891,9 +882,20 @@ def _transfer_per_layer_mla(
                     if layer.is_contiguous():
                         torch.index_select(layer, 0, token_indices, out=dst)
                     else:
-                        # Limit MUSA's temporary materialization to selected
-                        # blocks when the dim-0 view has physical padding.
+                        # Gather only selected rows to avoid materializing
+                        # the full padded source in the backend.
                         dst.copy_(layer[token_indices])
+                elif is_blocked_scale:
+                    vals, scales = _blocked_scale_views(layer)
+                    dst = chunk_gpu[layer_idx].view(n_valid, block_size, hidden_size)
+                    torch.cat(
+                        (
+                            vals.index_select(0, eff_idx),
+                            scales.index_select(0, eff_idx),
+                        ),
+                        dim=-1,
+                        out=dst,
+                    )
                 else:
                     dst = chunk_gpu[layer_idx].view(n_valid, block_size, hidden_size)
                     if layer.is_contiguous():
@@ -912,91 +914,15 @@ def _transfer_per_layer_mla(
                 if is_flat:
                     src_tokens = src.reshape(n_valid * block_size, 1, hidden_size)
                     layer.index_copy_(0, token_indices, src_tokens)
+                elif is_blocked_scale:
+                    vals, scales = _blocked_scale_views(layer)
+                    src_blocks = src.reshape(n_valid, block_size, hidden_size)
+                    val_units = vals.shape[-1]
+                    vals.index_copy_(0, eff_idx, src_blocks[..., :val_units])
+                    scales.index_copy_(0, eff_idx, src_blocks[..., val_units:])
                 else:
                     src_blocks = src.reshape(n_valid, block_size, hidden_size)
                     layer.index_copy_(0, eff_idx, src_blocks)
-
-
-def _transfer_per_layer_blocked_scale(
-    layer_tensors: list[torch.Tensor],
-    object_tensors: list[torch.Tensor],
-    block_ids: torch.Tensor | list[int],
-    n_block_ids: int,
-    blocks_per_object: int,
-    block_size: int,
-    format_spec: "type[KVFormatSpec]",
-    is_d2h: bool,
-    skip_prefix_n_blocks: int,
-) -> None:
-    """Transfer token-major staging rows to blocked value/scale pages."""
-    if not layer_tensors or not object_tensors:
-        return
-
-    if not format_spec.requires_blocked_scale_repacking:
-        raise ValueError("format does not require blocked-scale repacking")
-    if any(tensor.element_size() != 1 for tensor in layer_tensors + object_tensors):
-        raise ValueError("blocked-scale transfer requires byte tensors")
-
-    target_device = layer_tensors[0].device
-    block_ids_dev = torch.as_tensor(block_ids, dtype=torch.long, device=target_device)
-    if is_d2h:
-        objects_on_device = object_tensors
-    else:
-        objects_on_device = [
-            obj.to(target_device, non_blocking=True) for obj in object_tensors
-        ]
-
-    for object_idx, obj in enumerate(object_tensors):
-        valid = _valid_block_range_indices(
-            object_idx,
-            n_block_ids,
-            blocks_per_object,
-            block_size,
-            skip_prefix_n_blocks,
-        )
-        if valid is None:
-            continue
-        idx_start, idx_end, offset_in_object = valid
-        n_valid = idx_end - idx_start
-        token_end = offset_in_object + n_valid * block_size
-        selected_block_ids = block_ids_dev[idx_start:idx_end]
-        obj_device = objects_on_device[object_idx]
-        if obj_device.ndim != 3 or obj_device.shape[0] != len(layer_tensors):
-            raise ValueError(
-                "blocked-scale staging must have shape [NL, tokens, row_width]"
-            )
-        row_width = int(obj_device.shape[2])
-        scale_width = 4
-        value_width = row_width - scale_width
-        if value_width <= 0:
-            raise ValueError("blocked-scale staging row width is too small")
-
-        for layer_idx, layer in enumerate(layer_tensors):
-            values, scales = _blocked_scale_views(
-                layer,
-                block_size=block_size,
-                row_width=row_width,
-            )
-            if is_d2h:
-                rows = torch.cat(
-                    (
-                        values.index_select(0, selected_block_ids),
-                        scales.index_select(0, selected_block_ids),
-                    ),
-                    dim=-1,
-                )
-                obj[layer_idx, offset_in_object:token_end].copy_(
-                    rows.reshape(n_valid * block_size, row_width),
-                    non_blocking=True,
-                )
-            else:
-                rows = obj_device[layer_idx, offset_in_object:token_end].reshape(
-                    n_valid,
-                    block_size,
-                    row_width,
-                )
-                values.index_copy_(0, selected_block_ids, rows[..., :value_width])
-                scales.index_copy_(0, selected_block_ids, rows[..., value_width:])
 
 
 def _transfer_per_layer_hnd(
@@ -1302,3 +1228,12 @@ def _transfer_per_layer_nhd(
                     layer.index_copy_(
                         0, eff_idx, torch.stack([k_blocks, v_blocks], dim=1)
                     )
+
+
+def _to_block_id_list(block_ids: torch.Tensor | list[int]) -> list[int]:
+    """Convert block IDs from tensor/list form into a Python ``list[int]``."""
+    if isinstance(block_ids, torch.Tensor):
+        return [int(x) for x in block_ids.to(dtype=torch.int64).cpu().tolist()]
+    if isinstance(block_ids, list):
+        return [int(x) for x in block_ids]
+    raise TypeError("block_ids must be a torch.Tensor or list[int]")

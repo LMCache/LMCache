@@ -227,11 +227,12 @@ class MusaIPCWrapper(DeviceIPCWrapper):
         """Export a MUSA tensor view through TorchMUSA IPC.
 
         Args:
-            tensor: A MUSA tensor view to export. Non-contiguous views are
-                preserved through their shape, stride, and storage offset.
+            tensor: A MUSA tensor view to export. Dim-0 padding is preserved
+                through its shape, stride, and storage offset.
 
         Raises:
-            ValueError: If ``tensor`` is not a MUSA tensor.
+            ValueError: If ``tensor`` is not a MUSA tensor or has unsupported
+                inner-dimension padding.
             RuntimeError: If the opt-in TorchMUSA memory IPC capability is
                 unavailable.
         """

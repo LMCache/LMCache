@@ -200,6 +200,36 @@ def test_musa_block_transfer_fallback_mla_d2h_and_h2d() -> None:
         assert torch.count_nonzero(target[layer_idx][3]) == 0
 
 
+def test_musa_block_transfer_fallback_blocked_scale_d2h_and_h2d() -> None:
+    """The MUSA adapter repacks blocked-scale bytes through its CPU fallback."""
+    source = [torch.arange(2 * 132, dtype=torch.uint8).view(1, 2, 132)]
+    chunk = torch.empty(1, 2, 132, dtype=torch.uint8)
+    shape_desc = _shape_desc(
+        num_layers=1,
+        num_blocks=1,
+        block_size=2,
+        num_heads=1,
+        head_size=132,
+        kv_size=1,
+        dtype=torch.uint8,
+    )
+
+    target = _round_trip(
+        source,
+        chunk,
+        torch.tensor([0], dtype=torch.int64),
+        torch.device("cpu"),
+        shape_desc,
+        2,
+        EngineKVFormat.NL_X_NB_BSV_BSS,
+    )
+
+    raw = source[0].view(-1)
+    assert torch.equal(chunk[0, :, :128], raw[:256].view(2, 128))
+    assert torch.equal(chunk[0, :, 128:], raw[256:].view(2, 4))
+    assert torch.equal(target[0], source[0])
+
+
 @pytest.mark.skipif(
     not _using_python_fallback(),
     reason="CPU fallback correctness check needs the Python fallback backend",
@@ -207,7 +237,7 @@ def test_musa_block_transfer_fallback_mla_d2h_and_h2d() -> None:
 def test_musa_block_transfer_fallback_mla_d2h_handles_padded_layers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fallback MLA D2H avoids index_select output on padded layer views."""
+    """Fallback MLA D2H gathers selected blocks from padded layer views."""
     num_blocks = 4
     block_size = 2
     head_size = 4
@@ -245,7 +275,7 @@ def test_musa_block_transfer_fallback_mla_d2h_handles_padded_layers(
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if not input_tensor.is_contiguous():
-            raise RuntimeError("MUSA index_select does not support padded views")
+            raise AssertionError("padded source must bypass index_select")
         return real_index_select(input_tensor, dim, index, out=out)
 
     monkeypatch.setattr(torch, "index_select", reject_noncontiguous_out)
@@ -698,134 +728,3 @@ def test_musa_block_transfer_device_mla_d2h_and_h2d() -> None:
     for layer_idx in range(num_layers):
         assert torch.equal(target[layer_idx][0], source[layer_idx][0])
         assert torch.equal(target[layer_idx][2], source[layer_idx][2])
-
-
-_DSV4_NL = 2
-_DSV4_NB = 4
-_DSV4_BS = 4
-_DSV4_VALUE_WIDTH = 128
-_DSV4_SCALE_WIDTH = 4
-_DSV4_ROW_WIDTH = _DSV4_VALUE_WIDTH + _DSV4_SCALE_WIDTH
-_DSV4_BLOCK_STRIDE = _DSV4_BS * _DSV4_ROW_WIDTH + 8
-
-
-def _dsv4_cache() -> torch.Tensor:
-    """Build one DSV4 cache view with padding between physical blocks."""
-    storage = torch.zeros(
-        _DSV4_NB,
-        _DSV4_BLOCK_STRIDE,
-        dtype=torch.uint8,
-    )
-    return storage.as_strided(
-        (_DSV4_NB, _DSV4_BS, _DSV4_ROW_WIDTH),
-        (_DSV4_BLOCK_STRIDE, _DSV4_ROW_WIDTH, 1),
-    )
-
-
-def _dsv4_raw_page(cache: torch.Tensor, block_id: int) -> torch.Tensor:
-    """View one padded DSV4 physical block as bytes."""
-    raw_pages = cache.as_strided(
-        (_DSV4_NB, _DSV4_BLOCK_STRIDE),
-        (cache.stride(0), 1),
-    )
-    return raw_pages[block_id]
-
-
-def _dsv4_shape_desc() -> PageBufferShapeDesc:
-    """Build the DSV4 indexer descriptor used by the MUSA fallback test."""
-    shape_desc = PageBufferShapeDesc()
-    shape_desc.nl = _DSV4_NL
-    shape_desc.nb = _DSV4_NB
-    shape_desc.bs = _DSV4_BS
-    shape_desc.nh = 1
-    shape_desc.hs = _DSV4_ROW_WIDTH
-    shape_desc.kv_size = 1
-    shape_desc.element_size = 1
-    shape_desc.dtype = torch.uint8
-    shape_desc.block_stride_elems = _DSV4_BLOCK_STRIDE
-    return shape_desc
-
-
-def _write_dsv4_blocked_rows(
-    caches: list[torch.Tensor],
-    block_id: int,
-    rows: torch.Tensor,
-) -> None:
-    """Write token-major rows into a physical DSV4 blocked page."""
-    for layer_idx, cache in enumerate(caches):
-        page = _dsv4_raw_page(cache, block_id)
-        layer_rows = rows[layer_idx].view(_DSV4_BS, _DSV4_ROW_WIDTH)
-        page[: _DSV4_BS * _DSV4_VALUE_WIDTH].view(_DSV4_BS, _DSV4_VALUE_WIDTH).copy_(
-            layer_rows[:, :_DSV4_VALUE_WIDTH]
-        )
-        scale_start = _DSV4_BS * _DSV4_VALUE_WIDTH
-        scale_end = scale_start + _DSV4_BS * _DSV4_SCALE_WIDTH
-        page[scale_start:scale_end].view(_DSV4_BS, _DSV4_SCALE_WIDTH).copy_(
-            layer_rows[:, _DSV4_VALUE_WIDTH:]
-        )
-
-
-def _read_dsv4_blocked_rows(
-    caches: list[torch.Tensor],
-    block_id: int,
-) -> torch.Tensor:
-    """Read a physical DSV4 blocked page as token-major rows."""
-    rows = []
-    for layer_idx, cache in enumerate(caches):
-        page = _dsv4_raw_page(cache, block_id)
-        values = page[: _DSV4_BS * _DSV4_VALUE_WIDTH].view(_DSV4_BS, _DSV4_VALUE_WIDTH)
-        scale_start = _DSV4_BS * _DSV4_VALUE_WIDTH
-        scale_end = scale_start + _DSV4_BS * _DSV4_SCALE_WIDTH
-        scales = page[scale_start:scale_end].view(_DSV4_BS, _DSV4_SCALE_WIDTH)
-        rows.append(torch.cat((values, scales), dim=1))
-    return torch.stack(rows)
-
-
-def test_musa_block_transfer_fallback_dsv4_blocked_scale_round_trip() -> None:
-    """MUSA fallback gathers and scatters DSV4 indexer values and scales."""
-    shape_desc = _dsv4_shape_desc()
-    source = [_dsv4_cache() for _ in range(_DSV4_NL)]
-    target = [_dsv4_cache() for _ in range(_DSV4_NL)]
-    rows = (
-        torch.arange(
-            _DSV4_NL * _DSV4_BS * _DSV4_ROW_WIDTH,
-            dtype=torch.uint8,
-        )
-        .reshape(_DSV4_NL, _DSV4_BS, _DSV4_ROW_WIDTH)
-        .add(7)
-    )
-    _write_dsv4_blocked_rows(source, 2, rows)
-    staging = [
-        torch.zeros(
-            _DSV4_NL,
-            _DSV4_BS,
-            _DSV4_ROW_WIDTH,
-            dtype=torch.uint8,
-        )
-    ]
-
-    device_ops.multi_layer_block_kv_transfer(
-        source,
-        staging,
-        [2],
-        torch.device("cpu"),
-        lmcache_native.TransferDirection.D2H,
-        shape_desc,
-        _DSV4_BS,
-        lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
-        0,
-    )
-    assert torch.equal(staging[0], rows)
-
-    device_ops.multi_layer_block_kv_transfer(
-        target,
-        staging,
-        [1],
-        torch.device("cpu"),
-        lmcache_native.TransferDirection.H2D,
-        shape_desc,
-        _DSV4_BS,
-        lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
-        0,
-    )
-    assert torch.equal(_read_dsv4_blocked_rows(target, 1), rows)

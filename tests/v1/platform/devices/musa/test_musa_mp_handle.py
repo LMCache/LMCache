@@ -333,10 +333,10 @@ def test_musa_ipc_wrapper_rejects_non_musa_tensor() -> None:
         MusaIPCWrapper(torch.empty(4))
 
 
-def test_musa_ipc_wrapper_exports_noncontiguous_view_with_metadata(
+def test_musa_ipc_wrapper_exports_padded_view_with_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """MUSA IPC preserves an accepted strided view for storage-level export."""
+    """MUSA IPC preserves block padding and a nonzero storage offset."""
     # First Party
     from lmcache.v1.platform.devices.musa import ipc_wrapper
 
@@ -345,11 +345,10 @@ def test_musa_ipc_wrapper_exports_noncontiguous_view_with_metadata(
         def device(self) -> object:
             return SimpleNamespace(type="musa", index=0)
 
-    base = torch.arange(20, dtype=torch.float32).reshape(4, 5).t()
-    tensor = torch.Tensor._make_subclass(
-        _FakeMusaTensor,
-        base,
-        require_grad=False,
+    tensor = (
+        torch.arange(64, dtype=torch.float32)
+        .as_strided((3, 2, 4), (16, 4, 1), 3)
+        .as_subclass(_FakeMusaTensor)
     )
     exported: list[torch.Tensor] = []
 
@@ -357,11 +356,6 @@ def test_musa_ipc_wrapper_exports_noncontiguous_view_with_metadata(
         exported.append(value)
         return object()
 
-    monkeypatch.setattr(
-        ipc_wrapper,
-        "attempt_permute_to_contiguous_view",
-        lambda _tensor: tensor,
-    )
     monkeypatch.setattr(
         ipc_wrapper,
         "_torch_musa_ipc_module_if_ready",
@@ -375,7 +369,9 @@ def test_musa_ipc_wrapper_exports_noncontiguous_view_with_metadata(
 
     wrapper = ipc_wrapper.MusaIPCWrapper(tensor)
 
-    assert exported == [tensor]
+    assert len(exported) == 1
+    assert exported[0].data_ptr() == tensor.data_ptr()
+    assert not exported[0].is_contiguous()
     assert wrapper.shape == tuple(tensor.shape)
     assert wrapper.stride == tuple(tensor.stride())
     assert wrapper.storage_offset == tensor.storage_offset()

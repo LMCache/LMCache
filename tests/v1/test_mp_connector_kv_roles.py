@@ -398,8 +398,9 @@ def test_chunked_prefill_stores_and_completion(
 
 def test_mla_non_writer_wait_for_save_does_not_create_event(
     mock_io: SimpleNamespace,
+    lazy_offload: bool,
 ) -> None:
-    """MLA non-writer ranks must not create disposable IPC events."""
+    """Non-writers avoid IPC events but still report lazy store completion."""
     config = _config(
         KVTransferConfig(
             kv_connector="LMCacheMPConnector",
@@ -419,6 +420,7 @@ def test_mla_non_writer_wait_for_save_does_not_create_event(
         n_servers=1,
     )
     assert worker.worker_adapter.is_kv_writer is False
+    worker.worker_adapter.lazy_offload = lazy_offload
 
     try:
         request = _request()
@@ -438,6 +440,10 @@ def test_mla_non_writer_wait_for_save_does_not_create_event(
         worker.wait_for_save()
 
         mock_io.transfer.create_recorded_event.assert_not_called()
+        mock_io.transfer.submit_store.assert_not_called()
+        assert worker.worker_adapter.get_completed_store_requests() == (
+            {"request": 1} if lazy_offload else None
+        )
     finally:
         worker.shutdown()
         scheduler.shutdown()

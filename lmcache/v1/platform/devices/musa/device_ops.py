@@ -30,6 +30,7 @@ from lmcache.v1.platform.devices.musa.tensor_from_ptr import (
     construct_musa_tensor_from_data_pointer,
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.platform.torch_ops._kv_format import _format_spec as get_spec_class
 
 if TYPE_CHECKING:
     # First Party
@@ -39,26 +40,6 @@ _PagedBufferOperand: TypeAlias = (
     torch.Tensor | list[torch.Tensor] | list[list[torch.Tensor]]
 )
 _PagedLayers: TypeAlias = list[torch.Tensor] | list[list[torch.Tensor]]
-
-
-def get_spec_class(
-    engine_kv_format: EngineKVFormat,
-) -> "type[KVFormatSpec]":
-    """Resolve a KV-format spec without importing the registry at module load.
-
-    Args:
-        engine_kv_format: Engine KV format whose static spec should be resolved.
-
-    Returns:
-        The spec class that declares the layout of ``engine_kv_format``.
-
-    Raises:
-        ValueError: If ``engine_kv_format`` has no registered spec.
-    """
-    # First Party
-    from lmcache.v1.gpu_connector.kv_format import get_spec_class as resolve_spec_class
-
-    return resolve_spec_class(engine_kv_format)
 
 
 def _current_musa_device() -> torch.device:
@@ -188,14 +169,11 @@ def _paged_shape_and_stride(
     bs = int(shape_desc.bs)
     nh = int(shape_desc.nh)
     hs = int(shape_desc.hs)
-    block_stride = int(getattr(shape_desc, "block_stride_elems", 0))
-    return format_spec.paged_pointer_layout(
-        nb,
-        bs,
-        nh,
-        hs,
-        block_stride_elems=block_stride,
-    )
+    shape = format_spec.paged_pointer_shape(nb, bs, nh, hs)
+    if format_spec.is_mla:
+        block_stride = int(getattr(shape_desc, "block_stride_elems", 0))
+        return shape, (block_stride or bs * hs, hs, 1)
+    return shape, None
 
 
 def _staging_shape(

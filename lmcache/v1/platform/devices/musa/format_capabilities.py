@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat
+from lmcache.v1.platform.torch_ops._kv_format import _format_spec as get_spec_class
 
 if TYPE_CHECKING:
     # First Party
@@ -40,9 +41,6 @@ def is_supported_musa_mp_block_transfer_format(
         ``TWO_NB`` per-layer layouts, and the current SGLang K/V-list layout.
         ``False`` for all other physical contracts.
     """
-    # First Party
-    from lmcache.v1.gpu_connector.kv_format import get_spec_class
-
     return is_supported_musa_mp_block_transfer_spec(get_spec_class(engine_kv_format))
 
 
@@ -60,12 +58,7 @@ def is_supported_musa_mp_block_transfer_spec(
         ``False`` for all other physical contracts.
     """
     if spec.requires_blocked_scale_repacking:
-        return (
-            spec.is_layer_list
-            and spec.is_mla
-            and spec.blocked_value_width > 0
-            and spec.blocked_scale_width > 0
-        )
+        return spec.is_layer_list and spec.is_mla
     if _is_regular_per_layer_layout(spec):
         return spec.is_mla or spec.is_two_major
     return (
@@ -90,9 +83,6 @@ def is_supported_musa_native_block_transfer_format(
         ``False`` for K/V-list, HND, fused, blocked-scale, tuple, and other
         layouts that the current native ABI does not describe.
     """
-    # First Party
-    from lmcache.v1.gpu_connector.kv_format import get_spec_class
-
     return is_supported_musa_native_block_transfer_spec(
         get_spec_class(engine_kv_format)
     )
