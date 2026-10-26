@@ -10,7 +10,7 @@ deleted.
 """
 
 # Standard
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future
 import logging
 import sys
@@ -22,6 +22,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
@@ -58,6 +59,7 @@ from lmcache.v1.multiprocess.tp_reshard import (
     ReshardTask,
 )
 import lmcache.v1.memory_management as memory_management
+import lmcache.v1.multiprocess.modules.lookup as lookup_module
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -531,39 +533,20 @@ def test_partial_same_tp_hit_reshards_only_the_rest(
     assert _num_locked(mp_ctx.storage_manager, dst_keys) == 0
 
 
-@pytest.mark.parametrize("source_hits", [False, True])
-def test_partial_same_tp_hit_survives_a_missing_or_freed_source(
-    mp_ctx: MPCacheServerContext,
-    make_module: ModuleFactory,
-    monkeypatch: pytest.MonkeyPatch,
-    source_hits: bool,
+def test_partial_same_tp_hit_survives_a_missing_source(
+    mp_ctx: MPCacheServerContext, make_module: ModuleFactory
 ) -> None:
-    """With the source missing, or freed before its reshard starts, the
-    lookup answers with its same-TP hit and holds exactly its locks."""
+    """With the source missing, the lookup answers with its same-TP hit and
+    holds exactly its locks."""
     module = make_module(2, 1, 2)
-    src_keys = _store(mp_ctx, 2, 2) if source_hits else []
     same_tp_keys = _store(mp_ctx, 2, 1, num_chunks=1)
-    calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
     key = _lookup_key(1)
 
     module.lookup(key, 1)
-    if source_hits:
-        deadline = time.monotonic() + TIMEOUT
-        while len(calls) < 2:
-            assert time.monotonic() < deadline, "cross-TP stage never submitted"
-            assert module.query_prefetch_status("req") is None
-            time.sleep(0.005)
-        assert mp_ctx.storage_manager.wait_prefetch_status(calls[1][1], TIMEOUT)
-        module.free_lookup_locks(key, 1)
-        session = mp_ctx.session_manager.get("req")
-        assert session is not None
-        assert session.prefetch_hit_chunks == 1
-    else:
-        assert _poll(module, "req") == 1
-        assert _num_locked(mp_ctx.storage_manager, same_tp_keys) == len(same_tp_keys)
-        module.free_lookup_locks(key, 1)
+    assert _poll(module, "req") == 1
+    assert _num_locked(mp_ctx.storage_manager, same_tp_keys) == len(same_tp_keys)
+    module.free_lookup_locks(key, 1)
 
-    assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
     assert _num_locked(mp_ctx.storage_manager, same_tp_keys) == 0
 
 
@@ -598,38 +581,24 @@ def test_same_tp_prefix_loaded_from_l2_stays_locked_with_the_hit(
     assert _num_resident(sm, same_tp_keys) == 0
 
 
-def test_free_locks_after_cross_tp_stage_releases_and_misses(
-    mp_ctx: MPCacheServerContext,
-    make_module: ModuleFactory,
-    monkeypatch: pytest.MonkeyPatch,
+def test_free_before_any_poll_waits_for_the_cross_tp_lookup(
+    mp_ctx: MPCacheServerContext, make_module: ModuleFactory
 ) -> None:
-    """Freeing a lookup whose cross-TP stage hit drops A locks and answers with
-    the same-TP hit (none here)."""
+    """Freeing a lookup nobody polled waits for its cross-TP stage and
+    reshard, then drops every lock."""
     module = make_module(2, 1, 2)
     src_keys = _store(mp_ctx, 2, 2)
-    calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
     key = _lookup_key(1)
 
     module.lookup(key, 1)
-    deadline = time.monotonic() + TIMEOUT
-    while len(calls) < 2:
-        assert time.monotonic() < deadline, "cross-TP stage never submitted"
-        assert module.query_prefetch_status("req") is None
-        time.sleep(0.005)
-    source_handle = calls[1][1]
-    assert mp_ctx.storage_manager.wait_prefetch_status(source_handle, TIMEOUT)
-    # The finished cross-TP stage holds its A objects until someone settles it.
-    assert _num_locked(mp_ctx.storage_manager, src_keys) == len(src_keys)
-
     module.free_lookup_locks(key, 1)
 
-    assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
-    assert len(calls) == 2
     session = mp_ctx.session_manager.get("req")
     assert session is not None
-    assert session.prefetch_hit_chunks == 0
+    assert session.prefetch_hit_chunks == 2
+    assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
+    assert _num_locked(mp_ctx.storage_manager, _keys(mp_ctx, 1)) == 0
     assert module.query_prefetch_status("req") == 0
-    assert _num_resident(mp_ctx.storage_manager, _keys(mp_ctx, 1)) == 0
 
 
 @pytest.mark.parametrize("use_wait", [False, True])
@@ -764,10 +733,10 @@ def test_free_during_cross_tp_prefetch_waits_and_releases_everything(
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Freeing while the cross-TP prefetch runs waits for it, then drops the
-    same-TP hit's locks and the A locks."""
+    """Freeing while the cross-TP prefetch runs waits for it and the reshard,
+    then drops the same-TP hit's locks and the resharded objects' locks."""
     module = make_module(2, 1, 2)
-    same_tp_keys = _store(mp_ctx, 2, 1, num_chunks=1)
+    _store(mp_ctx, 2, 1, num_chunks=1)
     src_keys = _store(mp_ctx, 2, 2)
     sm = mp_ctx.storage_manager
     calls = _spy_submits(monkeypatch, sm)
@@ -802,35 +771,72 @@ def test_free_during_cross_tp_prefetch_waits_and_releases_everything(
     assert release.is_set()
     session = mp_ctx.session_manager.get("req")
     assert session is not None
-    assert session.prefetch_hit_chunks == 1
-    assert _num_locked(sm, same_tp_keys) == 0
+    assert session.prefetch_hit_chunks == 2
+    assert _num_locked(sm, _keys(mp_ctx, 1)) == 0
     assert _num_locked(sm, src_keys) == 0
     assert module.query_prefetch_status("req") == 0
 
 
-def test_reshard_refused_after_close_releases_source_locks(
+def test_cross_tp_result_is_consumed_once(
+    make_module: ModuleFactory,
+    mp_ctx: MPCacheServerContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that reaches a finished cross-TP lookup while another one is
+    consuming it gets the unknown-job answer, not a second copy."""
+    module = make_module(2, 1, 2)
+    _store(mp_ctx, 2, 2)
+    consumers: list[int] = []
+    # Holds the first consumer inside its fold so a second one can arrive.
+    both = threading.Barrier(2, timeout=1.0)
+    fold = lookup_module.fold_unfold_grouped
+
+    def held_fold(
+        cells: Sequence[Bitmap], windows: Sequence[int]
+    ) -> tuple[int, list[Bitmap]]:
+        consumers.append(threading.get_ident())
+        try:
+            both.wait()
+        except threading.BrokenBarrierError:
+            pass
+        return fold(cells, windows)
+
+    monkeypatch.setattr(lookup_module, "fold_unfold_grouped", held_fold)
+    module.lookup(_lookup_key(1), 1)
+    first: list[int | None] = []
+    waiter = threading.Thread(
+        target=lambda: first.append(module.wait_prefetch_status("req", TIMEOUT))
+    )
+    waiter.start()
+    deadline = time.monotonic() + TIMEOUT
+    while not consumers:
+        assert time.monotonic() < deadline, "lookup never consumed"
+        time.sleep(0.005)
+
+    assert module.query_prefetch_status("req") == 0
+    waiter.join()
+    assert first == [2]
+    assert len(set(consumers)) == 1
+
+
+def test_reshard_that_cannot_start_releases_source_locks(
     mp_ctx: MPCacheServerContext,
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cross-TP hit whose reshard cannot start (the module is closed)
-    answers with the same-TP hit (none here) and drops the A locks."""
+    """A cross-TP hit whose reshard cannot start answers with the same-TP hit
+    (none here) and drops the A locks."""
     module = make_module(2, 1, 2)
     src_keys = _store(mp_ctx, 2, 2)
-    sm = mp_ctx.storage_manager
-    calls = _spy_submits(monkeypatch, sm)
 
+    def refuse(self: L1Resharder, task: ReshardTask) -> Future[ReshardResult]:
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(L1Resharder, "submit", refuse)
     module.lookup(_lookup_key(1), 1)
-    deadline = time.monotonic() + TIMEOUT
-    while len(calls) < 2:
-        assert time.monotonic() < deadline, "cross-TP stage never submitted"
-        assert module.query_prefetch_status("req") is None
-        time.sleep(0.005)
-    assert sm.wait_prefetch_status(calls[1][1], TIMEOUT)
-    module.close()
 
-    assert module.query_prefetch_status("req") == 0
-    assert _num_locked(sm, src_keys) == 0
+    assert _poll(module, "req") == 0
+    assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
 
 
 def test_reshard_waits_for_the_latest_writer_of_its_keys(
