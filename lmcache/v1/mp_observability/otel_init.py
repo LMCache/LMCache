@@ -35,6 +35,16 @@ _GRPC_METRICS_ENABLED = False
 _METRICS_RESOURCE: "Resource | None" = None
 _METRICS_SOURCES: list[Callable[[], Iterable["Metric"]]] = []
 
+# gRFC A66's latency buckets, in seconds. grpcio-observability leaves the
+# SDK's default buckets (0 to 10000 s) in place, which put every sub-second
+# call in the first one.
+_GRPC_LATENCY_BOUNDS = (
+    0.0, 0.00001, 0.00005, 0.0001, 0.0003, 0.0006, 0.0008, 0.001, 0.002,
+    0.003, 0.004, 0.005, 0.006, 0.008, 0.01, 0.013, 0.016, 0.02, 0.025,
+    0.03, 0.04, 0.05, 0.065, 0.08, 0.1, 0.13, 0.16, 0.2, 0.25, 0.3, 0.4,
+    0.5, 0.65, 0.8, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0,
+)  # fmt: skip
+
 # grpcio-observability flushes its stats from a Python thread every 0.5s by
 # default and holds the GIL for the whole batch. Under load that stalls requests
 # for several ms, so flush smaller batches more often.
@@ -92,6 +102,7 @@ def init_otel_metrics(
     resource = _build_resource(resource_attributes)
     _GRPC_METRICS_ENABLED = enable_grpc_metrics
     _METRICS_RESOURCE = resource
+    views = _grpc_metrics_views() if enable_grpc_metrics else []
 
     if otlp_endpoint is not None:
         # OTLP push mode
@@ -107,7 +118,9 @@ def init_otel_metrics(
         reader = _with_metrics_sources(PeriodicExportingMetricReader)(
             exporter, export_interval_millis=10000
         )
-        provider = MeterProvider(metric_readers=[reader], resource=resource)
+        provider = MeterProvider(
+            metric_readers=[reader], resource=resource, views=views
+        )
         metrics.set_meter_provider(provider)
         if enable_grpc_metrics:
             init_grpc_otel_metrics(provider)
@@ -126,7 +139,9 @@ def init_otel_metrics(
             prometheus_port = 9090
 
         reader = _with_metrics_sources(PrometheusMetricReader)()
-        provider = MeterProvider(metric_readers=[reader], resource=resource)
+        provider = MeterProvider(
+            metric_readers=[reader], resource=resource, views=views
+        )
         metrics.set_meter_provider(provider)
         if enable_grpc_metrics:
             init_grpc_otel_metrics(provider)
@@ -145,6 +160,21 @@ def init_otel_metrics(
                 "/metrics must be exposed by the caller), resource=%s",
                 dict(resource.attributes),
             )
+
+
+def _grpc_metrics_views() -> list:
+    # Third Party
+    from opentelemetry.sdk.metrics.view import (
+        ExplicitBucketHistogramAggregation,
+        View,
+    )
+
+    return [
+        View(
+            instrument_name="grpc.server.call.duration",
+            aggregation=ExplicitBucketHistogramAggregation(_GRPC_LATENCY_BOUNDS),
+        )
+    ]
 
 
 def grpc_metrics_enabled() -> bool:
