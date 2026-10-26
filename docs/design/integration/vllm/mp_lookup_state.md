@@ -12,10 +12,10 @@ server acks, not one scheduler step later.
 
 | Adapter call | `LookupState` call |
 |---|---|
-| `maybe_submit_lookup_request` | create, `submit()` (sends LOOKUP to every server) |
-| `check_lookup_result` | `on_scheduler_check()`, then `get_result()` |
-| `cleanup_lookup_result` | `close()` and forget the object |
-| `end_session` | `drain()` before END_SESSION |
+| `maybe_submit_lookup_request` | wait for prior cleanup ACKs, then create and `submit()` |
+| `check_lookup_result` | poll a deferred replacement, or `on_scheduler_check()` then `get_result()` |
+| `cleanup_lookup_result` | close and transfer unconfirmed RPCs to the adapter |
+| `end_session` | close and take unconfirmed RPCs; callbacks submit END after each server's ACKs |
 
 `on_scheduler_check()` returns the servers whose RPC passed its deadline; the
 adapter marks them unhealthy. Health events and the per-request dict are
@@ -40,7 +40,8 @@ Each server that reported more than the minimum gets a `free_lookup_locks` for
 `[min, hits)`, because those chunks are locked but will never be retrieved.
 
 The result is **final** once set, whether by resolution, a timeout or
-`close()`. A final state sends nothing more, and late replies are ignored.
+`close()`. A final state sends no new lookup or status RPCs. Late replies
+still retire their raw handler acknowledgements.
 
 ## Why the rules are what they are
 
@@ -104,15 +105,63 @@ The scheduler thread calls everything else.
   `on_scheduler_check()` picks it up first. Callbacks only reduce latency;
   `on_scheduler_check()` handles any completed reply whose callback has not
   run, so it is never mistaken for a timeout.
-- `drain()` waits on the raw futures. A completed future means the server has
-  handled that RPC, which is the ordering END_SESSION needs.
+- `close_and_take_pending_rpcs()` closes sending and transfers raw pending
+  or failed futures once, under the same lock. A local deadline does not
+  cancel a server handler. A failed future is not a successful handler ACK.
 
-## Known gaps
+## Session end ordering
 
-- `request_finished` calls `cleanup_lookup_result` before `end_session`, and
-  cleanup forgets the state, so `end_session` has nothing to drain for an
-  aborted mid-lookup request.
-- A request id reused while the old state still has a QUERY_PREFETCH_STATUS
-  in flight can let that query consume the new lookup's job. Connector paths
-  reuse an id only after the old lookup resolved, so this does not occur
-  today.
+For each server, END_SESSION follows successful acknowledgements of every
+admitted LOOKUP, QUERY_PREFETCH_STATUS and FREE_LOOKUP_LOCKS. This includes
+the unequal-hit tail release and explicit releases from the adapter. A slow
+server does not hold up END on another server.
+
+The scheduler's `end_session()` remains a `None`-returning notification and
+does not wait. Existing transport futures hold the completion callbacks
+that submit END. The adapter retains no history of completed request IDs.
+If cleanup arrives first, the adapter temporarily owns its unconfirmed
+futures until the request-finished END notification. If END arrives first,
+it takes the lookup and cleanup has nothing to transfer again.
+
+An unhealthy flag only stops new cache work; it does not discard ordering
+responsibility for already-admitted RPCs. A failed predecessor is logged
+and prevents END on that server. This does not claim remote cleanup
+succeeded, and it does not add transport recovery or an ID-reuse protocol.
+Closing a request client during shutdown is likewise not a server ACK.
+
+## Replacement lookup ordering
+
+An APC shrink cleans up the partial lookup and requests a full-prefix lookup
+with the same request ID. The partial lookup's result can be final while its
+unequal-hit tail FREE is still running. If the replacement overtakes that
+FREE, the server can resolve the old release against the replacement's session
+metadata. A late QUERY_PREFETCH_STATUS can likewise consume the new lookup's
+job when a caller cleans up before resolution.
+
+`maybe_submit_lookup_request` therefore checks the prior lookup's captured
+RPCs before sending a replacement to any server. Pending ACKs return False
+and establish one deadline using the existing MQ timeout. The caller keeps
+calling on scheduler ticks, as the vLLM connector already does before checking
+each lookup result. Successful ACKs are pruned; no key or callback to send the
+replacement is retained. True still means a LOOKUP was actually submitted.
+
+`check_lookup_result` returns None while the replacement is deferred, even
+after its prerequisites finish, until the caller next attempts submission.
+An RPC failure or expired wait makes this replacement a stable cache miss.
+Timeouts mark the outstanding servers unhealthy. Recovery or a late ACK does
+not revive that failed replacement; cleanup or END must cancel it first.
+Pending/failed RPCs remain available to END ordering, regardless of this
+request-side deadline. Cleanup and END discard the deferred wait, so no
+callback can launch a cancelled replacement.
+
+The deadline is measured from the first blocked replacement attempt and is
+not extended by repeated checks. Replies already complete at the next poll
+are consumed before testing the deadline. The wait state and captured RPC map
+are scheduler-thread-owned; completion callbacks only update their existing
+future state. There is no completed-request history or additional timeout
+configuration.
+
+This orders calls issued through this adapter. It does not add attempt IDs to
+the wire or make arbitrary out-of-order server handler calls safe. Other
+clients must enforce the same ordering before reusing a live request ID, and
+request IDs must not be reused after END while old handlers remain in flight.
