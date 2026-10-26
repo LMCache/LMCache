@@ -6,6 +6,7 @@ Two cases are covered: each engine has its own LMCache server joined by P2P
 engines share one server. RFC #5969 leaves asymmetric TP open; this design
 keeps the store in each rank's native layout and reshards on D. This
 document covers phase 1: vLLM to vLLM, attention-only, non-MLA models.
+Later phases are listed under [Next phases](#next-phases).
 
 ## Problem
 
@@ -48,7 +49,9 @@ Why here and not elsewhere:
   shaped for it.
 
 The cost is one CPU copy of the hit bytes on D, plus transient L1 for both
-copies. Phase 3 measures it.
+copies. Measured on Qwen3-0.6B, 2048 tokens (224 MiB written): about 12 ms
+alone and 15-73 ms under 12 concurrent requests. Each reshard logs its cost
+(see [Lookup stages](#lookup-stages)).
 
 ## Head mapping
 
@@ -145,7 +148,7 @@ The e2e test is native PD on one node: two servers, a coordinator, NIXL P2P,
 | Phase | Content |
 | --- | --- |
 | 2 | GDN and Mamba2 recurrent groups, and hybrid subpaged attention. This needs a per-kernel-group shard description (segments sharded along one axis), because GDN conv is `[q\|k\|v]_local` and ssm splits by v heads. chunk_size must be a multiple of both engines' block sizes, which can differ by TP in hybrids. |
-| 3 | Measure the reshard cost on the PD handoff (logged per reshard); move it to the GPU if it matters. |
+| 3 | Move the reshard copy to the GPU if its logged cost matters on the PD handoff. |
 
 ## Open questions
 
