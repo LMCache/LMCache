@@ -24,19 +24,21 @@ so P and D read and write the same key.
 
 ## Decision: reshard in the reader's L1
 
-The store path is unchanged. When a lookup misses at its own TP, it looks up
-the source TP's keys, pulls those objects unchanged, and copies their head
-slices into B-keyed, B-shaped objects in its own L1. Everything after that
-(the final lock, retrieve, free accounting, the GPU kernel) sees an ordinary
-B-keyed hit.
+The store path is unchanged. A lookup at TP=B first counts what it already
+hits with its own keys, on every tier. For the chunks after that prefix it
+looks up the source TP's keys, pulls those objects unchanged, and copies
+their head slices into B-keyed, B-shaped objects in its own L1. Everything
+after that (the final lock, retrieve, free accounting, the GPU kernel) sees
+an ordinary B-keyed hit.
 
 ```
-D lookup (B keys)  ── primary stage ──────────────▶ miss (0 chunks)
-D lookup (A keys)  ── source stage, P2P/L2/L1 ────▶ hit: A objects in D L1, 1 read lock each
-reshard            ── A objects ─▶ B objects in D L1 (head-slice copies)
-                      release A read locks
-D lookup (B keys)  ── final stage, L1 only ───────▶ hit, num_kv_readers locks
-retrieve           ── unchanged
+D lookup (B keys, c0..cn)  ── local stage, L1/L2/P2P ───▶ hit c0..ck-1, num_kv_readers locks
+D lookup (A keys, ck..cn)  ── source stage, L1/L2/P2P ──▶ hit ck..cm-1: A objects in D L1, 1 lock each
+reshard                    ── A objects ─▶ B objects in D L1 (head-slice copies)
+                              release A read locks
+D lookup (B keys, c0..cn)  ── final stage, L1 only ─────▶ hit c0..cm-1, num_kv_readers locks
+                              release local stage locks
+retrieve                   ── unchanged
 ```
 
 Why here and not elsewhere:
@@ -71,7 +73,7 @@ replicates heads across ranks, and which ranks share a head is the engine's
 own rule (vLLM's `QKVParallelLinear` groups adjacent ranks). Contiguous
 splitting is the only assumption this design makes about the writer; adding
 a replication rule would tie the store format to one engine. Such a lookup
-gets no fallback and misses as before.
+gets no source stage and misses as before.
 
 vLLM sends H as the `total_num_kv_heads` layout hint. The shape alone cannot
 tell a rank holding one of H = tp heads from one holding a replicated head,
@@ -83,30 +85,36 @@ the reshard is valid:
   (`LMCacheMPWorkerAdapter.register_kv_caches`). PP, DCP or several servers
   make server ranks differ from TP ranks.
 
-Without the hint the fallback is off.
+Without the hint the source stage is off.
 
 ## Lookup stages
 
 The work splits so that `LookupModule` never deals with heads or TP sizes:
 
-- `tp_reshard.HeteroTPFallback.plan` decides whether a lookup qualifies
-  (head count reported, TP sizes divide it, no sliding window) and returns a
-  per-lookup `HeteroTPPlan`.
-- `HeteroTPPlan.next_source` gives each source stage as a `SourceStage`
-  (key, layouts and windows at the source TP); `convert` reshards a source
-  hit through `L1Resharder`; `release` drops a source hit's locks when the
-  lookup stops early.
+- `tp_reshard.PrefetchStage` is one prefetch: key, chunk hashes, layouts,
+  `num_kv_readers` and the allowed L2 tiers.
+- `tp_reshard.HeteroTP.plan` decides whether a lookup qualifies (a source TP
+  configured and different from the lookup's, head count reported, both TP
+  sizes divide it, no sliding window) and returns a per-lookup
+  `HeteroTPPlan`.
+- `HeteroTPPlan.source_stage(k)` gives the source stage for the chunks from
+  `k` on (key, layouts and windows at the source TP); `convert` reshards a
+  source hit through `L1Resharder`.
 - `LookupModule` runs the stages: it submits each as an ordinary prefetch and
   swaps the job's `handle` and `row_windows` together when a stage is
   replaced.
 
-1. **Primary stage** (B keys): if it finds no chunk and a candidate remains,
-   the next stage is submitted. A partial hit is final.
-2. **Source stage** (A keys, layouts from `reshard_layout_desc`,
+1. **Local stage** (B keys, all chunks, every tier): a full hit is final.
+   Otherwise its locks stay held and the source stage is submitted.
+2. **Source stage** (A keys, chunks k..n, layouts from `reshard_layout_desc`,
    `num_kv_readers=1`): a hit is resharded on a background thread, which
-   then submits the final stage. A miss moves on to the next candidate.
-3. **Final stage** (B keys, `allowed_l2_memory_tags=frozenset()`): its result
-   is the lookup's result.
+   then submits the final stage. A miss releases its locks and the local
+   stage answers.
+3. **Final stage** (B keys, all chunks, `allowed_l2_memory_tags=frozenset()`):
+   its result is the lookup's result. The local stage's locks are released
+   only after it, because it locks the same prefix again: a temporary
+   object loaded from L2 by the local stage is deleted once fully unlocked,
+   so an earlier release would lose it.
 
 Stages advance inside `query_prefetch_status` / `wait_prefetch_status`.
 The copy runs in `L1Resharder`, on its own thread pool (4 threads) rather
@@ -123,9 +131,10 @@ Resharded 8 chunks from TP1 to TP2 for request <id>: wrote 224.0 MiB in 38.36 ms
 ```
 
 `free_lookup_locks` consumes without advancing. A source-stage result has its
-A read locks released and reports a miss; a running reshard is waited for, so
-the release sees the final stage's locks. An exception in any stage is logged
-and reported as a miss, so the job always resolves. If a reshard fails
+A read locks released and the local stage answers; a running reshard is
+waited for, so the release sees the final stage's locks. An exception in any
+stage, or a failed reshard, is logged and the local stage answers, so the job
+always resolves and every lock it took is released. If a reshard fails
 mid-group, the destination objects reserved for that group stay reserved
 until the write TTL, because the storage manager cannot abandon a
 reservation.
@@ -133,7 +142,7 @@ reservation.
 ## After a reshard: only B stays
 
 D keeps only the converted B objects; the A copies it pulled are dropped.
-Nothing in the fallback deletes them: the default prefetch policy marks every
+Nothing in the lookup deletes them: the default prefetch policy marks every
 object loaded from L2 (P2P included) temporary, so L1 deletes it when the
 reshard releases its read lock. A objects that were already in L1, written by
 a TP=A engine sharing this server, are not temporary and stay. With
@@ -143,41 +152,31 @@ load does under that policy.
 ## Configuration
 
 ```bash
-lmcache server ... --hetero-tp-source-world-sizes 1 4
+lmcache server ... --hetero-tp-source-world-size 1
 ```
 
-These are the source TP sizes to try, in order. Phase 1 has no discovery:
-the operator lists the TP sizes of the other engines.
+The TP size the other engine stores at. Phase 1 has no discovery: the
+operator sets it. A lookup whose own TP equals it skips the source stage.
 
 ## Constraints (phase 1)
 
 - Attention-only, non-MLA models without sliding-window object groups.
 - Both TP sizes divide the model's KV head count.
 - LMCache-driven transfer. The engine-driven registration does not send the
-  head-count hint, so the fallback is off there.
-- The fallback runs only when the primary stage finds no chunk at all. See
-  [Known limitation](#known-limitation-partial-primary-hit).
+  head-count hint, so the source stage is off there.
+- One source TP per server.
 
-## Known limitation: partial primary hit
+## Later: a PD source
 
-If D already holds the first k chunks at TP=B, the primary stage finds k
-chunks, the lookup reports k, and D recomputes the rest, even when the
-source TP holds the whole prefix:
+The source stage is the single extension point for native PD. Two things
+change there, and the stage machine does not:
 
-```
-P store (A keys):  [c0][c1][c2][c3]
-D L1 (B keys):     [c0]                 shared system prompt
-D lookup:          primary hits c0 -> no fallback -> 1 chunk hit, c1..c3 recomputed
-```
-
-A common source of the B chunk is an earlier reshard: request 1 leaves its
-B objects in D's L1, and request 2 with the same system prompt hits them.
-vLLM's prefix cache on D hides this while it still holds those blocks,
-because the lookup then starts after them.
-
-Phase 1 does not handle this; it is the next change. The fix: on a partial
-primary hit, look up chunks k..n at the source TP, reshard only those, and
-return one combined hit.
+- **Where A comes from.** From the request (the PD coordinator knows which P
+  served it) or from a P2P RPC that asks the peer for its layout, instead of
+  the static config value.
+- **Which tiers the source stage reads.** PD pulls from P only, so the
+  source stage is restricted to the P2P adapter's `REMOTE` tag through its
+  `allowed_l2_memory_tags`. The local stage stays on every tier.
 
 ## Verification
 
@@ -195,14 +194,14 @@ The e2e test is native PD on one node: two servers, a coordinator, NIXL P2P,
 
 | Phase | Content |
 | --- | --- |
-| next | Fall back on a partial primary hit ([Known limitation](#known-limitation-partial-primary-hit)). |
 | 2 | GDN and Mamba2 recurrent groups, and hybrid subpaged attention. This needs a per-kernel-group shard description (segments sharded along one axis), because GDN conv is `[q\|k\|v]_local` and ssm splits by v heads. chunk_size must be a multiple of both engines' block sizes, which can differ by TP in hybrids. |
 | 3 | Move the reshard copy to the GPU if its logged cost matters on the PD handoff. |
 
 ## Open questions
 
 1. Source TP discovery: should a peer advertise its layouts (P2P RPC or
-   coordinator metadata) instead of using static config?
+   coordinator metadata) instead of using static config? See
+   [Later: a PD source](#later-a-pd-source).
 
 ## Pre-existing P2P gap: no object size check
 

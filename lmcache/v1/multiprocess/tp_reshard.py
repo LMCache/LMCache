@@ -14,9 +14,10 @@ engine-specific rule, so it is not supported.
 
 :class:`L1Resharder` runs such a reshard against the storage manager: it
 reads read-locked source objects and writes the destination objects into L1
-on its own threads. :class:`HeteroTPFallback` decides when a lookup may fall
-back to another TP size and hands the lookup each source to try as a
-:class:`SourceStage`, so the lookup itself never deals with heads or TP sizes.
+on its own threads. :class:`HeteroTP` decides whether a lookup may complete
+its hit from another TP size, and its :class:`HeteroTPPlan` describes the
+source prefetch and runs the reshard, so the lookup itself never deals with
+heads or TP sizes.
 """
 
 # Standard
@@ -24,7 +25,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, Callable, Sequence, TypeVar, cast
+from typing import Any, Callable, TypeVar, cast
 import threading
 import time
 
@@ -36,6 +37,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
+    MemoryTags,
     ObjectKey,
     PrefetchResult,
     ipc_key_to_object_keys,
@@ -432,192 +434,159 @@ class L1Resharder:
 
 
 @dataclass(frozen=True)
-class SourceStage:
-    """A prefetch at another TP size that a lookup submits as one stage.
+class PrefetchStage:
+    """One prefetch a lookup submits as a stage, over every object group.
 
     Attributes:
-        key: The lookup's key at the source TP size.
-        group_layout_descs: Per-object-group layouts at the source TP size.
-        attn_desc: Attention windows at the source TP size.
-        num_kv_readers: Read locks to take per object; only the reshard reads
-            the source objects, so this is 1.
+        key: Key whose model, world size and salt name the objects.
+        chunk_hashes: Chunk hashes to prefetch, in order.
+        group_layout_descs: Per-object-group layouts at ``key``'s world size.
+        attn_desc: Attention windows at ``key``'s world size.
+        num_kv_readers: Read locks to take per object.
+        allowed_l2_memory_tags: L2 tags the prefetch may load from; ``None``
+            allows all, an empty set restricts it to L1.
     """
 
     key: IPCCacheServerKey
+    chunk_hashes: list[bytes]
     group_layout_descs: dict[int, MemoryLayoutDesc]
     attn_desc: AttnWindowDesc
     num_kv_readers: int
+    allowed_l2_memory_tags: frozenset[MemoryTags] | None = None
 
 
 class HeteroTPPlan:
-    """The cross-TP fallback of one lookup: sources to try, and the reshard.
+    """How one lookup completes its hit from objects stored at another TP size.
 
-    Created by :meth:`HeteroTPFallback.plan`. The lookup calls
-    :meth:`next_source` for each source stage it submits. When a source stage
-    hits, the lookup either calls :meth:`convert` to reshard the hit into its
-    own TP size, or, when it stops early, :meth:`release` to drop the source
-    stage's read locks. Not thread-safe; the lookup serializes its calls.
+    Created by :meth:`HeteroTP.plan` from the lookup's local stage. After the
+    local stage hits its first ``k`` chunks, the lookup submits
+    :meth:`source_stage` for the rest; if that hits, :meth:`convert` reshards
+    the hit into the lookup's own TP size in L1. Call them in that order, at
+    most once each.
 
     Args:
-        key: The lookup's own key.
-        suffix_hashes: Chunk hashes of the looked-up range.
-        attn_desc: Attention windows at the lookup's TP size.
-        group_layout_descs: Per-object-group layouts at the lookup's TP size.
+        local: The lookup's local stage.
         num_kv_heads: KV heads of the whole model.
-        candidates: Source TP sizes to try, in order.
-        storage_manager: Storage manager the source stages lock in.
+        source_tp: TP size the source objects are stored with.
         resharder: Runs the reshard of a source hit.
     """
 
     def __init__(
         self,
-        key: IPCCacheServerKey,
-        suffix_hashes: list[bytes],
-        attn_desc: AttnWindowDesc,
-        group_layout_descs: dict[int, MemoryLayoutDesc],
+        local: PrefetchStage,
         num_kv_heads: int,
-        candidates: list[int],
-        storage_manager: StorageManager,
+        source_tp: int,
         resharder: L1Resharder,
     ) -> None:
-        self._key = key
-        self._suffix_hashes = suffix_hashes
-        self._attn_desc = attn_desc
-        self._group_layout_descs = group_layout_descs
+        self._local = local
         self._num_kv_heads = num_kv_heads
-        self._candidates = candidates
-        self._sm = storage_manager
+        self._source_tp = source_tp
         self._resharder = resharder
-        self._source: int | None = None
+        self._source_hashes: list[bytes] = []
 
-    def next_source(self) -> SourceStage | None:
-        """Move to the next source TP size and describe its prefetch.
+    def source_stage(self, start: int) -> PrefetchStage:
+        """Describe the prefetch of the local stage's chunks from ``start`` on.
+
+        Args:
+            start: Chunks the local stage hit; the source stage covers the
+                rest.
 
         Returns:
-            The stage to submit, or ``None`` if no source TP size is left.
+            The stage at the source TP size, on every tier, with one read lock
+            per object: only the reshard reads the source objects.
         """
-        if not self._candidates:
-            return None
-        source = self._candidates.pop(0)
-        self._source = source
-        return SourceStage(
-            key=replace(self._key, world_size=source),
+        local = self._local
+        self._source_hashes = local.chunk_hashes[start:]
+        return PrefetchStage(
+            key=replace(local.key, world_size=self._source_tp),
+            chunk_hashes=self._source_hashes,
             group_layout_descs={
                 gid: reshard_layout_desc(
-                    desc, self._num_kv_heads, self._key.world_size, source
+                    desc, self._num_kv_heads, local.key.world_size, self._source_tp
                 )
-                for gid, desc in self._group_layout_descs.items()
+                for gid, desc in local.group_layout_descs.items()
             },
-            attn_desc=replace(self._attn_desc, world_size=source),
+            attn_desc=replace(local.attn_desc, world_size=self._source_tp),
             num_kv_readers=1,
         )
 
     def convert(
         self, found: int, result: PrefetchResult, then: Callable[[], _T]
     ) -> Future[_T]:
-        """Reshard the current source stage's hit into the lookup's TP size.
+        """Reshard the source stage's hit into the lookup's TP size, in L1.
 
         Runs on a reshard thread and releases the source stage's read locks;
         see :meth:`L1Resharder.submit`.
 
         Args:
-            found: Leading chunks the current source stage hit.
-            result: The current source stage's result.
+            found: Leading chunks the source stage hit.
+            result: The source stage's result.
             then: Called on the reshard thread once the reshard is done.
 
         Returns:
             A future resolving to ``then``'s result.
         """
-        source = cast(int, self._source)
-        hashes = self._suffix_hashes[:found]
-        groups = list(range(self._attn_desc.num_object_groups))
+        local = self._local
+        hashes = self._source_hashes[:found]
+        groups = list(range(local.attn_desc.num_object_groups))
         return self._resharder.submit(
             ReshardTask(
                 src_keys=ipc_key_to_object_keys(
-                    replace(self._key, world_size=source), hashes, groups
+                    replace(local.key, world_size=self._source_tp), hashes, groups
                 ),
-                dst_keys=ipc_key_to_object_keys(self._key, hashes, groups),
-                dst_layout_descs=self._group_layout_descs,
+                dst_keys=ipc_key_to_object_keys(local.key, hashes, groups),
+                dst_layout_descs=local.group_layout_descs,
                 num_kv_heads=self._num_kv_heads,
-                src_tp=source,
-                dst_tp=self._key.world_size,
+                src_tp=self._source_tp,
+                dst_tp=local.key.world_size,
                 l1_owners=result.l1_owners,
-                request_id=self._key.request_id,
+                request_id=local.key.request_id,
             ),
             then,
         )
 
-    def release(self, found: int, result: PrefetchResult) -> None:
-        """Drop the read locks of the current source stage's hit.
 
-        Args:
-            found: Leading chunks the current source stage hit.
-            result: The current source stage's result.
-        """
-        self._sm.finish_read_prefetched(
-            [
-                k
-                for group in ipc_key_to_object_keys(
-                    replace(self._key, world_size=cast(int, self._source)),
-                    self._suffix_hashes[:found],
-                    list(range(self._attn_desc.num_object_groups)),
-                )
-                for k in group
-            ],
-            read_locks=1,
-            l1_owners=result.l1_owners,
-        )
-
-
-class HeteroTPFallback:
-    """Decides which lookups may fall back to other TP sizes, and builds plans.
+class HeteroTP:
+    """Decides which lookups may complete their hit from another TP size.
 
     Args:
         registry: Layout registry holding the KV head count engines report.
         storage_manager: Storage manager the reshards read and write.
-        source_world_sizes: TP sizes other engines store with, tried in order.
+        source_world_size: TP size other engines of the same model store
+            with; ``None`` turns cross-TP lookups off.
     """
 
     def __init__(
         self,
         registry: LayoutDescRegistry,
         storage_manager: StorageManager,
-        source_world_sizes: Sequence[int],
+        source_world_size: int | None,
     ) -> None:
         self._registry = registry
-        self._sm = storage_manager
-        self._source_world_sizes = list(source_world_sizes)
+        self._source_world_size = source_world_size
         self._resharder = L1Resharder(storage_manager)
-        # (KV heads, source world size) pairs already warned about.
-        self._warned_invalid_sources: set[tuple[int, int]] = set()
+        # KV head counts the source world size was already warned about.
+        self._warned_heads: set[int] = set()
 
-    def plan(
-        self,
-        key: IPCCacheServerKey,
-        suffix_hashes: list[bytes],
-        attn_desc: AttnWindowDesc,
-        group_layout_descs: dict[int, MemoryLayoutDesc],
-    ) -> HeteroTPPlan | None:
-        """Build the cross-TP fallback for a lookup, or ``None`` if it has none.
+    def plan(self, local: PrefetchStage) -> HeteroTPPlan | None:
+        """Build the cross-TP plan of a lookup, or ``None`` if it has none.
 
-        A lookup qualifies when source world sizes are configured, the engine
-        reported the model-wide KV head count (it does so only for
-        attention-only models whose world size equals their TP size), the
-        lookup's world size divides that head count, and no object group has
-        a sliding window. Candidates that do not divide the head count are
-        dropped with a warning.
+        A lookup qualifies when a source world size other than its own is
+        configured, the engine reported the model-wide KV head count (it does
+        so only for attention-only models whose world size equals their TP
+        size), both world sizes divide that head count, and no object group
+        has a sliding window. A source world size that does not divide the
+        head count is warned about once per head count.
 
         Args:
-            key: The lookup's key.
-            suffix_hashes: Chunk hashes of the looked-up range.
-            attn_desc: Attention windows at the lookup's world size.
-            group_layout_descs: Per-object-group layouts at the lookup's
-                world size.
+            local: The lookup's local stage.
 
         Returns:
-            The fallback plan, or ``None`` if the lookup does not qualify.
+            The plan, or ``None`` if the lookup does not qualify.
         """
-        if not self._source_world_sizes:
+        source = self._source_world_size
+        key = local.key
+        if source is None or source == key.world_size:
             return None
         num_heads = self._registry.find_total_num_kv_heads(
             key.model_name, key.world_size
@@ -625,35 +594,19 @@ class HeteroTPFallback:
         if (
             num_heads is None
             or not is_valid_tp(num_heads, key.world_size)
-            or any(w >= 0 for w in attn_desc.num_chunks_in_sw)
+            or any(w >= 0 for w in local.attn_desc.num_chunks_in_sw)
         ):
             return None
-        candidates = []
-        for world_size in self._source_world_sizes:
-            if world_size == key.world_size:
-                continue
-            if not is_valid_tp(num_heads, world_size):
-                if (num_heads, world_size) not in self._warned_invalid_sources:
-                    self._warned_invalid_sources.add((num_heads, world_size))
-                    logger.warning(
-                        "Skipping hetero TP source world size %d: %d KV heads",
-                        world_size,
-                        num_heads,
-                    )
-                continue
-            candidates.append(world_size)
-        if not candidates:
+        if not is_valid_tp(num_heads, source):
+            if num_heads not in self._warned_heads:
+                self._warned_heads.add(num_heads)
+                logger.warning(
+                    "Skipping hetero TP source world size %d: %d KV heads",
+                    source,
+                    num_heads,
+                )
             return None
-        return HeteroTPPlan(
-            key,
-            suffix_hashes,
-            attn_desc,
-            group_layout_descs,
-            num_heads,
-            candidates,
-            self._sm,
-            self._resharder,
-        )
+        return HeteroTPPlan(local, num_heads, source, self._resharder)
 
     def close(self) -> None:
         """Stop the reshard threads after every submitted reshard finishes.
