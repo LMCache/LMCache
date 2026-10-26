@@ -321,12 +321,36 @@ def test_reshard_leaves_no_read_locks(
     module.lookup(key, dst_tp)
     assert _poll(module, "req") == NUM_CHUNKS
 
-    # The final prefetch still holds every B object for the engine.
+    # The reshard left every B object read-locked for the engine.
     assert _num_locked(mp_ctx.storage_manager, dst_keys) == len(dst_keys)
     assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
 
     module.free_lookup_locks(key, dst_tp)
     assert _num_locked(mp_ctx.storage_manager, dst_keys) == 0
+
+
+@pytest.mark.parametrize("num_heads,src_tp,dst_tp", [(2, 1, 2), (4, 1, 4)])
+def test_reshard_locks_once_per_kv_reader(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    num_heads: int,
+    src_tp: int,
+    dst_tp: int,
+) -> None:
+    """Each B object stays locked until every worker's retrieve released it."""
+    module = make_module(num_heads, dst_tp, src_tp)
+    _store(mp_ctx, num_heads, src_tp)
+    dst_keys = _keys(mp_ctx, dst_tp)
+
+    module.lookup(_lookup_key(dst_tp), dst_tp)
+    assert _poll(module, "req") == NUM_CHUNKS
+
+    sm = mp_ctx.storage_manager
+    for _ in range(dst_tp - 1):
+        sm.finish_read_prefetched(dst_keys, read_locks=1)
+        assert _num_locked(sm, dst_keys) == len(dst_keys)
+    sm.finish_read_prefetched(dst_keys, read_locks=1)
+    assert _num_locked(sm, dst_keys) == 0
 
 
 def _local_stage(windows: list[int]) -> PrefetchStage:
@@ -537,13 +561,13 @@ def test_partial_local_hit_survives_a_missing_or_freed_source(
 
 
 @pytest.mark.parametrize("mp_ctx", [True], indirect=True)
-def test_local_prefix_loaded_from_l2_survives_the_lock_handoff(
+def test_local_prefix_loaded_from_l2_stays_locked_with_the_hit(
     mp_ctx: MPCacheServerContext,
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A local prefix loaded from L2 is temporary in L1; the final stage locks
-    it before the local stage lets go, so it is still there to be served."""
+    """A local prefix loaded from L2 is temporary in L1; the local stage's
+    locks are part of the answer, so it is still there to be served."""
     # MockL2Adapter never completes loads of multi-tensor objects.
     monkeypatch.setattr(sys.modules[__name__], "KERNEL_GROUP_LAYERS", (2,))
     sm = mp_ctx.storage_manager
@@ -633,7 +657,7 @@ def test_wait_follows_stage_chain_in_one_call(
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One wait covers primary, source and final stages and returns the hit."""
+    """One wait covers the local stage, the source stage and the reshard."""
     module = make_module(2, 1, 2)
     _store(mp_ctx, 2, 2)
     calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
@@ -641,14 +665,14 @@ def test_wait_follows_stage_chain_in_one_call(
     module.lookup(_lookup_key(1), 1)
 
     assert module.wait_prefetch_status("req", TIMEOUT) == NUM_CHUNKS
-    assert len(calls) == 3
-    # Source stage: A keys, one reader; final stage: B keys, L1 only.
-    source_spec, final_spec = calls[1][0], calls[2][0]
+    # Source stage: A keys, one reader. The reshard locks its own objects,
+    # so no further prefetch follows.
+    assert len(calls) == 2
+    source_spec = calls[1][0]
     assert source_spec.num_kv_readers == 1
     assert {k for row in source_spec.key_groups for k in row.keys} == set(
         _keys(mp_ctx, 2)
     )
-    assert final_spec.allowed_l2_memory_tags == frozenset()
     assert module.query_prefetch_status("req") == 0
     _assert_holds(mp_ctx, _keys(mp_ctx, 1), 2, 1)
 
@@ -728,31 +752,68 @@ def test_free_during_reshard_waits_and_releases_everything(
     assert module.query_prefetch_status("req") == 0
 
 
-def test_final_stage_failure_resolves_as_miss(
+def _drop_reservation(
+    monkeypatch: pytest.MonkeyPatch, sm: StorageManager, dropped: ObjectKey
+) -> None:
+    """Make ``reserve_write`` fail for ``dropped`` as if L1 were full."""
+    reserve = sm.reserve_write
+
+    def partial_reserve(
+        keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> dict[ObjectKey, MemoryObj]:
+        return reserve([k for k in keys if k != dropped], layout_desc)
+
+    monkeypatch.setattr(sm, "reserve_write", partial_reserve)
+
+
+def test_reshard_hit_stops_at_the_first_unwritten_object(
     mp_ctx: MPCacheServerContext,
     make_module: ModuleFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If the final prefetch cannot be submitted, the lookup reports a miss."""
-    module = make_module(2, 1, 2)
-    src_keys = _store(mp_ctx, 2, 2)
-    calls = _spy_submits(monkeypatch, mp_ctx.storage_manager)
-    submit = mp_ctx.storage_manager.submit_prefetch_task
+    """A destination object that cannot be written ends the hit there; the
+    objects written after it are not left locked."""
+    module = make_module(2, 2, 1)
+    src_keys = _store(mp_ctx, 2, 1)
+    dst_keys = _keys(mp_ctx, 2)
+    sm = mp_ctx.storage_manager
+    # Chunk 1 rank 0: chunk 1 is incomplete, its rank-1 object is written.
+    _drop_reservation(monkeypatch, sm, dst_keys[2])
+    key = _lookup_key(2)
 
-    def fail_third(
-        spec: PrefetchTaskSpec, external_request_id: str = ""
-    ) -> PrefetchHandle:
-        if len(calls) == 2:
-            raise RuntimeError("injected final-stage failure")
-        return submit(spec, external_request_id=external_request_id)
+    module.lookup(key, 2)
 
-    monkeypatch.setattr(mp_ctx.storage_manager, "submit_prefetch_task", fail_third)
+    assert module.wait_prefetch_status("req", TIMEOUT) == 1
+    assert _num_locked(sm, dst_keys[2:]) == 0
+    module.free_lookup_locks(key, 2)
+    assert _num_locked(sm, dst_keys) == 0
+    assert _num_locked(sm, src_keys) == 0
 
-    module.lookup(_lookup_key(1), 1)
+
+def test_reshard_failure_after_locking_releases_its_locks(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reshard that fails after locking some objects answers with the
+    local hit (none here) and leaves no object locked."""
+    module = make_module(2, 2, 1)
+    src_keys = _store(mp_ctx, 2, 1)
+    dst_keys = _keys(mp_ctx, 2)
+    sm = mp_ctx.storage_manager
+    _drop_reservation(monkeypatch, sm, dst_keys[2])
+
+    def fail(keys: list[ObjectKey], read_locks: int = 1) -> dict[ObjectKey, int]:
+        raise RuntimeError("injected reserve_read failure")
+
+    # Fails after the written objects were locked, on the one not written.
+    monkeypatch.setattr(sm, "reserve_read", fail)
+
+    module.lookup(_lookup_key(2), 2)
 
     assert module.wait_prefetch_status("req", TIMEOUT) == 0
-    assert module.query_prefetch_status("req") == 0
-    assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
+    assert _num_locked(sm, dst_keys) == 0
+    assert _num_locked(sm, src_keys) == 0
 
 
 def test_concurrent_lookups_of_one_prefix_both_hit(

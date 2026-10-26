@@ -13,11 +13,12 @@ A TP size larger than the head count replicates heads across ranks by an
 engine-specific rule, so it is not supported.
 
 :class:`L1Resharder` runs such a reshard against the storage manager: it
-reads read-locked source objects and writes the destination objects into L1
-on its own threads. :class:`HeteroTP` decides whether a lookup may complete
-its hit from another TP size, and its :class:`HeteroTPPlan` describes the
-source prefetch and runs the reshard, so the lookup itself never deals with
-heads or TP sizes.
+reads read-locked source objects and writes the destination objects into L1,
+read-locked for the lookup's readers, on its own threads. :class:`HeteroTP`
+decides whether a lookup may complete its hit from another TP size, and its
+:class:`HeteroTPPlan` describes the source prefetch, runs the reshard and
+merges its hit into the lookup's result, so the lookup itself never deals
+with heads or TP sizes.
 """
 
 # Standard
@@ -25,7 +26,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, Callable, TypeVar, cast
+from typing import Any, cast
 import threading
 import time
 
@@ -33,6 +34,7 @@ import time
 import torch
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
@@ -52,8 +54,6 @@ logger = init_logger(__name__)
 # Concurrent reshards. The copies are torch CPU copies, which release the GIL,
 # so a few lookups can reshard in parallel.
 _RESHARD_WORKERS = 4
-
-_T = TypeVar("_T")
 
 
 def _kernel_group_tensors(obj: MemoryObj) -> list[torch.Tensor]:
@@ -255,6 +255,8 @@ class ReshardTask:
         src_keys: Source object keys, each read-locked once by a prefetch.
         dst_keys: Destination object keys.
         dst_layout_descs: Layout of one destination object, per object group.
+        read_locks: Read locks to take per destination object, for the
+            readers of the lookup's hit.
         num_kv_heads: KV heads of the whole model.
         src_tp: TP size of the source objects.
         dst_tp: TP size of the destination objects.
@@ -265,11 +267,26 @@ class ReshardTask:
     src_keys: list[list[ObjectKey]]
     dst_keys: list[list[ObjectKey]]
     dst_layout_descs: dict[int, MemoryLayoutDesc]
+    read_locks: int
     num_kv_heads: int
     src_tp: int
     dst_tp: int
     l1_owners: dict[ObjectKey, int]
     request_id: str
+
+
+@dataclass(frozen=True)
+class ReshardResult:
+    """Destination objects a reshard left read-locked.
+
+    Attributes:
+        num_chunks: Leading chunks of the task whose destination objects are
+            all read-locked, ``ReshardTask.read_locks`` times each.
+        l1_owners: L1 owner of each of those objects.
+    """
+
+    num_chunks: int
+    l1_owners: dict[ObjectKey, int]
 
 
 class L1Resharder:
@@ -278,8 +295,8 @@ class L1Resharder:
     The copy grows with the hit, so it runs on a small thread pool instead of
     the request thread. Two reshards that write some of the same destination
     keys (two lookups of one prefix) are serialized: the later one waits for
-    the earlier, then writes only the keys still free, since a key reserved
-    by the earlier one cannot be reserved again.
+    the earlier, then writes only the keys still free and read-locks the
+    rest, since a key reserved by the earlier one cannot be reserved again.
 
     Args:
         storage_manager: Storage manager holding both the source and the
@@ -297,28 +314,29 @@ class L1Resharder:
         self._writers: dict[ObjectKey, Future[Any]] = {}
         self._writers_lock = threading.Lock()
 
-    def submit(self, task: ReshardTask, then: Callable[[], _T]) -> Future[_T]:
-        """Reshard ``task`` on a reshard thread, then call ``then`` there.
+    def submit(self, task: ReshardTask) -> Future[ReshardResult]:
+        """Reshard ``task`` on a reshard thread.
 
-        The source read locks are released whether or not the reshard
-        succeeds. A failed reshard is logged and ``then`` still runs, so the
-        caller learns what reached L1 the same way in both cases. Destination
-        keys that cannot be reserved (already resident, or out of memory) are
-        skipped.
+        Each destination object is read-locked ``task.read_locks`` times: one
+        the reshard writes as it is admitted, so eviction cannot take it
+        first, and one already resident (another writer was first) as it is
+        found. Only the leading chunks with every object locked are kept;
+        locks past the first gap (a key out of memory, or still being
+        written) are released. The source read locks are released whether or
+        not the reshard succeeds; a failed reshard is logged and keeps no
+        destination lock.
 
         Args:
             task: The reshard to run.
-            then: Called on the reshard thread once the reshard is done.
 
         Returns:
-            A future resolving to ``then``'s result, or raising its exception.
+            A future resolving to what the reshard left read-locked; it never
+            raises.
         """
         dst_keys = [k for group in task.dst_keys for k in group]
         with self._writers_lock:
             writers = {self._writers[k] for k in dst_keys if k in self._writers}
-            future = self._executor.submit(
-                self._run, task, then, writers, time.monotonic()
-            )
+            future = self._executor.submit(self._run, task, writers, time.monotonic())
             mine = [k for k in dst_keys if k not in self._writers]
             for k in mine:
                 self._writers[k] = future
@@ -343,33 +361,31 @@ class L1Resharder:
     def _run(
         self,
         task: ReshardTask,
-        then: Callable[[], _T],
         writers: set[Future[Any]],
         queued_at: float,
-    ) -> _T:
-        """Wait for ``writers``, reshard ``task``, log its cost, call ``then``.
+    ) -> ReshardResult:
+        """Wait for ``writers``, reshard ``task`` and log its cost.
 
         Args:
             task: The reshard to run.
-            then: Called once the reshard is done or has failed.
             writers: Running reshards that write some of the same destination
                 keys; this one writes only what they left free.
             queued_at: ``time.monotonic()`` when the reshard was submitted.
 
         Returns:
-            ``then``'s result.
+            What the reshard left read-locked; nothing if it failed.
         """
         dequeued = time.monotonic()
         # Writers were registered before this reshard, so waits never cycle.
         wait_futures(writers)
         started = time.monotonic()
         try:
-            nbytes = self._reshard(task)
+            nbytes, result = self._reshard(task)
             logger.info(
                 "Resharded %d chunks from TP%d to TP%d for request %s: wrote "
                 "%.1f MiB in %.2f ms (queued %.2f ms, waited %.2f ms on %d "
                 "other reshards)",
-                len(task.src_keys[0]) // task.src_tp,
+                result.num_chunks,
                 task.src_tp,
                 task.dst_tp,
                 task.request_id,
@@ -379,24 +395,70 @@ class L1Resharder:
                 (started - dequeued) * 1e3,
                 len(writers),
             )
+            return result
         except Exception:
             logger.exception("Cross-TP reshard failed for request %s", task.request_id)
-        return then()
+            return ReshardResult(0, {})
 
-    def _reshard(self, task: ReshardTask) -> int:
-        """Write the destination objects of ``task`` and release its sources.
+    def _reshard(self, task: ReshardTask) -> tuple[int, ReshardResult]:
+        """Write and read-lock the destination objects, release the sources.
 
         Args:
             task: The reshard to run.
+
+        Returns:
+            Bytes written into destination objects, and what stays locked.
+
+        Raises:
+            Exception: An allocation or copy error propagates. The source
+                read locks and every destination lock taken are released;
+                destination objects reserved for the failing group stay
+                reserved until the write TTL, since the storage manager has
+                no way to abandon them.
+        """
+        sm = self._sm
+        locked: dict[ObjectKey, int] = {}
+        try:
+            nbytes = self._write_and_lock(task, locked)
+        except Exception:
+            sm.finish_read_prefetched(
+                list(locked), read_locks=task.read_locks, l1_owners=locked
+            )
+            raise
+        dst_tp = task.dst_tp
+        num_chunks = 0
+        while num_chunks < len(task.dst_keys[0]) // dst_tp and all(
+            k in locked
+            for group in task.dst_keys
+            for k in group[num_chunks * dst_tp : (num_chunks + 1) * dst_tp]
+        ):
+            num_chunks += 1
+        kept = {
+            k: locked[k]
+            for group in task.dst_keys
+            for k in group[: num_chunks * dst_tp]
+        }
+        past_gap = [k for k in locked if k not in kept]
+        if past_gap:
+            sm.finish_read_prefetched(
+                past_gap, read_locks=task.read_locks, l1_owners=locked
+            )
+        return nbytes, ReshardResult(num_chunks, kept)
+
+    def _write_and_lock(self, task: ReshardTask, locked: dict[ObjectKey, int]) -> int:
+        """Write the destination objects and read-lock them into ``locked``.
+
+        Args:
+            task: The reshard to run.
+            locked: Filled with the L1 owner of each destination key locked,
+                as it is locked, so a caller can release them on an error.
 
         Returns:
             Bytes written into destination objects.
 
         Raises:
             Exception: An allocation or copy error propagates. The source
-                read locks are released either way; destination objects
-                reserved for the failing group stay reserved until the write
-                TTL, since the storage manager has no way to abandon them.
+                read locks are released either way.
         """
         sm = self._sm
         src_tp, dst_tp = task.src_tp, task.dst_tp
@@ -428,7 +490,16 @@ class L1Resharder:
                             copy_heads(dst, srcs, plans[b], dst_heads)
                             nbytes += sum(t.nbytes for t in dst)
                 if reserved:
-                    sm.finish_write_by_owner(sm.prepare_write_completion(reserved))
+                    locked.update(
+                        sm.finish_write_and_reserve_read(
+                            sm.prepare_write_completion(reserved), task.read_locks
+                        )
+                    )
+                # Another writer admitted these first: an earlier reshard of
+                # the same prefix, or the engine storing it.
+                taken = [k for k in g_dst if k not in reserved]
+                if taken:
+                    locked.update(sm.reserve_read(taken, task.read_locks))
         sm.finish_read_prefetched(flat_src, read_locks=1, l1_owners=task.l1_owners)
         return nbytes
 
@@ -461,8 +532,8 @@ class HeteroTPPlan:
     Created by :meth:`HeteroTP.plan` from the lookup's local stage. After the
     local stage hits its first ``k`` chunks, the lookup submits
     :meth:`source_stage` for the rest; if that hits, :meth:`convert` reshards
-    the hit into the lookup's own TP size in L1. Call them in that order, at
-    most once each.
+    the hit into the lookup's own TP size in L1, and :meth:`merge` appends it
+    to the local stage's result. Call them in that order, at most once each.
 
     Args:
         local: The lookup's local stage.
@@ -482,6 +553,7 @@ class HeteroTPPlan:
         self._num_kv_heads = num_kv_heads
         self._source_tp = source_tp
         self._resharder = resharder
+        self._start = 0
         self._source_hashes: list[bytes] = []
 
     def source_stage(self, start: int) -> PrefetchStage:
@@ -496,6 +568,7 @@ class HeteroTPPlan:
             per object: only the reshard reads the source objects.
         """
         local = self._local
+        self._start = start
         self._source_hashes = local.chunk_hashes[start:]
         return PrefetchStage(
             key=replace(local.key, world_size=self._source_tp),
@@ -510,21 +583,19 @@ class HeteroTPPlan:
             num_kv_readers=1,
         )
 
-    def convert(
-        self, found: int, result: PrefetchResult, then: Callable[[], _T]
-    ) -> Future[_T]:
+    def convert(self, found: int, result: PrefetchResult) -> Future[ReshardResult]:
         """Reshard the source stage's hit into the lookup's TP size, in L1.
 
-        Runs on a reshard thread and releases the source stage's read locks;
-        see :meth:`L1Resharder.submit`.
+        Runs on a reshard thread, releases the source stage's read locks and
+        leaves the new objects read-locked ``num_kv_readers`` times, as the
+        local stage left its own; see :meth:`L1Resharder.submit`.
 
         Args:
             found: Leading chunks the source stage hit.
             result: The source stage's result.
-            then: Called on the reshard thread once the reshard is done.
 
         Returns:
-            A future resolving to ``then``'s result.
+            A future resolving to what the reshard left read-locked.
         """
         local = self._local
         hashes = self._source_hashes[:found]
@@ -536,13 +607,41 @@ class HeteroTPPlan:
                 ),
                 dst_keys=ipc_key_to_object_keys(local.key, hashes, groups),
                 dst_layout_descs=local.group_layout_descs,
+                read_locks=local.num_kv_readers,
                 num_kv_heads=self._num_kv_heads,
                 src_tp=self._source_tp,
                 dst_tp=local.key.world_size,
                 l1_owners=result.l1_owners,
                 request_id=local.key.request_id,
-            ),
-            then,
+            )
+        )
+
+    def merge(self, local: PrefetchResult, resharded: ReshardResult) -> PrefetchResult:
+        """Append a reshard's hit to the local stage's result.
+
+        Args:
+            local: The local stage's result; it hit the chunks before the
+                source stage's start.
+            resharded: What :meth:`convert` left read-locked.
+
+        Returns:
+            One result over the local stage's rows, as if the local stage had
+            hit both. The resharded chunks count as L2 hits: the lookup's TP
+            size did not have them in L1.
+        """
+        end = self._start + resharded.num_chunks
+
+        def extend(rows: list[Bitmap]) -> list[Bitmap]:
+            out = [row.copy() for row in rows]
+            for row in out:
+                row.set_range(self._start, end)
+            return out
+
+        return PrefetchResult(
+            hit_cells=extend(local.hit_cells),
+            l1_hit_cells=[row.copy() for row in local.l1_hit_cells],
+            l2_hit_cells=extend(local.l2_hit_cells),
+            l1_owners={**local.l1_owners, **resharded.l1_owners},
         )
 
 

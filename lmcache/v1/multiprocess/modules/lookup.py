@@ -45,6 +45,7 @@ from lmcache.v1.multiprocess.tp_reshard import (
     HeteroTP,
     HeteroTPPlan,
     PrefetchStage,
+    ReshardResult,
 )
 
 logger = init_logger(__name__)
@@ -108,33 +109,27 @@ class _HeteroTPStages:
 
     See ``docs/design/v1/multiprocess/hetero_tp.md``. The local stage looks
     up the lookup's own keys on every tier. If it hits fewer than all chunks,
-    the source stage looks up the rest at the source TP size; a hit there is
-    resharded into the lookup's own layout in L1, and the final stage locks
-    the whole hit in L1. Its locks replace the local stage's.
+    its locks are kept and the source stage looks up the rest at the source
+    TP size; a hit there is resharded into the lookup's own layout in L1,
+    read-locked, and appended to the local stage's result.
 
     Attributes:
-        plan: The source stage and the reshard.
+        plan: The source stage, the reshard and the merge.
         local: The local stage.
-        phase: The running stage: ``"local"``, ``"source"`` or ``"final"``.
+        phase: The running stage: ``"local"`` or ``"source"``.
         local_result: The local stage's result, once it finished early.
         local_windows: The row windows ``local_result`` folds with.
-        local_found: Leading chunks the local stage hit and locked.
         source: The source stage, once submitted.
-        source_result: The source stage's result, kept while its hit is
-            resharded.
-        reshard: The running reshard of a source-stage hit; it resolves to
-            whether it submitted the final stage.
+        reshard: The running reshard of a source-stage hit.
     """
 
     plan: HeteroTPPlan
     local: PrefetchStage
-    phase: Literal["local", "source", "final"] = "local"
+    phase: Literal["local", "source"] = "local"
     local_result: PrefetchResult | None = None
     local_windows: tuple[int, ...] = ()
-    local_found: int = 0
     source: PrefetchStage | None = None
-    source_result: PrefetchResult | None = None
-    reshard: Future[bool] | None = None
+    reshard: Future[ReshardResult] | None = None
 
 
 @dataclass
@@ -452,8 +447,8 @@ class LookupModule(DiscoverableModule):
 
         With a cross-TP source configured, a finished stage can make this
         call submit the next stage and return None. A source-stage hit is
-        resharded into L1 on a background thread, which then submits the
-        final stage; until then this call returns None.
+        resharded into L1 on a background thread; until it finishes this
+        call returns None.
 
         Args:
             request_id: The external request ID passed in the lookup key.
@@ -559,7 +554,7 @@ class LookupModule(DiscoverableModule):
         is still running nothing is released: its locks still belong to the
         prefetch controller and expire with the read-lock TTL. A running
         cross-TP reshard is the exception: this call blocks until it finishes
-        (no timeout), so the final stage's locks are released.
+        (no timeout), so the locks it took are released too.
 
         Args:
             key: Cache key whose read locks should be released.
@@ -785,7 +780,7 @@ class LookupModule(DiscoverableModule):
                 stage. ``free_lookup_locks`` passes False because the request
                 is being released, so the current result is final; it also
                 blocks until a running reshard finishes, so the release sees
-                the final stage's locks.
+                the locks the reshard took.
 
         Returns:
             The hit chunk count, or None while the lookup is still running:
@@ -798,16 +793,19 @@ class LookupModule(DiscoverableModule):
         if reshard is not None and advance_hetero and not reshard.done():
             return None
         row_windows: tuple[int, ...]
-        if reshard is not None and not reshard.result():
-            # The final stage was never submitted: answer with the local
-            # stage, whose locks are still held. Nothing else hands this
-            # result out once, so the consumer that clears ``hetero`` owns it.
+        if reshard is not None:
+            # Append the reshard's hit to the local stage, whose locks are
+            # still held. Nothing else hands this result out once, so the
+            # consumer that clears ``hetero`` owns it.
+            resharded = reshard.result()
             with self._prefetch_job_lock:
                 state = job.hetero
                 if state is None or state.reshard is not reshard:
                     return None
                 job.hetero = None
-            result = cast(PrefetchResult, state.local_result)
+            result = state.plan.merge(
+                cast(PrefetchResult, state.local_result), resharded
+            )
             row_windows = state.local_windows
         else:
             with self._prefetch_job_lock:
@@ -938,12 +936,11 @@ class LookupModule(DiscoverableModule):
         """Move a lookup to its next cross-TP stage after a stage finished.
 
         Local stage: a full hit, or ``advance`` False, makes it final;
-        otherwise the source stage is submitted for the rest. Source stage: a
-        hit is handed to a background reshard, which submits the final
-        L1-only stage; a miss, or ``advance`` False, releases the source
-        locks and answers with the local stage. Final stage: the local
-        stage's locks are released, since the final stage holds the same
-        prefix again, and the final stage is the answer.
+        otherwise its locks are kept and the source stage is submitted for
+        the rest. Source stage: a hit is handed to a background reshard,
+        whose result ``_consume_prefetch_result`` appends to the local
+        stage's; a miss, or ``advance`` False, releases the source locks and
+        answers with the local stage.
 
         Args:
             job: The lookup's job.
@@ -964,63 +961,22 @@ class LookupModule(DiscoverableModule):
                 job.hetero = None
                 return result, row_windows
             state.local_result, state.local_windows = result, row_windows
-            state.local_found = found
             source = state.plan.source_stage(found)
             handle, windows = self._submit_stage(source)
             with self._prefetch_job_lock:
                 job.handle, job.row_windows = handle, windows
                 state.phase, state.source = "source", source
             return None
-        if state.phase == "source":
-            if found > 0 and advance:
-                state.source_result = result
-                state.reshard = state.plan.convert(
-                    found, result, partial(self._submit_final_stage, job, state)
-                )
-                return None
-            self._release_stage(cast(PrefetchStage, state.source), found, result)
-            job.hetero = None
-            return cast(PrefetchResult, state.local_result), state.local_windows
-        # The final stage locked the local prefix too: the object stays
-        # resident (temporary objects are freed only once fully unlocked).
-        self._release_stage(
-            state.local, state.local_found, cast(PrefetchResult, state.local_result)
-        )
+        if found > 0 and advance:
+            reshard = state.plan.convert(found, result)
+            with self._prefetch_job_lock:
+                state.reshard = reshard
+            return None
+        self._release_stage(cast(PrefetchStage, state.source), found, result)
         job.hetero = None
-        return result, row_windows
+        return cast(PrefetchResult, state.local_result), state.local_windows
 
-    def _submit_final_stage(self, job: _PrefetchJob, state: _HeteroTPStages) -> bool:
-        """Submit the L1-only prefetch of the lookup's own keys after a reshard.
-
-        Runs on a reshard thread, also after a failed reshard: the final
-        stage then reports whatever reached L1 (at least the local prefix).
-
-        Args:
-            job: The lookup's job.
-            state: ``job.hetero``.
-
-        Returns:
-            Whether the final stage was submitted and swapped into ``job``.
-        """
-        try:
-            # L1-only: the reshard just wrote these objects to L1, and the
-            # local prefix is locked there.
-            handle, row_windows = self._submit_stage(
-                replace(state.local, allowed_l2_memory_tags=frozenset())
-            )
-        except Exception:
-            logger.exception(
-                "Cross-TP final stage failed for request %s; answering with "
-                "the local hit",
-                job.request_id,
-            )
-            return False
-        with self._prefetch_job_lock:
-            job.handle, job.row_windows = handle, row_windows
-            state.phase, state.reshard = "final", None
-        return True
-
-    def _pending_reshard(self, job: _PrefetchJob) -> Future[bool] | None:
+    def _pending_reshard(self, job: _PrefetchJob) -> Future[ReshardResult] | None:
         """Return ``job``'s running reshard; call under ``_prefetch_job_lock``."""
         return job.hetero.reshard if job.hetero is not None else None
 
