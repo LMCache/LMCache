@@ -23,6 +23,7 @@ from vllm.distributed.kv_events import (  # noqa: E402
 from vllm.distributed.kv_transfer.kv_connector.factory import (  # noqa: E402
     KVConnectorFactory,
 )
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -36,7 +37,7 @@ from vllm.v1.kv_cache_interface import (  # noqa: E402
     KVCacheConfig,
     KVCacheGroupSpec,
 )
-from vllm.v1.outputs import KVConnectorOutput  # noqa: E402
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput  # noqa: E402
 from vllm.v1.request import Request, RequestStatus  # noqa: E402
 
 # First Party
@@ -51,7 +52,10 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.utils import CacheStoreEvent  # noqa: E402
+from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
+from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -394,6 +398,210 @@ def test_chunked_prefill_stores_and_completion(
     else:
         mock_io.telemetry.on_request_store_finished.assert_not_called()
     assert not any(worker.get_finished({"request"}))
+
+
+@pytest.mark.parametrize("kv_role", ["kv_both"], ids=["both"])
+@pytest.mark.parametrize("lazy_offload", [False], ids=["eager"])
+@pytest.mark.parametrize(
+    "finish_status",
+    [RequestStatus.FINISHED_STOPPED, RequestStatus.FINISHED_LENGTH_CAPPED],
+    ids=["stop", "length"],
+)
+@pytest.mark.parametrize("store_finishes_first", [False, True], ids=["late", "early"])
+@pytest.mark.parametrize("store_succeeds", [True, False], ids=["stored", "failed"])
+def test_successful_eager_session_cannot_be_recreated_by_final_store(
+    connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
+    mock_io: SimpleNamespace,
+    finish_status: RequestStatus,
+    store_finishes_first: bool,
+    store_succeeds: bool,
+) -> None:
+    """The late STORE race from #5062 must not leave a real orphan session.
+
+    Only transport/GPU I/O is stubbed. The delayed STORE handler creates a real
+    SessionManager entry before completing its real MessagingFuture. A failed
+    STORE response must retire the session just like a successful response.
+    """
+    scheduler, worker = connectors
+    request = _request()
+    sessions = SessionManager(
+        TokenHasher(chunk_size=4, hash_algorithm="blake3"), cleanup_interval=None
+    )
+    future: MessagingFuture[bool] = MessagingFuture()
+    mock_io.transfer.submit_store.return_value = future
+    mock_io.scheduler.end_session.side_effect = sessions.remove
+    try:
+        sessions.get_or_create(request.request_id)
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+        scheduler.update_state_after_alloc(
+            request, MagicMock(get_block_ids=lambda: ([1],)), 0
+        )
+        metadata = scheduler.build_connector_meta(
+            _schedule(num_tokens=4, block_ids=([1],), new=True)
+        )
+        worker.bind_connector_metadata(metadata)
+        worker.wait_for_save()
+        assert not any(worker.get_finished(set()))
+        mock_io.scheduler.cleanup_lookup_result.reset_mock()
+
+        if store_finishes_first:
+            sessions.get_or_create(request.request_id)
+            future.set_result(store_succeeds)
+            assert not any(worker.get_finished(set()))
+
+        request.status = finish_status
+        assert scheduler.request_finished(request, [1]) == (True, None)
+        if not store_finishes_first:
+            sessions.get_or_create(request.request_id)
+            future.set_result(store_succeeds)
+
+        sending, receiving = worker.get_finished({request.request_id})
+        assert sending == {request.request_id}
+        assert not receiving
+        output = KVConnectorOutput(finished_sending=sending, finished_recving=receiving)
+        scheduler.update_connector_output(output)
+        assert sessions.get(request.request_id) is None
+
+        assert not any(worker.get_finished({request.request_id}))
+        scheduler.update_connector_output(output)
+        mock_io.scheduler.end_session.assert_called_once_with(request.request_id)
+        mock_io.scheduler.cleanup_lookup_result.assert_called_once_with(
+            request.request_id
+        )
+    finally:
+        sessions.close()
+
+
+@pytest.mark.parametrize("kv_role", ["kv_both"])
+@pytest.mark.parametrize("lazy_offload", [False])
+@pytest.mark.parametrize("store_succeeds", [True, False], ids=["stored", "failed"])
+def test_completed_chunk_cannot_report_a_newer_pending_store_finished(
+    connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
+    mock_io: SimpleNamespace,
+    store_succeeds: bool,
+) -> None:
+    """An older chunk's completion cannot authorize reuse during a later STORE."""
+    scheduler, worker = connectors
+    request = _request()
+    first: MessagingFuture[bool] = MessagingFuture()
+    final: MessagingFuture[bool] = MessagingFuture()
+    mock_io.transfer.submit_store.side_effect = [first, final]
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    scheduler.update_state_after_alloc(
+        request, MagicMock(get_block_ids=lambda: ([1],)), 0
+    )
+    for index, future in enumerate((first, final)):
+        metadata = scheduler.build_connector_meta(
+            _schedule(num_tokens=4, block_ids=([index + 1],), new=index == 0)
+        )
+        worker.bind_connector_metadata(metadata)
+        worker.wait_for_save()
+        if index == 0:
+            future.set_result(True)
+            assert not any(worker.get_finished(set()))
+
+    request.status = RequestStatus.FINISHED_STOPPED
+    assert scheduler.request_finished(request, [1, 2]) == (True, None)
+    assert not any(worker.get_finished({request.request_id}))
+    assert not final.query()
+    final.set_result(store_succeeds)
+    sending, receiving = worker.get_finished(set())
+    assert sending == {request.request_id}
+    assert not receiving
+    scheduler.update_connector_output(KVConnectorOutput(finished_sending=sending))
+    mock_io.scheduler.end_session.assert_called_once_with(request.request_id)
+    assert not any(worker.get_finished({request.request_id}))
+
+
+@pytest.mark.parametrize("final_rank_reports", [True, False], ids=["all", "missing"])
+def test_successful_eager_session_waits_for_all_eight_store_reports(
+    mock_io: SimpleNamespace,
+    final_rank_reports: bool,
+) -> None:
+    """Seven ranks cannot retire a session, even at scheduler shutdown."""
+    scheduler = LMCacheMPConnector(
+        _config(KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")),
+        KVConnectorRole.SCHEDULER,
+    )
+    try:
+        request = _request()
+        request.status = RequestStatus.FINISHED_STOPPED
+        assert scheduler.request_finished(request, []) == (True, None)
+        aggregator = KVOutputAggregator(8)
+        reports = [{0, 1, 2, 3, 4, 5, 6}, {7} if final_rank_reports else set()]
+        for reporting_ranks in reports:
+            outputs = [
+                ModelRunnerOutput(
+                    req_ids=[],
+                    req_id_to_index={},
+                    kv_connector_output=KVConnectorOutput(
+                        finished_sending={request.request_id}
+                        if rank in reporting_ranks
+                        else None
+                    ),
+                )
+                for rank in range(8)
+            ]
+            aggregate = aggregator.aggregate(outputs)
+            assert aggregate is not None
+            assert aggregate.kv_connector_output is not None
+            scheduler.update_connector_output(aggregate.kv_connector_output)
+            if len(reporting_ranks) == 7:
+                mock_io.scheduler.end_session.assert_not_called()
+                mock_io.scheduler.cleanup_lookup_result.assert_not_called()
+        if not final_rank_reports:
+            mock_io.scheduler.end_session.assert_not_called()
+            mock_io.scheduler.cleanup_lookup_result.assert_not_called()
+            return
+        scheduler.update_connector_output(
+            KVConnectorOutput(finished_sending={request.request_id})
+        )
+        mock_io.scheduler.end_session.assert_called_once_with(request.request_id)
+        mock_io.scheduler.cleanup_lookup_result.assert_called_once_with(
+            request.request_id
+        )
+    finally:
+        scheduler.shutdown()
+        if not final_rank_reports:
+            mock_io.scheduler.end_session.assert_not_called()
+            mock_io.scheduler.cleanup_lookup_result.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "finish_status",
+    [RequestStatus.FINISHED_STOPPED, RequestStatus.FINISHED_ABORTED],
+)
+def test_request_without_store_keeps_role_and_cleanup_contract(
+    connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
+    kv_role: str,
+    lazy_offload: bool,
+    mock_io: SimpleNamespace,
+    finish_status: RequestStatus,
+) -> None:
+    """Consumer/lazy/abort paths do not gain a wait for nonexistent STORE I/O."""
+    scheduler, worker = connectors
+    request = _request()
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    request.status = finish_status
+    delay_free, params = scheduler.request_finished(request, [])
+    assert delay_free is (kv_role != "kv_consumer" and not lazy_offload)
+    assert params is None
+    deferred = delay_free and finish_status == RequestStatus.FINISHED_STOPPED
+    if deferred:
+        mock_io.scheduler.end_session.assert_not_called()
+    else:
+        mock_io.scheduler.end_session.assert_called_once_with(request.request_id)
+    sending, receiving = worker.get_finished({request.request_id})
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            finished_sending=sending,
+            finished_recving=receiving,
+            kv_connector_worker_meta=worker.build_connector_worker_meta(),
+        )
+    )
+    mock_io.scheduler.end_session.assert_called_once_with(request.request_id)
+    mock_io.scheduler.cleanup_lookup_result.assert_called_once_with(request.request_id)
+    assert not any(worker.get_finished({request.request_id}))
 
 
 @pytest.mark.parametrize("retrieve_success", [False, True])

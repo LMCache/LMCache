@@ -760,6 +760,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 required_chunk_alignment=scheduler_block_size,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
+            # Successful eager requests awaiting all workers' final STORE reports.
+            self._pending_eager_session_ends: set[str] = set()
             # Worker events aggregated per step, awaiting take_events().
             self._kv_cache_events: list[KVCacheEvent] = []
 
@@ -1234,11 +1236,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     def shutdown(self) -> None:
         """
-        Shutdown the connector. This is called when the owning process
-        (worker or scheduler) is shutting down to ensure that all the async
-        operations are completed and the connector is cleaned up properly.
+        Release resources owned by the worker or scheduler as it shuts down.
         On the scheduler side it also logs the lazy-offload counter ledger
         so the drop rate is auditable from the log.
+
+        Scheduler shutdown does not establish that remote STORE handlers have
+        stopped. It therefore does not end pending eager sessions without an
+        aggregated completion report; doing so could recreate the session race.
         """
         if hasattr(self, "worker_adapter"):
             self.worker_adapter.shutdown()
@@ -1632,9 +1636,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         return metadata
 
-    def update_connector_output(self, connector_output: KVConnectorOutput):
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """
-        Update KVConnector state from worker-side connectors output.
+        Update KVConnector state from aggregated worker-side output.
+
+        Successful eager requests end their sessions only after all workers
+        report finished_sending. Lazy offload retains its own receipt lifecycle.
+        A STORE returning False still reports completion. A missing worker
+        report retains the pending entry and lookup state for the connector's
+        lifetime; this path does not implement timeout or worker-loss recovery.
 
         Args:
             connector_output (KVConnectorOutput): the worker-side
@@ -1649,6 +1659,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._kv_cache_events.extend(kv_cache_events.aggregate().get_all_events())
 
         if not self.lazy_offload:
+            for request_id in self._pending_eager_session_ends.intersection(
+                connector_output.finished_sending or ()
+            ):
+                self.scheduler_adapter.end_session(request_id)
+                self.scheduler_adapter.cleanup_lookup_result(request_id)
+                self._pending_eager_session_ends.remove(request_id)
             return
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, LMCacheMPWorkerMetadata):
@@ -1671,6 +1687,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         The connector may assumes responsibility for freeing the blocks
         asynchronously by returning True.
+
+        A successful eager producer keeps its LMCache session until the
+        aggregated finished_sending report, so a late STORE cannot recreate it.
+        Consumer, lazy-offload and aborted-request cleanup is unchanged.
 
         Returns:
             True if the request is being saved/sent asynchronously and blocks
@@ -1699,6 +1719,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
+
+        if (
+            not self.lazy_offload
+            and self._can_store
+            and request.status
+            in (RequestStatus.FINISHED_STOPPED, RequestStatus.FINISHED_LENGTH_CAPPED)
+        ):
+            self._pending_eager_session_ends.add(request.request_id)
+            return True, (return_params or None)
 
         # Drop lookup state for a request aborted before its lookup was
         # consumed (update_state_after_alloc never ran for it). Both the eager
