@@ -121,6 +121,16 @@ mid-group, the destination objects reserved for that group stay reserved
 until the write TTL, because the storage manager cannot abandon a
 reservation.
 
+## After a reshard: only B stays
+
+D keeps only the converted B objects; the A copies it pulled are dropped.
+Nothing in the fallback deletes them: the default prefetch policy marks every
+object loaded from L2 (P2P included) temporary, so L1 deletes it when the
+reshard releases its read lock. A objects that were already in L1, written by
+a TP=A engine sharing this server, are not temporary and stay. With
+`--l2-prefetch-policy retain` the A copies stay until eviction, as every L2
+load does under that policy.
+
 ## Configuration
 
 ```bash
@@ -184,7 +194,5 @@ The e2e test is native PD on one node: two servers, a coordinator, NIXL P2P,
 
 1. Source TP discovery: should a peer advertise its layouts (P2P RPC or
    coordinator metadata) instead of using static config?
-2. After a reshard, keep the A copies in D's L1 for later TP=A readers, or
-   drop them?
-3. The NIXL load does not compare the remote object size with the local
+2. The NIXL load does not compare the remote object size with the local
    buffer (`P2PL2Adapter.submit_load_task`). Fix it separately.
