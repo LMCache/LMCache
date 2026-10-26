@@ -696,6 +696,68 @@ RetrieveResult = bool
 LookupResult = int
 
 
+_SessionRpcFuture = MessagingFuture[None] | MessagingFuture[int | None]
+
+
+class _OrderedSessionEnd:
+    """Let admitted RPC callbacks retain a server's deferred END submission."""
+
+    def __init__(
+        self,
+        request_id: str,
+        client: RequestClient,
+        predecessors: set[_SessionRpcFuture],
+    ) -> None:
+        self._request_id = request_id
+        self._client = client
+        self._pending = predecessors.copy()
+        self._failed = False
+        self._submitted = False
+        self._lock = threading.Lock()
+
+    def start(self) -> None:
+        """Register completion callbacks without waiting on the scheduler thread."""
+        with self._lock:
+            futures = tuple(self._pending)
+            if not futures:
+                self._submitted = True
+        if not futures:
+            self._send_end()
+            return
+        for future in futures:
+            future.add_done_callback(self._on_predecessor_done)
+
+    def _on_predecessor_done(self, future: _SessionRpcFuture) -> None:
+        with self._lock:
+            self._pending.discard(future)
+            error = future.exception_
+            if error is not None:
+                self._failed = True
+            ready = not self._pending and not self._failed and not self._submitted
+            if ready:
+                self._submitted = True
+        if error is not None:
+            logger.error(
+                "Cannot order END_SESSION for request %s after failed RPC: %s",
+                self._request_id,
+                error,
+            )
+        if ready:
+            self._send_end()
+
+    def _send_end(self) -> None:
+        future = self._client.end_session(self._request_id)
+        future.add_done_callback(self._on_end_done)
+
+    def _on_end_done(self, future: MessagingFuture[None]) -> None:
+        if future.exception_ is not None:
+            logger.error(
+                "END_SESSION for request %s failed: %s",
+                self._request_id,
+                future.exception_,
+            )
+
+
 class LMCacheMPSchedulerAdapter:
     def __init__(
         self,
@@ -767,6 +829,9 @@ class LMCacheMPSchedulerAdapter:
         # once resolved, so repeated checks return the same value after the
         # server has handed the hit count over (exactly once).
         self._lookups: dict[str, LookupState] = {}
+        # Cleanup may precede END in the connector. Keep only admitted RPCs
+        # until that once-only request-finished notification transfers them.
+        self._closed_lookup_rpcs: dict[str, dict[str, set[_SessionRpcFuture]]] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -1007,18 +1072,18 @@ class LMCacheMPSchedulerAdapter:
         return self.blocks_in_chunk
 
     def cleanup_lookup_result(self, request_id: str) -> None:
-        """
-        Clean up lookup state for a finished request to prevent memory leak.
-
-        The request's lookup stops sending RPCs, and replies still in flight
-        are ignored.
+        """Forget a lookup result while retaining its outstanding RPC ordering.
 
         Args:
-            request_id: The ID of the finished request.
+            request_id: Request whose result is no longer needed. Its final
+                end_session call takes any unconfirmed handler acknowledgements.
         """
         lookup = self._lookups.pop(request_id, None)
-        if lookup is not None:
-            lookup.close()
+        if lookup is None:
+            return
+        for url, futures in lookup.close_and_take_pending_rpcs().items():
+            pending = self._closed_lookup_rpcs.setdefault(request_id, {})
+            pending.setdefault(url, set()).update(futures)
 
     def reset_cache(self) -> bool:
         """Ask every backing LMCache server to best-effort clear idle cache.
@@ -1086,6 +1151,9 @@ class LMCacheMPSchedulerAdapter:
         Or use this when a request is cancelled or aborted after lookup but
         before retrieve to avoid holding read locks until TTL expiry.
 
+        Returns without waiting. The final end_session call also waits for
+        these server acknowledgements before submitting END_SESSION.
+
         When ``start`` or ``end`` is not aligned to the chunk size, the
         entire chunk containing start boundary is freed but not end boundary.
         It is caller's responsibility to properly align the boundaries.
@@ -1115,35 +1183,35 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         ).no_worker_id_version()
+        pending = self._closed_lookup_rpcs.setdefault(request_id, {})
         for url in self._server_urls:
-            self.req_clients[url].free_lookup_locks(
+            future = self.req_clients[url].free_lookup_locks(
                 base_key, self.tp_size, extra_ranges
             )
+            pending.setdefault(url, set()).add(future)
 
     def end_session(self, request_id: str) -> None:
-        """
-        Notify LMCache server to remove the session for a finished request.
+        """Submit END after each server acknowledges its admitted lookup RPCs.
 
-        If the request's lookup is still tracked, it stops sending RPCs, and
-        this function blocks until its LOOKUP and status RPCs already in
-        flight complete, so their handlers cannot recreate the session after
-        END_SESSION.
+        Returns without waiting for LOOKUP, status or FREE replies, including
+        after a local timeout marks a server unhealthy. A failed predecessor
+        is logged and prevents END on that server; it is not a successful ACK.
+        Pending transport futures retain the ordering callbacks. No completed
+        request identities are retained by the adapter.
 
         Args:
-            request_id: The ID of the finished request.
+            request_id: Finished request. As with request_finished, callers
+                notify once and do not reuse the identity while RPCs remain.
         """
-        if not self.is_healthy:
-            return
-
-        lookup = self._lookups.get(request_id)
+        pending = self._closed_lookup_rpcs.pop(request_id, {})
+        lookup = self._lookups.pop(request_id, None)
         if lookup is not None:
-            url = lookup.drain()
-            if url is not None:
-                self._mark_lookup_timed_out(url)
-                return
-
+            for url, futures in lookup.close_and_take_pending_rpcs().items():
+                pending.setdefault(url, set()).update(futures)
         for url in self._server_urls:
-            self.req_clients[url].end_session(request_id)
+            _OrderedSessionEnd(
+                request_id, self.req_clients[url], pending.get(url, set())
+            ).start()
 
     def report_block_allocations(
         self,

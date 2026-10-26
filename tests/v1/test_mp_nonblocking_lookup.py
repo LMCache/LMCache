@@ -91,7 +91,9 @@ class Client:
         assert self.replies, "duplicate status RPC while previous one is pending"
         return self.replies.popleft()
 
-    def free_lookup_locks(self, key: Any, tp_size: int) -> MessagingFuture[Any]:
+    def free_lookup_locks(
+        self, key: Any, tp_size: int, extra_ranges: tuple[tuple[int, int], ...] = ()
+    ) -> MessagingFuture[Any]:
         """Record released ranges and expose their acknowledgement."""
         self.frees.append(key)
         return self.free_ack
@@ -335,24 +337,17 @@ def test_status_is_sent_when_its_own_server_acks(
     assert adapter.check_lookup_result("r") == 128
 
 
-def test_end_session_waits_for_a_status_query_sent_on_ack(
+def test_end_session_defers_until_status_ack_without_blocking(
     make_adapter: AdapterFactory,
 ) -> None:
     adapter, (client,) = make_adapter()
-    ends_when_waited: list[list[str]] = []
-
-    class StatusFuture(MessagingFuture[Any]):
-        def wait(self, timeout: float | None = None) -> bool:
-            ends_when_waited.append(list(client.ends))
-            return True
-
-    client.replies = deque([StatusFuture()])
     adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
     client.ack.set_result(None)
     assert client.queries == ["r"]
 
     adapter.end_session("r")
-    assert ends_when_waited == [[]]
+    assert not client.ends
+    client.status.set_result(0)
     assert client.ends == ["r"]
 
 
@@ -512,29 +507,117 @@ def test_end_waits_for_already_sent_status_only(
     adapter, (client,) = make_adapter()
     submit(adapter, [client])
     assert adapter.check_lookup_result("r") is None
-    done = threading.Event()
-    errors: list[BaseException] = []
+    adapter.end_session("r")
+    assert not client.ends
+    client.status.set_result(reply)
+    assert client.queries == ["r"] and client.ends == ["r"]
+    assert not client.frees
+    assert not client.end_ack.query()
 
-    def finish() -> None:
-        try:
-            adapter.end_session("r")
-        except BaseException as error:
-            errors.append(error)
-        finally:
-            done.set()
 
-    thread = threading.Thread(target=finish)
-    thread.start()
-    try:
-        assert not done.wait(0.05)
+@pytest.mark.parametrize("phase", ["lookup", "query"])
+@pytest.mark.parametrize("cleanup_first", [False, True])
+def test_timed_out_rpc_still_orders_end_after_its_ack(
+    make_adapter: AdapterFactory, phase: str, cleanup_first: bool
+) -> None:
+    """A scheduler miss must not discard a still-running server handler."""
+    adapter, (client,) = make_adapter(timeout=0)
+    adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+    if phase == "query":
+        client.ack.set_result(None)
+    assert adapter.check_lookup_result("r") == 0
+    assert not adapter.is_healthy
+    if cleanup_first:
+        adapter.cleanup_lookup_result("r")
+    adapter.end_session("r")
+    adapter.cleanup_lookup_result("r")
+    assert not client.ends
+    if phase == "lookup":
+        client.ack.set_result(None)
+        assert not client.queries
+    else:
+        client.status.set_result(2)
+        assert client.queries == ["r"]
+    assert client.ends == ["r"]
+
+
+@pytest.mark.parametrize("cleanup_first", [False, True])
+def test_explicit_free_ack_precedes_end(
+    make_adapter: AdapterFactory, cleanup_first: bool
+) -> None:
+    """END must not overtake an admitted FREE on another server-pool thread."""
+    adapter, (client,) = make_adapter()
+    client.free_ack = MessagingFuture()
+    adapter.free_lookup_locks(pack_token_ids(range(256)), 0, 128, "r")
+    if cleanup_first:
+        adapter.cleanup_lookup_result("r")
+    adapter.end_session("r")
+    adapter.cleanup_lookup_result("r")
+    assert not client.ends
+    client.free_ack.set_result(None)
+    assert client.ends == ["r"]
+
+
+def test_tail_free_orders_only_its_own_servers_end(
+    make_adapter: AdapterFactory,
+) -> None:
+    """A slow tail release must not delay another server's independent END."""
+    adapter, clients = make_adapter(count=2)
+    clients[0].free_ack = MessagingFuture()
+    submit(adapter, clients)
+    clients[0].status.set_result(3)
+    clients[1].status.set_result(2)
+    assert adapter.check_lookup_result("r") == 128
+    adapter.end_session("r")
+    assert clients[1].ends == ["r"] and not clients[0].ends
+    clients[0].free_ack.set_result(None)
+    assert clients[0].ends == ["r"]
+
+
+@pytest.mark.parametrize("phase", ["lookup", "query", "free"])
+def test_failed_predecessor_is_not_a_successful_ack(
+    make_adapter: AdapterFactory, phase: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed RPC cannot authorize END, including an already-completed failure."""
+    adapter, (client,) = make_adapter()
+    if phase == "free":
+        client.free_ack = MessagingFuture()
+        adapter.free_lookup_locks(pack_token_ids(range(256)), 0, 128, "r")
+        client.free_ack.set_exception(RuntimeError("failed free"))
+    else:
+        adapter.maybe_submit_lookup_request("r", pack_token_ids(range(256)))
+        if phase == "lookup":
+            client.ack.set_exception(RuntimeError("failed lookup"))
+            client.status.set_result(0)
+        else:
+            client.ack.set_result(None)
+            client.status.set_exception(RuntimeError("failed query"))
+    adapter.end_session("r")
+    assert not client.ends
+    assert "Cannot order END_SESSION" in caplog.text
+
+
+@pytest.mark.parametrize("first_already_done", [False, True])
+@pytest.mark.parametrize("last_fails", [False, True])
+def test_end_requires_every_admitted_free_ack(
+    make_adapter: AdapterFactory, first_already_done: bool, last_fails: bool
+) -> None:
+    """Inline and delayed callbacks must agree on the final prerequisite."""
+    adapter, (client,) = make_adapter()
+    first: MessagingFuture[None] = MessagingFuture()
+    last: MessagingFuture[None] = MessagingFuture()
+    for future in (first, last):
+        client.free_ack = future
+        adapter.free_lookup_locks(pack_token_ids(range(256)), 0, 128, "r")
+    if first_already_done:
+        first.set_result(None)
+    adapter.end_session("r")
+    if not first_already_done:
+        first.set_result(None)
+    assert not client.ends
+    if last_fails:
+        last.set_exception(RuntimeError("last free failed"))
         assert not client.ends
-        client.status.set_result(reply)
-        assert done.wait(1)
-        assert not errors
-        assert client.queries == ["r"] and client.ends == ["r"]
-        assert not client.frees
-        assert not client.end_ack.query()
-    finally:
-        client.status.set_result(reply)
-        thread.join(timeout=6)
-        assert not thread.is_alive()
+    else:
+        last.set_result(None)
+        assert client.ends == ["r"]
