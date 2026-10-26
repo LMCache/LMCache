@@ -88,8 +88,9 @@ steps:
       # hybrid at TP1 on one XPU, over both transports. Inline keeps L1 lazy;
       # SHM disables it so the server maps its SHM pool. vLLM's XPU platform
       # rounds a GDN model's block size up to a multiple of 64 (544 -> 576), so
-      # the LMCache chunk and the 'align' scheduler step follow it.
-      - label: ":xpu: hma_lm_eval_qwen3_5 / engine_driven / {{matrix.transport}}"
+      # the LMCache chunk follows it. The scheduler token budget is larger
+      # to improve evaluation throughput.
+      - label: ":xpu: lm_eval_gdn / engine_driven / {{matrix.transport}}"
         command: |
           export LMCACHE_MP_TRANSFER_MODE="engine_driven"
           export ENGINE_DRIVEN_TRANSPORT="{{matrix.transport}}"
@@ -101,7 +102,8 @@ steps:
           export VLLM_USE_STANDALONE_COMPILE="0"
           export CPU_BUFFER_SIZE="80"
           export CHUNK_SIZE="576"
-          export MAX_NUM_BATCHED_TOKENS="576"
+          export MAX_NUM_BATCHED_TOKENS="32768"
+          export NUM_CONCURRENT="64"
           .buildkite/k3_tests/xpu/multiprocess/run.sh hma_lm_eval_qwen3_5
         matrix:
           setup:
