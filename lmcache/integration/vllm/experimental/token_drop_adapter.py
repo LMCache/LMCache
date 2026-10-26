@@ -6,6 +6,7 @@ from __future__ import annotations
 
 # Standard
 from functools import wraps
+from typing import Any
 
 # First Party
 from lmcache.integration.vllm.experimental.token_drop_scheduler import (
@@ -116,3 +117,59 @@ def install_token_drop_allocator_adapter() -> None:
     # Prevent wrapping the allocator more than once.
     setattr(wrapped_allocate_slots, adapter_marker, True)
     KVCacheManager.allocate_slots = wrapped_allocate_slots
+
+
+def install_token_drop_query_hooks(worker, no_compile_layers: dict[str, Any]) -> None:
+    """Capture post-RoPE queries without changing attention forward outputs."""
+    _check_vllm_version()
+    if worker._original_attention_forwards:
+        return
+
+    original_forwards = {}
+    for layer_name in worker._kv_caches:
+        impl = no_compile_layers[layer_name].impl
+        original_forwards[layer_name] = (impl, impl.forward)
+
+    worker._original_attention_forwards = original_forwards
+    for impl, original_forward in original_forwards.values():
+
+        def forward_with_query_capture(
+            attn_layer,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            *args,
+            _forward=original_forward,
+            **kwargs,
+        ):
+            # Profiling forwards have no attention metadata or live queries.
+            if attn_metadata is not None:
+                # PIECEWISE CUDA graphs may pad the query tensor.
+                worker.capture_query(
+                    attn_layer.layer_name, query[: attn_metadata.num_actual_tokens]
+                )
+            return _forward(
+                attn_layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                *args,
+                **kwargs,
+            )
+
+        try:
+            setattr(impl, "forward", forward_with_query_capture)  # noqa: B010
+        except Exception:
+            remove_token_drop_query_hooks(worker)
+            raise
+
+
+def remove_token_drop_query_hooks(worker) -> None:
+    """Restore original attention forwards after query capture."""
+    for impl, original_forward in worker._original_attention_forwards.values():
+        setattr(impl, "forward", original_forward)  # noqa: B010
+    worker._original_attention_forwards.clear()
