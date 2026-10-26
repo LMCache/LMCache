@@ -20,6 +20,12 @@ All commits in pull requests must include a DCO `Signed-off-by` trailer. Use
 `git commit -s` for new commits; if an existing commit is missing the trailer,
 amend or rebase to add it before pushing.
 
+Agent-created pull requests must be opened as drafts. An agent must not mark a
+pull request ready for review: the submitting human must first review every
+changed line, run the relevant validation, confirm that the PR description and
+test evidence are current, and explicitly decide that the change is ready.
+Pure agent submissions without this human review are not allowed.
+
 ## Python Environment
 
 We recommend using [uv](https://docs.astral.sh/uv/) to manage Python environments and dependencies:
@@ -219,4 +225,6 @@ When reviewing code (or self-checking before submitting), apply
 canonical standard; this file intentionally does not duplicate it.
 
 When asked to review a PR, use the `pr-review` skill; before creating a PR,
-self-check with the `pre-pr-check` skill (both under `.claude/skills/`).
+self-check with the `pre-pr-check` skill (both under `.claude/skills/`). Create
+the PR as a draft and leave the ready-for-review transition to the submitting
+human after their self-review.

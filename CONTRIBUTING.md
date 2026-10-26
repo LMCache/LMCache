@@ -106,10 +106,27 @@ Push the branch to your fork and open a PR against `dev`.
   user-facing docs and unit tests.
 - **Link the issue** — `Fixes #1234` closes the issue when the PR merges; `Refs #1234` links
   it for context without closing it.
-- **Open it as a draft** if you want early feedback on unfinished work, and mark it ready for
-  review when it is done.
+- **Open every PR as a draft.** A draft lets CI and the author catch problems before the PR
+  asks maintainers for review. Follow the self-review gate below before marking it ready.
 
-### 5. What CI runs on your PR
+### 5. Self-review before marking the PR ready
+
+The author owns the first review. Before clicking **Ready for review**:
+
+- Review every line in the **Files changed** tab, including generated or agent-assisted
+  changes, and fix anything you would ask another contributor to fix.
+- Run the relevant local checks and record the commands and results in the PR description.
+  Read the draft CI results too; a skipped check is not a passing check.
+- Confirm that the description still matches the final diff, links the relevant issue, and
+  calls out compatibility concerns, missing coverage, and user-facing documentation.
+- Confirm that every commit has a DCO `Signed-off-by` trailer.
+- Complete the **Before marking ready for review** checklist in the PR description.
+
+Only the submitting human should mark the PR ready. For AI-assisted changes, the human must
+understand and be able to defend the change end to end; a review performed only by the agent
+that wrote the change does not satisfy this gate.
+
+### 6. What CI runs on your PR
 
 Opening or updating a PR triggers a set of GitHub Actions workflows, plus a DCO check and a
 Buildkite pipeline that report back as PR checks. The path filters mostly separate
@@ -137,7 +154,7 @@ If a check fails, open its log from the **Checks** tab on the PR, reproduce and 
 locally, and push again. Every push re-runs the checks and cancels the previous in-flight
 run for that PR.
 
-### 6. Ask for a review in Slack
+### 7. Ask for a review in Slack
 
 Opening a PR does not notify a particular person. [`CODEOWNERS`](.github/CODEOWNERS)
 automatically requests review from the owners of the paths you touched, but the reliable way
@@ -154,7 +171,7 @@ the paths you changed — the goal is simply that a specific person knows the PR
 Please do follow up if your PR goes quiet: a PR with no activity for 60 days is marked
 `stale` and closed 30 days after that.
 
-### 7. Review, revisit, merge
+### 8. Review, revisit, merge
 
 - Maintainers review against [Section 9 of the coding standard](docs/coding_standards.md#9-code-review-process).
   Reading it first tells you what they will look for.

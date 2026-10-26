@@ -1,19 +1,18 @@
 ---
 name: create-pr
-description: Create a GitHub pull request from the current branch to the upstream repo, using the repo's PR template
+description: Create a draft GitHub pull request from the current branch to the upstream repo, using the repo's PR template
 allowed-tools: Bash, Read, Glob, Grep, Agent, mcp__github__create_pull_request
-argument-hint: "[base_branch] [--draft] [--title 'PR title']"
+argument-hint: "[base_branch] [--title 'PR title']"
 ---
 
 # Create Pull Request
 
-Create a GitHub pull request from the current branch to the upstream repository.
+Create a draft GitHub pull request from the current branch to the upstream repository.
 
 ## Arguments
 
 `$ARGUMENTS` may contain:
 - First positional arg: base branch to merge into (default: auto-detect from upstream's default branch)
-- `--draft`: create as a draft PR
 - `--title 'PR title'`: override the PR title (default: auto-generated from changes)
 
 ## Steps
@@ -72,6 +71,10 @@ If there are many commits, also read the full diff to understand the changes:
 git diff <upstream_remote>/<base_branch>..HEAD
 ```
 
+Run `/pre-pr-check --scope branch` and address or report its findings before
+continuing. A clean agent review does not replace the submitting human's own
+line-by-line review.
+
 ### 5. Draft the PR
 
 - **Title**: Use `--title` from arguments if provided. Otherwise, generate a concise title (under 70 chars) summarizing the change.
@@ -92,7 +95,7 @@ Use the `mcp__github__create_pull_request` tool:
 - `base`: the base branch
 - `title`: the PR title
 - `body`: the PR body
-- `draft`: true if `--draft` was specified
+- `draft`: true
 
 ### 7. Report
 
@@ -104,3 +107,6 @@ Print the PR URL so the user can review it.
 - Always show the PR title and body to the user for confirmation before creating.
 - If the working tree is dirty, warn the user that uncommitted changes won't be included.
 - Respect the PR template structure — fill in all sections, use checkboxes where the template has them.
+- Always create the PR as a draft. Never mark it ready for review; only the
+  submitting human may do that after completing the PR template's self-review
+  checklist.
