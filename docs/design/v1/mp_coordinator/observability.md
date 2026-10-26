@@ -277,7 +277,7 @@ The mp server sees that, and can report it as `lmcache_mp.prefetch_keys_used`.
 | `metadata_file.writes` | counter | `result` = ok, error | Pin and quota changes not saved |
 
 A failed metadata write undoes the change and returns 503, so the caller knows
-and can retry safely. Today it returns 200 and the change is lost on restart.
+and can retry safely.
 
 ### HTTP (P2)
 

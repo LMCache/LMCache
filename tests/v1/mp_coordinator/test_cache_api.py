@@ -466,6 +466,38 @@ def test_delete_force_removes_and_drops_l2_pin():
         assert eviction.filter_unpinned([keys[0]]) == [keys[0]]
 
 
+def test_delete_force_keeps_the_pin_when_its_removal_cannot_be_saved(tmp_path):
+    """The server's delete cannot be undone, so a forced delete whose pin
+    removal fails to save keeps the pin, and says both things in its 503."""
+    deletes: list = []
+    (tmp_path / "blocker").write_text("")  # metadata cannot be written under it
+    config = MPCoordinatorConfig(
+        health_check_interval=0.0,
+        eviction_check_interval=0.0,
+        chunk_size=4,
+        metadata_path=str(tmp_path / "blocker" / "metadata.json"),
+    )
+    with TestClient(create_app(config)) as client:
+        client.post(
+            "/instances",
+            json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
+        )
+        ctx = client.app.state.ctx
+        eviction = ctx.controllers.get(FleetEvictionController)
+        client.app.state.outbound_client = _mock_delete_server(deletes)
+        keys = _resolve_delete(ctx)
+        eviction.pin([keys[0]])
+
+        resp = client.post("/cache/delete", json=_delete_body("mp-1", force=True))
+
+        assert resp.status_code == 503
+        assert "deleted on 'mp-1'" in resp.json()["detail"]
+        # The delete itself went out...
+        assert len(deletes) == 1
+        # ...but the pin stays, matching the document on disk.
+        assert eviction.filter_unpinned([keys[0]]) == []
+
+
 def test_delete_l1_tier_ignores_l2_pins():
     """tier=l1 dispatches with tier=l1 and does not filter or drop L2 pins."""
     deletes: list = []
