@@ -271,7 +271,7 @@ data, or verify the MP adapter's cache-salt placement policy.
 .. code-block:: bash
 
     LMCACHE_TEST_FDP_CHAR_DEVICE=/dev/ng0n1 \
-      pytest -q tests/v1/storage_backend/test_raw_block_fdp_status_probe.py
+      pytest -q tests/v1/distributed/raw_block/test_fdp_status_probe.py
 
 When the variable is not set, the test skips. If the configured device, kernel,
 or controller does not support the FDP status query, the test skips with the

@@ -17,9 +17,9 @@ import threading
 from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.distributed.l2_adapters.dax.core import DaxCore
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import StoragePluginInterface
-from lmcache.v1.storage_backend.dax.core import DaxCore
 
 if TYPE_CHECKING:
     # Standard

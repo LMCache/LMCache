@@ -27,7 +27,7 @@ permissions:
 jobs:
   changes:
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pull-requests: read
     outputs:
@@ -52,11 +52,12 @@ jobs:
               - '!operator/**'
             raw_block:
               - 'rust/raw_block/**'
-              - 'lmcache/v1/storage_backend/raw_block/**'
+              - 'lmcache/v1/distributed/l2_adapters/raw_block/**'
               - 'lmcache/v1/distributed/l2_adapters/raw_block_l2_adapter.py'
               - 'lmcache/v1/multiprocess/**'
-              - 'tests/v1/storage_backend/test_raw_block*.py'
-              - 'tests/v1/storage_backend/raw_block_test_utils.py'
+              - 'tests/v1/distributed/raw_block/**'
+              - 'tests/v1/storage_backend/test_raw_block_uring_cmd.py'
+              - 'tests/v1/storage_backend/test_rust_raw_block_backend.py'
               - 'tests/v1/multiprocess/test_raw_block_l2_adapter.py'
               - '.github/workflows/test.yml'
 
@@ -73,7 +74,7 @@ jobs:
           - "3.12"
           - "3.13"
         platform:
-          - "ubuntu-latest"
+          - "ubuntu-24.04"
 
     steps:
       - name: "Harden Runner"
@@ -123,7 +124,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.raw_block == 'true'
     name: Rust unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: "Harden Runner"
@@ -149,7 +150,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.raw_block == 'true'
     name: raw-block temp-file tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       LMCACHE_LOG_LEVEL: CRITICAL
 
@@ -194,6 +195,6 @@ jobs:
       - name: Run raw-block tests
         run: |
           pytest -q --basetemp=.pytest-tmp/raw-block \
-            tests/v1/storage_backend/test_raw_block_device.py \
-            tests/v1/storage_backend/test_raw_block_core.py \
+            tests/v1/distributed/raw_block/test_device.py \
+            tests/v1/distributed/raw_block/test_core.py \
             tests/v1/multiprocess/test_raw_block_l2_adapter.py

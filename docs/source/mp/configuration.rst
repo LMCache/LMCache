@@ -235,8 +235,7 @@ Source: ``lmcache/v1/multiprocess/config.py``
        size, mamba/GDN) at KV-cache registration. Off by default; pass
        ``--separate-object-groups`` to enable it. **Required for Mamba /
        linear-attention hybrids** (it lets their recurrent state be cached
-       independently, and is what allows ``--max-num-batched-tokens`` to exceed
-       twice the block size). For a non-hybrid model it makes no difference —
+       independently). For a non-hybrid model it makes no difference —
        every layer resolves to one object group. See :doc:`/mp/hybrid_models`.
 
 Lookup Hash Logging
@@ -293,11 +292,11 @@ The HTTP frontend is included when running ``lmcache server``.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
-   * - ``--http-api-key-file``
+   * - ``--api-key-file``
      - unset
      - Read a bearer API key from a file. Repeat the option to accept multiple
-       keys during rotation. ``LMCACHE_HTTP_API_KEY_FILE`` and
-       ``LMCACHE_HTTP_API_KEY`` provide environment alternatives. All sources
+       keys during rotation. ``LMCACHE_API_KEY_FILE`` and
+       ``LMCACHE_API_KEY`` provide environment alternatives. All sources
        are cumulative. When none are set, authentication is disabled. ``/``
        and ``/healthcheck`` remain public when authentication is enabled.
 
