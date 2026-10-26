@@ -977,7 +977,13 @@ class LookupModule(DiscoverableModule):
                 state.phase, state.cross_tp = "cross_tp", cross_tp
             return None
         if found > 0 and advance:
-            reshard = state.plan.convert(found, result)
+            try:
+                reshard = state.plan.convert(found, result)
+            except Exception:
+                # The A objects are this call's to release until a reshard
+                # owns them.
+                self._release_stage(cast(PrefetchStage, state.cross_tp), found, result)
+                raise
             with self._prefetch_job_lock:
                 state.reshard = reshard
             return None

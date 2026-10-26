@@ -309,7 +309,7 @@ class L1Resharder:
         self._executor = ThreadPoolExecutor(
             max_workers=_RESHARD_WORKERS, thread_name_prefix="hetero-tp-reshard"
         )
-        # Running reshard writing each destination key.
+        # Latest running reshard of each destination key.
         self._writers: dict[ObjectKey, Future[ReshardResult]] = {}
         self._writers_lock = threading.Lock()
 
@@ -336,10 +336,11 @@ class L1Resharder:
         with self._writers_lock:
             writers = {self._writers[k] for k in dst_keys if k in self._writers}
             future = self._executor.submit(self._run, task, writers, time.monotonic())
-            mine = [k for k in dst_keys if k not in self._writers]
-            for k in mine:
+            # The latest reshard of a key is its writer: it already waits for
+            # the earlier ones, so a later reshard waits for it alone.
+            for k in dst_keys:
                 self._writers[k] = future
-        future.add_done_callback(partial(self._drop_writer, mine))
+        future.add_done_callback(partial(self._drop_writer, dst_keys))
         return future
 
     def close(self) -> None:
