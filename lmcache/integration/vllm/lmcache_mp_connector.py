@@ -764,6 +764,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._pending_eager_session_ends: set[str] = set()
             # Worker events aggregated per step, awaiting take_events().
             self._kv_cache_events: list[KVCacheEvent] = []
+            # Retrieves sent to the workers and not yet in finished_recving.
+            self._unreported_retrieves: set[str] = set()
+            self._finished_while_loading: set[str] = set()
 
             # Align-mode Mamba keeps one speculative block per draft token at
             # the tail of a request's block list.
@@ -949,6 +952,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
+        self.worker_adapter.skip_finished_sending(metadata.finished_while_loading)
 
         request_ids = []
         ops = []
@@ -1616,6 +1620,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = LMCacheMPConnectorMetadata()
         metadata.need_flush_before_forward = _has_preemption_reqs(scheduler_output)
+        metadata.finished_while_loading = self._finished_while_loading
+        self._finished_while_loading = set()
 
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
@@ -1650,6 +1656,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
+        self._unreported_retrieves.difference_update(
+            connector_output.finished_recving or ()
+        )
+
         # Worker metadata carries the events only when the hook is not called.
         kv_cache_events = connector_output.kv_cache_events or getattr(
             connector_output.kv_connector_worker_meta, "kv_events", None
@@ -1716,6 +1726,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "num_lmcache_cached_tokens": num_lmcache,
                 "num_lmcache_extra_cached_tokens": max(0, num_lmcache - num_vllm),
             }
+
+        # vLLM parks a request that finishes while its retrieve is unreported
+        # and frees it on the finished_recving report, asserting on any later
+        # report, so the worker must not also report it in finished_sending.
+        if request.request_id in self._unreported_retrieves:
+            self._unreported_retrieves.remove(request.request_id)
+            self._finished_while_loading.add(request.request_id)
 
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
@@ -1853,6 +1870,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
+                self._unreported_retrieves.add(request_tracker.request_id)
             request_tracker.state = LMCacheMPRequestState.READY
 
     def _process_new_requests(
