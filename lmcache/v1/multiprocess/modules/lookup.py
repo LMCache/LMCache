@@ -489,7 +489,9 @@ class LookupModule(DiscoverableModule):
         if key.start >= key.end and not extra_ranges:
             return
 
-        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session = self._ctx.session_manager.get(key.request_id)
+        if session is None:
+            return
         if session.prefetch_hit_chunks < 0:
             # The lookup result has not reached the session yet (no
             # QUERY/WAIT_PREFETCH_STATUS consumed it). Hand it over now so
@@ -556,6 +558,7 @@ class LookupModule(DiscoverableModule):
             obj_keys,
             read_locks=key.require_num_kv_readers(),
             l1_owners=self._ctx.get_read_owners(key.request_id),
+            read_generations=session.get_read_generations(obj_keys),
         )
 
     @request_handler(HandlerType.BLOCKING)
@@ -725,6 +728,7 @@ class LookupModule(DiscoverableModule):
             found_count,
             tuple(range(job.attn_desc.num_object_groups)),
             result.l1_owners,
+            read_generations=result.read_generations,
         )
 
         chunk_size = self._ctx.chunk_size
