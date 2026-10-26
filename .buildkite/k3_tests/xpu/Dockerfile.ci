@@ -1,5 +1,5 @@
 ARG XPU_BASE_IMAGE
-FROM ${XPU_BASE_IMAGE} AS candidate
+FROM ${XPU_BASE_IMAGE}
 
 USER root
 COPY .buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh /tmp/install_xpu_dpcpp_compiler.sh
@@ -9,11 +9,8 @@ RUN PYTHON="$(command -v python3)" bash /tmp/install_xpu_dpcpp_compiler.sh \
 
 ENV BASH_ENV=/opt/intel/oneapi/setvars.sh
 
-# Derive the PR image from the hardware-tested candidate without baking in LMCache.
-FROM ${XPU_BASE_IMAGE} AS dependencies
-
-RUN --mount=type=bind,source=dist/xpu,target=/tmp/xpu-wheel \
-    --mount=type=bind,source=requirements,target=/tmp/requirements \
-    uv pip install --no-cache /tmp/xpu-wheel/*.whl -r /tmp/requirements/test.txt \
-        'lm-eval[api]' pandas matplotlib \
-    && uv pip uninstall lmcache
+RUN --mount=type=bind,source=requirements,target=/tmp/requirements \
+    uv pip install --no-cache \
+        -r /tmp/requirements/common.txt \
+        -r /tmp/requirements/test.txt \
+        'lm-eval[api]' pandas matplotlib

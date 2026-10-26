@@ -228,7 +228,7 @@ jobs:
           CANDIDATE_TAG: lmcache/vllm-openai-xpu-ci:candidate-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -Eeuo pipefail
-          docker buildx build --push --platform linux/amd64 --target candidate \
+          docker buildx build --push --platform linux/amd64 \
             --build-arg "XPU_BASE_IMAGE=${BASE_IMAGE}" \
             -f .buildkite/k3_tests/xpu/Dockerfile.ci \
             -t "${CANDIDATE_TAG}" .
@@ -241,7 +241,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   verify-and-pin-xpu-ci:
-    name: Verify XPU wheel and prepare PR image
+    name: Verify XPU wheel and promote image pin
     needs: [build-xpu-ci-candidate, nightly-xpu-wheel]
     if: >-
       !cancelled() &&
@@ -265,45 +265,15 @@ jobs:
           WHEEL_ARTIFACT_DIGEST: ${{ needs.nightly-xpu-wheel.outputs.wheel_artifact_digest }}
           SOURCE_COMMIT: ${{ github.sha }}
         run: python3 .buildkite/k3_tests/xpu/verify-xpu-ci-image.py
-      - uses: ./.github/actions/free-disk-space
-      - name: Download tested XPU wheel
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          artifact-ids: ${{ needs.nightly-xpu-wheel.outputs.wheel_artifact_id }}
-          path: dist/xpu
-          merge-multiple: true
-      - uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
-        with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
-      - name: Build and push dependency-preinstalled PR image
-        id: pr-image
-        env:
-          BASE_IMAGE: ${{ needs.build-xpu-ci-candidate.outputs.image }}
-          PR_IMAGE_TAG: lmcache/vllm-openai-xpu-ci:nightly-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          set -Eeuo pipefail
-          docker buildx build --push --platform linux/amd64 --target dependencies \
-            --build-arg "XPU_BASE_IMAGE=${BASE_IMAGE}" \
-            -f .buildkite/k3_tests/xpu/Dockerfile.ci \
-            -t "${PR_IMAGE_TAG}" .
-          DIGEST="$(docker buildx imagetools inspect "${PR_IMAGE_TAG}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
-          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          {
-            echo "image=${PR_IMAGE_TAG%%:*}@${DIGEST}"
-            echo "digest=${DIGEST}"
-            echo "tag=${PR_IMAGE_TAG}"
-          } >> "$GITHUB_OUTPUT"
-      - name: Promote dependency-preinstalled XPU CI image pin
+      - name: Promote verified XPU CI image pin
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CI_PLATFORM: buildkite
           PIN_BACKEND: xpu
           PIN_VLLM_BRANCH: buildkite_latest_tested_vllm
-          VLLM_IMAGE_TAG: ${{ steps.pr-image.outputs.tag }}
-          VLLM_IMAGE_REF: ${{ steps.pr-image.outputs.image }}
-          XPU_CI_IMAGE_DIGEST: ${{ steps.pr-image.outputs.digest }}
+          VLLM_IMAGE_TAG: ${{ needs.build-xpu-ci-candidate.outputs.tag }}
+          VLLM_IMAGE_REF: ${{ needs.build-xpu-ci-candidate.outputs.image }}
+          XPU_CI_IMAGE_DIGEST: ${{ needs.build-xpu-ci-candidate.outputs.digest }}
           BUILD_NUMBER: ${{ steps.validate.outputs.unit_build_number }}
           BUILD_URL: ${{ steps.validate.outputs.unit_build_url }}
           COMMIT_SHA: ${{ github.sha }}
