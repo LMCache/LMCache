@@ -1481,6 +1481,7 @@ def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> Non
             self.status = RequestStatus.WAITING
             self.num_computed_tokens = 0
             self.num_preemptions = 0
+            self.skip_reading_prefix_cache = False
             self.cache_salt = ""
             self.prompt_token_ids = [1, 2, 3, 4]
             self.num_prompt_tokens = 4

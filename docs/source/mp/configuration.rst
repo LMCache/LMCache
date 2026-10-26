@@ -973,7 +973,8 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
      - Submit the LMCache lookup when a request enters vLLM's waiting queue,
        allowing L2-to-L1 KV staging to overlap with scheduler queue wait.
        Resumable requests are skipped because their token IDs may be incomplete
-       at enqueue time.
+       at enqueue time. Requests that skip reading the prefix cache (for
+       example with ``prompt_logprobs``) are also skipped.
    * - ``lmcache.mp.autostart``
      - ``false``
      - Whether vLLM worker 0 should start a local ``lmcache server`` process

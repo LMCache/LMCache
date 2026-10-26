@@ -1314,8 +1314,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             call. If the cache cannot be loaded for some tokens (e.g., due to
             connectivity issues or eviction), those tokens must not be taken
             into account.
+
+            Requests with ``request.skip_reading_prefix_cache`` return
+            ``(0, False)`` without submitting a lookup.
         """
         tracker = self._get_or_create_request_tracker(request)
+
+        # Do not acquire lookup resources for a request that will not use them.
+        if request.skip_reading_prefix_cache:
+            return 0, False
 
         # A failed asynchronous load is bypassed until vLLM admits the request
         # for local computation via update_state_after_alloc().  The scheduler
@@ -1485,6 +1492,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     def on_new_request(self, request: "Request") -> None:
         """Submit an LMCache lookup when a request enters the waiting queue.
 
+        Requests with ``request.skip_reading_prefix_cache`` do not start
+        eager prefetch.
+
         Args:
             request (Request): The request object.
         """
@@ -1494,6 +1504,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         tracker = self._get_or_create_request_tracker(request)
+        if request.skip_reading_prefix_cache:
+            return
         if tracker.lookup_started_at is None:
             tracker.lookup_started_at = time.monotonic()
         self.scheduler_adapter.maybe_submit_lookup_request(

@@ -73,6 +73,7 @@ class _FakeRequest:
     ):
         self.request_id = "req-0"
         self.resumable = False
+        self.skip_reading_prefix_cache = False
         self.status = RequestStatus.WAITING
         self.cache_salt = cache_salt
         self.prompt_token_ids = list(prompt_token_ids)

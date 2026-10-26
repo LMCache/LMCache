@@ -60,6 +60,7 @@ class _FakeRequest:
         self.num_prompt_tokens = len(prompt_token_ids)
         self.all_token_ids = list(prompt_token_ids)
         self.num_computed_tokens = 0
+        self.skip_reading_prefix_cache = False
         self.mm_features: list[Any] = []
         self.sampling_params = None
 
