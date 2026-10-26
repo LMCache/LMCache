@@ -54,6 +54,8 @@ def isolated_registry() -> Any:
     """Snapshot the device-spec table so tests can install fakes safely."""
     saved_backends = dict(platform_pkg._DEVICE_REGISTRY)
     saved_device_types = dict(platform_pkg._DEVICE_TYPE_REGISTRY)
+    platform_pkg._resolve_device_spec_cached.cache_clear()
+    platform_pkg._AUTO_SELECTION_LOGGED.clear()
     try:
         yield saved_backends, saved_device_types
     finally:
@@ -61,6 +63,8 @@ def isolated_registry() -> Any:
         platform_pkg._DEVICE_REGISTRY.update(saved_backends)
         platform_pkg._DEVICE_TYPE_REGISTRY.clear()
         platform_pkg._DEVICE_TYPE_REGISTRY.update(saved_device_types)
+        platform_pkg._resolve_device_spec_cached.cache_clear()
+        platform_pkg._AUTO_SELECTION_LOGGED.clear()
 
 
 # -- Contract --------------------------------------------------------------
@@ -332,6 +336,109 @@ def test_resolve_device_ops_returns_cached_singleton() -> None:
     b = resolve_device_ops("cpu")
     assert a is b
     assert isinstance(a, CpuDeviceOps)
+
+
+def test_device_spec_auto_selection_is_cached_and_logged_once(
+    isolated_registry: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeated automatic resolution reuses its spec and emits one info log."""
+    availability_checks = 0
+
+    class AvailableDeviceSpec(DeviceSpec):
+        @property
+        def device_type(self) -> str:
+            return "cache-test"
+
+        @property
+        def backend_name(self) -> str:
+            return "cache-test-available"
+
+        def is_available(self) -> bool:
+            nonlocal availability_checks
+            availability_checks += 1
+            return True
+
+    class UnavailableDeviceSpec(DeviceSpec):
+        @property
+        def device_type(self) -> str:
+            return "cache-test"
+
+        @property
+        def backend_name(self) -> str:
+            return "cache-test-unavailable"
+
+    available_spec = AvailableDeviceSpec()
+    unavailable_spec = UnavailableDeviceSpec()
+    monkeypatch.setattr(
+        platform_pkg,
+        "_DEVICE_TYPE_REGISTRY",
+        {"cache-test": (available_spec, unavailable_spec)},
+    )
+    monkeypatch.setattr(
+        platform_pkg,
+        "_DEVICE_REGISTRY",
+        {
+            available_spec.backend_name: available_spec,
+            unavailable_spec.backend_name: unavailable_spec,
+        },
+    )
+    monkeypatch.delenv(platform_pkg.DEVICE_BACKEND_ENV_VAR, raising=False)
+
+    # The platform logger does not propagate to root, so caplog cannot see it.
+    info_messages: list[str] = []
+    monkeypatch.setattr(
+        platform_pkg.logger,
+        "info",
+        lambda msg, *args: info_messages.append(msg % args),
+    )
+
+    first = platform_pkg._resolve_device_spec("cache-test")
+    second = platform_pkg._resolve_device_spec("cache-test")
+
+    assert first is available_spec
+    assert second is first
+    assert availability_checks == 1
+    assert sum("Auto-selected backend" in msg for msg in info_messages) == 1
+
+
+def test_device_spec_cache_respects_explicit_backend_changes(
+    isolated_registry: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Changing the explicit backend selects the matching cached spec."""
+
+    class CacheTestDeviceSpec(DeviceSpec):
+        def __init__(self, backend_name: str) -> None:
+            self._backend_name = backend_name
+
+        @property
+        def device_type(self) -> str:
+            return "cache-test"
+
+        @property
+        def backend_name(self) -> str:
+            return self._backend_name
+
+    first_spec = CacheTestDeviceSpec("cache-test-first")
+    second_spec = CacheTestDeviceSpec("cache-test-second")
+    monkeypatch.setattr(
+        platform_pkg,
+        "_DEVICE_TYPE_REGISTRY",
+        {"cache-test": (first_spec, second_spec)},
+    )
+    monkeypatch.setattr(
+        platform_pkg,
+        "_DEVICE_REGISTRY",
+        {
+            first_spec.backend_name: first_spec,
+            second_spec.backend_name: second_spec,
+        },
+    )
+
+    monkeypatch.setenv(platform_pkg.DEVICE_BACKEND_ENV_VAR, first_spec.backend_name)
+    assert platform_pkg._resolve_device_spec("cache-test") is first_spec
+
+    monkeypatch.setenv(platform_pkg.DEVICE_BACKEND_ENV_VAR, second_spec.backend_name)
+    assert platform_pkg._resolve_device_spec("cache-test") is second_spec
 
 
 def test_cpu_without_registered_spec_falls_back_to_base_device_ops(
