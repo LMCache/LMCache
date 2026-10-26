@@ -81,7 +81,7 @@ ValkeyRdmaL2Adapter  ── builds ──►  ValkeyRdmaWorkerPool
 | File | Owns |
 |------|------|
 | `lmcache/v1/distributed/l2_adapters/valkey_l2_adapter.py` | the `transport`, `rdma_provider` and `rdma_interface` fields; pool selection; the L1 descriptor check |
-| `lmcache/v1/storage_backend/valkey/rdma_worker_pool.py` | `ValkeyRdmaWorkerPool`: client configuration, arena registration, the two transfers, region teardown |
+| `lmcache/v1/distributed/l2_adapters/valkey/rdma_worker_pool.py` | `ValkeyRdmaWorkerPool`: client configuration, arena registration, the two transfers, region teardown |
 
 The two parent hooks were added for this adapter: `_create_pool` /
 `_pool_kwargs` on the adapter, and `_client_config_extras` on the pool.

@@ -69,7 +69,7 @@ permissions:
 jobs:
     build-rocm-artifacts:
         name: Build ROCm wheel (gfx942, gfx950)
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         outputs:
             rocm_version: ${{ steps.prepare.outputs.version }}
         steps:

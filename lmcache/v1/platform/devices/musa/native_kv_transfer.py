@@ -14,6 +14,12 @@ import os
 # Third Party
 import torch
 
+# First Party
+from lmcache.v1.gpu_connector.kv_format import get_spec_class
+from lmcache.v1.platform.devices.musa.format_capabilities import (
+    is_supported_musa_native_block_transfer_spec,
+)
+
 ENV_MUSA_NATIVE_KV_TRANSFER = "LMCACHE_MUSA_NATIVE_KV_TRANSFER"
 NATIVE_LMCACHE_KV_TRANSFER_ABI_VERSION = 1
 
@@ -25,11 +31,6 @@ _REQUIRED_NATIVE_SYMBOLS = (
     "lmcache_mla_buffer_to_paged",
 )
 
-_SUPPORTED_BLOCK_TRANSFER_FORMATS = {
-    "NL_X_TWO_NB_BS_NH_HS",
-    "NL_X_NB_BS_HS",
-}
-_MLA_BLOCK_TRANSFER_FORMATS = {"NL_X_NB_BS_HS"}
 _TRANSFER_DIRECTION_H2D = 0
 _TRANSFER_DIRECTION_D2H = 1
 
@@ -126,7 +127,8 @@ def try_native_multi_layer_block_kv_transfer(
         return False
     if not object_tensors or lmcache_chunk_size <= 0:
         return False
-    if not _is_supported_musa_block_transfer_format(engine_kv_format):
+    format_spec = get_spec_class(engine_kv_format)
+    if not is_supported_musa_native_block_transfer_spec(format_spec):
         return False
     if not _is_musa_block_transfer_candidate(paged_layers):
         return False
@@ -147,7 +149,7 @@ def try_native_multi_layer_block_kv_transfer(
     layer_tensors = _as_tensor_list(paged_layers)
     if layer_tensors is None:
         return False
-    use_mla = _is_mla_block_transfer_format(engine_kv_format)
+    use_mla = format_spec.is_mla
     native_dims = _native_transfer_dims(layer_tensors, shape_desc, use_mla)
     if native_dims is None:
         return False
@@ -320,24 +322,6 @@ def _native_module_if_ready() -> Any | None:
     if module is None or not check_native_abi(module):
         return None
     return module
-
-
-def _engine_kv_format_name(engine_kv_format: Any) -> str:
-    """Return a stable enum member name for Python and pybind enum values."""
-    name = getattr(engine_kv_format, "name", None)
-    if isinstance(name, str):
-        return name
-    return str(engine_kv_format).rsplit(".", maxsplit=1)[-1]
-
-
-def _is_supported_musa_block_transfer_format(engine_kv_format: Any) -> bool:
-    """Return whether the native MUSA block path supports ``engine_kv_format``."""
-    return _engine_kv_format_name(engine_kv_format) in _SUPPORTED_BLOCK_TRANSFER_FORMATS
-
-
-def _is_mla_block_transfer_format(engine_kv_format: Any) -> bool:
-    """Return whether ``engine_kv_format`` is a native-supported MLA layout."""
-    return _engine_kv_format_name(engine_kv_format) in _MLA_BLOCK_TRANSFER_FORMATS
 
 
 def _as_tensor_list(value: Any) -> list[torch.Tensor] | None:

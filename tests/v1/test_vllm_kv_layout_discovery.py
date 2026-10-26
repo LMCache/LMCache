@@ -79,6 +79,30 @@ class TestTranslateVllmKVCacheLayout:
 
 
 class TestTryGetVllmKVCacheLayout:
+    @pytest.mark.parametrize("reported_layout", ("NHD", "HND"))
+    def test_legacy_mlu_uses_physical_hnd_layout(
+        self, monkeypatch: pytest.MonkeyPatch, reported_layout: str
+    ) -> None:
+        """Cambricon's legacy V1 backend allocates [2, NB, NH, BS, HS]."""
+        monkeypatch.setattr("lmcache.integration.vllm.utils.torch_device_type", "mlu")
+        stub_module(
+            monkeypatch,
+            "vllm.v1.attention.backends.utils",
+            get_kv_cache_layout=lambda: reported_layout,
+        )
+        config = SimpleNamespace(cache_config=LegacyCacheConfig())
+        assert try_get_vllm_kv_cache_layout(config) == "HND"
+        assert vllm_layout_hints(config) == {"kv_layout": "HND"}
+
+    @pytest.mark.parametrize("resolved_layout", ("NHD", "HND", "BLNHC", "BLHNC"))
+    def test_mlu_preserves_resolved_layout(
+        self, monkeypatch: pytest.MonkeyPatch, resolved_layout: str
+    ) -> None:
+        """An explicit resolved layout takes precedence over legacy defaults."""
+        monkeypatch.setattr("lmcache.integration.vllm.utils.torch_device_type", "mlu")
+        config = make_vllm_config(resolved_layout)
+        assert try_get_vllm_kv_cache_layout(config) == resolved_layout
+
     def test_resolved_layout_from_explicit_config(self):
         config = make_vllm_config("LBNHC")
         assert try_get_vllm_kv_cache_layout(config) == "NHD"
