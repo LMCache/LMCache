@@ -99,6 +99,13 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         help="Tokens per request (default: 512)",
     )
 
+    parser.add_argument(
+        "--block-allocation",
+        choices=["sequential", "random"],
+        default="sequential",
+        help="Block allocation order (default: sequential).",
+    )
+
     # -- KV cache shape --
     kv = parser.add_argument_group("KV cache shape")
     kv.add_argument(
@@ -170,7 +177,7 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--url",
         default="http://localhost:8080",
-        help=("HTTP base URL for checksum API (default: http://localhost:8080)"),
+        help=("Legacy HTTP URL; checksums are computed from local worker buffers"),
     )
 
     prof = parser.add_argument_group(

@@ -24,8 +24,13 @@ main(sys.argv[2:])
 @pytest.mark.parametrize("missing", [("torch",), ("zmq",), ("torch", "zmq")])
 @pytest.mark.parametrize(
     "options",
-    [[], ["--rpc-url", "tcp://localhost:5555"], ["--help"]],
-    ids=["bare", "rpc-url", "help"],
+    [
+        [],
+        ["--rpc-url", "tcp://localhost:5555"],
+        ["--block-allocation", "random"],
+        ["--help"],
+    ],
+    ids=["bare", "rpc-url", "block-allocation", "help"],
 )
 def test_server_bench_without_runtime(
     missing: tuple[str, ...], options: list[str]
@@ -54,7 +59,13 @@ def test_server_bench_without_runtime(
     assert "Traceback" not in result.stderr
     if "--help" in options:
         assert result.returncode == 0, result.stderr
-        for option in ("--rpc-url", "--mode", "--kvcache-shape-spec", "--flamegraph"):
+        for option in (
+            "--rpc-url",
+            "--mode",
+            "--kvcache-shape-spec",
+            "--flamegraph",
+            "--block-allocation",
+        ):
             assert option in result.stdout
     else:
         assert result.returncode == 2, result.stderr
