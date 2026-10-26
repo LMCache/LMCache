@@ -274,7 +274,6 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             2,
             4,
             5.0,
-            layout_hints={"kv_list_layout": "unified"},
             engine_group_infos=[],
             engine_type=EngineType.SGLANG,
             lmcache_chunk_tokens=256,
@@ -464,7 +463,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertEqual(tuple(wire.shape), (1, 1, 1, 24))
         self.assertEqual(wire.data_ptr(), tensor.data_ptr())
         self.assertTrue(torch.equal(wire.reshape(-1), tensor.reshape(-1)))
-        fmt, _ = detect_format([wire], EngineType.SGLANG, {"kv_list_layout": "unified"})
+        fmt, _ = detect_format([wire], EngineType.SGLANG)
         self.assertEqual(fmt, lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS)
         self.assertFalse(lmcache_native.is_mla(fmt))
 
