@@ -149,7 +149,8 @@ class MPServerConfig:
     retries at each of these, in order, and reshards the first hit into its
     own layout. Takes effect only for engines that report their KV head count:
     attention-only, non-MLA vLLM models without PP, DCP or multiple servers,
-    under LMCache-driven transfer."""
+    under LMCache-driven transfer, and only for models without sliding-window
+    layers."""
 
     kv_load_policy: str = "DEFAULT"
     """Per-request choice between serving a lookup and letting the engine
@@ -567,7 +568,8 @@ def add_mp_server_args(
         default=[],
         help="TP sizes other engines of the same model store with. A lookup "
         "that finds no chunk at its own TP size retries at these and reshards "
-        "the hit. Attention-only, non-MLA models without PP or DCP. "
+        "the hit. Attention-only, non-MLA models without PP, DCP or "
+        "sliding-window layers. "
         "Example: --hetero-tp-source-world-sizes 1",
     )
     mp_group.add_argument(

@@ -74,6 +74,19 @@ def _kernel_group_tensors(obj: MemoryObj) -> list[torch.Tensor]:
     )
 
 
+def _flat_object_keys(
+    key: IPCCacheServerKey, chunk_hashes: list[bytes], num_object_groups: int
+) -> list[ObjectKey]:
+    """Return the object keys of ``chunk_hashes`` for every object group."""
+    return [
+        k
+        for group in ipc_key_to_object_keys(
+            key, chunk_hashes, list(range(num_object_groups))
+        )
+        for k in group
+    ]
+
+
 def resolve_prefetched_obj_keys(
     ctx: MPCacheServerContext,
     key: IPCCacheServerKey,
@@ -138,7 +151,6 @@ class _HeteroTPState:
         suffix_hashes: Chunk hashes of the looked-up range.
         group_layout_descs: Per-object-group layouts at the lookup's own
             world size.
-        num_kv_readers: Read locks the final prefetch takes per object.
         total_num_kv_heads: KV heads of the whole model.
         candidates: Source world sizes not tried yet, in order.
         source_world_size: World size of the running source stage, or
@@ -152,7 +164,6 @@ class _HeteroTPState:
     key: IPCCacheServerKey
     suffix_hashes: list[bytes]
     group_layout_descs: dict[int, MemoryLayoutDesc]
-    num_kv_readers: int
     total_num_kv_heads: int
     candidates: list[int]
     source_world_size: int | None = None
@@ -191,9 +202,12 @@ class _PrefetchJob:
     # Names the ``lookup()`` branch that returned before submitting a prefetch
     # task; empty on the normal path.
     early_exit_reason: str = ""
-    # Set while a cross-TP fallback may still replace ``handle``; ``handle``
-    # and ``row_windows`` are then swapped together under the module's
-    # ``_prefetch_job_lock``.
+    # Set while a cross-TP fallback may still replace ``handle``. A new
+    # stage swaps ``handle``, ``row_windows`` and ``hetero`` together under
+    # the module's ``_prefetch_job_lock``. Otherwise ``hetero`` is cleared
+    # only by the thread that took the current stage's result, which the
+    # storage manager hands out once; a failed reshard's result is claimed by
+    # clearing ``hetero`` under the lock.
     hetero: _HeteroTPState | None = None
 
 
@@ -248,6 +262,8 @@ class LookupModule(DiscoverableModule):
         # reporting a miss.
         self._reshard_writers: dict[ObjectKey, Future[bool]] = {}
         self._reshard_writers_lock = threading.Lock()
+        # (KV heads, source world size) pairs already warned about.
+        self._warned_invalid_sources: set[tuple[int, int]] = set()
         self._setup_metrics()
 
     @property
@@ -266,8 +282,12 @@ class LookupModule(DiscoverableModule):
         }
 
     def close(self) -> None:
-        """Stop the reshard threads; reshards not started yet are cancelled."""
-        self._reshard_executor.shutdown(wait=True, cancel_futures=True)
+        """Stop the reshard threads after every submitted reshard finishes.
+
+        Queued reshards still run: cancelling one would leave its source
+        read locks held until their TTL.
+        """
+        self._reshard_executor.shutdown(wait=True)
 
     # -----------------------------------------------------------------
     # Handlers
@@ -457,7 +477,7 @@ class LookupModule(DiscoverableModule):
                 model_name=model_name,
                 cache_salt=key.cache_salt,
                 hetero=self._hetero_tp_state(
-                    key, suffix_hashes, attn_desc, group_layout_descs, num_kv_readers
+                    key, suffix_hashes, attn_desc, group_layout_descs
                 ),
             )
         )
@@ -581,7 +601,9 @@ class LookupModule(DiscoverableModule):
         session (hit length, lock model, L1 owners). If that result has not
         been consumed yet it is handed over here first. While the prefetch
         is still running nothing is released: its locks still belong to the
-        prefetch controller and expire with the read-lock TTL.
+        prefetch controller and expire with the read-lock TTL. A running
+        cross-TP reshard is the exception: this call blocks until it finishes
+        (no timeout), so the final stage's locks are released.
 
         Args:
             key: Cache key whose read locks should be released.
@@ -820,11 +842,16 @@ class LookupModule(DiscoverableModule):
         if reshard is not None and advance_hetero and not reshard.done():
             return None
         row_windows: tuple[int, ...]
-        if reshard is not None and (reshard.cancelled() or not reshard.result()):
+        if reshard is not None and not reshard.result():
             # The final stage was never submitted: answer with the source
-            # stage's result and lock nothing at this world size.
-            state = cast(_HeteroTPState, job.hetero)
-            job.hetero = None
+            # stage's result and lock nothing at this world size. Nothing
+            # else hands this result out once, so the consumer that clears
+            # ``hetero`` owns it.
+            with self._prefetch_job_lock:
+                state = job.hetero
+                if state is None or state.reshard is not reshard:
+                    return None
+                job.hetero = None
             result, row_windows = cast(PrefetchResult, state.source_result), ()
         else:
             with self._prefetch_job_lock:
@@ -928,7 +955,6 @@ class LookupModule(DiscoverableModule):
         suffix_hashes: list[bytes],
         attn_desc: AttnWindowDesc,
         group_layout_descs: dict[int, MemoryLayoutDesc],
-        num_kv_readers: int,
     ) -> _HeteroTPState | None:
         """Build the cross-TP fallback for a lookup, or ``None`` if it has none.
 
@@ -944,7 +970,6 @@ class LookupModule(DiscoverableModule):
             attn_desc: Attention windows at the lookup's world size.
             group_layout_descs: Per-object-group layouts at the lookup's
                 world size.
-            num_kv_readers: Read locks the final prefetch takes per object.
 
         Returns:
             The fallback state, or ``None`` if the lookup does not qualify.
@@ -961,11 +986,13 @@ class LookupModule(DiscoverableModule):
             if world_size == key.world_size:
                 continue
             if not is_valid_tp(num_heads, world_size):
-                logger.warning(
-                    "Skipping hetero TP source world size %d: %d KV heads",
-                    world_size,
-                    num_heads,
-                )
+                if (num_heads, world_size) not in self._warned_invalid_sources:
+                    self._warned_invalid_sources.add((num_heads, world_size))
+                    logger.warning(
+                        "Skipping hetero TP source world size %d: %d KV heads",
+                        world_size,
+                        num_heads,
+                    )
                 continue
             candidates.append(world_size)
         if not candidates:
@@ -974,7 +1001,6 @@ class LookupModule(DiscoverableModule):
             key=key,
             suffix_hashes=suffix_hashes,
             group_layout_descs=group_layout_descs,
-            num_kv_readers=num_kv_readers,
             total_num_kv_heads=num_heads,
             candidates=candidates,
         )
@@ -1023,7 +1049,11 @@ class LookupModule(DiscoverableModule):
             return None
         if found > 0:
             self._ctx.storage_manager.finish_read_prefetched(
-                self._source_keys(state, job.attn_desc.num_object_groups, found),
+                _flat_object_keys(
+                    replace(state.key, world_size=cast(int, state.source_world_size)),
+                    state.suffix_hashes[:found],
+                    job.attn_desc.num_object_groups,
+                ),
                 read_locks=1,
                 l1_owners=result.l1_owners,
             )
@@ -1048,15 +1078,9 @@ class LookupModule(DiscoverableModule):
             state: ``job.hetero``, in a source stage with ``source_result``.
             found: Leading chunks the source stage hit.
         """
-        dst_keys = [
-            k
-            for group in ipc_key_to_object_keys(
-                state.key,
-                state.suffix_hashes[:found],
-                list(range(job.attn_desc.num_object_groups)),
-            )
-            for k in group
-        ]
+        dst_keys = _flat_object_keys(
+            state.key, state.suffix_hashes[:found], job.attn_desc.num_object_groups
+        )
         with self._reshard_writers_lock:
             writers = {
                 self._reshard_writers[k] for k in dst_keys if k in self._reshard_writers
@@ -1142,7 +1166,7 @@ class LookupModule(DiscoverableModule):
                 state.suffix_hashes,
                 state.group_layout_descs,
                 job.attn_desc,
-                state.num_kv_readers,
+                state.key.require_num_kv_readers(),
                 allowed_l2_memory_tags=frozenset(),
             )
         except Exception:
@@ -1151,9 +1175,7 @@ class LookupModule(DiscoverableModule):
                 job.request_id,
             )
             return False
-        with self._prefetch_job_lock:
-            job.handle, job.row_windows = handle, row_windows
-            job.hetero = None
+        self._swap_prefetch(job, handle, row_windows, None)
         return True
 
     def _pending_reshard(self, job: _PrefetchJob) -> Future[bool] | None:
@@ -1180,6 +1202,7 @@ class LookupModule(DiscoverableModule):
                 # Only the reshard reads the source objects.
                 1,
             ),
+            state,
         )
 
     def _submit_prefetch(
@@ -1228,31 +1251,26 @@ class LookupModule(DiscoverableModule):
         job: _PrefetchJob,
         handle: PrefetchHandle,
         row_windows: tuple[int, ...],
+        hetero: _HeteroTPState | None,
     ) -> None:
-        """Point ``job`` at a newly submitted stage; readers see both or neither."""
-        with self._prefetch_job_lock:
-            job.handle, job.row_windows = handle, row_windows
+        """Point ``job`` at a newly submitted stage; readers see all or none.
 
-    def _source_keys(
-        self, state: _HeteroTPState, num_object_groups: int, found: int
-    ) -> list[ObjectKey]:
-        """Return the source stage's keys of the first ``found`` chunks."""
-        return [
-            k
-            for group in ipc_key_to_object_keys(
-                replace(state.key, world_size=cast(int, state.source_world_size)),
-                state.suffix_hashes[:found],
-                list(range(num_object_groups)),
-            )
-            for k in group
-        ]
+        Args:
+            job: The lookup's job.
+            handle: The new stage's prefetch handle.
+            row_windows: The new stage's per-row windows.
+            hetero: The fallback state after this stage; ``None`` for the
+                final stage.
+        """
+        with self._prefetch_job_lock:
+            job.handle, job.row_windows, job.hetero = handle, row_windows, hetero
 
     def _reshard_into_l1(
         self,
         state: _HeteroTPState,
         num_object_groups: int,
         found: int,
-        l1_owners: dict[ObjectKey, int] | None,
+        l1_owners: dict[ObjectKey, int],
     ) -> int:
         """Rebuild the first ``found`` chunks as objects of the lookup's TP.
 
