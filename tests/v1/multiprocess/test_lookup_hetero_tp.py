@@ -12,6 +12,7 @@ deleted.
 # Standard
 from collections.abc import Callable, Iterator
 import logging
+import sys
 import threading
 import time
 
@@ -32,6 +33,14 @@ from lmcache.v1.distributed.config import (
     L1ManagerConfig,
     L1MemoryManagerConfig,
     StorageManagerConfig,
+)
+from lmcache.v1.distributed.l2_adapters.config import (
+    L2AdapterConfigBase,
+    L2AdaptersConfig,
+)
+from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
+    MockL2Adapter,
+    MockL2AdapterConfig,
 )
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, StorageManager
 from lmcache.v1.memory_management import MemoryObj
@@ -187,8 +196,18 @@ def _spy_submits(
 
 
 @pytest.fixture
-def mp_ctx(monkeypatch: pytest.MonkeyPatch) -> Iterator[MPCacheServerContext]:
-    """A real engine context over a small L1-only CPU storage manager."""
+def mp_ctx(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[MPCacheServerContext]:
+    """A real engine context over a small CPU storage manager.
+
+    L1-only by default; indirect parametrization with ``True`` adds a mock L2.
+    """
+    adapters: list[L2AdapterConfigBase] = (
+        [MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)]
+        if getattr(request, "param", False)
+        else []
+    )
     monkeypatch.setattr(
         memory_management,
         "_allocate_cpu_memory",
@@ -203,6 +222,7 @@ def mp_ctx(monkeypatch: pytest.MonkeyPatch) -> Iterator[MPCacheServerContext]:
                 )
             ),
             EvictionConfig("noop"),
+            L2AdaptersConfig(adapters),
         ),
         chunk_size=CHUNK,
     )
@@ -321,6 +341,47 @@ def test_no_usable_source_keeps_normal_miss(
     assert len(calls) == 1
     assert _num_resident(mp_ctx.storage_manager, _keys(mp_ctx, 4)) == 0
     assert _num_locked(mp_ctx.storage_manager, src_keys) == 0
+
+
+@pytest.mark.parametrize("mp_ctx", [True], indirect=True)
+def test_reshard_drops_source_copies_loaded_from_l2(
+    mp_ctx: MPCacheServerContext,
+    make_module: ModuleFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A objects loaded from L2 are temporary under the default prefetch
+    policy, so they leave L1 with the reshard; only B objects stay."""
+    # MockL2Adapter never completes loads of multi-tensor objects.
+    monkeypatch.setattr(sys.modules[__name__], "KERNEL_GROUP_LAYERS", (2,))
+    sm = mp_ctx.storage_manager
+    module = make_module(4, 2, [4])
+    src_keys = _store(mp_ctx, 4, 4)
+    adapter = sm.l2_adapters()[0][1]
+    assert isinstance(adapter, MockL2Adapter)
+    deadline = time.monotonic() + TIMEOUT
+    while not all(adapter.debug_has_key(k) for k in src_keys):
+        assert time.monotonic() < deadline, "source objects never reached L2"
+        time.sleep(0.005)
+    assert sm.delete_l1_keys(src_keys) == (len(src_keys), 0)
+
+    module.lookup(_lookup_key(2), 2)
+
+    assert _poll(module, "req") == NUM_CHUNKS
+    _assert_holds(mp_ctx, _keys(mp_ctx, 2), 4, 2)
+    assert _num_resident(sm, src_keys) == 0
+
+
+def test_reshard_keeps_source_objects_already_in_l1(
+    mp_ctx: MPCacheServerContext, make_module: ModuleFactory
+) -> None:
+    """A objects in L1 before the lookup (a TP=A engine on this server) stay."""
+    module = make_module(4, 2, [4])
+    src_keys = _store(mp_ctx, 4, 4)
+
+    module.lookup(_lookup_key(2), 2)
+
+    assert _poll(module, "req") == NUM_CHUNKS
+    assert _num_resident(mp_ctx.storage_manager, src_keys) == len(src_keys)
 
 
 def test_lookup_tp_above_head_count_keeps_normal_miss(
