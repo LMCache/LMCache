@@ -40,14 +40,29 @@ answer                     ── same-TP hit + resharded hit = c0..cm-1
 retrieve                   ── unchanged
 ```
 
-Why here and not elsewhere:
+Why here (the rejected placements are under
+[Where hetero TP lives](#where-hetero-tp-lives)):
 
-- **Not in the GPU copy.** Retrieve, locks and the kernel stay unchanged. The
-  network moves exactly P's bytes, once.
-- **Not a canonical layout on store** (for example per-head objects). That
-  changes `kv_rank` semantics, which orphans every persisted L2 object.
-- **Not on P.** P would need to know each reader's TP and serve objects
-  shaped for it.
+- **Retrieve is unchanged.** Locks and the GPU kernel see ordinary B
+  objects. The network moves exactly P's bytes, once.
+- **On the CPU, not the GPU.** GPU time is the scarce resource on D; the
+  copy stays on D's CPU until its throughput falls below the rate D receives
+  cross-TP data (see [Next phases](#next-phases)).
+
+The copy is a strided slice, not a transpose. Per kernel group an object is
+`[kv_size, L, T, local_heads * head_elems]` with heads innermost, so a
+rank's heads are one contiguous run inside each token row:
+
+```
+A=1 -> B=2: dst_b[kv, l, t, :] = src[kv, l, t, b*n*e : (b+1)*n*e]   (slice)
+A=2 -> B=1: dst[kv, l, t, :]   = concat_a src_a[kv, l, t, :]         (concat)
+```
+
+with `n` heads per destination rank and `e` elements per head. Each run is
+small (Qwen3-0.6B: 1 KiB per token and layer at TP2), so P2P cannot read a
+rank's share as sub-ranges of P's object; it pulls whole objects and D
+slices them. vLLM's NIXL connector avoids the copy because its block layout
+puts heads outside tokens, which makes a rank's share one large run.
 
 The cost is one CPU copy of the hit bytes on D, plus transient L1 for both
 copies. Measured on Qwen3-0.6B, 2048 tokens (224 MiB written): about 12 ms
@@ -85,6 +100,32 @@ the reshard is valid:
   make server ranks differ from TP ranks.
 
 Without the hint the cross-TP stage is off.
+
+## Where hetero TP lives
+
+Source-TP objects can sit in any tier, L1 included:
+
+- **Peer L1 over P2P.** The P2P adapter reads the peer's DRAM L1 (tag
+  `DRAM, REMOTE`); in PD that is P's L1, written at A.
+- **Shared L1.** Several servers map one region through the memory
+  orchestrator; servers whose engines differ in TP write both A and B keys
+  into it.
+- **Local L1 and L2.** A server or an L2 shared by engines at different TP.
+
+So the cross-TP stage sits in a module above the storage manager and calls
+`submit_prefetch_task` over every tier, the same way the P2P controller
+serves a peer's lookup (`p2p_controller.py`). The root cause is that keys
+match exactly and `kv_rank` encodes the TP; every placement has to map B
+keys to A keys and reshape the data somewhere.
+
+| Placement | Why not |
+| --- | --- |
+| Head-range keys and a cover lookup in L1 (the heads x layers `kv_rank` bitmap in `ComputeKVRank`'s TODO); retrieve reads strided head ranges | No reshard copy and one lookup, but it changes key encoding, the L1 index and the GPU connector, and orphans every persisted L2 object |
+| An L2 adapter wrapper that reshards on load, like `SerdeL2AdapterWrapper` | Sees only the adapter it wraps, never L1 |
+| An L2 adapter that maps B keys to A keys and looks them up in its own storage manager | No L2 adapter reads local L1 today, and the lookup re-enters the prefetch controller it is serving |
+| Reshard on P: P's P2P controller sees B's world size in the keys and serves B objects | Covers P2P only, not local or shared L1. Kept as an option for native PD, where it would remove the source TP setting on D |
+
+Phase 1 below implements the cross-TP stage in the lookup.
 
 ## Lookup stages
 
@@ -183,6 +224,12 @@ operator sets it. A lookup whose own TP equals it skips the cross-TP stage.
 - LMCache-driven transfer. The engine-driven registration does not send the
   head-count hint, so the cross-TP stage is off there.
 - One source TP per server.
+- Engine KV formats are not a constraint: each engine's GPU connector maps
+  its own layout (vLLM and SGLang differ) to the LMCache object format above,
+  and the reshard works only on that format. Both sides need the same
+  model, dtype, head size and `chunk_size`, or the keys or shapes differ.
+- The engine must send the KV head count. vLLM does; the SGLang MP connector
+  sends only `kv_list_layout`, so the cross-TP stage is off for SGLang.
 
 ## Later: a PD source
 
@@ -206,8 +253,9 @@ P's connector in `request_finished`) into D's request. The plan:
 3. D's connector passes the value in the lookup RPC, and `HeteroTP.plan`
    uses it instead of `--hetero-tp-source-world-size`.
 
-The same channel can name the P instance, which xPyD needs: the P2P peer
-is a static `peer_mq_server_url` today.
+The same channel can name the P instance, which xPyD needs: today the P2P
+controller builds one adapter per peer the coordinator lists, and a lookup
+asks all of them.
 
 ## Verification
 
@@ -229,13 +277,15 @@ The e2e test is native PD on one node: two servers, a coordinator, NIXL P2P,
 | Phase | Content |
 | --- | --- |
 | 2 | GDN and Mamba2 recurrent groups, and hybrid subpaged attention. This needs a per-kernel-group shard description (segments sharded along one axis), because GDN conv is `[q\|k\|v]_local` and ssm splits by v heads. chunk_size must be a multiple of both engines' block sizes, which can differ by TP in hybrids. |
-| 3 | Move the reshard copy to the GPU if its logged cost matters on the PD handoff. |
+| 3 | If the CPU copy cannot keep up with the cross-TP receive rate, fold the head slicing into the retrieve GPU kernel: it already scatters each object into the engine's paged layout, so reading head ranges from several source objects moves no extra bytes and needs no CPU copy. The cost is a retrieve that reads source-TP objects directly. Gate: measured reshard throughput per thread (about 5.8 GB/s at 224 MiB / 38 ms) and its thread scaling against the PD deployment's cross-TP receive rate. |
 
 ## Open questions
 
-1. Source TP discovery: should a peer advertise its layouts (P2P RPC or
-   coordinator metadata) instead of using static config? See
-   [Later: a PD source](#later-a-pd-source).
+1. Source TP discovery for generic hetero TP. The coordinator cannot answer
+   it today: registration carries no model or TP; the coordinator only
+   tells the P2P controller which peers exist. The candidate is a P2P RPC that returns the
+   world sizes the peer has registered for a model. A peer can hold several,
+   so the answer is a list.
 
 ## Pre-existing P2P gap: no object size check
 
