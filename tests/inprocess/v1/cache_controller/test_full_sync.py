@@ -457,7 +457,7 @@ class TestFullSyncBeforeStorageInit:
 
     def test_sender_is_none_without_storage_manager(self):
         # First Party
-        from lmcache.v1.cache_controller.worker import LMCacheWorker
+        from lmcache.inprocess.v1.cache_controller.worker import LMCacheWorker
 
         worker = LMCacheWorker.__new__(LMCacheWorker)
         worker._full_sync_sender = None

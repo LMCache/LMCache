@@ -41,7 +41,7 @@ from lmcache.inprocess.integration.vllm.vllm_v1_adapter import (  # noqa: E402
     ReqMeta,
 )
 from lmcache.utils import CacheEngineKey  # noqa: E402
-from lmcache.v1.cache_engine import LMCacheEngine  # noqa: E402
+from lmcache.inprocess.v1.cache_engine import LMCacheEngine  # noqa: E402
 
 
 class _FakeLookupClient:
