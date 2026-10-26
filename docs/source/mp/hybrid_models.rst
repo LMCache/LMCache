@@ -131,6 +131,18 @@ its own object group: full-attention layers form one group, and each
 sliding-window size (mamba / GDN included) forms another. The default is
 **off** — every layer shares a single full-attention object group.
 
+STORE validates the blocks retained after per-chunk window downsampling. If any
+required block is absent, LMCache skips that object. In the default merged
+configuration, a missing recurrent STATE slice therefore also prevents storing
+the chunk's complete attention PAGE data. This is intentional: a cache hit for
+the merged object must mean that every required slice is present.
+
+With ``--separate-object-groups``, complete PAGE objects can still be stored
+when a separate STATE object is incomplete. The tradeoff is made at the object
+group boundary; incomplete objects are never partially published. For example,
+a chunk with complete PAGE blocks and an absent STATE checkpoint is skipped
+when merged, but its PAGE object remains independently storable when separated.
+
 .. code-block:: bash
 
    # default: a single full-attention object group for all layers
@@ -145,6 +157,9 @@ difference — every layer resolves to one object group either way. For a
 linear-attention layers their own cache objects so their recurrent state is
 stored and loaded independently of the full-attention layers — which is what
 lets ``--max-num-batched-tokens`` exceed twice the block size.
+
+For deployments upgrading from the earlier STORE validation, see the
+:doc:`cache migration warning <release_notes>` before reusing existing caches.
 
 Mamba / Linear-Attention Hybrids
 --------------------------------
