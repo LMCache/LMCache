@@ -529,14 +529,14 @@ class PrefetchStage:
 class HeteroTPPlan:
     """How one lookup completes its hit from objects stored at another TP size.
 
-    Created by :meth:`HeteroTP.plan` from the lookup's local stage. After the
-    local stage hits its first ``k`` chunks, the lookup submits
-    :meth:`source_stage` for the rest; if that hits, :meth:`convert` reshards
+    Created by :meth:`HeteroTP.plan` from the lookup's same-TP stage. After the
+    same-TP stage hits its first ``k`` chunks, the lookup submits
+    :meth:`cross_tp_stage` for the rest; if that hits, :meth:`convert` reshards
     the hit into the lookup's own TP size in L1, and :meth:`merge` appends it
-    to the local stage's result. Call them in that order, at most once each.
+    to the same-TP stage's result. Call them in that order, at most once each.
 
     Args:
-        local: The lookup's local stage.
+        same_tp: The lookup's same-TP stage.
         num_kv_heads: KV heads of the whole model.
         source_tp: TP size the source objects are stored with.
         resharder: Runs the reshard of a source hit.
@@ -544,88 +544,90 @@ class HeteroTPPlan:
 
     def __init__(
         self,
-        local: PrefetchStage,
+        same_tp: PrefetchStage,
         num_kv_heads: int,
         source_tp: int,
         resharder: L1Resharder,
     ) -> None:
-        self._local = local
+        self._same_tp = same_tp
         self._num_kv_heads = num_kv_heads
         self._source_tp = source_tp
         self._resharder = resharder
         self._start = 0
-        self._source_hashes: list[bytes] = []
+        self._cross_tp_hashes: list[bytes] = []
 
-    def source_stage(self, start: int) -> PrefetchStage:
-        """Describe the prefetch of the local stage's chunks from ``start`` on.
+    def cross_tp_stage(self, start: int) -> PrefetchStage:
+        """Describe the prefetch of the same-TP stage's chunks from ``start`` on.
 
         Args:
-            start: Chunks the local stage hit; the source stage covers the
+            start: Chunks the same-TP stage hit; the cross-TP stage covers the
                 rest.
 
         Returns:
             The stage at the source TP size, on every tier, with one read lock
             per object: only the reshard reads the source objects.
         """
-        local = self._local
+        same_tp = self._same_tp
         self._start = start
-        self._source_hashes = local.chunk_hashes[start:]
+        self._cross_tp_hashes = same_tp.chunk_hashes[start:]
         return PrefetchStage(
-            key=replace(local.key, world_size=self._source_tp),
-            chunk_hashes=self._source_hashes,
+            key=replace(same_tp.key, world_size=self._source_tp),
+            chunk_hashes=self._cross_tp_hashes,
             group_layout_descs={
                 gid: reshard_layout_desc(
-                    desc, self._num_kv_heads, local.key.world_size, self._source_tp
+                    desc, self._num_kv_heads, same_tp.key.world_size, self._source_tp
                 )
-                for gid, desc in local.group_layout_descs.items()
+                for gid, desc in same_tp.group_layout_descs.items()
             },
-            attn_desc=replace(local.attn_desc, world_size=self._source_tp),
+            attn_desc=replace(same_tp.attn_desc, world_size=self._source_tp),
             num_kv_readers=1,
         )
 
     def convert(self, found: int, result: PrefetchResult) -> Future[ReshardResult]:
-        """Reshard the source stage's hit into the lookup's TP size, in L1.
+        """Reshard the cross-TP stage's hit into the lookup's TP size, in L1.
 
-        Runs on a reshard thread, releases the source stage's read locks and
+        Runs on a reshard thread, releases the cross-TP stage's read locks and
         leaves the new objects read-locked ``num_kv_readers`` times, as the
-        local stage left its own; see :meth:`L1Resharder.submit`.
+        same-TP stage left its own; see :meth:`L1Resharder.submit`.
 
         Args:
-            found: Leading chunks the source stage hit.
-            result: The source stage's result.
+            found: Leading chunks the cross-TP stage hit.
+            result: The cross-TP stage's result.
 
         Returns:
             A future resolving to what the reshard left read-locked.
         """
-        local = self._local
-        hashes = self._source_hashes[:found]
-        groups = list(range(local.attn_desc.num_object_groups))
+        same_tp = self._same_tp
+        hashes = self._cross_tp_hashes[:found]
+        groups = list(range(same_tp.attn_desc.num_object_groups))
         return self._resharder.submit(
             ReshardTask(
                 src_keys=ipc_key_to_object_keys(
-                    replace(local.key, world_size=self._source_tp), hashes, groups
+                    replace(same_tp.key, world_size=self._source_tp), hashes, groups
                 ),
-                dst_keys=ipc_key_to_object_keys(local.key, hashes, groups),
-                dst_layout_descs=local.group_layout_descs,
-                read_locks=local.num_kv_readers,
+                dst_keys=ipc_key_to_object_keys(same_tp.key, hashes, groups),
+                dst_layout_descs=same_tp.group_layout_descs,
+                read_locks=same_tp.num_kv_readers,
                 num_kv_heads=self._num_kv_heads,
                 src_tp=self._source_tp,
-                dst_tp=local.key.world_size,
+                dst_tp=same_tp.key.world_size,
                 l1_owners=result.l1_owners,
-                request_id=local.key.request_id,
+                request_id=same_tp.key.request_id,
             )
         )
 
-    def merge(self, local: PrefetchResult, resharded: ReshardResult) -> PrefetchResult:
-        """Append a reshard's hit to the local stage's result.
+    def merge(
+        self, same_tp: PrefetchResult, resharded: ReshardResult
+    ) -> PrefetchResult:
+        """Append a reshard's hit to the same-TP stage's result.
 
         Args:
-            local: The local stage's result; it hit the chunks before the
-                source stage's start.
+            same_tp: The same-TP stage's result; it hit the chunks before the
+                cross-TP stage's start.
             resharded: What :meth:`convert` left read-locked.
 
         Returns:
-            One result over the local stage's rows, as if the local stage had
+            One result over the same-TP stage's rows, as if the same-TP stage had
             hit both. The resharded chunks count as L2 hits: the lookup's TP
             size did not have them in L1.
         """
@@ -638,10 +640,10 @@ class HeteroTPPlan:
             return out
 
         return PrefetchResult(
-            hit_cells=extend(local.hit_cells),
-            l1_hit_cells=[row.copy() for row in local.l1_hit_cells],
-            l2_hit_cells=extend(local.l2_hit_cells),
-            l1_owners={**local.l1_owners, **resharded.l1_owners},
+            hit_cells=extend(same_tp.hit_cells),
+            l1_hit_cells=[row.copy() for row in same_tp.l1_hit_cells],
+            l2_hit_cells=extend(same_tp.l2_hit_cells),
+            l1_owners={**same_tp.l1_owners, **resharded.l1_owners},
         )
 
 
@@ -667,7 +669,7 @@ class HeteroTP:
         # KV head counts the source world size was already warned about.
         self._warned_heads: set[int] = set()
 
-    def plan(self, local: PrefetchStage) -> HeteroTPPlan | None:
+    def plan(self, same_tp: PrefetchStage) -> HeteroTPPlan | None:
         """Build the cross-TP plan of a lookup, or ``None`` if it has none.
 
         A lookup qualifies when a source world size other than its own is
@@ -678,13 +680,13 @@ class HeteroTP:
         head count is warned about once per head count.
 
         Args:
-            local: The lookup's local stage.
+            same_tp: The lookup's same-TP stage.
 
         Returns:
             The plan, or ``None`` if the lookup does not qualify.
         """
         source = self._source_world_size
-        key = local.key
+        key = same_tp.key
         if source is None or source == key.world_size:
             return None
         num_heads = self._registry.find_total_num_kv_heads(
@@ -693,7 +695,7 @@ class HeteroTP:
         if (
             num_heads is None
             or not is_valid_tp(num_heads, key.world_size)
-            or any(w >= 0 for w in local.attn_desc.num_chunks_in_sw)
+            or any(w >= 0 for w in same_tp.attn_desc.num_chunks_in_sw)
         ):
             return None
         if not is_valid_tp(num_heads, source):
@@ -705,7 +707,7 @@ class HeteroTP:
                     num_heads,
                 )
             return None
-        return HeteroTPPlan(local, num_heads, source, self._resharder)
+        return HeteroTPPlan(same_tp, num_heads, source, self._resharder)
 
     def close(self) -> None:
         """Stop the reshard threads after every submitted reshard finishes.

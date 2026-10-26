@@ -107,28 +107,28 @@ def resolve_prefetched_obj_keys(
 class _HeteroTPStages:
     """Stages of a lookup that completes its hit from another TP size.
 
-    See ``docs/design/v1/multiprocess/hetero_tp.md``. The local stage looks
+    See ``docs/design/v1/multiprocess/hetero_tp.md``. The same-TP stage looks
     up the lookup's own keys on every tier. If it hits fewer than all chunks,
-    its locks are kept and the source stage looks up the rest at the source
+    its locks are kept and the cross-TP stage looks up the rest at the source
     TP size; a hit there is resharded into the lookup's own layout in L1,
-    read-locked, and appended to the local stage's result.
+    read-locked, and appended to the same-TP stage's result.
 
     Attributes:
-        plan: The source stage, the reshard and the merge.
-        local: The local stage.
-        phase: The running stage: ``"local"`` or ``"source"``.
-        local_result: The local stage's result, once it finished early.
-        local_windows: The row windows ``local_result`` folds with.
-        source: The source stage, once submitted.
-        reshard: The running reshard of a source-stage hit.
+        plan: The cross-TP stage, the reshard and the merge.
+        same_tp: The same-TP stage.
+        phase: The running stage: ``"same_tp"`` or ``"cross_tp"``.
+        same_tp_result: The same-TP stage's result, once it finished early.
+        same_tp_windows: The row windows ``same_tp_result`` folds with.
+        cross_tp: The cross-TP stage, once submitted.
+        reshard: The running reshard of a cross-TP stage hit.
     """
 
     plan: HeteroTPPlan
-    local: PrefetchStage
-    phase: Literal["local", "source"] = "local"
-    local_result: PrefetchResult | None = None
-    local_windows: tuple[int, ...] = ()
-    source: PrefetchStage | None = None
+    same_tp: PrefetchStage
+    phase: Literal["same_tp", "cross_tp"] = "same_tp"
+    same_tp_result: PrefetchResult | None = None
+    same_tp_windows: tuple[int, ...] = ()
+    cross_tp: PrefetchStage | None = None
     reshard: Future[ReshardResult] | None = None
 
 
@@ -407,10 +407,10 @@ class LookupModule(DiscoverableModule):
             )
             return
 
-        local = PrefetchStage(
+        same_tp = PrefetchStage(
             key, suffix_hashes, group_layout_descs, attn_desc, num_kv_readers
         )
-        handle, row_windows = self._submit_stage(local)
+        handle, row_windows = self._submit_stage(same_tp)
         self._register_prefetch_job(
             _PrefetchJob(
                 handle=handle,
@@ -429,7 +429,7 @@ class LookupModule(DiscoverableModule):
                 ),
                 model_name=model_name,
                 cache_salt=key.cache_salt,
-                hetero=self._hetero_tp_stages(local),
+                hetero=self._hetero_tp_stages(same_tp),
             )
         )
 
@@ -446,7 +446,7 @@ class LookupModule(DiscoverableModule):
         semantics).
 
         With a cross-TP source configured, a finished stage can make this
-        call submit the next stage and return None. A source-stage hit is
+        call submit the next stage and return None. A cross-TP stage hit is
         resharded into L1 on a background thread; until it finishes this
         call returns None.
 
@@ -510,7 +510,7 @@ class LookupModule(DiscoverableModule):
                 handle = job.handle
                 reshard = self._pending_reshard(job)
             if reshard is not None:
-                # The finished source stage's handle never completes again;
+                # The finished cross-TP stage's handle never completes again;
                 # the reshard is what submits the next prefetch.
                 if not wait_futures([reshard], remaining).done:
                     return None
@@ -794,7 +794,7 @@ class LookupModule(DiscoverableModule):
             return None
         row_windows: tuple[int, ...]
         if reshard is not None:
-            # Append the reshard's hit to the local stage, whose locks are
+            # Append the reshard's hit to the same-TP stage, whose locks are
             # still held. Nothing else hands this result out once, so the
             # consumer that clears ``hetero`` owns it.
             resharded = reshard.result()
@@ -804,9 +804,9 @@ class LookupModule(DiscoverableModule):
                     return None
                 job.hetero = None
             result = state.plan.merge(
-                cast(PrefetchResult, state.local_result), resharded
+                cast(PrefetchResult, state.same_tp_result), resharded
             )
-            row_windows = state.local_windows
+            row_windows = state.same_tp_windows
         else:
             with self._prefetch_job_lock:
                 handle, row_windows = job.handle, job.row_windows
@@ -826,14 +826,14 @@ class LookupModule(DiscoverableModule):
                 # released. Answer with the stage whose locks are held.
                 logger.exception(
                     "Cross-TP stage failed for request %s; answering with the "
-                    "local hit",
+                    "same-TP hit",
                     job.request_id,
                 )
                 job.hetero = None
-                if state.phase == "source":
+                if state.phase == "cross_tp":
                     answer = (
-                        cast(PrefetchResult, state.local_result),
-                        state.local_windows,
+                        cast(PrefetchResult, state.same_tp_result),
+                        state.same_tp_windows,
                     )
                 else:
                     answer = result, row_windows
@@ -911,19 +911,19 @@ class LookupModule(DiscoverableModule):
         with self._prefetch_job_lock:
             return len(self._prefetch_jobs)
 
-    def _hetero_tp_stages(self, local: PrefetchStage) -> _HeteroTPStages | None:
+    def _hetero_tp_stages(self, same_tp: PrefetchStage) -> _HeteroTPStages | None:
         """Return the cross-TP stages of a lookup, or ``None`` if it has none.
 
         Args:
-            local: The lookup's local stage, already submitted.
+            same_tp: The lookup's same-TP stage, already submitted.
 
         Returns:
             The stages, or ``None`` if the lookup cannot use another TP size.
         """
-        plan = self._hetero_tp.plan(local)
+        plan = self._hetero_tp.plan(same_tp)
         if plan is None:
             return None
-        return _HeteroTPStages(plan, local)
+        return _HeteroTPStages(plan, same_tp)
 
     def _advance_hetero_tp(
         self,
@@ -935,12 +935,12 @@ class LookupModule(DiscoverableModule):
     ) -> tuple[PrefetchResult, tuple[int, ...]] | None:
         """Move a lookup to its next cross-TP stage after a stage finished.
 
-        Local stage: a full hit, or ``advance`` False, makes it final;
-        otherwise its locks are kept and the source stage is submitted for
-        the rest. Source stage: a hit is handed to a background reshard,
-        whose result ``_consume_prefetch_result`` appends to the local
+        Same-TP stage: a full hit, or ``advance`` False, makes it final;
+        otherwise its locks are kept and the cross-TP stage is submitted for
+        the rest. Cross-TP stage: a hit is handed to a background reshard,
+        whose result ``_consume_prefetch_result`` appends to the same-TP
         stage's; a miss, or ``advance`` False, releases the source locks and
-        answers with the local stage.
+        answers with the same-TP stage.
 
         Args:
             job: The lookup's job.
@@ -956,25 +956,25 @@ class LookupModule(DiscoverableModule):
             answers the lookup and the row windows to fold it with.
         """
         found, _ = fold_unfold_grouped(result.hit_cells, row_windows)
-        if state.phase == "local":
-            if found == len(state.local.chunk_hashes) or not advance:
+        if state.phase == "same_tp":
+            if found == len(state.same_tp.chunk_hashes) or not advance:
                 job.hetero = None
                 return result, row_windows
-            state.local_result, state.local_windows = result, row_windows
-            source = state.plan.source_stage(found)
-            handle, windows = self._submit_stage(source)
+            state.same_tp_result, state.same_tp_windows = result, row_windows
+            cross_tp = state.plan.cross_tp_stage(found)
+            handle, windows = self._submit_stage(cross_tp)
             with self._prefetch_job_lock:
                 job.handle, job.row_windows = handle, windows
-                state.phase, state.source = "source", source
+                state.phase, state.cross_tp = "cross_tp", cross_tp
             return None
         if found > 0 and advance:
             reshard = state.plan.convert(found, result)
             with self._prefetch_job_lock:
                 state.reshard = reshard
             return None
-        self._release_stage(cast(PrefetchStage, state.source), found, result)
+        self._release_stage(cast(PrefetchStage, state.cross_tp), found, result)
         job.hetero = None
-        return cast(PrefetchResult, state.local_result), state.local_windows
+        return cast(PrefetchResult, state.same_tp_result), state.same_tp_windows
 
     def _pending_reshard(self, job: _PrefetchJob) -> Future[ReshardResult] | None:
         """Return ``job``'s running reshard; call under ``_prefetch_job_lock``."""
