@@ -220,3 +220,21 @@ def test_request_server_factory_selects_zmq_server(
 
     assert result is server
     build.assert_called_once_with(modules, config)
+
+
+@pytest.mark.parametrize("source", ["cli", *KEY_ENV_VARS])
+def test_native_grpc_rejects_configured_authentication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: str
+) -> None:
+    """Native mode must not silently bypass shared server authentication."""
+    key_file = tmp_path / "key"
+    key_file.write_text("native-secret\n")
+    config = MPServerConfig(transport="grpc", grpc_server_mode="native")
+    if source == "cli":
+        config.api_key_files = [str(key_file)]
+    else:
+        monkeypatch.setenv(
+            source, str(key_file) if source.endswith("_FILE") else "native-secret"
+        )
+    with pytest.raises(ValueError, match="use --grpc-server-mode sync or aio"):
+        create_request_server([], config)
