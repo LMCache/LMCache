@@ -87,6 +87,9 @@ def setup_mooncake_store(
         None.  ``store`` is mutated in place.
 
     Raises:
+        RuntimeError: If ``store.setup()`` returns a non-zero
+            Mooncake error code (e.g. the master is unreachable),
+            so the connector never runs without a client.
         Exception: Any exception raised by ``store.setup()``
             other than :class:`TypeError` is propagated to the
             caller (``TypeError`` is caught and used as the
@@ -95,7 +98,7 @@ def setup_mooncake_store(
     setup_dict = config.setup_config
     try:
         # New API (Mooncake PR #1445): setup(config: dict)
-        store.setup(setup_dict)
+        ret = store.setup(setup_dict)
         logger.info("Using dict-based setup API (new)")
     except TypeError:
         # Legacy API: setup with positional arguments.
@@ -113,7 +116,12 @@ def setup_mooncake_store(
                 except (TypeError, ValueError):
                     v = 0
             args.append(v)
-        store.setup(*args)
+        ret = store.setup(*args)
+
+    # Mooncake reports setup failures through the return code, not an
+    # exception; a store whose setup failed has no client.
+    if ret != 0:
+        raise RuntimeError(f"Mooncake store setup failed with error code {ret}")
 
 
 # Prefix for keys that should be forwarded to mooncake setup.
@@ -484,10 +492,10 @@ class MooncakestoreConnector(RemoteConnector):
         return True
 
     async def exists(self, key: CacheEngineKey) -> bool:
-        return self.store.is_exist(key.to_string())
+        return self._is_exist(key.to_string())
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
-        return self.store.is_exist(key.to_string())
+        return self._is_exist(key.to_string())
 
     async def batched_get(
         self, keys: List[CacheEngineKey]
@@ -518,7 +526,7 @@ class MooncakestoreConnector(RemoteConnector):
     ) -> int:
         num_hit_counts = 0
         for key in keys:
-            if not self.store.is_exist(key.to_string()):
+            if not self._is_exist(key.to_string()):
                 break
             num_hit_counts += 1
         return num_hit_counts
@@ -732,7 +740,7 @@ class MooncakestoreConnector(RemoteConnector):
             buffer_sizes.append(obj.get_size())
 
         try:
-            await asyncio.wait_for(
+            codes = await asyncio.wait_for(
                 asyncio.to_thread(
                     self.store.batch_put_from,
                     key_strs,
@@ -745,6 +753,20 @@ class MooncakestoreConnector(RemoteConnector):
         except asyncio.TimeoutError:
             logger.warning(
                 "Timeout during batch_put_from; some decoders may redo prefill."
+            )
+            return
+
+        failed = {
+            key_str: code
+            for key_str, code in zip(key_strs, codes, strict=True)
+            if code != 0
+        }
+        if failed:
+            logger.warning(
+                "batch_put_from failed for %d of %d keys (key: error code): %s",
+                len(failed),
+                len(key_strs),
+                failed,
             )
 
     async def _batched_put_with_metadata(
@@ -765,7 +787,7 @@ class MooncakestoreConnector(RemoteConnector):
             buffer_ptr = memory_obj.data_ptr
             buffer_size = memory_obj.get_size()
 
-            await asyncio.wait_for(
+            ret = await asyncio.wait_for(
                 asyncio.to_thread(
                     self.store.put_from,
                     key_str,
@@ -775,6 +797,10 @@ class MooncakestoreConnector(RemoteConnector):
                 ),
                 timeout=self.config.transfer_timeout,
             )
+            if ret != 0:
+                logger.warning(
+                    "Failed to put key %s using put_from: error=%s", key_str, ret
+                )
         except asyncio.TimeoutError:
             logger.warning(
                 "Timeout when putting key %s using put_from. "
@@ -807,12 +833,16 @@ class MooncakestoreConnector(RemoteConnector):
             ).serialize()
             assert len(metadata_bytes) == self.remote_metadata_bytes
 
-            await asyncio.wait_for(
+            ret = await asyncio.wait_for(
                 asyncio.to_thread(
                     self.store.put_parts, key_str, metadata_bytes, kv_bytes
                 ),
                 timeout=self.config.transfer_timeout,
             )
+            if ret != 0:
+                logger.warning(
+                    "Failed to put key %s using put_parts: error=%s", key_str, ret
+                )
         except asyncio.TimeoutError:
             logger.warning(
                 "Timeout when putting key %s using put_parts. "
@@ -838,3 +868,14 @@ class MooncakestoreConnector(RemoteConnector):
 
         self.store.close()
         logger.info("Closed the mooncake store connection")
+
+    def _is_exist(self, key_str: str) -> bool:
+        """Treat only ``is_exist() == 1`` as a hit.
+
+        A negative error code (e.g. the client is not initialized) is logged
+        and counted as a miss so that LMCache never loads a key it cannot read.
+        """
+        ret = self.store.is_exist(key_str)
+        if ret < 0:
+            logger.warning("is_exist failed for key %s: error=%s", key_str, ret)
+        return ret == 1
