@@ -148,11 +148,11 @@ must be self-contained and include:
 - compatibility and performance risks, validation evidence, missing coverage, and focused
   questions for reviewers.
 
-Attach the `.html` file to the PR or provide a stable link that every reviewer can open. If
-the hosting surface does not accept raw HTML, attach a `.zip` containing the HTML. Embed CSS,
-SVG diagrams, and other assets in the file; remove secrets, machine-local paths, and links to
-artifacts reviewers cannot access. The explainer supplements the PR description and source
-diff; it does not replace either one.
+Attach or link the `.html` file directly in the PR description; do not post a separate
+comment for it. When the explainer is one self-contained file, upload that `.html` file
+without wrapping it in a zip archive. Embed CSS, SVG diagrams, and other assets in the file;
+remove secrets, machine-local paths, and links to artifacts reviewers cannot access. The
+explainer supplements the PR description and source diff; it does not replace either one.
 
 ### 6. What CI runs on your PR
 

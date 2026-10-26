@@ -89,8 +89,8 @@ reviewer can open without repository context or local assets. Include:
 
 Use embedded CSS and SVG diagrams. Remove secrets, machine-local paths, and
 inaccessible links. Keep the file outside the repository unless the user asks
-to commit it. Attach it to the PR, or use a reviewer-accessible stable link; if
-raw HTML is not accepted, attach a zip containing it.
+to commit it. Attach or link the `.html` file directly in the PR description,
+not in a separate comment. Do not archive a single HTML file in a zip.
 
 ### 6. Draft the PR
 

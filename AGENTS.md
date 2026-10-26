@@ -34,14 +34,15 @@ explicitly mark the PR ready again. An earlier human review does not cover later
 AI-generated changes.
 
 AI-assisted PRs must include a self-contained HTML reviewer explainer, attached
-to the PR or linked from a reviewer-accessible location. Keep it synchronized
-with the current head. It must use diagrams and concrete code references to
-explain the change, the affected end-to-end call chains and responsibility
-boundaries, and why each added or changed test is necessary. Also cover
-compatibility, risks, validation gaps, and reviewer attention points. Do not
-include secrets, machine-local paths, inaccessible artifacts, or dependencies
-on local assets; use embedded CSS and diagrams so the downloaded file works on
-its own.
+or linked directly in the PR description rather than posted as a separate
+comment. Upload a single `.html` file directly; do not archive one file in a
+zip. Keep it synchronized with the current head. It must use diagrams and
+concrete code references to explain the change, the affected end-to-end call
+chains and responsibility boundaries, and why each added or changed test is
+necessary. Also cover compatibility, risks, validation gaps, and reviewer
+attention points. Do not include secrets, machine-local paths, inaccessible
+artifacts, or dependencies on local assets; use embedded CSS and diagrams so
+the downloaded file works on its own.
 
 ## Python Environment
 
