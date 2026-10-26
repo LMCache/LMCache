@@ -326,11 +326,17 @@ def hf3fs_l2_adapter(hf3fs_native_client):
     )
 
     client = hf3fs_native_client[0]
-    return NativeConnectorL2Adapter(
+    adapter = NativeConnectorL2Adapter(
         client,
         _MEMORY_TAGS,
         type_name="Hf3fsL2Adapter",
     )
+    # Closing only the client leaves the demux thread running, and it can
+    # abort the interpreter at exit.
+    try:
+        yield adapter
+    finally:
+        adapter.close()
 
 
 # =============================================================================
