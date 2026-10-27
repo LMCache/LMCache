@@ -4,14 +4,17 @@
 Each line holds ``t`` (unix seconds), every :data:`METRICS` sample summed over
 labels and URLs, and ``vllm:prompt_tokens_by_source/<source>``. With a cgroup,
 also ``mem_anon`` and ``mem_file`` (bytes): the container's own memory and the
-page cache charged to it.
+page cache charged to it. With an ``io`` reader, also ``io_rbytes`` and
+``io_wbytes``: the cache tiers' block I/O so far.
 """
 
 # Standard
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 import json
 import re
+import subprocess
 import threading
 import time
 import urllib.error
@@ -81,6 +84,7 @@ class Sampler:
         url: str,
         interval_s: float = 5.0,
         cgroup: Path | None = None,
+        io: Callable[[], dict[str, int]] | None = None,
     ) -> None:
         """Prepare a sampler; call :meth:`start` to begin.
 
@@ -89,11 +93,13 @@ class Sampler:
             url: Prometheus endpoint to scrape.
             interval_s: Seconds between ticks.
             cgroup: cgroup v2 dir whose memory to sample, or None.
+            io: Returns block I/O as ``rbytes`` and ``wbytes``, or None.
         """
         self.out = out
         self.url = url
         self.interval_s = interval_s
         self.cgroup = cgroup
+        self.io = io
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
@@ -126,6 +132,11 @@ class Sampler:
                         _memory(self.cgroup, rec)
                     except OSError as e:
                         rec["mem_err"] = str(e)
+                if self.io is not None:
+                    try:
+                        rec |= {f"io_{k}": v for k, v in self.io().items()}
+                    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                        rec["io_err"] = str(e)
                 f.write(json.dumps(rec) + "\n")
                 f.flush()
                 self._stop.wait(max(0.0, self.interval_s - (time.time() - t)))

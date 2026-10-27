@@ -571,6 +571,8 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
             cgroup=docker.cgroup_dir(f"prt-{run_id}-vllm")
             if spec.vllm_memory_gb is not None
             else None,
+            # For score()'s warmup and steady-state disk write rates.
+            io=lambda: io_bytes(servers),
         )
         sampler.start()
         io0 = io_bytes(servers)

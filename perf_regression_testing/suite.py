@@ -62,7 +62,8 @@ REPORT_COLS = [
     ("l2_disk_used_gb", "L2 disk used GB"),
     ("disk_write_gb", "disk written GB"),
     ("disk_read_gb", "disk read GB"),
-    ("disk_write_gb_s", "disk write GB/s"),
+    ("disk_write_gb_s_steady", "disk write GB/s, steady"),
+    ("disk_write_gb_s", "disk write GB/s, whole run"),
     ("disk_read_per_write", "disk read / written"),
     ("kv_cache_tokens", "GPU KV cache tokens"),
 ]

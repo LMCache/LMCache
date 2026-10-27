@@ -87,3 +87,26 @@ def test_a_gone_cgroup_is_recorded_not_raised(tmp_path: Path) -> None:
     srv.shutdown()
     rec = json.loads(out.read_text().splitlines()[0])
     assert "mem_err" in rec and "mem_anon" not in rec
+
+
+def test_block_io_is_sampled_and_a_gone_container_recorded(tmp_path: Path) -> None:
+    srv, url = _serve(ENGINE)
+    out = tmp_path / "samples.jsonl"
+    s = Sampler(out, url, interval_s=0.05, io=lambda: {"rbytes": 1, "wbytes": 2})
+    s.start()
+    time.sleep(0.1)
+    s.stop()
+
+    def gone() -> dict[str, int]:
+        raise FileNotFoundError("io.stat")
+
+    out2 = tmp_path / "gone.jsonl"
+    s = Sampler(out2, url, interval_s=0.05, io=gone)
+    s.start()
+    time.sleep(0.1)
+    s.stop()
+    srv.shutdown()
+    rec = json.loads(out.read_text().splitlines()[0])
+    assert (rec["io_rbytes"], rec["io_wbytes"]) == (1, 2)
+    rec = json.loads(out2.read_text().splitlines()[0])
+    assert "io_err" in rec and "io_wbytes" not in rec

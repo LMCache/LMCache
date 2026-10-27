@@ -118,3 +118,34 @@ def test_spec_accept_len_counts_the_target_token_and_accepted_drafts(
         s["vllm:spec_decode_num_accepted_tokens_total"] = drafts * 2.5
     plain.write_text("".join(json.dumps(s) + "\n" for s in samples))
     assert score(tmp_path, window_s=100.0)["spec_accept_len"] == 3.5
+
+
+def test_disk_write_rates_split_warmup_from_the_window(tmp_path: Path) -> None:
+    (tmp_path / "aiperf").mkdir()
+    reqs = [_request(100.0, 104.0), _request(101.0, 150.0)]
+    (tmp_path / "aiperf" / "profile_export.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in reqs)
+    )
+    # Warmup 0-100 s writes 1 GB/s; the window [100, 200] 2 GB/s, then 4 in its
+    # last quarter.
+    io = {0: 0, 100: 100e9, 175: 250e9, 200: 350e9, 250: 350e9}
+    samples = [_counters(t, 0, 0) | {"io_wbytes": w} for t, w in io.items()]
+    (tmp_path / "samples.jsonl").write_text(
+        "".join(json.dumps(s) + "\n" for s in samples)
+    )
+    s = score(tmp_path, window_s=100.0)
+    assert s["disk_write_gb_s_warmup"] == 1.0
+    assert s["disk_write_gb_s_steady"] == 2.5
+    assert s["disk_write_gb_s_steady_quarters"] == [2.0, 2.0, 2.0, 4.0]
+
+
+def test_no_disk_rates_without_io_samples(tmp_path: Path) -> None:
+    (tmp_path / "aiperf").mkdir()
+    (tmp_path / "aiperf" / "profile_export.jsonl").write_text(
+        json.dumps(_request(100.0, 104.0)) + "\n"
+    )
+    samples = [_counters(t, 0, 0) for t in (50, 250)]
+    (tmp_path / "samples.jsonl").write_text(
+        "".join(json.dumps(s) + "\n" for s in samples)
+    )
+    assert "disk_write_gb_s_steady" not in score(tmp_path, window_s=100.0)

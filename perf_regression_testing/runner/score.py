@@ -7,6 +7,9 @@ the AIPerf endpoint logs in :data:`PROMPT_DIR`. The window is
 error) counts if it ends inside. Decode rate is ``(output tokens - 1) /
 (latency - TTFT)``. Server counters are interpolated at the window edges.
 
+Disk write rates: ``warmup`` from the first I/O sample (AIPerf's start) to the
+window start, ``steady`` over the window, which follows the warmup.
+
 The ideal cache hit share is what an unbounded token-granular prefix cache
 would serve: each prompt, in start order from the server's first request, hits
 its longest common prefix with any earlier prompt, at most all but its last
@@ -211,7 +214,23 @@ def score(run_dir: Path, window_s: float) -> dict[str, Any]:
         if any("vllm:spec_decode_num_drafts_total" in s for s in samples)
         else 0
     )
-    return {
+    disk: dict[str, Any] = {}
+    io = [s for s in samples if "io_wbytes" in s]
+    if io:
+        t0 = io[0]["t"]
+        disk["disk_write_gb_s_warmup"] = (
+            (_at(samples, ws, "io_wbytes") - io[0]["io_wbytes"]) / 1e9 / (ws - t0)
+        )
+        disk["disk_write_gb_s_steady"] = delta("io_wbytes") / 1e9 / (we - ws)
+        # A mean over the window hides a rate still climbing as L1 fills.
+        edges = [ws + (we - ws) * i / 4 for i in range(5)]
+        disk["disk_write_gb_s_steady_quarters"] = [
+            (_at(samples, b, "io_wbytes") - _at(samples, a, "io_wbytes"))
+            / 1e9
+            / (b - a)
+            for a, b in zip(edges, edges[1:], strict=False)
+        ]
+    return disk | {
         "window_start": ws,
         "window_s": we - ws,
         "requests": len(ok),
