@@ -160,22 +160,23 @@ def test_store_owner_callback_round_trip(
         release_kind, release_encoded = queued[0]
         assert release_kind == "release_imported_event"
         assert msgspec.msgpack.decode(release_encoded, type=tuple[int, int]) == (1, 7)
-        if failure != "none":
-            assert len(queued) == 1
-            assert order == ["callback", "copy", "copy", "record"]
+        # A failed store aborts every reservation once its copies drain,
+        # routed by the owner each reservation had before any copy ran.
+        assert order == ["callback", "copy", "copy", "record", "callback"]
+        kind, encoded = queued[1]
+        assert kind == ("finish_write" if succeeded else "abort_write")
+        payload = msgspec.msgpack.decode(encoded, type=dict[ObjectKey, int])
+        assert payload == {
+            k: managers[0 if owner_count == 1 else i].l1_manager_id
+            for i, k in enumerate(keys)
+        }
+        if not succeeded:
             assert all(obj.is_valid() for obj in copied)
-        else:
-            assert order == ["callback", "copy", "copy", "record", "callback"]
-            kind, encoded = queued[1]
-            assert kind == "finish_write"
-            payload = msgspec.msgpack.decode(encoded, type=dict[ObjectKey, int])
-            assert payload == {
-                k: managers[0 if owner_count == 1 else i].l1_manager_id
-                for i, k in enumerate(keys)
-            }
         module.close()
         cache_context.release_imported_event.assert_called_once_with(7)
         for index, manager in enumerate(managers):
+            # close() drained the queue: an aborted store left no staging behind.
+            assert manager.report_status()["staging_object_count"] == 0
             found = manager.reserve_read(keys)
             expected = (
                 [] if failure != "none" else keys if owner_count == 1 else [keys[index]]
