@@ -721,6 +721,7 @@ bool resolve_block_addressing(EngineKVFormat format,
     case EngineKVFormat::NL_X_NBBS_ONE_HS:      // SGLang MLA [NBBS, 1, HS]
     case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:  // fused NHD [NB, BS, NH, 2HS]
     case EngineKVFormat::NL_X_NB_BS_NH_CS:      // fused NHD [NB, BS, NH, CS]
+    case EngineKVFormat::NL_X_NB_BS_NH_HS:  // SGLang component [NB, BS, NH, HS]
       out = {B::kPerLayer, 0, 0, blk, tight};
       return true;
     case EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS:  // SGLang MHA, K then V ptrs
