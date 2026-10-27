@@ -50,12 +50,17 @@ def resolve_prefetched_obj_keys(
     hit_chunks: int,
     locked_gids: tuple,
     group_windows: tuple[int, ...] | None = None,
+    group_tp_replicas: tuple[int, ...] | None = None,
+    group_dcp_shards: tuple[int, ...] | None = None,
 ) -> list[ObjectKey]:
     """Resolve the subset of a request range that lookup actually locked.
 
     ``key.worker_id=None`` resolves every KV rank for scheduler-owned cleanup.
     A worker-specific key resolves only that worker's shard (or one MLA reader
     share), which is required for per-instance RETRIEVE failure cleanup.
+    ``group_windows``, ``group_tp_replicas`` and ``group_dcp_shards`` are the
+    lock model the lookup recorded on its session; each defaults to the
+    registered descriptor's.
     """
     chunk_hashes = ctx.token_hasher.compute_packed_chunk_hashes(
         key.token_bytes, start=key.start, end=key.end
@@ -65,12 +70,16 @@ def resolve_prefetched_obj_keys(
 
     start_chunk = key.start // ctx.chunk_size
     end_chunk = start_chunk + len(chunk_hashes)
-    if group_windows is None:
-        group_windows = tuple(
-            ctx.layout_desc_registry.find_attn_desc(
-                key.model_name, key.world_size
-            ).num_chunks_in_sw
+    if group_windows is None or group_tp_replicas is None or group_dcp_shards is None:
+        attn_desc = ctx.layout_desc_registry.find_attn_desc(
+            key.model_name, key.world_size
         )
+        if group_windows is None:
+            group_windows = tuple(attn_desc.num_chunks_in_sw)
+        if group_tp_replicas is None:
+            group_tp_replicas = attn_desc.group_tp_replicas
+        if group_dcp_shards is None:
+            group_dcp_shards = attn_desc.group_dcp_shards
 
     obj_keys: list[ObjectKey] = []
     for group_idx, window in enumerate(group_windows):
@@ -89,7 +98,11 @@ def resolve_prefetched_obj_keys(
         if lo >= hi:
             continue
         group_hashes = chunk_hashes[lo - start_chunk : hi - start_chunk]
-        obj_keys.extend(ipc_key_to_object_keys(key, group_hashes, [group_idx])[0])
+        obj_keys.extend(
+            ipc_key_to_object_keys(
+                key, group_hashes, [group_idx], group_tp_replicas, group_dcp_shards
+            )[0]
+        )
     return obj_keys
 
 
@@ -280,7 +293,12 @@ class LookupModule(DiscoverableModule):
         # The engine-covered prefix is never looked up, so it is excluded from
         # the hit-rate denominator and reported separately.
         looked_up_tokens = requested_tokens - start_chunk * self._ctx.chunk_size
-        session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
+        session.begin_lookup(
+            key,
+            tuple(attn_desc.num_chunks_in_sw),
+            attn_desc.group_tp_replicas,
+            attn_desc.group_dcp_shards,
+        )
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
             model_name, world_size
@@ -330,6 +348,8 @@ class LookupModule(DiscoverableModule):
                         key,
                         chunk_hashes[:start_chunk],
                         list(range(attn_desc.num_object_groups)),
+                        attn_desc.group_tp_replicas,
+                        attn_desc.group_dcp_shards,
                     )
                     for obj_key in group_keys
                 ]
@@ -552,11 +572,7 @@ class LookupModule(DiscoverableModule):
         if not obj_keys:
             return
 
-        self._ctx.storage_manager.finish_read_prefetched(
-            obj_keys,
-            read_locks=key.require_num_kv_readers(),
-            l1_owners=self._ctx.get_read_owners(key.request_id),
-        )
+        self._finish_read_by_group(key, obj_keys)
 
     @request_handler(HandlerType.BLOCKING)
     def end_session(self, request_id: str) -> None:
@@ -600,6 +616,29 @@ class LookupModule(DiscoverableModule):
     # Internal helpers
     # -----------------------------------------------------------------
 
+    def _finish_read_by_group(
+        self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]
+    ) -> None:
+        """Release a lookup's read locks on ``obj_keys``: each group releases
+        what its prefetch reserved (:meth:`AttnWindowDesc.num_kv_readers`)."""
+        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
+            key.model_name, key.world_size
+        )
+        l1_owners = self._ctx.get_read_owners(key.request_id)
+        if not attn_desc.group_tp_replicas:
+            self._ctx.storage_manager.finish_read_prefetched(
+                obj_keys, read_locks=key.require_num_kv_readers(), l1_owners=l1_owners
+            )
+            return
+        by_read_locks: dict[int, list[ObjectKey]] = {}
+        for obj_key in obj_keys:
+            read_locks = attn_desc.num_kv_readers(obj_key.object_group_id, key)
+            by_read_locks.setdefault(read_locks, []).append(obj_key)
+        for read_locks, group_keys in by_read_locks.items():
+            self._ctx.storage_manager.finish_read_prefetched(
+                group_keys, read_locks=read_locks, l1_owners=l1_owners
+            )
+
     def _all_object_keys(
         self,
         key: IPCCacheServerKey,
@@ -607,9 +646,9 @@ class LookupModule(DiscoverableModule):
     ) -> list[ObjectKey]:
         """Resolve every object key of a request across all object groups.
 
-        The object-group count is read from the layout registry for
-        ``key``'s ``(model_name, world_size)``. The order of the returned keys
-        is unspecified.
+        The object-group count and replication flags are read from the
+        layout registry for ``key``'s ``(model_name, world_size)``. The order
+        of the returned keys is unspecified.
 
         Args:
             key: The IPC key (model/world/worker, salt).
@@ -618,10 +657,16 @@ class LookupModule(DiscoverableModule):
         Returns:
             The object keys of all groups and kv ranks for ``chunk_hashes``.
         """
-        num_groups = self._ctx.layout_desc_registry.find_attn_desc(
+        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
             key.model_name, key.world_size
-        ).num_object_groups
-        per_group = ipc_key_to_object_keys(key, chunk_hashes, list(range(num_groups)))
+        )
+        per_group = ipc_key_to_object_keys(
+            key,
+            chunk_hashes,
+            list(range(attn_desc.num_object_groups)),
+            attn_desc.group_tp_replicas,
+            attn_desc.group_dcp_shards,
+        )
         return [obj_key for group_keys in per_group for obj_key in group_keys]
 
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:

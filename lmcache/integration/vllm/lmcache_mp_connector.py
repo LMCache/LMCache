@@ -732,6 +732,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         dcp_size = parallel_strategy.dcp_size
         self._dcp_size = dcp_size
+        self._parallel_strategy = parallel_strategy
 
         # Lazy offload configuration: when enabled, store operations are
         # buffered and drained by the configured policy.
@@ -914,6 +915,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             kv_caches,
             layout_hints=layout_hints,
             dcp_size=self._dcp_size,
+            # A group vLLM replicates on every TP rank is shared by this
+            # server's TP ranks; a pure-MLA key space has no TP axis.
+            tp_replicas=(
+                1
+                if self._parallel_strategy.mla_only
+                else self._parallel_strategy.kv_tp_size
+            ),
         )
         self.worker_adapter.register_kv_caches(
             kv_caches,

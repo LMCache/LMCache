@@ -806,5 +806,41 @@ class TestKernelAndObjectGroups:
         assert manager.calculate_num_blocks(0, 256) == 16
 
 
+def test_object_groups_expose_their_kernel_groups_tp_replication():
+    """Under separate object groups each object group reports whether its
+    kernel groups are replicated, and ``get_attn_desc`` carries one flag per
+    object group."""
+    tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
+    manager = _build_manager(
+        tensors,
+        engine_group_infos=[
+            EngineGroupInfo(0, (0,), tp_replicas=4, dcp_shards=2),
+            EngineGroupInfo(1, (1,), sw_size_tokens=64),
+        ],
+        separate_object_groups=True,
+    )
+    attn_desc = manager.get_attn_desc()
+    assert attn_desc.group_tp_replicas == (4, 1)
+    assert attn_desc.group_dcp_shards == (2, 1)
+
+
+def test_bundled_object_group_is_replicated_only_if_all_kernel_groups_are():
+    """Without separation one object holds every kernel group and is stored
+    whole, so a replicated kernel group bundled with a sharded one leaves the
+    object stored by every worker."""
+    tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
+    manager = _build_manager(
+        tensors,
+        engine_group_infos=[
+            EngineGroupInfo(0, (0,), tp_replicas=4, dcp_shards=2),
+            EngineGroupInfo(1, (1,)),
+        ],
+        separate_object_groups=False,
+    )
+    attn_desc = manager.get_attn_desc()
+    assert attn_desc.group_tp_replicas == ()
+    assert attn_desc.group_dcp_shards == ()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

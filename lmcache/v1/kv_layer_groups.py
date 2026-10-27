@@ -219,6 +219,10 @@ class KernelGroupInfo:
     """Whether this group's pages hold recurrent state snapshots (Mamba/GDN)
     rather than per-token attention KV. The window reflects restore
     semantics, so ``full_sw_kv`` forcing must not widen it."""
+    tp_replicas: int = 1
+    """``EngineGroupInfo.tp_replicas`` of this group."""
+    dcp_shards: int = 1
+    """``EngineGroupInfo.dcp_shards`` of this group."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -464,6 +468,8 @@ class KVLayerGroupsManager:
                     recurrent_state=(
                         info.recurrent_state if info is not None else False
                     ),
+                    tp_replicas=info.tp_replicas if info is not None else 1,
+                    dcp_shards=info.dcp_shards if info is not None else 1,
                 )
             )
 
@@ -642,6 +648,23 @@ class KVLayerGroupsManager:
             "aux" if g.aux else ("recurrent" if g.recurrent else "attention")
             for g in self._object_groups
         )
+        # An object shared by all ranks only if every kernel group in it is.
+        replicas = tuple(
+            min(self._kernel_groups[i].tp_replicas for i in g.kernel_group_indices)
+            for g in self._object_groups
+        )
+        group_tp_replicas = replicas if any(r > 1 for r in replicas) else ()
+        # DCP is deployment-wide: every replicated kernel group carries it.
+        group_dcp_shards = (
+            tuple(
+                max(self._kernel_groups[i].dcp_shards for i in g.kernel_group_indices)
+                if r > 1
+                else 1
+                for g, r in zip(self._object_groups, replicas, strict=True)
+            )
+            if group_tp_replicas
+            else ()
+        )
         if self._full_sw_kv:
             # full_sw_kv: attention groups report full attention;
             # recurrent-state groups keep their window (position-bound
@@ -654,6 +677,8 @@ class KVLayerGroupsManager:
                     for g in self._object_groups
                 ],
                 group_kinds=kinds,
+                group_tp_replicas=group_tp_replicas,
+                group_dcp_shards=group_dcp_shards,
             )
         return AttnWindowDesc(
             num_chunks_in_sw=[
@@ -661,6 +686,8 @@ class KVLayerGroupsManager:
                 for w in (g.sw_size_chunks for g in self._object_groups)
             ],
             group_kinds=kinds,
+            group_tp_replicas=group_tp_replicas,
+            group_dcp_shards=group_dcp_shards,
         )
 
     def calculate_num_blocks(self, kernel_group_idx: int, num_tokens: int) -> int:

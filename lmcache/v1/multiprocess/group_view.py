@@ -64,6 +64,18 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     KV; the one-block window reflects restore semantics and blend full-window
     forcing must not widen it. Defaulted field: wire-compatible."""
 
+    tp_replicas: int = 1
+    """Consecutive kv ranks that together hold this group in full (one
+    tensor-parallel group's workers, a run). The run is split into
+    ``dcp_shards`` token shards, each keyed by the first rank of the run
+    holding it, so a run stores ``dcp_shards`` objects. ``1`` stores per
+    rank. Defaulted field: wire-compatible."""
+
+    dcp_shards: int = 1
+    """Token shards of a run (decode context parallelism): rank ``w`` of a
+    run holds shard ``w % dcp_shards``, shared by ``tp_replicas //
+    dcp_shards`` ranks. ``1`` without DCP. Defaulted field: wire-compatible."""
+
 
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).

@@ -565,6 +565,63 @@ def l2_storage_manager_config(basic_l1_config):
     )
 
 
+def test_rows_declare_their_own_reader_count(
+    basic_storage_manager_config, basic_layout
+):
+    """A row's ``num_kv_readers`` overrides the task-wide count for its
+    group: the shared group's objects take one lock per worker, the sharded
+    group's one."""
+    # First Party
+    from lmcache.v1.distributed.api import (
+        GroupedObjectKeys,
+        ObjectKey,
+        PrefetchTaskSpec,
+    )
+
+    sm = StorageManager(basic_storage_manager_config)
+    shared = [make_object_key(i) for i in range(2)]
+    sharded = [
+        ObjectKey(
+            chunk_hash=ObjectKey.IntHash2Bytes(i),
+            model_name="test_model",
+            kv_rank=0,
+            object_group_id=1,
+        )
+        for i in range(2)
+    ]
+    ret = sm.reserve_write(shared + sharded, basic_layout)
+    sm.finish_write(list(ret.keys()))
+
+    handle = sm.submit_prefetch_task(
+        PrefetchTaskSpec(
+            key_groups=[
+                GroupedObjectKeys(
+                    keys=shared,
+                    object_group_id=0,
+                    layout_desc=basic_layout,
+                    num_kv_readers=3,
+                ),
+                GroupedObjectKeys(
+                    keys=sharded, object_group_id=1, layout_desc=basic_layout
+                ),
+            ]
+        )
+    )
+    status = sm.query_prefetch_status(handle)
+    assert [cells.count_leading_ones() for cells in status.hit_cells] == [2, 2]
+
+    # The sharded group took the default single lock.
+    sm.finish_read_prefetched(sharded, read_locks=1)
+    assert sm.delete_l1_keys(sharded) == (2, 0)
+    # The shared group took three: one reader leaves two locks held.
+    sm.finish_read_prefetched(shared, read_locks=1)
+    assert sm.delete_l1_keys(shared) == (0, 2)
+    sm.finish_read_prefetched(shared, read_locks=2)
+    assert sm.delete_l1_keys(shared) == (2, 0)
+
+    sm.close()
+
+
 class TestStorageManagerL2Prefetch:
     """Tests for prefetching from L2 through StorageManager."""
 

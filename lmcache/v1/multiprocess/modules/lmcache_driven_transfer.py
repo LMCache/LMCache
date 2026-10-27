@@ -294,13 +294,22 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         lock_state = session.prepare_failed_retrieve_release(key)
         if lock_state is None:
             return
-        hit_chunks, locked_gids, group_windows, lookup_generation = lock_state
+        (
+            hit_chunks,
+            locked_gids,
+            group_windows,
+            group_tp_replicas,
+            group_dcp_shards,
+            lookup_generation,
+        ) = lock_state
         obj_keys = resolve_prefetched_obj_keys(
             self._ctx,
             key,
             hit_chunks,
             locked_gids,
             group_windows=group_windows,
+            group_tp_replicas=group_tp_replicas,
+            group_dcp_shards=group_dcp_shards,
         )
         if not session.claim_failed_retrieve_release(
             instance_id, key, lookup_generation

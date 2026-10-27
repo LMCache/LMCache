@@ -2143,3 +2143,31 @@ def test_disabled_server_stream_keeps_completed_store_reporting(
         assert client.subscribe_kv_events.call_count == 1
     finally:
         adapter.shutdown()
+
+
+@pytest.mark.parametrize(
+    "tp_size,pp_size,n_servers,mla_only,expected",
+    [
+        (8, 1, 1, False, 8),
+        (8, 1, 2, False, 4),
+        (4, 2, 1, False, 4),
+        (1, 1, 1, False, 1),
+        # A pure-MLA key space has no TP axis to share.
+        (8, 1, 1, True, 1),
+    ],
+)
+def test_tp_replicas_of_a_replicated_group(
+    tp_size: int, pp_size: int, n_servers: int, mla_only: bool, expected: int
+):
+    """``EngineGroupInfo.tp_replicas`` the connector sends for a group vLLM
+    replicates on every TP rank: this server's TP ranks, or 1 for pure MLA."""
+    strategy = adapter_mod.ParallelStrategy(
+        mla_only=mla_only,
+        vllm_world_size=tp_size * pp_size,
+        vllm_worker_id=0,
+        tp_size=tp_size,
+        pp_size=pp_size,
+        n_servers=n_servers,
+        dcp_size=1,
+    )
+    assert (1 if strategy.mla_only else strategy.kv_tp_size) == expected

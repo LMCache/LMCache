@@ -51,6 +51,8 @@ class Session:
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
     prefetch_group_windows: tuple[int, ...] = ()
+    prefetch_group_tp_replicas: tuple[int, ...] = ()
+    prefetch_group_dcp_shards: tuple[int, ...] = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
     _lookup_generation: int = field(default=0, repr=False)
@@ -155,13 +157,21 @@ class Session:
         self,
         key: IPCCacheServerKey,
         group_windows: tuple[int, ...],
+        group_tp_replicas: tuple[int, ...] = (),
+        group_dcp_shards: tuple[int, ...] = (),
     ) -> None:
-        """Record a new lookup and reset its per-lookup release state."""
+        """Record a new lookup and reset its per-lookup release state.
+
+        ``group_windows``, ``group_tp_replicas`` and ``group_dcp_shards`` are
+        the ``AttnWindowDesc`` fields the lookup resolved its keys with.
+        """
         with self._lock:
             self.lookup_ipc_key = key
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
             self.prefetch_group_windows = group_windows
+            self.prefetch_group_tp_replicas = group_tp_replicas
+            self.prefetch_group_dcp_shards = group_dcp_shards
             self._lookup_generation += 1
             self._failed_retrieve_releases.clear()
             self._prefetch_owners.clear()
@@ -186,8 +196,20 @@ class Session:
     def prepare_failed_retrieve_release(
         self,
         key: IPCCacheServerKey,
-    ) -> tuple[int, tuple[int, ...], tuple[int, ...], int] | None:
-        """Return a stable snapshot for a failed worker's lock release."""
+    ) -> (
+        tuple[
+            int, tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...], int
+        ]
+        | None
+    ):
+        """Return a stable snapshot for a failed worker's lock release.
+
+        Returns:
+            ``(hit_chunks, locked_gids, group_windows, group_tp_replicas,
+            group_dcp_shards, lookup_generation)`` of the current lookup, or
+            ``None`` when ``key`` is not a worker key of that lookup or no
+            result exists.
+        """
         if key.worker_id is None:
             return None
 
@@ -212,6 +234,8 @@ class Session:
                 hit_chunks,
                 self.prefetch_locked_gids,
                 self.prefetch_group_windows,
+                self.prefetch_group_tp_replicas,
+                self.prefetch_group_dcp_shards,
                 self._lookup_generation,
             )
 

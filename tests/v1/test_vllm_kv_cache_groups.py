@@ -56,7 +56,10 @@ class FullAttentionSpec(AttentionSpec):
 
 @dataclass
 class MLAAttentionSpec(AttentionSpec):
-    """Key-only, one-vector-per-token spec (an MLA index cache)."""
+    """Key-only, one-vector-per-token spec (an MLA index cache); vLLM's
+    ``max_tp_shards == 1`` declares it replicated on every TP rank."""
+
+    max_tp_shards: "int | None" = None
 
 
 @dataclass
@@ -65,6 +68,7 @@ class MambaSpec:
 
     block_size: int
     mamba_cache_mode: str = "align"
+    tp_replicated: bool = False
 
 
 @dataclass
@@ -582,3 +586,83 @@ def test_conversion_skips_format_discovery_for_scratch_layers(
 
     assert [g.engine_group_id for g in spec] == [0]
     assert get_engine_group_indices(spec, 2) == [0, EXCLUDED_ENGINE_GROUP]
+
+
+def test_conversion_marks_tp_replicated_groups():
+    """A group whose spec declares full tensor-parallel replication
+    (``max_tp_shards == 1``) carries the caller's replica count; any other
+    group carries 1."""
+    infos = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    ["mla.0"], MLAAttentionSpec(block_size=16, max_tp_shards=1)
+                ),
+                MockKVCacheGroup(["kda.0"], MambaSpec(block_size=16)),
+                MockKVCacheGroup(
+                    ["ple.0"], MambaSpec(block_size=16, tp_replicated=True)
+                ),
+            ]
+        ),
+        _same_shape_caches(["mla.0", "kda.0", "ple.0"]),
+        dcp_size=2,
+        tp_replicas=8,
+    )
+
+    assert [group.tp_replicas for group in infos] == [8, 1, 1]
+    assert [group.dcp_shards for group in infos] == [2, 1, 1]
+
+
+def test_conversion_mla_spec_without_max_tp_shards_is_replicated():
+    """An MLA spec that leaves ``max_tp_shards`` unset is still one latent
+    head held in full on every TP rank, so it is tagged like a declared one."""
+    infos = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["mla.0"], MLAAttentionSpec(block_size=16)),
+                MockKVCacheGroup(["attn.0"], FullAttentionSpec(block_size=16)),
+            ]
+        ),
+        _same_shape_caches(["mla.0", "attn.0"]),
+        tp_replicas=8,
+    )
+
+    assert [group.tp_replicas for group in infos] == [8, 1]
+
+
+def test_conversion_partial_tp_sharding_is_not_replicated():
+    """Only full replication shares an object: a cache split into fewer
+    shards than ranks is still stored per rank."""
+    infos = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    ["mla.0"], MLAAttentionSpec(block_size=16, max_tp_shards=2)
+                ),
+            ]
+        ),
+        _same_shape_caches(["mla.0"]),
+        dcp_size=2,
+        tp_replicas=8,
+    )
+
+    assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [(1, 1)]
+
+
+def test_conversion_pure_mla_key_space_takes_no_dcp_shards():
+    """With ``tp_replicas == 1`` (a pure-MLA key space, or no TP) there is no
+    run to shard, so ``dcp_shards`` stays 1 even under DCP."""
+    infos = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    ["mla.0"], MLAAttentionSpec(block_size=16, max_tp_shards=1)
+                ),
+            ]
+        ),
+        _same_shape_caches(["mla.0"]),
+        dcp_size=2,
+        tp_replicas=1,
+    )
+
+    assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [(1, 1)]

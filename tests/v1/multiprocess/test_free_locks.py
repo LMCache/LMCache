@@ -12,7 +12,12 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
+from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
+    ObjectKey,
+    PrefetchHandle,
+    PrefetchResult,
+)
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
@@ -110,6 +115,9 @@ def _make_free_locks_ctx(
     hit_chunks: int,
     locked_gids: tuple = (),
     lookup_start: int = 0,
+    world_size: int = 1,
+    group_tp_replicas: tuple[int, ...] = (),
+    group_dcp_shards: tuple[int, ...] = (),
 ) -> MagicMock:
     """Build a mock engine context for free_lookup_locks tests.
 
@@ -122,6 +130,11 @@ def _make_free_locks_ctx(
             "every group" (legacy std-lookup behavior).
         lookup_start: ``start`` of the session's lookup key; releases are
             floored to it.
+        world_size: KV world size of the registered AttnWindowDesc.
+        group_tp_replicas: Per-object-group replica counts of the registered
+            AttnWindowDesc.
+        group_dcp_shards: Per-object-group DCP shard counts of the registered
+            AttnWindowDesc.
 
     Returns:
         The configured MagicMock context.
@@ -132,7 +145,10 @@ def _make_free_locks_ctx(
     ctx.token_hasher.chunk_size = 256
     ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
-        num_chunks_in_sw=windows
+        num_chunks_in_sw=windows,
+        world_size=world_size,
+        group_tp_replicas=group_tp_replicas,
+        group_dcp_shards=group_dcp_shards,
     )
     session = ctx.session_manager.get_or_create.return_value
     session.prefetch_hit_chunks = hit_chunks
@@ -166,11 +182,13 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
     )
 
 
-def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
+def _free_locks_key(
+    num_tokens: int, start: int, end: int, world_size: int = 1
+) -> IPCCacheServerKey:
     """Build a lookup-style (worker_id=None) key over [start, end)."""
     return IPCCacheServerKey.from_token_ids(
         model_name="testmodel",
-        world_size=1,
+        world_size=world_size,
         num_kv_readers=1,
         worker_id=None,
         token_ids=tuple(range(num_tokens)),
@@ -511,7 +529,9 @@ def test_server_free_lookup_locks_honors_the_session_lock_model():
 
     with patch(
         "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
-        side_effect=lambda k, hs, gids: [[f"g{gids[0]}-{h.decode()}" for h in hs]],
+        side_effect=lambda k, hs, gids, group_tp_replicas=(), group_dcp_shards=(): [
+            [f"g{gids[0]}-{h.decode()}" for h in hs]
+        ],
     ):
         module.free_lookup_locks(key, 1)
 
@@ -519,6 +539,63 @@ def test_server_free_lookup_locks_honors_the_session_lock_model():
     # Group 0 (recurrent, window 1): only the boundary chunk. Group 1
     # (attention): the whole hit prefix. Group 2 (standalone aux): NOTHING.
     assert released == ["g0-h2", "g1-h0", "g1-h1", "g1-h2"]
+
+
+def test_server_free_lookup_locks_releases_replicated_groups_per_reader():
+    """A replicated group's one object was locked once per worker, so its
+    key releases that many locks; the sharded group releases the key's single
+    lock on every rank's key."""
+    ctx = _make_free_locks_ctx(
+        [b"h0"],
+        windows=[-1, -1],
+        hit_chunks=1,
+        world_size=2,
+        group_tp_replicas=(2, 1),
+    )
+    module = LookupModule(ctx)
+
+    module.free_lookup_locks(_free_locks_key(256, 0, 256, world_size=2), 1)
+
+    released = {
+        kwargs["read_locks"]: {(k.object_group_id, k.kv_rank) for k in args[0]}
+        for args, kwargs in ctx.storage_manager.finish_read_prefetched.call_args_list
+    }
+    rank0, rank1 = (
+        ObjectKey.ComputeKVRank(
+            world_size=2, global_rank=w, local_world_size=2, local_rank=w
+        )
+        for w in range(2)
+    )
+    assert released == {2: {(0, rank0)}, 1: {(1, rank0), (1, rank1)}}
+
+
+def test_server_free_lookup_locks_releases_dcp_shards_per_shard_reader():
+    """Under DCP a replicated group's run holds one object per token shard,
+    each locked once per rank holding that shard: TP=4, DCP=2 releases two
+    locks on each of the shard-0 and shard-1 keys."""
+    ctx = _make_free_locks_ctx(
+        [b"h0"],
+        windows=[-1],
+        hit_chunks=1,
+        world_size=4,
+        group_tp_replicas=(4,),
+        group_dcp_shards=(2,),
+    )
+    module = LookupModule(ctx)
+
+    module.free_lookup_locks(_free_locks_key(256, 0, 256, world_size=4), 1)
+
+    released = {
+        kwargs["read_locks"]: {k.kv_rank for k in args[0]}
+        for args, kwargs in ctx.storage_manager.finish_read_prefetched.call_args_list
+    }
+    shard0, shard1 = (
+        ObjectKey.ComputeKVRank(
+            world_size=4, global_rank=w, local_world_size=4, local_rank=w
+        )
+        for w in range(2)
+    )
+    assert released == {2: {shard0, shard1}}
 
 
 def test_disjoint_frees_for_one_lookup_both_land():
