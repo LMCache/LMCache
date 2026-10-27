@@ -51,6 +51,4 @@ class LMCacheTokenDropScheduler(Scheduler):
         super().__init__(*args, **kwargs)
         if type(self.kv_cache_manager) is not KVCacheManager:
             raise RuntimeError("Token dropping requires the stock KVCacheManager")
-        self.kv_cache_manager = _EngineLocalKVCacheManagerProxy(
-            self.kv_cache_manager
-        )
+        self.kv_cache_manager = _EngineLocalKVCacheManagerProxy(self.kv_cache_manager)
