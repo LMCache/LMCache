@@ -178,8 +178,15 @@ class RemoteBackend(StorageBackendInterface):
                 future = asyncio.run_coroutine_threadsafe(
                     self.connection.exists(key), self.loop
                 )
-                res = future.result()
-                return res
+                try:
+                    return future.result(self.config.blocking_timeout_secs)
+                except TimeoutError:
+                    future.cancel()
+                    logger.warning(
+                        "Remote contains timed out after %.3fs",
+                        self.config.blocking_timeout_secs,
+                    )
+                    return False
         except Exception as e:
             logger.warning("Remote connection failed in contains: %s", e)
             logger.warning("Returning False")
