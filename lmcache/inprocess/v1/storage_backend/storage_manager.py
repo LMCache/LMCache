@@ -1181,7 +1181,9 @@ class StorageManager:
 
         :return: Generator of (backend_name, backend) tuples.
         """
-        for backend_name, backend in self.storage_backends.items():
+        with self.manager_lock:
+            backends = list(self.storage_backends.items())
+        for backend_name, backend in backends:
             # In freeze mode, only use local_cpu backend
             with self._freeze_lock:
                 if self._freeze and backend_name != "LocalCPUBackend":
@@ -1387,14 +1389,18 @@ class StorageManager:
         :param str req_id: The request identifier to cancel.
         :return: None
         """
-        for backend in self.storage_backends.values():
+        with self.manager_lock:
+            backends = list(self.storage_backends.values())
+        for backend in backends:
             backend.cancel_request(req_id)
 
     def close(self):
         logger.info("Closing StorageManager...")
 
         # Close all backends
-        for name, backend in self.storage_backends.items():
+        with self.manager_lock:
+            backends = list(self.storage_backends.items())
+        for name, backend in backends:
             try:
                 logger.info("Closing storage backend: %s", name)
                 backend.close()
