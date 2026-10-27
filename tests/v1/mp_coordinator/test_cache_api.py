@@ -26,6 +26,7 @@ from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
+from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 
@@ -69,6 +70,8 @@ def test_prefetch_unknown_instance_returns_404():
     with _client() as client:
         resp = client.post("/cache/prefetches", json=_prefetch_body("does-not-exist"))
         assert resp.status_code == 404
+        prefetch = client.app.state.ctx.controllers.get(PrefetchManager)
+        assert prefetch.stats().requests_submitted["unknown_server"] == 1
 
 
 def test_prefetch_submit_then_status_proxy():
