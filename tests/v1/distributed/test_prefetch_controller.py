@@ -45,6 +45,7 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
 )
+from lmcache.v1.distributed.l2_adapters.raw_block import RawBlockCore, encode_object_key
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
     RawBlockL2Adapter,
     RawBlockL2AdapterConfig,
@@ -63,7 +64,6 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     L2AdapterDescriptor,
 )
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
-from lmcache.v1.storage_backend.raw_block import RawBlockCore, encode_object_key
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
 if not torch_dev.is_available():

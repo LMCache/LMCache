@@ -423,7 +423,7 @@ class TestBigtableL2Adapter:
         from lmcache.v1.distributed.l2_adapters.bigtable_key_encoder import (
             BigtableL2KeyEncoder,
         )
-        from lmcache.v1.storage_backend.connector.bigtable_sharder import (
+        from lmcache.v1.distributed.l2_adapters.bigtable_sharder import (
             BigtablePayloadSharder,
         )
 

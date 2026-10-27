@@ -112,9 +112,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - gRPC request-dispatch threads. Used only with ``--transport grpc``.
    * - ``--grpc-server-mode``
      - ``sync``
-     - gRPC server implementation: ``sync`` or ``aio``. ``aio`` receives
-       requests on one event loop and hands only the handlers to worker
-       threads. Used only with ``--transport grpc``.
+     - gRPC server implementation: ``sync``, ``aio`` or ``native``.
+       ``aio`` receives requests on one event loop and hands only the
+       handlers to worker threads. ``native`` does the HTTP/2 and gRPC
+       framing in Rust, outside the GIL; it needs
+       ``pip install pygrpc-native``, which the Docker images do not
+       include yet. All three serve the same clients over TCP.
+       In ``native`` mode the grpcio runtime metrics only cover
+       out-of-tree services. Used only with ``--transport grpc``.
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.
@@ -292,11 +297,11 @@ The HTTP frontend is included when running ``lmcache server``.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
-   * - ``--http-api-key-file``
+   * - ``--api-key-file``
      - unset
      - Read a bearer API key from a file. Repeat the option to accept multiple
-       keys during rotation. ``LMCACHE_HTTP_API_KEY_FILE`` and
-       ``LMCACHE_HTTP_API_KEY`` provide environment alternatives. All sources
+       keys during rotation. ``LMCACHE_API_KEY_FILE`` and
+       ``LMCACHE_API_KEY`` provide environment alternatives. All sources
        are cumulative. When none are set, authentication is disabled. ``/``
        and ``/healthcheck`` remain public when authentication is enabled.
 

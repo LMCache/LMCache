@@ -44,7 +44,7 @@ jobs:
     # points to rather than SGLang's GitHub release, whose image is pushed later.
     resolve-sglang-version:
         name: Resolve the newest SGLang release image
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         outputs:
             version: ${{ steps.resolve.outputs.version }}
 
@@ -71,7 +71,7 @@ jobs:
             matrix:
                 include:
                     - arch: amd64
-                      runner: ubuntu-latest
+                      runner: ubuntu-24.04
                     - arch: arm64
                       runner: ubuntu-24.04-arm
         runs-on: ${{ matrix.runner }}
@@ -151,7 +151,7 @@ jobs:
         name: Publish lmcache/sglang manifest
         if: inputs.push
         needs: [build-sglang-image]
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
 
         steps:
             - name: "Harden Runner"

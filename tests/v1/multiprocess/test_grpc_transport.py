@@ -87,6 +87,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
 )
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
+from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 _GRPC_MODULE_TYPES = (
     LookupModule,
@@ -123,6 +124,10 @@ def _expected_grpc_service_name(module_type: type[Any]) -> str:
     )
 
 
+_NATIVE_MODE = pytest.param("native", marks=requires_pygrpc_native)
+_GRPC_SERVER_MODES = ["sync", "aio", _NATIVE_MODE]
+
+
 @dataclass
 class _Calls:
     lookup: tuple[IPCCacheServerKey, int] | None = None
@@ -131,7 +136,7 @@ class _Calls:
     chunk_negotiation: int | None = None
 
 
-@pytest.fixture(params=["sync", "aio"])
+@pytest.fixture(params=_GRPC_SERVER_MODES)
 def grpc_client(
     request: pytest.FixtureRequest,
 ) -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
@@ -709,7 +714,7 @@ def test_generated_grpc_server_module_call_round_trips(
     )
 
 
-@pytest.mark.parametrize("grpc_server_mode", ["sync", "aio"])
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
 def test_grpc_server_keeps_handler_concurrency(grpc_server_mode: str) -> None:
     """Normal handlers stay within max_cpu_workers, and a client's affinity
     handlers all run on one worker."""
@@ -759,7 +764,7 @@ def test_grpc_server_keeps_handler_concurrency(grpc_server_mode: str) -> None:
     assert [len(threads) for threads in affinity_threads.values()] == [1, 1]
 
 
-@pytest.mark.parametrize("grpc_server_mode", ["sync", "aio"])
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
 def test_stalled_stream_subscriber_stops_server_reads(grpc_server_mode: str) -> None:
     """A subscriber that stops reading leaves later batches unread in the
     handler's stream instead of buffered on the server."""
