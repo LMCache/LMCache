@@ -16,6 +16,7 @@ message RegisterKvCacheRequest {
   string engine_type = 5;
   bytes encoded_layout_hints = 6;
   repeated EngineGroupInfo engine_group_infos = 7;
+  optional KVEventProfile event_profile = 8;
 }
 
 message RegisterKvCacheResponse {}

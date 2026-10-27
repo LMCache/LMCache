@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
+from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash, resolve_block_hashes
 from vllm.v1.utils import ConstantList
 import torch
 
@@ -21,11 +22,13 @@ from lmcache.integration.vllm.utils import (
     extract_request_configs_from_request,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
+from lmcache.v1.multiprocess.custom_types import EventBinding, KVEventProfile
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
 from lmcache.v1.multiprocess.token_codec import (
     TOKEN_STRIDE,
     num_packed_tokens,
     pack_token_ids,
+    unpack_token_ids,
 )
 
 if TYPE_CHECKING:
@@ -98,6 +101,8 @@ class LMCacheMPRequestTracker:
     pending_free_ranges: list[tuple[int, int]] = field(default_factory=list)
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
+    native_block_hashes: list[bytes] | None = None
+    """Live engine hashes; required for every event-enabled STORE."""
 
     # Packed prefix of `get_token_ids()`, grown in place. A request emits one
     # op per scheduler step, so repacking the whole sequence each time would
@@ -125,6 +130,7 @@ class LMCacheMPRequestTracker:
         self.state = LMCacheMPRequestState.PREFETCHING
         self.packed_tokens = bytearray()
         self.mm_adjusted_prompt_ids = []
+        self.native_block_hashes = None
         mm_hashes, mm_positions = extract_mm_features(request)
         if mm_hashes and mm_positions:
             prompt_ids = torch.tensor(request.prompt_token_ids)
@@ -306,6 +312,8 @@ class LMCacheMPRequestMetadata:
         group_tokens_per_block: list[int],
         *,
         save_decode_cache: bool = False,
+        event_profile: KVEventProfile | None = None,
+        hash_block_size: int = 0,
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the store metadata for the current request tracker.
@@ -321,6 +329,9 @@ class LMCacheMPRequestMetadata:
             save_decode_cache: Whether to store chunks containing generated
                 tokens. Defaults to storing only complete chunks within the
                 initial prompt, including when decode fills its partial tail.
+            event_profile: Negotiated native identity profile, or disabled.
+                A missing native hash source is an error when enabled.
+            hash_block_size: Granularity of the scheduler Request.block_hashes.
 
         Returns:
             Metadata for newly storable chunks, or None when no complete
@@ -398,6 +409,52 @@ class LMCacheMPRequestMetadata:
                 start=start_token_idx,
                 end=end_token_idx,
             )
+
+            if event_profile is not None:
+                if tracker.native_block_hashes is None:
+                    raise ValueError(
+                        "Event-enabled STORE is missing scheduler native hashes"
+                    )
+                block_size = event_profile.block_size
+                if hash_block_size <= 0 or block_size % hash_block_size:
+                    raise ValueError("Native event block/hash geometry is incompatible")
+                if lmcache_tokens_per_chunk % block_size:
+                    raise ValueError(
+                        "LMCache chunks must contain complete native blocks"
+                    )
+                hashes = resolve_block_hashes(
+                    tracker.native_block_hashes, hash_block_size, block_size
+                )
+                if len(hashes) * block_size < end_token_idx:
+                    raise ValueError("Scheduler native hashes do not cover the STORE")
+                bindings = []
+                for start in range(
+                    start_token_idx, end_token_idx, lmcache_tokens_per_chunk
+                ):
+                    end = start + lmcache_tokens_per_chunk
+                    first, last = start // block_size, end // block_size
+                    bindings.append(
+                        EventBinding(
+                            profile_id=event_profile.profile_id,
+                            block_hashes=tuple(
+                                maybe_convert_block_hash(h) for h in hashes[first:last]
+                            ),
+                            parent_block_hash=(
+                                maybe_convert_block_hash(hashes[first - 1])
+                                if first
+                                else None
+                            ),
+                            token_ids=tuple(
+                                unpack_token_ids(
+                                    token_bytes[
+                                        start * TOKEN_STRIDE : end * TOKEN_STRIDE
+                                    ]
+                                )
+                            ),
+                            block_size=block_size,
+                        )
+                    )
+                op.event_bindings = tuple(bindings)
 
             ret = LMCacheMPRequestMetadata(
                 request_id=tracker.request_id,

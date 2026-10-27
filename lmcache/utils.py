@@ -746,6 +746,8 @@ class LayerCacheEngineKey(CacheEngineKey):
 
 @dataclass
 class CacheStoreEvent:
+    """A cache store, optionally scoped to an engine-native cache group."""
+
     block_hashes: list[int | bytes]
     parent_block_hash: int | bytes | None
     token_ids: list[int]
@@ -758,6 +760,9 @@ class CacheStoreEvent:
 
     medium: str | None
     lora_name: str | None
+    # None leaves legacy producers' events unscoped.
+    group_idx: int | None = None
+    kv_cache_spec_kind: str | None = None
 
 
 @dataclass
@@ -766,6 +771,7 @@ class CacheRemoveEvent:
 
     block_hashes: list[int | bytes]
     medium: str | None
+    group_idx: int | None = None
 
 
 CacheEvent = CacheStoreEvent | CacheRemoveEvent

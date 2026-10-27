@@ -26,6 +26,7 @@ from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_ke
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
+    KVEventProfile,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
@@ -55,6 +56,15 @@ from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
+
+
+def _reclaim_device_memory() -> None:
+    """Reclaim cached device allocations after context references are released."""
+    torch_dev.empty_cache()
+    ipc_collect = getattr(torch_dev, "ipc_collect", None)
+    if ipc_collect is not None:
+        # Backends without IPC collection omit this optional operation.
+        ipc_collect()
 
 
 def get_layout_desc(
@@ -223,6 +233,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             "release_imported_event",
             self._release_imported_event,
             payload_type=tuple[int, int],
+        )
+        self._device_host_func_dispatcher.register(
+            "finish_native_event_store",
+            self._finish_native_event_store,
+            payload_type=tuple[L1WriteCompletion, str, str],
         )
         self._device_host_func_dispatcher.start()
 
@@ -412,11 +427,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         entries.clear()
         # ipc_collect() only unmaps a CUDA-IPC-imported segment once its last
         # tensor reference is gone (LMCache#4014), hence the clear() above.
-        torch_dev.empty_cache()
-        ipc_collect = getattr(torch_dev, "ipc_collect", None)
-        if ipc_collect is not None:
-            # Backends without IPC collection omit this optional operation.
-            ipc_collect()
+        _reclaim_device_memory()
 
     def report_status(self) -> dict:
         """Return GPU transfer module status information.
@@ -463,6 +474,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
+        event_profile: KVEventProfile | None = None,
     ) -> None:
         """Register the KV cache tensors for a given GPU instance ID.
 
@@ -478,6 +490,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 GPUCacheContext for GPU KV format detection.
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
+            event_profile: Native CPU-event identity contract. Every rank validates
+                it, including idempotent registration after a heartbeat recovery.
+
+        Raises:
+            ValueError: If the native event profile or dense layout is unsupported.
+
+        A native profile rejection closes and reclaims the candidate context
+        before raising; existing registrations and layout descriptors are retained.
         """
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
@@ -486,13 +506,29 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # is SERIALIZED on the MQ main loop, so it is the sole inserter.
         with self._lock:
             existing = self._cache_contexts.get(instance_id)
-            if existing is not None:
-                existing.last_seen = now
-                logger.info(
-                    "Instance %d already registered; refreshing liveness",
-                    instance_id,
+        if existing is not None:
+            if event_profile is not None:
+                if (model_name, world_size) != (
+                    existing.model_name,
+                    existing.world_size,
+                ):
+                    raise ValueError("native event registration context mismatch")
+                if self._ctx.kv_event_module is None:
+                    raise ValueError("native KV event capability is unavailable")
+                self._ctx.kv_event_module.register_profile(
+                    model_name,
+                    world_size,
+                    event_profile,
+                    attn_desc=existing.cache_context.kv_layer_groups_manager.get_attn_desc(),
                 )
-                return
+            with self._lock:
+                if self._cache_contexts.get(instance_id) is existing:
+                    existing.last_seen = now
+                    logger.info(
+                        "Instance %d already registered; refreshing liveness",
+                        instance_id,
+                    )
+                    return
 
         # Build the context and layout descriptor outside the lock.
         cache_context = self._create_cache_context(
@@ -518,6 +554,19 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             for gid in range(num_object_groups)
         }
         attn_desc = kv_groups_manager.get_attn_desc()
+        if event_profile is not None:
+            try:
+                if self._ctx.kv_event_module is None:
+                    raise ValueError("native KV event capability is unavailable")
+                # Validate before overwriting the existing ranks' shared layout.
+                self._ctx.kv_event_module.register_profile(
+                    model_name, world_size, event_profile, attn_desc=attn_desc
+                )
+            except ValueError:
+                cache_context.close()
+                del cache_context
+                _reclaim_device_memory()
+                raise
         self._ctx.layout_desc_registry.register(
             model_name,
             world_size,
@@ -595,7 +644,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
         Args:
             key: The IPC key for the KV cache blocks.
-                Must have worker_id != None (worker store operation).
+                Must have worker_id != None (worker store operation). Optional
+                native event metadata binds each complete chunk before copying.
             instance_id: The GPU instance ID (such as PID).
             gpu_block_ids: GPU block IDs to store, indexed by LMCache KV
                 group index.
@@ -612,6 +662,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
+            ValueError: If native event metadata conflicts with the registered
+                profile, tokens or chunk geometry.
 
         Notes:
             All-or-nothing. If ``gpu_block_ids`` do not fully cover every chunk
@@ -723,6 +775,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 (instance_id, import_token),
             )
 
+            transfer_key = next_transfer_key(key.request_id)
+            if key.event_profile is not None:
+                if self._ctx.kv_event_module is None:
+                    raise ValueError("native KV event capability is unavailable")
+                self._ctx.kv_event_module.bind_store(
+                    key, obj_keys_per_obj_group[0], transfer_key
+                )
+
             # CPU-synchronous sentinel: a GPU store is about to be enqueued.
             # Must be published via publish() (not publish_on_stream) so the
             # drain thread sees it before MP_REQUEST_END can race MP_STORE_END.
@@ -734,35 +794,34 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 )
             )
 
-            # Worker 0 only: bindings depend on token content alone, so one
-            # report covers every rank's keys. Published before finish_write
-            # is enqueued so the token bindings precede the write-finished
-            # events on the bus.
-            if key.worker_id == 0 and self._ctx.event_bus.has_subscribers(
-                EventType.MP_TOKENS
-            ):
-                self._publish_token_bindings(key, obj_keys_per_obj_group[0])
-
-            transfer_key = next_transfer_key(key.request_id)
-            self._ctx.event_bus.publish_on_stream(
-                cache_context.cupy_stream,
-                Event(
-                    event_type=EventType.MP_STORE_START,
-                    session_id=key.request_id,
-                    metadata={
-                        "device": str(cache_context.device),
-                        "engine_id": instance_id,
-                        "model_name": model_name,
-                        "transfer_key": transfer_key,
-                    },
-                ),
-            )
-
             reserved_dict: dict[ObjectKey, MemoryObj] = {}
             all_dict: dict[ObjectKey, MemoryObj] = {}
             total_bytes: int = 0
             store_succeeded = False
             try:
+                # Worker 0 only: bindings depend on token content alone, so one
+                # report covers every rank's keys. Published before finish_write
+                # is enqueued so the token bindings precede the write-finished
+                # events on the bus.
+                if key.worker_id == 0 and self._ctx.event_bus.has_subscribers(
+                    EventType.MP_TOKENS
+                ):
+                    self._publish_token_bindings(key, obj_keys_per_obj_group[0])
+
+                self._ctx.event_bus.publish_on_stream(
+                    cache_context.cupy_stream,
+                    Event(
+                        event_type=EventType.MP_STORE_START,
+                        session_id=key.request_id,
+                        metadata={
+                            "device": str(cache_context.device),
+                            "engine_id": instance_id,
+                            "model_name": model_name,
+                            "transfer_key": transfer_key,
+                        },
+                    ),
+                )
+
                 for obj_group_id in range(num_object_groups):
                     obj_keys = obj_keys_per_obj_group[obj_group_id]
                     skip_mask = skipped_chunks[obj_group_id]
@@ -815,13 +874,23 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 # Fail closed: commit the reserved objects only when every chunk
                 # copied successfully; otherwise the whole store is skipped.
                 stored_count = len(all_dict) if store_succeeded else 0
-                if stored_count:
+                if key.event_profile is not None:
+                    submit_callback_to_stream(
+                        cache_context.cupy_stream,
+                        "finish_native_event_store",
+                        (
+                            completion if stored_count else [],
+                            key.request_id,
+                            transfer_key,
+                        ),
+                    )
+                elif stored_count:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
                         "finish_write_by_owner",
                         completion,
                     )
-                else:
+                if not stored_count:
                     total_bytes = 0
                 num_tokens = num_chunks * self._ctx.chunk_size if stored_count else 0
                 self._ctx.event_bus.publish_on_stream(
@@ -1209,3 +1278,30 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 },
             )
         )
+
+    def _finish_native_event_store(
+        self, payload: tuple[L1WriteCompletion, str, str]
+    ) -> None:
+        """Release pending bindings after L1 has emitted actual commit events.
+
+        GPU MP_STORE_END and host completion dispatch use different queues;
+        only this callback orders metadata cleanup after readable residency.
+        """
+        completion, request_id, transfer_key = payload
+        try:
+            if completion:
+                self._ctx.storage_manager.finish_write_by_owner(completion)
+        finally:
+            self._ctx.event_bus.publish(
+                Event(
+                    event_type=EventType.MP_TOKENS,
+                    session_id=request_id,
+                    metadata={
+                        "chunk_hashes": [],
+                        "token_chunks": [],
+                        "token_offsets": [],
+                        "parent_hashes": [],
+                        "native_store_finished": transfer_key,
+                    },
+                )
+            )

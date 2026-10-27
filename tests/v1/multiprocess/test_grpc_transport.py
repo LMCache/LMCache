@@ -28,6 +28,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CBUnifiedLookupResult,
     IPCCacheServerKey,
     KVEventBatch,
+    KVEventProfile,
     KVEventRecord,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
@@ -599,8 +600,10 @@ def test_response_encoder_compiles_its_codec_once(
     encode = proto_codec.compile_response_encoder_for_type(
         kv_event_service_pb2.KVEventBatch, KVEventBatch
     )
-    record = KVEventRecord(1, "stored", "cpu", "model", [b"h"], None, [1, 2, 3])
-    batch = KVEventBatch(True, 1, 2, False, [record])
+    record = KVEventRecord(
+        1, "stored", "CPU", "model", (b"h",), None, (1, 2, 3), 3, "native-test", 1
+    )
+    batch = KVEventBatch(True, 1, 2, False, [record], schema_version=1)
 
     first = encode(batch).SerializeToString()
     after_first = len(compiled)
@@ -769,7 +772,13 @@ def test_stalled_stream_subscriber_stops_server_reads(grpc_server_mode: str) -> 
     class Module:
         @request_handler()
         def subscribe_kv_events(
-            self, instance_id: int, model_name: str, cursor: int, max_events: int
+            self,
+            instance_id: int,
+            model_name: str,
+            cursor: int,
+            max_events: int,
+            world_size: int,
+            profile: KVEventProfile,
         ) -> MessagingStream[KVEventBatch]:
             def read(closed: threading.Event) -> KVEventBatch:
                 nonlocal reads
@@ -777,9 +786,18 @@ def test_stalled_stream_subscriber_stops_server_reads(grpc_server_mode: str) -> 
                     raise StopIteration
                 reads += 1
                 record = KVEventRecord(
-                    reads, "store", "cpu", model_name, [b"h"], None, [1] * 4096
+                    reads,
+                    "stored",
+                    "CPU",
+                    model_name,
+                    (b"h",),
+                    None,
+                    (1,) * 4096,
+                    profile.block_size,
+                    profile.profile_id,
+                    world_size,
                 )
-                return KVEventBatch(True, 1, reads, False, [record])
+                return KVEventBatch(True, 1, reads, False, [record], schema_version=1)
 
             return MessagingStream(read, lambda: None)
 
@@ -795,7 +813,9 @@ def test_stalled_stream_subscriber_stops_server_reads(grpc_server_mode: str) -> 
     server.start()
     client = GrpcMultiprocessClient(f"grpc://127.0.0.1:{server.bound_port}")  # type: ignore[abstract]
     try:
-        stream = client.subscribe_kv_events(1, "model", 0, 16)
+        stream = client.subscribe_kv_events(
+            1, "model", 0, 16, 1, KVEventProfile("test", 4096)
+        )
         next(stream)
         # Reads stop once the flow-control window is full.
         deadline = time.monotonic() + 10

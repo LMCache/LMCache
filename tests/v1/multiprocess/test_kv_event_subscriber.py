@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Subscriber lifetime and ordering through the public stream/client boundary."""
+"""Ordering, invalidation and ownership at the subscriber transport boundary."""
 
 # Standard
+from collections.abc import Iterator
 from dataclasses import replace
-from unittest.mock import MagicMock
+from unittest.mock import Mock
 import queue
 import subprocess
 import sys
@@ -14,335 +15,361 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import KVEventBatch, KVEventRecord
+from lmcache.utils import CacheStoreEvent
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
+from lmcache.v1.multiprocess.custom_types import (
+    KVEventBatch,
+    KVEventProfile,
+    KVEventRecord,
+    NativeBlockHash,
+)
 from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.kv_event_subscriber import (
-    KVEventStreamClosed,
+    KVEventLedger,
+    KVEventReset,
     MPKVEventSubscriber,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
 
+PROFILE = KVEventProfile("native-test", 2)
 
-def test_import_does_not_load_inference_engines() -> None:
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys; "
-            "from lmcache.v1.multiprocess.kv_event_subscriber "
-            "import MPKVEventSubscriber; "
-            "assert not any(name.split('.')[0] in ('vllm', 'sglang') "
-            "for name in sys.modules)",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
+
+@pytest.mark.parametrize("hashes", [(10, 11, 12), (b"shared", b"first", b"sibling")])
+def test_ledger_preserves_shared_blocks_and_slices_native_descriptors(
+    hashes: tuple[NativeBlockHash, NativeBlockHash, NativeBlockHash],
+) -> None:
+    """Each placement is announced once and retained until its last chunk leaves."""
+    shared, first_hash, sibling_hash = hashes
+    first = KVEventRecord(
+        1,
+        "stored",
+        "CPU",
+        "model",
+        (shared, first_hash),
+        None,
+        (1, 2, 3, 4),
+        2,
+        PROFILE.profile_id,
+        2,
     )
-    assert result.returncode == 0, result.stderr
+    sibling = replace(
+        first, seq=2, block_hashes=(shared, sibling_hash), token_ids=(1, 2, 5, 6)
+    )
+    ledger = KVEventLedger()
+    (stored,) = ledger.apply(first)
+    assert isinstance(stored, CacheStoreEvent)
+    assert stored.block_hashes == [shared, first_hash]
+    assert stored.token_ids == [1, 2, 3, 4]
+    assert ledger.apply(replace(first, seq=3)) == []
+    (stored,) = ledger.apply(sibling)
+    assert isinstance(stored, CacheStoreEvent)
+    assert stored.block_hashes == [sibling_hash]
+    assert stored.parent_block_hash == shared
+    assert stored.token_ids == [5, 6] and stored.block_size == 2
+    removed_first = replace(first, seq=4, kind="removed", token_ids=())
+    (removed,) = ledger.apply(removed_first)
+    assert removed.block_hashes == [first_hash]
+    assert ledger.apply(removed_first) == []
+    (stored,) = ledger.apply(replace(first, seq=5))
+    assert isinstance(stored, CacheStoreEvent)
+    assert stored.block_hashes == [first_hash] and stored.parent_block_hash == shared
+    (removed,) = ledger.apply(replace(sibling, seq=6, kind="removed", token_ids=()))
+    assert removed.block_hashes == [sibling_hash]
+    (removed,) = ledger.apply(replace(removed_first, seq=7))
+    assert removed.block_hashes == [shared, first_hash]
+    assert ledger.reset() == []
 
 
-class EventChannel:
-    """Cancellable transport double with observable receiver and delivery queues."""
+def test_ledger_ignores_unseen_chunk_removals_after_truncated_replay() -> None:
+    """A removal without its old STORE cannot withdraw a sibling's shared block."""
+    first = KVEventRecord(
+        1,
+        "stored",
+        "CPU",
+        "model",
+        (10, 11),
+        None,
+        (1, 2, 3, 4),
+        2,
+        PROFILE.profile_id,
+        2,
+    )
+    unseen = replace(first, block_hashes=(10, 12), kind="removed", token_ids=())
+    ledger = KVEventLedger()
+    ledger.apply(first)
+    assert ledger.apply(unseen) == []
+    (removed,) = ledger.apply(replace(first, kind="removed", token_ids=()))
+    assert removed.block_hashes == [10, 11]
+
+
+def test_ledger_reset_withdraws_shared_blocks_once_and_discards_contributors() -> None:
+    """Loss clears both advertisements and chunk references before replay."""
+    first = KVEventRecord(
+        1,
+        "stored",
+        "CPU",
+        "model",
+        (10, 11),
+        None,
+        (1, 2, 3, 4),
+        2,
+        PROFILE.profile_id,
+        2,
+    )
+    sibling = replace(first, seq=2, block_hashes=(10, 12), token_ids=(1, 2, 5, 6))
+    ledger = KVEventLedger()
+    ledger.apply(first)
+    ledger.apply(sibling)
+    (removed,) = ledger.reset()
+    assert removed.block_hashes == [10, 11, 12] and removed.medium == "CPU"
+    assert ledger.reset() == []
+    (stored,) = ledger.apply(first)
+    assert stored.block_hashes == [10, 11]
+    assert ledger.apply(replace(sibling, kind="removed", token_ids=())) == []
+    (removed,) = ledger.apply(replace(first, kind="removed", token_ids=()))
+    assert removed.block_hashes == [10, 11]
+
+
+def batch(
+    seq: int,
+    *,
+    incarnation: int = 1,
+    next_cursor: int | None = None,
+    lost: bool = False,
+    enabled: bool = True,
+    events: list[KVEventRecord] | None = None,
+    schema_version: int = 1,
+) -> KVEventBatch:
+    """Build a native batch with explicit overrides for stream-boundary tests."""
+    record = KVEventRecord(
+        seq, "stored", "CPU", "model", (10,), None, (1, 2), 2, PROFILE.profile_id, 2
+    )
+    return KVEventBatch(
+        enabled,
+        incarnation,
+        seq if next_cursor is None else next_cursor,
+        lost,
+        [record] if events is None else events,
+        schema_version,
+    )
+
+
+class Source:
+    """A cancellable stream; send waits until reception has processed the item."""
 
     def __init__(self) -> None:
-        self.inbox: queue.Queue[KVEventBatch | Exception | None] = queue.Queue()
-        self.updates: queue.Queue[list[KVEventBatch | KVEventStreamClosed]] = (
-            queue.Queue()
-        )
-        self.receivers: list[threading.Thread] = []
-        self.attempts: list[float] = []
-        self.cancelled = threading.Event()
-        self.subscribed = threading.Event()
-        self.reading = threading.Event()
-        self.client = MagicMock(spec=RequestClient)
-        self.client.subscribe_kv_events.side_effect = self.subscribe
-
-    def subscribe(self, *args: object) -> MessagingStream[KVEventBatch]:
-        """Record the receiving thread and return a blocking cancellable stream."""
-        self.receivers.append(threading.current_thread())
-        self.attempts.append(time.monotonic())
-        self.subscribed.set()
-        return MessagingStream(self.read, self.cancel)
+        self.inbox: queue.Queue[
+            tuple[KVEventBatch | Exception | None, threading.Event]
+        ] = queue.Queue()
+        self.consumed = threading.Event()
+        self.closed = threading.Event()
+        self.stream = MessagingStream(self.read, self.cancel)
 
     def read(self, closed: threading.Event) -> KVEventBatch:
-        """Read a batch, propagate an injected failure, or finish on cancellation."""
-        self.reading.set()
-        value = self.inbox.get(timeout=5)
-        if value is None or closed.is_set():
+        self.consumed.set()
+        value, self.consumed = self.inbox.get(timeout=5)
+        if closed.is_set():
             raise StopIteration
         if isinstance(value, Exception):
             raise value
+        assert value is not None
         return value
 
     def cancel(self) -> None:
-        """Wake a blocked read and record stream cancellation."""
-        self.cancelled.set()
-        self.inbox.put(None)
+        self.closed.set()
+        self.consumed.set()
+        self.inbox.put((None, threading.Event()))
 
-    def collect(self, subscriber: MPKVEventSubscriber) -> None:
-        """Drain on the receiver thread, as required by the notification contract."""
-        self.updates.put(subscriber.drain())
-
-
-def test_batches_keep_payload_and_order() -> None:
-    channel = EventChannel()
-    subscriber = MPKVEventSubscriber(channel.client, 41, "model", channel.collect)
-    stored = KVEventRecord(1, "stored", "CPU", "model", [b"chunk"], None, [1, 2])
-    batches = [
-        KVEventBatch(True, 7, 1, False, [stored]),
-        KVEventBatch(True, 7, 12, False, [replace(stored, kind="removed")]),
-        KVEventBatch(True, 8, 1, True, [stored]),
-    ]
-    try:
-        subscriber.start()
-        subscriber.start()
-        for batch in batches:
-            channel.inbox.put(batch)
-        assert [channel.updates.get(timeout=5) for _ in batches] == [
-            [batch] for batch in batches
-        ]
-        assert subscriber.drain() == []
-        channel.client.subscribe_kv_events.assert_called_once_with(41, "model", 0, 1024)
-    finally:
-        subscriber.close()
-    subscriber.close()
-    assert channel.cancelled.is_set()
-    assert all(not thread.is_alive() for thread in channel.receivers)
-    channel.client.close.assert_not_called()
-    channel.client.ping.assert_not_called()
+    def send(self, value: KVEventBatch | Exception) -> None:
+        consumed = threading.Event()
+        self.inbox.put((value, consumed))
+        assert consumed.wait(5), "receiver did not process the item"
 
 
-@pytest.mark.parametrize("failure", [None, ConnectionError("disconnected")])
-def test_stream_end_and_disconnect_replay_after_interruptible_delay(
-    failure: Exception | None,
-) -> None:
-    channel = EventChannel()
-    # Each attempt gets its own stream, so cancellation cannot end the next one.
-    second = EventChannel()
-    channel.client.subscribe_kv_events.side_effect = [
-        channel.subscribe(),
-        second.subscribe(),
-    ]
-    subscriber = MPKVEventSubscriber(channel.client, 41, "model", channel.collect)
-    try:
-        subscriber.start()
-        start = time.monotonic()
-        channel.inbox.put(failure)
-        assert channel.updates.get(timeout=5) == [KVEventStreamClosed()]
-        second.inbox.put(KVEventBatch(True, 7, 0, False, []))
-        assert channel.updates.get(timeout=5) == [KVEventBatch(True, 7, 0, False, [])]
-        assert time.monotonic() - start >= 0.9
-        assert channel.client.subscribe_kv_events.call_count == 2
-        assert all(
-            call.args == (41, "model", 0, 1024)
-            for call in channel.client.subscribe_kv_events.call_args_list
-        )
-    finally:
-        subscriber.close()
-    assert second.cancelled.is_set()
-    channel.client.close.assert_not_called()
-
-
-def test_subscription_failure_backoff_is_cancelled_by_close() -> None:
-    channel = EventChannel()
-    channel.client.subscribe_kv_events.side_effect = ConnectionError("unavailable")
-    subscriber = MPKVEventSubscriber(channel.client, 41, "model", channel.collect)
+@pytest.fixture
+def connected() -> Iterator[tuple[MPKVEventSubscriber, Mock, Source]]:
+    source = Source()
+    client = Mock(spec=RequestClient)
+    client.subscribe_kv_events.return_value = source.stream
+    subscriber = MPKVEventSubscriber(
+        client, 42, "model", world_size=2, profile=PROFILE, max_pending_events=4
+    )
     subscriber.start()
-    try:
-        assert channel.updates.get(timeout=5) == [KVEventStreamClosed()]
-    finally:
-        start = time.monotonic()
-        subscriber.close()
-    assert time.monotonic() - start < 0.8
-    channel.client.subscribe_kv_events.assert_called_once()
-    channel.client.close.assert_not_called()
+    yield subscriber, client, source
+    subscriber.close()
+    subscriber.close()
+    assert source.closed.is_set()
+    client.close.assert_not_called()
 
 
-@pytest.mark.parametrize("failure", ["disabled", "read", "subscribe"])
-def test_disabled_and_terminal_streams_do_not_restart(failure: str) -> None:
-    channel = EventChannel()
-    receivers: list[threading.Thread] = []
+def test_order_deduplication_and_filtered_gaps(
+    connected: tuple[MPKVEventSubscriber, Mock, Source],
+) -> None:
+    subscriber, client, source = connected
+    source.send(batch(1, next_cursor=3))
+    removed = replace(batch(5).events[0], kind="removed", token_ids=())
+    source.send(batch(5, next_cursor=6, events=[removed]))
+    source.send(batch(8))
+    source.send(batch(8))
+    kinds: list[str] = []
+    for update in subscriber.drain():
+        assert isinstance(update, KVEventBatch)
+        kinds.extend(event.kind for event in update.events)
+    assert kinds == ["stored", "removed", "stored"]
+    assert subscriber.drain() == []
+    client.subscribe_kv_events.assert_called_once_with(42, "model", 0, 3, 2, PROFILE)
 
-    def collect(subscriber: MPKVEventSubscriber) -> None:
-        receivers.append(threading.current_thread())
-        channel.collect(subscriber)
 
-    subscriber = MPKVEventSubscriber(channel.client, 41, "model", collect)
-    expected: KVEventBatch | KVEventStreamClosed
-    if failure == "disabled":
-        expected = KVEventBatch(False, 7, 0, False, [])
-        channel.inbox.put(expected)
+@pytest.mark.parametrize("reason", ["server_restart", "events_lost", "queue_overflow"])
+def test_reset_precedes_recovered_data(
+    connected: tuple[MPKVEventSubscriber, Mock, Source], reason: str
+) -> None:
+    subscriber, _, source = connected
+    source.send(batch(100))
+    subscriber.drain()
+    if reason == "queue_overflow":
+        for seq in range(101, 106):
+            source.send(batch(seq))
+        expected = 105
     else:
-        error = RuntimeError("invalid channel")
-        expected = KVEventStreamClosed(error=str(error))
-        if failure == "subscribe":
-            channel.client.subscribe_kv_events.side_effect = error
-        else:
-            channel.inbox.put(error)
-    try:
-        subscriber.start()
-        assert channel.updates.get(timeout=5) == [expected]
-        receivers[0].join(timeout=5)
-        assert not receivers[0].is_alive()
-        subscriber.start()
-        assert subscriber.drain() == []
-    finally:
-        subscriber.close()
-    channel.client.subscribe_kv_events.assert_called_once()
-    channel.client.close.assert_not_called()
+        source.send(
+            batch(
+                1,
+                incarnation=2 if reason == "server_restart" else 1,
+                lost=reason == "events_lost",
+            )
+        )
+        expected = 1
+    reset, recovered = subscriber.drain()
+    assert reset == KVEventReset(reason)
+    assert isinstance(recovered, KVEventBatch)
+    assert recovered.events[0].seq == expected
 
 
-def test_close_before_start_prevents_subscription() -> None:
-    channel = EventChannel()
-    subscriber = MPKVEventSubscriber(channel.client, 41, "model", channel.collect)
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ValueError("profile mismatch"),
+        batch(1, enabled=False),
+        batch(2, next_cursor=1),
+        batch(9),
+    ],
+)
+def test_terminal_error_is_visible_at_drain_and_startup(
+    connected: tuple[MPKVEventSubscriber, Mock, Source],
+    failure: KVEventBatch | Exception,
+) -> None:
+    subscriber, client, source = connected
+    source.send(batch(10))
+    subscriber.drain()
+    source.send(failure)
+    assert source.closed.wait(5)
+    (reset,) = subscriber.drain()
+    assert isinstance(reset, KVEventReset)
+    assert reset.reason == "protocol_error" and reset.error
+    with pytest.raises(RuntimeError):
+        subscriber.start(timeout=0.1)
+    assert client.subscribe_kv_events.call_count == 1
+
+
+def test_startup_timeout_closes_owned_stream(
+    connected: tuple[MPKVEventSubscriber, Mock, Source],
+) -> None:
+    subscriber, _, source = connected
+    with pytest.raises(LMCacheTimeoutError, match="negotiation timed out"):
+        subscriber.start(timeout=0.05)
+    assert source.closed.is_set()
+
+
+def test_import_does_not_load_engines() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import lmcache.v1.multiprocess.kv_event_subscriber; "
+            "assert not {'vllm', 'sglang'}.intersection(sys.modules)",
+        ],
+        check=True,
+        timeout=30,
+    )
+
+
+@pytest.mark.parametrize("schema_version", [0, 2])
+def test_unknown_stream_schema_is_terminal(
+    connected: tuple[MPKVEventSubscriber, Mock, Source], schema_version: int
+) -> None:
+    subscriber, _, source = connected
+    source.send(batch(1, schema_version=schema_version))
+    (reset,) = subscriber.drain()
+    assert isinstance(reset, KVEventReset)
+    assert reset.reason == "protocol_error"
+    assert reset.error is not None
+    assert "schema mismatch" in reset.error
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"block_hashes": (10, 11), "token_ids": (1, 2)},
+        {"token_ids": (1, -1)},
+        {"block_hashes": [10, 11]},
+        {"group_idx": 1},
+        {"kv_cache_spec_kind": "sliding_window"},
+    ],
+)
+def test_malformed_native_descriptor_never_reaches_ledger(
+    connected: tuple[MPKVEventSubscriber, Mock, Source], changes: dict[str, object]
+) -> None:
+    subscriber, _, source = connected
+    value = batch(1)
+    malformed = replace(value.events[0], **changes)  # type: ignore[arg-type]
+    source.send(replace(value, events=[malformed]))
+    (reset,) = subscriber.drain()
+    assert isinstance(reset, KVEventReset)
+    assert reset.reason == "protocol_error" and reset.error
+
+
+def test_close_before_start_does_not_borrow_transport_resources() -> None:
+    client = Mock(spec=RequestClient)
+    subscriber = MPKVEventSubscriber(client, 42, "model", world_size=2, profile=PROFILE)
     subscriber.close()
     subscriber.close()
     with pytest.raises(RuntimeError, match="closed"):
         subscriber.start()
-    channel.client.subscribe_kv_events.assert_not_called()
-    channel.client.close.assert_not_called()
+    client.subscribe_kv_events.assert_not_called()
+    client.close.assert_not_called()
 
 
-def test_batch_callback_failure_delivers_terminal_update() -> None:
-    channel = EventChannel()
-
-    def collect(subscriber: MPKVEventSubscriber) -> None:
-        updates = subscriber.drain()
-        if isinstance(updates[0], KVEventBatch):
-            raise RuntimeError("batch rejected")
-        channel.updates.put(updates)
-
-    subscriber = MPKVEventSubscriber(channel.client, 41, "model", collect)
-    try:
-        subscriber.start()
-        channel.inbox.put(KVEventBatch(True, 7, 0, False, []))
-        assert channel.updates.get(timeout=5) == [
-            KVEventStreamClosed(error="batch rejected")
-        ]
-    finally:
-        subscriber.close()
-    assert channel.cancelled.is_set()
-    assert not channel.receivers[0].is_alive()
-    channel.client.subscribe_kv_events.assert_called_once()
-    channel.client.close.assert_not_called()
-
-
-def test_close_cancels_blocked_read_and_joins_receiver() -> None:
-    channel = EventChannel()
-    subscriber = MPKVEventSubscriber(channel.client, 41, "model", channel.collect)
-    subscriber.start()
-    try:
-        assert channel.reading.wait(5)
-    finally:
-        subscriber.close()
-    assert channel.cancelled.is_set()
-    assert not channel.receivers[0].is_alive()
-    assert channel.updates.empty()
-    channel.client.close.assert_not_called()
-
-
-def _wait_for_close(subscriber: MPKVEventSubscriber) -> None:
-    """Observe shutdown through start rejection without accessing internal state."""
-    deadline = time.monotonic() + 5
-    while True:
-        try:
-            subscriber.start()
-        except RuntimeError:
-            return
-        assert time.monotonic() < deadline, "close did not stop reception"
-        time.sleep(0.001)
-
-
-def test_close_cancels_stream_returned_by_inflight_subscription() -> None:
-    channel = EventChannel()
-    entered = threading.Event()
-    release = threading.Event()
+def test_close_cancels_a_stream_returned_after_shutdown_started() -> None:
+    client = Mock(spec=RequestClient)
+    source = Source()
+    entered, release = threading.Event(), threading.Event()
 
     def subscribe(*args: object) -> MessagingStream[KVEventBatch]:
         entered.set()
         assert release.wait(5)
-        return channel.subscribe(*args)
+        return source.stream
 
-    channel.client.subscribe_kv_events.side_effect = subscribe
-    subscriber = MPKVEventSubscriber(channel.client, 41, "model", channel.collect)
-    subscriber.start()
+    client.subscribe_kv_events.side_effect = subscribe
+    subscriber = MPKVEventSubscriber(client, 42, "model", world_size=2, profile=PROFILE)
     closer = threading.Thread(target=subscriber.close)
     try:
+        subscriber.start()
         assert entered.wait(5)
         closer.start()
-        _wait_for_close(subscriber)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                subscriber.start()
+            except RuntimeError:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.001)
     finally:
         release.set()
         if closer.ident is not None:
             closer.join(timeout=5)
         subscriber.close()
-    assert not closer.is_alive()
-    assert channel.cancelled.is_set()
-    assert all(not thread.is_alive() for thread in channel.receivers)
-    assert channel.updates.empty()
-    channel.client.close.assert_not_called()
-
-
-def test_close_waits_for_inflight_callback() -> None:
-    channel = EventChannel()
-    entered = threading.Event()
-    release = threading.Event()
-
-    def collect(subscriber: MPKVEventSubscriber) -> None:
-        entered.set()
-        assert release.wait(5)
-        channel.collect(subscriber)
-
-    subscriber = MPKVEventSubscriber(channel.client, 41, "model", collect)
-    closer = threading.Thread(target=subscriber.close)
-    batch = KVEventBatch(True, 7, 0, False, [])
-    try:
-        subscriber.start()
-        channel.inbox.put(batch)
-        assert entered.wait(5)
-        closer.start()
-        _wait_for_close(subscriber)
-        assert closer.is_alive()
-    finally:
-        release.set()
-        if closer.ident is not None:
-            closer.join(timeout=5)
-        subscriber.close()
-    assert not closer.is_alive()
-    assert channel.updates.get(timeout=5) == [batch]
-    assert channel.updates.empty()
-    assert not channel.receivers[0].is_alive()
-    channel.client.close.assert_not_called()
-
-
-@pytest.mark.parametrize("failure", [ConnectionError("gap"), RuntimeError("invalid")])
-def test_failure_callback_must_not_raise(
-    failure: Exception, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    channel = EventChannel()
-    errors: queue.Queue[BaseException | None] = queue.Queue()
-
-    def record_failure(args: threading.ExceptHookArgs) -> None:
-        errors.put(args.exc_value)
-
-    def collect(subscriber: MPKVEventSubscriber) -> None:
-        channel.collect(subscriber)
-        raise RuntimeError("closure handler failed")
-
-    monkeypatch.setattr(threading, "excepthook", record_failure)
-    subscriber = MPKVEventSubscriber(channel.client, 41, "model", collect)
-    try:
-        subscriber.start()
-        channel.inbox.put(failure)
-        assert str(errors.get(timeout=5)) == "closure handler failed"
-        channel.receivers[0].join(timeout=5)
-        assert not channel.receivers[0].is_alive()
-        expected_error = None if isinstance(failure, ConnectionError) else str(failure)
-        assert channel.updates.get(timeout=5) == [
-            KVEventStreamClosed(error=expected_error)
-        ]
-        assert channel.updates.empty()
-    finally:
-        subscriber.close()
-    channel.client.subscribe_kv_events.assert_called_once()
-    channel.client.close.assert_not_called()
+    assert not closer.is_alive() and source.closed.is_set()
+    assert subscriber.drain() == []
+    client.close.assert_not_called()

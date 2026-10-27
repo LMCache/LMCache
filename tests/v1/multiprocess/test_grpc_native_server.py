@@ -27,7 +27,7 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.custom_types import KVEventBatch
+from lmcache.v1.multiprocess.custom_types import KVEventBatch, KVEventProfile
 from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.protocols.server_module import (
     ServerModuleCallRequest,
@@ -49,6 +49,9 @@ pytest.importorskip("pygrpc_native")
 
 extension_service_pb2 = importlib.import_module(
     "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.extension_service_pb2"
+)
+kv_event_service_pb2 = importlib.import_module(
+    "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.kv_event_service_pb2"
 )
 
 _PING = "/lmcache.mp.ManagementService/Ping"
@@ -114,7 +117,13 @@ def _stream_module(make: Callable[[], Any]) -> object:
     class Module:
         @request_handler()
         def subscribe_kv_events(
-            self, instance_id: int, model_name: str, cursor: int, max_events: int
+            self,
+            instance_id: int,
+            model_name: str,
+            cursor: int,
+            max_events: int,
+            world_size: int,
+            profile: KVEventProfile,
         ) -> MessagingStream[KVEventBatch]:
             return cast(MessagingStream[KVEventBatch], make())
 
@@ -126,7 +135,9 @@ def _first_stream_error(
 ) -> tuple[grpc.StatusCode, str]:
     client = _client(server)
     try:
-        stream = client.subscribe_kv_events(1, "model", 0, 8)
+        stream = client.subscribe_kv_events(
+            1, "model", 0, 8, 1, KVEventProfile("native-test", 1)
+        )
         with pytest.raises(grpc.RpcError) as info:
             next(stream)
         return _status(info.value)
@@ -308,7 +319,13 @@ def test_cancelled_stream_closes_the_handler_stream() -> None:
     class Module:
         @request_handler()
         def subscribe_kv_events(
-            self, instance_id: int, model_name: str, cursor: int, max_events: int
+            self,
+            instance_id: int,
+            model_name: str,
+            cursor: int,
+            max_events: int,
+            world_size: int,
+            profile: KVEventProfile,
         ) -> MessagingStream[KVEventBatch]:
             started.set()
             return _idle_stream(closed)
@@ -316,7 +333,9 @@ def test_cancelled_stream_closes_the_handler_stream() -> None:
     server = _serve([Module()])
     client = _client(server)
     try:
-        stream = client.subscribe_kv_events(1, "model", 0, 8)
+        stream = client.subscribe_kv_events(
+            1, "model", 0, 8, 1, KVEventProfile("native-test", 1)
+        )
         assert started.wait(5)
         stream.close()
         assert closed.wait(5)
@@ -335,7 +354,13 @@ def test_stream_cancelled_before_the_handler_returns_is_closed() -> None:
     class Module:
         @request_handler()
         def subscribe_kv_events(
-            self, instance_id: int, model_name: str, cursor: int, max_events: int
+            self,
+            instance_id: int,
+            model_name: str,
+            cursor: int,
+            max_events: int,
+            world_size: int,
+            profile: KVEventProfile,
         ) -> MessagingStream[KVEventBatch]:
             entered.set()
             assert release.wait(5)
@@ -344,7 +369,9 @@ def test_stream_cancelled_before_the_handler_returns_is_closed() -> None:
     server = _serve([Module()])
     client = _client(server)
     try:
-        stream = client.subscribe_kv_events(1, "model", 0, 8)
+        stream = client.subscribe_kv_events(
+            1, "model", 0, 8, 1, KVEventProfile("native-test", 1)
+        )
         assert entered.wait(5)
         stream.close()
         # Give the cancel time to reach the server first; if it arrives
@@ -370,7 +397,13 @@ def test_deadline_ends_unary_and_streaming_calls(blocked: threading.Event) -> No
 
         @request_handler()
         def subscribe_kv_events(
-            self, instance_id: int, model_name: str, cursor: int, max_events: int
+            self,
+            instance_id: int,
+            model_name: str,
+            cursor: int,
+            max_events: int,
+            world_size: int,
+            profile: KVEventProfile,
         ) -> MessagingStream[KVEventBatch]:
             return _idle_stream(closed)
 
@@ -380,7 +413,17 @@ def test_deadline_ends_unary_and_streaming_calls(blocked: threading.Event) -> No
             with pytest.raises(grpc.RpcError) as info:
                 channel.unary_unary(_PING)(b"", timeout=0.3)
             assert _status(info.value)[0] is grpc.StatusCode.DEADLINE_EXCEEDED
-            stream = channel.unary_stream(_SUBSCRIBE)(b"", timeout=0.3)
+            request = kv_event_service_pb2.SubscribeKvEventsRequest(
+                instance_id=1,
+                model_name="model",
+                cursor=0,
+                max_events=8,
+                world_size=1,
+                profile={"profile_id": "native-test", "block_size": 1},
+            )
+            stream = channel.unary_stream(_SUBSCRIBE)(
+                request.SerializeToString(), timeout=0.3
+            )
             with pytest.raises(grpc.RpcError) as info:
                 next(stream)
             assert _status(info.value)[0] is grpc.StatusCode.DEADLINE_EXCEEDED
@@ -700,7 +743,13 @@ def test_failing_stream_close_callback_does_not_stop_the_server() -> None:
 
         @request_handler()
         def subscribe_kv_events(
-            self, instance_id: int, model_name: str, cursor: int, max_events: int
+            self,
+            instance_id: int,
+            model_name: str,
+            cursor: int,
+            max_events: int,
+            world_size: int,
+            profile: KVEventProfile,
         ) -> MessagingStream[KVEventBatch]:
             started.set()
 
@@ -713,7 +762,9 @@ def test_failing_stream_close_callback_does_not_stop_the_server() -> None:
     server = _serve([Module()])
     client = _client(server)
     try:
-        stream = client.subscribe_kv_events(1, "model", 0, 8)
+        stream = client.subscribe_kv_events(
+            1, "model", 0, 8, 1, KVEventProfile("native-test", 1)
+        )
         assert started.wait(5)
         stream.close()
         assert client.ping(1).result(5) is True
@@ -743,7 +794,12 @@ def test_close_survives_a_failing_stream_close_callback() -> None:
 
     server = cast(GrpcNativeMultiprocessServer, _serve([_stream_module(make)]))
     client = _client(server)
-    streams = [client.subscribe_kv_events(i, "model", 0, 8) for i in (1, 2)]
+    streams = [
+        client.subscribe_kv_events(
+            i, "model", 0, 8, 1, KVEventProfile("native-test", 1)
+        )
+        for i in (1, 2)
+    ]
     try:
         deadline = time.monotonic() + 5
         while len(server._streams) < 2 and time.monotonic() < deadline:

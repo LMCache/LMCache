@@ -4,10 +4,12 @@
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 import math
+import os
 import sys
 import time
 
 # Third Party
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
     BlockRemoved,
@@ -21,6 +23,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
+from vllm.exceptions import VLLMValidationError
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 try:
     # Third Party
@@ -44,7 +49,6 @@ except ImportError:
 
 # Third Party
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
@@ -84,6 +88,7 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.utils import CacheRemoveEvent
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.multiprocess.custom_types import KVEventProfile
 
 try:
     # First Party
@@ -134,13 +139,6 @@ logger = lmcache_init_logger(__name__)
 
 _DCP_LAYOUT_NAMESPACE = "##lmcache-dcp-layout-v1-"
 _MAX_LCM_EXPANSION_FACTOR = 4
-
-
-def _convert_kv_event_hash(block_hash: bytes | int | None) -> bytes | int | None:
-    """Convert LMCache event hashes to vLLM's configured external format."""
-    if isinstance(block_hash, bytes):
-        return maybe_convert_block_hash(BlockHash(block_hash))
-    return block_hash
 
 
 class LMCacheMPKVEvents(KVConnectorKVEvents):
@@ -639,6 +637,60 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             and vllm_config.kv_events_config.enable_kv_cache_events
         )
 
+        self._event_profile: KVEventProfile | None = None
+        self._event_hash_block_size = 0
+        if self._enable_kv_events:
+            if not hasattr(KVConnectorBase_V1, "validate_request"):
+                raise ValueError(
+                    "MP native KV events require vLLM's connector "
+                    "request-validation hook"
+                )
+            parallel = vllm_config.parallel_config
+            if (
+                kv_cache_config is None
+                or len(kv_cache_config.kv_cache_groups) != 1
+                or type(kv_cache_config.kv_cache_groups[0].kv_cache_spec)
+                is not FullAttentionSpec
+                or kv_cache_config.kv_cache_groups[0].kv_cache_spec.sliding_window
+                is not None
+                or kv_cache_config.kv_cache_groups[0].kv_cache_spec.attention_chunk_size
+                is not None
+                or parallel.pipeline_parallel_size != 1
+                or parallel.data_parallel_size != 1
+                or parallel.decode_context_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or vllm_config.speculative_config is not None
+                or vllm_config.lora_config is not None
+                or not vllm_config.cache_config.enable_prefix_caching
+            ):
+                raise ValueError(
+                    "MP KV events require dense full attention, DP=PP=DCP=PCP=1, "
+                    "prefix caching, and no LoRA or speculative decoding"
+                )
+            algorithm = vllm_config.cache_config.prefix_caching_hash_algo
+            seed = os.environ.get("PYTHONHASHSEED", "vllm-none-hash")
+            if (
+                algorithm not in ("sha256", "sha256_cbor")
+                and "PYTHONHASHSEED" not in os.environ
+            ):
+                raise ValueError(
+                    "MP KV events require deterministic native hashing; "
+                    "set PYTHONHASHSEED"
+                )
+            _, self._event_hash_block_size = resolve_kv_cache_block_sizes(
+                kv_cache_config, vllm_config
+            )
+            event_block_size = kv_cache_config.kv_cache_groups[
+                0
+            ].kv_cache_spec.block_size
+            representation = (
+                "uint64" if envs.VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES else "bytes"
+            )
+            self._event_profile = KVEventProfile(
+                profile_id=f"vllm-native-v1:{algorithm}:{seed}:{representation}:B={event_block_size}:H={self._event_hash_block_size}",
+                block_size=event_block_size,
+            )
+
         self._eager_prefetch: bool = bool(
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "lmcache.mp.eager_prefetch", False
@@ -673,6 +725,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # The server count is derived from lmcache.mp.server_urls.
         n_servers = len(server_urls)
+        if self._enable_kv_events and n_servers != 1:
+            raise ValueError("MP KV events require one private MP per complete replica")
         if (
             is_mp_server_autostart_enabled(
                 vllm_config.kv_transfer_config.kv_connector_extra_config
@@ -792,6 +846,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
                 enable_kv_events=self._enable_kv_events,
                 required_chunk_alignment=scheduler_block_size,
+                event_profile=self._event_profile,
             )
             # Whether vLLM called get_kv_connector_kv_cache_events this step; it
             # never does for a MultiConnector child (see build_connector_worker_meta).
@@ -1196,9 +1251,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         Returns:
             A vLLM KV event container with ``BlockStored`` events for LMCache
-            stores (own completed stores and stores learned from the MP
-            server) and ``BlockRemoved`` events for CPU evictions, or None
-            when disabled or when nothing happened.
+            committed stores learned from the MP server and ``BlockRemoved`` events
+            for CPU evictions, or None when disabled or when nothing happened.
         """
         self._kv_events_hook_called = True
         if not self._enable_kv_events:
@@ -1209,23 +1263,27 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         blocks: list[KVCacheEvent] = []
         for event in events:
-            block_hashes = [
-                _convert_kv_event_hash(block_hash) for block_hash in event.block_hashes
-            ]
+            block_hashes = event.block_hashes
             if isinstance(event, CacheRemoveEvent):
                 blocks.append(
-                    BlockRemoved(block_hashes=block_hashes, medium=event.medium)
+                    BlockRemoved(
+                        block_hashes=block_hashes,
+                        medium=event.medium,
+                        group_idx=event.group_idx,
+                    )
                 )
                 continue
             blocks.append(
                 BlockStored(
                     block_hashes=block_hashes,
-                    parent_block_hash=_convert_kv_event_hash(event.parent_block_hash),
+                    parent_block_hash=event.parent_block_hash,
                     token_ids=event.token_ids,
                     lora_id=event.lora_id,
                     block_size=event.block_size,
                     medium=event.medium,
                     lora_name=event.lora_name,
+                    group_idx=event.group_idx,
+                    kv_cache_spec_kind=event.kv_cache_spec_kind,
                 )
             )
         kv_events = LMCacheMPKVEvents(num_workers=1)
@@ -1726,6 +1784,29 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """HMA request-finished entry point; cleanup is request-id based."""
         return self.request_finished(request, block_ids[0] if block_ids else [])
 
+    def validate_request(self, request: "Request") -> None:
+        """Reject unsupported native identity inputs before scheduler admission.
+
+        Args:
+            request: Engine request, read without mutating scheduler state.
+
+        Raises:
+            VLLMValidationError: An event-enabled request uses an unsupported
+                namespace or resumable session. Events-disabled requests pass.
+        """
+        if self._enable_kv_events and (
+            request.cache_salt
+            or request.lora_request is not None
+            or request.mm_features
+            or request.prompt_embeds is not None
+            or request.resumable
+            or request.session_id is not None
+        ):
+            raise VLLMValidationError(
+                "MP KV events do not support salted, LoRA, multimodal, embedding, "
+                "or session requests"
+            )
+
     def take_events(self) -> Iterable["KVCacheEvent"]:
         """
         Take the KV cache events from the connector.
@@ -1850,6 +1931,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
+                event_profile=self._event_profile,
+                hash_block_size=self._event_hash_block_size,
             )
             if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
@@ -1892,6 +1975,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
+                event_profile=self._event_profile,
+                hash_block_size=self._event_hash_block_size,
             )
 
             if r_meta is not None:
@@ -1999,6 +2084,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 for session_id in actions.sessions_to_end:
                     self.scheduler_adapter.end_session(session_id)
             new_tracker = LMCacheMPRequestTracker(request)
+            if self._enable_kv_events:
+                # Request appends native hashes as decode progresses; retaining
+                # its list avoids rebuilding the prompt hash on every step.
+                new_tracker.native_block_hashes = request.block_hashes
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]
 

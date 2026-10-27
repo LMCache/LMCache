@@ -13,6 +13,7 @@ import grpc
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.custom_types import KV_EVENT_OPERATIONS
 from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import ServiceBinding
@@ -54,10 +55,7 @@ class _AioServicer:
             async def subscribe(
                 request: Any, context: grpc.aio.ServicerContext
             ) -> AsyncIterator[Any]:
-                try:
-                    stream = await server.dispatch(handler, request, context)
-                except ValueError as exc:
-                    await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+                stream = await server.dispatch(handler, request, context)
                 async for response in server.forward(stream, handler, context):
                     yield response
 
@@ -163,6 +161,16 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
                 )
         except NotImplementedError as exc:
             await context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
+            raise RuntimeError("gRPC context abort unexpectedly returned") from exc
+        except ConnectionError as exc:
+            if registered.operation not in KV_EVENT_OPERATIONS:
+                raise
+            await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+            raise RuntimeError("gRPC context abort unexpectedly returned") from exc
+        except (TypeError, ValueError) as exc:
+            if registered.operation not in KV_EVENT_OPERATIONS:
+                raise
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
             raise RuntimeError("gRPC context abort unexpectedly returned") from exc
         if isinstance(result, MessagingStream):
             return result

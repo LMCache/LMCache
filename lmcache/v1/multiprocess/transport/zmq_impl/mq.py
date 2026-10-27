@@ -21,6 +21,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
+    KV_EVENT_OPERATIONS,
     DeviceIPCWrapper,
     get_customized_decoder,
     get_customized_encoder,
@@ -44,6 +45,31 @@ T = TypeVar("T")
 
 # Internal type used for the client-server communication
 RequestUID = int
+
+_PROTOCOL_ERROR_FRAME = b"lmcache.protocol_error.v1"
+_TRANSIENT_ERROR_FRAME = b"lmcache.transient_error.v1"
+
+
+def _encode_rpc_error(error: Exception) -> list[bytes]:
+    """Keep native-event validation errors distinct from successful RPC payloads."""
+    marker = (
+        _TRANSIENT_ERROR_FRAME
+        if isinstance(error, ConnectionError)
+        else _PROTOCOL_ERROR_FRAME
+    )
+    return [marker, msgspec_encode(str(error), str)]
+
+
+def _decode_rpc_error(response: list[bytes]) -> Exception | None:
+    """Decode an explicit native-event failure without interpreting data as errors."""
+    if response and response[0] in (_PROTOCOL_ERROR_FRAME, _TRANSIENT_ERROR_FRAME):
+        if len(response) != 2:
+            return ValueError("Malformed native-event RPC error")
+        error_type = (
+            ConnectionError if response[0] == _TRANSIENT_ERROR_FRAME else ValueError
+        )
+        return error_type(msgspec_decode(response[1], cls=str))
+    return None
 
 
 # Helper functions
@@ -417,8 +443,11 @@ class MessageQueueClient:
                     or not b_response
                 ):
                     raise ConnectionError("Event subscription ended")
-                response = msgspec_decode(b_response[0], cls=rpc_spec.response_type)
-                responses.put_nowait(response)
+                if error := _decode_rpc_error(b_response):
+                    responses.put_nowait(error)
+                else:
+                    response = msgspec_decode(b_response[0], cls=rpc_spec.response_type)
+                    responses.put_nowait(response)
             except Exception:
                 stream.close()
             return
@@ -434,7 +463,9 @@ class MessageQueueClient:
                     )
                 )
                 return
-            if b_response:
+            if error := _decode_rpc_error(b_response):
+                future.set_exception(error)
+            elif b_response:
                 response = msgspec_decode(b_response[0], cls=rpc_spec.response_type)
                 future.set_result(response)
             else:
@@ -736,6 +767,11 @@ class MessageQueueServer(RequestServer):
                 self.output_queue.put(frames_to_send)
                 self._output_efd.notify()
 
+            except (ConnectionError, TypeError, ValueError) as exc:
+                logger.exception("Error in blocking handler")
+                if decode_operation(prefix_frames[2]) in KV_EVENT_OPERATIONS:
+                    self.output_queue.put(prefix_frames + _encode_rpc_error(exc))
+                    self._output_efd.notify()
             except Exception:
                 logger.exception("Error in blocking handler")
 
@@ -787,6 +823,12 @@ class MessageQueueServer(RequestServer):
                     payloads=payloads,
                     prefix_frames=[identity, b_request_uid, b_operation],
                 )
+            except (ConnectionError, TypeError, ValueError) as exc:
+                logger.exception("Error handling operation %s", operation)
+                if operation in KV_EVENT_OPERATIONS:
+                    self.socket.send_multipart(
+                        [identity, b_request_uid, b_operation] + _encode_rpc_error(exc)
+                    )
             except Exception:
                 logger.exception("Error handling operation %s", operation)
         else:

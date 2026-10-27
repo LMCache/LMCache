@@ -5,6 +5,7 @@ from typing import Any, cast
 import ast
 
 # First Party
+from lmcache.v1.multiprocess.custom_types import KVEventProfile
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.protocols.server_module import ServerModuleCallRequest
 from lmcache.v1.multiprocess.rpc import get_rpc_specs
@@ -140,8 +141,14 @@ def test_named_rpc_method_delegates_to_zmq_request_envelope() -> None:
     assert future.result(timeout=0) == "lookup"
     assert transport.calls == [("lookup", ["key", 4])]
 
-    client.subscribe_kv_events(9, "model", cursor=7, max_events=16)
-    assert transport.calls[-1] == ("subscribe_kv_events", [9, "model", 7, 16])
+    profile = KVEventProfile("test:v1", 16)
+    client.subscribe_kv_events(
+        9, "model", cursor=7, max_events=16, world_size=1, profile=profile
+    )
+    assert transport.calls[-1] == (
+        "subscribe_kv_events",
+        [9, "model", 7, 16, 1, profile],
+    )
 
 
 def test_zmq_clear_defaults_to_non_force_and_accepts_force() -> None:

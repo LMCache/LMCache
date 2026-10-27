@@ -4,7 +4,7 @@
 # Standard
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 import threading
 
 # First Party
@@ -31,6 +31,11 @@ class ShmPoolInfo(TypedDict):
 
     shm_name: str
     pool_size: int
+
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 
 
 @dataclass
@@ -226,6 +231,7 @@ class MPCacheServerContext:
         self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
             storage_manager_config
         )
+        self._storage_manager_config = storage_manager_config
         self._storage_manager = StorageManager(storage_manager_config)
         self._token_hasher = TokenHasher(
             chunk_size=chunk_size, hash_algorithm=hash_algorithm
@@ -235,6 +241,9 @@ class MPCacheServerContext:
         )
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry()
+        # Set by the event module before requests are accepted. The transfer
+        # module uses this hook for synchronous native-binding validation.
+        self.kv_event_module: KVEventModule | None = None
 
     def close(self) -> None:
         """
@@ -360,6 +369,21 @@ class MPCacheServerContext:
     def storage_manager(self) -> StorageManager:
         """The storage manager instance."""
         return self._storage_manager
+
+    def validate_native_event_storage(self) -> None:
+        """Reject storage outside the private CPU/L1 native-event profile.
+
+        Raises:
+            ValueError: L2 or GDS is configured. Event-disabled
+                operation continues to use the ordinary storage paths.
+        """
+        config = self._storage_manager_config
+        if config.l2_adapter_config.adapters or any(
+            c.gds_l1_config is not None for c in config.l1_manager_configs
+        ):
+            raise ValueError(
+                "native KV events require private CPU/L1 storage without L2 or GDS"
+            )
 
     def get_read_owners(self, request_id: str) -> dict[ObjectKey, int] | None:
         """Get the exact prefetch owners for a request, or None for legacy single L1.

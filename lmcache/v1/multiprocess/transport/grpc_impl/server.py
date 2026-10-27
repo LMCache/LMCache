@@ -11,6 +11,7 @@ import grpc
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
+from lmcache.v1.multiprocess.custom_types import KV_EVENT_OPERATIONS
 from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import ServiceBinding
@@ -54,11 +55,7 @@ class _GeneratedServicer:
             def subscribe(
                 request: Any, context: grpc.ServicerContext, send: Callable
             ) -> None:
-                try:
-                    stream = self._dispatch(handler, request, context)
-                except ValueError as exc:
-                    context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
-                    return
+                stream = self._dispatch(handler, request, context)
                 if not context.add_callback(stream.close):
                     stream.close()
                     return
@@ -129,12 +126,22 @@ class _GeneratedServicer:
                 raise NotImplementedError(
                     f"{registered.handler_type.name} handlers are not supported"
                 )
-            if isinstance(result, MessagingStream):
-                return result
-            return registered.response_encoder(result)
         except NotImplementedError as exc:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
             raise RuntimeError("gRPC context abort unexpectedly returned") from exc
+        except ConnectionError as exc:
+            if registered.operation not in KV_EVENT_OPERATIONS:
+                raise
+            context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+            raise RuntimeError("gRPC context abort unexpectedly returned") from exc
+        except (TypeError, ValueError) as exc:
+            if registered.operation not in KV_EVENT_OPERATIONS:
+                raise
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+            raise RuntimeError("gRPC context abort unexpectedly returned") from exc
+        if isinstance(result, MessagingStream):
+            return result
+        return registered.response_encoder(result)
 
 
 class GrpcMultiprocessServer(GrpcMultiprocessServerBase):

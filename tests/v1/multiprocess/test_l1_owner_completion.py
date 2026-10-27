@@ -28,15 +28,18 @@ from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess import native_completion
+from lmcache.v1.multiprocess.custom_types import KVEventProfile
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as transfer
 
 
+@pytest.mark.parametrize("native_events", [False, True])
 @pytest.mark.parametrize("owner_count", [1, 2])
-@pytest.mark.parametrize("failure", ["none", "copy", "owner"])
+@pytest.mark.parametrize("failure", ["none", "copy", "owner", "noop"])
 def test_store_owner_callback_round_trip(
     monkeypatch: pytest.MonkeyPatch,
     owner_count: int,
-    failure: Literal["none", "copy", "owner"],
+    native_events: bool,
+    failure: Literal["none", "copy", "owner", "noop"],
 ) -> None:
     """Real reservations survive serialization and finish only after dispatch.
 
@@ -101,7 +104,7 @@ def test_store_owner_callback_round_trip(
     monkeypatch.setattr(transfer, "downsample_and_stage_block_ids", lambda cc, ids: ids)
     layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
     monkeypatch.setattr(transfer, "get_layout_desc", lambda *args, **kwargs: layout)
-    copied: list[MemoryObj] = []
+    copied: list[MemoryObj | None] = []
 
     def copy(*args: Any, **kwargs: Any) -> None:
         order.append("copy")
@@ -109,14 +112,20 @@ def test_store_owner_callback_round_trip(
         if failure == "copy" and len(copied) == 2:
             raise RuntimeError("device copy failed")
         if failure == "owner" and len(copied) == 2:
+            assert copied[-1] is not None
             copied[-1].reset_l1_manager()
 
     keys = [ObjectKey(b"chunk", "model", 0, gid) for gid in range(2)]
+    if failure == "noop":
+        for key in keys:
+            existing = storage.reserve_write([key], layout)
+            storage.finish_write_by_owner(storage.prepare_write_completion(existing))
     ctx = SimpleNamespace(
         chunk_size=1,
         null_block_id=0,
         storage_manager=storage,
         event_bus=MagicMock(),
+        kv_event_module=MagicMock(),
         resolve_obj_keys=lambda key, gids: [[k] for k in keys],
     )
     module = transfer.LMCacheDrivenTransferModule(cast(Any, ctx))
@@ -138,48 +147,85 @@ def test_store_owner_callback_round_trip(
     monkeypatch.setattr(module, "get_and_touch_context_entry", lambda _: entry)
     try:
         _, succeeded = module.store(
-            cast(Any, SimpleNamespace(request_id="req", worker_id=1)),
+            cast(
+                Any,
+                SimpleNamespace(
+                    request_id="req",
+                    worker_id=1,
+                    event_profile=KVEventProfile("native:v1", 1)
+                    if native_events
+                    else None,
+                ),
+            ),
             1,
             [[1], [2]],
             b"producer",
         )
-        assert succeeded is (failure == "none")
+        assert succeeded is (failure in ("none", "noop"))
         assert len(copied) == 2
+        if failure == "noop":
+            assert copied == [None, None]
         end_event = ctx.event_bus.publish_on_stream.call_args.args[1]
         assert end_event.event_type == EventType.MP_STORE_END
-        assert end_event.metadata["stored_count"] == (2 if succeeded else 0)
-        if not succeeded:
+        assert end_event.metadata["stored_count"] == (2 if failure == "none" else 0)
+        if failure != "none":
             assert end_event.metadata["total_bytes"] == 0
             assert end_event.metadata["num_tokens"] == 0
         for manager in managers:
-            assert all(
-                err == L1Error.KEY_NOT_EXIST
-                for err, _ in manager.reserve_read(keys).values()
-            )
+            found = manager.reserve_read(keys)
+            if failure == "noop":
+                readable = [
+                    key for key, (err, _) in found.items() if err == L1Error.SUCCESS
+                ]
+                manager.finish_read(readable)
+            else:
+                assert all(err == L1Error.KEY_NOT_EXIST for err, _ in found.values())
         # The imported producer event is released by a callback queued right
         # behind the stream wait, before any copy.
         release_kind, release_encoded = queued[0]
         assert release_kind == "release_imported_event"
         assert msgspec.msgpack.decode(release_encoded, type=tuple[int, int]) == (1, 7)
-        if failure != "none":
+        if failure != "none" and not native_events:
             assert len(queued) == 1
             assert order == ["callback", "copy", "copy", "record"]
-            assert all(obj.is_valid() for obj in copied)
+            assert all(obj is None or obj.is_valid() for obj in copied)
         else:
             assert order == ["callback", "copy", "copy", "record", "callback"]
             kind, encoded = queued[1]
-            assert kind == "finish_write_by_owner"
-            payload = msgspec.msgpack.decode(encoded, type=L1WriteCompletion)
-            assert payload == [
-                (manager.l1_manager_id, keys if owner_count == 1 else [keys[index]])
-                for index, manager in enumerate(managers)
-            ]
+            if native_events:
+                assert kind == "finish_native_event_store"
+                payload, request, transfer_key = msgspec.msgpack.decode(
+                    encoded, type=tuple[L1WriteCompletion, str, str]
+                )
+                assert request == "req"
+            else:
+                assert kind == "finish_write_by_owner"
+                payload = msgspec.msgpack.decode(encoded, type=L1WriteCompletion)
+            expected_payload = (
+                [
+                    (manager.l1_manager_id, keys if owner_count == 1 else [keys[index]])
+                    for index, manager in enumerate(managers)
+                ]
+                if failure == "none"
+                else []
+            )
+            assert payload == expected_payload
         module.close()
         cache_context.release_imported_event.assert_called_once_with(7)
+        if native_events:
+            cleanup = ctx.event_bus.publish.call_args.args[0]
+            assert cleanup.event_type == EventType.MP_TOKENS
+            assert cleanup.session_id == "req"
+            assert cleanup.metadata["native_store_finished"] == transfer_key
+            assert cleanup.metadata["chunk_hashes"] == []
         for index, manager in enumerate(managers):
             found = manager.reserve_read(keys)
             expected = (
-                [] if failure != "none" else keys if owner_count == 1 else [keys[index]]
+                []
+                if failure not in ("none", "noop")
+                else keys
+                if owner_count == 1
+                else [keys[index]]
             )
             assert [
                 key for key, (err, _) in found.items() if err == L1Error.SUCCESS

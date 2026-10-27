@@ -17,6 +17,7 @@ import grpc
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.custom_types import KV_EVENT_OPERATIONS
 from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.client import parse_grpc_target
@@ -41,6 +42,7 @@ _UNIMPLEMENTED = grpc.StatusCode.UNIMPLEMENTED.value[0]
 _INVALID_ARGUMENT = grpc.StatusCode.INVALID_ARGUMENT.value[0]
 _INTERNAL = grpc.StatusCode.INTERNAL.value[0]
 _UNKNOWN = grpc.StatusCode.UNKNOWN.value[0]
+_UNAVAILABLE = grpc.StatusCode.UNAVAILABLE.value[0]
 
 
 class _FrontServedServicer:
@@ -316,9 +318,10 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
         """Decode, run and answer one call on a handler thread.
 
         Status codes follow the sync server: an undecodable request is
-        INTERNAL, NotImplementedError is UNIMPLEMENTED, a ValueError from a
-        streaming handler is INVALID_ARGUMENT, and any other exception is
-        UNKNOWN. A streaming method's stream is then sent by ``_forward``.
+        INTERNAL and NotImplementedError is UNIMPLEMENTED. Native-event RPCs
+        distinguish validation (INVALID_ARGUMENT) from transient (UNAVAILABLE)
+        errors; unrelated application errors remain UNKNOWN. A streaming
+        method's stream is then sent by ``_forward``.
         """
         registered = method.registered
         front = self._front
@@ -332,6 +335,27 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
             # Only methods with a handler get a submitter.
             handler = cast(Callable[..., Any], registered.handler)
             result = handler(*registered.request_decoder(request))
+        except NotImplementedError as exc:
+            front.fail(call_id, _UNIMPLEMENTED, str(exc))
+            return
+        except ConnectionError as exc:
+            if registered.operation in KV_EVENT_OPERATIONS:
+                front.fail(call_id, _UNAVAILABLE, str(exc))
+            else:
+                self._fail_application(registered, call_id, exc)
+            return
+        except (TypeError, ValueError) as exc:
+            if registered.operation in KV_EVENT_OPERATIONS or (
+                method.server_streaming and isinstance(exc, ValueError)
+            ):
+                front.fail(call_id, _INVALID_ARGUMENT, str(exc))
+            else:
+                self._fail_application(registered, call_id, exc)
+            return
+        except Exception as exc:
+            self._fail_application(registered, call_id, exc)
+            return
+        try:
             if method.server_streaming:
                 if not isinstance(result, MessagingStream):
                     raise TypeError(
@@ -343,15 +367,6 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
                 result.close()
                 raise TypeError(f"{registered.operation} returned a stream")
             response = registered.response_encoder(result).SerializeToString()
-        except NotImplementedError as exc:
-            front.fail(call_id, _UNIMPLEMENTED, str(exc))
-            return
-        except ValueError as exc:
-            if method.server_streaming:
-                front.fail(call_id, _INVALID_ARGUMENT, str(exc))
-            else:
-                self._fail_application(registered, call_id, exc)
-            return
         except Exception as exc:
             self._fail_application(registered, call_id, exc)
             return

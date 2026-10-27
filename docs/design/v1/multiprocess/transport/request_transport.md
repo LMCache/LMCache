@@ -172,20 +172,21 @@ The CPU/L1 channel reuses the event bus and the existing vLLM publisher:
 
 ```text
 MP_TOKENS + L1 write/eviction -> KVEventModule's bounded log
-    -> subscribe_kv_events(instance, model, cursor, limit)
+    -> subscribe_kv_events(instance, model, cursor, limit, world_size, profile)
     -> ZMQ / gRPC push -> MP worker buffer -> vLLM -> router
 ```
 
-One rank per server subscribes. Completed server writes are the store source;
-a successful store request can skip chunks it could not reserve. Stores
-require known tokens and parent hashes. Unknown bindings are counted and
-skipped, and the binding cache is bounded.
+One rank per private MP subscribes for the complete replica. STORE carries
+engine-native identities; placement is published only after every required
+rank and object group has a committed L1 copy. Bindings remain while objects
+or transfers own them. A successful STORE RPC alone does not prove residency.
 
 Batches carry an incarnation, cursor, loss flag and ordered records.
 Restart, lost records or disconnect withdraw announced CPU placements.
-Disconnects reopen the subscription; other failures fall back to own completed
-stores. The buffer gauge and generated, drained, batch and resync counters
-expose delivery progress.
+Disconnects reopen the subscription and replay retained records. Protocol
+failures are exposed after CPU withdrawals, without switching to local store
+announcements. The buffer gauge and generated, drained, batch and resync
+counters expose delivery progress.
 
 Both transports use `MessagingStream` and the same bounded replay log. Readers
 wait on a condition notified by event-bus callbacks, including dropped events.
@@ -205,8 +206,8 @@ store/remove/store transitions. Workers receive pushes while idle; vLLM still
 drains and publishes during engine steps, so idle routing entries can remain
 stale until stepping resumes.
 
-Both transports advertise `kv_event_stream`. Enable the event
-bus and vLLM KV events, and match hash algorithms and chunk sizes. Workers
-subscribe automatically to capable servers. See
+Both transports advertise `kv_event_native_bindings_v1` when enabled. Workers
+require this capability and validate an immutable native identity profile on
+registration and subscription. See [native CPU KV events](../native_kv_events.md)
+for supported layouts, block geometry, and recovery limits, and
 `docs/source/mp/configuration.rst` for the server's log-size/disable control.
-L2 events, access events and salted hash interoperability are outside scope.

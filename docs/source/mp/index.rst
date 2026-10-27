@@ -5,6 +5,7 @@ Overview
    :hidden:
 
    request_transport
+   kv_events
    multi_l1
    chunk_size_negotiation
 
