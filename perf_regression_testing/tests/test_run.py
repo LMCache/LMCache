@@ -161,8 +161,26 @@ def test_io_bytes_sums_reads_and_writes_over_containers_and_devices(
     ]:
         (tmp_path / name).mkdir()
         (tmp_path / name / "io.stat").write_text(stat)
+    for dev in ["8:0", "259:0", "259:1"]:
+        (tmp_path / "sys" / dev / "holders").mkdir(parents=True)
     monkeypatch.setattr(run.docker, "cgroup_dir", lambda name: tmp_path / name)
+    monkeypatch.setattr(run, "SYS_BLOCK", tmp_path / "sys")
     assert run.io_bytes(["a", "b"]) == {"rbytes": 111, "wbytes": 222}
+
+
+def test_io_bytes_counts_an_md_array_once_not_again_on_its_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c" / "io.stat").write_text(
+        "9:1 rbytes=8 wbytes=16\n259:10 rbytes=4 wbytes=8\n259:11 rbytes=4 wbytes=8\n"
+    )
+    (tmp_path / "sys" / "9:1" / "holders").mkdir(parents=True)
+    for member in ["259:10", "259:11"]:
+        (tmp_path / "sys" / member / "holders" / "md1").mkdir(parents=True)
+    monkeypatch.setattr(run.docker, "cgroup_dir", lambda name: tmp_path / name)
+    monkeypatch.setattr(run, "SYS_BLOCK", tmp_path / "sys")
+    assert run.io_bytes(["c"]) == {"rbytes": 8, "wbytes": 16}
 
 
 def test_gpu_holders_names_the_container_of_each_process(

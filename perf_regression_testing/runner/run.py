@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 EXIT_VALID, EXIT_INVALID, EXIT_GPU_BUSY, EXIT_NOT_UP, EXIT_INPUT = 0, 2, 3, 4, 5
 SHM_DIR = Path("/dev/shm")
+SYS_BLOCK = Path("/sys/dev/block")
 PROC = Path("/proc")
 # AIPerf runs for up to hours; log that it is alive this often.
 _HEARTBEAT_S = 300.0
@@ -202,6 +203,9 @@ def io_bytes(names: list[str]) -> dict[str, int]:
     """Sum the block I/O of running containers from their cgroup v2 ``io.stat``.
 
     Page-cache hits are not block I/O, so a read served from RAM counts nothing.
+    ``io.stat`` charges an I/O to an md array and again to its member disks, so
+    a device that another one holds (``/sys/dev/block/<dev>/holders``) is
+    skipped.
 
     Args:
         names: Container names.
@@ -216,7 +220,10 @@ def io_bytes(names: list[str]) -> dict[str, int]:
     total = {"rbytes": 0, "wbytes": 0}
     for name in names:
         for line in (docker.cgroup_dir(name) / "io.stat").read_text().splitlines():
-            for field in line.split()[1:]:
+            dev, *fields = line.split()
+            if any((SYS_BLOCK / dev / "holders").iterdir()):
+                continue
+            for field in fields:
                 key, value = field.split("=")
                 if key in total:
                     total[key] += int(value)
@@ -567,6 +574,7 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
         )
         sampler.start()
         io0 = io_bytes(servers)
+        io_t0 = time.monotonic()
         logger.info("AIPerf running (log: %s)", out / "aiperf.log")
         aiperf = docker.start(cmds["aiperf"], out / "aiperf.log")
         t0 = time.monotonic()
@@ -595,8 +603,15 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
             # traffic, without the model load before it.
             try:
                 io1 = io_bytes(servers)
-                summary["disk_read_gb"] = (io1["rbytes"] - io0["rbytes"]) / 1e9
-                summary["disk_write_gb"] = (io1["wbytes"] - io0["wbytes"]) / 1e9
+                io_s = time.monotonic() - io_t0
+                read = summary["disk_read_gb"] = (io1["rbytes"] - io0["rbytes"]) / 1e9
+                wrote = summary["disk_write_gb"] = (io1["wbytes"] - io0["wbytes"]) / 1e9
+                # Over the whole AIPerf run, warmup included: the rate the
+                # cache tiers wear their disks at under this load.
+                summary["disk_write_gb_s"] = wrote / io_s
+                # Share of the bytes written that came back as reads; None
+                # when nothing was written (a CPU-only tier).
+                summary["disk_read_per_write"] = read / wrote if wrote else None
             except (subprocess.CalledProcessError, FileNotFoundError) as e:
                 # Expected once a server exited mid-run, which the run already
                 # names as invalid; a traceback here reads like the cause.
