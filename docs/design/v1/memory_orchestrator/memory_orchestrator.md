@@ -73,6 +73,7 @@ explicit wire contract rather than being inferred from Python field order.
 | `FinishWrite` / `AbortWrite` | tokens: `WRITING` to `VALID` / to `CONSUMED` (the extent is never reused) |
 | `ReserveRead` / `FinishRead` | per key: `READ_GRANTED` (handle, layout, leases), `MISS`, `BUSY_WRITING`; release leases |
 | `Usage`, `CloseClient` | counters; retire this incarnation |
+| `DeleteObjects` / `DeletePublished` | per key: `DELETED`, `MISS`, `BUSY_WRITING` / every `VALID` object written under the caller's `client_id`: `VALID` to `CONSUMED`; leases already issued stay releasable |
 
 These RPCs sit below `L1ManagerInterface`. The shared L1 binding will translate
 its existing key-based calls: write keys and `MemoryLayoutDesc` become entries
@@ -88,20 +89,23 @@ client/region envelope; the binding retains them behind the local L1 API.
 
 ```text
               ReserveWrite               FinishWrite
-(no object) ---------------> WRITING -----------------> VALID (terminal here:
-                                |                       no eviction or reuse)
-                                |
-                                |  Write expiry, AbortWrite, CloseClient, or
-                                |  the writer registering again (new incarnation)
-                                v
-                            CONSUMED
+(no object) ---------------> WRITING -----------------> VALID
+                                |                         |
+                                |  Write expiry,          |  DeleteObjects,
+                                |  AbortWrite,            |  DeletePublished
+                                |  CloseClient, or the    |
+                                |  writer registering     |
+                                |  again                  |
+                                v                         |
+                            CONSUMED <--------------------+
             record dropped, extent never reused; a later store
             of the key gets a new extent
 ```
 
 A client sends `FinishWrite` only once its copies into the extent are complete
-and visible to other hosts; reads are granted on `VALID` only, and `VALID` is
-terminal here. A write reservation expires after `--write-ttl-seconds`
+and visible to other hosts; reads are granted on `VALID` only, and `VALID`
+leaves only through a delete, which hides the key without reclaiming the
+extent. A write reservation expires after `--write-ttl-seconds`
 (default 600). Key and write-token access lazily consume expired reservations
 under the state lock. Their tokens become stale and a later store gets a fresh
 extent. Usage counters reflect expiry once processed; idle records are not
@@ -164,11 +168,10 @@ flow, replay, startup marker, batch splitting and rollback).
 
 ## Follow-ups
 
-External eviction needs a delete/eviction RPC in the reclamation follow-up.
-A metadata-only delete could hide a key, but would not recover capacity with
-this monotonic allocator. Extent reuse needs coordinated reader/writer
-retirement and protection against late accesses; this PR keeps committed
-objects immutable rather than offering a delete that implies reclamation.
+`DeleteObjects` and `DeletePublished` hide keys but recover no capacity: the
+allocator stays monotonic, so a delete never implies reclamation. Eviction and
+extent reuse need coordinated reader/writer retirement and protection against
+late accesses.
 
 Read lease TTL and client fencing (`Renew`, quarantine of orphaned extents);
 reclamation and eviction (`RequestEvict`, `VALID -> EVICTING -> FREE`,
