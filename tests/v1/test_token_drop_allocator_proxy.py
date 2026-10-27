@@ -139,8 +139,10 @@ def test_proxy_is_instance_local_and_never_replaces_allocator_class(proxy_factor
 
 
 def test_scheduler_configuration_is_opt_in(proxy_factory):
+    # Third Party
     from vllm.v1.core.sched.scheduler import Scheduler
 
+    # First Party
     from lmcache.integration.vllm.experimental.token_drop_scheduler_proxy import (
         LMCacheTokenDropScheduler,
     )
