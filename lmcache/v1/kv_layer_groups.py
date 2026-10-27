@@ -48,7 +48,8 @@ DTYPE_MAP: dict[str, torch.dtype] = {
 # The tuple that uniquely identifies a set of kernel-equivalent layers; one
 # distinct identity becomes one LMCache KV group:
 # ``(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype,
-# engine_kv_format)``.
+# engine_kv_format, block_stride_elems)``. Equal shapes can have different
+# physical block strides when layers share a padded KV pool.
 # ``engine_group_idx`` is the engine group id (one paged-block address space):
 # block IDs are only meaningful within one group, so layers from different
 # groups must not share an LMCache group even if shape and dtype match.
@@ -64,6 +65,7 @@ class KernelGroupIdentity(NamedTuple):
     engine_group_idx: int
     dtype: torch.dtype
     engine_kv_format: "lmcache_native.EngineKVFormat"
+    block_stride_elems: int | None = None
 
 
 LayerGroupIdentity = KernelGroupIdentity  # Alias for compatibility
@@ -102,7 +104,8 @@ def group_layers_by_identity(
 
     Raises:
         ValueError: If ``per_layer_engine_group_idx`` is given but its length
-            does not match ``engine_kv_formats``.
+            does not match ``engine_kv_formats``, or a format has unsupported
+            dim-0 padding.
     """
     # First Party
     from lmcache.v1.gpu_connector.utils import (
@@ -111,6 +114,7 @@ def group_layers_by_identity(
         get_head_size,
         get_kv_size,
         get_num_heads,
+        resolve_block_stride_and_log_layout,
     )
 
     num_layers = len(engine_kv_formats)
@@ -141,6 +145,9 @@ def group_layers_by_identity(
         hs = get_head_size(kv_caches, layer_format, idx)
         dt = get_dtype(kv_caches, layer_format, idx)
         bs = get_block_size(kv_caches, layer_format, idx)
+        block_stride_elems = resolve_block_stride_and_log_layout(
+            kv_caches, layer_format, idx
+        )
 
         identity = LayerGroupIdentity(
             kv_size=kv_size,
@@ -150,6 +157,7 @@ def group_layers_by_identity(
             engine_group_idx=engine_group_idx,
             dtype=dt,
             engine_kv_format=layer_format,
+            block_stride_elems=block_stride_elems,
         )
         groups_dict[identity].append(idx)
     return sorted(groups_dict.items(), key=lambda kv: kv[1][0])
@@ -164,7 +172,7 @@ class KernelGroupInfo:
     :data:`LayerGroupIdentity`; every layer referenced by
     ``layer_indices`` shares the same
     ``(kv_size, num_heads, head_size, block_size, engine_group_idx,
-    dtype, engine_kv_format)`` signature.
+    dtype, engine_kv_format, block_stride_elems)`` signature.
     Consumers use ``layer_indices`` to pull the matching device pointers
     out of ``kv_caches`` (via
     :func:`~lmcache.v1.gpu_connector.utils.get_group_data_ptrs`) and
@@ -315,9 +323,8 @@ class KVLayerGroupsManager:
 
     At construction time, every layer in ``kv_caches`` is bucketed by its
     :data:`LayerGroupIdentity` (``(kv_size, num_heads, head_size,
-    block_size, engine_group_idx, dtype, engine_kv_format)``). Each bucket
-    becomes one
-    :class:`KernelGroupInfo` holding the layer indices, a shared
+    block_size, engine_group_idx, dtype, engine_kv_format, block_stride_elems)``).
+    Each bucket becomes one :class:`KernelGroupInfo` holding the layer indices, a shared
     :class:`PageBufferShapeDesc`, and the group's torch dtype.
 
     Downstream consumers (``VLLMPagedMemGPUConnectorV3``,
@@ -407,7 +414,7 @@ class KVLayerGroupsManager:
             # Block count is per engine group (each is its own block-id space), so
             # read it from this group's own tensor rather than a context-wide value.
             group_num_blocks = get_num_blocks([kv_caches[indices[0]]], group_format)
-            block_stride_elems = resolve_block_stride_and_log_layout(
+            resolve_block_stride_and_log_layout(
                 kv_caches,
                 group_format,
                 layer_idx=indices[0],
@@ -420,7 +427,7 @@ class KVLayerGroupsManager:
                 num_layers_in_group=len(indices),
                 num_blocks=group_num_blocks,
                 block_size=bs,
-                block_stride_elems=block_stride_elems,
+                block_stride_elems=identity.block_stride_elems,
             )
 
             info = engine_group_infos[group_idx] if engine_group_infos else None

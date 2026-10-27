@@ -508,13 +508,13 @@ def resolve_block_stride_and_log_layout(
     kv_caches: DiscoverableKVCache,
     engine_kv_format: "lmcache_native.EngineKVFormat",
     layer_idx: int,
-    group_idx: int,
+    group_idx: int | None = None,
 ) -> Optional[int]:
-    """Resolve the per-block stride for a KV layer group and log its layout.
+    """Resolve a layer's per-block stride, optionally logging its layout.
 
-    Single entry point for :class:`KVLayerGroupsManager` to obtain the
-    ``block_stride_elems`` value for :class:`PageBufferShapeDesc` and emit
-    a one-shot layout audit line. All ``EngineKVFormat``-aware reasoning is
+    Used for both layer grouping and the ``block_stride_elems`` value of
+    :class:`PageBufferShapeDesc`. Supplying ``group_idx`` also emits a
+    one-shot layout audit line. All ``EngineKVFormat``-aware reasoning is
     kept here so callers never touch a "representative KV cache" tensor.
 
     * Block-axis formats (:data:`_BLOCK_AXIS_FORMATS`): ``stride(0)`` is
@@ -530,7 +530,8 @@ def resolve_block_stride_and_log_layout(
         kv_caches: Full KV cache structure (already normalised).
         engine_kv_format: Format of ``kv_caches``.
         layer_idx: 0-based layer index used as the layout probe.
-        group_idx: 0-based group index, used only for logging.
+        group_idx: 0-based group index for logging. When omitted, resolve
+            the stride without emitting a layout audit line.
 
     Returns:
         ``stride(0)`` for block-axis formats; ``None`` otherwise.
@@ -590,6 +591,9 @@ def resolve_block_stride_and_log_layout(
                     f"dtype={rep.dtype}."
                 )
         block_stride_elems = None
+
+    if group_idx is None:
+        return block_stride_elems
 
     # Best-effort layout audit log; the log line itself must not raise.
     shape = tuple(rep.shape)
