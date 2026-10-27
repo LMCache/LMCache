@@ -139,6 +139,9 @@ class LocalDiskBackend(StorageBackendInterface):
         self.local_cpu_backend = local_cpu_backend
 
         self.disk_lock = threading.Lock()
+        # Cap concurrent host GETs. A full CPU tier must not pile allocations
+        # onto the storage loop. 128 matches one scheduler window.
+        self._disk_prefetch_slots = asyncio.Semaphore(128)
 
         assert config.local_disk is not None
 
@@ -599,60 +602,73 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> list[MemoryObj]:
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
+        prefix_keys: list[CacheEngineKey] = []
 
         logger.debug(
             "lookup_id: %s; Prefetching %s keys from disk.", lookup_id, len(keys)
         )
-        for key in keys:
-            self.disk_lock.acquire()
-            assert key in self.dict, f"Key {key} not found in disk cache after pinning"
+        slots = getattr(self, "_disk_prefetch_slots", None)
+        if slots is None:
+            slots = asyncio.Semaphore(128)
+            self._disk_prefetch_slots = slots
+        async with slots:
+            for key in keys:
+                memory_obj = None
+                with self.disk_lock:
+                    # A missing key means the index changed between lookup and
+                    # GET. That fails the read. An allocation miss is only a
+                    # shorter prefix, and the lock must not stay held.
+                    assert key in self.dict, (
+                        f"Key {key} not found in disk cache after pinning"
+                    )
+                    meta = self.dict[key]
+                    path = meta.path
+                    dtype = meta.dtype
+                    shape = meta.shape
+                    fmt = meta.fmt
+                    assert dtype is not None
+                    assert shape is not None
 
-            path = self.dict[key].path
-            dtype = self.dict[key].dtype
-            shape = self.dict[key].shape
-            fmt = self.dict[key].fmt
+                    # busy_loop=False prevents spinning on the event loop thread;
+                    # if staging memory is exhausted the caller will get a logged
+                    # error rather than a silent deadlock.
+                    memory_obj = self.local_cpu_backend.allocate(
+                        shape,
+                        dtype,
+                        fmt,
+                        busy_loop=False,
+                    )
+                    if memory_obj is None:
+                        logger.error(
+                            "Memory allocation failed during async disk load for "
+                            "key %s. CPU staging pool may be exhausted (unpin() "
+                            "not called after a previous retrieve). Returning "
+                            "partial results.",
+                            key,
+                        )
+                    else:
+                        meta.pin()
+                        # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
+                        # Update cache recency
+                        self.cache_policy.update_on_hit(key, self.dict)
+                if memory_obj is None:
+                    break
+                logger.debug("Prefetching %s from disk.", key)
+                memory_obj.pin()
+                mem_objs.append(memory_obj)
+                paths.append(path)
+                prefix_keys.append(key)
 
-            assert dtype is not None
-            assert shape is not None
+            if not mem_objs:
+                return []
 
-            # busy_loop=False prevents spinning on the event loop thread;
-            # if staging memory is exhausted the caller will get a logged
-            # error rather than a silent deadlock.
-            memory_obj = self.local_cpu_backend.allocate(
-                shape,
-                dtype,
-                fmt,
-                busy_loop=False,
+            return await self.disk_worker.submit_task(
+                "prefetch",
+                self.batched_async_load_bytes_from_disk,
+                paths=paths,
+                keys=prefix_keys,
+                memory_objs=mem_objs,
             )
-
-            if memory_obj is None:
-                logger.error(
-                    "Memory allocation failed during async disk load for key %s. "
-                    "CPU staging pool may be exhausted (unpin() not called after "
-                    "a previous retrieve). Returning partial results.",
-                    key,
-                )
-                return mem_objs
-
-            self.dict[key].pin()
-
-            # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
-            # Update cache recency
-            self.cache_policy.update_on_hit(key, self.dict)
-
-            self.disk_lock.release()
-            logger.debug("Prefetching %s from disk.", key)
-            memory_obj.pin()
-            mem_objs.append(memory_obj)
-            paths.append(path)
-
-        return await self.disk_worker.submit_task(
-            "prefetch",
-            self.batched_async_load_bytes_from_disk,
-            paths=paths,
-            keys=keys,
-            memory_objs=mem_objs,
-        )
 
     async def batched_async_contains(
         self,
