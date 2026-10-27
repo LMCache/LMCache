@@ -142,7 +142,9 @@ class StorageManager:
                 wants, or a policy name is unknown.
         """
         with ExitStack() as cleanup:
-            # Placement order is the order of ``config.l1_manager_configs``.
+            self._event_bus = get_event_bus()
+
+            # L1 Managers:
             self._l1_managers: list[L1ManagerInterface] = create_l1_managers(
                 config.l1_manager_configs
             )
@@ -151,9 +153,10 @@ class StorageManager:
 
             self._l1_managers_by_id = {m.l1_manager_id: m for m in self._l1_managers}
             self._l1_by_tag = {m.config.tag: m for m in self._l1_managers}
-            self._write_policy = create_write_policy(config.write_policy)
-            self._event_bus = get_event_bus()
 
+            self._write_policy = create_write_policy(config.write_policy)
+
+            # L1 Eviction:
             self._eviction_controllers = [
                 L1EvictionController(m, m.config.eviction or config.eviction_config)
                 for m in self._l1_managers
@@ -161,7 +164,8 @@ class StorageManager:
             for eviction_controller in self._eviction_controllers:
                 eviction_controller.start()
                 cleanup.callback(eviction_controller.stop)
-            self._next_adapter_id = 0
+
+            # Locks:
             # Serializes L1/L2 additions and L2 adapter registration/deletion.
             # Held from ownership check through add, before allocator/device locks.
             self._lifecycle_lock = threading.Lock()
@@ -170,9 +174,13 @@ class StorageManager:
             self._capacity_publish_lock = threading.Lock()
             # Guards the _l2_adapters and _adapter_descriptors dicts.
             self._adapters_lock = threading.Lock()
+
+            # L2 adapters:
+            self._next_adapter_id = 0
             self._registered_l2_listeners: list[L2AdapterListener] = []
             self._l2_adapters: dict[int, L2AdapterInterface] = {}
             self._adapter_descriptors: dict[int, L2AdapterDescriptor] = {}
+
             for ac in config.l2_adapter_config.adapters:
                 self._check_dax_devices_unowned(ac)
                 adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
@@ -184,7 +192,6 @@ class StorageManager:
                 interval_ms=config.periodic_notifier_interval_ms,
                 use_eventfd=HAS_EVENTFD,
             )
-
             cleanup.callback(PeriodicEventNotifier.shutdown)
 
             # Per-cache_salt quota registry. Shared across the L2 eviction
@@ -222,6 +229,7 @@ class StorageManager:
             self._l2_eviction_controller.start()
             cleanup.callback(self._l2_eviction_controller.stop)
 
+            # Storage controllers:
             # Controllers receive the initial set as ordered lists; they key
             # their own copies by ``descriptor.index`` (== adapter_id) and learn
             # of later changes via add_adapter/request_remove_adapter.
@@ -242,6 +250,7 @@ class StorageManager:
                 self._store_controllers[manager.l1_manager_id] = controller
                 controller.start()
                 cleanup.callback(controller.stop)
+
             self._prefetch_controller = PrefetchController(
                 l1_managers=list(self._l1_managers),
                 l1_manager_descriptors=[
