@@ -45,7 +45,11 @@ def _row(n: int, gid: int = 0, kv_rank: int = 0, window: int = -1) -> GroupedObj
     )
 
 
-def _ipc_key(world_size: int, worker_id: int | None = None) -> IPCCacheServerKey:
+def _ipc_key(
+    world_size: int,
+    worker_id: int | None = None,
+    request_configs: dict[str, object] | None = None,
+) -> IPCCacheServerKey:
     return IPCCacheServerKey.from_token_ids(
         model_name="m",
         world_size=world_size,
@@ -55,6 +59,7 @@ def _ipc_key(world_size: int, worker_id: int | None = None) -> IPCCacheServerKey
         end=0,
         request_id="r",
         cache_salt="salt",
+        request_configs=request_configs,
     )
 
 
@@ -115,6 +120,31 @@ class TestPrefetchTaskSpecShape:
 
 
 class TestIpcKeyToGroupedObjectKeys:
+    @pytest.mark.parametrize("request_configs", [{}, {"encryption_key": "key-1"}])
+    def test_request_configs_reach_flat_and_grouped_keys_by_reference(
+        self, request_configs: dict[str, object]
+    ) -> None:
+        """Store and lookup/load expansions retain one request metadata object."""
+        ipc_key = _ipc_key(2, request_configs=request_configs)
+        hashes = [b"c0", b"c1"]
+        attn = AttnWindowDesc(num_chunks_in_sw=[-1, -1], world_size=2)
+
+        flat = ipc_key_to_object_keys(ipc_key, hashes, [0, 1])
+        grouped = ipc_key_to_grouped_object_keys(
+            ipc_key, hashes, [0, 1], {0: LAYOUT, 1: LAYOUT}, attn
+        )
+
+        assert all(
+            key.extra_attributes is request_configs
+            for group_keys in flat
+            for key in group_keys
+        )
+        assert all(
+            key.extra_attributes is request_configs
+            for row in grouped
+            for key in row.keys
+        )
+
     def test_rows_are_group_major_rank_minor_and_chunk_ordered(self):
         hashes = [b"c0", b"c1", b"c2"]
         attn = AttnWindowDesc(num_chunks_in_sw=[-1, 2, 1], world_size=2)

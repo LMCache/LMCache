@@ -23,10 +23,20 @@ def _make_object_key(**overrides) -> ObjectKey:
         kv_rank=overrides.get("kv_rank", 7),
         object_group_id=overrides.get("object_group_id", 0),
         cache_salt=overrides.get("cache_salt", ""),
+        extra_attributes=overrides.get("extra_attributes", {}),
     )
 
 
 class TestRoundTrip:
+    def test_extra_attributes_do_not_change_identity_or_encoded_key(self):
+        left = _make_object_key(extra_attributes={"encryption_key": "key-1"})
+        right = _make_object_key(extra_attributes={"encryption_key": "key-2"})
+
+        assert left == right
+        assert hash(left) == hash(right)
+        assert left.to_encoded_object_key() == right.to_encoded_object_key()
+        assert left.to_encoded_object_key().to_object_key().extra_attributes == {}
+
     def test_encode_preserves_all_fields(self):
         obj = _make_object_key(
             chunk_hash_hex="cafebabe",

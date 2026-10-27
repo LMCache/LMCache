@@ -218,7 +218,9 @@ class L2AdapterInterface(ABC):
         a batch of keys.
 
         Args:
-            keys (list[ObjectKey]): the list of keys to be stored.
+            keys (list[ObjectKey]): the list of keys to be stored. Request-level
+                adapter metadata is available through
+                ``ObjectKey.extra_attributes`` and must be treated as read-only.
             objects (list[MemoryObj]): the list of memory objects to be stored.
                 The length of the objects list should be the same as the length of
                 the keys list.

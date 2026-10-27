@@ -53,6 +53,25 @@ mismatch raises ``TypeError``).
 
 See ``examples/lmc_external_l2_adapter/`` for a complete reference plugin.
 
+Request-scoped metadata
+~~~~~~~~~~~~~~~~~~~~~~~
+
+For requests that provide LMCache request configuration, every ``ObjectKey``
+passed to an adapter exposes that same mapping as ``key.extra_attributes``.
+This applies to store, lookup, and load paths, so an adapter can use the
+metadata for request-level behavior such as encryption and decryption. The
+mapping is metadata rather than cache identity: it does not participate in
+``ObjectKey`` equality or hashing and is omitted from persistent key encodings.
+Treat it as read-only because all keys expanded from one request share the
+same mapping object.
+
+.. code-block:: python
+
+    def submit_store_task(self, keys, objects):
+        request_config = keys[0].extra_attributes
+        encryption_key = request_config.get("my_backend.encryption_key")
+        # Store the objects using request-scoped adapter behavior.
+
 ``native_plugin``
 -----------------
 

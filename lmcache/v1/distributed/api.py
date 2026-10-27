@@ -196,6 +196,17 @@ class ObjectKey:
     hash, and extension are added.
     """
 
+    extra_attributes: dict[str, object] = field(
+        default_factory=dict, compare=False, repr=False
+    )
+    """Request-scoped metadata exposed to L2 adapters.
+
+    This field is excluded from equality, hashing, and ``repr`` so it does not
+    change cache identity or accidentally log values such as encryption
+    material. Adapters must treat the mapping as read-only because all object
+    keys expanded from one request share the same reference.
+    """
+
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
     _SALT_MAX_LEN = 128
 
@@ -695,9 +706,13 @@ def ipc_key_to_object_keys(
     duplicating the source of truth would risk silent isolation bugs
     where a caller passes ``ipc_key`` but forgets the salt.
 
+    ``request_configs`` is likewise read from ``ipc_key`` and exposed through
+    every produced key's ``extra_attributes`` field. The same mapping reference
+    is shared across all keys rather than copied once per chunk or rank.
+
     Args:
         ipc_key: The IPC key providing model_name, world_size, worker_id,
-            and cache_salt.
+            cache_salt, and request_configs.
         chunk_hashes: List of chunk hash bytes, one per chunk.
         object_group_ids: Object group ids to produce keys for.
 
@@ -706,6 +721,9 @@ def ipc_key_to_object_keys(
         for ``object_group_ids[i]``.
     """
     cache_salt = ipc_key.cache_salt
+    extra_attributes = (
+        ipc_key.request_configs if ipc_key.request_configs is not None else {}
+    )
 
     # The (chunk_hash, kv_rank) expansion is independent of the object group,
     # so compute it once and reuse it for every group.
@@ -719,6 +737,7 @@ def ipc_key_to_object_keys(
                 kv_rank=kv_rank,
                 object_group_id=object_group_id,
                 cache_salt=cache_salt,
+                extra_attributes=extra_attributes,
             )
             for chunk_hash in chunk_hashes
             for kv_rank in kv_ranks
@@ -761,9 +780,14 @@ def ipc_key_to_grouped_object_keys(
     Note:
         A key without ``worker_id`` fans out to every kv rank of its world
         size; a worker-specific key yields that rank only. ``cache_salt`` is
-        taken from ``ipc_key``.
+        taken from ``ipc_key``. Every produced key shares the exact
+        ``ipc_key.request_configs`` mapping through ``extra_attributes`` when
+        request configs are present.
     """
     kv_ranks = _lookup_kv_ranks(ipc_key)
+    extra_attributes = (
+        ipc_key.request_configs if ipc_key.request_configs is not None else {}
+    )
     rows: list[GroupedObjectKeys] = []
     for object_group_id in object_group_ids:
         layout_desc = group_layout_descs.get(object_group_id)
@@ -788,6 +812,7 @@ def ipc_key_to_grouped_object_keys(
                             kv_rank=kv_rank,
                             object_group_id=object_group_id,
                             cache_salt=ipc_key.cache_salt,
+                            extra_attributes=extra_attributes,
                         )
                         for chunk_hash in chunk_hashes
                     ],

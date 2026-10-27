@@ -12,6 +12,8 @@ message ObjectKey {
   int64 kv_rank = 3;
   int64 object_group_id = 4;
   string cache_salt = 5;
+  // Request-scoped adapter metadata; excluded from cache identity.
+  bytes encoded_extra_attributes = 6;
 }
 
 message TensorShape {
