@@ -793,6 +793,7 @@ class TensorMemoryObj(MemoryObj):
                     self.meta.ref_count,
                 )
                 self.meta.ref_count = 0
+                return
             if (
                 self.meta.ref_count == 0
                 and self.parent_allocator is not None
@@ -825,23 +826,6 @@ class TensorMemoryObj(MemoryObj):
     def unpin(self) -> bool:
         with self.lock:
             self.meta.pin_count -= 1
-
-            # if pin_count is 0, indicates that the object is unpinned
-            if self.meta.pin_count == 0:
-                TensorMemoryObj.monitor.update_pinned_memory_objs_count(-1)
-                # Unregister from PinMonitor when fully unpinned
-                pin_monitor = PinMonitor.GetOrCreate()
-                pin_monitor.on_unpin(self)
-
-            if self.meta.pin_count <= 0 and self.meta.ref_count <= 0:
-                if self.parent_allocator is None:
-                    logger.error(
-                        "Parent allocator is None when trying to free MemoryObj."
-                        "This could cause memory leak"
-                    )
-                else:
-                    self.parent_allocator.free(self)
-
             if self.meta.pin_count < 0:
                 logger.warning(
                     "Pin count of MemoryObj %s"
@@ -852,6 +836,23 @@ class TensorMemoryObj(MemoryObj):
                     self.meta.pin_count,
                 )
                 self.meta.pin_count = 0
+                return True
+
+            # if pin_count is 0, indicates that the object is unpinned
+            if self.meta.pin_count == 0:
+                TensorMemoryObj.monitor.update_pinned_memory_objs_count(-1)
+                # Unregister from PinMonitor when fully unpinned
+                pin_monitor = PinMonitor.GetOrCreate()
+                pin_monitor.on_unpin(self)
+
+                if self.meta.ref_count == 0:
+                    if self.parent_allocator is None:
+                        logger.error(
+                            "Parent allocator is None when trying to free MemoryObj."
+                            "This could cause memory leak"
+                        )
+                    else:
+                        self.parent_allocator.free(self)
             return True
 
     @property
