@@ -20,7 +20,10 @@ from lmcache.v1.multiprocess.custom_types import (
     KVEventBatch,
     KVEventRecord,
 )
-from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_context import (
+    LayoutDescRegistry,
+    MPCacheServerContext,
+)
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
     EngineModule,
@@ -38,6 +41,86 @@ from lmcache.v1.multiprocess.request_handler import request_handler
 
 _KIND_LOST = "lost"
 _TOKEN_BINDING_CACHE_SIZE = 65536
+_ChunkKey = tuple[str, int, str, bytes]
+
+
+def _chunk_key(key: ObjectKey) -> _ChunkKey:
+    """Identify content independently of its required rank and object group."""
+    return (
+        key.model_name,
+        ObjectKey.WorldSizeFromKVRank(key.kv_rank),
+        key.cache_salt,
+        key.chunk_hash,
+    )
+
+
+class CommittedKVResidency:
+    """Project committed L1 copies onto complete chunks.
+
+    The owning KVEventModule serializes every call under its event lock.
+    Owners are retained only while their ObjectKey has a readable copy.
+
+    Args:
+        layouts: Registered geometry supplying every required object group;
+            ObjectKey supplies the complete KV world size.
+    """
+
+    def __init__(self, layouts: LayoutDescRegistry) -> None:
+        self._layouts = layouts
+        self._owners: dict[ObjectKey, set[str]] = {}
+
+    def commit(self, key: ObjectKey, l1_tag: str) -> None:
+        """Record a completed readable copy; duplicate notifications are idempotent.
+
+        Args:
+            key: The committed object, including rank, group, and cache salt.
+            l1_tag: The L1 manager that completed the write.
+        """
+        self._owners.setdefault(key, set()).add(l1_tag)
+
+    def evict(self, key: ObjectKey, l1_tag: str) -> None:
+        """Forget one L1 copy, removing owner state when its final copy is gone.
+
+        Args:
+            key: The object removed from L1.
+            l1_tag: The L1 manager that removed it. Unknown copies are ignored.
+        """
+        owners = self._owners.get(key)
+        if owners is not None:
+            owners.discard(l1_tag)
+            if not owners:
+                del self._owners[key]
+
+    def is_committed(self, key: ObjectKey) -> bool:
+        """Return whether every required rank/group has a readable L1 copy.
+
+        Args:
+            key: Any object identifying the chunk's model, world, salt, and hash.
+
+        Returns:
+            False for missing/empty registered geometry or an incomplete chunk.
+            Different L1 tags may supply different required objects.
+        """
+        world_size = ObjectKey.WorldSizeFromKVRank(key.kv_rank)
+        groups = self._layouts.find_group_layout_descs(key.model_name, world_size)
+        if not world_size or not groups:
+            return False
+        return all(
+            ObjectKey(
+                key.chunk_hash,
+                key.model_name,
+                ObjectKey.ComputeKVRank(world_size, rank, world_size, rank),
+                group,
+                key.cache_salt,
+            )
+            in self._owners
+            for rank in range(world_size)
+            for group in groups
+        )
+
+    def clear(self) -> None:
+        """Discard all ownership after event loss makes the projection unreliable."""
+        self._owners.clear()
 
 
 class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
@@ -91,10 +174,13 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
         self._kv_event_incarnation = time.time_ns()
         self._kv_event_next_seq = 1
         self._kv_event_dropped = self._kv_event_lost_markers = 0
+        self._discard_until_empty = False
         self._kv_event_unbound_stores = 0
         self._kv_event_bindings: OrderedDict[
             bytes, tuple[tuple[int, ...], bytes | None]
         ] = OrderedDict()
+        self._residency = CommittedKVResidency(ctx.layout_desc_registry)
+        self._announced: dict[_ChunkKey, int] = {}
         if not self._kv_events_enabled:
             return
         self._ctx.event_bus.subscribe_drops(self._record_kv_event_loss)
@@ -286,11 +372,21 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
             if dropped > self._kv_event_dropped:
                 self._kv_event_dropped = dropped
                 self._kv_event_lost_markers += 1
+                self._residency.clear()
+                self._announced.clear()
                 self._append_kv_event(_KIND_LOST, "", [])
+            # Read the drop count before the queue: later overflow stays detectable.
+            self._discard_until_empty = self._ctx.event_bus.queue_depth() > 0
 
     def _record_kv_event(self, event: Event) -> None:
         """Translate bus events to ordered records; token bindings precede writes."""
         with self._kv_event_lock:
+            if (
+                self._discard_until_empty
+                or self._ctx.event_bus.dropped_events_count() > self._kv_event_dropped
+            ):
+                self._record_kv_event_loss()
+                return
             if event.event_type == EventType.MP_TOKENS:
                 for chunk_hash, tokens, parent in zip(
                     event.metadata["chunk_hashes"],
@@ -305,25 +401,39 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
                         self._kv_event_bindings.popitem(last=False)
                 return
             keys: list[ObjectKey] = event.metadata["keys"]
-            by_model: dict[str, dict[bytes, None]] = {}
+            l1_tag: str = event.metadata["l1_tag"]
+            evicted = event.event_type == EventType.L1_KEYS_EVICTED
+            chunks: dict[_ChunkKey, ObjectKey] = {}
             for key in keys:
-                by_model.setdefault(key.model_name, {})[key.chunk_hash] = None
-            for model_name, hashes in by_model.items():
-                if event.event_type == EventType.L1_KEYS_EVICTED:
-                    self._append_kv_event(
-                        KV_EVENT_KIND_REMOVED, model_name, list(hashes)
-                    )
+                if evicted:
+                    self._residency.evict(key, l1_tag)
+                else:
+                    self._residency.commit(key, l1_tag)
+                chunks[_chunk_key(key)] = key
+            for chunk, key in chunks.items():
+                announced = self._announced.get(chunk)
+                if not self._residency.is_committed(key):
+                    if announced is not None:
+                        del self._announced[chunk]
+                        self._append_kv_event(
+                            KV_EVENT_KIND_REMOVED, key.model_name, [key.chunk_hash]
+                        )
                     continue
-                for chunk_hash in hashes:
-                    binding = self._kv_event_bindings.get(chunk_hash)
-                    if binding is None:
-                        self._kv_event_unbound_stores += 1
-                        continue
-                    tokens, parent = binding
-                    self._append_kv_event(
-                        KV_EVENT_KIND_STORED,
-                        model_name,
-                        [chunk_hash],
-                        parent,
-                        tokens,
-                    )
+                if evicted:
+                    continue
+                # Refresh aged-out records on a new commit so replay can recover.
+                if announced is not None and announced >= self._kv_event_log[0].seq:
+                    continue
+                binding = self._kv_event_bindings.get(key.chunk_hash)
+                if binding is None:
+                    self._kv_event_unbound_stores += 1
+                    continue
+                tokens, parent = binding
+                self._announced[chunk] = self._kv_event_next_seq
+                self._append_kv_event(
+                    KV_EVENT_KIND_STORED,
+                    key.model_name,
+                    [key.chunk_hash],
+                    parent,
+                    tokens,
+                )
