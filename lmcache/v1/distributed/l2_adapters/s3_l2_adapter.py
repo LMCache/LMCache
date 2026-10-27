@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 # Third Party
 from awscrt import auth, io, s3
+from awscrt.exceptions import AwsCrtError
 from awscrt.http import HttpHeaders, HttpRequest
 from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
 
@@ -200,6 +201,82 @@ def _format_safe_path(key_str: str) -> str:
     return "/" + url_quote(key_str)
 
 
+def _split_endpoint(endpoint: str, addressing_style: str) -> tuple[str, str]:
+    """Split ``s3_endpoint`` into the ``Host`` header and the request path
+    prefix for the given addressing style.
+
+    Virtual-hosted (``<bucket>.<host>[:port]``): the bucket rides in the
+    Host header and object paths start at ``/``. Path-style
+    (``<host>[:port]/<bucket>``): the Host is the bare server and every
+    object path is prefixed with ``/<bucket>``.
+
+    Raises:
+        ValueError: the endpoint does not match the addressing style.
+    """
+    endpoint = endpoint.removeprefix("s3://")
+    if addressing_style == "virtual":
+        if "/" in endpoint:
+            raise ValueError(
+                f"s3_endpoint {endpoint!r} contains a path; virtual-hosted "
+                "addressing expects '<bucket>.<host>[:port]'. Set "
+                "s3_addressing_style to 'path' for '<host>[:port]/<bucket>'."
+            )
+        return endpoint, ""
+    host, _, bucket = endpoint.partition("/")
+    if not host or not bucket or "/" in bucket:
+        raise ValueError(
+            f"s3_endpoint {endpoint!r} is not '<host>[:port]/<bucket>', "
+            "which path-style addressing requires"
+        )
+    return host, "/" + bucket
+
+
+def _parse_s3_error_body(body: Optional[bytes]) -> tuple[Optional[str], Optional[str]]:
+    """Return ``(Code, Message)`` from an S3 XML error body.
+
+    HEAD responses carry no body, and some proxies answer with non-XML
+    pages, so either field may be ``None``.
+    """
+    if not body:
+        return None, None
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError:
+        return None, None
+    return root.findtext("Code"), root.findtext("Message")
+
+
+def _s3_error_fields(err: BaseException) -> tuple[Optional[str], Optional[str]]:
+    """Return ``(Code, Message)`` for ``err``; ``(None, None)`` when it is
+    not an S3 error response or its body has no parsable XML."""
+    if not isinstance(err, s3.S3ResponseError):
+        return None, None
+    return _parse_s3_error_body(err.body)
+
+
+def _describe_s3_error(
+    err: BaseException,
+    fields: Optional[tuple[Optional[str], Optional[str]]] = None,
+) -> str:
+    """Render a failed request as ``<Operation> HTTP <status> <Code>: <Message>``.
+
+    awscrt reports every non-2xx response as the same generic
+    ``AWS_ERROR_S3_INVALID_RESPONSE_STATUS``. The status and S3 error code
+    are what tell a missing bucket apart from bad credentials.
+
+    ``fields`` is the ``(Code, Message)`` pair from ``_s3_error_fields``
+    when the caller already parsed it, so the body is parsed only once.
+    """
+    if not isinstance(err, s3.S3ResponseError):
+        return str(err)
+    code, message = fields if fields is not None else _s3_error_fields(err)
+    parts = [err.operation_name or "request", f"HTTP {err.status_code}"]
+    if code:
+        parts.append(code)
+    desc = " ".join(parts)
+    return f"{desc}: {message}" if message else desc
+
+
 def _make_credentials_provider(
     config: "S3L2AdapterConfig",
 ) -> auth.AwsCredentialsProvider:
@@ -307,6 +384,50 @@ def _is_connection_error(error_msg: str) -> bool:
     )
 
 
+_CREDENTIALS_HINT = "check aws_access_key_id, aws_secret_access_key and s3_region"
+_BUCKET_HINT = (
+    "check the bucket in s3_endpoint and s3_addressing_style; "
+    "virtual-hosted addressing against MinIO also requires "
+    "MINIO_DOMAIN to be set on the server"
+)
+
+# S3 error codes that mean the adapter is misconfigured, mapped to a
+# remediation hint. Retrying cannot succeed until the config changes.
+_MISCONFIGURATION_HINTS = {
+    "InvalidAccessKeyId": _CREDENTIALS_HINT,
+    "SignatureDoesNotMatch": _CREDENTIALS_HINT,
+    "NoSuchBucket": _BUCKET_HINT,
+    # MinIO without MINIO_DOMAIN reads the first path segment as the
+    # bucket; when the object name has no "/" that segment is not a valid
+    # bucket name, so the PUT fails with this code instead of NoSuchBucket.
+    "InvalidBucketName": _BUCKET_HINT,
+}
+
+# Operation names awscrt reports for a failed PUT_OBJECT request; large
+# objects are uploaded as several multipart operations.
+_PUT_OPERATIONS = frozenset(
+    {"PutObject", "CreateMultipartUpload", "UploadPart", "CompleteMultipartUpload"}
+)
+
+
+def _misconfiguration_hint(err: BaseException, code: Optional[str]) -> Optional[str]:
+    """Return remediation advice when ``err``, whose S3 error code is
+    ``code``, shows the adapter is misconfigured, else ``None``.
+
+    Only PUT responses are classified. HEAD responses carry no body, so a
+    lookup cannot tell a missing bucket from a missing key, and S3 answers
+    a HEAD for a missing key with 403 when the credentials lack
+    ``s3:ListBucket``. Other 403 codes (``AccessDenied``, ``ExpiredToken``,
+    ``RequestTimeTooSkewed``) are left out because they can be scoped to
+    some keys or clear on their own.
+    """
+    if not isinstance(err, s3.S3ResponseError):
+        return None
+    if err.operation_name not in _PUT_OPERATIONS or code is None:
+        return None
+    return _MISCONFIGURATION_HINTS.get(code)
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -316,12 +437,15 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     """Config for the S3 L2 adapter.
 
     Fields:
-    - s3_endpoint (str, required): bucket URL using **virtual-hosted**
-      style; accepts either ``"s3://<bucket>.<host>"`` or the bare
-      ``"<bucket>.<host>"`` form. The bucket name must be part of the
-      host because requests are signed and routed against this Host
-      header (path-style addressing is not supported).
+    - s3_endpoint (str, required): bucket URL, optionally prefixed with
+      ``s3://``. Its form depends on ``s3_addressing_style``:
+      ``"<bucket>.<host>[:port]"`` for virtual-hosted,
+      ``"<host>[:port]/<bucket>"`` for path-style.
     - s3_region (str, required): AWS region used for SigV4.
+    - s3_addressing_style (str): ``"virtual"`` (default) puts the bucket
+      in the Host header; ``"path"`` puts it in the request path. AWS
+      supports both; S3-compatible servers often need ``"path"`` (MinIO
+      only routes virtual-hosted requests when ``MINIO_DOMAIN`` is set).
     - s3_num_io_threads (int): CRT IO threads.
     - s3_prefer_http2 (bool): ALPN negotiate to HTTP/2.
     - s3_enable_s3express (bool): enable S3 Express signing.
@@ -347,9 +471,11 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
         max_capacity_gb: float = 0.0,
+        s3_addressing_style: str = "virtual",
     ):
         self.s3_endpoint = s3_endpoint
         self.s3_region = s3_region
+        self.s3_addressing_style = s3_addressing_style
         self.s3_num_io_threads = s3_num_io_threads
         self.s3_prefer_http2 = s3_prefer_http2
         self.s3_enable_s3express = s3_enable_s3express
@@ -391,12 +517,23 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         if not isinstance(max_cap, (int, float)) or isinstance(max_cap, bool):
             raise ValueError("max_capacity_gb must be a number")
 
+        addressing_style = d.get("s3_addressing_style", "virtual")
+        if addressing_style not in ("virtual", "path"):
+            raise ValueError("s3_addressing_style must be 'virtual' or 'path'")
+        _split_endpoint(endpoint, addressing_style)
+        s3express = _bool("s3_enable_s3express", False)
+        if s3express and addressing_style == "path":
+            raise ValueError(
+                "s3_enable_s3express requires s3_addressing_style 'virtual'"
+            )
+
         cfg = cls(
             s3_endpoint=endpoint,
             s3_region=region,
+            s3_addressing_style=addressing_style,
             s3_num_io_threads=_int("s3_num_io_threads", 64),
             s3_prefer_http2=_bool("s3_prefer_http2", True),
-            s3_enable_s3express=_bool("s3_enable_s3express", False),
+            s3_enable_s3express=s3express,
             disable_tls=_bool("disable_tls", False),
             aws_access_key_id=_opt_str("aws_access_key_id"),
             aws_secret_access_key=_opt_str("aws_secret_access_key"),
@@ -409,9 +546,12 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     def help(cls) -> str:
         return (
             "S3 L2 adapter config fields:\n"
-            "- s3_endpoint (str, required): virtual-hosted bucket URL "
-            "('s3://<bucket>.<host>' or '<bucket>.<host>')\n"
+            "- s3_endpoint (str, required): bucket URL, '<bucket>.<host>' "
+            "(virtual-hosted) or '<host>/<bucket>' (path-style), optionally "
+            "prefixed with 's3://'\n"
             "- s3_region (str, required): AWS region for SigV4\n"
+            "- s3_addressing_style (str): 'virtual' (default) or 'path'; "
+            "MinIO needs 'path' unless MINIO_DOMAIN is set\n"
             "- s3_num_io_threads (int): CRT IO threads (default 64)\n"
             "- s3_prefer_http2 (bool): try HTTP/2 via ALPN (default true)\n"
             "- s3_enable_s3express (bool): S3 Express signing (default false)\n"
@@ -442,9 +582,13 @@ class S3L2Adapter(L2AdapterInterface):
     a concurrent load is about to read.
 
     Circuit breaker: after ``max_connection_failures`` consecutive
-    connection-class errors, ``connection_disabled`` is set; all
-    subsequent submits short-circuit and record failure without
-    touching S3.
+    connection-class or misconfiguration errors (a PUT rejected with
+    ``InvalidAccessKeyId``, ``SignatureDoesNotMatch``, ``NoSuchBucket`` or
+    ``InvalidBucketName``), ``connection_disabled`` is set; all subsequent
+    submits short-circuit and record failure without touching S3.
+    Misconfiguration counts because no retry can succeed until the
+    config changes. Lookup (HEAD) failures only count when they are
+    connection errors: see ``_misconfiguration_hint``.
     """
 
     max_connection_failures = 3
@@ -453,10 +597,10 @@ class S3L2Adapter(L2AdapterInterface):
         super().__init__(max_capacity_bytes=int(config.max_capacity_gb * (1024**3)))
         self._config = config
 
-        endpoint = config.s3_endpoint
-        if endpoint.startswith("s3://"):
-            endpoint = endpoint[len("s3://") :]
-        self._endpoint = endpoint
+        self._endpoint, self._path_prefix = _split_endpoint(
+            config.s3_endpoint, config.s3_addressing_style
+        )
+        self._addressing_style = config.s3_addressing_style
         self._region = config.s3_region
         self._enable_s3express = config.s3_enable_s3express
 
@@ -527,6 +671,10 @@ class S3L2Adapter(L2AdapterInterface):
         self._connection_failures = 0
         self._connection_disabled = False
 
+        # (operation, HTTP status, S3 error code) of 4xx failures already
+        # logged at WARNING; repeats drop to DEBUG.
+        self._warned_errors: set[tuple[Optional[str], int, Optional[str]]] = set()
+
         self._lock = threading.Lock()
 
         # Background asyncio event loop.
@@ -541,9 +689,11 @@ class S3L2Adapter(L2AdapterInterface):
         self._closed = False
 
         logger.info(
-            "Initialized S3L2Adapter (endpoint=%s region=%s "
+            "Initialized S3L2Adapter (endpoint=%s%s addressing=%s region=%s "
             "http2=%s s3express=%s tls=%s max_capacity_gb=%.2f)",
             self._endpoint,
+            self._path_prefix,
+            self._addressing_style,
             self._region,
             config.s3_prefer_http2,
             self._enable_s3express,
@@ -774,7 +924,8 @@ class S3L2Adapter(L2AdapterInterface):
         return {
             "is_healthy": self._loop_thread.is_alive() and not disabled,
             "type": "S3L2Adapter",
-            "endpoint": self._endpoint,
+            "endpoint": self._endpoint + self._path_prefix,
+            "addressing_style": self._addressing_style,
             "region": self._region,
             "connection_failures": failures,
             "connection_disabled": disabled,
@@ -839,6 +990,12 @@ class S3L2Adapter(L2AdapterInterface):
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
+    # Request builders register no ``on_done`` status checks: awscrt
+    # already fails ``finished_future`` with an ``S3ResponseError``
+    # (status, headers, body) on any non-2xx response, and an exception
+    # raised from ``on_done`` is swallowed by awscrt and only printed as
+    # "Exception ignored". Failures are inspected on the future instead.
+
     def _make_request(
         self, method: str, key_str: str, *, body_stream=None, extra_headers=None
     ):
@@ -849,7 +1006,7 @@ class S3L2Adapter(L2AdapterInterface):
                 headers.add(k, v)
         return HttpRequest(
             method,
-            _format_safe_path(key_str),
+            self._path_prefix + _format_safe_path(key_str),
             headers,
             body_stream=body_stream,
         )
@@ -886,19 +1043,11 @@ class S3L2Adapter(L2AdapterInterface):
             # Write chunk into the caller-provided MemoryObj buffer.
             ctypes.memmove(data_ptr + offset, chunk, len(chunk))
 
-        def on_done(error=None, status_code=None, **kwargs):
-            ok = (status_code in (200, 206)) or (status_code is None and error is None)
-            if error or not ok:
-                raise RuntimeError(
-                    f"S3 GET failed for {key_str}: {error or status_code}"
-                )
-
         s3_req = s3.S3Request(
             client=self._s3_client,
             type=s3.S3RequestType.GET_OBJECT,
             request=req,
             on_body=on_body,
-            on_done=on_done,
             credential_provider=self._credentials_provider,
             region=self._region,
         )
@@ -916,20 +1065,10 @@ class S3L2Adapter(L2AdapterInterface):
                 ("Content-Type", "application/octet-stream"),
             ],
         )
-        captured = {"status": None}
-
-        def on_done(error=None, status_code=None, **kwargs):
-            captured["status"] = status_code
-            if error or status_code not in (200, 201):
-                raise RuntimeError(
-                    f"S3 PUT failed for {key_str}: {error or status_code}"
-                )
-
         s3_req = s3.S3Request(
             client=self._s3_client,
             type=s3.S3RequestType.PUT_OBJECT,
             request=req,
-            on_done=on_done,
             credential_provider=self._credentials_provider,
             region=self._region,
         )
@@ -937,26 +1076,11 @@ class S3L2Adapter(L2AdapterInterface):
 
     def _delete_request(self, key_str: str):
         req = self._make_request("DELETE", key_str)
-        captured = {"status": None}
-
-        def on_headers(status_code, headers, **kwargs):
-            captured["status"] = status_code
-
-        def on_done(error=None, status_code=None, **kwargs):
-            captured["status"] = status_code or captured["status"]
-            # 204 is standard for DeleteObject, 200 also tolerated.
-            if error or captured["status"] not in (200, 204):
-                raise RuntimeError(
-                    f"S3 DELETE failed for {key_str}: {error or captured['status']}"
-                )
-
         s3_req = s3.S3Request(
             client=self._s3_client,
             type=s3.S3RequestType.DEFAULT,
             request=req,
             operation_name="DeleteObject",
-            on_headers=on_headers,
-            on_done=on_done,
             credential_provider=self._credentials_provider,
             region=self._region,
         )
@@ -970,7 +1094,7 @@ class S3L2Adapter(L2AdapterInterface):
     ):
         """Build a ListObjectsV2 request.
 
-        Returns ``(s3_req, body_chunks, captured)``. The caller awaits
+        Returns ``(s3_req, body_chunks)``. The caller awaits
         ``s3_req.finished_future`` and assembles the XML from
         ``body_chunks``.
         """
@@ -984,27 +1108,18 @@ class S3L2Adapter(L2AdapterInterface):
             params.append(("continuation-token", continuation_token))
         # urlencode handles percent-escaping of values (continuation
         # tokens are typically base64 with ``+``/``/``/``=`` chars).
-        path = "/?" + urlencode(params, quote_via=url_quote)
+        # Virtual-hosted lists the bucket root ``/``; path-style lists
+        # ``/<bucket>``.
+        path = (self._path_prefix or "/") + "?" + urlencode(params, quote_via=url_quote)
 
         headers = HttpHeaders()
         headers.add("Host", self._endpoint)
         req = HttpRequest("GET", path, headers)
 
         body_chunks: list[bytes] = []
-        captured: dict[str, Optional[int]] = {"status": None}
 
         def on_body(chunk, offset, **kwargs):
             body_chunks.append(bytes(chunk))
-
-        def on_headers(status_code, headers, **kwargs):
-            captured["status"] = status_code
-
-        def on_done(error=None, status_code=None, **kwargs):
-            captured["status"] = status_code or captured["status"]
-            if error or captured["status"] != 200:
-                raise RuntimeError(
-                    f"S3 ListObjectsV2 failed: {error or captured['status']}"
-                )
 
         s3_req = s3.S3Request(
             client=self._s3_client,
@@ -1012,36 +1127,98 @@ class S3L2Adapter(L2AdapterInterface):
             request=req,
             operation_name="ListObjectsV2",
             on_body=on_body,
-            on_headers=on_headers,
-            on_done=on_done,
             credential_provider=self._credentials_provider,
             region=self._region,
         )
-        return s3_req, body_chunks, captured
+        return s3_req, body_chunks
 
-    def _record_connection_outcome(self, error_msg: Optional[str]) -> None:
-        """Update the circuit breaker under the lock."""
-        with self._lock:
-            if error_msg is None:
+    def _record_connection_outcome(self, error: Optional[BaseException]) -> None:
+        """Update the circuit breaker and log a task's outcome.
+
+        ``error`` is the task's last failure, or ``None`` when the task
+        reached S3 successfully. Logging is limited to what points at a
+        bad configuration:
+
+        - breaker errors log one ERROR per strike, with a remediation
+          hint for misconfiguration, and nothing once the adapter is
+          disabled;
+        - other 4xx responses (e.g. ``AccessDenied`` from a bucket
+          policy) log one WARNING per (operation, status, code), then
+          DEBUG;
+        - everything else (5xx, throttling, missing keys) logs at DEBUG.
+        """
+        if error is None:
+            with self._lock:
                 if self._connection_failures > 0:
                     logger.info("S3L2Adapter connection recovered")
                 self._connection_failures = 0
-                return
-            if not _is_connection_error(error_msg):
+            return
+
+        fields = _s3_error_fields(error)
+        hint = _misconfiguration_hint(error, fields[0])
+        if hint is None and not _is_connection_error(str(error)):
+            self._log_non_breaker_error(error, fields)
+            return
+
+        with self._lock:
+            if self._connection_disabled:
                 return
             self._connection_failures += 1
             logger.error(
-                "S3L2Adapter connection error (%d/%d): %s",
+                "S3L2Adapter %s (%d/%d): %s%s",
+                "misconfiguration" if hint else "connection error",
                 self._connection_failures,
                 self.max_connection_failures,
-                error_msg,
+                _describe_s3_error(error, fields),
+                f" -- {hint}" if hint else "",
             )
             if self._connection_failures >= self.max_connection_failures:
                 self._connection_disabled = True
                 logger.error(
-                    "S3L2Adapter disabled after %d consecutive connection failures",
+                    "S3L2Adapter disabled after %d consecutive connection or "
+                    "configuration failures; L2 stores, lookups and loads "
+                    "will be skipped",
                     self.max_connection_failures,
                 )
+
+    def _log_non_breaker_error(
+        self,
+        error: BaseException,
+        fields: tuple[Optional[str], Optional[str]],
+    ) -> None:
+        """Log a failure that does not count toward the circuit breaker."""
+        desc = _describe_s3_error(error, fields)
+        code = fields[0]
+        status = getattr(error, "status_code", None)
+        if (
+            not isinstance(error, s3.S3ResponseError)
+            or status is None
+            or not 400 <= status < 500
+            or code == "NoSuchKey"
+        ):
+            logger.debug("S3L2Adapter request failed: %s", desc)
+            return
+
+        warn_key = (error.operation_name, status, code)
+        with self._lock:
+            first = warn_key not in self._warned_errors
+            self._warned_errors.add(warn_key)
+        if not first:
+            logger.debug("S3L2Adapter request failed: %s", desc)
+            return
+
+        note = ""
+        if error.operation_name == "HeadObject" and status == 403:
+            note = (
+                "; lookups treat this as a miss (S3 returns 403 for missing "
+                "keys when the credentials lack s3:ListBucket, or the "
+                "credentials may be invalid)"
+            )
+        logger.warning(
+            "S3L2Adapter request failed: %s%s; repeats are logged at DEBUG",
+            desc,
+            note,
+        )
 
     # ------------------------------------------------------------------
     # Internal: coroutines
@@ -1084,12 +1261,14 @@ class S3L2Adapter(L2AdapterInterface):
         # bytes for the same object.
         newly_stored_keys: list[ObjectKey] = []
         newly_stored_sizes: list[int] = []
-        last_error: Optional[str] = None
+        last_error: Optional[BaseException] = None
+        num_failed = 0
         for indexed_entry, result in zip(indexed, results, strict=True):
             i, key, obj, opt_key_str = indexed_entry
             if isinstance(result, Exception):
                 success = False
-                last_error = str(result)
+                last_error = result
+                num_failed += 1
                 continue
             # Use logical size (``get_size``) to match the number of
             # bytes actually PUT to S3 via ``obj.byte_array`` — which
@@ -1108,7 +1287,15 @@ class S3L2Adapter(L2AdapterInterface):
                 newly_stored_keys.append(key)
                 newly_stored_sizes.append(size)
 
-        self._record_connection_outcome(last_error if not success else None)
+        if last_error is not None:
+            logger.debug(
+                "S3L2Adapter store task %d: %d/%d PUTs failed; last error: %s",
+                task_id,
+                num_failed,
+                len(results),
+                last_error,
+            )
+        self._record_connection_outcome(last_error)
 
         bytes_transferred = sum(newly_stored_sizes)
         with self._lock:
@@ -1163,7 +1350,7 @@ class S3L2Adapter(L2AdapterInterface):
             else:
                 combined.append(next(real_iter))
 
-        last_error: Optional[str] = None
+        last_error: Optional[BaseException] = None
         any_success = False
 
         for i, (key, key_str, captured, result) in enumerate(
@@ -1176,7 +1363,7 @@ class S3L2Adapter(L2AdapterInterface):
                 # 404 is an expected not-found.
                 if status == 404:
                     continue
-                last_error = str(result)
+                last_error = result
                 continue
             # result is None (cached) or None (success returned by future).
             if status == 200 and length is not None and length > 0:
@@ -1186,6 +1373,12 @@ class S3L2Adapter(L2AdapterInterface):
                     self._object_size_cache[key_str] = length
                     self._locked_keys[key] += 1
 
+        if last_error is not None:
+            logger.debug(
+                "S3L2Adapter lookup task %d: HEAD failed; last error: %s",
+                task_id,
+                last_error,
+            )
         if any_success:
             self._record_connection_outcome(None)
         elif last_error is not None:
@@ -1219,16 +1412,26 @@ class S3L2Adapter(L2AdapterInterface):
                 logger.exception("S3L2Adapter failed to launch GET")
 
         results = await asyncio.gather(*futures, return_exceptions=True)
-        last_error: Optional[str] = None
+        last_error: Optional[BaseException] = None
+        num_failed = 0
         any_success = False
 
         for idx, result in zip(launched_indices, results, strict=True):
             if isinstance(result, Exception):
-                last_error = str(result)
+                last_error = result
+                num_failed += 1
                 continue
             bitmap.set(idx)
             any_success = True
 
+        if last_error is not None:
+            logger.debug(
+                "S3L2Adapter load task %d: %d/%d GETs failed; last error: %s",
+                task_id,
+                num_failed,
+                len(results),
+                last_error,
+            )
         if any_success:
             self._record_connection_outcome(None)
         elif last_error is not None:
@@ -1244,11 +1447,19 @@ class S3L2Adapter(L2AdapterInterface):
         max_keys: int,
         continuation_token: Optional[str],
     ) -> tuple[list[tuple[ObjectKey, int]], Optional[str]]:
-        """Issue one ``ListObjectsV2`` call and parse the response."""
-        s3_req, body_chunks, _captured = self._list_request(
-            prefix, max_keys, continuation_token
-        )
-        await asyncio.wrap_future(s3_req.finished_future)
+        """Issue one ``ListObjectsV2`` call and parse the response.
+
+        Raises:
+            RuntimeError: the request failed; the message carries the
+                HTTP status and S3 error code when the server answered.
+        """
+        s3_req, body_chunks = self._list_request(prefix, max_keys, continuation_token)
+        try:
+            await asyncio.wrap_future(s3_req.finished_future)
+        except AwsCrtError as e:
+            raise RuntimeError(
+                f"S3 ListObjectsV2 failed: {_describe_s3_error(e)}"
+            ) from e
         return _parse_list_response_xml(b"".join(body_chunks))
 
     async def _execute_delete(
@@ -1279,7 +1490,11 @@ class S3L2Adapter(L2AdapterInterface):
         deleted_sizes: list[int] = []
         for (key, key_str), result in zip(indexed, results, strict=True):
             if isinstance(result, Exception):
-                logger.warning("S3L2Adapter DELETE failed for %s: %s", key_str, result)
+                logger.warning(
+                    "S3L2Adapter DELETE failed for %s: %s",
+                    key_str,
+                    _describe_s3_error(result),
+                )
                 continue
             with self._lock:
                 sz = self._key_sizes.pop(key, None)
