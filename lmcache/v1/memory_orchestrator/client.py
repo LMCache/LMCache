@@ -22,6 +22,7 @@ from lmcache.v1.memory_orchestrator._proto_gen.memory_orchestrator_pb2_grpc impo
 from lmcache.v1.memory_orchestrator.api import (
     MAX_UINT64,
     CloseResult,
+    DeleteStatus,
     OrchestratorError,
     OrchestratorUnavailableError,
     ReadGrantResult,
@@ -32,6 +33,7 @@ from lmcache.v1.memory_orchestrator.api import (
     RegisterResult,
     RequestRejectedError,
     TokenStatus,
+    WireObjectKey,
     WriteGrantResult,
     WriteRequest,
 )
@@ -300,6 +302,42 @@ class MemoryOrchestratorClient:
             OrchestratorError: See the class docstring.
         """
         return self._token_batch("FinishRead", self._stub.FinishRead, tokens)
+
+    def delete_objects(self, keys: Sequence[WireObjectKey]) -> list[DeleteStatus]:
+        """Make committed objects unreadable for every client; extents stay consumed.
+
+        Args:
+            keys: Keys of the objects to delete.
+
+        Returns:
+            One status per key, in request order.
+
+        Raises:
+            OrchestratorError: See the class docstring.
+        """
+        statuses: list[DeleteStatus] = []
+        for chunk in self._chunks(keys):
+            request = pb2.DeleteObjectsRequest(
+                env=self._next_envelope(self.region_epoch),
+                keys=codec.delete_keys_to_proto(chunk),
+            )
+            reply = self._invoke("DeleteObjects", self._stub.DeleteObjects, request)
+            _check_result_count("DeleteObjects", len(reply.results), len(chunk))
+            statuses.extend(codec.delete_status_from_proto(s) for s in reply.results)
+        return statuses
+
+    def delete_published(self) -> int:
+        """Delete every committed object written under this client_id.
+
+        Returns:
+            The number of objects deleted.
+
+        Raises:
+            OrchestratorError: See the class docstring.
+        """
+        env = self._next_envelope(self.region_epoch)
+        reply = self._invoke("DeletePublished", self._stub.DeletePublished, env)
+        return reply.deleted
 
     def usage(self) -> RegionUsage:
         """Fetch the region's counters; requires a registered client.
