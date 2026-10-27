@@ -18,6 +18,15 @@ Secondary lookup (always on):
 - Lookup always checks secondary storage (disk) on miss and lazily
   populates the in-memory index when a file is found. File names are
   derived deterministically from ObjectKey.
+
+Index/disk consistency:
+- ``delete()`` runs on the eviction thread and unlinks files outside the
+  lock. Keys being deleted are tombstoned in ``_deleting`` until the unlink
+  finishes, so a concurrent lookup cannot re-add them from disk and a
+  concurrent store cannot publish a file that the delete then removes.
+- A load that finds its file missing (ENOENT/ESTALE, e.g. deleted by another
+  server sharing the directory) drops that key from the index instead of
+  leaving a stale entry that fails on every later load.
 """
 
 # Future
@@ -26,6 +35,7 @@ from __future__ import annotations
 # Standard
 from typing import Optional
 import asyncio
+import errno
 import threading
 
 # First Party
@@ -58,6 +68,20 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
+
+
+def _is_missing_file_error(exc: BaseException) -> bool:
+    """Return whether ``exc`` means the file behind an index entry is gone.
+
+    Args:
+        exc: Exception raised by a load.
+
+    Returns:
+        True for ENOENT and ESTALE (the NFS form of a deleted file).
+    """
+    return isinstance(exc, FileNotFoundError) or (
+        isinstance(exc, OSError) and exc.errno == errno.ESTALE
+    )
 
 
 def _create_dynamic_nixl_storage_agent(
@@ -133,6 +157,9 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         self._memory_objects: dict[ObjectKey, NixlStoreObj] = {}
         self._inflight_stores: set[ObjectKey] = set()
         self._total_bytes: int = 0
+        # Keys removed from the index whose files may still be on disk
+        # (a delete is in progress); guarded by ``_lock``.
+        self._deleting: set[ObjectKey] = set()
 
         # Task ID management
         self._next_task_id: L2TaskId = 0
@@ -237,7 +264,16 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     #####################
 
     def delete(self, keys: list[ObjectKey]) -> None:
-        """Delete objects from storage, removing their files from disk."""
+        """Delete objects from storage, removing their files from disk.
+
+        Pinned keys are skipped. Deleted keys stay tombstoned until their
+        files are unlinked, so lookup and store ignore them meanwhile. A file
+        that cannot be unlinked is logged and left for the secondary lookup to
+        re-register; it does not stop the remaining deletes.
+
+        Args:
+            keys: Keys to delete.
+        """
         to_delete: list[tuple[ObjectKey, int]] = []
         with self._lock:
             for key in keys:
@@ -253,17 +289,21 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                     continue
                 self._total_bytes -= obj.size
                 del self._memory_objects[key]
+                self._deleting.add(key)
                 to_delete.append((key, obj.size))
         # Filesystem I/O outside the lock to avoid blocking concurrent
         # store/lookup/load operations.
-        deleted_keys: list[ObjectKey] = []
-        deleted_sizes: list[int] = []
-        for key, size in to_delete:
-            self.nixl_agent.dynamic_delete(key)
-            deleted_keys.append(key)
-            deleted_sizes.append(size)
-        if deleted_keys:
-            self._notify_keys_deleted(deleted_keys, deleted_sizes)
+        for key, _ in to_delete:
+            try:
+                self.nixl_agent.dynamic_delete(key)
+            except OSError:
+                logger.exception("Failed to unlink the file of evicted key %s", key)
+        with self._lock:
+            self._deleting.difference_update(key for key, _ in to_delete)
+        if to_delete:
+            self._notify_keys_deleted(
+                [key for key, _ in to_delete], [size for _, size in to_delete]
+            )
 
     # ``get_usage`` is inherited from L2AdapterInterface; byte accounting
     # is driven by ``_notify_keys_*`` through the base class now.
@@ -391,6 +431,10 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 with self._lock:
                     if key in self._memory_objects or key in self._inflight_stores:
                         continue
+                    if key in self._deleting:
+                        # The old file is about to be unlinked; publishing a
+                        # new one now would lose it to that unlink.
+                        continue
                     if self._total_bytes + mem_size > self._max_capacity_bytes:
                         logger.warning(
                             "Storage capacity exceeded, skipping store for key %s",
@@ -484,7 +528,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 if obj is not None:
                     bitmap.set(i)
                     obj.increase_pin_count()
-                else:
+                elif key not in self._deleting:
                     missing.append((i, key))
 
         # Filesystem I/O outside the lock to avoid blocking concurrent
@@ -503,6 +547,9 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                     obj.increase_pin_count()
                     continue
                 if key in self._inflight_stores:
+                    continue
+                if key in self._deleting:
+                    # Deleted while we were stat-ing it: do not resurrect.
                     continue
                 if self._total_bytes + obj_size > self._max_capacity_bytes:
                     logger.debug(
@@ -543,6 +590,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         """
         bitmap = Bitmap(len(keys))
         accessed_keys: list[ObjectKey] = []
+        missing_keys: list[ObjectKey] = []
         try:
             # Read every present key's file concurrently (asyncio.gather
             # below) so a multi-chunk request does not pay per-file NIXL
@@ -575,6 +623,9 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 results = await asyncio.gather(*coros, return_exceptions=True)
                 for pos, result in zip(found_positions, results, strict=True):
                     if isinstance(result, BaseException):
+                        if _is_missing_file_error(result):
+                            missing_keys.append(keys[pos])
+                            continue
                         logger.error(
                             "Dynamic NIXL load failed for key %s: %r",
                             keys[pos],
@@ -587,11 +638,49 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         except Exception:
             logger.exception("Dynamic NIXL load task %d failed", task_id)
 
+        if missing_keys:
+            self._drop_missing_objects(missing_keys)
         if accessed_keys:
             self._notify_keys_accessed(accessed_keys)
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
         self._signal_load_event()
+
+    def _drop_missing_objects(self, keys: list[ObjectKey]) -> None:
+        """Drop index entries whose files are gone and notify listeners.
+
+        The files are already missing (for example deleted by another server
+        sharing the directory), so nothing is unlinked. Only the given keys
+        are dropped: objects that differ in kv_rank, object group, salt or tags
+        are separate files and stay valid. One warning is logged per call, not
+        per key, because an eviction on a shared directory can make thousands
+        of entries stale at once.
+
+        The dropped entry may still be pinned by the lookup that led to this
+        load. That lookup's later unlock finds no entry, or an entry stored for
+        the same key since, whose pin count floors at zero.
+
+        Args:
+            keys: Keys whose load found the file missing.
+        """
+        dropped: list[tuple[ObjectKey, int]] = []
+        with self._lock:
+            for key in keys:
+                obj = self._memory_objects.pop(key, None)
+                if obj is None:
+                    continue  # already removed by a delete or another load
+                self._total_bytes -= obj.size
+                dropped.append((key, obj.size))
+        if not dropped:
+            return
+        logger.warning(
+            "Dropped %d L2 index entries whose files are missing (first: %s)",
+            len(dropped),
+            dropped[0][0],
+        )
+        self._notify_keys_deleted(
+            [key for key, _ in dropped], [size for _, size in dropped]
+        )
 
 
 # ---------------------------------------------------------------------
