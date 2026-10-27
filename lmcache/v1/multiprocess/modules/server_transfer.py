@@ -13,6 +13,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.storage_manager import l1_owners_of
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     PrepareRetrieveResponse,
@@ -45,7 +46,7 @@ def create_transfer_strategy(
     read_owner_resolver: Callable[[str], dict[ObjectKey, int] | None] | None = None,
     shm_name: str,
     pool_size: int,
-    pending_writes: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
+    pending_writes: dict[tuple[int, IPCCacheServerKey], dict[ObjectKey, int]],
     pending_reads: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
     pending_lock: LockType,
     transfer_key_factory: Callable[
@@ -58,7 +59,8 @@ def create_transfer_strategy(
         storage_manager: Storage manager used by the selected strategy.
         shm_name: Shared-memory pool name advertised to workers.
         pool_size: Shared-memory pool size in bytes.
-        pending_writes: Map of pending SHM write reservations keyed by transfer key.
+        pending_writes: Map of pending SHM write reservations keyed by transfer
+            key; each value maps the reserved keys to their L1 owner.
         pending_reads: Map of pending SHM read reservations keyed by transfer key.
         pending_lock: Lock guarding shared pending SHM reservation state.
         transfer_key_factory: Factory that builds the `(instance_id, key)` lookup key
@@ -282,12 +284,11 @@ class InlineTransferStrategy(TransferStrategy):
                 written_keys.append(obj_key)
         finally:
             # Complete by owner: with several L1 managers the reservations can
-            # live in different ones, and finish_write(keys) refuses that case.
+            # live in different ones.
             if written_keys:
-                self._storage_manager.finish_write_by_owner(
-                    self._storage_manager.prepare_write_completion(
-                        {k: reserved_dict[k] for k in written_keys}
-                    )
+                self._storage_manager.finish_write(
+                    written_keys,
+                    l1_owners=l1_owners_of({k: reserved_dict[k] for k in written_keys}),
                 )
             # Release reservations that were never written so their write
             # locks don't wedge later operations on the same keys, then drop
@@ -295,10 +296,9 @@ class InlineTransferStrategy(TransferStrategy):
             written = set(written_keys)
             leftover = [k for k in reserved_dict if k not in written]
             if leftover:
-                self._storage_manager.finish_write_by_owner(
-                    self._storage_manager.prepare_write_completion(
-                        {k: reserved_dict[k] for k in leftover}
-                    )
+                self._storage_manager.finish_write(
+                    leftover,
+                    l1_owners=l1_owners_of({k: reserved_dict[k] for k in leftover}),
                 )
                 self._storage_manager.delete_l1_keys(leftover)
 
@@ -459,7 +459,7 @@ class ShmTransferStrategy(TransferStrategy):
     def __init__(
         self,
         storage_manager: "StorageManager",
-        pending_writes: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
+        pending_writes: dict[tuple[int, IPCCacheServerKey], dict[ObjectKey, int]],
         pending_reads: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
         pending_lock: LockType,
         transfer_key_factory: Callable[
@@ -519,6 +519,7 @@ class ShmTransferStrategy(TransferStrategy):
         chunk_indices: list[int] = []
         group_ids: list[int] = []
         reserved_keys: list[ObjectKey] = []
+        owners: dict[ObjectKey, int] = {}
         for gid, (g_keys, g_layout) in enumerate(
             zip(group_keys, group_layouts, strict=True)
         ):
@@ -528,6 +529,7 @@ class ShmTransferStrategy(TransferStrategy):
             reserved = self._storage_manager.reserve_write(
                 [k for idx, k in enumerate(g_keys) if idx not in skip], g_layout
             )
+            g_owners = l1_owners_of(reserved)
             g_reserved: list[ObjectKey] = []
             try:
                 for idx, obj_key in enumerate(g_keys):
@@ -553,8 +555,11 @@ class ShmTransferStrategy(TransferStrategy):
                     obj_key for obj_key in reserved if obj_key not in g_reserved_set
                 ]
                 if unused_keys:
-                    self._storage_manager.finish_write(unused_keys)
+                    self._storage_manager.finish_write(
+                        unused_keys, l1_owners={k: g_owners[k] for k in unused_keys}
+                    )
             reserved_keys.extend(g_reserved)
+            owners.update({k: g_owners[k] for k in g_reserved})
 
         if not reserved_keys:
             empty: dict[str, Any] = {"slots": [], "chunk_indices": []}
@@ -563,7 +568,7 @@ class ShmTransferStrategy(TransferStrategy):
             return PrepareStoreResponse(context=empty)
         transfer_key = self._transfer_key_factory(key, instance_id)
         with self._pending_lock:
-            self._pending_writes[transfer_key] = reserved_keys
+            self._pending_writes[transfer_key] = owners
         ctx: dict[str, Any] = {"slots": slots, "chunk_indices": chunk_indices}
         if multi_group:
             ctx["group_ids"] = group_ids
@@ -594,11 +599,11 @@ class ShmTransferStrategy(TransferStrategy):
             )
         transfer_key = self._transfer_key_factory(key, instance_id)
         with self._pending_lock:
-            reserved_keys = self._pending_writes.pop(transfer_key, None)
-        if reserved_keys is None:
+            pending = self._pending_writes.pop(transfer_key, None)
+        if pending is None:
             return False
-        if reserved_keys:
-            self._storage_manager.finish_write(reserved_keys)
+        if pending:
+            self._storage_manager.finish_write(list(pending), l1_owners=pending)
         return True
 
     def prepare_retrieve(

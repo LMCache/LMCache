@@ -4,9 +4,9 @@ Distributed multi-tier storage manager for MP mode
 """
 
 # Standard
-from collections import defaultdict
+from collections import Counter, defaultdict
+from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
-from dataclasses import replace
 from typing import Any, Iterator, Optional, cast
 import threading
 import time
@@ -14,10 +14,14 @@ import time
 # First Party
 from lmcache.lmcache_native import PeriodicEventNotifier
 from lmcache.logging import init_logger
+from lmcache.utils import lmcache_deprecate
 from lmcache.v1.distributed.api import (
     CapacitySnapshot,
     L1BackendType,
     MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
     ModuleMemoryCapacity,
     ObjectKey,
     PrefetchHandle,
@@ -34,11 +38,10 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError, strerror
 from lmcache.v1.distributed.internal_api import (
     L1ManagerInterface,
-    L1MemoryDesc,
     L1OperationResult,
     L2AdapterListener,
 )
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DevDaxL1Manager, create_l1_managers
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -71,7 +74,9 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     L2AdapterDescriptor,
     resolve_l1_affinity,
 )
-from lmcache.v1.distributed.storage_controllers.write_policy import OrderedWritePolicy
+from lmcache.v1.distributed.storage_controllers.write_policy import (
+    create_write_policy,
+)
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaState,
     DevDaxArenaStatus,
@@ -95,97 +100,90 @@ logger = init_logger(__name__)
 # tag makes concurrent stores of the same key exclude each other.
 _L1_WRITE_TAG = "storage_manager"
 
-# Internal stream-callback payload. No MemoryObj or device pointer crosses msgpack.
+# Owner/key groups of the deprecated read-completion API (see
+# ``prepare_read_completion``). No MemoryObj or device pointer crosses msgpack.
 L1WriteCompletion = list[tuple[int, list[ObjectKey]]]
+
+_DEVDAX_L1_TAGS = MemoryTags(segment=MemorySegment.CXL, residency=MemoryResidency.LOCAL)
+
+
+def l1_owners_of(objects: Mapping[ObjectKey, MemoryObj]) -> dict[ObjectKey, int]:
+    """Return the L1 manager that reserved each object.
+
+    Args:
+        objects: Key/object pairs as returned by ``reserve_write``.
+
+    Returns:
+        The ``l1_manager_id`` per key, the ``l1_owners`` that
+        ``StorageManager.finish_write`` takes.
+
+    Raises:
+        ValueError: An object was not reserved through an L1 manager.
+    """
+    owners: dict[ObjectKey, int] = {}
+    for key, obj in objects.items():
+        owner = obj.get_l1_manager()
+        if owner is None:
+            raise ValueError(f"Memory object for key {key} has no L1 owner")
+        owners[key] = owner
+    return owners
+
+
+def _validate_write_targets(
+    keys: list[ObjectKey],
+    targets: dict[int, list[ObjectKey]],
+    registered: Mapping[int, L1ManagerInterface],
+) -> None:
+    """Check a write policy answer before any L1 is touched.
+
+    Raises:
+        ValueError: A target is not a registered L1 manager id, or the
+            targets do not contain every key exactly once.
+    """
+    unknown = [owner for owner in targets if owner not in registered]
+    if unknown:
+        raise ValueError(
+            f"The write policy selected unregistered L1 managers: {unknown}"
+        )
+    placed = [key for group in targets.values() for key in group]
+    if Counter(placed) != Counter(keys):
+        raise ValueError("The write policy must place every key exactly once")
 
 
 class StorageManager:
-    def __init__(
-        self,
-        config: StorageManagerConfig,
-        *,
-        _l1_managers: tuple[L1ManagerInterface, ...] | None = None,
-        _write_policy: OrderedWritePolicy | None = None,
-    ) -> None:
-        """Create configured peer L1s and their affinity-bound L2 controllers.
+    def __init__(self, config: StorageManagerConfig) -> None:
+        """Create the configured L1 managers and their affinity-bound L2 controllers.
 
         Args:
-            config: Backend, capacity, eviction, and fixed-affinity settings.
-            _l1_managers: Internal test injection of existing ordered managers.
-                Validated managers transfer lifecycle ownership to this instance.
-            _write_policy: Candidate order, validated and captured once at startup.
-                Later policy mutations do not reconfigure the manager.
+            config: L1 managers, L2 adapters, eviction, policy and notifier
+                settings.
 
         Raises:
-            ValueError: Manager identities/tags, placement, backing storage, or
-                affinity settings conflict.
+            ValueError: An L1 configuration is invalid or maps a Device-DAX
+                range another L1 owns, no L1 has the memory tags an L2 adapter
+                wants, or a policy name is unknown.
         """
         with ExitStack() as cleanup:
-            if _l1_managers is not None:
-                if not _l1_managers or len(
-                    {m.l1_manager_id for m in _l1_managers}
-                ) != len(_l1_managers):
-                    raise ValueError("L1 managers must be nonempty and distinct")
-                managers = _l1_managers
-                config = replace(
-                    config, l1_manager_configs=[m.config for m in managers]
-                )
-            else:
-                created: list[L1ManagerInterface] = []
-                for manager_config in config.l1_manager_configs:
-                    memory = manager_config.memory_config
-                    path = memory.devdax_path
-                    if path and any(
-                        m.owns_range(
-                            path,
-                            memory.devdax_offset_in_bytes,
-                            memory.devdax_size_in_bytes or memory.size_in_bytes,
-                        )
-                        for m in created
-                    ):
-                        raise ValueError(
-                            f"Device-DAX path already owned by an L1: {path}"
-                        )
-                    manager: L1ManagerInterface = L1Manager(manager_config)
-                    cleanup.callback(manager.close)
-                    created.append(manager)
-                managers = tuple(created)
-            self._l1_configs = (
-                [m.config for m in managers]
-                if _l1_managers is not None
-                else config.l1_manager_configs
+            # Placement order is the order of ``config.l1_manager_configs``.
+            self._l1_managers: list[L1ManagerInterface] = create_l1_managers(
+                config.l1_manager_configs
             )
-            self._l1_by_tag = {
-                c.tag: m for c, m in zip(self._l1_configs, managers, strict=True)
-            }
-            self._l1_manager = managers[0]
-            self._l1_managers_by_id = {m.l1_manager_id: m for m in managers}
-            policy = _write_policy or OrderedWritePolicy(tuple(self._l1_managers_by_id))
-            candidates = policy.select_write_targets()
-            if len(set(candidates)) != len(candidates) or any(
-                owner not in self._l1_managers_by_id for owner in candidates
-            ):
-                raise ValueError(
-                    "write policy must select distinct registered L1 managers"
-                )
-            # Topology is fixed; resolve the validated order outside the write path.
-            self._write_managers = tuple(
-                self._l1_managers_by_id[owner] for owner in candidates
-            )
-            if _l1_managers is not None:
-                for manager in managers:
-                    cleanup.callback(manager.close)
+            for manager in self._l1_managers:
+                cleanup.callback(manager.close)
+            self._l1_managers_by_id = {m.l1_manager_id: m for m in self._l1_managers}
+            self._l1_by_tag = {m.config.tag: m for m in self._l1_managers}
+            self._write_policy = create_write_policy(config.write_policy)
+            # Owner-less reads on several L1s probe every L1; said once.
+            self._fanout_warned = False
             self._event_bus = get_event_bus()
 
             self._eviction_controllers = [
-                L1EvictionController(m, c.eviction or config.eviction_config)
-                for c, m in zip(self._l1_configs, managers, strict=True)
+                L1EvictionController(m, m.config.eviction or config.eviction_config)
+                for m in self._l1_managers
             ]
             for eviction_controller in self._eviction_controllers:
                 eviction_controller.start()
                 cleanup.callback(eviction_controller.stop)
-            self._eviction_controller = self._eviction_controllers[0]
-            self._l1_memory_desc = self._l1_manager.get_l1_memory_desc()
             self._next_adapter_id = 0
             # Serializes L1/L2 additions and L2 adapter registration/deletion.
             # Held from ownership check through add, before allocator/device locks.
@@ -251,11 +249,12 @@ class StorageManager:
             # their own copies by ``descriptor.index`` (== adapter_id) and learn
             # of later changes via add_adapter/request_remove_adapter.
             self._store_controllers: dict[int, StoreController] = {}
-            for c, manager in zip(self._l1_configs, managers, strict=True):
+            for manager in self._l1_managers:
                 descriptors = [
                     d
                     for d in self._adapter_descriptors.values()
-                    if resolve_l1_affinity(d.config, self._l1_by_tag) == c.tag
+                    if resolve_l1_affinity(d.config, self._l1_by_tag)
+                    == manager.config.tag
                 ]
                 controller = StoreController(
                     manager,
@@ -266,12 +265,11 @@ class StorageManager:
                 self._store_controllers[manager.l1_manager_id] = controller
                 controller.start()
                 cleanup.callback(controller.stop)
-            self._store_controller = self._store_controllers[managers[0].l1_manager_id]
             self._prefetch_controller = PrefetchController(
-                l1_managers=list(managers),
+                l1_managers=list(self._l1_managers),
                 l1_manager_descriptors=[
-                    L1ManagerDescriptor(index=m.l1_manager_id, config=c)
-                    for m, c in zip(managers, self._l1_configs, strict=True)
+                    L1ManagerDescriptor(index=m.l1_manager_id, config=m.config)
+                    for m in self._l1_managers
                 ],
                 l2_adapters=list(self._l2_adapters.values()),
                 adapter_descriptors=list(self._adapter_descriptors.values()),
@@ -282,7 +280,7 @@ class StorageManager:
             cleanup.callback(self._prefetch_controller.stop)
 
             # L2 usage gauge — one observation per adapter, tagged by
-            # ``l2_name``.  Parallel to L1Manager's ``l1_memory_usage_bytes``.
+            # ``l2_name``.  Parallel to the L1 ``l1_memory_usage_bytes`` gauge.
             register_gauge(
                 "lmcache.l2",
                 "lmcache_mp.l2_usage_bytes",
@@ -304,6 +302,10 @@ class StorageManager:
         """
         Reserve the object for writing into the storage manager.
 
+        The write policy decides which L1 manager reserves each key. A key
+        its L1 cannot reserve (out of memory, write conflict) is omitted
+        from the result; there is no second attempt on another L1.
+
         Args:
             keys (list[ObjectKey]): List of object keys to reserve for writing.
             layout_desc (MemoryLayoutDesc): Description of the memory layout
@@ -313,34 +315,27 @@ class StorageManager:
                 reserved memory objects. Note that not all requested keys could be
                 reserved (e.g., out of memory or write conflict)
 
-        Only OUT_OF_MEMORY keys advance to the next candidate. Each L1 receives
-        the whole pending subset; overflow does not split allocation batches.
-        Candidate managers and their order are captured at construction.
-
         Raises:
-            Exception: Allocation exceptions propagate; they are not overflow.
+            ValueError: The write policy selected an unregistered L1 manager
+                or did not place every key exactly once.
         """
-        reserve_result: dict[ObjectKey, L1OperationResult] = {
-            key: (L1Error.OUT_OF_MEMORY, None) for key in keys
-        }
-        pending = keys
-        for manager in self._write_managers:
-            if not pending:
-                break
-            results = manager.reserve_write(
-                keys=pending,
-                is_temporary=[False] * len(pending),
-                layout_desc=layout_desc,
-                tag=_L1_WRITE_TAG,
+        targets = self._write_policy.select_write_targets(keys, self._l1_managers)
+        _validate_write_targets(keys, targets, self._l1_managers_by_id)
+        reserve_result: dict[ObjectKey, L1OperationResult] = {}
+        for owner, group in targets.items():
+            reserve_result.update(
+                self._l1_managers_by_id[owner].reserve_write(
+                    keys=group,
+                    is_temporary=[False] * len(group),
+                    layout_desc=layout_desc,
+                    tag=_L1_WRITE_TAG,
+                )
             )
-            reserve_result.update(results)
-            # Retry the failed batch subset, never individual allocations or
-            # terminal conflicts. Each candidate is visited at most once.
-            pending = [k for k in pending if results[k][0] == L1Error.OUT_OF_MEMORY]
 
-        result = {k: m for k, (e, m) in reserve_result.items() if m is not None}
+        # Report in request order, whatever grouping the policy chose.
+        result = {k: m for k in keys if (m := reserve_result[k][1]) is not None}
         successful_keys = list(result.keys())
-        failed_keys = [k for k, (e, m) in reserve_result.items() if m is None]
+        failed_keys = [k for k in keys if reserve_result[k][1] is None]
         self._event_bus.publish(
             Event(
                 event_type=EventType.SM_WRITE_RESERVED,
@@ -351,9 +346,7 @@ class StorageManager:
             )
         )
 
-        oom_keys = [
-            k for k, (e, _) in reserve_result.items() if e == L1Error.OUT_OF_MEMORY
-        ]
+        oom_keys = [k for k in keys if reserve_result[k][0] == L1Error.OUT_OF_MEMORY]
         if oom_keys:
             self._event_bus.publish(
                 Event(
@@ -364,9 +357,11 @@ class StorageManager:
 
         return result
 
+    @enable_tracing(redact=("l1_owners",))
     def finish_write(
         self,
         keys: list[ObjectKey],
+        l1_owners: dict[ObjectKey, int] | None = None,
     ) -> None:
         """
         Finish writing the objects into the storage manager.
@@ -377,63 +372,27 @@ class StorageManager:
 
         Args:
             keys (list[ObjectKey]): List of object keys that have been written.
+            l1_owners: The L1 manager each key was reserved in, built from the
+                reserved objects with :func:`l1_owners_of`. ``None`` offers
+                the keys to every L1 and each admits the keys it stages.
 
         Raises:
-            ValueError: Multiple managers require captured owner/key groups via
-                prepare_write_completion and finish_write_by_owner instead.
+            ValueError: ``l1_owners`` omits a key or names an unregistered L1
+                manager.
         """
-        self._require_single_l1()
-        self.finish_write_by_owner([(self._l1_manager.l1_manager_id, keys)])
-
-    def prepare_write_completion(
-        self, objects: dict[ObjectKey, MemoryObj]
-    ) -> L1WriteCompletion:
-        """Capture owner/key groups from the actual reserved objects.
-
-        Args:
-            objects: Original key/object pairs returned by reserve_write.
-
-        Returns:
-            A MessagePack-compatible batch for finish_write_by_owner.
-
-        Raises:
-            ValueError: An object has no owner or belongs to another manager set.
-        """
-        groups: dict[int, list[ObjectKey]] = {}
-        for key, obj in objects.items():
-            owner = obj.get_l1_manager()
-            if owner is None or owner not in self._l1_managers_by_id:
-                raise ValueError("write completion requires a registered L1 owner")
-            groups.setdefault(owner, []).append(key)
-        return list(groups.items())
-
-    def finish_write_by_owner(self, completion: L1WriteCompletion) -> None:
-        """Finish captured reservations without rerunning placement policy.
-
-        Args:
-            completion: Owner/key groups captured before scheduling completion.
-
-        Raises:
-            ValueError: A captured owner is no longer registered.
-
-        The caller must wait for device writes. L1 staging, writer tags, and TTLs
-        retain their existing lifetime rules; an owner tag is not a write epoch.
-        Single-L1 tracing retains the replayable finish_write(keys) record.
-        """
-        if any(owner not in self._l1_managers_by_id for owner, _ in completion):
-            raise ValueError("write completion requires a registered L1 owner")
-        if is_tracing_enabled() and len(self._l1_managers_by_id) == 1:
-            # Replay creates fresh manager IDs; keep its existing key-only schema
-            # and emit once for both the legacy and owner-routed entry points.
-            publish_call_event(
-                "lmcache.v1.distributed.storage_manager.StorageManager.finish_write",
-                {"keys": [key for _, keys in completion for key in keys]},
-            )
         finish_result: dict[ObjectKey, L1Error] = {}
-        for owner, keys in completion:
-            finish_result.update(
-                self._l1_managers_by_id[owner].finish_write(keys, tag=_L1_WRITE_TAG)
-            )
+        if l1_owners is None:
+            for manager in self._l1_managers:
+                for key, err in manager.finish_write(keys, tag=_L1_WRITE_TAG).items():
+                    if err == L1Error.SUCCESS or key not in finish_result:
+                        finish_result[key] = err
+        else:
+            for owner, group in self._group_by_owner(keys, l1_owners).items():
+                finish_result.update(
+                    self._l1_managers_by_id[owner].finish_write(
+                        group, tag=_L1_WRITE_TAG
+                    )
+                )
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
         self._event_bus.publish(
@@ -732,7 +691,7 @@ class StorageManager:
                 Missing keys are a no-op, so the operation is idempotent.
         """
         results: dict[ObjectKey, L1Error] = {}
-        for manager in self._l1_managers_by_id.values():
+        for manager in self._l1_managers:
             for key, error in manager.delete(keys, force=force).items():
                 if error == L1Error.KEY_IS_LOCKED or (
                     error != L1Error.KEY_NOT_EXIST
@@ -770,18 +729,36 @@ class StorageManager:
         """
         return self._quota_manager
 
-    @property
-    def l1_memory_desc(self) -> L1MemoryDesc:
-        """Descriptor of the L1 memory buffer backing this storage manager.
+    def l1_managers(self) -> list[L1ManagerInterface]:
+        """Return the L1 managers in write-placement order.
+
+        The topology is fixed at startup, so the list never changes; the
+        managers are live objects owned by this storage manager.
+
+        Returns:
+            A new list of the L1 managers, first placement target first.
+        """
+        return list(self._l1_managers)
+
+    def get_l1_manager_by_tags(self, tags: MemoryTags) -> L1ManagerInterface:
+        """Return the one L1 manager with the given memory tags.
+
+        Args:
+            tags: Memory tags to match exactly (see ``memory_tags.md``).
+
+        Returns:
+            The matching L1 manager.
 
         Raises:
-            ValueError: More than one L1 is configured, or the L1 has no
-                registerable buffer (GDS).
+            ValueError: No L1 manager, or more than one, has ``tags``.
         """
-        self._require_single_l1()
-        if self._l1_memory_desc is None:
-            raise ValueError("The L1 exposes no registerable memory buffer")
-        return self._l1_memory_desc
+        matches = [m for m in self._l1_managers if m.get_memory_tags() == tags]
+        if len(matches) != 1:
+            raise ValueError(
+                f"Expected exactly one L1 with memory tags {tags.segment.value}/"
+                f"{tags.residency.value}, found {len(matches)}"
+            )
+        return matches[0]
 
     def get_l2_usages(
         self,
@@ -844,9 +821,8 @@ class StorageManager:
             L1 per backing medium, then one entry per L2 adapter.
         """
         per_backend: dict[L1BackendType, int] = defaultdict(int)
-        for manager in self._l1_managers_by_id.values():
-            for backend, size in manager.get_capacity_bytes_by_backend().items():
-                per_backend[backend] += size
+        for manager in self._l1_managers:
+            per_backend[manager.backend_type] += manager.get_capacity_bytes()
         capacities = [
             ModuleMemoryCapacity(
                 tier=Tier.L1,
@@ -884,22 +860,20 @@ class StorageManager:
         Returns:
             Tuple of ``(used_bytes, total_bytes)``.
         """
-        usages = [m.get_memory_usage() for m in self._l1_managers_by_id.values()]
+        usages = [m.get_memory_usage() for m in self._l1_managers]
         return sum(u for u, _ in usages), sum(t for _, t in usages)
 
     # L1 reconfiguration APIs
     def get_l1_devdax_arena_statuses(self) -> list[DevDaxArenaStatus]:
-        """Return runtime status for every Device-DAX L1 arena.
+        """Return runtime status for every arena of the Device-DAX L1.
 
         Returns:
             One status per mapped arena, in pool order.
 
         Raises:
-            L1ReconfigureError: If L1 is not Device-DAX backed.
-            ValueError: This legacy operation requires a single L1 manager.
+            L1ReconfigureError: There is not exactly one Device-DAX L1.
         """
-        self._require_single_l1()
-        return self._l1_manager.get_devdax_arena_statuses()
+        return self._devdax_l1().get_devdax_arena_statuses()
 
     def add_l1_devdax_device(
         self,
@@ -907,7 +881,7 @@ class StorageManager:
         size_in_bytes: int,
         offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
-        """Add a Device-DAX range to the L1 arena pool.
+        """Add a Device-DAX range to the Device-DAX L1's arena pool.
 
         A successful addition publishes the current whole capacity topology.
 
@@ -924,15 +898,14 @@ class StorageManager:
             Status of the newly added arena.
 
         Raises:
-            L1ReconfigureError: If L1 is not Device-DAX backed, a single-region
-                L2 adapter is configured (409), the physical device is already
-                mapped by L2 (409), or the request cannot be applied.
-            ValueError: This legacy operation requires a single L1 manager.
+            L1ReconfigureError: There is not exactly one Device-DAX L1, a
+                single-region L2 adapter is configured (409), the physical
+                device is already mapped by L2 (409), or the request cannot be
+                applied.
         """
-        self._require_single_l1()
         with self._lifecycle_lock:
             # Report the L1 backing error before adapter compatibility.
-            self._l1_manager.get_devdax_arena_statuses()
+            devdax_l1 = self._devdax_l1()
             incompatible = self._single_region_adapter_names()
             if incompatible:
                 raise L1ReconfigureError(
@@ -952,7 +925,7 @@ class StorageManager:
                     "is already mapped by L2 adapter(s) "
                     f"({', '.join(device_owners)})",
                 )
-            status = self._l1_manager.add_devdax_device(
+            status = devdax_l1.add_devdax_device(
                 device_path, size_in_bytes, offset_in_bytes
             )
         self._publish_capacity_changed()
@@ -964,7 +937,7 @@ class StorageManager:
         mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
         offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
-        """Remove a Device-DAX arena from the L1 arena pool.
+        """Remove a Device-DAX arena from the Device-DAX L1's arena pool.
 
         Whenever the call changes usable capacity, it publishes the current
         whole topology. This includes a drain transition whose later device
@@ -979,22 +952,19 @@ class StorageManager:
             Status of the arena after the removal request.
 
         Raises:
-            L1ReconfigureError: If L1 is not Device-DAX backed or the request
-                cannot be applied.
+            L1ReconfigureError: There is not exactly one Device-DAX L1, or
+                the request cannot be applied.
             RuntimeError: If device synchronization or cleanup fails after the
                 drain transition.
             OSError: If unmapping or closing the device fails after the drain
                 transition.
-            ValueError: This legacy operation requires a single L1 manager.
         """
-        self._require_single_l1()
+        devdax_l1 = self._devdax_l1()
         target_was_active = self._l1_devdax_arena_is_active(
             device_path, offset_in_bytes
         )
         try:
-            status = self._l1_manager.remove_devdax_device(
-                device_path, mode, offset_in_bytes
-            )
+            status = devdax_l1.remove_devdax_device(device_path, mode, offset_in_bytes)
         except Exception:
             # Draining begins before an empty arena is synchronized and
             # unmapped. If that cleanup raises, usable capacity has still
@@ -1032,10 +1002,10 @@ class StorageManager:
         """Return whether an ACTIVE Device-DAX arena is at ``(device_path, offset)``.
 
         Both must match the values used when adding the arena. ``False`` when
-        L1 is not Device-DAX backed or nothing is registered there.
+        there is no Device-DAX L1 or nothing is registered there.
         """
         try:
-            status = self._l1_manager.get_devdax_arena_status(
+            status = self._devdax_l1().get_devdax_arena_status(
                 device_path, offset_in_bytes
             )
         except L1ReconfigureError:
@@ -1163,23 +1133,26 @@ class StorageManager:
 
         Raises:
             ValueError: If no L1 has the memory tags the adapter wants, the
-                adapter registers a single L1 memory region while L1 spans
-                more than one (hybrid DRAM + Device-DAX, or more than one
-                Device-DAX arena), or a DAX device is already mapped by L1 or
-                another L2 adapter.
+                adapter registers a single L1 memory region while its L1 spans
+                more than one Device-DAX arena, or a DAX device is already
+                mapped by L1 or another L2 adapter.
         """
         with self._lifecycle_lock:
             # Mirror of the check in add_l1_devdax_device: a single-region
             # adapter may only be added while L1 is exactly one memory region.
             adapter_name = requires_single_l1_memory_region(config)
             manager = self._l1_by_tag[resolve_l1_affinity(config, self._l1_by_tag)]
-            region_count = manager.memory_region_count()
+            region_count = (
+                manager.memory_region_count()
+                if isinstance(manager, DevDaxL1Manager)
+                else 1
+            )
             if adapter_name is not None and region_count > 1:
                 raise ValueError(
                     f"{adapter_name} registers a single L1 memory region, but "
-                    f"L1 currently spans {region_count} regions (hybrid DRAM + "
-                    "Device-DAX, or more than one Device-DAX arena); remove the "
-                    "additional Device-DAX regions before adding it"
+                    f"L1 currently spans {region_count} regions (more than one "
+                    "Device-DAX arena); remove the additional Device-DAX "
+                    "regions before adding it"
                 )
             self._check_dax_devices_unowned(config)
             adapter_id, adapter, descriptor = self._build_l2_adapter(config)
@@ -1277,7 +1250,7 @@ class StorageManager:
                 If False (default), only clear unlocked objects, keeping
                 write-locked and read-locked objects intact.
         """
-        for manager in self._l1_managers_by_id.values():
+        for manager in self._l1_managers:
             manager.clear(force=force)
 
     def close(self):
@@ -1296,26 +1269,29 @@ class StorageManager:
         for adapter in self._l2_adapters.values():
             adapter.close()
 
-        for manager in self._l1_managers_by_id.values():
+        for manager in self._l1_managers:
             manager.close()
 
     @property
     def is_multi_l1(self) -> bool:
-        """Whether owner metadata is required to resolve a serving read."""
-        return len(self._l1_managers_by_id) > 1
+        """Whether more than one L1 is configured.
+
+        Gates the per-tag status shape, owner-routed read completion and the
+        ``L1[tag]`` device-owner names; reads without owners still resolve.
+        """
+        return len(self._l1_managers) > 1
 
     def report_status(self) -> dict:
         """Return per-L1 status and aggregate health; retain single-L1 field names."""
-        managers = list(self._l1_managers_by_id.values())
-        tags = [c.tag for c in self._l1_configs]
-        l1s = {tag: m.report_status() for tag, m in zip(tags, managers, strict=True)}
+        managers = self._l1_managers
+        tags = [m.config.tag for m in managers]
+        l1s = {m.config.tag: m.report_status() for m in managers}
         capacities: dict[str, int] = defaultdict(int)
-        for status in l1s.values():
-            for backend, size in status["capacity_bytes_by_backend"].items():
-                capacities[backend] += size
+        for m in managers:
+            capacities[m.backend_type.value] += m.get_capacity_bytes()
         stores = {
-            tag: self._store_controllers[m.l1_manager_id].report_status()
-            for tag, m in zip(tags, managers, strict=True)
+            m.config.tag: self._store_controllers[m.l1_manager_id].report_status()
+            for m in managers
         }
         evictions = {
             tag: c.report_status()
@@ -1376,9 +1352,13 @@ class StorageManager:
         Returns:
             True if memory is consistent, False otherwise.
         """
-        checks = [m.memcheck() for m in self._l1_managers_by_id.values()]
+        checks = [m.memcheck() for m in self._l1_managers]
         return all(checks)
 
+    @lmcache_deprecate(
+        "read-completion groups will be built by the caller; use "
+        "finish_read_prefetched(keys, l1_owners=...) instead"
+    )
     def prepare_read_completion(
         self,
         keys: list[ObjectKey],
@@ -1388,16 +1368,22 @@ class StorageManager:
 
         Args:
             keys: Keys whose read locks the caller owns from prefetch.
-            l1_owners: Owners retained by that prefetch; required for multiple L1s.
+            l1_owners: Owners retained by that prefetch; ``None`` resolves
+                the owners by probing the L1s.
 
         Returns:
-            Serializable owner/key groups, identical in shape to write completion.
+            Serializable owner/key groups.
 
         Raises:
-            ValueError: A key has no registered owner, or multi-L1 owners are absent.
+            ValueError: ``l1_owners`` omits a key or names an unregistered
+                L1 manager.
         """
         return list(self._read_groups(keys, l1_owners).items())
 
+    @lmcache_deprecate(
+        "read-completion groups will be built by the caller; use "
+        "finish_read_prefetched(keys, l1_owners=...) instead"
+    )
     def finish_read_by_owner(self, completion: L1WriteCompletion) -> None:
         """Release one read lock per key on its captured owner after device use.
 
@@ -1416,45 +1402,127 @@ class StorageManager:
         for owner, keys in completion:
             self.finish_read_prefetched(keys, l1_owners=dict.fromkeys(keys, owner))
 
+    def _group_by_owner(
+        self, keys: list[ObjectKey], owners: Mapping[ObjectKey, int]
+    ) -> dict[int, list[ObjectKey]]:
+        """Group ``keys`` by the L1 manager id ``owners`` assigns them.
+
+        Raises:
+            ValueError: A key has no owner, or its owner is not registered.
+        """
+        groups: dict[int, list[ObjectKey]] = defaultdict(list)
+        for key in keys:
+            owner = owners.get(key)
+            if owner is None or owner not in self._l1_managers_by_id:
+                raise ValueError(
+                    f"Key {key} has no registered L1 owner (owner={owner!r})"
+                )
+            groups[owner].append(key)
+        return groups
+
+    def _warn_fanout_once(self) -> None:
+        """Log, once, that owner-less reads probe every L1."""
+        if self._fanout_warned:
+            return
+        self._fanout_warned = True
+        logger.warning(
+            "Read without L1 owners on %d L1 managers: probing every L1 in "
+            "placement order. This is correct only while a key is read-locked "
+            "in at most one L1; pass l1_owners from the prefetch result.",
+            len(self._l1_managers),
+        )
+
     def _read_groups(
         self, keys: list[ObjectKey], owners: dict[ObjectKey, int] | None
     ) -> dict[int, list[ObjectKey]]:
-        if owners is None:
-            self._require_single_l1()
-            return {self._l1_manager.l1_manager_id: keys}
+        """Resolve which L1 manager holds each key.
+
+        With ``owners`` the groups are exactly the owners' choice. Without
+        them a single L1 gets every key; with several L1s each key goes to
+        the first L1, in placement order, that holds it read-locked. Keys
+        no L1 holds are absent from the result.
+        """
+        if owners is not None:
+            return self._group_by_owner(keys, owners)
+        if len(self._l1_managers) == 1:
+            return {self._l1_managers[0].l1_manager_id: list(keys)}
+        self._warn_fanout_once()
         groups: dict[int, list[ObjectKey]] = defaultdict(list)
-        for key in keys:
-            if key not in owners or owners[key] not in self._l1_managers_by_id:
-                raise ValueError("Read requires the exact owner retained by prefetch")
-            groups[owners[key]].append(key)
+        pending = list(keys)
+        for manager in self._l1_managers:
+            if not pending:
+                break
+            results = manager.unsafe_read(pending)
+            held = [k for k in pending if results[k][0] == L1Error.SUCCESS]
+            if held:
+                groups[manager.l1_manager_id].extend(held)
+                held_set = set(held)
+                pending = [k for k in pending if k not in held_set]
         return groups
 
     def _read_objects(
         self, keys: list[ObjectKey], owners: dict[ObjectKey, int] | None
     ) -> dict[ObjectKey, L1OperationResult]:
+        """Read already read-locked objects, by owner or by probing the L1s.
+
+        Without owners on several L1s, a key is served by the first L1 in
+        placement order that holds it read-locked. A key no L1 serves is
+        ``KEY_NOT_READABLE`` if some L1 holds it unlocked, else
+        ``KEY_NOT_EXIST``.
+        """
         results: dict[ObjectKey, L1OperationResult] = {
             key: (L1Error.KEY_NOT_EXIST, None) for key in keys
         }
-        for owner, group in self._read_groups(keys, owners).items():
-            results.update(self._l1_managers_by_id[owner].unsafe_read(group))
+        if owners is not None or len(self._l1_managers) == 1:
+            for owner, group in self._read_groups(keys, owners).items():
+                results.update(self._l1_managers_by_id[owner].unsafe_read(group))
+            return results
+        self._warn_fanout_once()
+        pending = list(keys)
+        for manager in self._l1_managers:
+            if not pending:
+                break
+            probe = manager.unsafe_read(pending)
+            still_pending: list[ObjectKey] = []
+            for key in pending:
+                err, obj = probe[key]
+                if err == L1Error.SUCCESS:
+                    results[key] = (err, obj)
+                    continue
+                if err == L1Error.KEY_NOT_READABLE:
+                    results[key] = (err, None)
+                still_pending.append(key)
+            pending = still_pending
         return results
 
     def _finish_read_objects(
         self, keys: list[ObjectKey], count: int, owners: dict[ObjectKey, int] | None
     ) -> dict[ObjectKey, L1Error]:
-        results = {}
+        """Release ``count`` read locks per key on the L1 that holds it."""
+        results: dict[ObjectKey, L1Error] = {key: L1Error.KEY_NOT_EXIST for key in keys}
         for owner, group in self._read_groups(keys, owners).items():
             results.update(
                 self._l1_managers_by_id[owner].finish_read(group, read_locks=count)
             )
         return results
 
-    def _require_single_l1(self) -> None:
-        """Guard legacy operations that cannot identify an individual L1."""
-        if len(self._l1_managers_by_id) != 1:
-            raise ValueError(
-                "This operation requires a single L1; use owner-routed operations"
-            )
+    def _devdax_l1(self) -> DevDaxL1Manager:
+        """Return the one Device-DAX L1 the ``/reconfigure/dax/l1`` routes act on.
+
+        Raises:
+            L1ReconfigureError: 409 unless exactly one Device-DAX L1 is
+                configured.
+        """
+        try:
+            manager = self.get_l1_manager_by_tags(_DEVDAX_L1_TAGS)
+        except ValueError as exc:
+            raise L1ReconfigureError(
+                409,
+                "L1 is not Device-DAX backed (--l1-devdax-path not set), or "
+                f"more than one Device-DAX L1 is configured: {exc}",
+            ) from exc
+        # Only DevDaxL1Manager reports CXL tags.
+        return cast(DevDaxL1Manager, manager)
 
     def _snapshot_adapters(
         self,
@@ -1590,9 +1658,10 @@ class StorageManager:
     ) -> list[str]:
         """Return other L1/L2 owners while the caller holds the lifecycle lock."""
         owners = [
-            f"L1[{tag}]" if self.is_multi_l1 else "L1"
-            for tag, manager in self._l1_by_tag.items()
-            if manager.owns_range(device_path, offset_in_bytes, size_in_bytes)
+            f"L1[{manager.config.tag}]" if self.is_multi_l1 else "L1"
+            for manager in self._l1_managers
+            if isinstance(manager, DevDaxL1Manager)
+            and manager.owns_range(device_path, offset_in_bytes, size_in_bytes)
         ]
         return owners + self._l2_device_owner_names(
             device_path, offset_in_bytes, size_in_bytes, exclude

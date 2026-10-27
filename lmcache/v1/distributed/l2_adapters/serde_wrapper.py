@@ -14,7 +14,7 @@ Lookup / unlock / delete / eviction pass straight through to the inner
 adapter (no serde transform involved).
 
 Temp buffer lifecycle: temp byte buffers come from the injected
-``L1Manager`` so the extra memory shows up in L1 accounting just like
+the L1 manager so the extra memory shows up in L1 accounting just like
 the non-serde path's temporary KV buffers. For a store, the temp holds
 serialized bytes; for a load, the temp catches the bytes L2 reads
 before deserialize copies them into the caller-provided KV buffer.
