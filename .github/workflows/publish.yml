@@ -56,7 +56,10 @@ jobs:
                         - '**.py'
                         - 'pyproject.toml'
                         - 'pyproject_cli.toml'
+                        - 'pyproject_client_sdk.toml'
                         - 'requirements/**.txt'
+                        - 'lmcache_client_sdk/**'
+                        - 'tests/lmcache_client_sdk/**'
                         - 'rust/raw_block/**'
                         - 'docker/**'
                         - '.github/workflows/test.yml'
@@ -64,6 +67,7 @@ jobs:
                         - '.github/workflows/publish.yml'
                         - '.github/workflows/build_main_artifacts.yml'
                         - '.github/workflows/build_cli_artifacts.yml'
+                        - '.github/workflows/build_client_sdk_artifacts.yml'
                         - '.github/workflows/build_raw_block_artifacts.yml'
                         - '.github/scripts/stamp_raw_block_version.sh'
                         - '.github/workflows/build_cu129_artifacts.yml'
@@ -95,6 +99,12 @@ jobs:
         if: needs.changes.outputs.lmcache == 'true'
         name: Build CLI
         uses: ./.github/workflows/build_cli_artifacts.yml
+
+    build-client-sdk:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
+        name: Build client SDK
+        uses: ./.github/workflows/build_client_sdk_artifacts.yml
 
     # The raw_block L2 adapter's Rust module (lmcache_rust_raw_block_io): a
     # separate PyPI project, published with lmcache at the same version.
@@ -263,6 +273,40 @@ jobs:
                   repository-url: https://test.pypi.org/legacy/
                   verbose: true
 
+    publish-client-sdk-test-pypi:
+        name: Publish lmcache-client-sdk packages to test.pypi.org
+        if: |
+            needs.build-client-sdk.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
+            needs.changes.outputs.lmcache == 'true' &&
+            github.repository_owner == 'LMCache' &&
+            github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        permissions:
+            contents: read
+            id-token: write
+        runs-on: ubuntu-24.04
+        needs: [changes, build-client-sdk, test, code-quality]
+
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Fetch client SDK release artifacts
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+              with:
+                  name: release-client-sdk-artifacts
+                  path: dist
+
+            - name: Upload lmcache-client-sdk to Test PyPI
+              uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
+              with:
+                  repository-url: https://test.pypi.org/legacy/
+                  verbose: true
+
     # Push to PyPI (production) when:
     # - a new GitHub release is created
     publish-pypi:
@@ -346,6 +390,44 @@ jobs:
                   gh release upload '${{ github.ref_name }}' dist/* --repo '${{ github.repository }}'
 
             - name: Upload lmcache-cli to PyPI
+              uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
+              with:
+                verbose: true
+
+    publish-client-sdk-pypi:
+        name: Publish lmcache-client-sdk release to pypi.org
+        if: |
+            needs.build-client-sdk.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
+            needs.changes.outputs.lmcache == 'true' &&
+            github.repository_owner == 'LMCache' && github.event.action == 'published'
+        permissions:
+            id-token: write
+            contents: write
+        runs-on: ubuntu-24.04
+        needs: [changes, build-client-sdk, test, code-quality]
+
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                  disable-sudo-and-containers: false
+                  egress-policy: audit
+
+            - name: Fetch client SDK release artifacts
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+              with:
+                  name: release-client-sdk-artifacts
+                  path: dist
+
+            - name: Upload lmcache-client-sdk release artifacts to GitHub release
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+              run: >-
+                  gh release upload '${{ github.ref_name }}' dist/* --repo '${{ github.repository }}'
+
+            - name: Upload lmcache-client-sdk to PyPI
               uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
               with:
                 verbose: true

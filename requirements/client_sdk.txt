@@ -1,0 +1,7 @@
+# Runtime dependencies of the standalone lmcache-client-sdk package.
+# The inference engine environment already provides torch; the version bound
+# here only guards standalone installs.
+torch >= 2.0
+requests
+msgspec
+pyzmq
