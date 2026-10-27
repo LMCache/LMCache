@@ -33,9 +33,4 @@ unset CUDA_VISIBLE_DEVICES || true
 
 bootstrap_musa_ci 0
 
-if [ "${MUSA_CI_PREPROVISIONED}" = "1" ]; then
-    # The container wrapper already validated and installed LMCache.
-    exec bash "${REPO_ROOT}/.buildkite/k3_tests/multiprocess/run.sh" "${MODE}"
-fi
-
 exec bash "${REPO_ROOT}/.buildkite/k3_tests/multiprocess/run.sh" "${MODE}"

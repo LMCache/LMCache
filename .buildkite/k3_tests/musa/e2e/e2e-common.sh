@@ -5,7 +5,7 @@ set -euo pipefail
 E2E_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${E2E_SCRIPT_DIR}/../unittests/ci-common.sh"
-bootstrap_musa_ci 0
+bootstrap_musa_ci 1
 
 MUSA_VISIBLE_DEVICES="${MUSA_VISIBLE_DEVICES:-0}"
 MODEL="${MUSA_E2E_MODEL:-}"
@@ -197,13 +197,17 @@ compare_completion_text() {
 log_hit_count() {
     local count=0
     local log_file
+    local matches
     local log_files=("${ARTIFACT_DIR}"/*.log)
     if [[ "$#" -gt 0 ]]; then
         log_files=("$@")
     fi
     for log_file in "${log_files[@]}"; do
         [[ -f "${log_file}" ]] || continue
-        count=$((count + $(grep -Eio "${HIT_PATTERN}" "${log_file}" 2>/dev/null | wc -l | tr -d ' ')))
+        matches="$(grep -Eio "${HIT_PATTERN}" "${log_file}" 2>/dev/null || true)"
+        if [[ -n "${matches}" ]]; then
+            count=$((count + $(printf '%s\n' "${matches}" | wc -l)))
+        fi
     done
     echo "${count}"
 }
