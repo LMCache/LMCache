@@ -552,10 +552,13 @@ class LookupModule(DiscoverableModule):
         if not obj_keys:
             return
 
+        # These locks are released without the data being read (the engine
+        # chose not to retrieve), so they must not count as L1 reads.
         self._ctx.storage_manager.finish_read_prefetched(
             obj_keys,
             read_locks=key.require_num_kv_readers(),
             l1_owners=self._ctx.get_read_owners(key.request_id),
+            consumed=False,
         )
 
     @request_handler(HandlerType.BLOCKING)

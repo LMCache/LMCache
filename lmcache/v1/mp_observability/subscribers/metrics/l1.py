@@ -21,7 +21,8 @@ class L1MetricsSubscriber(EventSubscriber):
     """Maintains OTel counters for L1Manager operations.
 
     Metric parity with the old ``L1ManagerStatsLogger``:
-    - ``lmcache_mp.l1_read``    — chunks read from L1
+    - ``lmcache_mp.l1_read``    — chunks read from L1 (read-lock releases
+      reported with ``consumed=False`` are not reads and are skipped)
     - ``lmcache_mp.l1_write``   — chunks written to L1
     - ``lmcache_mp.l1_evicted`` — chunks evicted from L1
     """
@@ -53,6 +54,9 @@ class L1MetricsSubscriber(EventSubscriber):
         }
 
     def _on_read_finished(self, event: Event) -> None:
+        # A release of locks whose data was never read is not an L1 read.
+        if not event.metadata.get("consumed", True):
+            return
         emit_salt_counts(
             self._read_counter,
             group_by_salt(event.metadata["keys"]),

@@ -574,15 +574,22 @@ class StorageManager:
         keys: list[ObjectKey],
         read_locks: int = 1,
         l1_owners: dict[ObjectKey, int] | None = None,
+        consumed: bool = True,
     ) -> None:
         """Finish reading prefetched objects.
 
         Args:
-            keys: Object keys that have been read.
+            keys: Object keys whose read locks are released.
             read_locks: Read locks to release per key (the whole
                 reservation when releasing a lookup's locks).
+            l1_owners: Owning L1 per key in multi-L1 mode.
+            consumed: False when the objects were never read (e.g. a
+                lookup's locks released without a retrieve). Only affects
+                L1 read metrics; see ``L1ManagerInterface.finish_read``.
         """
-        finish_result = self._finish_read_objects(keys, read_locks, l1_owners)
+        finish_result = self._finish_read_objects(
+            keys, read_locks, l1_owners, consumed=consumed
+        )
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
         self._event_bus.publish(
@@ -1440,12 +1447,18 @@ class StorageManager:
         return results
 
     def _finish_read_objects(
-        self, keys: list[ObjectKey], count: int, owners: dict[ObjectKey, int] | None
+        self,
+        keys: list[ObjectKey],
+        count: int,
+        owners: dict[ObjectKey, int] | None,
+        consumed: bool = True,
     ) -> dict[ObjectKey, L1Error]:
         results = {}
         for owner, group in self._read_groups(keys, owners).items():
             results.update(
-                self._l1_managers_by_id[owner].finish_read(group, read_locks=count)
+                self._l1_managers_by_id[owner].finish_read(
+                    group, read_locks=count, consumed=consumed
+                )
             )
         return results
 
