@@ -13,7 +13,8 @@ GPU KV <-> CPU chunks <----> CPU cache
 
 The [original example](../) uses a GPU-visible server for the CUDA IPC path.
 A cache stored in CPU RAM does not make that server CPU-only: CUDA IPC still
-needs GPU access. Here, both sides explicitly select `engine_driven`, and the
+needs GPU access. This release uses pickle serialization for inline transfer.
+Here, both sides explicitly select `engine_driven`, and the
 server cannot see GPUs. Inline transfer needs no shared host `/dev/shm`; the
 worker has its own 1 GiB memory-backed volume for vLLM multiprocessing.
 
@@ -26,7 +27,7 @@ worker has its own 1 GiB memory-backed volume for vLLM multiprocessing.
   deploy workloads using host networking. Adapt the GPU-node toleration if your
   cluster uses a different taint.
 - Network access from the worker to download `Qwen/Qwen3-0.6B`.
-- The manifests pin the same LMCache/vLLM image build on both sides to keep
+- The manifests pin the official LMCache v0.5.6 image on both sides to keep
   their wire protocol compatible. The server overrides the image entrypoint
   and runs only LMCache, with GPUs hidden. When upgrading, update both image
   references together and repeat the checks below.
@@ -88,7 +89,7 @@ kubectl -n multi-process-cpu-server exec deploy/vllm-cpu-server -- \
 ```
 
 The server log should report `StubCPUDevice` and
-`Using safe inline non-GPU transfer strategy`; worker logs should show a CUDA
+`Using pickle non-GPU transfer strategy`; worker logs should show a CUDA
 transfer context with `mode=engine_driven` and no GPU UUID registration error.
 Run this request twice. The repeated text makes the prompt span multiple cache
 chunks; the response's `usage.prompt_tokens` should exceed 1,024.

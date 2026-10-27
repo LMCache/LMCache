@@ -32,7 +32,7 @@ spec:
             sizeLimit: 1Gi
       containers:
         - name: vllm
-          image: lmcache/vllm-openai:nightly-39774749300-amd64@sha256:2e8888e1148d43be3157a854206943817b0cc38c9df760e1fffad0ce8218ab16
+          image: lmcache/vllm-openai:v0.5.6-amd64@sha256:865f575b505437ba68ea2c2a2612f47c80bc7ab0515d4e8f8f36ee1b800b6016
           imagePullPolicy: Always
           command:
             - /bin/bash
