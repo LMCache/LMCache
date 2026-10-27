@@ -308,6 +308,16 @@ def _background_loop_specs(loops: BackgroundLoops) -> list[_MetricSpec]:
             "the loop keeps running.",
             lambda: _loop_pass_points(loops),
         ),
+        _MetricSpec(
+            _PREFIX + "background_loop.late_passes",
+            "counter",
+            "Background loop passes that started more than one interval late: "
+            "the coordinator was not running for at least that long.",
+            lambda: [
+                (stats.late_passes, {"loop": name})
+                for name, stats in loops.stats().items()
+            ],
+        ),
     ]
 
 

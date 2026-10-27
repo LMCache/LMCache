@@ -51,13 +51,19 @@ keeps the default below.
    * - ``--instance-timeout``
      - ``30``
      - Seconds without a heartbeat after which a server is dropped from the
-       fleet.
+       fleet. After the coordinator itself stalls (a health sweep starts more
+       than one ``--health-check-interval`` late), servers get another
+       ``--instance-timeout`` to heartbeat before they can be dropped, so a
+       dead server can stay up to two timeouts plus the stall.
    * - ``--health-check-interval``
      - ``10``
      - Seconds between health-check sweeps that expire stale MP-server
        registrations. ``0`` disables the stale-instance eviction loop; it does
        **not** affect the ``/quota`` L2 eviction loop (see
-       ``--eviction-check-interval`` below).
+       ``--eviction-check-interval`` below). Keep ``--instance-timeout`` at
+       least twice this plus the servers' heartbeat interval (``30 >= 2 * 10 +
+       5`` by default); otherwise a coordinator stall can go unnoticed yet
+       still drop live servers.
    * - ``--eviction-check-interval``
      - ``5``
      - Seconds between L2 eviction sweeps. ``0`` disables the loop.
@@ -286,8 +292,9 @@ Kubernetes downward API); an explicit flag wins over the env var.
        outbound IP).
    * - ``--coordinator-heartbeat-interval``
      - ``LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL``
-     - Seconds between heartbeats (must be ``> 0``, default ``5``). Keep it well
-       below the coordinator's ``INSTANCE_TIMEOUT``.
+     - Seconds between heartbeats (must be ``> 0``, default ``5``). Keep it at
+       most the coordinator's ``--instance-timeout`` minus twice its
+       ``--health-check-interval``.
    * - ``--coordinator-event-reporting``
      - ``LMCACHE_COORDINATOR_EVENT_REPORTING``
      - Stream cache store/access/delete events to the coordinator,
