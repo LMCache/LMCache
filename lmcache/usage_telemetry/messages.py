@@ -204,8 +204,9 @@ class MPServerMessage(UsageMessage):
 
         Returns:
             The populated message. ``l1_medium`` joins the distinct media of
-            the configured L1s with ``+``, DRAM first (``"dram"``, ``"gds"``,
-            ``"dram+devdax"``, ...); ``l2_adapter_types`` is a
+            the configured L1s with ``+``, DRAM first: ``"dram"`` or ``"gds"``
+            for one L1, ``"dram+devdax"`` for a DRAM L1 beside a Device-DAX
+            L1; ``l2_adapter_types`` is a
             comma-joined list of adapter type names (empty when no L2 is
             configured); ``l2_serde_types`` is comma-joined and aligned
             with ``l2_adapter_types``, with an empty entry for adapters

@@ -238,7 +238,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         Args:
             l1_owners: The L1 manager that reserved each stored key.
         """
-        self._ctx.storage_manager.finish_write(list(l1_owners), l1_owners=l1_owners)
+        self._ctx.storage_manager.finish_write(
+            list(l1_owners.keys()), l1_owners=l1_owners
+        )
 
     def register_host_func(self, kind: str, handler: Any, payload_type: Any) -> None:
         """Register *handler* for *kind* on the per-process device host-func

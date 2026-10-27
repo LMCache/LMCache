@@ -107,28 +107,6 @@ L1WriteCompletion = list[tuple[int, list[ObjectKey]]]
 _DEVDAX_L1_TAGS = MemoryTags(segment=MemorySegment.CXL, residency=MemoryResidency.LOCAL)
 
 
-def l1_owners_of(objects: Mapping[ObjectKey, MemoryObj]) -> dict[ObjectKey, int]:
-    """Return the L1 manager that reserved each object.
-
-    Args:
-        objects: Key/object pairs as returned by ``reserve_write``.
-
-    Returns:
-        The ``l1_manager_id`` per key, the ``l1_owners`` that
-        ``StorageManager.finish_write`` takes.
-
-    Raises:
-        ValueError: An object was not reserved through an L1 manager.
-    """
-    owners: dict[ObjectKey, int] = {}
-    for key, obj in objects.items():
-        owner = obj.get_l1_manager()
-        if owner is None:
-            raise ValueError(f"Memory object for key {key} has no L1 owner")
-        owners[key] = owner
-    return owners
-
-
 def _validate_write_targets(
     keys: list[ObjectKey],
     targets: dict[int, list[ObjectKey]],
@@ -170,11 +148,10 @@ class StorageManager:
             )
             for manager in self._l1_managers:
                 cleanup.callback(manager.close)
+
             self._l1_managers_by_id = {m.l1_manager_id: m for m in self._l1_managers}
             self._l1_by_tag = {m.config.tag: m for m in self._l1_managers}
             self._write_policy = create_write_policy(config.write_policy)
-            # Owner-less reads on several L1s probe every L1; said once.
-            self._fanout_warned = False
             self._event_bus = get_event_bus()
 
             self._eviction_controllers = [
@@ -301,10 +278,6 @@ class StorageManager:
     ) -> dict[ObjectKey, MemoryObj]:
         """
         Reserve the object for writing into the storage manager.
-
-        The write policy decides which L1 manager reserves each key. A key
-        its L1 cannot reserve (out of memory, write conflict) is omitted
-        from the result; there is no second attempt on another L1.
 
         Args:
             keys (list[ObjectKey]): List of object keys to reserve for writing.
@@ -1355,10 +1328,8 @@ class StorageManager:
         checks = [m.memcheck() for m in self._l1_managers]
         return all(checks)
 
-    @lmcache_deprecate(
-        "read-completion groups will be built by the caller; use "
-        "finish_read_prefetched(keys, l1_owners=...) instead"
-    )
+    # TODO(ApostaC): refactor the read-completion callers and drop this method.
+    @lmcache_deprecate("this method will be dropped in a future refactor")
     def prepare_read_completion(
         self,
         keys: list[ObjectKey],
@@ -1380,10 +1351,8 @@ class StorageManager:
         """
         return list(self._read_groups(keys, l1_owners).items())
 
-    @lmcache_deprecate(
-        "read-completion groups will be built by the caller; use "
-        "finish_read_prefetched(keys, l1_owners=...) instead"
-    )
+    # TODO(ApostaC): refactor the read-completion callers and drop this method.
+    @lmcache_deprecate("this method will be dropped in a future refactor")
     def finish_read_by_owner(self, completion: L1WriteCompletion) -> None:
         """Release one read lock per key on its captured owner after device use.
 
@@ -1420,11 +1389,8 @@ class StorageManager:
             groups[owner].append(key)
         return groups
 
-    def _warn_fanout_once(self) -> None:
-        """Log, once, that owner-less reads probe every L1."""
-        if self._fanout_warned:
-            return
-        self._fanout_warned = True
+    def _warn_fanout(self) -> None:
+        """Log that an owner-less read is probing every L1."""
         logger.warning(
             "Read without L1 owners on %d L1 managers: probing every L1 in "
             "placement order. This is correct only while a key is read-locked "
@@ -1446,7 +1412,7 @@ class StorageManager:
             return self._group_by_owner(keys, owners)
         if len(self._l1_managers) == 1:
             return {self._l1_managers[0].l1_manager_id: list(keys)}
-        self._warn_fanout_once()
+        self._warn_fanout()
         groups: dict[int, list[ObjectKey]] = defaultdict(list)
         pending = list(keys)
         for manager in self._l1_managers:
@@ -1477,7 +1443,7 @@ class StorageManager:
             for owner, group in self._read_groups(keys, owners).items():
                 results.update(self._l1_managers_by_id[owner].unsafe_read(group))
             return results
-        self._warn_fanout_once()
+        self._warn_fanout()
         pending = list(keys)
         for manager in self._l1_managers:
             if not pending:
@@ -1720,3 +1686,25 @@ class StorageManager:
         if adapter_index < 0 or adapter_index >= len(adapters):
             raise L2ReconfigureError(404, "L2 adapter not reconfigurable")
         return adapters[adapter_index][1]
+
+
+def l1_owners_of(objects: Mapping[ObjectKey, MemoryObj]) -> dict[ObjectKey, int]:
+    """Return the L1 manager that reserved each object.
+
+    Args:
+        objects: Key/object pairs as returned by ``reserve_write``.
+
+    Returns:
+        The ``l1_manager_id`` per key, the ``l1_owners`` that
+        ``StorageManager.finish_write`` takes.
+
+    Raises:
+        ValueError: An object was not reserved through an L1 manager.
+    """
+    owners: dict[ObjectKey, int] = {}
+    for key, obj in objects.items():
+        owner = obj.get_l1_manager()
+        if owner is None:
+            raise ValueError(f"Memory object for key {key} has no L1 owner")
+        owners[key] = owner
+    return owners

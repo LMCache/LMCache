@@ -319,9 +319,9 @@ def test_reads_without_owners_fan_out_with_a_warning(
         store.finish_read_prefetched([key(1), key(2)])
     finally:
         sm_logger.removeHandler(handler)
-    # The probe is announced once per storage manager, not per call.
-    assert [r.levelno for r in handler.records] == [logging.WARNING]
-    assert "probing every L1" in handler.records[0].getMessage()
+    # Every owner-less call on several L1s is announced.
+    assert [r.levelno for r in handler.records] == [logging.WARNING] * 2
+    assert all("probing every L1" in r.getMessage() for r in handler.records)
     assert primary.report_status()["read_locked_count"] == 0
     assert fallback.report_status()["read_locked_count"] == 0
 

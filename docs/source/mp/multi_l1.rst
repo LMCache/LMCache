@@ -114,7 +114,7 @@ and keeps that selection in the request's result. GPU completion releases
 locks on those exact owners, including when another request finds a different
 copy of the same key. A read or release that arrives without owners is
 served by the first manager, in argument order, that holds the key
-read-locked (one warning per server). Every manager has independent read and
+read-locked (logged as a warning). Every manager has independent read and
 write locks.
 
 Status and Prometheus
