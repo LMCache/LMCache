@@ -43,6 +43,27 @@ Therefore the framework enforces:
 3. eventfd-based non-polling completions (the kernel wakes up Python)
 4. Non-blocking submission (submission queue / completion queue architecture)
 
+## Error handling in batch operations
+
+A batch is split into tiles that run on different workers, so one key's
+failure must not discard the results of the others. The table describes the
+default `do_batch_*` implementations in `ConnectorBase`; connectors that
+override them (Mooncake, NIXL, HF3FS) define their own error handling.
+
+| Op | A key whose `do_single_*` throws | Reported as |
+|----|----------------------------------|-------------|
+| GET, EXISTS, DELETE | logged to stderr, batch continues | `0` in `per_key_results` |
+| SET | not caught, the tile fails | `ok=False` for the whole batch |
+
+A failed check is reported as a miss because a false miss only costs a
+recompute or a re-fetch, while a false hit would make the caller use data
+that is not there. Prefix consumers stop at the failed key; the MP
+`NativeConnectorL2Adapter` leaves its bit unset in the lookup bitmap.
+SET has no per-key result, so catching its exception would hide a lost write.
+Example: an over-long key makes `std::filesystem::exists` throw
+`File name too long`; EXISTS reports that key as `0` and still answers the
+other keys.
+
 ## Files
 
 | File | Purpose |
@@ -214,6 +235,14 @@ class MyBackendClient(ConnectorClientBase[LMCacheMyBackendClient]):
 
 This gives you `async get/set/exists`, `batch_get/batch_set/batch_exists`,
 and sync variants, all with automatic eventfd-driven completion handling.
+
+`batch_get` returns one bool per key — `True` if that key hit and its buffer
+was filled, `False` if it missed — because a batch completes with `ok=True`
+even when individual keys miss. Buffers of missed keys are left untouched, so
+callers must consult the mask before reading them. This requires your
+`do_batch_get` to write `req.batch->per_key_results[req.start_idx + i]` for
+every key (the default implementation in `ConnectorBase` already does); the
+Python client raises if the mask length does not match the batch size.
 
 **Reference:** `lmcache/v1/storage_backend/native_clients/resp_client.py`
 
