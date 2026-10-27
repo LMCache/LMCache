@@ -634,6 +634,10 @@ class HeartbeatThread(PeriodicThread):
                 "re-registering",
                 self._instance_id,
             )
+            # Clear the event first, as on the outage path: re-registration
+            # publishes a new transfer context before the server accepts it,
+            # and submissions must not use it until then.
+            self._health_event.clear()
             healthy = self._recover_callback()
 
         need_trigger_recover = (

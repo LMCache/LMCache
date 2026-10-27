@@ -1614,8 +1614,8 @@ def test_heartbeat_first_ping_runs_callback_before_setting_event(
 @pytest.mark.parametrize(
     ("worker_ping", "server_ping", "recover_ok", "expect_recover", "expect_healthy"),
     [
-        # Server up but this worker unknown (reaped while silent): re-register
-        # and stay healthy, without a degraded-mode flap.
+        # Server up but this worker unknown (reaped while silent): degraded
+        # while it re-registers, healthy once the server accepts it.
         (False, True, True, True, True),
         # Re-registration failed: degraded until a later cycle succeeds.
         (False, True, False, True, False),
@@ -1635,7 +1635,7 @@ def test_heartbeat_reregisters_a_worker_the_server_no_longer_holds(
 ) -> None:
     """Real HeartbeatThread, starting healthy: a failed worker ping is told
     apart from an outage by an untracked ping, and only the former runs the
-    re-registration callback."""
+    re-registration callback, with the health event cleared while it runs."""
     monkeypatch.setattr(
         adapter_mod,
         "send_ping",
@@ -1651,12 +1651,17 @@ def test_heartbeat_reregisters_a_worker_the_server_no_longer_holds(
         interval=60.0,
         instance_id=7,
     )
-    recover = MagicMock(return_value=recover_ok)
+    event_state_during_callback: list[bool] = []
+
+    def recover() -> bool:
+        event_state_during_callback.append(health_event.is_set())
+        return recover_ok
+
     heartbeat.register_recover_callback(recover)
 
     heartbeat._execute()
 
-    assert recover.called is expect_recover
+    assert event_state_during_callback == ([False] if expect_recover else [])
     assert health_event.is_set() is expect_healthy
 
 
