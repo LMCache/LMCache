@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Compare GPU APC and LMCache using the same long prompt in three stages.
+"""Compare hybrid-model GPU APC and LMCache results in three stages.
 
 Cold prefill populates both caches. The second request hits GPU APC and supplies
 the reference token IDs and logprobs. Reset only GPU APC before the third request,
@@ -12,6 +12,7 @@ ensure both cached runs recompute the same suffix.
 # Standard
 from dataclasses import dataclass
 from pathlib import Path
+import argparse
 import json
 import math
 import os
@@ -49,7 +50,7 @@ def verify_results(
         gpu: GPU APC reference request, without LMCache retrievals.
         restored: LMCache request after GPU APC reset.
         chunk_size: Shared positive LMCache chunk and vLLM block size.
-        sliding_window: Sliding-window length from the model's text configuration.
+        sliding_window: Sliding-window length, or zero for a non-SWA hybrid.
 
     Raises:
         ValueError: If hit lengths, output token IDs, or logprobs are invalid.
@@ -82,8 +83,12 @@ def verify_results(
         raise ValueError("GPU APC and LMCache token IDs or logprobs differ")
 
 
-def main() -> None:
+def main(workload: str = "hma_swa_correctness") -> None:
     """Run the three-stage comparison using the multiprocess harness environment.
+
+    Args:
+        workload: Either hma_swa_correctness, which also verifies a prefix longer
+            than the model's sliding window, or hma_kda_mla_correctness.
 
     Raises:
         ValueError: If configuration, cache hits, or generated results are wrong.
@@ -110,7 +115,7 @@ def main() -> None:
         raise ValueError(
             "Requested transport and multi-group registration not confirmed"
         )
-    output = Path(os.environ["RESULTS_DIR"]) / "hma_swa_correctness"
+    output = Path(os.environ["RESULTS_DIR"]) / workload
     output.mkdir(parents=True, exist_ok=True)
     notes = "\n".join(
         f"Record {i:03d}: Station Cedar-{i} keeps its backup batteries in room "
@@ -118,8 +123,14 @@ def main() -> None:
         "connections each Monday. A green indicator means the last check passed."
         for i in range(60)
     )
-    sliding_window = AutoConfig.from_pretrained(model).get_text_config().sliding_window
-    tokenizer = AutoTokenizer.from_pretrained(model)
+    sliding_window = 0
+    if workload == "hma_swa_correctness":
+        sliding_window = (
+            AutoConfig.from_pretrained(model).get_text_config().sliding_window
+        )
+    tokenizer = AutoTokenizer.from_pretrained(
+        model, trust_remote_code=os.environ.get("VLLM_TRUST_REMOTE_CODE", "0") == "1"
+    )
     prompt = tokenizer.apply_chat_template(
         [
             {
@@ -164,7 +175,7 @@ def main() -> None:
                 if reset.json()["success"] is not True:
                     raise ValueError("GPU prefix-cache reset failed")
             response = session.post(
-                f"{base_url}/v1/completions", json=request, timeout=180
+                f"{base_url}/v1/completions", json=request, timeout=600
             )
             response.raise_for_status()
             data = response.json()
@@ -206,4 +217,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "workload",
+        nargs="?",
+        choices=("hma_swa_correctness", "hma_kda_mla_correctness"),
+        default="hma_swa_correctness",
+    )
+    main(parser.parse_args().workload)
