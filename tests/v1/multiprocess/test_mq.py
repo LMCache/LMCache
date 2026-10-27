@@ -785,7 +785,9 @@ def test_unregistered_operation_returns_remote_error() -> None:
 
     client = MessageQueueClient(server_url, context)
     try:
-        unsupported = client.submit_request("get_chunk_size", [])
+        unsupported: MessagingFuture[int] | MessagingStream[int] = (
+            client.submit_request("get_chunk_size", [])
+        )
         assert isinstance(unsupported, MessagingFuture)
         with pytest.raises(
             RuntimeError,
@@ -793,7 +795,9 @@ def test_unregistered_operation_returns_remote_error() -> None:
         ):
             unsupported.result(timeout=1)
 
-        healthy = client.submit_request("noop", [])
+        healthy: MessagingFuture[str] | MessagingStream[str] = client.submit_request(
+            "noop", []
+        )
         assert isinstance(healthy, MessagingFuture)
         assert healthy.result(timeout=1) == "NOOP_OK"
     finally:
