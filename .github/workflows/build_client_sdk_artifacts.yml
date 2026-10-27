@@ -85,11 +85,11 @@ jobs:
                 # Import the installed wheel from outside the repo so the
                 # source tree cannot shadow the installed package.
                 cd /tmp && python -c "
-import lmcache_client_sdk
-from lmcache_client_sdk import connect
-assert connect.__name__ == 'connect'
-print('OK: lmcache-client-sdk', lmcache_client_sdk.__version__)
-"
+                import lmcache_client_sdk
+                from lmcache_client_sdk import connect
+                assert connect.__name__ == 'connect'
+                print('OK: lmcache-client-sdk', lmcache_client_sdk.__version__)
+                "
 
             - name: Upload client SDK release artifacts to GHA
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
