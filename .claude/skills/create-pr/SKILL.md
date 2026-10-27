@@ -77,49 +77,8 @@ line-by-line review.
 
 ### 5. Generate the reviewer explainer
 
-For AI-assisted code changes, generate a self-contained HTML file that a
-reviewer can open without repository context or local assets. Include:
-
-- a visual overview and explanations of meaningful code changes;
-- end-to-end call chains, ownership boundaries, and extension points;
-- a test map explaining the necessity and regression target of each changed
-  test;
-- compatibility and performance risks, validation evidence, gaps, and focused
-  reviewer questions.
-
-Build this as a reviewer-facing technical article, not a decorative summary.
-For a non-trivial change, normally include at least three substantive visuals:
-a before/after architecture view, an end-to-end sequence or data-flow view, and
-a responsibility/extension-boundary or test-coverage view. Connect every visual
-and annotated code walkthrough to real files and symbols, inputs and outputs,
-state transitions, error paths, and owners. Explain motivation, rejected or
-important alternatives, compatibility and performance effects, rollout or
-fallback behavior, remaining gaps, and a suggested review order. Screenshots or
-decorative graphics do not count; use fewer diagrams for a small change only
-when the explainer says why that is sufficient.
-
-When motion materially clarifies a call chain or state transition, add a
-lightweight animated or step-through diagram with visible pause, replay, or
-step controls. Provide a complete static fallback, respect
-`prefers-reduced-motion`, avoid distracting auto-looping, and keep it usable
-offline.
-
-Put complete English and Chinese versions in the same HTML file, with a visible
-one-click language switch. Keep both views semantically synchronized across
-code changes, call chains, test rationale, risks, evidence, gaps, and reviewer
-questions. The switch must work from a downloaded local file without a server,
-build step, external assets, or an online translation service. Do not create
-separate language-specific files or rely on automatic browser translation.
-Translate diagram labels, captions, animation controls, alt text, and reviewer
-guidance as well as the prose.
-
-Use embedded CSS and SVG diagrams. Remove secrets, machine-local paths, and
-inaccessible links. Keep the file outside the repository unless the user asks
-to commit it. Upload the `.html` file and put its link directly in the PR
-description. A GitHub attachment that downloads the file for local viewing is
-acceptable. Do not post a separate comment or archive one HTML file in a zip.
-Never create or enable Pages, another repository, a branch, a gist, or a
-different hosting resource for the explainer.
+Run `/create-pr-explainer` and use its validated artifact and publication
+details. Do not duplicate or weaken that skill's requirements in this workflow.
 
 ### 6. Draft the PR
 

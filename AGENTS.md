@@ -33,46 +33,11 @@ the relevant validation. The submitting human must then review the new diff and
 explicitly mark the PR ready again. An earlier human review does not cover later
 AI-generated changes.
 
-AI-assisted PRs must include a self-contained HTML reviewer explainer. The AI
-tool must upload it to a reviewer-accessible URL and place that URL directly in
-the PR description. A GitHub attachment that downloads the file is acceptable.
-Do not post a separate comment or archive one HTML file in a zip. Do not create
-or enable Pages, a repository, a branch, a gist, or another hosting resource
-for the explainer.
-
-Keep the explainer synchronized with the current head. It must use diagrams and
-concrete code references to explain the change, the affected end-to-end call
-chains and responsibility boundaries, and why each added or changed test is
-necessary. Also cover compatibility, risks, validation gaps, and reviewer
-attention points. Do not include secrets, machine-local paths, inaccessible
-artifacts, or dependencies on local assets; use embedded CSS and diagrams so
-the page works on its own.
-
-Treat the explainer as a reviewer-facing technical article, not a decorative
-summary. For a non-trivial change, use multiple purposeful visuals to show the
-before/after architecture, the end-to-end sequence or data flow, responsibility
-and extension boundaries, and the test/validation map. Tie every visual to real
-symbols, files, inputs, outputs, state transitions, error paths, and ownership;
-annotate the important diff rather than merely restating filenames. Explain the
-motivation, alternatives, compatibility and performance consequences, rollout
-or fallback behavior, remaining gaps, and a concrete review path for someone
-without prior project context.
-
-When motion materially makes a call chain or state transition easier to
-understand, include a lightweight animated or step-through diagram with visible
-pause, replay, or step controls. It must also have a complete static fallback,
-respect `prefers-reduced-motion`, avoid distracting auto-looping, and remain
-fully usable offline. Visual density should be proportional to the change, but
-non-trivial PRs should normally contain at least three substantive diagrams;
-screenshots or decorative graphics do not count toward this bar.
-
-The same HTML file must provide complete English and Chinese explanations with
-a visible one-click language switch. Both language views must cover the same
-code changes, call chains, test rationale, risks, and reviewer questions; do
-not ship a partial translation or separate language-specific files. The switch
-must work locally without a server, build step, or external translation service.
-Translate diagram labels, captions, controls, alt text, and reviewer guidance as
-well as prose.
+AI-assisted PRs must include a self-contained reviewer HTML that stays
+synchronized with the current head. Before creating or updating that artifact,
+read and follow `.claude/skills/create-pr-explainer/SKILL.md`; it is the
+authoritative workflow for content depth, bilingual presentation, diagrams,
+optional motion, validation, and publication in the PR description.
 
 ## Python Environment
 
