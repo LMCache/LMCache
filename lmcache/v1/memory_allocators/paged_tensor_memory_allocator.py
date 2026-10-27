@@ -150,6 +150,9 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         free_block.meta.dtypes = dtypes
         free_block.meta.fmt = fmt
         free_block.meta.ref_count = 1
+        free_block.meta.pin_count = 0
+        free_block.meta.cached_positions = None
+        free_block.valid = True
         # Reset any narrowed-size override left over from the previous
         # owner of this block, so get_size() returns the layout-derived
         # size for the fresh allocation.
@@ -207,6 +210,9 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             free_block.meta.dtypes = dtypes
             free_block.meta.fmt = fmt
             free_block.meta.ref_count = 1
+            free_block.meta.pin_count = 0
+            free_block.meta.cached_positions = None
+            free_block.valid = True
             # Reset narrowed-size override (see notes in ``allocate``).
             free_block._used_size_override = None
             free_block.reset_l1_manager()
@@ -246,8 +252,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             memory_obj.raw_data = self.paged_buffers[page_idx]
 
         self.free_blocks.append(memory_obj)
-
-        # memory_obj.invalidate()
+        memory_obj.invalidate()
 
         # TODO (Jiayi): need a flag to drop these debug ops
         # NOTE (Jiayi): the following code is not thread-safe but
@@ -282,12 +287,12 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             if not memory_obj.is_valid():
                 logger.warning("Trying to free an invalidated MemoryObj")
                 continue
-            # memory_obj.invalidate()
             if memory_obj.meta.shapes != self.shapes:
                 page_idx = memory_obj.meta.address
                 memory_obj.raw_data = self.paged_buffers[page_idx]
 
             self.free_blocks.append(memory_obj)
+            memory_obj.invalidate()
 
         if update_stats:
             num_freed_blocks = len(memory_objs)
