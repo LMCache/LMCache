@@ -995,7 +995,7 @@ class TestFailureEventProduction:
             handle = sm.submit_prefetch_task(single_row_spec(keys, basic_layout))
             assert wait_for_prefetch_status(sm, handle) == len(keys)
 
-            # Force a mid-read race by removing the key from the L1 manager's
+            # Force a mid-read race by removing the key from L1Manager's
             # internal state dict, bypassing the lock check that
             # ``delete`` enforces. This simulates the exact TOCTOU
             # anomaly the metric is designed to catch: reserve_read acquired

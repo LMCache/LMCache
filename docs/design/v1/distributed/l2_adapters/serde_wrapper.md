@@ -29,7 +29,7 @@ consumed by the wrapper's internal thread.
      │ (1) submit_store_task(keys, objs)                           
      ▼                                                             
    ┌─────────────────┐  (2) reserve_write(tmp)   ┌──────────────┐  
-   │  wrapper (API)  │ ─────────────────────────►│  L1 manager  │  
+   │  wrapper (API)  │ ─────────────────────────►│  L1Manager   │  
    │                 │ ◄────── tmp_objs ─────────│              │  
    └────────┬────────┘                           └──────────────┘  
             │ (3) submit_serialize(objs, tmp_objs)                 
@@ -66,7 +66,7 @@ consumed by the wrapper's internal thread.
      │ (1) submit_load_task(keys, dst_objs)                        
      ▼                                                             
    ┌─────────────────┐  (2) reserve_write(tmp)   ┌──────────────┐  
-   │  wrapper (API)  │ ─────────────────────────►│  L1 manager  │  
+   │  wrapper (API)  │ ─────────────────────────►│  L1Manager   │  
    │                 │ ◄────── tmp_objs ─────────│              │  
    └────────┬────────┘                           └──────────────┘  
             │ (3) inner.submit_load_task(keys, tmp_objs)           
@@ -102,7 +102,7 @@ sequenceDiagram
     participant W as SerdeL2AdapterWrapper
     participant Thread as wrapper internal thread
     participant Serde as SerdeProcessor
-    participant L1 as L1 manager
+    participant L1 as L1Manager
     participant Inner as inner L2 adapter
 
     Controller->>W: submit_store_task(keys, objs)
@@ -141,7 +141,7 @@ sequenceDiagram
     participant Thread as wrapper internal thread
     participant Inner as inner L2 adapter
     participant Serde as SerdeProcessor
-    participant L1 as L1 manager
+    participant L1 as L1Manager
 
     Controller->>W: submit_load_task(keys, dst_objs)
     W->>L1: reserve_write(temp_keys, byte layout)

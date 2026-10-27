@@ -73,7 +73,7 @@ class StoreListener(L1ManagerListener):
     Listener that receives L1 write-completion callbacks and enqueues
     keys for the StoreController's background loop.
 
-    The ``on_keys_write_finished`` callback is invoked inside the L1 manager's
+    The ``on_keys_write_finished`` callback is invoked inside L1Manager's
     lock, so it must be non-blocking. It appends keys to an internal list
     and signals an eventfd to wake up the controller's select.poll().
     """
@@ -123,8 +123,8 @@ class StoreListener(L1ManagerListener):
         """
         Enqueue keys and signal the notifier.
 
-        Called inside the L1 manager's lock. Must be fast and must not
-        call any L1 manager methods (would deadlock).
+        Called inside L1Manager's lock. Must be fast and must not
+        call any L1Manager methods (would deadlock).
 
         Args:
             keys (list[ObjectKey]): Keys that finished writing.
@@ -199,7 +199,7 @@ class StoreController(StorageControllerInterface):
     Asynchronously stores L1 data to L2 adapters after write completion.
 
     The controller:
-    1. Registers a StoreListener with the L1 manager to receive
+    1. Registers a StoreListener with L1Manager to receive
        on_keys_write_finished callbacks.
     2. Runs a background thread with an event-driven loop using
        select.poll() on the listener eventfd and all L2 adapter

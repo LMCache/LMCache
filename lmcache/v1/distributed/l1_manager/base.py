@@ -97,7 +97,7 @@ class L1ObjectState:
 
 def l1_mgr_synchronized(func):
     """
-    Decorator to mark L1 manager methods as thread-safe
+    Decorator to mark L1Manager methods as thread-safe
     """
 
     def wrapper(self: "BaseL1Manager", *args, **kwargs):
@@ -276,7 +276,7 @@ class BaseL1Manager(L1ManagerInterface):
         """
 
     def register_listener(self, listener: L1ManagerListener) -> None:
-        """Register a listener for L1 manager events.
+        """Register a listener for L1Manager events.
 
         Args:
             listener: The listener to register.
@@ -954,7 +954,7 @@ class BaseL1Manager(L1ManagerInterface):
     def is_key_evictable(self, key: ObjectKey) -> bool:
         """Check if a key is eligible for eviction (not locked).
 
-        This method does NOT acquire the global L1 manager lock.
+        This method does NOT acquire the global L1Manager lock.
         ``delete()`` will check again and safely reject a key
         that became locked between the check and the actual deletion.
 

@@ -16,7 +16,7 @@ For the trace recording subsystem (`lmcache trace`), see
 ## Architecture
 
 ```
-Producers (the L1 managers, StorageManager, MPCacheServer)
+Producers (L1Manager, StorageManager, MPCacheServer)
     │
     │  event_bus.publish(Event(...))
     ▼

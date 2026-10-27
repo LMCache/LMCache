@@ -307,7 +307,7 @@ class TestReportStatusSharesTheSource:
     """``report_status`` and the capacity API must report the same size."""
 
     def _l1_manager(self, configured: int) -> BaseL1Manager:
-        """Build an L1 manager over a fake memory manager.
+        """Build an L1Manager over a fake memory manager.
 
         Args:
             configured: The configured DRAM capacity in bytes.

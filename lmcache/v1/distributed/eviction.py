@@ -174,7 +174,7 @@ class EvictionPolicy:
 
 class L1EvictionPolicy(L1ManagerListener):
     """
-    Bridges L1 manager lifecycle events to an EvictionPolicy instance.
+    Bridges L1Manager lifecycle events to an EvictionPolicy instance.
 
     The actual eviction policy is provided via the constructor, keeping
     the policy logic decoupled from the listener interface.
