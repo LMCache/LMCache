@@ -365,8 +365,8 @@ def send_ping(
     req_client: RequestClient,
     timeout: float,
     instance_id: int | None = None,
-) -> bool:
-    """Send a PING request and return the result.
+) -> bool | None:
+    """Send a PING request and return the server's answer.
 
     Args:
         req_client: The request client.
@@ -375,16 +375,19 @@ def send_ping(
             liveness, or None for an untracked prober (scheduler adapter).
 
     Returns:
-        True if server is healthy, False on timeout or error.
+        The server's answer: True if it is up and, for a worker, still holds
+        the worker's registration; False if it is up but does not. None when
+        no answer arrived (timeout or error), which says nothing about the
+        registration.
     """
     try:
         future = req_client.ping(instance_id)
-        return future.result(timeout=timeout)
+        return bool(future.result(timeout=timeout))
     except TimeoutError:
-        return False
+        return None
     except Exception:
         logger.debug("Ping failed with exception", exc_info=True)
-        return False
+        return None
 
 
 @dataclass
@@ -609,18 +612,16 @@ class HeartbeatThread(PeriodicThread):
         UNREGISTER must not re-register a ghost context.
         """
         was_healthy = self._health_event.is_set()
-        healthy = send_ping(
+        answer = send_ping(
             self._req_client, timeout=self._interval, instance_id=self._instance_id
         )
-        # A failed worker ping can mean the server is up but no longer holds
+        healthy = answer is True
+        # Only an explicit False means the server is up but no longer holds
         # this worker's registration: it reaped the worker after a silent
-        # spell, or restarted. An untracked ping tells that apart from an
-        # outage, and the worker re-registers instead of staying unregistered.
-        instance_unknown = (
-            not healthy
-            and self._instance_id is not None
-            and send_ping(self._req_client, timeout=self._interval)
-        )
+        # spell, or restarted. The worker then re-registers instead of staying
+        # unregistered. No answer (None) is an outage and takes the degraded
+        # path: a timeout under load must not replace a registered context.
+        instance_unknown = answer is False
 
         if self.stop_requested:
             return ThreadRunSummary(

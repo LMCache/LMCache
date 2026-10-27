@@ -108,19 +108,20 @@ class _HeartbeatThread(PeriodicThread):
         ):
             thread.join()
 
-    def _ping(self, instance_id: int | None) -> bool:
-        try:
-            return bool(self._client.ping(instance_id).result(timeout=self._timeout))
-        except Exception:
-            return False
-
     def _execute(self) -> ThreadRunSummary:
         was_healthy = self._health_event.is_set()
-        healthy = self._ping(self._instance_id)
-        # A failed worker ping with the server still answering means it no
-        # longer holds this worker's registration (reaped, or restarted):
-        # re-register rather than stay unregistered.
-        instance_unknown = not healthy and self._ping(None)
+        try:
+            answer: bool | None = bool(
+                self._client.ping(self._instance_id).result(timeout=self._timeout)
+            )
+        except Exception:
+            answer = None
+        healthy = answer is True
+        # Only an explicit False means the server is up but no longer holds
+        # this worker's registration (reaped, or restarted): re-register rather
+        # than stay unregistered. No answer is an outage, not a lost
+        # registration, and takes the degraded path.
+        instance_unknown = answer is False
         if self.stop_requested:
             return ThreadRunSummary(success=True, message="stopping")
 

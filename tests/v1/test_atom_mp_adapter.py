@@ -304,12 +304,15 @@ def test_atom_worker_reregisters_without_wrapping_inflight_future(
 def test_atom_heartbeat_runs_recovery_before_publishing_health(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A successful ping only restores health after re-registration succeeds."""
+    """A ping with no answer degrades without re-registering; a successful
+    ping only restores health after re-registration succeeds."""
     server_up = False
 
     def ping(_instance_id: int | None) -> MessagingFuture[Any]:
+        if not server_up:
+            raise TimeoutError("no answer")
         future: MessagingFuture[Any] = MessagingFuture()
-        future.set_result(server_up)
+        future.set_result(True)
         return future
 
     client = MagicMock()
@@ -339,12 +342,13 @@ def test_atom_heartbeat_runs_recovery_before_publishing_health(
 
 
 def test_atom_heartbeat_reregisters_when_the_server_forgot_the_worker() -> None:
-    """The server answers but no longer holds this worker (reaped while
-    silent): the worker re-registers without publishing an outage."""
+    """The server answers False, so it is up but no longer holds this worker
+    (reaped while silent): the worker re-registers without publishing an
+    outage, in one ping."""
 
-    def ping(instance_id: int | None) -> MessagingFuture[Any]:
+    def ping(_instance_id: int | None) -> MessagingFuture[Any]:
         future: MessagingFuture[Any] = MessagingFuture()
-        future.set_result(instance_id is None)  # up, but instance 7 unknown
+        future.set_result(False)
         return future
 
     client = MagicMock()
@@ -364,6 +368,7 @@ def test_atom_heartbeat_reregisters_when_the_server_forgot_the_worker() -> None:
 
     heartbeat._execute()
 
+    client.ping.assert_called_once_with(7)
     recover.assert_called_once_with()
     unhealthy.assert_not_called()
     assert health_event.is_set() is True

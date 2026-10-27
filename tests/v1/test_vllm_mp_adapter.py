@@ -1611,40 +1611,41 @@ def test_heartbeat_first_ping_runs_callback_before_setting_event(
     assert event_state_during_callback == [False]
 
 
+@pytest.mark.parametrize("start_healthy", [True, False])
 @pytest.mark.parametrize(
-    ("worker_ping", "server_ping", "recover_ok", "expect_recover", "expect_healthy"),
+    ("answer", "recover_ok", "expect_recover", "expect_healthy"),
     [
         # Server up but this worker unknown (reaped while silent): degraded
         # while it re-registers, healthy once the server accepts it.
-        (False, True, True, True, True),
+        (False, True, True, True),
         # Re-registration failed: degraded until a later cycle succeeds.
-        (False, True, False, True, False),
-        # Server down: no re-registration attempt, degraded.
-        (False, False, True, False, False),
-        # Worker known: nothing to do.
-        (True, True, True, False, True),
+        (False, False, True, False),
+        # No answer (timeout or error): an outage, never a re-registration.
+        (None, True, False, False),
     ],
 )
-def test_heartbeat_reregisters_a_worker_the_server_no_longer_holds(
+def test_heartbeat_reregisters_only_on_an_explicit_unknown_answer(
     monkeypatch,
-    worker_ping: bool,
-    server_ping: bool,
+    start_healthy: bool,
+    answer: bool | None,
     recover_ok: bool,
     expect_recover: bool,
     expect_healthy: bool,
 ) -> None:
-    """Real HeartbeatThread, starting healthy: a failed worker ping is told
-    apart from an outage by an untracked ping, and only the former runs the
-    re-registration callback, with the health event cleared while it runs."""
-    monkeypatch.setattr(
-        adapter_mod,
-        "send_ping",
-        lambda req_client, timeout, instance_id=None: (
-            worker_ping if instance_id is not None else server_ping
-        ),
-    )
+    """Real HeartbeatThread: only the server's explicit False runs the
+    re-registration callback, with the health event cleared while it runs,
+    whether the worker was healthy or already degraded. No answer degrades
+    without touching the registration."""
+    pings: list[int | None] = []
+
+    def ping(req_client, timeout, instance_id=None) -> bool | None:
+        pings.append(instance_id)
+        return answer
+
+    monkeypatch.setattr(adapter_mod, "send_ping", ping)
     health_event = threading.Event()
-    health_event.set()
+    if start_healthy:
+        health_event.set()
     heartbeat = HeartbeatThread(
         req_client=MagicMock(name="req_client"),
         health_event=health_event,
@@ -1661,8 +1662,30 @@ def test_heartbeat_reregisters_a_worker_the_server_no_longer_holds(
 
     heartbeat._execute()
 
+    assert pings == [7]
     assert event_state_during_callback == ([False] if expect_recover else [])
     assert health_event.is_set() is expect_healthy
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [(True, True), (False, False), (TimeoutError(), None), (RuntimeError(), None)],
+)
+def test_send_ping_returns_the_answer_or_none_without_one(
+    result: object, expected: bool | None
+) -> None:
+    """send_ping passes the server's True or False through, and reports a
+    timeout or error as None, so callers never read a lost answer as an
+    unknown worker."""
+    future = MagicMock(name="future")
+    if isinstance(result, BaseException):
+        future.result.side_effect = result
+    else:
+        future.result.return_value = result
+    req_client = MagicMock(name="req_client")
+    req_client.ping.return_value = future
+
+    assert adapter_mod.send_ping(req_client, timeout=1.0, instance_id=7) is expected
 
 
 def test_dropped_retrieve_reported_once_via_unhealthy_get_finished(
