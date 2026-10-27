@@ -12,7 +12,7 @@ that stitches serde into the distributed storage pipeline.
 ## Design Summary
 
 `SerdeL2AdapterWrapper` implements `L2AdapterInterface` by composing
-an inner L2 adapter with a `SerdeProcessor` and an `L1Manager`. The
+an inner L2 adapter with a `SerdeProcessor` and a `BaseL1Manager`. The
 caller sees the wrapper's public API only; the wrapper's internal
 thread is the sole consumer of the inner adapter's and serde's event
 fds.
@@ -29,7 +29,7 @@ consumed by the wrapper's internal thread.
      │ (1) submit_store_task(keys, objs)                           
      ▼                                                             
    ┌─────────────────┐  (2) reserve_write(tmp)   ┌──────────────┐  
-   │  wrapper (API)  │ ─────────────────────────►│  L1Manager   │  
+   │  wrapper (API)  │ ─────────────────────────►│  L1 manager  │  
    │                 │ ◄────── tmp_objs ─────────│              │  
    └────────┬────────┘                           └──────────────┘  
             │ (3) submit_serialize(objs, tmp_objs)                 
@@ -66,7 +66,7 @@ consumed by the wrapper's internal thread.
      │ (1) submit_load_task(keys, dst_objs)                        
      ▼                                                             
    ┌─────────────────┐  (2) reserve_write(tmp)   ┌──────────────┐  
-   │  wrapper (API)  │ ─────────────────────────►│  L1Manager   │  
+   │  wrapper (API)  │ ─────────────────────────►│  L1 manager  │  
    │                 │ ◄────── tmp_objs ─────────│              │  
    └────────┬────────┘                           └──────────────┘  
             │ (3) inner.submit_load_task(keys, tmp_objs)           
@@ -102,7 +102,7 @@ sequenceDiagram
     participant W as SerdeL2AdapterWrapper
     participant Thread as wrapper internal thread
     participant Serde as SerdeProcessor
-    participant L1 as L1Manager
+    participant L1 as L1 manager
     participant Inner as inner L2 adapter
 
     Controller->>W: submit_store_task(keys, objs)
@@ -141,7 +141,7 @@ sequenceDiagram
     participant Thread as wrapper internal thread
     participant Inner as inner L2 adapter
     participant Serde as SerdeProcessor
-    participant L1 as L1Manager
+    participant L1 as L1 manager
 
     Controller->>W: submit_load_task(keys, dst_objs)
     W->>L1: reserve_write(temp_keys, byte layout)
@@ -287,7 +287,7 @@ interacts with them only through their documented APIs.
 ## Known Limitations / Follow-ups
 
 - **Temp buffer allocation per submit.** Every store / load call
-  issues an `L1Manager.reserve_write` for fresh temp keys. A free-list
+  issues a `BaseL1Manager.reserve_write` for fresh temp keys. A free-list
   keyed on `(shape, dtype)` would skip the allocator on the hot path.
   Not done in the initial version — correctness first.
 - **Bookkeeping-dict duplication.** Six of the existing L2 adapters

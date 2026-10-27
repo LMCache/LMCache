@@ -105,8 +105,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # mutates them off the MQ main loop). Leaf lock, never held with
         # _pending_shm_lock.
         self._lock = threading.Lock()
+        # Reserved keys of each pending SHM store, mapped to their L1 owner.
         self._pending_shm_writes: dict[
-            tuple[int, IPCCacheServerKey], list[ObjectKey]
+            tuple[int, IPCCacheServerKey], dict[ObjectKey, int]
         ] = {}
         self._pending_shm_reads: dict[
             tuple[int, IPCCacheServerKey], list[ObjectKey]
@@ -278,12 +279,12 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         with self._pending_shm_lock:
             stale_writes = [k for k in self._pending_shm_writes if k[0] == instance_id]
             stale_reads = [k for k in self._pending_shm_reads if k[0] == instance_id]
-            write_obj_keys = [self._pending_shm_writes.pop(k) for k in stale_writes]
+            write_owners = [self._pending_shm_writes.pop(k) for k in stale_writes]
             read_obj_keys = [self._pending_shm_reads.pop(k) for k in stale_reads]
 
-        for obj_keys in write_obj_keys:
-            if obj_keys:
-                self._ctx.storage_manager.finish_write(obj_keys)
+        for owners in write_owners:
+            if owners:
+                self._ctx.storage_manager.finish_write(list(owners), l1_owners=owners)
         for obj_keys in read_obj_keys:
             if obj_keys:
                 self._ctx.storage_manager.finish_read_prefetched(obj_keys)

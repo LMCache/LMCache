@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""L1 logging subscriber — debug logs for L1Manager events.
+"""L1 logging subscriber — debug logs for L1 manager events.
 
 Logs are emitted via Python's standard logging module.  When OpenTelemetry
 is installed, ``init_logger`` automatically attaches an OTel
@@ -20,7 +20,7 @@ logger = init_logger(__name__)
 
 
 class L1LoggingSubscriber(EventSubscriber):
-    """Logs L1Manager events at debug level."""
+    """Logs L1 manager events at debug level."""
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {

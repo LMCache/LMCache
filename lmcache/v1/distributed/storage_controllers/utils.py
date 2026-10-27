@@ -15,11 +15,7 @@ from typing import TypeVar
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import L1BackendType
-from lmcache.v1.distributed.config import (
-    L1ManagerConfig,
-    get_configured_capacity_bytes,
-)
+from lmcache.v1.distributed.config import L1ManagerConfig
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -65,34 +61,10 @@ class L1ManagerDescriptor:
     """
 
     index: int
-    """Position in the L1 managers list."""
+    """The manager's ``l1_manager_id`` (the owner tag on its memory objects)."""
 
     config: L1ManagerConfig
     """The manager's configuration object."""
-
-    @property
-    def backend_types(self) -> frozenset[L1BackendType]:
-        """
-        The storage media backing this L1 manager.
-
-        A hybrid Device-DAX tier spans both DRAM and Device-DAX; every other
-        tier has a single medium.
-
-        Returns:
-            The backend types with a non-zero configured capacity.
-        """
-        return frozenset(get_configured_capacity_bytes(self.config))
-
-    @property
-    def type_name(self) -> str:
-        """
-        Wire names of the backing media joined with ``+`` in sorted order
-        (e.g., "dram", "gds", "devdax+dram").
-
-        Returns:
-            str: The combined backend type name.
-        """
-        return "+".join(sorted(backend.value for backend in self.backend_types))
 
 
 class Bitmap2D:
@@ -262,7 +234,7 @@ class Bitmap2D:
 class MapState:
     """Tracks the global bitmap state.
 
-    It maps from L2Adapter/L1Manager index to the global bitmap grid of the
+    It maps from L2 adapter / L1 manager index to the global bitmap grid of the
     object key groups. Row ``i`` of every grid is the key group at index
     ``i`` of the prefetch request (see `GroupedObjectKeys`).
 

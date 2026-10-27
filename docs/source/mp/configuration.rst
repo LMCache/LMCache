@@ -389,10 +389,9 @@ single-L1 interface. For placing L1 on CXL-attached memory see
        backing arena.  When set, disable lazy allocation with
        ``--no-l1-use-lazy`` and leave ``--shm-name`` at its default ``""``
        (SHM transfer disabled) because the L1 bytes live in the DAX
-       mapping.  If a
-       DAX L2 adapter with the same ``device_path`` is registered, that
-       adapter's ``max_dax_size_gb`` is used as the L1 Device-DAX overflow
-       size. Pass the device node, for example
+       mapping.  A ``dax`` L2 adapter may not map the same device range;
+       give the L1 and the adapter disjoint ranges. Pass the device node,
+       for example
        ``--l1-devdax-path /dev/dax0.0 --l1-size-gb 512 --no-l1-use-lazy
        --shm-name ""``; find the node for a CXL region with ``daxctl list``.
        See *Device-DAX / CXL L1* below.
@@ -459,10 +458,11 @@ off:
        --l1-devdax-path /dev/dax0.0 --l1-size-gb 512 --l1-devdax-offset-gb 512 \
        --no-l1-use-lazy --shm-name ""
 
-Hybrid DRAM + Device-DAX has no overflow flag: a ``dax`` L2 adapter whose
-``device_path`` matches ``--l1-devdax-path`` is consumed, its
-``max_dax_size_gb`` becomes the overflow size, and ``--l1-size-gb`` becomes
-the DRAM half.
+A Device-DAX L1 is a pool of its own. To combine it with DRAM, configure a
+``DRAM`` and a ``DEVDAX`` manager with ``--l1-manager`` (see
+:doc:`multi_l1`); the write policy decides which keys land in which pool.
+A ``dax`` L2 adapter on the same device range as the L1 is rejected at
+startup.
 
 **Verify.** ``GET /status`` reports ``l1_capacity_bytes_by_backend`` with a
 ``devdax`` entry equal to the mapped size; Prometheus

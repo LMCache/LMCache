@@ -24,7 +24,7 @@ class L1ReconfigureError(RuntimeError):
 
 
 class L1Error(enum.Enum):
-    """Errors for L1Manager class APIs."""
+    """Errors for L1 manager APIs."""
 
     SUCCESS = enum.auto()
     """ Operation succeeded. """
