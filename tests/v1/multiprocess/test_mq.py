@@ -775,6 +775,32 @@ def test_invalid_outbound_request_does_not_block_later_requests() -> None:
         server.close()
 
 
+def test_unregistered_operation_returns_remote_error() -> None:
+    """An unsupported RPC must fail promptly without poisoning later requests."""
+    server_url = f"tcp://127.0.0.1:{_unused_tcp_port()}"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, "noop", test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        unsupported = client.submit_request("get_chunk_size", [])
+        assert isinstance(unsupported, MessagingFuture)
+        with pytest.raises(
+            RuntimeError,
+            match=("get_chunk_size.*operation_not_enabled.*--supported-transfer-mode"),
+        ):
+            unsupported.result(timeout=1)
+
+        healthy = client.submit_request("noop", [])
+        assert isinstance(healthy, MessagingFuture)
+        assert healthy.result(timeout=1) == "NOOP_OK"
+    finally:
+        client.close()
+        server.close()
+
+
 def test_server_answers_a_burst_larger_than_one_poll() -> None:
     server_url = "tcp://127.0.0.1:16031"
     context = zmq.Context.instance()
