@@ -46,12 +46,12 @@ Validated models
          (see :doc:`../getting_started/installation`); stable LMCache releases
          include K3 support starting from **0.5.3**.
 
-      As a Mamba / linear-attention hybrid, Kimi K3 needs the same three
-      settings as the other KDA / GDN hybrids: the ``align`` Mamba cache mode,
-      prefix caching, and a chunk size negotiated from vLLM's *unified block
-      size* ``N`` (see :ref:`mamba-block-size` for how ``N`` is determined). For
-      Kimi K3 at ``--tensor-parallel-size 8`` the unified block size is
-      ``N = 768``:
+      As a Mamba / linear-attention hybrid, Kimi K3 needs the same settings as
+      the other KDA / GDN hybrids: the ``align`` Mamba cache mode, prefix
+      caching, and ``--separate-object-groups`` on the LMCache server. The
+      chunk size is negotiated from vLLM's *unified block size* ``N`` (see
+      :ref:`mamba-block-size`). For Kimi K3 at ``--tensor-parallel-size 8``
+      the unified block size is ``N = 768``:
 
       .. list-table::
          :header-rows: 1
@@ -66,9 +66,8 @@ Validated models
 
       ``N`` depends on the tensor-parallel size (the KDA state is sharded
       across TP ranks while the MLA cache is not), so after changing
-      ``--tensor-parallel-size`` always re-read ``N`` from vLLM's
-      ``Setting attention block size to N tokens`` startup log line and
-      re-derive ``--max-num-batched-tokens`` from it.
+      ``--tensor-parallel-size`` re-read ``N`` from vLLM's
+      ``Setting attention block size to N tokens`` startup log line.
 
       Start the LMCache MP server with an explicitly compatible minimum
       (a lower minimum would negotiate to ``N = 768``):
@@ -103,7 +102,6 @@ Validated models
              --reasoning-parser kimi_k3 \
              --enable-prefix-caching \
              --mamba-cache-mode align \
-             --max-num-batched-tokens 1500 \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.port":6555}}'
 
@@ -117,18 +115,10 @@ Validated models
         the recurrent state.
       - ``--separate-object-groups`` (server) is **required** for hybrid
         Mamba / linear-attention models: it gives the KDA layers their own
-        cache objects and is what lets ``--max-num-batched-tokens`` exceed
-        ``2N``.
+        cache objects.
       - ``--chunk-size`` (server) is a minimum. The connector negotiates the
         smallest multiple of ``N`` that is at least that value. See
         :doc:`/mp/chunk_size_negotiation`.
-      - ``--max-num-batched-tokens`` must be **at least** ``N`` (= ``768``); the
-        validated value is ``1500``. ``align`` snapshots the KDA state only on a
-        block boundary at the end of a scheduler step. Within ``[N, 2N)`` every
-        step advances exactly one block, snapshotting every boundary (finest
-        reuse); with ``--separate-object-groups`` values ``≥ 2N`` are allowed
-        too, trading coarser reuse for higher prefill throughput. See
-        :doc:`../mp/hybrid_models` for the full rationale.
       - The server's ``--port 6555`` must match ``lmcache.mp.port`` in the
         connector config.
 
@@ -147,8 +137,7 @@ Validated models
         stack can be validated without downloading the full checkpoint —
         **drop it to serve the real weights**.
       - ``--tensor-parallel-size 8`` shards the weights across eight GPUs.
-        Adjust it to your hardware — but note it changes ``N`` and the two
-        derived flags (see above).
+        Adjust it to your hardware — but note it changes ``N`` (see above).
 
       No attention-backend or ``--no-disable-hybrid-kv-cache-manager`` flag is
       needed; ``LMCacheMPConnector`` advertises hybrid support and vLLM

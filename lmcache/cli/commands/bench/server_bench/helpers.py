@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Internal helpers for ``lmcache bench server``.
-
-This module owns the heavy runtime imports (``torch`` / ``zmq`` /
-``lmcache.v1.*``) and all pure / low-level helper functions used by
-the ``server`` bench target. The CLI registration and execute
-orchestration live in :mod:`lmcache.cli.commands.bench.server_bench.command`.
-
-Splitting the module this way keeps the public command surface in line
-with the ``engine_bench`` and ``l2_adapter_bench`` siblings, while
-still quarantining the heavy imports behind a single guarded block so
-the slim ``lmcache-cli`` install can load the bench parser without
-torch / zmq.
-"""
+"""Low-level runtime helpers for ``lmcache bench server``."""
 
 # Future
 from __future__ import annotations
@@ -19,59 +7,14 @@ from __future__ import annotations
 # Standard
 from typing import Any
 import json
-import sys
 import time
 import urllib.error
 import urllib.request
 
-# ``lmcache bench server`` allocates real CUDA tensors and talks to
-# the MP server via ZMQ, both of which are absent from the thin
-# ``lmcache-cli`` distribution (no torch, no zmq, no lmcache.v1.*).
-# Importing them unconditionally would kill the *entire* ``lmcache``
-# CLI at registry load time with an opaque ImportError. Wrap the
-# heavy imports and remember the error so ``add_arguments`` /
-# ``execute`` can bail out with an actionable install hint.
-_IMPORT_ERROR: ImportError | None = None
-try:
-    # Third Party
-    import torch  # noqa: F401
-    import zmq  # noqa: F401  # availability probe; used by command.py
-
-    # First Party
-    from lmcache.v1.kv_layer_groups import DTYPE_MAP
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
-    from lmcache.v1.multiprocess.transport.base import RequestClient
-except ImportError as _exc:
-    _IMPORT_ERROR = _exc
-    # Fallback placeholder so ``add_arguments`` can still build its
-    # help text without crashing on a CLI-only install.
-    DTYPE_MAP = {}  # type: ignore[assignment]
-
-
-def _require_full_install() -> None:
-    """Exit with an install hint if the full LMCache runtime is missing.
-
-    ``lmcache bench server`` needs torch, zmq and ``lmcache.v1.*``
-    (MP client, KV layer-group parser). When those imports failed at
-    module load — almost always because the user installed
-    ``lmcache-cli`` instead of the full package — print the shortest
-    actionable message to stderr and exit with status ``2`` so
-    scripts can detect the install gap programmatically.
-    """
-    if _IMPORT_ERROR is None:
-        return
-    print(
-        "ERROR: `lmcache bench server` needs the full LMCache package "
-        "(torch, zmq, MP runtime), but only the `lmcache-cli` shell "
-        "appears to be installed.\n"
-        "  Install the full package with `pip install lmcache` and try "
-        "again.\n"
-        f"  Original import error: {_IMPORT_ERROR}",
-        file=sys.stderr,
-    )
-    sys.exit(2)
-
+# First Party
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
+from lmcache.v1.multiprocess.transport.base import RequestClient
 
 # ------------------------------------------------------------------ #
 #  Constants                                                           #
@@ -87,11 +30,6 @@ _INSTANCE_ID = 0
 # well above legacy ``_INSTANCE_ID = 0`` so single-worker bench runs
 # and the multi-worker path never collide on the server side.
 _INSTANCE_ID_BASE = 1000
-
-# Default KV shape spec matching the original defaults:
-# 32 layers, (2, num_blocks=1024, block_size=16, 8 heads, 128 head_size)
-_DEFAULT_SHAPE_SPEC = "(2,1024,16,8,128):float16:32"
-
 
 # ------------------------------------------------------------------ #
 #  Low-level helpers                                                   #
@@ -157,7 +95,7 @@ def _make_key(
     num_kv_readers: int = 1,
 ) -> IPCCacheServerKey:
     """Build an IPCCacheServerKey."""
-    return IPCCacheServerKey(
+    return IPCCacheServerKey.from_token_ids(
         model_name=_MODEL_NAME,
         world_size=world_size,
         num_kv_readers=num_kv_readers,
