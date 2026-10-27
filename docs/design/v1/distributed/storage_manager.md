@@ -195,7 +195,7 @@ keys. Each session keeps its own owner map. `read_prefetched_results`,
 with it, each key goes exactly to its owner. Without it a single L1 serves
 every key, as before. With several L1s the storage manager probes them in
 placement order with `unsafe_read` and the first L1 holding the key
-read-locked serves or releases it, logging one warning per storage manager
+read-locked serves or releases it, logging a warning on every such call
 (`unsafe_read` rather than `finish_read`, because an L1 without the key
 answers `unsafe_read` silently). That release is correct only while a key is
 read-locked in at most one L1, which holds today because the prefetch policy

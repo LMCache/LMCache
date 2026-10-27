@@ -55,11 +55,6 @@ _INVALID_ADDRESS = TransferChannelAddress(offset=-1, size=0)
 # Consecutive missed polls a peer may be absent before its adapter is removed.
 _MAX_MISSES = 3
 
-# Peers read the L1 registered with the transfer channel: the one local DRAM L1.
-_P2P_L1_MEMORY_TAGS = MemoryTags(
-    segment=MemorySegment.DRAM, residency=MemoryResidency.LOCAL
-)
-
 
 def _group_keys_by_object_group(
     keys: list[ObjectKey],
@@ -236,9 +231,11 @@ class P2PController(DiscoverableModule):
             ValueError: There is not exactly one local DRAM L1, or it exposes
                 no registerable memory buffer.
         """
+        # Peers read the L1 registered with the transfer channel: the one
+        # local DRAM L1.
         try:
             l1_manager = self._ctx.storage_manager.get_l1_manager_by_tags(
-                _P2P_L1_MEMORY_TAGS
+                MemoryTags(segment=MemorySegment.DRAM, residency=MemoryResidency.LOCAL)
             )
         except ValueError as e:
             raise ValueError(f"P2P requires exactly one local DRAM L1: {e}") from e

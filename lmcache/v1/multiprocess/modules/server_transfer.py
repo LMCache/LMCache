@@ -603,7 +603,7 @@ class ShmTransferStrategy(TransferStrategy):
         if pending is None:
             return False
         if pending:
-            self._storage_manager.finish_write(list(pending), l1_owners=pending)
+            self._storage_manager.finish_write(list(pending.keys()), l1_owners=pending)
         return True
 
     def prepare_retrieve(

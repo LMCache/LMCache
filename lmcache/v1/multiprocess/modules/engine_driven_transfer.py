@@ -284,7 +284,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
         for owners in write_owners:
             if owners:
-                self._ctx.storage_manager.finish_write(list(owners), l1_owners=owners)
+                self._ctx.storage_manager.finish_write(
+                    list(owners.keys()), l1_owners=owners
+                )
         for obj_keys in read_obj_keys:
             if obj_keys:
                 self._ctx.storage_manager.finish_read_prefetched(obj_keys)
