@@ -89,4 +89,3 @@ def _allocate_with_resident_frontier(
         updated_length = min(resident_kv_length + num_new_tokens, manager.max_model_len)
         set_resident_kv_tokens(request_id, updated_length)
     return result
-
