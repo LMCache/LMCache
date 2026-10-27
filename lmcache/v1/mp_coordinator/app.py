@@ -24,8 +24,7 @@ import asyncio
 import time
 
 # Third Party
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 import httpx
 
 # First Party
@@ -65,10 +64,7 @@ from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
 )
-from lmcache.v1.mp_coordinator.persistence.metadata import (
-    MetadataPersister,
-    MetadataWriteError,
-)
+from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 from lmcache.v1.mp_coordinator.persistence.store import (
     ArtifactStore,
@@ -276,11 +272,6 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
 
     app = FastAPI(title="LMCache MP Coordinator", version="1.0.0", lifespan=lifespan)
     app.state.ctx = ctx
-    # A route that saves operator intent and lets a failed write escape
-    # (a controller loaded from a package, say) still answers 503, not
-    # 500: the client can retry once the storage is fixed. Routes that
-    # change pins or quotas catch it themselves first, to undo the change.
-    app.add_exception_handler(MetadataWriteError, _metadata_write_failed)
     # Out-of-context collaborator kept on app.state directly.
     app.state.config = config
 
@@ -297,19 +288,6 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
                 app.include_router(router)
 
     return app
-
-
-async def _metadata_write_failed(request: Request, exc: Exception) -> JSONResponse:
-    """Answer 503 for a metadata write no route handled.
-
-    Args:
-        request: The request whose change could not be saved.
-        exc: The :class:`MetadataWriteError`.
-
-    Returns:
-        A 503 carrying the reason.
-    """
-    return JSONResponse(status_code=503, content={"detail": f"change not saved: {exc}"})
 
 
 def _artifact_store(path: str) -> ArtifactStore:

@@ -9,7 +9,6 @@ from contextlib import contextmanager
 from pathlib import Path
 
 # Third Party
-from fastapi import APIRouter
 from fastapi.testclient import TestClient
 
 # First Party
@@ -18,7 +17,6 @@ from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
-from lmcache.v1.mp_coordinator.persistence.metadata import MetadataWriteError
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 _GB = 1024**3
@@ -109,25 +107,6 @@ class TestPins:
             pins = client.get("/cache/pins").json()
             assert pins["total"] == len(_pinned_keys(client))
             assert all(p["pin_count"] == 1 for p in pins["pins"])
-
-
-class TestFallback:
-    def test_a_route_that_lets_the_error_escape_still_answers_503(self, tmp_path: Path):
-        """A controller from a package that saves without catching gets a
-        503 the client can retry, not a 500."""
-        app = create_app(_config(tmp_path / "metadata.json"))
-        router = APIRouter()
-
-        @router.post("/test/save")
-        async def save() -> None:
-            raise MetadataWriteError("disk full")
-
-        app.include_router(router)
-        with TestClient(app) as client:
-            response = client.post("/test/save")
-
-        assert response.status_code == 503
-        assert "disk full" in response.json()["detail"]
 
 
 class TestWritableStorage:

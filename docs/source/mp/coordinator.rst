@@ -100,9 +100,7 @@ keeps the default below.
    * - ``--metadata-path``
      - (empty)
      - File the operator-set state (L2 pins and per-``cache_salt`` quotas)
-       is stored in. Empty means that state is lost on restart. If the file
-       cannot be written, the request that changed a pin or quota is undone
-       and answers 503.
+       is stored in. Empty means that state is lost on restart.
    * - ``--extra-config``
      - (empty)
      - JSON object of settings the core flags do not name, read by whichever

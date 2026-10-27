@@ -78,8 +78,7 @@ Options
    * - ``--metadata-path FILE``
      - Store operator-set state -- L2 pins and per-``cache_salt`` quotas -- in
        this file, written whenever it changes. Unset means that state is lost
-       on restart. If the file cannot be written, the request that made the
-       change is undone and answers 503.
+       on restart.
    * - ``--extra-config JSON``
      - JSON object of settings the core flags do not name, read by whichever
        view or controller looks for them. Lets a new one ship with its own
