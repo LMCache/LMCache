@@ -1485,6 +1485,10 @@ class LMCacheMPWorkerAdapter:
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat: HeartbeatThread | None = None
         self._heartbeat_lock = threading.Lock()
+        # Set by shutdown() under _heartbeat_lock. Registration publishes a
+        # context only while it is clear, so a shutdown during the first
+        # registration, before any heartbeat exists, is still seen.
+        self._shutdown_requested = False
         if 3 * heartbeat_interval > _SERVER_REAP_TIMEOUT_FLOOR_SECONDS:
             logger.warning(
                 "lmcache.mp.heartbeat_interval is %.1fs, so 3 x "
@@ -1639,29 +1643,31 @@ class LMCacheMPWorkerAdapter:
                 lmcache_chunk_tokens=self.lmcache_tokens_per_chunk,
             )
         except TimeoutError:
-            transfer_ctx.close()
+            # The server may have registered it after the timeout.
+            self._discard_transfer_context(transfer_ctx)
             raise ConnectionError(
                 "LMCache server did not respond to "
                 "register_kv_caches within "
                 f"{self._mq_timeout}s. Is the server running?"
             ) from None
         except Exception:
-            transfer_ctx.close()
+            self._discard_transfer_context(transfer_ctx)
             raise
 
-        # shutdown() stops the heartbeat under this lock, then unregisters
-        # whatever context is published. A shutdown that started during
-        # registration would miss this context, so discard it here instead
-        # of publishing it.
+        # shutdown() sets the flag under this lock, then unregisters whatever
+        # context is published. A shutdown that started during registration
+        # would miss this context, so discard it here instead of publishing it.
         with self._heartbeat_lock:
-            if not self._heartbeat_stop_requested():
+            if not self._shutdown_requested:
                 self.transfer_ctx = transfer_ctx
                 return
         logger.info("Shutdown began during registration; discarding the new context")
         self._discard_transfer_context(transfer_ctx)
 
     def _discard_transfer_context(self, transfer_ctx: TransferContext) -> None:
-        """Unregister and close a registered context that was never published.
+        """Unregister and close a context that was never published.
+
+        Failures are logged, not raised, so a caller's own error is kept.
 
         Args:
             transfer_ctx: The context to discard.
@@ -1676,7 +1682,12 @@ class LMCacheMPWorkerAdapter:
                 "reaps it after its liveness timeout",
                 exc_info=True,
             )
-        transfer_ctx.close()
+        try:
+            transfer_ctx.close()
+        except Exception:
+            logger.warning(
+                "Failed to close a discarded transfer context", exc_info=True
+            )
 
     def _ensure_heartbeat_started(self) -> None:
         """Lazily start the heartbeat on first store, retrieve, or event poll.
@@ -1691,7 +1702,7 @@ class LMCacheMPWorkerAdapter:
         if self._heartbeat is not None:
             return
         with self._heartbeat_lock:
-            if self._heartbeat is not None:
+            if self._heartbeat is not None or self._shutdown_requested:
                 return
             heartbeat = HeartbeatThread(
                 req_client=self.req_client,
@@ -2465,9 +2476,15 @@ class LMCacheMPWorkerAdapter:
         if self._kv_event_subscription is not None:
             self._kv_event_subscription.close()
 
+        # Mark shutdown under the lock, then stop the heartbeat outside it: a
+        # re-registration finishing on the heartbeat thread needs the lock to
+        # see the flag and discard its new context, and stop() joins that
+        # thread.
         with self._heartbeat_lock:
-            if self._heartbeat is not None:
-                self._heartbeat.stop()
+            self._shutdown_requested = True
+            heartbeat = self._heartbeat
+        if heartbeat is not None:
+            heartbeat.stop()
 
         if self.transfer_ctx is not None:
             logger.info("Unregistering kv caches")

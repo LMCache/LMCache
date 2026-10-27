@@ -1873,23 +1873,42 @@ def test_recover_callback_skips_register_after_stop_requested(
     assert contexts[-1].register.call_count == 1  # no second REGISTER
 
 
-@pytest.mark.parametrize("stop_during_register", [False, True])
-def test_reregistration_publishes_only_a_registered_context(
-    fake_adapter, monkeypatch, stop_during_register: bool
+@pytest.mark.parametrize(
+    ("first", "during_register", "expect_published"),
+    [
+        # Re-registration: the old context stays visible until the new one
+        # is registered, then the new one is published.
+        (False, None, True),
+        # Re-registration with shutdown arriving mid-registration.
+        (False, "shutdown", False),
+        # First registration (no heartbeat yet) with shutdown arriving.
+        (True, "shutdown", False),
+        # The server's answer times out; it may still have registered.
+        (False, "timeout", False),
+    ],
+)
+def test_registration_publishes_only_a_registered_context(
+    fake_adapter,
+    monkeypatch,
+    first: bool,
+    during_register: str | None,
+    expect_published: bool,
 ) -> None:
-    """Re-registration keeps the old transfer context visible until the
-    server accepts the new one, so no submission can use an unregistered
-    context. If shutdown begins during registration, the new context is
-    unregistered and closed instead of published."""
+    """A transfer context is published only after the server registers it,
+    so no submission can use an unregistered one. If the real shutdown()
+    runs during registration, first or re-registration, or registration
+    times out, the new context is unregistered and closed instead, and is
+    never published."""
     adapter, _req_client, _ = fake_adapter
     contexts = _patch_transfer_context_factory(monkeypatch)
-
     fake_tensor = MagicMock()
     fake_tensor.device.type = "cuda"
-    adapter.register_kv_caches({"layer.0": fake_tensor})
-    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
-    heartbeat = FakeHeartbeatThread.instances[0]
-    old_ctx = contexts[-1]
+    kv_caches = {"layer.0": fake_tensor}
+    old_ctx = None
+    if not first:
+        adapter.register_kv_caches(kv_caches)
+        adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+        old_ctx = contexts[-1]
     published_during_register: list[object] = []
 
     def mint_next(*_args, **_kwargs) -> MagicMock:
@@ -1897,8 +1916,10 @@ def test_reregistration_publishes_only_a_registered_context(
 
         def register(*_a, **_kw) -> None:
             published_during_register.append(adapter.transfer_ctx)
-            if stop_during_register:
-                heartbeat.stop()
+            if during_register == "shutdown":
+                adapter.shutdown()
+            elif during_register == "timeout":
+                raise TimeoutError
 
         new_ctx.register.side_effect = register
         new_ctx.unregister.return_value = None
@@ -1907,18 +1928,22 @@ def test_reregistration_publishes_only_a_registered_context(
 
     monkeypatch.setattr(adapter_mod, "create_transfer_context", mint_next)
 
-    adapter._send_register_kv_caches_request(adapter.kv_caches)
+    if during_register == "timeout":
+        with pytest.raises(ConnectionError):
+            adapter._send_register_kv_caches_request(kv_caches)
+    else:
+        adapter._send_register_kv_caches_request(kv_caches)
 
     new_ctx = contexts[-1]
     assert published_during_register == [old_ctx]
-    if stop_during_register:
-        assert adapter.transfer_ctx is old_ctx
-        new_ctx.unregister.assert_called_once_with()
-        new_ctx.close.assert_called_once_with()
-    else:
+    if expect_published:
         assert adapter.transfer_ctx is new_ctx
         new_ctx.unregister.assert_not_called()
         new_ctx.close.assert_not_called()
+    else:
+        assert adapter.transfer_ctx is not new_ctx
+        new_ctx.unregister.assert_called_once_with()
+        new_ctx.close.assert_called_once_with()
 
 
 def test_register_uses_local_context_when_self_transfer_ctx_nulled(
