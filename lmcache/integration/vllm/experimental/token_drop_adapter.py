@@ -5,8 +5,6 @@
 from __future__ import annotations
 
 # Standard
-from functools import wraps
-
 # First Party
 from lmcache.integration.vllm.experimental.token_drop_scheduler import (
     clear_resident_kv_tokens,
@@ -92,24 +90,3 @@ def _allocate_with_resident_frontier(
         set_resident_kv_tokens(request_id, updated_length)
     return result
 
-
-def install_token_drop_allocator_adapter() -> None:
-    """Install the resident-frontier allocation hook for vLLM 0.25.1."""
-    # Third Party
-    from vllm.v1.core.kv_cache_manager import KVCacheManager
-
-    _check_vllm_version()
-
-    original_allocate = KVCacheManager.allocate_slots
-    if getattr(original_allocate, "_lmcache_token_drop_allocator_adapter", False):
-        return
-
-    @wraps(original_allocate)
-    def wrapped_allocate(self, *args, **kwargs):
-        return _allocate_with_resident_frontier(
-            original_allocate, self, *args, **kwargs
-        )
-
-    # Mark the wrapper so repeated installation does not stack allocator hooks.
-    wrapped_allocate._lmcache_token_drop_allocator_adapter = True  # type: ignore[attr-defined]
-    KVCacheManager.allocate_slots = wrapped_allocate
