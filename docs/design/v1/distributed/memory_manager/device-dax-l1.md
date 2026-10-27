@@ -303,3 +303,10 @@ the last cached entry is deleted. It accepts real `/dev/dax` devices via
   (`add_device` / `remove_device`).
 - Runtime reconfigure maps and unmaps already-provisioned Device-DAX devices;
   it does not perform kernel-level CXL/DAX namespace reconfiguration.
+
+## Shared Mode
+
+With a `shared` object the manager has no arenas and no allocator: it maps the
+orchestrator's region with `DevDaxMemoryAllocator.open_devdax_mapping`,
+requires GPU registration, returns parentless `view()`s of granted extents
+(dropping one frees nothing) and answers every arena call with 409.
