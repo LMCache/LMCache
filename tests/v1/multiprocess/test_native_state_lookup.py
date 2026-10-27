@@ -35,6 +35,7 @@ from lmcache.v1.multiprocess.engine_context import (
     MPCacheServerContext,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.lookup_ledger import LookupLockLedger
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import all_null_chunk_masks
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.session import SessionManager
@@ -240,6 +241,7 @@ def _lookup(
         token_hasher=hasher,
         layout_desc_registry=registry,
         session_manager=SessionManager(hasher, cleanup_interval=None),
+        lookup_ledger=LookupLockLedger(),
         event_bus=MagicMock(),
         chunk_size=CHUNK,
     )

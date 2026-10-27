@@ -15,6 +15,7 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.lookup_ledger import LookupLockState
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.rpc import get_rpc_spec
@@ -116,12 +117,11 @@ def _make_free_locks_ctx(
     Args:
         chunk_hashes: Hashes returned for every resolved [start, end) range.
         windows: Per-object-group windows for the registered AttnWindowDesc.
-        hit_chunks: Prefetch hit length recorded on the session (-1 for
+        hit_chunks: Prefetch hit length recorded on the lock ledger (-1 for
             "never recorded").
-        locked_gids: The lock model recorded on the session; empty means
+        locked_gids: The lock model recorded on the ledger; empty means
             "every group" (legacy std-lookup behavior).
-        lookup_start: ``start`` of the session's lookup key; releases are
-            floored to it.
+        lookup_start: ``start`` of the lookup key; releases are floored to it.
 
     Returns:
         The configured MagicMock context.
@@ -134,10 +134,13 @@ def _make_free_locks_ctx(
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=windows
     )
-    session = ctx.session_manager.get_or_create.return_value
-    session.prefetch_hit_chunks = hit_chunks
-    session.prefetch_locked_gids = tuple(locked_gids)
-    session.lookup_ipc_key = _free_locks_key(1024, start=lookup_start, end=1024)
+    ctx.lookup_ledger = MagicMock()
+    ctx.lookup_ledger.lock_state.return_value = LookupLockState(
+        key=_free_locks_key(1024, start=lookup_start, end=1024),
+        hit_chunks=hit_chunks,
+        locked_gids=tuple(locked_gids),
+        group_windows=tuple(windows),
+    )
     return ctx
 
 
@@ -318,11 +321,13 @@ def test_server_free_lookup_locks_without_result_releases_nothing():
 def test_server_free_lookup_locks_consumes_pending_result_first():
     """An unconsumed result supplies the exact hit length and retained owners."""
     ctx = _make_free_locks_ctx([b"h0", b"h1", b"h2"], windows=[-1], hit_chunks=-1)
-    session = ctx.session_manager.get_or_create.return_value
-    session.record_prefetch_result.side_effect = lambda hit, gids, owners=None: (
-        setattr(session, "prefetch_hit_chunks", hit),
-        setattr(session, "prefetch_locked_gids", gids),
-    )
+    state = ctx.lookup_ledger.lock_state.return_value
+
+    def _record(request_id: str, hit: int, gids: tuple, owners=None) -> None:
+        state.hit_chunks = hit
+        state.locked_gids = gids
+
+    ctx.lookup_ledger.record_prefetch_result.side_effect = _record
     owners = {"owner-map": 1}
     ctx.get_read_owners.return_value = owners
     ctx.storage_manager.query_prefetch_status.return_value = PrefetchResult(
@@ -346,7 +351,9 @@ def test_server_free_lookup_locks_consumes_pending_result_first():
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
 
-    session.record_prefetch_result.assert_called_once_with(2, (0,), owners)
+    ctx.lookup_ledger.record_prefetch_result.assert_called_once_with(
+        "req-sw", 2, (0,), owners
+    )
     assert "req-sw" not in module._prefetch_jobs
     ctx.event_bus.publish.assert_called_once()
     assert (
@@ -383,7 +390,7 @@ def test_server_free_lookup_locks_while_prefetch_running_releases_nothing():
 
     ctx.storage_manager.finish_read_prefetched.assert_not_called()
     assert "req-sw" in module._prefetch_jobs
-    ctx.session_manager.get_or_create.return_value.record_prefetch_result.assert_not_called()
+    ctx.lookup_ledger.record_prefetch_result.assert_not_called()
 
 
 def test_server_free_lookup_locks_no_matching_chunks():

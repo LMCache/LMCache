@@ -275,23 +275,23 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     ) -> None:
         """Release only one failed instance's unconsumed lookup locks.
 
-        The lookup session is the ownership record.  If it is absent or does
-        not match the RETRIEVE range, no release is attempted: L1 locks are
-        anonymous refcounts, so guessing could consume a concurrent reader's
-        lock.  ``claim_failed_retrieve_release`` also makes duplicate failure
-        responses idempotent.
+        The lock ledger is the ownership record.  If it has no entry for the
+        request, or the entry does not match the RETRIEVE range, no release is
+        attempted: L1 locks are anonymous refcounts, so guessing could consume
+        a concurrent reader's lock.  ``claim_failed_retrieve_release`` also
+        makes duplicate failure responses idempotent.
         """
-        session = self._ctx.session_manager.get(key.request_id)
-        if session is None:
+        ledger = self._ctx.lookup_ledger
+        if ledger.lock_state(key.request_id) is None:
             logger.warning(
                 "Cannot release RETRIEVE locks for unregistered instance %d: "
-                "request %s has no lookup session",
+                "request %s has no lookup record",
                 instance_id,
                 key.request_id,
             )
             return
 
-        lock_state = session.prepare_failed_retrieve_release(key)
+        lock_state = ledger.prepare_failed_retrieve_release(key.request_id, key)
         if lock_state is None:
             return
         hit_chunks, locked_gids, group_windows, lookup_generation = lock_state
@@ -302,8 +302,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             locked_gids,
             group_windows=group_windows,
         )
-        if not session.claim_failed_retrieve_release(
-            instance_id, key, lookup_generation
+        if not ledger.claim_failed_retrieve_release(
+            key.request_id, instance_id, key, lookup_generation
         ):
             return
         if obj_keys:

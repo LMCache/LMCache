@@ -425,16 +425,13 @@ def _fake_obj_key(chunk_hash: bytes, worker_id: int) -> SimpleNamespace:
 
 
 def test_obj_keys_cache_round_trip_tp1():
-    """At world_size=1, retrieve can rebuild from the session stash exactly."""
-    # First Party
-    from lmcache.v1.multiprocess.session import Session
-
-    session = Session(request_id="req-1", hasher=MagicMock())
+    """At world_size=1, retrieve can rebuild from the module stash exactly."""
+    unretrieved_locks: dict[str, dict] = {}
 
     # Simulate what the lookup's classify stores.
     chunk_hashes = [b"h1", b"h2", b"h3"]
     obj_keys_per_chunk = {h: [_fake_obj_key(h, 0)] for h in chunk_hashes}
-    session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA] = {
+    unretrieved_locks["req-1"] = {
         "read_locks": 1,
         "per_hash": obj_keys_per_chunk,
     }
@@ -443,7 +440,7 @@ def test_obj_keys_cache_round_trip_tp1():
     matches_sorted = [
         SimpleNamespace(hash=h, cur_st=i) for i, h in enumerate(chunk_hashes)
     ]
-    stash = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
+    stash = unretrieved_locks.pop("req-1", None)
     cached = stash["per_hash"] if stash else None
 
     assert cached is not None
@@ -453,21 +450,18 @@ def test_obj_keys_cache_round_trip_tp1():
     assert [k.chunk_hash for k in rebuilt] == chunk_hashes
     # Stash is now empty: a second take (the session destroy listener after
     # a successful retrieve) releases nothing twice.
-    assert session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None) is None
+    assert unretrieved_locks.pop("req-1", None) is None
 
 
 def test_obj_keys_cache_round_trip_tp_expanded():
     """world_size>1: cached entry per hash is a list of length world_size,
     rebuilt list is flat chunk-major."""
-    # First Party
-    from lmcache.v1.multiprocess.session import Session
-
-    session = Session(request_id="req-tp", hasher=MagicMock())
+    unretrieved_locks: dict[str, dict] = {}
 
     ws = 4
     chunk_hashes = [b"h1", b"h2"]
     per_hash = {h: [_fake_obj_key(h, w) for w in range(ws)] for h in chunk_hashes}
-    session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA] = {
+    unretrieved_locks["req-tp"] = {
         "read_locks": 1,
         "per_hash": per_hash,
     }
@@ -475,7 +469,7 @@ def test_obj_keys_cache_round_trip_tp_expanded():
     matches_sorted = [
         SimpleNamespace(hash=h, cur_st=i) for i, h in enumerate(chunk_hashes)
     ]
-    stash = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
+    stash = unretrieved_locks.pop("req-tp", None)
     cached = stash["per_hash"] if stash else None
     assert cached is not None
     rebuilt = [k for r in matches_sorted for k in cached[r.hash]]
@@ -776,9 +770,7 @@ def test_retrieve_take_prevents_double_release_at_session_end():
     _run_unretrieved_lookup(blend, "req-retrieved")
 
     # Emulate the retrieve's consumption + release of the taken keys.
-    session = ctx.session_manager.get("req-retrieved")
-    assert session is not None
-    stash = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
+    stash = blend.unretrieved_locks.pop("req-retrieved", None)
     assert stash is not None and len(stash["per_hash"]) == _UNRETRIEVED_N_CHUNKS
     storage.finish_read_prefetched(
         [key for keys in stash["per_hash"].values() for key in keys],
@@ -847,13 +839,13 @@ def _classify_engine():
 
     eng = MagicMock(spec=BlendModule)
     eng._sparse_classify = BlendModule._sparse_classify.__get__(eng)
-    eng.UNRETRIEVED_KEYS_EXTRA = BlendModule.UNRETRIEVED_KEYS_EXTRA
+    eng.unretrieved_locks = {}
+    eng.sparse_l1_owners = {}
     eng._STALE_STRIKE_THRESHOLD = 2
     eng._pending_fp_lock = threading.Lock()
     eng._pending_fp_hashes = set()
     eng._stale_strike = {}
     eng._ctx = MagicMock()
-    eng._ctx.session_manager.get_or_create.return_value = SimpleNamespace(extras={})
     eng._event_bus = MagicMock()
     eng._token_range_matcher = MagicMock()
     return eng

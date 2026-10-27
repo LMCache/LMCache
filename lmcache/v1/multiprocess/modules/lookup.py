@@ -280,7 +280,9 @@ class LookupModule(DiscoverableModule):
         # The engine-covered prefix is never looked up, so it is excluded from
         # the hit-rate denominator and reported separately.
         looked_up_tokens = requested_tokens - start_chunk * self._ctx.chunk_size
-        session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
+        self._ctx.lookup_ledger.begin_lookup(
+            key.request_id, key, tuple(attn_desc.num_chunks_in_sw)
+        )
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
             model_name, world_size
@@ -472,7 +474,7 @@ class LookupModule(DiscoverableModule):
         (``key.num_kv_readers``).
 
         The release is derived from the lookup result recorded on the
-        session (hit length, lock model, L1 owners). If that result has not
+        lock ledger (hit length, lock model, L1 owners). If that result has not
         been consumed yet it is handed over here first. While the prefetch
         is still running nothing is released: its locks still belong to the
         prefetch controller and expire with the read-lock TTL.
@@ -489,9 +491,10 @@ class LookupModule(DiscoverableModule):
         if key.start >= key.end and not extra_ranges:
             return
 
-        session = self._ctx.session_manager.get_or_create(key.request_id)
-        if session.prefetch_hit_chunks < 0:
-            # The lookup result has not reached the session yet (no
+        ledger = self._ctx.lookup_ledger
+        state = ledger.lock_state(key.request_id)
+        if state is None or state.hit_chunks < 0:
+            # The lookup result has not reached the ledger yet (no
             # QUERY/WAIT_PREFETCH_STATUS consumed it). Hand it over now so
             # the release below sees the real hit length, lock model and L1
             # owners. While the prefetch is still running its locks belong
@@ -507,10 +510,10 @@ class LookupModule(DiscoverableModule):
                     key.request_id,
                 )
                 return
+            state = ledger.lock_state(key.request_id)
 
-        hit_chunks = session.prefetch_hit_chunks
-        if hit_chunks < 0:
-            # No lookup result exists (never looked up, or the session was
+        if state is None or state.hit_chunks < 0:
+            # No lookup result exists (never looked up, or the request was
             # recreated after END_SESSION). L1 locks are anonymous refcounts:
             # guessing a range could strip a concurrent reader's lock.
             logger.warning(
@@ -522,7 +525,7 @@ class LookupModule(DiscoverableModule):
         # Release exactly the groups the prefetch locked (std lookup: all;
         # CB prefix leg: its prefix set) -- releasing an unlocked group
         # would drop another request's lock on the shared object key.
-        lookup_key = session.lookup_ipc_key
+        lookup_key = state.key
         lock_floor = lookup_key.start if lookup_key is not None else 0
         obj_keys: list[ObjectKey] = []
         if key.start < key.end:
@@ -531,8 +534,8 @@ class LookupModule(DiscoverableModule):
                 resolve_prefetched_obj_keys(
                     self._ctx,
                     replace(key, start=max(key.start, lock_floor)),
-                    hit_chunks,
-                    session.prefetch_locked_gids,
+                    state.hit_chunks,
+                    state.locked_gids,
                 )
             )
         for range_start, range_end in extra_ranges:
@@ -546,7 +549,7 @@ class LookupModule(DiscoverableModule):
                     self._ctx,
                     replace(key, start=range_start, end=range_end),
                     range_end // self._ctx.chunk_size,
-                    session.prefetch_locked_gids,
+                    state.locked_gids,
                 )
             )
         if not obj_keys:
@@ -560,7 +563,7 @@ class LookupModule(DiscoverableModule):
 
     @request_handler(HandlerType.BLOCKING)
     def end_session(self, request_id: str) -> None:
-        """Remove the session for a finished request.
+        """Remove the session and lock record of a finished request.
 
         Args:
             request_id: The request ID whose session should be removed.
@@ -571,6 +574,7 @@ class LookupModule(DiscoverableModule):
                 metadata={"request_id": request_id},
             )
         )
+        lock_state = self._ctx.lookup_ledger.release(request_id)
         session = self._ctx.session_manager.remove(request_id)
         self._ctx.event_bus.publish(
             Event(
@@ -581,15 +585,15 @@ class LookupModule(DiscoverableModule):
         if session is None:
             logger.warning("Session %s not found, skipping touch", request_id)
             return
-        if session.lookup_ipc_key is None:
+        if lock_state is None or lock_state.key is None:
             logger.warning(
-                "Session %s has no lookup ipc key, skipping touch",
+                "Request %s has no lookup key on its lock record, skipping touch",
                 request_id,
             )
             return
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]
-        obj_keys = self._all_object_keys(session.lookup_ipc_key, chunk_hashes)
+        obj_keys = self._all_object_keys(lock_state.key, chunk_hashes)
         # unified touch of all keys, which include retrieved and stored keys
         # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp
         #  and will be deleted after finish_read_prefetched, when we touch all keys,
@@ -681,12 +685,12 @@ class LookupModule(DiscoverableModule):
         )
 
     def _consume_prefetch_result(self, job: _PrefetchJob) -> int | None:
-        """Hand a finished prefetch result over to the request's session.
+        """Hand a finished prefetch result over to the request's lock ledger.
 
         Takes the result from the storage manager (each result is returned
         once), records the model-wide hit length, lock model and retained L1
-        owners on the session, emits ``MP_LOOKUP_PREFETCH_END`` and drops the
-        job. This is the only path that moves lookup state into the session,
+        owners on the ledger, emits ``MP_LOOKUP_PREFETCH_END`` and drops the
+        job. This is the only path that moves lookup state into the ledger,
         so ``query_prefetch_status`` and ``free_lookup_locks`` cannot disagree
         about what a lookup locked.
 
@@ -716,12 +720,12 @@ class LookupModule(DiscoverableModule):
         # The engine resolves the hit in absolute chunks; shift it back.
         found_count += job.start_chunk
 
-        # Record the model-wide hit length on the session so a later
+        # Record the model-wide hit length on the lock ledger so a later
         # free_lookup_locks can reconstruct which keys the prefetch
         # read-locked (see ``unfold``: full-attention groups lock the whole
         # hit prefix, sliding-window groups only its in-window suffix).
-        session = self._ctx.session_manager.get_or_create(job.request_id)
-        session.record_prefetch_result(
+        self._ctx.lookup_ledger.record_prefetch_result(
+            job.request_id,
             found_count,
             tuple(range(job.attn_desc.num_object_groups)),
             result.l1_owners,

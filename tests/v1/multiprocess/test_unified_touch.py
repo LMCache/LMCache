@@ -20,6 +20,7 @@ from lmcache.v1.distributed.api import ObjectKey, ipc_key_to_object_keys
 from lmcache.v1.distributed.eviction import L1EvictionPolicy
 from lmcache.v1.distributed.eviction_policy import LRUEvictionPolicy
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.lookup_ledger import LookupLockLedger
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -193,13 +194,14 @@ class TestEndSessionTouchKeys:
 
     These tests verify that end_session correctly:
     1. Retrieves the session with accumulated hashes
-    2. Generates the correct ObjectKeys using lookup_ipc_key
+    2. Generates the correct ObjectKeys from the ledger's lookup key
     3. Handles edge cases (no session, no lookup key, empty hashes)
     """
 
     def test_end_session_generates_correct_keys(self, hasher: TokenHasher):
         """end_session should generate ObjectKeys from session hashes and lookup key."""
         mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
+        ledger = LookupLockLedger()
         session = mgr.get_or_create("req-1")
 
         tokens = list(range(12))  # 3 chunks of 4
@@ -207,15 +209,17 @@ class TestEndSessionTouchKeys:
         session.get_hashes(0, 12)
 
         ipc_key = make_ipc_key(tokens, chunk_size=4, worker_id=None, request_id="req-1")
-        session.lookup_ipc_key = ipc_key
+        ledger.ensure("req-1", ipc_key)
 
         # Simulate end_session logic
         removed = mgr.remove("req-1")
+        lock_state = ledger.release("req-1")
         assert removed is not None
-        assert removed.lookup_ipc_key is not None
+        assert lock_state is not None
+        assert lock_state.key is not None
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes, [0])[0]
+        obj_keys = ipc_key_to_object_keys(lock_state.key, chunk_hashes, [0])[0]
 
         # With world_size=1 and worker_id=None, should have 3 keys
         assert len(obj_keys) == 3
@@ -223,6 +227,7 @@ class TestEndSessionTouchKeys:
     def test_end_session_expands_keys_for_world_size(self, hasher: TokenHasher):
         """end_session should expand keys for all workers when world_size > 1."""
         mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
+        ledger = LookupLockLedger()
         session = mgr.get_or_create("req-1")
 
         tokens = list(range(8))  # 2 chunks of 4
@@ -236,14 +241,16 @@ class TestEndSessionTouchKeys:
             worker_id=None,
             request_id="req-1",
         )
-        session.lookup_ipc_key = ipc_key
+        ledger.ensure("req-1", ipc_key)
 
         removed = mgr.remove("req-1")
+        lock_state = ledger.release("req-1")
         assert removed is not None
-        assert removed.lookup_ipc_key is not None
+        assert lock_state is not None
+        assert lock_state.key is not None
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes, [0])[0]
+        obj_keys = ipc_key_to_object_keys(lock_state.key, chunk_hashes, [0])[0]
 
         # 2 chunks * 2 workers = 4 keys
         assert len(obj_keys) == 4
@@ -256,35 +263,39 @@ class TestEndSessionTouchKeys:
         # No error should occur
 
     def test_end_session_no_lookup_key_skips_touch(self, hasher: TokenHasher):
-        """end_session should skip touch when session has no lookup_ipc_key."""
+        """end_session should skip touch when the ledger has no lookup key."""
         mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
+        ledger = LookupLockLedger()
         session = mgr.get_or_create("req-1")
         session.set_tokens(pack_token_ids(list(range(8))))
         session.get_hashes(0, 8)
-        # Don't set lookup_ipc_key
+        # Don't record a lookup key
 
         removed = mgr.remove("req-1")
         assert removed is not None
-        assert removed.lookup_ipc_key is None
+        assert ledger.release("req-1") is None
         # No error should occur
 
     def test_end_session_empty_hashes_produces_no_keys(self, hasher: TokenHasher):
         """end_session should produce no keys when session has no computed hashes."""
         mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
-        session = mgr.get_or_create("req-1")
+        ledger = LookupLockLedger()
+        mgr.get_or_create("req-1")
 
         ipc_key = make_ipc_key(
             list(range(8)), chunk_size=4, worker_id=None, request_id="req-1"
         )
-        session.lookup_ipc_key = ipc_key
+        ledger.ensure("req-1", ipc_key)
         # Don't compute any hashes
 
         removed = mgr.remove("req-1")
+        lock_state = ledger.release("req-1")
         assert removed is not None
-        assert removed.lookup_ipc_key is not None
+        assert lock_state is not None
+        assert lock_state.key is not None
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes, [0])[0]
+        obj_keys = ipc_key_to_object_keys(lock_state.key, chunk_hashes, [0])[0]
         assert len(obj_keys) == 0
 
     def test_end_session_hashes_cover_retrieve_and_store(self, hasher: TokenHasher):
