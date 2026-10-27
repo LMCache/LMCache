@@ -129,9 +129,13 @@ class _HeartbeatThread(PeriodicThread):
             if instance_unknown:
                 logger.warning(
                     "LMCache server no longer holds a registration for ATOM "
-                    "instance %d; re-registering",
+                    "instance %s; re-registering",
                     self._instance_id,
                 )
+                # Stop new submissions before re-registering: the worker's
+                # context swap then waits only for submissions already in
+                # flight on the old context.
+                self._publish_unhealthy()
             try:
                 healthy = self._recover_callback()
             except Exception:

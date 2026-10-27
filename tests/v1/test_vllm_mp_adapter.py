@@ -1817,6 +1817,36 @@ def test_straggler_cycle_after_stop_skips_callback_and_event(monkeypatch) -> Non
     assert not health_event.is_set()
 
 
+@pytest.mark.parametrize("answer", [True, False])
+def test_stop_during_recovery_leaves_the_health_event_cleared(
+    monkeypatch, answer: bool
+) -> None:
+    """Real HeartbeatThread: when shutdown requests a stop while the recover
+    callback runs, after a server restart (True on a degraded worker) or an
+    explicit unknown-worker answer (False), the cycle does not set the health
+    event, even though recovery reported success."""
+    monkeypatch.setattr(
+        adapter_mod, "send_ping", lambda req_client, timeout, instance_id=None: answer
+    )
+    health_event = threading.Event()  # degraded, so True takes the recovery edge
+    heartbeat = HeartbeatThread(
+        req_client=MagicMock(name="req_client"),
+        health_event=health_event,
+        interval=60.0,
+        instance_id=7,
+    )
+
+    def recover() -> bool:
+        heartbeat._stop_event.set()  # shutdown arrives mid-recovery
+        return True
+
+    heartbeat.register_recover_callback(recover)
+
+    heartbeat._execute()
+
+    assert not health_event.is_set()
+
+
 def test_recover_callback_skips_register_after_stop_requested(
     fake_adapter, monkeypatch
 ) -> None:

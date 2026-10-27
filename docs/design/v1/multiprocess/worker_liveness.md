@@ -177,8 +177,10 @@ builds nothing.
 A worker can also be reaped while alive and connected: its heartbeat had not
 started (idle past the registration grace) or stalled past the reap timeout. Its
 next PING is answered `False`, and the heartbeat runs the same recover callback.
-The vLLM adapter clears `health_event` first, as on the outage path, because
-re-registration publishes the new transfer context before the server accepts it.
+Both adapters clear `health_event` first, as on the outage path, so new
+submissions stop while the worker re-registers: vLLM publishes the new transfer
+context before the server accepts it, and ATOM's context swap waits only for
+submissions already in flight.
 Stores in the interval before that PING are still rejected, since the heartbeat
 starts lazily.
 

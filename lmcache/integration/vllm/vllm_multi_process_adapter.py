@@ -631,7 +631,7 @@ class HeartbeatThread(PeriodicThread):
 
         if instance_unknown:
             logger.warning(
-                "LMCache server no longer holds a registration for instance %d; "
+                "LMCache server no longer holds a registration for instance %s; "
                 "re-registering",
                 self._instance_id,
             )
@@ -655,6 +655,14 @@ class HeartbeatThread(PeriodicThread):
             )
             # If the callback fails, it should not become healthy
             healthy = self._recover_callback()
+
+        # Shutdown may have requested a stop while recovery ran: leave the
+        # event alone so a straggling cycle cannot reopen submissions.
+        if self.stop_requested:
+            return ThreadRunSummary(
+                success=True,
+                message="stop requested; skipping health update",
+            )
 
         if healthy:
             self._health_event.set()

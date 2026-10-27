@@ -343,8 +343,9 @@ def test_atom_heartbeat_runs_recovery_before_publishing_health(
 
 def test_atom_heartbeat_reregisters_when_the_server_forgot_the_worker() -> None:
     """The server answers False, so it is up but no longer holds this worker
-    (reaped while silent): the worker re-registers without publishing an
-    outage, in one ping."""
+    (reaped while silent): in one ping, the worker stops new submissions,
+    then re-registers and is healthy again."""
+    order: list[str] = []
 
     def ping(_instance_id: int | None) -> MessagingFuture[Any]:
         future: MessagingFuture[Any] = MessagingFuture()
@@ -355,22 +356,24 @@ def test_atom_heartbeat_reregisters_when_the_server_forgot_the_worker() -> None:
     client.ping.side_effect = ping
     health_event = threading.Event()
     health_event.set()
-    recover = MagicMock(return_value=True)
-    unhealthy = MagicMock()
     heartbeat = atom_adapter._HeartbeatThread(
         client,
         health_event,
         instance_id=7,
         interval=1.0,
     )
+
+    def recover() -> bool:
+        order.append(f"recover healthy={health_event.is_set()}")
+        return True
+
     heartbeat.register_recover_callback(recover)
-    heartbeat.register_unhealthy_callback(unhealthy)
+    heartbeat.register_unhealthy_callback(lambda: order.append("unhealthy"))
 
     heartbeat._execute()
 
     client.ping.assert_called_once_with(7)
-    recover.assert_called_once_with()
-    unhealthy.assert_not_called()
+    assert order == ["unhealthy", "recover healthy=False"]
     assert health_event.is_set() is True
 
 
