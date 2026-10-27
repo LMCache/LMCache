@@ -4,7 +4,6 @@
 # Future
 from __future__ import annotations
 
-# Standard
 # First Party
 from lmcache.integration.vllm.experimental.token_drop_scheduler import (
     clear_resident_kv_tokens,
