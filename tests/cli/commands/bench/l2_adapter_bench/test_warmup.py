@@ -151,6 +151,11 @@ def test_benchmark_excludes_warmup_from_reported_metrics(
     parser = argparse.ArgumentParser()
     command.register(parser.add_subparsers())
     output = tmp_path / "result.json"
+
+    num_keys = 2
+    in_flight = 2
+    keys_per_round = num_keys * in_flight
+
     args = parser.parse_args(
         [
             "l2",
@@ -159,9 +164,9 @@ def test_benchmark_excludes_warmup_from_reported_metrics(
             "--only",
             operation,
             "--num-keys",
-            "2",
+            str(num_keys),
             "--in-flight",
-            "2",
+            str(in_flight),
             "--data-size-kb",
             "1",
             "--rounds",
@@ -184,7 +189,7 @@ def test_benchmark_excludes_warmup_from_reported_metrics(
     measurement_rounds = len(rounds) - warmup
     assert metrics["rounds"] == measurement_rounds
     assert metrics["rounds_timed_out"] == expected_timeouts
-    assert metrics["total_keys"] == 4 * measurement_rounds
+    assert metrics["total_keys"] == keys_per_round * measurement_rounds
     assert metrics["total_success"] == expected_success
     expected_avg = statistics.mean(expected_durations) if expected_durations else 0.0
     assert metrics["duration_avg_ms"] == pytest.approx(expected_avg * 1000)
@@ -197,4 +202,7 @@ def test_benchmark_excludes_warmup_from_reported_metrics(
     if operation == "lookup":
         expected_rate = expected_success / (4 * measurement_rounds)
         assert metrics["actual_hit_rate"] == pytest.approx(round(expected_rate, 4))
+
+        # The test sets lookup-max-hit-rate to 1.
+        assert metrics["expected_hit_count"] == keys_per_round * measurement_rounds
     adapter.close.assert_called_once_with()
