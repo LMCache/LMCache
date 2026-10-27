@@ -35,6 +35,7 @@ from lmcache.v1.multiprocess.kv_load_policy import (
     create_kv_load_policy,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.multiprocess.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -164,6 +165,7 @@ class LookupModule(DiscoverableModule):
         self._prefetch_jobs: dict[str, _PrefetchJob] = {}
         self._prefetch_job_lock = threading.Lock()
         self._setup_metrics()
+        ctx.session_manager.destroy_listeners.append(self._on_session_destroyed)
 
     @property
     def context(self) -> MPCacheServerContext:
@@ -565,6 +567,7 @@ class LookupModule(DiscoverableModule):
         Args:
             request_id: The request ID whose session should be removed.
         """
+        self._drop_prefetch_job(request_id)
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_VLLM_END_SESSION,
@@ -599,6 +602,23 @@ class LookupModule(DiscoverableModule):
     # -----------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------
+
+    def _on_session_destroyed(self, session: Session) -> None:
+        """Drop the prefetch job owned by a destroyed session.
+
+        Args:
+            session: The session whose per-request state is being destroyed.
+        """
+        self._drop_prefetch_job(session.request_id)
+
+    def _drop_prefetch_job(self, request_id: str) -> None:
+        """Drop a request's prefetch job if it is still registered.
+
+        Args:
+            request_id: The request whose job should be removed.
+        """
+        with self._prefetch_job_lock:
+            self._prefetch_jobs.pop(request_id, None)
 
     def _all_object_keys(
         self,
