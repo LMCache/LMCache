@@ -464,9 +464,11 @@ Implementation notes
   compiled kernel takes tensors, binding it with ``bind_native`` is enough.
   If it takes raw addresses like CUDA's, override
   ``multi_layer_block_kv_transfer`` and ``allocate_block_transfer_output``
-  in your ``DeviceOps`` subclass, call the helpers in
-  ``lmcache/v1/platform/native_block_transfer.py`` (they convert tensors to
-  the kernel's addresses and pin host buffers), and pass
+  in your ``DeviceOps`` subclass, convert the tensors to your kernel's
+  addresses in your own backend package (see
+  ``lmcache/v1/platform/devices/cuda/block_transfer.py``: the address table,
+  the per-launch chunk limit, and pinning or staging host buffers, each set by
+  what your kernel requires), and pass
   ``skip={"multi_layer_block_kv_transfer"}`` to ``bind_native`` so the
   compiled kernel does not shadow your override. Reference the kernel
   directly (``native.multi_layer_block_kv_transfer``) rather than probing for

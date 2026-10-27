@@ -155,18 +155,24 @@ class DeviceOps:
   moves them is its own business. The CUDA/ROCm, XPU and Ascend kernels take
   raw addresses instead, so those backends override the method directly.
   Each keeps the compiled kernel private (`bind_native(module,
-  skip={"multi_layer_block_kv_transfer"})`) and calls
-  `transfer_with_address_kernel` in `platform/native_block_transfer.py`. That
-  helper lowers tensors to the kernel's operands: a per-layer address table,
-  chunk addresses, a device block-ID tensor, and launches of at most four
-  chunks. `skip_prefix_n_blocks` counts across the whole transfer, so a skip
-  longer than one launch carries into the following launches. Because the
-  kernel's GPU threads read host chunks directly, it also pins or stages
-  unpinned chunks, and the backends' `allocate_block_transfer_output` hands
-  callers pinned buffers while the kernel is bound; every other backend
-  inherits the plain CPU allocation. The helpers are plain functions rather
-  than a shared base class, so every backend stays a direct `DeviceOps`
-  subclass.
+  skip={"multi_layer_block_kv_transfer"})`) and lowers tensors in its own
+  package: `devices/cuda/block_transfer.py`, `devices/xpu/block_transfer.py`
+  and `devices/npu/block_transfer.py`. Each lowering builds the kernel's
+  operands (a per-layer address table, chunk addresses, a device block-ID
+  tensor) and splits launches at that backend's chunk limit.
+  `skip_prefix_n_blocks` counts across the whole transfer, so a skip longer
+  than one launch carries into the following launches. A kernel that reads
+  host chunks through raw addresses needs memory it can reach, so the
+  lowering pins or stages unpinned chunks, and the backend's
+  `allocate_block_transfer_output` hands callers pinned buffers while the
+  kernel is bound; every other backend inherits the plain CPU allocation.
+
+  No shared lowering sits between `DeviceOps` and the backends. Launch limits
+  and the handling of unpinned memory are kernel properties: CUDA's kernel
+  takes at most four chunks per launch, while XPU's SYCL kernel has no
+  per-launch limit and accepts any USM allocation. Owning the lowering lets
+  each backend change these without touching the others. The three copies
+  start out identical, using CUDA's limit, so the split changes no behavior.
 
   Sliding-window groups need nothing from the op. Gather and scatter keep
   only the trailing window blocks of each chunk, then pass the window's token
@@ -190,7 +196,7 @@ class DeviceOps:
   ```
 
   The LMCache-driven callers (`object_group_transfer`, the TRT-LLM connector)
-  still pass the kernel's address form, which `transfer_with_address_kernel`
+  still pass the kernel's address form, which each backend's lowering
   forwards unchanged until those callers move to tensors
   ([#4465](https://github.com/LMCache/LMCache/issues/4465) step 3).
 
@@ -360,7 +366,7 @@ class MluDeviceOps(DeviceOps):
 ```
 
 MLU has no compiled module and supports only the engine-driven path, so it
-needs nothing from `native_block_transfer.py`. It rejects pointer operands
+has no address lowering. It rejects pointer operands
 instead of reconstructing them, and it inherits the plain CPU
 `allocate_block_transfer_output`. See
 [`devices/mlu/README.md`](devices/mlu/README.md) for the supported layouts and

@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Block-transfer helpers for backends whose compiled kernel takes addresses.
+"""XPU block transfer on the compiled SYCL address-taking kernel.
 
-CUDA/ROCm (``lmcache.cuda_ops``), XPU (``lmcache.xpu_ops``) and Ascend
-(``lmcache_ascend.ops``) ship a ``multi_layer_block_kv_transfer`` kernel that
-takes a device tensor of per-layer base addresses, chunk addresses as
-``list[int]`` and a device block-ID tensor. Its GPU threads read host chunks
-directly, so they must be pinned, and one launch addresses at most four chunks.
-Those backends override :meth:`DeviceOps.multi_layer_block_kv_transfer` and
-call :func:`transfer_with_address_kernel` to serve its tensor contract on that
-kernel.
+``lmcache.xpu_ops`` ships a ``multi_layer_block_kv_transfer`` kernel with the
+CUDA kernel's operands: a device tensor of per-layer base addresses, chunk
+addresses as ``list[int]`` and a device block-ID tensor. It rejects host
+pointers that are not USM allocations, so pageable chunks are staged or
+pinned first. :class:`XpuDeviceOps` calls :func:`transfer_with_address_kernel`
+to serve the tensor contract of :meth:`DeviceOps.multi_layer_block_kv_transfer`
+on that kernel.
 """
 
 # Future
@@ -34,8 +33,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-#: Chunks one kernel launch can address (``TORCH_CHECK(num_objects <= 4)`` in
-#: ``csrc/cuda/mp_mem_kernels.cu``).
+#: Chunks per kernel launch. The SYCL kernel has no per-launch limit; this
+#: matches the CUDA kernel's, and raising it needs validation on XPU hardware.
 MAX_CHUNKS_PER_LAUNCH = 4
 
 
@@ -70,10 +69,10 @@ def _paged_pointer_table(
 
 
 def allocate_pinned_chunk(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
-    """Allocate a host chunk an address-taking kernel can read and write.
+    """Allocate a host chunk the SYCL kernel can read and write.
 
-    The kernel's GPU threads dereference host chunk addresses directly, which
-    only works for page-locked memory.
+    The kernel accepts only USM allocations; pinned torch host memory on XPU
+    is USM host memory.
 
     Args:
         shape: Canonical chunk shape.

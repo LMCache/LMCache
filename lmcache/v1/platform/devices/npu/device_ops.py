@@ -28,7 +28,7 @@ import torch
 # First Party
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
-from lmcache.v1.platform.native_block_transfer import (
+from lmcache.v1.platform.devices.npu.block_transfer import (
     allocate_pinned_chunk,
     transfer_with_address_kernel,
 )

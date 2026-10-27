@@ -24,14 +24,17 @@ from lmcache.v1.gpu_connector.utils import (
     make_page_buffer_shape_desc,
     normalize_kv_and_discover_format,
 )
-from lmcache.v1.platform import native_block_transfer, resolve_device_ops
+from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
+from lmcache.v1.platform.devices.cuda import block_transfer as cuda_block_transfer
 from lmcache.v1.platform.devices.cuda.device_ops import CudaDeviceOps
 from lmcache.v1.platform.devices.npu import NpuDeviceSpec
+from lmcache.v1.platform.devices.npu import block_transfer as npu_block_transfer
 from lmcache.v1.platform.devices.npu.device_ops import NpuDeviceOps
 from lmcache.v1.platform.devices.xpu import XpuDeviceSpec
+from lmcache.v1.platform.devices.xpu import block_transfer as xpu_block_transfer
 from lmcache.v1.platform.devices.xpu.device_ops import XpuDeviceOps
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
@@ -55,6 +58,12 @@ _NATIVE_SPECS = [
 ]
 # NPU requires its plugin; only CUDA and XPU run on the baseline without one.
 _OPTIONAL_EXTENSION_BACKENDS = _NATIVE_BACKENDS[:2]
+# Each backend owns its lowering, including the device sync it issues.
+_BLOCK_TRANSFER_MODULES: dict[type[DeviceOps], ModuleType] = {
+    CudaDeviceOps: cuda_block_transfer,
+    XpuDeviceOps: xpu_block_transfer,
+    NpuDeviceOps: npu_block_transfer,
+}
 
 
 @dataclass
@@ -311,8 +320,9 @@ def test_legacy_address_operands_are_forwarded_unchanged(
     assert launch.skip == 3
 
 
+@pytest.mark.parametrize(("ops_cls", "module_name"), _NATIVE_BACKENDS)
 def test_unpinned_h2d_chunks_sync_after_launch(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
 ) -> None:
     """Chunks pinned into temporaries are synchronized before the op returns.
 
@@ -320,10 +330,10 @@ def test_unpinned_h2d_chunks_sync_after_launch(
     tracking cannot see, so returning without a sync would let the caching
     host allocator recycle them while the copy is still in flight.
     """
-    ops, kernel = _native_ops(monkeypatch, CudaDeviceOps, "lmcache.cuda_ops")
+    ops, kernel = _native_ops(monkeypatch, ops_cls, module_name)
     syncs: list[int] = []
     monkeypatch.setattr(
-        native_block_transfer,
+        _BLOCK_TRANSFER_MODULES[ops_cls],
         "synchronize_device",
         lambda _device: syncs.append(len(kernel.launches)),
     )
@@ -354,7 +364,9 @@ def test_pinned_chunks_keep_the_async_path(
     """Already pinned chunks are passed as-is and nothing synchronizes."""
     ops, kernel = _native_ops(monkeypatch, ops_cls, module_name)
     syncs: list[torch.device] = []
-    monkeypatch.setattr(native_block_transfer, "synchronize_device", syncs.append)
+    monkeypatch.setattr(
+        _BLOCK_TRANSFER_MODULES[ops_cls], "synchronize_device", syncs.append
+    )
     paged, fmt, desc = _paged_kv(num_blocks=2)
 
     ops.multi_layer_block_kv_transfer(
