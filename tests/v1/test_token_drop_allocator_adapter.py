@@ -145,4 +145,3 @@ def test_td_physical_allocation_rejects_incompatible_kv_modes(kwargs):
 
     assert request.num_computed_tokens == 104
     assert get_resident_kv_tokens("req") == 32
-
