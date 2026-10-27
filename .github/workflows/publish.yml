@@ -34,7 +34,7 @@ permissions:
 jobs:
     changes:
         name: Detect changes
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         permissions:
             pull-requests: read
         outputs:
@@ -128,7 +128,7 @@ jobs:
         needs: changes
         if: needs.changes.outputs.lmcache == 'true'
         name: Resolve XPU release runtime
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         outputs:
             image: ${{ steps.runtime.outputs.image }}
         steps:
@@ -201,7 +201,7 @@ jobs:
             contents: read
             # see https://docs.pypi.org/trusted-publishers/
             id-token: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-main, test, code-quality]
 
         steps:
@@ -241,7 +241,7 @@ jobs:
         permissions:
             contents: read
             id-token: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-cli, test, code-quality]
 
         steps:
@@ -279,7 +279,7 @@ jobs:
             # allow gh release upload
             contents: write
 
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-main, test, code-quality]
 
         steps:
@@ -323,7 +323,7 @@ jobs:
         permissions:
             id-token: write
             contents: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-cli, test, code-quality]
 
         steps:
@@ -364,7 +364,7 @@ jobs:
         permissions:
             id-token: write
             contents: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-raw-block, test, code-quality]
 
         steps:
@@ -403,7 +403,7 @@ jobs:
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
             contents: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-cu129, test, code-quality]
 
         steps:
@@ -453,7 +453,7 @@ jobs:
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
             contents: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-rocm, test, code-quality]
 
         steps:
@@ -480,7 +480,7 @@ jobs:
                     --title "Release ${{ github.ref_name }} · ROCm (gfx942, gfx950)" \
                     --notes "ROCm 7.2 wheel for LMCache ${{ github.ref_name }}, built for AMD
                   Instinct gfx942 (MI300X/MI325X) and gfx950 (MI350X/MI355X). ABI-matched
-                  to the upstream \`vllm/vllm-openai-rocm\` image (torch 2.11, cp312).
+                  to the upstream \`vllm/vllm-openai-rocm\` image (torch 2.13, cp312).
 
                   Install into an upstream vLLM ROCm container:
                   \`\`\`
@@ -502,7 +502,7 @@ jobs:
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
             contents: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-xpu, test, code-quality]
 
         steps:
@@ -552,7 +552,7 @@ jobs:
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
             contents: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-musa, test, code-quality]
 
         steps:
@@ -601,7 +601,7 @@ jobs:
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
             contents: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-rocm-torch210, test, code-quality]
 
         steps:
@@ -665,7 +665,7 @@ jobs:
             matrix:
                 include:
                     - arch: amd64
-                      runner: ubuntu-latest
+                      runner: ubuntu-24.04
                     # Build CUDA images natively; QEMU is too slow and fragile
                     # for the package installation and extension build stages.
                     - arch: arm64
@@ -879,7 +879,7 @@ jobs:
         name: Publish multi-arch image manifests
         if: needs.publish-image.result == 'success'
         needs: [publish-image]
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
 
         steps:
             - name: "Harden Runner"
@@ -1011,7 +1011,7 @@ jobs:
             matrix:
                 include:
                     - arch: amd64
-                      runner: ubuntu-latest
+                      runner: ubuntu-24.04
                     # Keep RC validation identical to stable releases.
                     - arch: arm64
                       runner: ubuntu-24.04-arm
@@ -1084,7 +1084,7 @@ jobs:
         name: Publish multi-arch RC image manifest
         if: needs.publish-image-rc.result == 'success'
         needs: [publish-image-rc]
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
 
         steps:
             - name: "Harden Runner"

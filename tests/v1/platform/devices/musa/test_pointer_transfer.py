@@ -20,6 +20,13 @@ def test_pointer_operands_are_reconstructed_inside_musa_adapter(
     """Paged and staging pointers become views before native dispatch."""
     fake_device = SimpleNamespace(type="musa", index=0)
     calls: list[tuple[int, tuple[int, ...], torch.dtype, tuple[int, ...] | None]] = []
+    format_spec_lookups = 0
+    real_get_spec_class = device_ops.get_spec_class
+
+    def get_spec_class_once(fmt: EngineKVFormat) -> object:
+        nonlocal format_spec_lookups
+        format_spec_lookups += 1
+        return real_get_spec_class(fmt)
 
     def construct(
         ptr: int,
@@ -43,6 +50,7 @@ def test_pointer_operands_are_reconstructed_inside_musa_adapter(
         "construct_musa_tensor_from_data_pointer",
         construct,
     )
+    monkeypatch.setattr(device_ops, "get_spec_class", get_spec_class_once)
     monkeypatch.setattr(
         "lmcache.v1.platform.devices.musa.native_kv_transfer"
         ".try_native_multi_layer_block_kv_transfer",
@@ -76,6 +84,7 @@ def test_pointer_operands_are_reconstructed_inside_musa_adapter(
         (202, (3, 4, 8), torch.bfloat16, (40, 8, 1)),
         (303, (2, 4, 8), torch.bfloat16, None),
     ]
+    assert format_spec_lookups == 1
 
 
 def test_pointer_transfer_rejects_ambiguous_two_byte_dtype() -> None:
