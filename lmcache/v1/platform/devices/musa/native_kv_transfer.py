@@ -16,13 +16,13 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import TransferDirection
+from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.platform.devices.musa.format_capabilities import (
     is_supported_musa_mp_block_transfer_spec,
     is_supported_musa_native_block_transfer_spec,
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.torch_ops._kv_format import _BLOCKED_SCALE_BYTES
-from lmcache.v1.platform.torch_ops._kv_format import _format_spec as get_spec_class
 from lmcache.v1.platform.torch_ops.mp_mem_kernels import _valid_block_range_indices
 
 if TYPE_CHECKING:

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat
-from lmcache.v1.platform.torch_ops._kv_format import _format_spec as get_spec_class
+from lmcache.v1.gpu_connector.kv_format import get_spec_class
 
 if TYPE_CHECKING:
     # First Party

@@ -20,6 +20,7 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
+from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.devices.musa import native_kv_transfer
@@ -30,7 +31,6 @@ from lmcache.v1.platform.devices.musa.tensor_from_ptr import (
     construct_musa_tensor_from_data_pointer,
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
-from lmcache.v1.platform.torch_ops._kv_format import _format_spec as get_spec_class
 
 if TYPE_CHECKING:
     # First Party
@@ -160,39 +160,6 @@ def _infer_dtype(
         ) from exc
 
 
-def _paged_shape_and_stride(
-    format_spec: "type[KVFormatSpec]",
-    shape_desc: PageBufferShapeDesc,
-) -> tuple[tuple[int, ...], tuple[int, ...] | None]:
-    """Return per-layer shape and physical stride for a MUSA layout."""
-    nb = int(shape_desc.nb)
-    bs = int(shape_desc.bs)
-    nh = int(shape_desc.nh)
-    hs = int(shape_desc.hs)
-    shape = format_spec.paged_pointer_shape(nb, bs, nh, hs)
-    if format_spec.is_mla:
-        block_stride = int(getattr(shape_desc, "block_stride_elems", 0))
-        return shape, (block_stride or bs * hs, hs, 1)
-    return shape, None
-
-
-def _staging_shape(
-    format_spec: "type[KVFormatSpec]",
-    shape_desc: PageBufferShapeDesc,
-    lmcache_chunk_size: int,
-) -> tuple[int, ...]:
-    """Return the logical shape of one staging chunk."""
-    nl = int(shape_desc.nl)
-    nh = int(shape_desc.nh)
-    hs = int(shape_desc.hs)
-    return format_spec.staging_shape(
-        nl,
-        lmcache_chunk_size,
-        nh * hs,
-        int(getattr(shape_desc, "kv_size", 0)),
-    )
-
-
 def _validate_pointer_tensor(value: torch.Tensor, expected_layers: int) -> None:
     """Validate a packed per-layer pointer tensor."""
     if value.ndim != 1 or value.dtype not in (torch.int64, torch.uint64):
@@ -248,7 +215,13 @@ def _reconstruct_paged_layers(
         raise ValueError(
             f"MUSA pointer reconstruction requires a MUSA device, got {device}"
         )
-    shape, stride = _paged_shape_and_stride(format_spec, shape_desc)
+    nb = int(shape_desc.nb)
+    bs = int(shape_desc.bs)
+    nh = int(shape_desc.nh)
+    hs = int(shape_desc.hs)
+    shape = format_spec.paged_pointer_shape(nb, bs, nh, hs)
+    block_stride = int(getattr(shape_desc, "block_stride_elems", 0))
+    stride = (block_stride or bs * hs, hs, 1) if format_spec.is_mla else None
     reconstructed = [
         construct_musa_tensor_from_data_pointer(
             int(pointer.item()),
@@ -288,7 +261,12 @@ def _reconstruct_staging_tensors(
         raise ValueError(
             f"MUSA pointer reconstruction requires a MUSA device, got {device}"
         )
-    shape = _staging_shape(format_spec, shape_desc, lmcache_chunk_size)
+    shape = format_spec.staging_shape(
+        int(shape_desc.nl),
+        lmcache_chunk_size,
+        int(shape_desc.nh) * int(shape_desc.hs),
+        int(getattr(shape_desc, "kv_size", 0)),
+    )
     pointers = cast(list[int], value)
     return [
         construct_musa_tensor_from_data_pointer(pointer, shape, dtype, device)
