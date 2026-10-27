@@ -159,6 +159,7 @@ an `EngineKVFormat`. Nothing else may index raw shapes.
 | `NL_X_NB_NH_BS_CS` | vLLM blocks-first fused (unified KV cache) | HND | `NL × [NB, NH, BS, CS]`, raw registration; CS = content size = 2·HS (K/V packed) |
 | `NL_X_NB_BS_NH_CS` | vLLM blocks-first fused (unified KV cache) | NHD | `NL × [NB, BS, NH, CS]`, raw registration; CS = content size = 2·HS (K/V packed) |
 | `NL_X_TWO_NB_NH_ONE_BS_HS` | vLLM-RBLN attention | HND | `NL × [2, NB, NH, 1, BS, HS]`; axis 3 is always 1 (an RBLN attention-backend requirement) |
+| `NL_X_NB_TWO_NH_ONE_BS_HS` | vLLM-RBLN default attention kernels | HND | `NL × [NB, 2, NH, 1, BS, HS]`; blocks-first counterpart of the row above, axis 3 is always 1 |
 
 The two cross-layer formats (`NB_NL_TWO_*`) share a single base
 pointer, the kernel walks layers internally via `shape_desc.nl`. Use
@@ -262,7 +263,7 @@ consumer code must never do any of the following — it queries via the
   `get_shape_desc(group_idx)` to it, assembles per-group GPU pointer
   tensors via `get_group_data_ptrs`. No parallel `shape_descs_` /
   `hidden_dim_sizes_` state.
-- **`lmcache/v1/gpu_connector/gpu_connectors.py::VLLMPagedMemGPUConnectorV3._initialize_kv_cache_pointers`**
+- **`lmcache/inprocess/v1/gpu_connector/gpu_connectors.py::VLLMPagedMemGPUConnectorV3._initialize_kv_cache_pointers`**
   — for the in-process vLLM path, calls
   `normalize_kv_and_discover_format` (which permutes for HND support
   and detects the format in one step) and constructs

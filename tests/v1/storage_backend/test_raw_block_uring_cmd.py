@@ -20,12 +20,12 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.l2_adapters.raw_block.core import (
+    RawBlockCore,
+)
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.plugins.rust_raw_block_backend import (
     RustRawBlockBackend,
-)
-from lmcache.v1.storage_backend.raw_block.core import (
-    RawBlockCore,
 )
 
 logger = init_logger(__name__)
@@ -376,7 +376,7 @@ def test_uring_cmd_auto_transfer_limit_from_sysfs_ng_device():
         return None
 
     with patch(
-        "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
+        "lmcache.v1.distributed.l2_adapters.raw_block.core._read_sysfs_int",
         side_effect=fake_read,
     ) as mock_read:
         backend = _build_transfer_limit_backend(
@@ -407,7 +407,7 @@ def test_uring_cmd_auto_transfer_limit_capped_by_max_segments():
         return None
 
     with patch(
-        "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
+        "lmcache.v1.distributed.l2_adapters.raw_block.core._read_sysfs_int",
         side_effect=fake_read,
     ):
         backend = _build_transfer_limit_backend(
@@ -430,7 +430,7 @@ def test_uring_cmd_auto_transfer_limit_ignores_missing_max_segments():
         return None
 
     with patch(
-        "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
+        "lmcache.v1.distributed.l2_adapters.raw_block.core._read_sysfs_int",
         side_effect=fake_read,
     ):
         backend = _build_transfer_limit_backend(
@@ -445,7 +445,7 @@ def test_uring_cmd_auto_transfer_limit_fails_when_sysfs_unavailable():
         f"{_get_sysfs_path(TEST_DEVICES['char_device'])}/queue/max_hw_sectors_kb"
     )
     with patch(
-        "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
+        "lmcache.v1.distributed.l2_adapters.raw_block.core._read_sysfs_int",
         return_value=None,
     ) as mock_read:
         with pytest.raises(RuntimeError, match="failed to read max_hw_sectors_kb"):

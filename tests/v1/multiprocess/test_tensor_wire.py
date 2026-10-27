@@ -14,7 +14,9 @@ import torch
 from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
     TensorEnvelope,
     TensorFrame,
+    decode_grouped_tensors,
     decode_tensors,
+    encode_grouped_tensors,
     encode_tensors,
 )
 
@@ -131,3 +133,106 @@ def test_tensor_wire_rejects_mismatched_count() -> None:
             expected_dtype=torch.float32,
             expected_count=2,
         )
+
+
+def test_grouped_tensor_envelope_round_trips_per_group_layouts() -> None:
+    groups = [
+        (
+            [0, 1],
+            [torch.arange(6, dtype=torch.float32).reshape(2, 3) + i for i in range(2)],
+        ),
+        # A group may carry only some of the request's chunks.
+        (
+            [1, 3, 4],
+            [torch.arange(4, dtype=torch.bfloat16).reshape(1, 4) for _ in range(3)],
+        ),
+    ]
+
+    decoded = decode_grouped_tensors(
+        encode_grouped_tensors(groups),
+        expected=[
+            (torch.Size([2, 3]), torch.float32, 2),
+            (torch.Size([1, 4]), torch.bfloat16, 5),
+        ],
+    )
+
+    assert [indices for indices, _ in decoded] == [[0, 1], [1, 3, 4]]
+    for (_, want), (_, got) in zip(groups, decoded, strict=True):
+        for w, g in zip(want, got, strict=True):
+            assert torch.equal(w, g)
+
+
+@pytest.mark.parametrize(
+    ("expected", "match"),
+    [
+        (
+            [(torch.Size([2, 3]), torch.float32, 2)],
+            "group count mismatch",
+        ),
+        (
+            [
+                (torch.Size([2, 3]), torch.float32, 2),
+                (torch.Size([2, 3]), torch.float32, 1),
+            ],
+            "chunk index out of range",
+        ),
+        (
+            [
+                (torch.Size([2, 3]), torch.float32, 2),
+                (torch.Size([3, 2]), torch.float32, 2),
+            ],
+            "shape mismatch",
+        ),
+        (
+            [
+                (torch.Size([2, 3]), torch.float32, 2),
+                (torch.Size([2, 3]), torch.float16, 2),
+            ],
+            "dtype mismatch",
+        ),
+    ],
+)
+def test_grouped_tensor_envelope_validates_each_group(
+    expected: list[tuple[torch.Size, torch.dtype, int]], match: str
+) -> None:
+    payload = encode_grouped_tensors(
+        [([0, 1], [torch.zeros(2, 3), torch.zeros(2, 3)]), ([1], [torch.zeros(2, 3)])]
+    )
+
+    with pytest.raises(ValueError, match=match):
+        decode_grouped_tensors(payload, expected=expected)
+
+
+@pytest.mark.parametrize(
+    ("indices", "match"),
+    [
+        ([1, 1], "not strictly increasing"),
+        ([2, 0], "not strictly increasing"),
+        ([0], "1 chunk indices for 2 tensors"),
+    ],
+)
+def test_grouped_tensor_envelope_rejects_bad_chunk_indices(
+    indices: list[int], match: str
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        encode_grouped_tensors([(indices, [torch.zeros(2), torch.zeros(2)])])
+
+
+def test_flat_and_grouped_envelopes_do_not_decode_as_each_other() -> None:
+    flat = encode_tensors([torch.zeros(2)])
+    grouped = encode_grouped_tensors([([0], [torch.zeros(2)])])
+
+    with pytest.raises(msgspec.ValidationError):
+        decode_grouped_tensors(flat, expected=[(torch.Size([2]), torch.float32, 1)])
+    with pytest.raises(msgspec.ValidationError):
+        decode_tensors(
+            grouped,
+            expected_shape=torch.Size([2]),
+            expected_dtype=torch.float32,
+            expected_count=1,
+        )
+
+
+def test_grouped_tensor_envelope_rejects_too_many_groups() -> None:
+    with pytest.raises(ValueError, match="group count exceeds 64"):
+        encode_grouped_tensors([([], []) for _ in range(65)])

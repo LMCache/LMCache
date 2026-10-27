@@ -422,6 +422,57 @@ def test_cross_process_round_trip_of_interior_view(clear_fd_resolver) -> None:
         pool.close()
 
 
+def test_cross_process_round_trip_of_dim0_padded_view(clear_fd_resolver) -> None:
+    """Regression for #5097 on the VMM path: a hybrid-model unified KV pool
+    view (blocks at a padded dim-0 stride) round-trips element for element,
+    and consumer writes never touch the inter-block padding. Strides are
+    distinct so the layout normalization never reorders dims.
+    """
+    pool = _VmmPool()
+    try:
+        flat = pool.tensor(0, pool.size // 4)
+        flat.fill_(7.0)
+        view = flat[512:].as_strided((4, 8, 16), (256, 16, 1))
+        view.copy_(
+            torch.arange(view.numel(), device=DEVICE, dtype=torch.float32).reshape(
+                view.shape
+            )
+        )
+        torch.cuda.synchronize()
+
+        wrapper = VmmCudaIPCWrapper(view)
+        payload = DeviceIPCWrapper.Serialize(wrapper)
+        fd_payload = wrapper.fd_payload()
+        assert fd_payload is not None
+        export_id, fd = fd_payload
+
+        parent_sock, child_sock = socket.socketpair()
+        ctx = get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe()
+        child = ctx.Process(target=_vmm_consumer, args=(child_conn, child_sock))
+        child.start()
+        try:
+            parent_conn.send_bytes(payload)
+            socket.send_fds(parent_sock, [export_id], [fd])
+            assert parent_conn.poll(120), "consumer died before reporting"
+            assert parent_conn.recv() is True  # consumer saw the exact pattern
+
+            torch.cuda.synchronize()
+            assert bool((view == -1.0).all().item())  # consumer wrote back
+            blocks = flat[512 : 512 + 4 * 256].view(4, 256)
+            assert bool((blocks[:, 128:] == 7.0).all().item())  # padding untouched
+            parent_conn.send("release")
+        finally:
+            child.join(timeout=60)
+            if child.is_alive():
+                child.kill()
+                child.join()
+        assert child.exitcode == 0
+        wrapper.close()
+    finally:
+        pool.close()
+
+
 # ---------------------------------------------------------------------------
 # Fabric kind (requires an IMEX channel; validates the blob path)
 # ---------------------------------------------------------------------------

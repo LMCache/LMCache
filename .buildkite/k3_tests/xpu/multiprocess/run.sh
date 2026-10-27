@@ -11,13 +11,6 @@ export DEFAULT_MODEL="Qwen/Qwen3-8B"
 export LM_EVAL_NUM_CONCURRENT_DEFAULT="8"
 export BK_SETUP_ENV_SCRIPT=".buildkite/k3_harness/setup-lmcache-only-env.sh"
 
-if [[ "${1:-}" == "lm_eval" ]]; then
-    # turn on batch invariant as CUDA
-    export BATCH_INVARIANT_DEFAULT="1"
-    # Batch-invariant evaluation is slower; use fewer samples to save CI resources.
-    export LIMIT="${LIMIT:-150}"
-fi
-
 # The shared vLLM harness defaults to FLASH_ATTN when this is unset.
 # Use vLLM's automatic XPU selection unless the caller specifies a backend.
 export ATTENTION_BACKEND="${ATTENTION_BACKEND:-auto}"
