@@ -2,7 +2,7 @@
 """Conversions between the api types and the generated protobuf messages."""
 
 # Standard
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict
 from typing import TypeVar
 
@@ -12,6 +12,7 @@ from google.protobuf.message import Message
 # First Party
 from lmcache.v1.memory_orchestrator._proto_gen import memory_orchestrator_pb2 as pb2
 from lmcache.v1.memory_orchestrator.api import (
+    DeleteStatus,
     Envelope,
     ExtentHandle,
     OrchestratorError,
@@ -36,9 +37,13 @@ _ApiT = TypeVar("_ApiT")
 _WRITE_STATUS_TO_PROTO = {s: pb2.WriteGrant.Status.Value(s.name) for s in WriteStatus}
 _READ_STATUS_TO_PROTO = {s: pb2.ReadGrant.Status.Value(s.name) for s in ReadStatus}
 _TOKEN_STATUS_TO_PROTO = {s: pb2.ResultBatch.Status.Value(s.name) for s in TokenStatus}
+_DELETE_STATUS_TO_PROTO = {
+    s: pb2.DeleteObjectsReply.Status.Value(s.name) for s in DeleteStatus
+}
 _WRITE_STATUS_FROM_PROTO = {wire: api for api, wire in _WRITE_STATUS_TO_PROTO.items()}
 _READ_STATUS_FROM_PROTO = {wire: api for api, wire in _READ_STATUS_TO_PROTO.items()}
 _TOKEN_STATUS_FROM_PROTO = {wire: api for api, wire in _TOKEN_STATUS_TO_PROTO.items()}
+_DELETE_STATUS_FROM_PROTO = {wire: api for api, wire in _DELETE_STATUS_TO_PROTO.items()}
 
 
 def _from_proto(cls: type[_ApiT], msg: Message) -> _ApiT:
@@ -209,6 +214,34 @@ def token_status_from_proto(value: pb2.ResultBatch.Status) -> TokenStatus:
         OrchestratorError: If the status is unknown.
     """
     return _decode_status(_TOKEN_STATUS_FROM_PROTO, value, "ResultBatch")
+
+
+def delete_keys_to_proto(
+    keys: Sequence[WireObjectKey],
+) -> list[p2p_service_pb2.ObjectKey]:
+    """Convert the keys of a delete request to their wire form."""
+    return [_key_to_proto(key) for key in keys]
+
+
+def delete_keys_from_proto(
+    msgs: Iterable[p2p_service_pb2.ObjectKey],
+) -> list[WireObjectKey]:
+    """Convert the wire keys of a delete request."""
+    return [_key_from_proto(msg) for msg in msgs]
+
+
+def delete_status_to_proto(status: DeleteStatus) -> pb2.DeleteObjectsReply.Status:
+    """Convert a delete result to its wire form."""
+    return _DELETE_STATUS_TO_PROTO[status]
+
+
+def delete_status_from_proto(value: pb2.DeleteObjectsReply.Status) -> DeleteStatus:
+    """Convert a wire delete result.
+
+    Raises:
+        OrchestratorError: If the status is unknown.
+    """
+    return _decode_status(_DELETE_STATUS_FROM_PROTO, value, "DeleteObjectsReply")
 
 
 def contract_to_proto(contract: RegionContract) -> pb2.RegionContract:

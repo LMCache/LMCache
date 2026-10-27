@@ -21,6 +21,7 @@ from lmcache.v1.memory_orchestrator._proto_gen.memory_orchestrator_pb2_grpc impo
 from lmcache.v1.memory_orchestrator.api import (
     DEFAULT_LAYOUT_FINGERPRINT,
     CloseResult,
+    DeleteStatus,
     OrchestratorUnavailableError,
     ReadRequest,
     ReadStatus,
@@ -207,6 +208,30 @@ def test_write_finish_read_flow_in_split_batches(clients):
     assert reader.usage().read_leases == leased - 2 * count
     again = reader.reserve_write([write(name, 100 + i) for i, name in enumerate(names)])
     assert [g.status for g in again] == [WriteStatus.EXISTS_VALID] * count
+
+
+def test_delete_objects_and_published_in_split_batches(clients):
+    writer = clients("mp-deleter")
+    reader = clients("mp-delete-reader")
+    names = [f"delete-{i}" for i in range(MAX_BATCH + 2)]
+    tokens = [g.token for g in writer.reserve_write([write(name) for name in names])]
+    assert writer.finish_write(tokens) == [TokenStatus.OK] * len(names)
+    pending = writer.reserve_write([write("delete-pending")])[0]
+    leases = list(reader.reserve_read([ReadRequest(key(names[0]), 1)])[0].leases)
+    allocated = reader.usage().allocated_bytes
+    statuses = reader.delete_objects(
+        [key(name) for name in names[:-1]] + [key("delete-pending"), key("absent")]
+    )
+    deleted = [DeleteStatus.DELETED] * (len(names) - 1)
+    assert statuses == [*deleted, DeleteStatus.BUSY_WRITING, DeleteStatus.MISS]
+    assert reader.finish_read(leases) == [TokenStatus.OK]
+    assert writer.finish_write([pending.token]) == [TokenStatus.OK]
+    # Only the writer's own committed objects go; extents are never reclaimed.
+    assert reader.delete_published() == 0
+    assert writer.delete_published() == 2
+    found = reader.reserve_read([ReadRequest(key(name), 1) for name in names])
+    assert {r.status for r in found} == {ReadStatus.MISS}
+    assert reader.usage().allocated_bytes == allocated
 
 
 def test_repeated_request_id_replays_or_rejects(shared, clients):
