@@ -29,7 +29,9 @@ CHUNK = 32
 def aligner(monkeypatch) -> ChunkAligner:
     """An aligner over the fake tokenizer with a small vocabulary size."""
     monkeypatch.setattr(alignment, "_FILLER_VOCAB_SIZE", 200)
-    return ChunkAligner(make_fake_tokenizer(), "fake-model", CHUNK, seed=3)
+    return ChunkAligner(
+        make_fake_tokenizer(bpe_pieces=True), "fake-model", CHUNK, seed=3
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -76,7 +78,7 @@ def engines(monkeypatch) -> dict[str, FakeSender]:
     """
     monkeypatch.setattr(alignment, "_FILLER_VOCAB_SIZE", 200)
     monkeypatch.setattr(
-        run_stage, "try_load_tokenizer", lambda _: make_fake_tokenizer()
+        run_stage, "try_load_tokenizer", lambda _: make_fake_tokenizer(bpe_pieces=True)
     )
     monkeypatch.setattr(run_stage, "engine_version", lambda _url: "fake-1.0")
     senders: dict[str, FakeSender] = {REF_URL: FakeSender(answering(RIGHT))}

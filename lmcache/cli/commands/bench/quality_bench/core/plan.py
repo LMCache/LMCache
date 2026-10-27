@@ -18,10 +18,13 @@ import json
 import random
 
 # First Party
-from lmcache.cli.commands.bench.engine_bench.quality.alignment import ChunkAligner
+from lmcache.cli.commands.bench.engine_bench.quality.alignment import (
+    ChunkAligner,
+    Filler,
+)
 from lmcache.cli.commands.bench.engine_bench.quality.dataset import Sample
 from lmcache.cli.commands.bench.engine_bench.quality.prompts import (
-    QA_SYSTEM_PROMPT,
+    ANSWER_TAG_PROMPT,
     compose_qa_messages,
     compose_store_messages,
 )
@@ -30,6 +33,31 @@ from lmcache.cli.commands.bench.quality_bench.core.config import ReuseScenario
 
 _STORE_REQUEST_PREFIX = "store"
 _MEASURED_REQUEST_PREFIX = "q"
+
+# Misplaced blocks listed in a PlanAlignmentError; the rest are counted.
+_MAX_LISTED_PROBLEMS = 5
+
+
+class PlanAlignmentError(ValueError):
+    """Some passage would not be reused: it is off a chunk boundary, or
+    tokenizes differently in two prompts, once the chat template is applied.
+
+    Attributes:
+        problems: One line per misplaced block.
+    """
+
+    def __init__(self, problems: list[str], filler: Filler) -> None:
+        self.problems = problems
+        listed = "\n  ".join(problems[:_MAX_LISTED_PROBLEMS])
+        more = len(problems) - _MAX_LISTED_PROBLEMS
+        super().__init__(
+            f"{len(problems)} passage placement(s) would lose cache reuse "
+            f"with --filler {filler.value}; the run would measure less reuse "
+            f"than its plan claims:\n  {listed}"
+            + (f"\n  … and {more} more" if more > 0 else "")
+            + "\nTry another --filler, or check --chunk-size and "
+            "--template-kwargs against the engine."
+        )
 
 
 class StoreOrigin(enum.Enum):
@@ -93,6 +121,8 @@ class PassageProvenance:
             these (itself blended) rather than from ``store_request_id``. Empty
             means ``store_request_id`` is the only cached copy. See the
             design doc, "Reuse from earlier measured questions".
+        pad_tokens: Filler tokens added to align it to whole chunks (``0``
+            in plans made before this was recorded).
     """
 
     passage_id: str
@@ -102,6 +132,7 @@ class PassageProvenance:
     measured_position: int
     is_evidence: bool
     measured_earlier_in: tuple[str, ...] = ()
+    pad_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -147,7 +178,7 @@ class SamplePlan:
             ``evidence_source``, ``evidence_passage_ids`` and ``passages``
             (one dict per passage: ``passage_id``, ``origin``,
             ``store_request_id``, ``stored_position``, ``measured_position``,
-            ``is_evidence``, ``measured_earlier_in``).
+            ``is_evidence``, ``measured_earlier_in``, ``pad_tokens``).
         """
         return {
             "qid": self.sample.sample_id,
@@ -168,10 +199,32 @@ class SamplePlan:
                     "measured_position": p.measured_position,
                     "is_evidence": p.is_evidence,
                     "measured_earlier_in": list(p.measured_earlier_in),
+                    "pad_tokens": p.pad_tokens,
                 }
                 for p in self.passages
             ],
         }
+
+
+@dataclass(frozen=True)
+class PaddingStats:
+    """How much of the measured prompts is chunk-alignment filler.
+
+    Attributes:
+        filler: The filler used.
+        pad_tokens: Filler tokens over every measured prompt.
+        prompt_tokens: Tokens of every measured prompt, chat template
+            included.
+    """
+
+    filler: str
+    pad_tokens: int
+    prompt_tokens: int
+
+    @property
+    def share(self) -> float:
+        """Filler tokens as a share of measured prompt tokens."""
+        return self.pad_tokens / self.prompt_tokens if self.prompt_tokens else 0.0
 
 
 @dataclass(frozen=True)
@@ -183,12 +236,15 @@ class QualityPlan:
         chunk_size: The chunk size passages are aligned to.
         store_requests: Requests to send before measuring, in order.
         samples: One measured request per question, in dataset order.
+        padding: Filler statistics, or ``None`` for plans made before they
+            were recorded.
     """
 
     scenario: ReuseScenario
     chunk_size: int
     store_requests: list[StoreRequest]
     samples: list[SamplePlan]
+    padding: PaddingStats | None = None
 
     @property
     def prompts_digest(self) -> str:
@@ -238,7 +294,7 @@ class QualityPlan:
         Returns:
             A record that :meth:`from_record` turns back into an equal plan.
         """
-        return {
+        record: dict[str, object] = {
             "scenario": self.scenario.value,
             "chunk_size": self.chunk_size,
             "store_requests": [
@@ -257,6 +313,13 @@ class QualityPlan:
                 for s in self.samples
             ],
         }
+        if self.padding is not None:
+            record["padding"] = {
+                "filler": self.padding.filler,
+                "pad_tokens": self.padding.pad_tokens,
+                "prompt_tokens": self.padding.prompt_tokens,
+            }
+        return record
 
     @classmethod
     def from_record(cls, record: Mapping[str, Any]) -> "QualityPlan":
@@ -275,6 +338,7 @@ class QualityPlan:
         """
         try:
             scenario = ReuseScenario(record["scenario"])
+            padding = record.get("padding")
             plan = cls(
                 scenario=scenario,
                 chunk_size=int(record["chunk_size"]),
@@ -283,6 +347,15 @@ class QualityPlan:
                     for r in record["store_requests"]
                 ],
                 samples=[_sample_plan_from_record(s) for s in record["samples"]],
+                padding=(
+                    None
+                    if padding is None
+                    else PaddingStats(
+                        str(padding["filler"]),
+                        int(padding["pad_tokens"]),
+                        int(padding["prompt_tokens"]),
+                    )
+                ),
             )
             recorded_hashes = [s["prompt_hash"] for s in record["samples"]]
         except (KeyError, TypeError, ValueError) as e:
@@ -324,6 +397,7 @@ def _sample_plan_from_record(record: Mapping[str, Any]) -> SamplePlan:
             measured_position=int(p["measured_position"]),
             is_evidence=bool(p["is_evidence"]),
             measured_earlier_in=tuple(p["measured_earlier_in"]),
+            pad_tokens=int(p.get("pad_tokens", 0)),
         )
         for p in record["passages"]
     ]
@@ -400,6 +474,12 @@ def build_plan(
     also appeared in an earlier measured question may instead be reused from
     that question's cached prompt (recorded by ``measured_earlier_in``).
 
+    Every prompt is then rendered with the chat template and tokenized as the
+    engine will, and every passage must start on a chunk boundary and
+    tokenize identically wherever it appears (see
+    :meth:`ChunkAligner.place_blocks`). Otherwise the plan is refused: the
+    run would silently measure less reuse than it claims.
+
     Args:
         samples: Questions to measure, in order.
         aligner: Pads blocks to *chunk_size*. Must have been built with it.
@@ -412,12 +492,16 @@ def build_plan(
 
     Raises:
         ValueError: If *samples* is empty.
+        PlanAlignmentError: If any passage would not be reused.
     """
     if not samples:
         raise ValueError("samples must be non-empty")
 
-    system_block = aligner.system_block(QA_SYSTEM_PROMPT)
+    prompt = ANSWER_TAG_PROMPT
+    system_block = aligner.system_block(prompt.system)
     store_requests: list[StoreRequest] = []
+    # Passage ids and blocks each request holds, in order, for the check.
+    request_blocks: dict[str, tuple[list[str], list[str]]] = {}
     # Store request id and position per stored unit, so repeats reuse them.
     stored_alone: dict[str, str] = {}
     stored_lists: dict[tuple[str, ...], str] = {}
@@ -439,6 +523,7 @@ def build_plan(
                             request_id, compose_store_messages(system_block, [block])
                         )
                     )
+                    request_blocks[request_id] = ([passage_id], [block])
                     stored_alone[passage_id] = request_id
         else:
             key = tuple(ids)
@@ -449,6 +534,7 @@ def build_plan(
                         request_id, compose_store_messages(system_block, blocks)
                     )
                 )
+                request_blocks[request_id] = (list(ids), list(blocks))
                 stored_lists[key] = request_id
 
         order = _measured_order(sample, scenario, seed)
@@ -472,6 +558,7 @@ def build_plan(
                     measured_position=measured_position,
                     is_evidence=stored_index in evidence,
                     measured_earlier_in=tuple(measured_in.get(ids[stored_index], [])),
+                    pad_tokens=aligner.pad_tokens(sample.documents[stored_index]),
                 )
             )
         # dict.fromkeys: a passage repeated within one question counts once.
@@ -483,23 +570,87 @@ def build_plan(
                 sample=sample,
                 request_id=measured_id,
                 messages=compose_qa_messages(
-                    system_block, [blocks[i] for i in order], sample.question
+                    system_block,
+                    [blocks[i] for i in order],
+                    sample.question,
+                    prompt.question_template,
                 ),
                 passages=provenance,
                 evidence_source=evidence_source,
             )
         )
+        request_blocks[measured_id] = (
+            [ids[i] for i in order],
+            [blocks[i] for i in order],
+        )
 
+    padding = _check_placements(aligner, store_requests, sample_plans, request_blocks)
     return QualityPlan(
         scenario=scenario,
         chunk_size=chunk_size,
         store_requests=store_requests,
         samples=sample_plans,
+        padding=padding,
     )
+
+
+def _check_placements(
+    aligner: ChunkAligner,
+    store_requests: list[StoreRequest],
+    sample_plans: list[SamplePlan],
+    request_blocks: Mapping[str, tuple[list[str], list[str]]],
+) -> PaddingStats:
+    """Check every passage's placement in every rendered prompt.
+
+    Args:
+        aligner: The aligner that padded the blocks.
+        store_requests: The plan's store requests.
+        sample_plans: The plan's measured requests.
+        request_blocks: Per request id, its passage ids and blocks in order.
+
+    Returns:
+        Filler statistics over the measured prompts.
+
+    Raises:
+        PlanAlignmentError: If any passage is misplaced in any prompt, or
+            tokenizes differently in two of them.
+    """
+    problems: list[str] = []
+    first_seen: dict[str, tuple[str, tuple[int, ...]]] = {}
+    prompt_tokens = 0
+    requests = [(r.request_id, r.messages) for r in store_requests] + [
+        (s.request_id, s.messages) for s in sample_plans
+    ]
+    for request_id, messages in requests:
+        passage_ids, blocks = request_blocks[request_id]
+        num_tokens, placements = aligner.place_blocks(messages, blocks)
+        if not request_id.startswith(_STORE_REQUEST_PREFIX):
+            prompt_tokens += num_tokens
+        for passage_id, placement in zip(passage_ids, placements, strict=True):
+            if placement.problem:
+                problems.append(
+                    f"passage {passage_id} in {request_id}: {placement.problem}"
+                )
+                continue
+            seen = first_seen.setdefault(passage_id, (request_id, placement.tokens))
+            if seen[1] != placement.tokens:
+                problems.append(
+                    f"passage {passage_id}: tokenizes differently in "
+                    f"{seen[0]} and {request_id}, so their chunks differ"
+                )
+    if problems:
+        raise PlanAlignmentError(problems, aligner.filler)
+    pad_tokens = sum(
+        aligner.system_pad_tokens + sum(p.pad_tokens for p in s.passages)
+        for s in sample_plans
+    )
+    return PaddingStats(aligner.filler.value, pad_tokens, prompt_tokens)
 
 
 __all__ = [
     "EvidenceSource",
+    "PaddingStats",
+    "PlanAlignmentError",
     "PassageProvenance",
     "QualityPlan",
     "SamplePlan",

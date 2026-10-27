@@ -17,8 +17,12 @@ _PUNCTUATION = str.maketrans("", "", string.punctuation)
 
 # Lazy match, last region wins: reasoning models may echo an example answer
 # before their own. Include an unfinished last region to avoid scoring the example.
+# Opening tags: <final_answer> or <answer>, or a bare "final_answer>" -- gpt-oss
+# opens its answer channel with "<|channel|>final" and, primed by the prompt,
+# continues "_answer>" instead of "<|message|>", so the "<" never appears.
 _FINAL_ANSWER = re.compile(
-    r"<final_answer>\s*(.*?)\s*(</final_answer>|$)",
+    r"(?:<(?:final_answer|answer)>|(?<![<\w/])final_answer>)"
+    r"\s*(.*?)\s*(</(?:final_answer|answer)>|$)",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -106,8 +110,11 @@ _ABSTENTION_ANSWERS = frozenset({"none", "n/a", "na", "null", "unknown"})
 def extract_final_answer(output: str) -> str:
     """Extract the model's delimited final answer from a response.
 
-    An unterminated region counts as no answer: generation was cut off, so
-    scoring the reasoning before it would report an answer never produced.
+    Accepts ``<final_answer>…</final_answer>`` and ``<answer>…</answer>``
+    (either prompt version), and gpt-oss's ``final_answer>…</final_answer>``
+    with the opening ``<`` lost to its channel header. An unterminated region
+    counts as no answer: generation was cut off, so scoring the reasoning
+    before it would report an answer never produced.
 
     Args:
         output: The model's full response text.

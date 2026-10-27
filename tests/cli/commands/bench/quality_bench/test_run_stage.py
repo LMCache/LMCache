@@ -10,6 +10,7 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.quality import alignment
+from lmcache.cli.commands.bench.engine_bench.quality.alignment import Filler
 from lmcache.cli.commands.bench.quality_bench.core import run_stage
 from lmcache.cli.commands.bench.quality_bench.core.blend_counters import BlendCounters
 from lmcache.cli.commands.bench.quality_bench.core.config import (
@@ -35,6 +36,7 @@ from .stages import (
     parse_run,
     run,
     run_both,
+    summary,
 )
 
 
@@ -185,11 +187,16 @@ class TestRunFiles:
         """Same flags, different prompts: e.g. the tokenizer changed."""
         engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
         out = str(tmp_path / "out")
-        run(dataset, out, "--reference-url", REF_URL)
+        # The words filler draws from a pool sized by the tokenizer; a
+        # smaller pool stands in for a changed tokenizer.
+        run(dataset, out, "--reference-url", REF_URL, "--filler", "words")
         monkeypatch.setattr(alignment, "_FILLER_VOCAB_SIZE", 150)
 
         error = expect_setup_error(
-            capsys, lambda: run(dataset, out, "--candidate-url", CANDIDATE_URL)
+            capsys,
+            lambda: run(
+                dataset, out, "--candidate-url", CANDIDATE_URL, "--filler", "words"
+            ),
         )
         assert "prompts differ" in error
         assert engines[CANDIDATE_URL].sent == []
@@ -354,3 +361,68 @@ class TestRunOutcome:
 class TestEngineVersion:
     def test_unreachable_engine_reports_none(self) -> None:
         assert run_stage.engine_version("http://127.0.0.1:9/v1") is None
+
+
+class TestFiller:
+    def test_dots_is_the_default(self) -> None:
+        config = run_stage.run_config_from_args(
+            parse_run("--reference-url", REF_URL, "--model", "m", "--dataset", "d")
+        )
+        assert config.filler is Filler.DOTS
+        assert config.plan_settings()["filler"] == "dots"
+
+    def test_words_is_recorded_too(self) -> None:
+        config = run_stage.run_config_from_args(
+            parse_run(
+                "--reference-url",
+                REF_URL,
+                "--model",
+                "m",
+                "--dataset",
+                "d",
+                "--filler",
+                "words",
+            )  # fmt: skip
+        )
+        assert config.plan_settings()["filler"] == "words"
+
+    def test_another_filler_is_refused_in_the_same_directory(
+        self, dataset, engines, tmp_path, capsys
+    ) -> None:
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
+        out = str(tmp_path / "out")
+        run(dataset, out, "--reference-url", REF_URL)
+
+        error = expect_setup_error(
+            capsys,
+            lambda: run(
+                dataset, out, "--candidate-url", CANDIDATE_URL, "--filler", "dashes"
+            ),
+        )
+        assert "filler: 'dots' -> 'dashes'" in error
+        assert engines[CANDIDATE_URL].sent == []
+
+    def test_padding_is_reported_in_the_summary(
+        self, dataset, engines, tmp_path, judge_client
+    ) -> None:
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
+        out = str(tmp_path / "out")
+        run_both(dataset, out)
+        analyze(out)
+        padding = summary(out)["padding"]
+        assert padding["filler"] == "dots"
+        assert 0 < padding["share"] < 1
+
+    def test_a_misplaced_passage_exits_2_before_any_request(
+        self, dataset, engines, tmp_path, monkeypatch, capsys
+    ) -> None:
+        monkeypatch.setattr(
+            alignment.ChunkAligner, "_chat_prefix_tokens", lambda _self: 1
+        )
+        out = str(tmp_path / "out")
+        error = expect_setup_error(
+            capsys, lambda: run(dataset, out, "--reference-url", REF_URL)
+        )
+        assert "would lose cache reuse" in error
+        assert engines[REF_URL].sent == []
+        assert not os.path.exists(out)

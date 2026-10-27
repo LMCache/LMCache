@@ -93,6 +93,80 @@ Prompts are built by the shared `quality/prompts.py` and padded by
 `quality/alignment.py` (see Section 4) so that each passage starts on a chunk
 boundary and fills whole chunks.
 
+### Padding (`--filler`)
+
+At chunk size 256, short passages are mostly padding: HotpotQA's ~130-token
+paragraphs each need ~126 tokens of it, about 45% of a measured prompt. What
+that padding *is* therefore matters as much as where it ends:
+
+| `--filler` | Block layout |
+|---|---|
+| `dots` (default) | `Passage <id>:\n<passage>\n\n . . … .\nend of passage <id>` |
+| `dashes` | same, with ` -` |
+| `words` | `<passage>\n` + random single-token words (`rag-qa-quality`'s padding) |
+
+The prompt around the passages is the same for every filler, so comparing
+two fillers isolates the padding.
+
+`words` was the only padding before the flag. Its filler is random
+vocabulary words (on a multilingual tokenizer, a mix of languages and code
+identifiers), and nothing separates it from the next passage
+(`…cantorLeederville Oval.…`). It lowers the reference's own accuracy and
+may cost a KV-reuse candidate more, since recompute budget can go to noise
+tokens. The framed fillers use a repeated low-information token instead,
+inside a label and an end marker that also make passage boundaries explicit.
+
+The framed layout is built so no tokenizer merges a block with its
+neighbours and no chat template changes it:
+
+- **It starts with a letter and ends with a digit.** `<id>` is six hex
+  characters of the passage digest plus a digit (`block_id`). A final
+  letter merges into the next block's first word on Llama-style
+  pre-tokenizers. A final punctuation mark glues to the following newlines
+  on GPT-4o-style ones. Final whitespace merges with the question's leading
+  `\n\n`, and Gemma's and Llama's templates trim it from a store prompt.
+  Every tokenizer checked splits a digit from a following letter or
+  newline.
+- **The pad unit is one token everywhere checked.** ` .` and ` -` were
+  checked for gpt-oss-120b/20b, GLM-5.2, MiniMax-M3/M2.5, Gemma 3/4,
+  Nemotron 3 Super/Nano, MiMo-V2.5/V2-Flash and Llama 3.1, and the layout
+  aligned every passage of HotpotQA and FinanceBench in both scenarios.
+- **The system block ends the same way:** `\nend of instructions 0`.
+
+### Answer tags
+
+`bench quality` asks for `<answer>…</answer>` (`ANSWER_TAG_PROMPT`).
+`rag-qa-quality`, whose prompt it shared before, asks for
+`<final_answer>…</final_answer>`, which trips up gpt-oss. Its response format
+opens the answer channel with `<|channel|>final`. Primed by a prompt full of
+`final_answer`, it continues `_answer>…` instead of `<|message|>`, so the
+reply has no opening tag (5–9 empty answers per 100 HotpotQA questions in
+one run). `extract_final_answer` accepts both tags and that bare form, so
+`rag-qa-quality` recovers those answers without a prompt change.
+
+`plan_settings` records `filler`, so a results directory never mixes
+fillers. The manifest records each passage's `pad_tokens`. `plan.json` and
+`summary.json` record `padding`: the filler, and the share of measured
+prompt tokens that are padding.
+
+### Placement check
+
+Padding a block standalone does not guarantee it lands on a boundary in a
+real prompt. The chat template wraps the content, and a tokenizer may merge
+across a block's edges. So `build_plan` renders every store and measured
+prompt with the chat template (and `--template-kwargs`), tokenizes it as the
+engine will, and checks each passage (`ChunkAligner.place_blocks`):
+
+- it appears verbatim, in order;
+- it starts and ends on chunk boundaries, with no token straddling either;
+- it has the same token ids in every prompt that holds it.
+
+Any failure refuses the plan (`PlanAlignmentError`, exit 2) before a
+request is sent, listing the misplaced passages. A misplaced passage would
+otherwise lose its reuse silently, and the run would measure less reuse than
+its plan claims. Real tokenizers fail with `words`: 7 of the 12 above, on
+HotpotQA or FinanceBench `reordered`. `dots` passed on all of them.
+
 | Scenario | Stored as | Measured as | What it tests |
 |---|---|---|---|
 | `independent` | each distinct passage alone, once | the sample's passages in dataset order | the basic RAG case: passages cached separately, combined at query time |
@@ -210,9 +284,13 @@ prompts and score answers the same way, so their results are comparable:
 
 * `alignment.py` — `ChunkAligner`: pads the system block so chat-template
   prefix + system block is a whole number of chunks, and pads each passage to
-  whole chunks with seeded single-token filler.
-* `prompts.py` — the QA system prompt, question template, and message
-  composition for measured and store requests.
+  whole chunks with the chosen `Filler` (Section 2, "Padding"), and checks
+  placements in rendered prompts (`place_blocks`). `rag-qa-quality` keeps
+  the `words` filler.
+* `prompts.py` — the QA system prompt and question template
+  (`ANSWER_TAG_PROMPT` for `bench quality`; `rag-qa-quality` keeps its
+  `<final_answer>` version), and message composition for measured and store
+  requests.
 * `dataset.py` — `load_samples` and the hub dataset registry. A `Sample`
   carries the dataset's evidence markers (`evidence_indices`), and the
   RAGAS hand-off shape (`user_input`, `retrieved_contexts`, `reference`)
@@ -371,7 +449,7 @@ are conditional -- is the user docs page
 | `arm_<label>.json` | `run` | per pass: role, repeat, URL, metrics URL, engine version (best-effort `GET /version`), lmcache version, start and finish times, run-level blend counters (when captured), store failures, `plan_fingerprint` |
 | `answers_<label>.jsonl` | `run` | per question: response, parsed answer, TTFT, output tokens, counter delta |
 | `rows.jsonl` | `analyze` | per question: gold, score per arm, answers, loss tag, reference flipped, blend share, evidence; with the judge, also each arm's `match` score as a cross-check |
-| `summary.json` | `analyze` | verdict and `invalid_reasons`, metric, tolerance, Δ, SE, flip rate, engagement, per-arm counts, each arm's provenance, evidence sources (`dataset` / `answer_string` / `none`), `measured_earlier_share`, judge model and unscored questions, `plan_fingerprint`, `run_fingerprint` |
+| `summary.json` | `analyze` | verdict and `invalid_reasons`, metric, tolerance, Δ, SE, flip rate, engagement, per-arm counts, each arm's provenance, evidence sources (`dataset` / `answer_string` / `none`), `measured_earlier_share`, `padding`, judge model and unscored questions, `plan_fingerprint`, `run_fingerprint` |
 | `judge_cache.jsonl` | `analyze` | judge ratings by (judge model, question, answer, reference), reused by later `analyze` runs. An unparsable line (a partial append from a killed run) is skipped and re-judged, and terminated so the next append starts a fresh line. The key trusts the judge model name; change what serves it and the cache must be deleted |
 
 **What keeps the files consistent.**
@@ -485,8 +563,8 @@ that do are listed here, with how each should generalize.
 | Alignment, reuse scenarios, reuse manifest | Operate on passages | No |
 | Runner, engagement counters | Operate on requests | No |
 | Verdict statistics (paired Δ, SE, PASS/FAIL/UNDERPOWERED) | Operate on a per-question score in [0, 1] | No |
-| Prompt (`QA_SYSTEM_PROMPT`, question template) | "Answer the question", `<final_answer>` tags | **Yes** |
-| Answer extraction (`extract_final_answer`) | Last `<final_answer>` region | **Yes** |
+| Prompt (`QAPrompt`: system text, question template) | "Answer the question", `<answer>` tags | **Yes** |
+| Answer extraction (`extract_final_answer`) | Last `<answer>` / `<final_answer>` region | **Yes** |
 | Scorer (`answer_match`, token F1) | Short-answer matching | **Yes** |
 | Loss tags (`abstention`, `wrong_value`) | Short-answer heuristics | **Yes** |
 | Evidence fallback (gold string in a passage) | Short golds only | **Yes** |

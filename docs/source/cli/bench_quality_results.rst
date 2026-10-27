@@ -132,7 +132,7 @@ a sentinel:
      - ``-1.0``: the request failed.
    * - ``answer`` (answers, rows)
      - ``""``: no complete answer -- the request failed, or the
-       ``<final_answer>`` tags were missing or cut off.
+       ``<answer>`` tags were missing or cut off.
    * - ``counters`` (arm, answers), ``blend_share`` (rows)
      - ``null``: blend metrics were not captured (any arm but a candidate
        run with ``--capture-blend-metrics``).
@@ -236,6 +236,9 @@ or dataset and so that later runs can check they build the same prompts.
    * - ``seed``
      - int
      - ``--seed``.
+   * - ``filler``
+     - string
+     - ``--filler``: ``"dots"``, ``"dashes"`` or ``"words"``.
 
 The arm URLs, ``--reference-repeats`` and ``--capture-blend-metrics`` are not
 settings: runs of different arms into one directory may differ in them.
@@ -266,6 +269,11 @@ settings: runs of different arms into one directory may differ in them.
        ``evidence_indices`` (array of ints into ``documents`` that the
        dataset marks as evidence; ``[]`` when it marks none) and
        ``messages`` (the measured prompt, as in ``store_requests``).
+   * - ``padding``
+     - object
+     - ``{filler, pad_tokens, prompt_tokens}``: padding tokens and all
+       tokens over every measured prompt, chat template included. Absent in
+       plans made before it was recorded.
 
 .. code-block:: json
 
@@ -358,6 +366,10 @@ it (``plan.json`` holds the same records); it is there to read and grep.
        passage. A caching candidate caches measured prompts too, so the passage
        may be reused from the last of these rather than from
        ``store_request_id``. ``[]`` when none.
+   * - ``pad_tokens``
+     - int
+     - Padding tokens added to align it to whole chunks (the filler only,
+       not the ``Passage <id>:`` label).
 
 .. code-block:: json
 
@@ -367,10 +379,10 @@ it (``plan.json`` holds the same records); it is there to read and grep.
     "passages": [
       {"passage_id": "2408066aee02", "origin": "alone", "store_request_id": "store1",
        "stored_position": 0, "measured_position": 0, "is_evidence": false,
-       "measured_earlier_in": ["q0"]},
+       "measured_earlier_in": ["q0"], "pad_tokens": 118},
       {"passage_id": "193996aa3260", "origin": "alone", "store_request_id": "store2",
        "stored_position": 0, "measured_position": 1, "is_evidence": true,
-       "measured_earlier_in": []}]}
+       "measured_earlier_in": [], "pad_tokens": 97}]}
 
 
 arm_<label>.json
@@ -494,8 +506,9 @@ full text, reasoning included.
      - Whether the request produced output.
    * - ``answer``
      - string
-     - The text inside the last ``<final_answer>`` tags; ``""`` when the
-       request failed or the tags were missing or cut off.
+     - The text inside the last ``<answer>`` tags (``<final_answer>`` and
+       gpt-oss's bare ``final_answer>…</final_answer>`` are also accepted);
+       ``""`` when the request failed or the tags were missing or cut off.
    * - ``response``
      - string
      - The full response, reasoning included.
@@ -515,7 +528,7 @@ full text, reasoning included.
 .. code-block:: json
 
    {"qid": "s2", "request_id": "q2", "successful": true, "answer": "Geneva",
-    "response": "Bern is the federal city, but ... <final_answer>Geneva</final_answer>",
+    "response": "Bern is the federal city, but ... <answer>Geneva</answer>",
     "ttft": 0.0841, "num_output_tokens": 212,
     "counters": {"requested_tokens": 256.0, "prefix_hit_tokens": 64.0,
                  "non_prefix_hit_tokens": 192.0, "segmented_prefix_hit_tokens": 0.0,
@@ -633,6 +646,10 @@ The verdict and everything needed to interpret it.
      - number
      - Share of measured passages that an earlier question also held
        (see ``measured_earlier_in``).
+   * - ``padding``
+     - object or null
+     - ``plan.json``'s ``padding`` plus ``share`` (padding tokens over
+       measured prompt tokens); ``null`` for older plans.
    * - ``num_store_requests``
      - int
      - Store requests in the plan.

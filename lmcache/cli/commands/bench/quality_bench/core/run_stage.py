@@ -13,10 +13,14 @@ from datetime import datetime
 import argparse
 import asyncio
 import json
+import sys
 import urllib.request
 
 # First Party
-from lmcache.cli.commands.bench.engine_bench.quality.alignment import ChunkAligner
+from lmcache.cli.commands.bench.engine_bench.quality.alignment import (
+    ChunkAligner,
+    Filler,
+)
 from lmcache.cli.commands.bench.engine_bench.quality.dataset import (
     describe_hub_datasets,
     load_samples,
@@ -39,7 +43,11 @@ from lmcache.cli.commands.bench.quality_bench.core.config import (
     ReuseScenario,
     TaskType,
 )
-from lmcache.cli.commands.bench.quality_bench.core.plan import QualityPlan, build_plan
+from lmcache.cli.commands.bench.quality_bench.core.plan import (
+    PlanAlignmentError,
+    QualityPlan,
+    build_plan,
+)
 from lmcache.cli.commands.bench.quality_bench.core.report import arm_counts
 from lmcache.cli.commands.bench.quality_bench.core.run_files import (
     ResultsDirError,
@@ -170,11 +178,19 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="Chat-template variable (repeatable), e.g. reasoning_effort=low.",
     )
     workload.add_argument(
+        "--filler",
+        choices=[f.value for f in Filler],
+        default=Filler.DOTS.value,
+        help="What pads passages to whole chunks. dots / dashes: a repeated "
+        "' .' / ' -' between a 'Passage <id>:' label and an 'end of passage "
+        "<id>' marker. words: random single-token words appended to the "
+        "passage, as rag-qa-quality pads (default: dots).",
+    )
+    workload.add_argument(
         "--seed",
         type=int,
         default=42,
-        help="Seed for the chunk-alignment filler and the reordered "
-        "permutation (default: 42).",
+        help="Seed for the words filler and the reordered permutation (default: 42).",
     )
     parser.add_argument(
         "--output-dir",
@@ -226,6 +242,7 @@ def run_config_from_args(args: argparse.Namespace) -> QualityRunConfig:
         blend_metrics_url=args.blend_metrics_url,
         output_dir=args.output_dir,
         seed=args.seed,
+        filler=Filler(args.filler),
     )
 
 
@@ -242,6 +259,8 @@ def build_quality_plan(config: QualityRunConfig) -> QualityPlan:
         RuntimeError: If the model's tokenizer cannot be loaded.
         ValueError: If the dataset yields no usable questions, or does not
             fit the configured task type.
+        PlanAlignmentError: If a passage would not be reused once the chat
+            template is applied.
     """
     tokenizer = try_load_tokenizer(config.model)
     if tokenizer is None:
@@ -254,7 +273,14 @@ def build_quality_plan(config: QualityRunConfig) -> QualityPlan:
     if config.num_samples:
         samples = samples[: config.num_samples]
     check_task(samples, config.task)
-    aligner = ChunkAligner(tokenizer, config.model, config.chunk_size, config.seed)
+    aligner = ChunkAligner(
+        tokenizer,
+        config.model,
+        config.chunk_size,
+        config.seed,
+        filler=config.filler,
+        template_kwargs=config.template_kwargs,
+    )
     return build_plan(samples, aligner, config.scenario, config.chunk_size, config.seed)
 
 
@@ -358,15 +384,20 @@ def run_quality_run(args: argparse.Namespace) -> None:
 
     Raises:
         SystemExit: With status 1 when a pass had no successful request or
-            failed store requests, or 2 if the plan differs from the one
-            already in the results directory (a setup problem, checked
-            before any request).
+            failed store requests, or 2 if a passage would not be reused
+            (it lands off a chunk boundary or tokenizes differently in two
+            prompts) or the plan differs from the one already in the
+            results directory (setup problems, checked before any request).
         ValueError: If an argument is invalid or the dataset is refused.
         RuntimeError: If the blend-server metrics cannot be read.
     """
     started = _now()
     config = run_config_from_args(args)
-    plan = build_quality_plan(config)
+    try:
+        plan = build_quality_plan(config)
+    except PlanAlignmentError as e:
+        print(f"lmcache bench quality run: error: {e}", file=sys.stderr)
+        raise SystemExit(2) from e
     results_dir = config.output_dir or create_run_dir(DEFAULT_RESULTS_ROOT, started)
     try:
         fingerprint = ensure_plan(results_dir, plan, config.plan_settings())
@@ -378,6 +409,11 @@ def run_quality_run(args: argparse.Namespace) -> None:
         f"{len(plan.store_requests)} store requests, "
         f"scenario={plan.scenario.value}, arms: {arm_names}"
     )
+    if plan.padding is not None:
+        print(
+            f"padding: --filler {plan.padding.filler}, "
+            f"{plan.padding.share:.0%} of measured prompt tokens"
+        )
     print(f"results directory: {results_dir}")
 
     blend_counters: BlendCounterSource = (

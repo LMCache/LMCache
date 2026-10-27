@@ -5,15 +5,26 @@
 import pytest
 
 # First Party
+from lmcache.cli.commands.bench.engine_bench.quality import alignment
+from lmcache.cli.commands.bench.engine_bench.quality.alignment import (
+    ChunkAligner,
+    Filler,
+)
 from lmcache.cli.commands.bench.engine_bench.quality.dataset import Sample
+from lmcache.cli.commands.bench.engine_bench.quality.prompts import (
+    ANSWER_TAG_PROMPT,
+)
 from lmcache.cli.commands.bench.quality_bench.core.config import ReuseScenario
 from lmcache.cli.commands.bench.quality_bench.core.plan import (
     EvidenceSource,
+    PlanAlignmentError,
+    QualityPlan,
     StoreOrigin,
     build_plan,
 )
 
 # Local
+from ..engine_bench.fake_tokenizer import make_fake_tokenizer
 from .conftest import CHUNK
 from .fakes import samples
 
@@ -162,3 +173,74 @@ class TestMeasuredEarlier:
         passages = entry["passages"]
         assert isinstance(passages, list)
         assert [p["measured_earlier_in"] for p in passages] == [["q0"], []]
+
+
+def _filler_aligner(filler: Filler) -> ChunkAligner:
+    return ChunkAligner(
+        make_fake_tokenizer(bpe_pieces=True), "fake-model", CHUNK, 3, filler=filler
+    )
+
+
+class TestFillers:
+    @pytest.fixture(autouse=True)
+    def small_word_pool(self, monkeypatch) -> None:
+        """The fake tokenizer's vocabulary is smaller than the default pool."""
+        monkeypatch.setattr(alignment, "_FILLER_VOCAB_SIZE", 200)
+
+    @pytest.mark.parametrize("filler", list(Filler))
+    def test_every_filler_asks_for_answer_tags(self, filler) -> None:
+        """The prompt does not change with --filler; only the padding does."""
+        plan = _plan(_filler_aligner(filler), ReuseScenario.INDEPENDENT)
+        prompt = plan.samples[0].prompt_text
+        assert prompt.startswith(ANSWER_TAG_PROMPT.system)
+        assert prompt.endswith(
+            ANSWER_TAG_PROMPT.question_template.format(question="Capital?")
+        )
+        assert "final_answer" not in prompt
+
+    def test_framed_fillers_label_each_passage(self) -> None:
+        plan = _plan(_filler_aligner(Filler.DOTS), ReuseScenario.INDEPENDENT)
+        prompt = plan.samples[0].prompt_text
+        assert prompt.count("Passage ") == len(plan.samples[0].passages)
+
+    @pytest.mark.parametrize("filler", list(Filler))
+    @pytest.mark.parametrize("scenario", list(ReuseScenario))
+    def test_every_filler_passes_the_placement_check(self, filler, scenario) -> None:
+        plan = _plan(_filler_aligner(filler), scenario)
+        assert plan.padding is not None
+        assert plan.padding.filler == filler.value
+        assert 0 < plan.padding.share < 1
+
+    def test_manifest_records_padding_per_passage(self) -> None:
+        aligner = _filler_aligner(Filler.DOTS)
+        plan = _plan(aligner, ReuseScenario.INDEPENDENT)
+        entry = plan.samples[0].manifest_entry(plan.scenario, plan.chunk_size)
+        passages = entry["passages"]
+        assert passages[0]["pad_tokens"] == aligner.pad_tokens(  # type: ignore[index]
+            "Paris is in France."
+        )
+
+    def test_padding_round_trips(self) -> None:
+        plan = _plan(_filler_aligner(Filler.DASHES), ReuseScenario.REORDERED)
+        assert QualityPlan.from_record(plan.to_record()) == plan
+
+    def test_plans_without_padding_still_load(self, aligner) -> None:
+        """Plans saved before padding was recorded."""
+        record = _plan(aligner, ReuseScenario.INDEPENDENT).to_record()
+        del record["padding"]
+        for sample in record["samples"]:  # type: ignore[union-attr]
+            for passage in sample["passages"]:
+                del passage["pad_tokens"]
+        plan = QualityPlan.from_record(record)
+        assert plan.padding is None
+        assert plan.samples[0].passages[0].pad_tokens == 0
+
+    def test_a_misplaced_passage_refuses_the_plan(self, monkeypatch) -> None:
+        """A chat prefix one token off shifts every passage off the boundary."""
+        aligner = _filler_aligner(Filler.DOTS)
+        real = aligner._chat_prefix_tokens
+        monkeypatch.setattr(aligner, "_chat_prefix_tokens", lambda: real() + 1)
+        with pytest.raises(PlanAlignmentError, match="chunk boundary") as exc:
+            _plan(aligner, ReuseScenario.INDEPENDENT)
+        assert exc.value.problems
+        assert "--filler dots" in str(exc.value)

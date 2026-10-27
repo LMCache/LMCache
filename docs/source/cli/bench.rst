@@ -1825,8 +1825,16 @@ prompts:
        seeded new order -- reuse at a different position *and* next to
        different neighbors.
 
-Prompts are chunk-aligned the same way as ``rag-qa-quality``, so for a
-caching candidate set ``--chunk-size`` to its chunk size.
+Prompts are chunk-aligned like ``rag-qa-quality``'s, so for a caching
+candidate set ``--chunk-size`` to its chunk size. ``--filler`` picks what pads
+each passage to whole chunks. The default, ``dots``, frames it as
+``Passage <id>: … end of passage <id>`` with a repeated `` .`` in between.
+``words`` keeps the random-word padding of earlier implementations, as
+``rag-qa-quality`` still pads. The prompt asks for the answer between
+``<answer>`` tags whatever the filler. Before any request, every prompt is
+rendered with the model's chat template and each passage must
+land on a chunk boundary with identical tokens wherever it appears; otherwise
+``run`` lists the misplaced passages and exits 2.
 
 **Blend metrics.** For a candidate served through the LMCache blend server,
 which reuses cached KV at new positions, a silent fallback to recompute would
@@ -2092,9 +2100,15 @@ same workload flags (``--model`` through ``--seed``).
    * - ``--template-kwargs``
      - *(unset)*
      - Chat-template variable as ``KEY=VALUE``, repeatable.
+   * - ``--filler``
+     - ``dots``
+     - What pads passages to whole chunks: ``dots`` or ``dashes`` (a repeated
+       `` .`` / `` -`` inside a ``Passage <id>:`` label and an
+       ``end of passage <id>`` marker), or ``words`` (random single-token
+       words, as ``rag-qa-quality`` pads).
    * - ``--seed``
      - 42
-     - Seed for chunk-alignment filler and the ``reordered`` permutation.
+     - Seed for the ``words`` filler and the ``reordered`` permutation.
    * - ``--output-dir``
      - *(new dir)*
      - Results directory, used as given; runs of different arms into it are

@@ -133,6 +133,7 @@ def write_results(
         ),
         "evidence_sources": plan.evidence_coverage(),
         "measured_earlier_share": plan.measured_earlier_share(),
+        "padding": _padding_record(plan),
         "num_store_requests": len(plan.store_requests),
         "verdict": verdict.verdict.value,
         "invalid_reasons": verdict.invalid_reasons,
@@ -207,6 +208,11 @@ def format_summary(
             )
     else:
         lines.append("blend share: not captured (no --capture-blend-metrics)")
+    if plan.padding is not None:
+        lines.append(
+            f"padding: --filler {plan.padding.filler}, "
+            f"{plan.padding.share:.1%} of measured prompt tokens"
+        )
     coverage = plan.evidence_coverage()
     lines.append(
         "evidence passages identified: "
@@ -236,6 +242,18 @@ def format_summary(
         verdict_line += f" ({'; '.join(verdict.invalid_reasons)})"
     lines.append(verdict_line)
     return "\n".join(lines)
+
+
+def _padding_record(plan: QualityPlan) -> dict[str, object] | None:
+    """Return the plan's filler statistics, or ``None`` for older plans."""
+    if plan.padding is None:
+        return None
+    return {
+        "filler": plan.padding.filler,
+        "pad_tokens": plan.padding.pad_tokens,
+        "prompt_tokens": plan.padding.prompt_tokens,
+        "share": plan.padding.share,
+    }
 
 
 def _comparison_record(comparison: ArmComparison) -> dict[str, object]:

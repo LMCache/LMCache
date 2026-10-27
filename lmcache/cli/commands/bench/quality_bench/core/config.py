@@ -6,6 +6,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 import enum
 
+# First Party
+from lmcache.cli.commands.bench.engine_bench.quality.alignment import Filler
+
 
 class ArmRole(enum.Enum):
     """The serving stack an arm runs, and how its answers are used.
@@ -136,7 +139,8 @@ class QualityRunConfig:
             checked and the verdict says so. Only valid with a candidate arm.
         output_dir: Results directory, used as given. Empty means a new
             timestamped directory under ``quality_results``.
-        seed: Seed for passage padding and the re-ordering permutations.
+        seed: Seed for ``words`` padding and the re-ordering permutations.
+        filler: What pads passages and the system block to whole chunks.
     """
 
     model: str
@@ -152,6 +156,7 @@ class QualityRunConfig:
     blend_metrics_url: str = ""
     output_dir: str = ""
     seed: int = 42
+    filler: Filler = Filler.DOTS
 
     def __post_init__(self) -> None:
         if not self.model:
@@ -223,6 +228,7 @@ class QualityRunConfig:
             "max_output_tokens": self.max_output_tokens,
             "template_kwargs": dict(self.template_kwargs),
             "seed": self.seed,
+            "filler": self.filler.value,
         }
 
 

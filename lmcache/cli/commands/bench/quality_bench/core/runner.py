@@ -50,7 +50,7 @@ class ArmAnswer:
         request_id: The measured request's id (same on every arm).
         successful: Whether the request completed.
         response: The full response text, reasoning included.
-        answer: The extracted ``<final_answer>``. ``""`` when absent or cut
+        answer: The extracted ``<answer>``. ``""`` when absent or cut
             off.
         ttft: Time to first token in seconds. On failure: ``-1.0``.
         num_output_tokens: Tokens generated.
