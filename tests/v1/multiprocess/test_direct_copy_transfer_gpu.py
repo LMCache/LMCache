@@ -106,8 +106,12 @@ def _paged_tensors(g: _Geometry, device: torch.device) -> list[torch.Tensor]:
         return [rnd([nb * bs, nh, hs]) for _ in range(2 * nl)]
     if g.fmt in (Fmt.TWO_X_NL_X_NB_BS_NH_HS,):
         return [rnd([nb, bs, nh, hs]) for _ in range(2 * nl)]
-    if g.fmt in (Fmt.NL_X_NB_BS_NH_TWO_HS, Fmt.NL_X_NB_BS_NH_CS):
-        return [rnd([nb, bs, nh, hs]) for _ in range(nl)]  # hs already fused
+    if g.fmt in (
+        Fmt.NL_X_NB_BS_NH_TWO_HS,
+        Fmt.NL_X_NB_BS_NH_CS,
+        Fmt.NL_X_NB_BS_NH_HS,
+    ):
+        return [rnd([nb, bs, nh, hs]) for _ in range(nl)]
     raise ValueError(f"unsupported test format {g.fmt}")
 
 
@@ -151,6 +155,9 @@ _GEOMETRIES = {
         Fmt.NL_X_NB_BS_NH_TWO_HS, nl=3, kv_size=1, nh=2, hs=32, bs=8
     ),
     "cs_nhd": _Geometry(Fmt.NL_X_NB_BS_NH_CS, nl=3, kv_size=1, nh=2, hs=32, bs=8),
+    "sglang_component": _Geometry(
+        Fmt.NL_X_NB_BS_NH_HS, nl=3, kv_size=1, nh=2, hs=16, bs=8
+    ),
 }
 
 _CHUNK_TOKENS = 32  # 4 blocks of 8 tokens per chunk
@@ -514,6 +521,7 @@ def test_format_eligibility_table() -> None:
         Fmt.TWO_X_NL_X_NB_BS_NH_HS,
         Fmt.NL_X_NB_BS_NH_TWO_HS,
         Fmt.NL_X_NB_BS_NH_CS,
+        Fmt.NL_X_NB_BS_NH_HS,
     }
     for fmt in Fmt.__members__.values():
         assert cuda_ops.direct_copy_format_supported(fmt) == (fmt in eligible), fmt
