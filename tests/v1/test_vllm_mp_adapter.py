@@ -1611,6 +1611,55 @@ def test_heartbeat_first_ping_runs_callback_before_setting_event(
     assert event_state_during_callback == [False]
 
 
+@pytest.mark.parametrize(
+    ("worker_ping", "server_ping", "recover_ok", "expect_recover", "expect_healthy"),
+    [
+        # Server up but this worker unknown (reaped while silent): re-register
+        # and stay healthy, without a degraded-mode flap.
+        (False, True, True, True, True),
+        # Re-registration failed: degraded until a later cycle succeeds.
+        (False, True, False, True, False),
+        # Server down: no re-registration attempt, degraded.
+        (False, False, True, False, False),
+        # Worker known: nothing to do.
+        (True, True, True, False, True),
+    ],
+)
+def test_heartbeat_reregisters_a_worker_the_server_no_longer_holds(
+    monkeypatch,
+    worker_ping: bool,
+    server_ping: bool,
+    recover_ok: bool,
+    expect_recover: bool,
+    expect_healthy: bool,
+) -> None:
+    """Real HeartbeatThread, starting healthy: a failed worker ping is told
+    apart from an outage by an untracked ping, and only the former runs the
+    re-registration callback."""
+    monkeypatch.setattr(
+        adapter_mod,
+        "send_ping",
+        lambda req_client, timeout, instance_id=None: (
+            worker_ping if instance_id is not None else server_ping
+        ),
+    )
+    health_event = threading.Event()
+    health_event.set()
+    heartbeat = HeartbeatThread(
+        req_client=MagicMock(name="req_client"),
+        health_event=health_event,
+        interval=60.0,
+        instance_id=7,
+    )
+    recover = MagicMock(return_value=recover_ok)
+    heartbeat.register_recover_callback(recover)
+
+    heartbeat._execute()
+
+    assert recover.called is expect_recover
+    assert health_event.is_set() is expect_healthy
+
+
 def test_dropped_retrieve_reported_once_via_unhealthy_get_finished(
     fake_adapter,
 ) -> None:

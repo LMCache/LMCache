@@ -305,11 +305,11 @@ def test_atom_heartbeat_runs_recovery_before_publishing_health(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A successful ping only restores health after re-registration succeeds."""
-    ping_results = iter([False, True])
+    server_up = False
 
-    def ping(_instance_id: int) -> MessagingFuture[Any]:
+    def ping(_instance_id: int | None) -> MessagingFuture[Any]:
         future: MessagingFuture[Any] = MessagingFuture()
-        future.set_result(next(ping_results))
+        future.set_result(server_up)
         return future
 
     client = MagicMock()
@@ -330,10 +330,43 @@ def test_atom_heartbeat_runs_recovery_before_publishing_health(
     heartbeat._execute()
     assert health_event.is_set() is False
     unhealthy.assert_called_once_with()
+    recover.assert_not_called()
 
+    server_up = True
     heartbeat._execute()
     assert health_event.is_set() is True
     recover.assert_called_once_with()
+
+
+def test_atom_heartbeat_reregisters_when_the_server_forgot_the_worker() -> None:
+    """The server answers but no longer holds this worker (reaped while
+    silent): the worker re-registers without publishing an outage."""
+
+    def ping(instance_id: int | None) -> MessagingFuture[Any]:
+        future: MessagingFuture[Any] = MessagingFuture()
+        future.set_result(instance_id is None)  # up, but instance 7 unknown
+        return future
+
+    client = MagicMock()
+    client.ping.side_effect = ping
+    health_event = threading.Event()
+    health_event.set()
+    recover = MagicMock(return_value=True)
+    unhealthy = MagicMock()
+    heartbeat = atom_adapter._HeartbeatThread(
+        client,
+        health_event,
+        instance_id=7,
+        interval=1.0,
+    )
+    heartbeat.register_recover_callback(recover)
+    heartbeat.register_unhealthy_callback(unhealthy)
+
+    heartbeat._execute()
+
+    recover.assert_called_once_with()
+    unhealthy.assert_not_called()
+    assert health_event.is_set() is True
 
 
 @pytest.mark.parametrize("adapter_kind", ["scheduler", "worker"])

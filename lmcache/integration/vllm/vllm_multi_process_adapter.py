@@ -612,6 +612,15 @@ class HeartbeatThread(PeriodicThread):
         healthy = send_ping(
             self._req_client, timeout=self._interval, instance_id=self._instance_id
         )
+        # A failed worker ping can mean the server is up but no longer holds
+        # this worker's registration: it reaped the worker after a silent
+        # spell, or restarted. An untracked ping tells that apart from an
+        # outage, and the worker re-registers instead of staying unregistered.
+        instance_unknown = (
+            not healthy
+            and self._instance_id is not None
+            and send_ping(self._req_client, timeout=self._interval)
+        )
 
         if self.stop_requested:
             return ThreadRunSummary(
@@ -619,8 +628,19 @@ class HeartbeatThread(PeriodicThread):
                 message="stop requested; skipping health update",
             )
 
+        if instance_unknown:
+            logger.warning(
+                "LMCache server no longer holds a registration for instance %d; "
+                "re-registering",
+                self._instance_id,
+            )
+            healthy = self._recover_callback()
+
         need_trigger_recover = (
-            healthy and not was_healthy and self._recover_callback is not None
+            healthy
+            and not was_healthy
+            and not instance_unknown
+            and self._recover_callback is not None
         )
 
         # Try to call recover callback

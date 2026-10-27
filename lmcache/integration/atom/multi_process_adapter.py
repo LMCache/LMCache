@@ -108,18 +108,29 @@ class _HeartbeatThread(PeriodicThread):
         ):
             thread.join()
 
+    def _ping(self, instance_id: int | None) -> bool:
+        try:
+            return bool(self._client.ping(instance_id).result(timeout=self._timeout))
+        except Exception:
+            return False
+
     def _execute(self) -> ThreadRunSummary:
         was_healthy = self._health_event.is_set()
-        try:
-            healthy = bool(
-                self._client.ping(self._instance_id).result(timeout=self._timeout)
-            )
-        except Exception:
-            healthy = False
+        healthy = self._ping(self._instance_id)
+        # A failed worker ping with the server still answering means it no
+        # longer holds this worker's registration (reaped, or restarted):
+        # re-register rather than stay unregistered.
+        instance_unknown = not healthy and self._ping(None)
         if self.stop_requested:
             return ThreadRunSummary(success=True, message="stopping")
 
-        if healthy and not was_healthy:
+        if instance_unknown or (healthy and not was_healthy):
+            if instance_unknown:
+                logger.warning(
+                    "LMCache server no longer holds a registration for ATOM "
+                    "instance %d; re-registering",
+                    self._instance_id,
+                )
             try:
                 healthy = self._recover_callback()
             except Exception:

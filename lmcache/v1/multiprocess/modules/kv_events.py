@@ -145,7 +145,11 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
                 stream.close()
 
     def touch_instance(self, instance_id: int) -> None:
-        """Refresh an existing subscription's last-seen time on worker PING."""
+        """Refresh an existing subscription's last-seen time on worker PING.
+
+        Returns None: a subscription is not a worker registration, so it has no
+        say in whether a pinging worker is still registered.
+        """
         with self._kv_event_lock:
             if instance_id in self._kv_event_streams:
                 stream, _ = self._kv_event_streams[instance_id]

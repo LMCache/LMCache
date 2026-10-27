@@ -299,6 +299,110 @@ def test_management_ping_touches_targets() -> None:
     assert target.touched == [42]
 
 
+def _register_gpu_instance(
+    monkeypatch: pytest.MonkeyPatch, module: LMCacheDrivenTransferModule, iid: int
+) -> None:
+    _stub_gpu_registration_backend(monkeypatch)
+    monkeypatch.setattr(
+        gpu_mod,
+        "create_cache_context",
+        lambda *a, **kw: MagicMock(
+            num_layers=2, **{"kv_layer_groups_manager.num_object_groups": 1}
+        ),
+    )
+    monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
+    module.register_kv_cache(iid, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
+
+
+@pytest.mark.parametrize(
+    ("registered", "with_subscription", "ping_id", "expected"),
+    [
+        (True, False, 5, True),  # registered worker
+        (False, False, 5, False),  # reaped or never registered
+        (False, True, 5, False),  # a KV-event subscription is not a registration
+        (False, False, None, True),  # untracked prober (scheduler)
+    ],
+)
+def test_management_ping_reports_whether_the_worker_is_registered(
+    monkeypatch: pytest.MonkeyPatch,
+    registered: bool,
+    with_subscription: bool,
+    ping_id: int | None,
+    expected: bool,
+) -> None:
+    """PING answers False for a worker no registration owner tracks, so the
+    worker can re-register; True for a registered worker or a None prober."""
+    module = _bare_gpu_module()
+    if registered:
+        _register_gpu_instance(monkeypatch, module, 5)
+    events, _ = _event_module()
+    if with_subscription:
+        events.subscribe_kv_events(5, "model", 0, 8)
+    mgmt = ManagementModule(MagicMock(), liveness_targets=[module, events])
+    try:
+        assert mgmt.ping(ping_id) is expected
+    finally:
+        mgmt.close()
+        events.close()
+
+
+def test_management_ping_is_true_without_a_registration_owner() -> None:
+    """With only targets that own no registrations (KV-event streams), a
+    worker ping keeps answering True."""
+    events, _ = _event_module()
+    mgmt = ManagementModule(MagicMock(), liveness_targets=[events])
+    try:
+        assert mgmt.ping(5) is True
+    finally:
+        mgmt.close()
+        events.close()
+
+
+def test_reaped_worker_reregisters_on_its_next_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registered worker that never pinged is reaped after the grace; on
+    its next heartbeat the server reports it unknown, the worker re-registers,
+    and the server holds a context for it again (what STORE looks up)."""
+    # First Party
+    from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
+
+    module = _bare_gpu_module()
+    _register_gpu_instance(monkeypatch, module, 5)
+    mgmt = ManagementModule(MagicMock(), liveness_targets=[module])
+    try:
+        module._cache_contexts[5].last_seen = time.monotonic() - 4000.0
+        assert module.reap_stale_instances(120.0, 3600.0) == [5]
+        assert module.get_and_touch_context_entry(5) is None
+
+        def ping(instance_id: int | None) -> MagicMock:
+            return MagicMock(**{"result.return_value": mgmt.ping(instance_id)})
+
+        health_event = threading.Event()
+        health_event.set()
+        heartbeat = adapter_mod.HeartbeatThread(
+            req_client=MagicMock(**{"ping.side_effect": ping}),
+            health_event=health_event,
+            interval=60.0,
+            instance_id=5,
+        )
+
+        def reregister() -> bool:
+            module.register_kv_cache(
+                5, MagicMock(), "model", 1, MagicMock(), MagicMock(), []
+            )
+            return True
+
+        heartbeat.register_recover_callback(reregister)
+        heartbeat._execute()
+
+        assert module.get_and_touch_context_entry(5) is not None
+        assert health_event.is_set()
+        assert mgmt.ping(5) is True
+    finally:
+        mgmt.close()
+
+
 def test_management_clear_defaults_to_non_force() -> None:
     ctx = MagicMock()
     mgmt = ManagementModule(ctx)
