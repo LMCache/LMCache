@@ -234,7 +234,7 @@ class Bitmap2D:
 class MapState:
     """Tracks the global bitmap state.
 
-    It maps from L2 adapter / L1 manager index to the global bitmap grid of the
+    It maps from L2Adapter/L1Manager index to the global bitmap grid of the
     object key groups. Row ``i`` of every grid is the key group at index
     ``i`` of the prefetch request (see `GroupedObjectKeys`).
 

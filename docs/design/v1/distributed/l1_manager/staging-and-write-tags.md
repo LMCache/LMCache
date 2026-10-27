@@ -1,4 +1,4 @@
-# L1 manager: staging objects and write tags
+# L1Manager: staging objects and write tags
 
 Design of the write path in `lmcache/v1/distributed/l1_manager/base.py`
 (`BaseL1Manager`, shared by every medium; see [l1-manager-types.md](l1-manager-types.md)).

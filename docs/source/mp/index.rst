@@ -89,8 +89,7 @@ High-Level Architecture
          v
     StorageManager (distributed/storage_manager.py)
          |
-         |--- L1 managers (l1_manager/): DramL1Manager, DevDaxL1Manager,
-         |    GdsL1Manager sharing the BaseL1Manager state machine
+         |--- L1Manager (l1_manager/)
          |       |--- L1MemoryManager (CPU DRAM),
          |       |    DevDaxL1MemoryManager (Device-DAX slab), or
          |       |    GDSL1MemoryManager (NVMe slab via cuFile / hipFile)
@@ -98,7 +97,7 @@ High-Level Architecture
          |
          |--- StoreController  -----> L2 Adapter(s) (async L1->L2 push)
          |--- PrefetchController ---> L2 Adapter(s) (async L2->L1 load)
-         |--- EvictionController ----> L1 manager (watermark-triggered eviction)
+         |--- EvictionController ----> L1Manager (watermark-triggered eviction)
          |
          v
     EventBus + OTel providers (observability)
@@ -350,8 +349,8 @@ methods:
 See :doc:`multi_l1` for the internal write-placement and ownership foundations.
 Normal serving still uses one L1.
 
-L1 managers
-~~~~~~~~~~~
+L1Manager
+~~~~~~~~~
 
 ``lmcache/v1/distributed/l1_manager/``
 
@@ -436,7 +435,7 @@ LOOKUP Flow
 
 .. code-block:: text
 
-    vLLM                MPCacheServer          StorageManager         L1 manager      L2 (PrefetchController)
+    vLLM                MPCacheServer          StorageManager         L1Manager       L2 (PrefetchController)
      |                       |                       |                    |                    |
      |---LOOKUP(key)-------->|                       |                    |                    |
      |                       |--submit_prefetch------>|                    |                    |
@@ -454,7 +453,7 @@ STORE Flow
 
 .. code-block:: text
 
-    vLLM                MPCacheServer          StorageManager         L1 manager
+    vLLM                MPCacheServer          StorageManager         L1Manager
      |                       |                       |                    |
      |---STORE(key,blocks)-->|                       |                    |
      |                       |--reserve_write-------->|                    |
@@ -473,7 +472,7 @@ RETRIEVE Flow
 
 .. code-block:: text
 
-    vLLM                MPCacheServer          StorageManager         L1 manager
+    vLLM                MPCacheServer          StorageManager         L1Manager
      |                       |                       |                    |
      |---RETRIEVE(key)------>|                       |                    |
      |                       |--read_prefetched------>|                    |
@@ -619,8 +618,7 @@ Key Source Files
    * - ``lmcache/v1/distributed/config.py``
      - StorageManagerConfig hierarchy
    * - ``lmcache/v1/distributed/l1_manager/``
-     - L1 managers: ``BaseL1Manager`` state machine and the per-medium
-       ``DramL1Manager`` / ``DevDaxL1Manager`` / ``GdsL1Manager``
+     - L1Manager (object state machine)
    * - ``lmcache/v1/distributed/l2_adapters/config.py``
      - L2 adapter config registry
    * - ``lmcache/v1/distributed/l2_adapters/base.py``

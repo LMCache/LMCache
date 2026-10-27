@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""L1 metrics subscriber — OTel counters for L1 manager events."""
+"""L1 metrics subscriber — OTel counters for L1Manager events."""
 
 # Future
 from __future__ import annotations
@@ -18,7 +18,7 @@ from lmcache.v1.mp_observability.subscribers.metrics.utils import (
 
 
 class L1MetricsSubscriber(EventSubscriber):
-    """Maintains OTel counters for L1 manager operations.
+    """Maintains OTel counters for L1Manager operations.
 
     Metric parity with the old ``L1ManagerStatsLogger``:
     - ``lmcache_mp.l1_read``    — chunks read from L1
