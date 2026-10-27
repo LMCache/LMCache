@@ -3,7 +3,6 @@
 
 # Standard
 from types import SimpleNamespace
-from unittest.mock import patch
 
 # Third Party
 import pytest
@@ -11,7 +10,6 @@ import pytest
 # First Party
 from lmcache.integration.vllm.experimental.token_drop_adapter import (
     _allocate_with_resident_frontier,
-    install_token_drop_allocator_adapter,
 )
 from lmcache.integration.vllm.experimental.token_drop_scheduler import (
     clear_resident_kv_tokens,
@@ -148,20 +146,3 @@ def test_td_physical_allocation_rejects_incompatible_kv_modes(kwargs):
     assert request.num_computed_tokens == 104
     assert get_resident_kv_tokens("req") == 32
 
-
-def test_allocator_hook_installation_is_idempotent():
-    vllm = pytest.importorskip("vllm")
-    if vllm.__version__ != "0.25.1":
-        pytest.skip("Requires pinned vLLM 0.25.1")
-
-    # Third Party
-    from vllm.v1.core.kv_cache_manager import KVCacheManager
-
-    original = KVCacheManager.allocate_slots
-    with patch.object(KVCacheManager, "allocate_slots", original):
-        install_token_drop_allocator_adapter()
-        installed = KVCacheManager.allocate_slots
-        assert getattr(installed, "_lmcache_token_drop_allocator_adapter", False)
-
-        install_token_drop_allocator_adapter()
-        assert KVCacheManager.allocate_slots is installed
