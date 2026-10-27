@@ -107,6 +107,20 @@ class TestSurvivableFailures:
         assert controller.filter_unpinned([_key(1)]) == [_key(1)], reason
 
 
+class TestStats:
+    def test_saves_are_counted_by_result(self, tmp_path: Path):
+        unwritable = tmp_path / "dir-in-the-way"
+        unwritable.mkdir()
+        good = MetadataPersister(LocalArtifactStore(tmp_path / "metadata.json"))
+        bad = MetadataPersister(LocalArtifactStore(unwritable))
+
+        good.save()
+        bad.save()
+
+        assert good.stats().writes == {"ok": 1, "error": 0}
+        assert bad.stats().writes == {"ok": 0, "error": 1}
+
+
 class TestRegistration:
     def test_checkpoint_state_is_refused(self, tmp_path: Path):
         """Derived state here would be rewritten on every operator change
