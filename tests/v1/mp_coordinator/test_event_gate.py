@@ -3,6 +3,9 @@
 detection, incarnation fencing, and what each of those hands to the
 registered consumers."""
 
+# Standard
+import time
+
 # First Party
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
@@ -48,6 +51,7 @@ def _batch(
     size_bytes: int = 1024,
     shared: bool = False,
     dropped_events: int = 0,
+    ts: float = 0.0,
 ) -> CacheEventBatch:
     return CacheEventBatch(
         instance_id=instance_id,
@@ -62,6 +66,7 @@ def _batch(
         ],
         shared=shared,
         dropped_events=dropped_events,
+        ts=ts,
     )
 
 
@@ -271,7 +276,38 @@ def test_drop_instance_fences_consumers_and_forgets_the_cursor():
     assert consumer.fenced == ["node-a"]
     assert gate.stats().streams == {}
     # A reconnect starts fresh with any incarnation.
+    gate.readmit_instance("node-a")
     assert gate.ingest(_batch(incarnation=1, seq=1)) == IngestResult.ADMITTED
+
+
+def test_late_l1_batch_from_a_dropped_incarnation_is_stale():
+    consumer = _RecordingConsumer()
+    gate = _gate(consumer)
+    gate.ingest(_batch(incarnation=5, seq=1))
+
+    gate.drop_instance("node-a")
+
+    assert gate.ingest(_batch(incarnation=5, seq=2)) == IngestResult.STALE_INCARNATION
+    assert len(consumer.batches) == 1
+
+
+def test_late_l2_batch_from_a_dropped_incarnation_is_admitted():
+    gate = _gate()
+    gate.ingest(_batch(incarnation=5, seq=1))
+
+    gate.drop_instance("node-a")
+
+    late = _batch(incarnation=5, seq=2, tier=Tier.L2, backend="fs")
+    assert gate.ingest(late) == IngestResult.ADMITTED
+
+
+def test_restart_after_drop_is_admitted():
+    gate = _gate()
+    gate.ingest(_batch(incarnation=5, seq=1))
+
+    gate.drop_instance("node-a")
+
+    assert gate.ingest(_batch(incarnation=6, seq=1)) == IngestResult.ADMITTED
 
 
 def test_drop_unknown_instance_is_noop_for_the_cursor():
@@ -367,6 +403,7 @@ def test_loss_counts_start_over_when_the_emitter_leaves():
     gate.ingest(_batch(seq=1))
     gate.ingest(_batch(seq=3, dropped_events=2))
     gate.drop_instance("node-a")
+    gate.readmit_instance("node-a")
     gate.ingest(_batch(seq=4))
 
     assert _loss(gate) == (0, 0, True)
@@ -411,3 +448,42 @@ def test_a_cursor_checkpointed_without_a_last_drop_count_restores_unknown():
     restored.ingest(_batch(seq=6, dropped_events=31))
 
     assert _loss(restored) == (0, 1, True)
+
+
+# -- Freshness ---------------------------------------------------------------
+
+
+def test_seconds_since_last_event_restarts_at_each_admitted_batch():
+    gate = _gate()
+    gate.ingest(_batch(seq=1))
+    time.sleep(0.05)
+    waited = gate.stats().streams["node-a"].seconds_since_last_event
+
+    gate.ingest(_batch(seq=2))
+
+    assert waited >= 0.05
+    assert gate.stats().streams["node-a"].seconds_since_last_event < waited
+
+
+def test_a_rejected_batch_does_not_count_as_an_event():
+    gate = _gate()
+    gate.ingest(_batch(seq=1))
+    time.sleep(0.05)
+    gate.ingest(_batch(seq=1))  # duplicate
+
+    assert gate.stats().streams["node-a"].seconds_since_last_event >= 0.05
+
+
+def test_delivery_delay_is_the_last_batch_s_send_to_admit_time():
+    gate = _gate()
+    gate.ingest(_batch(seq=1, ts=time.time() - 5.0))
+
+    delay = gate.stats().streams["node-a"].event_delivery_delay_seconds
+    assert delay is not None and 5.0 <= delay < 10.0
+
+
+def test_delivery_delay_is_unknown_until_a_batch_carries_its_send_time():
+    gate = _gate()
+    gate.ingest(_batch(seq=1, ts=0.0))
+
+    assert gate.stats().streams["node-a"].event_delivery_delay_seconds is None

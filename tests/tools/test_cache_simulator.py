@@ -66,6 +66,18 @@ class TestLRUCacheFast:
         assert cache.contains("b")
         assert cache.eviction_count == 1
 
+    def test_insert_returns_evicted_key(self) -> None:
+        """Callers can remove the same key from their secondary index."""
+        cache = LRUCacheFast(2)
+        assert cache.insert("a") is None
+        assert cache.insert("b") is None
+        assert cache.insert("a") is None
+        assert cache.insert("c") == "b"
+        assert cache.contains("a")
+        assert cache.contains("c")
+        assert not cache.contains("b")
+        assert cache.eviction_count == 1
+
     def test_invalid_capacity_raises(self) -> None:
         with pytest.raises(ValueError):
             LRUCacheFast(-1)
@@ -123,7 +135,7 @@ def test_zero_capacity_cache_stays_empty(
     """A cache with no slots must never admit or evict an entry."""
     cache = cache_cls(0)
     for key in ["a", "b", "a"]:
-        cache.insert(key)
+        assert cache.insert(key) is None
         assert not cache.contains(key)
         assert len(cache) == 0
     assert cache.eviction_count == 0

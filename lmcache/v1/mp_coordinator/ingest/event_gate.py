@@ -18,11 +18,14 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import cast
 import threading
+import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
+from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 
@@ -72,6 +75,13 @@ class InstanceStreamStats:
             counts none, since earlier batches were sent before it listened.
         events_dropped: Events the emitter reported dropping before they
             reached the coordinator (the increases of ``dropped_events``).
+        seconds_since_last_event: Seconds since the gate last admitted a
+            batch from this emitter, or since it restored the cursor from a
+            checkpoint if none was admitted since.
+        event_delivery_delay_seconds: For the last admitted batch, the
+            emitter's send time (``ts``) to admission, measured across the
+            two hosts' clocks; ``None`` until a batch carrying ``ts``
+            arrives.
     """
 
     incarnation: int
@@ -79,6 +89,8 @@ class InstanceStreamStats:
     gap_detected: bool
     missing_batches: int = 0
     events_dropped: int = 0
+    seconds_since_last_event: float = 0.0
+    event_delivery_delay_seconds: float | None = None
 
 
 @dataclass
@@ -114,6 +126,8 @@ class _StreamCursor:
 
     ``last_dropped_events`` is the ``dropped_events`` of the last admitted
     batch, or ``None`` until the gate knows it (a stream joined midway).
+    ``last_admitted_monotonic`` is when the cursor last admitted a batch, or
+    when it was created or restored.
     """
 
     incarnation: int
@@ -122,6 +136,8 @@ class _StreamCursor:
     last_dropped_events: int | None = None
     missing_batches: int = 0
     events_dropped: int = 0
+    last_admitted_monotonic: float = field(default_factory=time.monotonic)
+    event_delivery_delay_seconds: float | None = None
 
 
 class EventGate:
@@ -143,12 +159,14 @@ class EventGate:
         self._lock = threading.Lock()
         self._broadcaster = broadcaster
         self._cursors: dict[str, _StreamCursor] = {}
+        self._departed: dict[str, int] = {}
         # Acquired outside self._lock on every mutating path, so a capture
         # and an ingest take the two locks in the same order.
         self._quiesce = quiesce
         # The totals; ``streams`` stays empty here and is filled from the
         # cursors when stats() takes a snapshot.
         self._stats = EventGateStats()
+        register_metric_source(self)
 
     def ingest(self, batch: CacheEventBatch) -> IngestResult:
         """Offer one batch to the consumers, applying incarnation
@@ -213,7 +231,18 @@ class EventGate:
         """
         with self._quiesce.applying(), self._lock:
             self._broadcaster.fence_instance(instance_id)
-            self._cursors.pop(instance_id, None)
+            cursor = self._cursors.pop(instance_id, None)
+            if cursor is not None:
+                self._departed[instance_id] = cursor.incarnation
+
+    def readmit_instance(self, instance_id: str) -> None:
+        """Take L1 batches from ``instance_id`` again after it re-registers.
+
+        Args:
+            instance_id: The instance that registered again.
+        """
+        with self._lock:
+            self._departed.pop(instance_id, None)
 
     @property
     def name(self) -> str:
@@ -289,6 +318,7 @@ class EventGate:
 
     def stats(self) -> EventGateStats:
         """Return a snapshot of the totals and every emitter's cursor."""
+        now = time.monotonic()
         with self._lock:
             return replace(
                 self._stats,
@@ -299,6 +329,10 @@ class EventGate:
                         gap_detected=cursor.gap_detected,
                         missing_batches=cursor.missing_batches,
                         events_dropped=cursor.events_dropped,
+                        seconds_since_last_event=now - cursor.last_admitted_monotonic,
+                        event_delivery_delay_seconds=(
+                            cursor.event_delivery_delay_seconds
+                        ),
                     )
                     for instance_id, cursor in self._cursors.items()
                 },
@@ -309,6 +343,12 @@ class EventGate:
     def _admit(self, batch: CacheEventBatch) -> IngestResult:
         """Decide ``batch``'s fate and, if admitted, account its loss and
         broadcast it. Call holding the quiesce and ``self._lock``."""
+        departed = self._departed.get(batch.instance_id)
+        if departed is not None:
+            if batch.incarnation > departed:
+                del self._departed[batch.instance_id]
+            elif batch.tier == Tier.L1:
+                return IngestResult.STALE_INCARNATION
         cursor = self._cursors.get(batch.instance_id)
         # Loss is measured only from a known starting point: a stream the
         # gate already tracks, including across a restart.
@@ -353,6 +393,9 @@ class EventGate:
                 self._stats.events_dropped += dropped
         cursor.last_dropped_events = batch.dropped_events
         cursor.last_seq = batch.seq
+        cursor.last_admitted_monotonic = time.monotonic()
+        if batch.ts > 0:
+            cursor.event_delivery_delay_seconds = time.time() - batch.ts
         self._broadcaster.broadcast(batch)
         return IngestResult.ADMITTED
 

@@ -56,16 +56,20 @@ each instance is the sole writer of its own facts, so there is no
 global order and no cross-instance arbitration. `instance_id` is really
 the *emitter stream id* — a shared medium's controller sends under its
 own stable id and gets an ordinary deduplicated, fenced stream with no
-special-casing (see [key_directory.md](key_directory.md), Shared pools).
+special-casing (see [key_directory.md](views/key_directory.md), Shared pools).
 
 The gate's lock is held across the fan-out, so an emitter's batches
 reach the consumers in admission order. Consumers must therefore not
 call back into the gate.
 
 `drop_instance(id)` is the same fence without a batch — for
-deregistration and heartbeat-timeout eviction. It also forgets the
-cursor, so a reconnect starts fresh at any incarnation. (Wiring it to
-the registry is still a follow-up; the method exists and is tested.)
+deregistration, heartbeat-timeout eviction, and instances restored from a
+checkpoint that do not re-register within `instance_timeout`. It forgets
+the cursor but remembers the dropped incarnation: a late L1 batch from it
+is dropped as `STALE_INCARNATION`, while a higher incarnation or a
+re-registration (`readmit_instance`) starts a fresh cursor at any
+incarnation. L2 batches are still admitted, since L2 bytes outlive the
+process.
 
 ## Sources
 
@@ -118,10 +122,14 @@ checkpoint -- resuming from it would skip the records in between
 permanently, since the broker considers them delivered and the restored
 state does not contain them. One cursor, moved only by a checkpoint, has
 no such gap. The cost: `kafka-consumer-groups --describe` shows this
-group no progress.
+group no progress, so the source reports its own lag instead:
+`lmcache_coordinator.kafka.unread_records` per partition (the high
+watermark from the consumer's fetch cache, minus the next offset to read,
+computed when metrics are read so it can never stall ingest), plus `kafka.partitions_assigned` and
+`kafka.records_read`.
 
 Because the restored view and the resume point cannot disagree, nothing
-here measures lag or gates startup on catching up. A partition
+gates startup on catching up. A partition
 `StreamPosition` has never seen -- a first start, one added since, or
 any start with no checkpoint path configured -- falls back to
 `auto.offset.reset` (`earliest`).
@@ -188,15 +196,12 @@ coordinator keeps measuring against the last report. See
 
 - **Gap visibility over HTTP**: `gap_detected` is a metric but still has
   no HTTP endpoint (the planned `GET /status`, see
-  [observability.md](observability.md)). Consumer lag is not exposed
-  yet either; it is part of the same plan.
+  [observability.md](observability.md)).
 - **Operator-driven replay from an arbitrary point**: a restart already
   resumes correctly on its own. Replaying from further back --
   reprocessing retained history the checkpoint has already moved past --
   is still manual: an operator clears the `kafka_stream_position`
   section from the checkpoint, and the source falls back to
   `auto.offset.reset`.
-- **Registry integration**: calling `EventGate.drop_instance` from
-  deregistration / heartbeat-timeout eviction.
 - **Allocation generations** for shared pools (deterministic
   cross-reporter conflict resolution).

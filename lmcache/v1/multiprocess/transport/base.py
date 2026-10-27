@@ -116,7 +116,10 @@ class RequestClient(Protocol):
 
     @rpc_method
     def free_lookup_locks(
-        self, key: IPCCacheServerKey, tp_size: int
+        self,
+        key: IPCCacheServerKey,
+        tp_size: int,
+        extra_ranges: tuple[tuple[int, int], ...] = (),
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
@@ -134,7 +137,10 @@ class RequestClient(Protocol):
 
     @rpc_method
     def prepare_store(
-        self, key: IPCCacheServerKey, instance_id: int
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        skipped_chunks: tuple[tuple[int, ...], ...] = (),
     ) -> MessagingFuture[PrepareStoreResponse]: ...
 
     @rpc_method
@@ -157,6 +163,11 @@ class RequestClient(Protocol):
 
     @rpc_method
     def get_chunk_size(self) -> MessagingFuture[int]: ...
+
+    @rpc_method
+    def negotiate_chunk_size(
+        self, required_chunk_alignment: int
+    ) -> MessagingFuture[int]: ...
 
     @rpc_method
     def ping(self, instance_id: int | None) -> MessagingFuture[bool]: ...
@@ -241,6 +252,11 @@ class RequestClient(Protocol):
 
     @rpc_method
     def server_module_call(
+        self, request: ServerModuleCallRequest
+    ) -> MessagingFuture[ServerModuleCallResponse]: ...
+
+    @rpc_method
+    def server_module_affinity_call(
         self, request: ServerModuleCallRequest
     ) -> MessagingFuture[ServerModuleCallResponse]: ...
 

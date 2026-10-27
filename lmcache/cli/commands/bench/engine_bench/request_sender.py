@@ -36,9 +36,18 @@ def _normalize_url(engine_url: str) -> str:
 
 
 def _extract_content(chunk: object, completions_mode: bool) -> str:
-    """Return text content from a streaming chunk, or ``""`` if none.
+    """Return non-empty text from a completion or chat streaming chunk.
 
-    Ported from Tensormesh-Benchmark ``streaming_utils.py``.
+    Chat chunks fall back to ``reasoning_content`` and then ``reasoning``
+    when ``content`` is empty. Ported from Tensormesh-Benchmark
+    ``streaming_utils.py``.
+
+    Args:
+        chunk: An OpenAI-compatible streaming response chunk.
+        completions_mode: Whether the chunk uses the legacy completions API.
+
+    Returns:
+        The chunk's text, or an empty string when it contains no text.
     """
     choices = getattr(chunk, "choices", None)
     if not choices:
@@ -55,12 +64,12 @@ def _extract_content(chunk: object, completions_mode: bool) -> str:
     if delta is None:
         return ""
     content = getattr(delta, "content", None)
-    if content is not None:
+    if content:
         return content
     # Fallback for reasoning models
     for attr in ("reasoning_content", "reasoning"):
         fallback = getattr(delta, attr, None)
-        if fallback is not None:
+        if fallback:
             return fallback
     return ""
 
@@ -138,10 +147,20 @@ class RequestSender:
     ) -> RequestResult:
         """Send a single streaming request and return the result.
 
-        Streams the response via SSE, measures TTFT, decode speed, and
-        total latency.  Extracts token counts from server usage reports.
+        Streams the response via SSE, measures TTFT from the first non-empty
+        content or reasoning text, decode speed, and total latency. Extracts
+        token counts from server usage reports.
         After collecting the result, invokes all registered
         ``on_finished`` callbacks.
+
+        Args:
+            request_id: Identifier included in the result and callbacks.
+            messages: Chat messages, or the first message's content as the
+                prompt in completions mode.
+            max_tokens: Maximum number of output tokens requested.
+
+        Returns:
+            Token counts, timings, and success status for this request.
         """
         submit_time = time.time()
         first_token_time = 0.0

@@ -26,7 +26,7 @@ class ExternalConnectorAdapter(ConnectorAdapter):
         Examples:
         - external://host:0/external_log_connector.lmc_external_log_connector/?connector_name=ExternalLogConnector
         """
-        logger.info(f"Creating External connector for URL: {context.url}")
+        logger.info("Creating External connector for URL: %s", context.url)
         logger.warning(
             "External connector is due for deprecation in release v0.5.0. "
             "Please use the Remote Storage Plugin Framework instead."
@@ -67,7 +67,7 @@ class ExternalConnectorAdapter(ConnectorAdapter):
                 local_cpu_backend=context.local_cpu_backend,
                 config=context.config,
             )
-            logger.info(f"Loaded external connector: {module_path}.{connector_name}")
+            logger.info("Loaded external connector: %s.%s", module_path, connector_name)
             return connector
         except ImportError as e:
             raise ImportError(
