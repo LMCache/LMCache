@@ -2,12 +2,15 @@
 """Append a suite's runs to the results file a static page renders.
 
 One JSON line per run: its summary and its check against its own history,
-plus where it ran. The results repo's GitHub Pages site reads this file, so
-CI only ever appends to it. A line, summary shortened::
+plus where it ran and how the page names it (config.toml's ``label`` and
+``desc``), so the page carries no copy of the config. The results repo's
+GitHub Pages site reads this file, so CI only ever appends to it. A line,
+summary shortened::
 
     {"host": "yotta-jap-h200-22", "suite": "nightly", "date": "20261015-011210",
      "build_url": "https://buildkite.com/...", "workload": "agentic",
      "deployment": "vllm_lmcache", "summary": {"ttft_p50": 1.84, ...},
+     "display": {"label": "LMCache, hybrid SWA", "desc": "...", "model": ...},
      "vs_history": {"metrics": {...}, "min_runs": 10, ...},
      "images": {"vllm_source": "pinned", "pinned_since": 1791...}}
 
@@ -49,6 +52,7 @@ def append(report: dict[str, Any], path: Path, host: str, build_url: str | None)
             "workload": r["workload"],
             "deployment": r["deployment"],
             "summary": r["summary"],
+            "display": r["display"],
             "vs_history": r.get("vs_history"),
             "images": {k: images.get(k) for k in IMAGE_KEYS},
         }

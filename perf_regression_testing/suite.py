@@ -40,6 +40,7 @@ from perf_regression_testing.runner.config import (
     PKG_DIR,
     HostSetupError,
     check_host,
+    display,
     load,
     missing_models,
     resolve,
@@ -260,20 +261,38 @@ def suite(name: str, out: Path, deployments: list[str] | None = None) -> int:
             spec = resolve(cfg, w, d)
             run_dir = out / f"{stamp}-{w}-{d}"
             model = cfg["deployments"][d]["model"]
+            shown = display(cfg, d, plan["gate"])
             skip = None
             if spec.image_target == "mooncake" and mooncake_error:
                 skip = f"no mooncake image: {mooncake_error}"
             elif model in model_errors:
                 skip = f"no {model} snapshot: {model_errors[model]}"
             if skip:
-                summary = {"invalid": [skip]}
-                rep["runs"].append({"workload": w, "deployment": d, "summary": summary})
+                # The page keys a run's setup on these, as run() records them.
+                summary = {
+                    "model": spec.served_name,
+                    "concurrency": spec.aiperf_args["concurrency"],
+                    "invalid": [skip],
+                }
+                rep["runs"].append(
+                    {
+                        "workload": w,
+                        "deployment": d,
+                        "summary": summary,
+                        "display": shown,
+                    }
+                )
                 codes.append(EXIT_SUITE_INVALID)
                 continue
             logger.info("run %s/%s", w, d)
             code = run(spec, run_dir, by_target[spec.image_target], aiperf)
             summary = json.loads((run_dir / "summary.json").read_text())
-            entry = {"workload": w, "deployment": d, "summary": summary}
+            entry = {
+                "workload": w,
+                "deployment": d,
+                "summary": summary,
+                "display": shown,
+            }
             if not summary["invalid"]:
                 record = {
                     "run_id": run_dir.name,

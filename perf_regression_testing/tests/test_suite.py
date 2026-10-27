@@ -82,6 +82,17 @@ def test_missing_models_are_downloaded_and_a_failed_one_skips_its_pairs(
     assert rep["prune_error"] == "root-owned snapshot"
     skipped = [r for r in rep["runs"] if r["deployment"] == "vllm_lmcache_ssm"]
     assert "disk full" in skipped[0]["summary"]["invalid"][0]
+    # Run or skipped, each run names itself as config.toml does, for the page.
+    shown = {r["deployment"]: r["display"] for r in rep["runs"]}
+    assert shown["vllm_simple"] == {
+        "label": "vLLM simple",
+        "desc": "vLLM SimpleCPUOffloadConnector · CPU 1500 GiB",
+        "model": "Trinity-Large-Thinking-FP8-Block",
+        "gated": False,
+    }
+    assert shown["vllm_lmcache_ssm"]["model"] == "Qwen3.8-Flash-Next-FP8"
+    assert skipped[0]["summary"]["model"] == "qwen3p8"
+    assert skipped[0]["summary"]["concurrency"] == 230
     root = Path(suite.load()["host"]["root"])
     history = (root / "prt-results" / "history.jsonl").read_text().splitlines()
     assert [json.loads(h)["suite"] for h in history] == ["weekly"]

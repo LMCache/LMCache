@@ -151,9 +151,13 @@ invalid_log_patterns = ["unhealthy"]
 # Service fields: `command` + `args` (a table value is passed as JSON), `env`,
 # `ready_url`, and `scratch` dirs that are mounted, checked for `min_free_gb`,
 # and wiped before and after the run.
+# `label` and `desc` (connector · tier sizes) are what the results page shows;
+# publish.py records them with each run, so edit them with the tiers.
 
 [deployments.vllm_lmcache]
 model = "trinity"
+label = "LMCache, hybrid SWA"
+desc = "LMCache MP server · CPU 1500 GiB + disk 6000 GiB"
 image_target = "lmcache"
 
 [deployments.vllm_lmcache.vllm_args]
@@ -201,6 +205,8 @@ eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 
 # (mamba_cache_mode "align") and LMCache needs chunk-size equal to that block
 # size: 1600 at TP4 with fp8 KV (vLLM's error message, build 28).
 model = "qwen38"
+label = "LMCache, hybrid SSM"
+desc = "LMCache MP server · CPU 800 GiB + disk 1500 GiB"
 image_target = "lmcache"
 
 [deployments.vllm_lmcache_ssm.vllm_args]
@@ -241,6 +247,8 @@ eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 
 
 [deployments.vllm_native]
 model = "trinity"
+label = "vLLM native"
+desc = "vLLM OffloadingConnector · CPU 1500 GiB + disk 6000 GiB"
 # Both tiers live in the vLLM workers. CPU tier 1500 GiB total over the TP
 # ranks. vLLM's fs tier has no capacity limit, so cap_gb freezes the dir at
 # 6000 GiB (runner/disk_cap.py): full means no new entries, not eviction.
@@ -258,6 +266,8 @@ kv-transfer-config = '{"kv_connector":"OffloadingConnector","kv_role":"kv_both",
 
 [deployments.vllm_simple]
 model = "trinity"
+label = "vLLM simple"
+desc = "vLLM SimpleCPUOffloadConnector · CPU 1500 GiB"
 # vLLM SimpleCPUOffloadConnector. Its offload pool is one tier, CPU or disk,
 # never both: this runs CPU, 1500 GiB total over the TP ranks, and no disk.
 image_target = "serving"
@@ -267,6 +277,8 @@ kv-transfer-config = '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_
 
 [deployments.vllm_simple_l2]
 model = "trinity"
+label = "vLLM simple L2"
+desc = "vLLM SimpleCPUOffloadConnector · disk 6000 GiB, page cache 1500 GiB"
 # SimpleCPUOffloadConnector's disk backend, 6000 GiB (750 GiB per TP rank),
 # read through the page cache. That cache is the DRAM tier: vllm_memory_gb
 # caps the container's memory, page cache included, at 1500 GiB plus the
@@ -280,6 +292,8 @@ kv-transfer-config = '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_
 
 [deployments.vllm_mooncake]
 model = "trinity"
+label = "Mooncake"
+desc = "Mooncake store · CPU 1500 GiB + disk 6000 GiB"
 # Tuned through Mooncake's own config only. Standalone-store layout:
 # mooncake_client owns the CPU pool and SSD tier. Budget 1500 GiB pool, 6000
 # GiB disk, split over four clients since one client writes SSD from a single

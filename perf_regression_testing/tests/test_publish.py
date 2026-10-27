@@ -15,12 +15,14 @@ REPORT = {
             "workload": "agentic",
             "deployment": "vllm_native",
             "summary": {"invalid": [], "ttft_p50": 1.6},
+            "display": {"label": "vLLM native", "gated": False},
             "vs_history": {"metrics": {}, "min_runs": 10},
         },
         {
             "workload": "agentic",
             "deployment": "vllm_mooncake",
             "summary": {"invalid": ["no mooncake image: gh failed"]},
+            "display": {"label": "Mooncake", "gated": False},
         },
     ],
 }
@@ -36,6 +38,7 @@ def test_each_run_becomes_one_line_and_lines_accumulate(tmp_path: Path) -> None:
     assert native["host"] == "h200-22" and native["build_url"] == "https://bk/12"
     assert native["suite"] == "weekly" and native["date"] == "20261015-181909"
     assert native["summary"]["ttft_p50"] == 1.6
+    assert native["display"] == {"label": "vLLM native", "gated": False}
     assert native["vs_history"] == {"metrics": {}, "min_runs": 10}
     assert native["images"]["mooncake_commit"] == "3aa0f716"
     assert "serving" not in native["images"]

@@ -149,6 +149,27 @@ def missing_models(cfg: dict[str, Any], deployments: list[str]) -> list[str]:
     return [n for n in names if not Path(cfg["models"][n]["done"]).is_file()]
 
 
+def display(cfg: dict[str, Any], deployment: str, gated: bool) -> dict[str, Any]:
+    """Return what the results page shows for a run of ``deployment``.
+
+    Args:
+        cfg: Parsed config from :func:`load`.
+        deployment: Key under ``[deployments]``.
+        gated: Whether the run's suite fails on a regression.
+
+    Returns:
+        The deployment's ``label`` and ``desc``, the model's repo name, and
+        ``gated``.
+    """
+    d = cfg["deployments"][deployment]
+    return {
+        "label": d["label"],
+        "desc": d["desc"],
+        "model": cfg["models"][d["model"]]["repo"].split("/")[-1],
+        "gated": gated,
+    }
+
+
 def cli_args(args: dict[str, Any]) -> list[str]:
     """Turn an args table into command-line arguments.
 
