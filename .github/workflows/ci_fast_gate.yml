@@ -1,0 +1,38 @@
+name: Fast PR checks
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  checks: read
+  statuses: read
+  pull-requests: read
+
+jobs:
+  gate:
+    name: Wait for Code Quality and DCO
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      # Gate changes in a PR are exercised by regression tests, not used to
+      # decide that same PR's admission. Pin the source to its upstream base.
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          sparse-checkout: .buildkite/k3_tests/common_scripts
+      - name: Wait for the current PR head
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          script=.buildkite/k3_tests/common_scripts/wait-for-required-checks.sh
+          if [[ ! -f "$script" ]]; then
+            echo '::error::The trusted base has no gate script. Land the shared script before enabling PR orchestration.'
+            exit 1
+          fi
+          bash "$script" "$REPOSITORY" "$PR_NUMBER" "$HEAD_SHA"

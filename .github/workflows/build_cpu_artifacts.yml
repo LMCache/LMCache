@@ -5,19 +5,6 @@ name: Build CPU Artifacts
 
 on:
     workflow_call:
-    pull_request:
-        branches:
-            - dev
-            - "release-**"
-        paths:
-            - 'setup.py'
-            - 'pyproject.toml'
-            - 'csrc/**'
-            - 'requirements/common.txt'
-            - 'requirements/build.txt'
-            - 'lmcache/__init__.py'
-            - '.github/workflows/build_cpu_artifacts.yml'
-            - '.github/actions/build-artifacts/action.yml'
 
 env:
     LC_ALL: en_US.UTF-8
@@ -28,7 +15,7 @@ defaults:
 
 # Cancel stale runs per ref.
 concurrency:
-    group: ${{ github.workflow }}-${{ github.ref }}
+    group: build-cpu-${{ github.workflow }}-${{ github.ref }}
     cancel-in-progress: true
 
 permissions:
