@@ -1884,8 +1884,9 @@ class LMCacheEngine:
                 # Broadcast tensor data
                 raw_tensor = memory_obj.raw_tensor
                 assert raw_tensor is not None
+                # worker_id is 0 on every DP rank; use the device holding the KV cache.
                 tensor_to_broadcast = raw_tensor.to(
-                    f"{torch_device_type}:{self.metadata.worker_id}"
+                    f"{torch_device_type}:{torch_dev.current_device()}"
                 )
                 self.broadcast_fn(tensor_to_broadcast, self.metadata.first_rank)
 
@@ -1924,7 +1925,7 @@ class LMCacheEngine:
 
                 # Create tensor and receive data
                 metadata = MemoryObjMetadata.from_dict(metadata_dict)
-                local_rank = self.metadata.worker_id % torch_dev.device_count()
+                local_rank = torch_dev.current_device()
                 raw_tensor = torch.empty(
                     torch.Size([metadata.get_size()]),
                     dtype=torch.uint8,
