@@ -87,7 +87,7 @@ attach memcheck, timeout and logging are host-local settings.
 | `buckets_per_level` | `[200003, 200009, 200017, 200023, 200029]`; one to eight positive level sizes |
 | `visibility_mode` | `x86_clflushopt_bulk_v1` (default): flush/invalidate payload cache lines with CLFLUSHOPT and one SFENCE per batch. `x86_clflush_64b_v1`: use CLFLUSH and MFENCE per payload range. Metadata synchronization is unchanged. With payload maintenance enabled, bulk mode reduces fence overhead and is generally faster for large batches; `skip_payload_flush=true` skips this work in both modes. |
 | `skip_payload_flush` | `false` (default): flush payload after GPU-to-DAX DMA and refresh it before DAX-to-GPU DMA. `true`: skip both operations, reducing CPU cache-maintenance overhead and generally improving effective payload transfer performance; DMA bytes and completion synchronization are unchanged. Recommended `true` to fully utilize the media’s transfer performance once all prerequisites are satisfied, including qualified DDIO non-allocating writes, UC coverage of the entire payload on every host.
-| `reformat` | `false` (default). Set `"reformat": true` in this JSON on participant 0 only to erase existing cache metadata or layout. Ensure that Stop all participants first, then start participant 0 with `"reformat": true` and wait for initialization before starting peers. Active peers are not detected, so user ensure all participants are terminated. |
+| `reformat` | `false` (default). Set `"reformat": true` in this JSON on participant 0 only to erase existing cache metadata or layout. Stop all participants first, then start participant 0 with `"reformat": true`. At startup it clears the metadata ready marker, so peers started afterwards wait until participant 0 formats at its first model registration. Peers already attached are not detected, so ensure all participants are terminated before restarting participant 0. |
 | `memcheck_on_attach` | `false` (default). Set to `true` to check metadata integrity before reuse after an abnormal shutdown or when corruption is suspected. Scans the full index while all participants have paused cache operations; does not repair corruption. Success: no dedicated check-result message; attach continues and logs `Device-DAX model payload geometry: ...`. Failure: attach is rejected with `RuntimeError: DAX-Coordinated L1 region requires recovery before attach`; no bucket/slot details are reported. |
 | `per_transfer_logging` | `false`; completed STORE/RETRIEVE bytes, latency and GB/s |
 | `read_view_cache_max_entries` | `8192`; host-local descriptor cache limit. `0` disables retention without changing payload capacity. |
@@ -108,7 +108,9 @@ REGISTER_KV_CACHE
 ```
 
 Participant 0 initializes metadata if it is not already formatted, or explicitly
-reformats it when `reformat=true`.
+reformats it when `reformat=true`. With `reformat=true`, participant 0 also
+clears the superblock ready marker when its MP process starts, before any model
+is registered, so a peer cannot attach to the old metadata in between.
 Other participants retry attachment on subsequent requests until
 initialization completes.
 

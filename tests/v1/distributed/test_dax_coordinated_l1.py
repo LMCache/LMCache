@@ -2733,3 +2733,26 @@ def test_reformat_discards_old_keys_once_and_preserves_new_keys(
     with closing(_client(replace(reset_config, reformat=False))) as client:
         assert client.initialize_model_layouts(_MODEL, 2, 256, [_layout()])
         assert client.reserve_read([new_key])[new_key].result == Raw.SUCCESS
+
+
+def test_reformat_blocks_peers_before_participant_0_registers(
+    emulated_devices: tuple,
+) -> None:
+    """Starting a reformat client hides old metadata from peers until it formats."""
+    placement, _, _ = emulated_devices
+    placement = replace(placement, kv_world_size=2)
+    config = _config(placement)
+    key = _key(0, 2, chunk=1)
+    with closing(_client(config)) as client:
+        assert client.initialize_model_layouts(_MODEL, 2, 256, [_layout()])
+        _payload_values(client.reserve_write([key], _layout()), {key: 11})
+        _assert_success(client.finish_write([key]))
+    reset_config = replace(config, region_epoch=2, reformat=True)
+    with closing(_client(reset_config)) as owner:
+        peer_config = replace(reset_config, participant_id=1, reformat=False)
+        with closing(_client(peer_config)) as peer:
+            assert not peer.initialize_model_layouts(_MODEL, 2, 256, [_layout()])
+        assert owner.initialize_model_layouts(_MODEL, 2, 256, [_layout()])
+        with closing(_client(peer_config)) as peer:
+            assert peer.initialize_model_layouts(_MODEL, 2, 256, [_layout()])
+            assert peer.reserve_read([key])[key].result == Raw.NOT_FOUND

@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 # Standard
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 import ctypes
@@ -128,6 +130,53 @@ def _validate_mapping_ranges(
                 "DAX-Coordinated L1 metadata and payload offset ranges overlap"
             )
         previous.append((offset, offset + size))
+
+
+@contextmanager
+def map_metadata_header(
+    dax_coordinated_l1_config: DaxCoordinatedL1Config,
+) -> Iterator[int]:
+    """Map the first Device-DAX page of the common metadata arena.
+
+    The page is mapped before the engine KV world size is known, so only
+    ``rank_placement.regions[0]`` and its metadata offset are used.
+
+    Args:
+        dax_coordinated_l1_config: Config whose first region holds the metadata.
+
+    Yields:
+        The local address of the metadata header, valid inside the context.
+
+    Raises:
+        ValueError: The metadata offset is unset, misaligned or out of range.
+        OSError: The device cannot be opened or mapped.
+    """
+    region = dax_coordinated_l1_config.rank_placement.regions[0]
+    if region.metadata_offset_bytes is None:
+        raise ValueError("rank_placement regions[0] requires metadata_offset_bytes")
+    path = region.devdax_path
+    offset = int(region.metadata_offset_bytes)
+    size = _read_devdax_alignment(path)
+    _validate_mapping_ranges([DevDaxPayloadMapping(path, offset, size)], size, True)
+    fd = os.open(path, os.O_RDWR)
+    try:
+        mapping = mmap.mmap(
+            fd,
+            size,
+            flags=mmap.MAP_SHARED,
+            prot=mmap.PROT_READ | mmap.PROT_WRITE,
+            offset=offset,
+        )
+    finally:
+        os.close(fd)
+    try:
+        buffer = (ctypes.c_uint8 * size).from_buffer(mapping)
+        try:
+            yield ctypes.addressof(buffer)
+        finally:
+            del buffer
+    finally:
+        mapping.close()
 
 
 @dataclass(frozen=True)

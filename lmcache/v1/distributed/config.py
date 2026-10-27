@@ -254,6 +254,7 @@ class DaxCoordinatedL1Config:
 
     reformat: bool = False
     """Reformat once per client after runtime registration, participant 0 only.
+    The ready marker is cleared at client startup so later peers wait.
     All participants must be stopped before restarting with this option.
     Leaving it enabled reformats again on the next process start.
     """

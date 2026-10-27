@@ -11,6 +11,7 @@ from functools import lru_cache
 from hashlib import sha256
 from threading import RLock
 from typing import NoReturn, Protocol
+import ctypes
 
 # First Party
 from lmcache.integration.vllm.utils import get_size_bytes
@@ -39,6 +40,7 @@ from lmcache.v1.distributed.dax_coordinated_l1.devdax_model_profile import (
 )
 from lmcache.v1.distributed.dax_coordinated_l1.devdax_region import (
     DaxCoordinatedL1Region,
+    map_metadata_header,
 )
 from lmcache.v1.distributed.dax_coordinated_l1.devdax_types import (
     DaxCoordinatedL1RawResult as RawResult,
@@ -56,6 +58,8 @@ try:
         DevDaxBucketIndexCore,
         dax_coordinated_l1_is_formatted,
         dax_coordinated_l1_parameters,
+        dax_coordinated_l1_publish,
+        dax_coordinated_l1_refresh,
         format_dax_coordinated_l1_region,
     )
 except ModuleNotFoundError as exc:
@@ -75,8 +79,14 @@ except ModuleNotFoundError as exc:
     dax_coordinated_l1_parameters = _native_extension_unavailable
     dax_coordinated_l1_is_formatted = _native_extension_unavailable
     format_dax_coordinated_l1_region = _native_extension_unavailable
+    dax_coordinated_l1_publish = _native_extension_unavailable
+    dax_coordinated_l1_refresh = _native_extension_unavailable
 
 logger = init_logger(__name__)
+
+# Superblock.magic is the first eight bytes of the metadata arena; peers attach
+# only after reading the ready value there (csrc/dax_coordinated_l1/layout.h).
+_SUPERBLOCK_MAGIC_BYTES = 8
 
 
 @lru_cache(maxsize=len(RawResult))
@@ -137,11 +147,22 @@ class DaxCoordinatedL1Client:
     ) -> None:
         """Defer payload mapping until engine KV world size is registered.
 
+        With ``reformat``, participant 0 clears the shared ready magic here so
+        peers that start later wait instead of attaching to old metadata. The
+        full format still happens at the first model registration.
+
         Args:
             dax_coordinated_l1_config: Participant, region, and qualification contract.
             memory_config: Device path, range size, and payload alignment.
+
+        Raises:
+            ValueError: The reformat metadata range is invalid.
+            OSError: The reformat metadata header cannot be mapped.
+            RuntimeError: The native extension is unavailable for reformat.
         """
         self._reformat_pending = dax_coordinated_l1_config.reformat
+        if self._reformat_pending:
+            self._invalidate_metadata(dax_coordinated_l1_config)
         self._config = dax_coordinated_l1_config
         self._rank_placement: DevDaxRankPlacement | None = None
         self._closed = False
@@ -161,6 +182,22 @@ class DaxCoordinatedL1Client:
         ] = OrderedDict()
         self._read_view_hits = 0
         self._read_view_misses = 0
+
+    @staticmethod
+    def _invalidate_metadata(config: DaxCoordinatedL1Config) -> None:
+        """Clear and publish the ready magic before the deferred reformat."""
+        logger.warning(
+            "Reformatting DAX-Coordinated L1 metadata: region=%s epoch=%d; "
+            "existing cache entries are discarded and peers wait until "
+            "participant 0 registers the model. Peers already attached must be "
+            "stopped; this is not verified by the runtime.",
+            config.region_id,
+            config.region_epoch,
+        )
+        with map_metadata_header(config) as address:
+            dax_coordinated_l1_refresh(address, _SUPERBLOCK_MAGIC_BYTES)
+            ctypes.memset(address, 0, _SUPERBLOCK_MAGIC_BYTES)
+            dax_coordinated_l1_publish(address, _SUPERBLOCK_MAGIC_BYTES)
 
     @property
     def initialized(self) -> bool:
@@ -649,14 +686,6 @@ class DaxCoordinatedL1Client:
                     self._config.participant_id,
                 )
                 return False
-            if self._reformat_pending:
-                logger.warning(
-                    "Reformatting DAX-Coordinated L1 metadata: region=%s epoch=%d; "
-                    "existing cache entries are discarded. All other participants "
-                    "must be stopped; this is not verified by the runtime.",
-                    self._config.region_id,
-                    self._config.region_epoch,
-                )
             format_dax_coordinated_l1_region(
                 region.base_address, region.size, parameters
             )
