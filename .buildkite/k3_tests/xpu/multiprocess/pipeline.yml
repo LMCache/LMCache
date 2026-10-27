@@ -179,6 +179,30 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
+      - label: ":xpu: restart_recovery / engine_driven / shm"
+        command: .buildkite/k3_tests/xpu/multiprocess/run.sh restart_recovery
+        env:
+          MODEL: "Qwen/Qwen3-8B"
+          LMCACHE_MP_TRANSFER_MODE: "engine_driven"
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          L1_USE_LAZY: "false"
+          # Old and new SHM mappings can coexist until worker re-registration.
+          CPU_BUFFER_SIZE: "8"
+          ENFORCE_EAGER: "1"
+          VLLM_USE_STANDALONE_COMPILE: "0"
+          BATCH_INVARIANT: "0"
+          ASYNC_SCHEDULING: "1"
+          GPU_MEMORY_UTILIZATION: "0.85"
+          MAX_MODEL_LEN: "8192"
+          CHUNK_SIZE: "256"
+          # Engine-driven status lacks KV sizes; BF16 Qwen3-8B uses 147456 B/token.
+          RR_TOKENS_PER_GB: "7281"
+          MAX_WAIT_SECONDS: "600"
+        timeout_in_minutes: 30
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
       - label: ":xpu: vllm_bench"
         command: |
           export LMCACHE_MP_TRANSFER_MODE="engine_driven"
