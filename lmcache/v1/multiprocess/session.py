@@ -1,20 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Session and SessionManager for tracking per-request state
+Session and SessionManager for tracking per-request token state
 in the multiprocess cache server.
+
+A Session holds only a request's token sequence and the chunk hashes derived
+from it. State owned by a specific feature — for example the read locks a
+lookup acquired, see :mod:`lmcache.v1.multiprocess.lookup_ledger` — lives with
+that feature instead, so each owner decides when its own state is released.
 """
 
 # Standard
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Optional, overload
+from typing import Any, overload
 import threading
 import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE, num_packed_tokens
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.periodic_thread import (
@@ -46,17 +49,6 @@ class Session:
     chunk_hashes: list = field(default_factory=list)
     last_prefix_hash: Any = None
     num_chunks_processed: int = 0
-    created_at: float = field(default_factory=time.time)
-    lookup_ipc_key: Optional[IPCCacheServerKey] = None
-    prefetch_hit_chunks: int = -1
-    prefetch_locked_gids: tuple = ()
-    prefetch_group_windows: tuple[int, ...] = ()
-    _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
-    extras: dict[str, Any] = field(default_factory=dict)
-    _lookup_generation: int = field(default=0, repr=False)
-    _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
-        default_factory=set, repr=False
-    )
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def set_tokens(self, packed_token_ids: bytes) -> None:
@@ -151,119 +143,18 @@ class Session:
             self.chunk_hashes.append(h)
             self.num_chunks_processed += 1
 
-    def begin_lookup(
-        self,
-        key: IPCCacheServerKey,
-        group_windows: tuple[int, ...],
-    ) -> None:
-        """Record a new lookup and reset its per-lookup release state."""
-        with self._lock:
-            self.lookup_ipc_key = key
-            self.prefetch_hit_chunks = -1
-            self.prefetch_locked_gids = ()
-            self.prefetch_group_windows = group_windows
-            self._lookup_generation += 1
-            self._failed_retrieve_releases.clear()
-            self._prefetch_owners.clear()
 
-    def record_prefetch_result(
-        self,
-        hit_chunks: int,
-        locked_gids: tuple[int, ...],
-        l1_owners: dict[ObjectKey, int] | None = None,
-    ) -> None:
-        """Record the lock set acquired by the current lookup."""
-        with self._lock:
-            self.prefetch_hit_chunks = hit_chunks
-            self.prefetch_locked_gids = locked_gids
-            self._prefetch_owners = dict(l1_owners) if l1_owners is not None else {}
+@dataclass
+class _SessionEntry:
+    """A managed session together with the manager's own bookkeeping.
 
-    def get_prefetch_owners(self) -> dict[ObjectKey, int]:
-        """Snapshot the L1 owners whose read locks this session's lookup retained."""
-        with self._lock:
-            return self._prefetch_owners.copy()
+    Attributes:
+        session: The tracked session.
+        created_at: Creation time, used to expire idle sessions.
+    """
 
-    def prepare_failed_retrieve_release(
-        self,
-        key: IPCCacheServerKey,
-    ) -> tuple[int, tuple[int, ...], tuple[int, ...], int] | None:
-        """Return a stable snapshot for a failed worker's lock release."""
-        if key.worker_id is None:
-            return None
-
-        with self._lock:
-            lookup_key = self.lookup_ipc_key
-            hit_chunks = self.prefetch_hit_chunks
-            if lookup_key is None or hit_chunks < 0:
-                return None
-
-            same_lookup = (
-                key.model_name == lookup_key.model_name
-                and key.world_size == lookup_key.world_size
-                and key.token_bytes == lookup_key.token_bytes
-                and key.cache_salt == lookup_key.cache_salt
-                and key.start >= lookup_key.start
-                and key.end <= lookup_key.end
-            )
-            if not same_lookup:
-                return None
-
-            return (
-                hit_chunks,
-                self.prefetch_locked_gids,
-                self.prefetch_group_windows,
-                self._lookup_generation,
-            )
-
-    def claim_failed_retrieve_release(
-        self,
-        instance_id: int,
-        key: IPCCacheServerKey,
-        lookup_generation: int,
-    ) -> bool:
-        """Atomically claim one failed worker's prepared lock release.
-
-        A scheduler lookup acquires read locks for every KV worker (or one
-        reader count per TP worker for MLA), while RETRIEVE responses are
-        per worker instance.  When a worker has lost its GPU registration,
-        only that instance's share may be released.  Claiming after key
-        resolution makes duplicate failed RETRIEVEs idempotent without
-        consuming the claim when resolution itself fails.
-
-        ``False`` is also returned when the session cannot prove ownership of
-        the requested range.  In that case it is safer to leave the lock to
-        its TTL than to decrement a concurrent request's anonymous L1 count.
-        """
-        if key.worker_id is None:
-            return False
-
-        with self._lock:
-            lookup_key = self.lookup_ipc_key
-            if lookup_key is None or lookup_generation != self._lookup_generation:
-                return False
-
-            same_lookup = (
-                key.model_name == lookup_key.model_name
-                and key.world_size == lookup_key.world_size
-                and key.token_bytes == lookup_key.token_bytes
-                and key.cache_salt == lookup_key.cache_salt
-                and key.start >= lookup_key.start
-                and key.end <= lookup_key.end
-            )
-            if not same_lookup:
-                return False
-
-            owner = (
-                lookup_generation,
-                instance_id,
-                key.worker_id,
-                key.start,
-                key.end,
-            )
-            if owner in self._failed_retrieve_releases:
-                return False
-            self._failed_retrieve_releases.add(owner)
-            return True
+    session: Session
+    created_at: float = field(default_factory=time.time)
 
 
 class SessionManager:
@@ -280,11 +171,11 @@ class SessionManager:
     ) -> None:
         self._hasher = hasher
         self._ttl = ttl
-        self._sessions: dict[str, Session] = {}
+        self._entries: dict[str, _SessionEntry] = {}
         self._lock = threading.Lock()
         #: Callbacks invoked for every destroyed session, so owners of
-        #: per-request state (e.g. entries in ``Session.extras``) can release
-        #: it however the request ended. See :meth:`_notify_destroyed`.
+        #: per-request state can release it however the request ended.
+        #: See :meth:`_notify_destroyed`.
         self.destroy_listeners: list[Callable[[Session], None]] = []
         self._cleanup_interval = cleanup_interval
         self._cleanup_thread: PeriodicThread | None = None
@@ -302,19 +193,22 @@ class SessionManager:
             The Session for this request_id.
         """
         with self._lock:
-            if request_id not in self._sessions:
-                self._sessions[request_id] = Session(
-                    request_id=request_id, hasher=self._hasher
+            entry = self._entries.get(request_id)
+            if entry is None:
+                entry = _SessionEntry(
+                    session=Session(request_id=request_id, hasher=self._hasher)
                 )
+                self._entries[request_id] = entry
                 logger.debug("Created session for request_id=%s", request_id)
-            return self._sessions[request_id]
+            return entry.session
 
-    def get(self, request_id: str) -> Optional[Session]:
+    def get(self, request_id: str) -> Session | None:
         """Return an existing session without creating ownership state."""
         with self._lock:
-            return self._sessions.get(request_id)
+            entry = self._entries.get(request_id)
+            return entry.session if entry is not None else None
 
-    def remove(self, request_id: str) -> Optional[Session]:
+    def remove(self, request_id: str) -> Session | None:
         """Remove a session by request_id.
 
         Args:
@@ -324,13 +218,12 @@ class SessionManager:
             The removed session, or None if no session was found.
         """
         with self._lock:
-            if request_id not in self._sessions:
+            entry = self._entries.pop(request_id, None)
+            if entry is None:
                 return None
-            session = self._sessions[request_id]
-            del self._sessions[request_id]
             logger.debug("Removed session for request_id=%s", request_id)
-        self._notify_destroyed(session)
-        return session
+        self._notify_destroyed(entry.session)
+        return entry.session
 
     def cleanup_expired(self) -> int:
         """Remove sessions that have exceeded their TTL.
@@ -339,16 +232,15 @@ class SessionManager:
             Number of sessions removed.
         """
         now = time.time()
-        expired: list[Session] = []
+        expired: list[_SessionEntry] = []
         with self._lock:
-            for session in self._sessions.values():
-                if now - session.created_at > self._ttl:
-                    expired.append(session)
-            for session in expired:
-                del self._sessions[session.request_id]
+            for entry in list(self._entries.values()):
+                if now - entry.created_at > self._ttl:
+                    expired.append(entry)
+                    del self._entries[entry.session.request_id]
 
-        for session in expired:
-            self._notify_destroyed(session)
+        for entry in expired:
+            self._notify_destroyed(entry.session)
         if expired:
             logger.info("Cleaned up %d expired sessions", len(expired))
         return len(expired)
@@ -379,7 +271,7 @@ class SessionManager:
             Number of currently tracked sessions.
         """
         with self._lock:
-            return len(self._sessions)
+            return len(self._entries)
 
     def close(self) -> None:
         """Stop the background cleanup thread and unregister it."""

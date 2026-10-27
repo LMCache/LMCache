@@ -102,7 +102,8 @@ class RetrieveMixin:
 
     if TYPE_CHECKING:
         # State owned by BlendModule.__init__; declared so the mixin type-checks.
-        UNRETRIEVED_KEYS_EXTRA: str
+        unretrieved_locks: dict[str, dict[str, Any]]
+        sparse_l1_owners: dict[str, dict[ObjectKey, int]]
         _ctx: "MPCacheServerContext"
         _event_bus: Any
         _transfer_module: "LMCacheDrivenTransferModule"
@@ -749,22 +750,15 @@ class RetrieveMixin:
                     f"slot_bound={slot_bound}",
                 )
         # L2 opt: take the lookup's obj_keys stash (once; later calls
-        # re-resolve). ``get``, not ``get_or_create``: a retrieve after
-        # session end must not recreate ownership state.
-        session = self._ctx.session_manager.get(key.request_id)
-        _stash = (
-            session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
-            if session is not None
-            else None
-        )
+        # re-resolve). The stash is owned by the module, not by the session,
+        # so a retrieve after session end still finds it.
+        _stash = self.unretrieved_locks.pop(key.request_id, None)
         cached = _stash["per_hash"] if _stash else None
         stash_read_locks = _stash["read_locks"] if _stash else 1
         l1_owners = (
             _stash.get("l1_owners")
             if _stash
-            else session.extras.get("cb.sparse_l1_owners")
-            if session
-            else None
+            else self.sparse_l1_owners.get(key.request_id)
         )
         if cached is not None and all(r.hash in cached for r in cb_match_result):
             # The lookup cached all-ranks obj keys (group-major, rank-minor);

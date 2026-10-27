@@ -20,7 +20,8 @@ from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.session import SessionManager
+from lmcache.v1.multiprocess.lookup_ledger import LookupLockLedger
+from lmcache.v1.multiprocess.session import Session, SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
@@ -233,6 +234,10 @@ class MPCacheServerContext:
         self._session_manager = SessionManager(
             self._token_hasher, ttl=session_ttl_seconds
         )
+        self._lookup_ledger = LookupLockLedger()
+        # An abandoned request never sends END_SESSION, so its lock record is
+        # dropped with the session it belongs to.
+        self._session_manager.destroy_listeners.append(self._release_lookup_locks)
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry()
 
@@ -242,6 +247,14 @@ class MPCacheServerContext:
         """
         self._session_manager.close()
         self._storage_manager.close()
+
+    def _release_lookup_locks(self, session: Session) -> None:
+        """Drop the lock record of a request whose session is destroyed.
+
+        Args:
+            session: The session that was just destroyed.
+        """
+        self._lookup_ledger.release(session.request_id)
 
     @property
     def chunk_size(self) -> int:
@@ -368,14 +381,18 @@ class MPCacheServerContext:
             request_id: Request whose lookup acquired the read locks.
 
         Raises:
-            ValueError: A multi-L1 retrieve has no live lookup session.
+            ValueError: A multi-L1 retrieve has no live lookup record.
         """
         if not self._storage_manager.is_multi_l1:
             return None
-        session = self._session_manager.get(request_id)
-        if session is None:
-            raise ValueError("Multi-L1 retrieve requires a live prefetch session")
-        return session.get_prefetch_owners()
+        if self._lookup_ledger.lock_state(request_id) is None:
+            raise ValueError("Multi-L1 retrieve requires a live prefetch record")
+        return self._lookup_ledger.get_prefetch_owners(request_id)
+
+    @property
+    def lookup_ledger(self) -> LookupLockLedger:
+        """The ledger recording which keys each request's lookup locked."""
+        return self._lookup_ledger
 
     @property
     def token_hasher(self) -> TokenHasher:
@@ -418,8 +435,7 @@ class MPCacheServerContext:
         """
         session = self.session_manager.get_or_create(key.request_id)
         session.set_tokens(key.token_bytes)
-        if session.lookup_ipc_key is None:
-            session.lookup_ipc_key = key.no_worker_id_version()
+        self._lookup_ledger.ensure(key.request_id, key)
         chunk_hashes = [
             TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
         ]
@@ -466,6 +482,9 @@ class MPCacheServerContext:
             self._token_hasher, ttl=self._session_ttl_seconds
         )
         self._session_manager.destroy_listeners.extend(destroy_listeners)
+        # Group windows and hit lengths are chunk-sized, so a rebind
+        # invalidates every recorded lookup.
+        self._lookup_ledger.clear()
 
 
 def _round_up_to_multiple(value: int, multiple: int) -> int:

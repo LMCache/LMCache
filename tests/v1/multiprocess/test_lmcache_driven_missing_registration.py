@@ -15,6 +15,10 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_object_keys,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.lookup_ledger import (
+    LookupLockLedger,
+    LookupLockState,
+)
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
@@ -144,9 +148,9 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
     lookup_key = _cache_key(
         world_size=world_size, worker_id=None, request_id=request_id
     )
-    session = sessions.get_or_create(request_id)
-    session.begin_lookup(lookup_key, (-1,))
-    session.record_prefetch_result(2, (0,))
+    ledger = LookupLockLedger()
+    ledger.begin_lookup(request_id, lookup_key, (-1,))
+    ledger.record_prefetch_result(request_id, 2, (0,))
 
     storage = _CountingStorageManager()
     layout_registry = MagicMock()
@@ -158,6 +162,7 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
         chunk_size=hasher.chunk_size,
         token_hasher=hasher,
         session_manager=sessions,
+        lookup_ledger=ledger,
         layout_desc_registry=layout_registry,
         storage_manager=storage,
     )
@@ -230,9 +235,10 @@ def test_cleanup_exception_does_not_suppress_terminal_false() -> None:
         return_value=None
     )
     module._ctx = MagicMock()
-    session = MagicMock()
-    session.prepare_failed_retrieve_release.return_value = (2, (0,), (-1,), 7)
-    module._ctx.session_manager.get.return_value = session
+    ledger = MagicMock()
+    ledger.lock_state.return_value = LookupLockState()
+    ledger.prepare_failed_retrieve_release.return_value = (2, (0,), (-1,), 7)
+    module._ctx.lookup_ledger = ledger
     module._ctx.token_hasher.compute_packed_chunk_hashes.side_effect = RuntimeError(
         "cleanup failed"
     )
@@ -245,4 +251,4 @@ def test_cleanup_exception_does_not_suppress_terminal_false() -> None:
     )
 
     assert result == (b"", False)
-    session.claim_failed_retrieve_release.assert_not_called()
+    ledger.claim_failed_retrieve_release.assert_not_called()

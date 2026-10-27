@@ -11,6 +11,7 @@ import weakref
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -110,10 +111,10 @@ class BlendModule(
             enable_reorder=build_ctx.mp_config.enable_blend_reorder,
         )
 
-    #: ``Session.extras`` key: ``{"read_locks": N, "per_hash": {hash: keys}}``
+    #: Shape of one entry of :attr:`unretrieved_locks`:
+    #: ``{"read_locks": N, "per_hash": {hash: keys}, "l1_owners": owners}``
     #: — the sparse lookup's read-lock reservation, consumed by exactly one
-    #: ``extras.pop`` (the retrieve, or :meth:`_release_unretrieved_locks`).
-    UNRETRIEVED_KEYS_EXTRA = "cb.unretrieved_read_locked_keys"
+    #: ``pop`` (the retrieve, or :meth:`_release_unretrieved_locks`).
 
     def __init__(
         self,
@@ -150,6 +151,12 @@ class BlendModule(
 
         # Backstop for locks the retrieve never consumed.
         ctx.session_manager.destroy_listeners.append(self._release_unretrieved_locks)
+        # Read-lock reservation of each request's sparse lookup, keyed by
+        # request id; consumed by the retrieve or by the destroy listener.
+        self.unretrieved_locks: dict[str, dict[str, Any]] = {}
+        # L1 owners each sparse lookup retained; outlives the reservation so a
+        # second retrieve can still name them.
+        self.sparse_l1_owners: dict[str, dict[ObjectKey, int]] = {}
 
         # vLLM may call retrieve twice per request; already-scattered ranges
         # are skipped. Bounded LRU keyed by (request id, WORKER id): at TP>1
@@ -284,7 +291,9 @@ class BlendModule(
         would pin its sparse-prefetched chunks in L1 forever. Session
         destruction is the safe release point: no retrieve can arrive after.
         """
-        stash = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
+        request_id = session.request_id
+        self.sparse_l1_owners.pop(request_id, None)
+        stash = self.unretrieved_locks.pop(request_id, None)
         if not stash:
             return
         keys = [key for hash_keys in stash["per_hash"].values() for key in hash_keys]
@@ -295,7 +304,7 @@ class BlendModule(
         logger.info(
             "Released %d unretrieved read lock(s) for ended request %s",
             len(keys),
-            session.request_id,
+            request_id,
         )
 
     def close(self) -> None:
@@ -307,6 +316,8 @@ class BlendModule(
             # Joins the client's daemon thread and closes its httpx.Client.
             self._coordinator.close()
         self._cb_rope_state.clear()
+        self.unretrieved_locks.clear()
+        self.sparse_l1_owners.clear()
 
     def drop_instance_state(self, instance_id: int) -> None:
         """Drop CB rope state for a reaped instance (InstanceLivenessTarget

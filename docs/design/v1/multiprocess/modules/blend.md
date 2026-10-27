@@ -64,7 +64,7 @@ covers, `request_id` (session tracking), and `worker_id` (TP rank).
   matches beyond the prefix, `cur_st` order, each
   `(old_st, old_ed, cur_st, cur_ed, hash)`) — already sparse-prefetched,
   so the retrieve set equals this set.
-- Side effects: sparse read locks taken and stashed on the session for the
+- Side effects: sparse read locks taken and stashed on the module for the
   retrieve.
 
 **`cb_retrieve_pre_computed(key, matches, gpu_block_ids, instance_id,
@@ -123,8 +123,8 @@ The two legs trim opposite ways:
 A chunk missing **any** rank's or **any** read group's key is dropped whole
 and takes a stale strike (evicted from the matcher at the strike threshold);
 the rest of the request proceeds. The found set's object keys are stashed in
-`Session.extras` for the retrieve; whatever no retrieve consumes is released
-by the session-destroy listener.
+`BlendModule.unretrieved_locks` for the retrieve; whatever no retrieve consumes
+is released by the session-destroy listener.
 
 ## Retrieve (plan-then-execute, all-or-nothing)
 
@@ -203,7 +203,7 @@ returns `[]` on any error. Token ids only: no document boundaries are needed.
 
 Sparse-prefetch read locks follow one rule: exactly one owner releases each
 reservation. The retrieve releases applied ranges stream-ordered after the
-scatter, releases lookup-stash orphans it will never read, and leaves
+scatter, releases stash orphans it will never read, and leaves
 beyond-slot-bound ranges locked for the follow-up call; anything never
 consumed by a retrieve is released on session destruction.
 

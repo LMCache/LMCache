@@ -2,6 +2,7 @@
 """Engine-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
+from collections import OrderedDict
 from dataclasses import dataclass
 import threading
 import time
@@ -41,6 +42,27 @@ from .server_transfer import (
 )
 
 logger = init_logger(__name__)
+
+# Requests whose prepare is never committed stop being timed at this many.
+_MAX_TRACKED_TRANSFERS = 1024
+
+
+def _mark_start_time(
+    times: OrderedDict[str, float],
+    request_id: str,
+    now: float,
+) -> None:
+    """Remember when a prepare started so the matching commit can time it.
+
+    Args:
+        times: Bounded LRU of request id to prepare timestamp.
+        request_id: Request whose prepare started.
+        now: Timestamp of the prepare.
+    """
+    times[request_id] = now
+    times.move_to_end(request_id)
+    if len(times) > _MAX_TRACKED_TRANSFERS:
+        times.popitem(last=False)
 
 
 @dataclass
@@ -101,6 +123,10 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         ] = {}
         self._pending_shm_lock = threading.Lock()
         self._shm_pool_info: ShmPoolInfo = self._ctx.shm_pool_info
+        # Prepare timestamps of in-flight transfers, so the matching commit
+        # can report how long the store or retrieve took.
+        self._store_start_times: OrderedDict[str, float] = OrderedDict()
+        self._retrieve_start_times: OrderedDict[str, float] = OrderedDict()
 
     @property
     def context(self) -> MPCacheServerContext:
@@ -539,8 +565,10 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             group_keys=group_keys,
             skipped_chunks=skipped_chunks,
         )
-        session = self._ctx.session_manager.get_or_create(key.request_id)
-        session.extras["store_start_time"] = time.perf_counter()
+        with self._lock:
+            _mark_start_time(
+                self._store_start_times, key.request_id, time.perf_counter()
+            )
         return response
 
     @request_handler(
@@ -569,8 +597,8 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 instance ID.
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
-        session = self._ctx.session_manager.get_or_create(key.request_id)
-        st = session.extras.pop("store_start_time", None)
+        with self._lock:
+            st = self._store_start_times.pop(key.request_id, None)
         result = strategy.commit_store(
             key=key,
             instance_id=instance_id,
@@ -634,8 +662,10 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             group_keys=group_keys,
             group_first_chunk=group_first_chunk,
         )
-        session = self._ctx.session_manager.get_or_create(key.request_id)
-        session.extras["retrieve_start_time"] = time.perf_counter()
+        with self._lock:
+            _mark_start_time(
+                self._retrieve_start_times, key.request_id, time.perf_counter()
+            )
         return response
 
     @request_handler(
@@ -658,8 +688,8 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             Always ``True``.
         """
         _, strategy = self._resolve_for_transfer(instance_id)
-        session = self._ctx.session_manager.get_or_create(key.request_id)
-        st = session.extras.pop("retrieve_start_time", None)
+        with self._lock:
+            st = self._retrieve_start_times.pop(key.request_id, None)
         result = strategy.commit_retrieve(key=key, instance_id=instance_id)
         if st is not None:
             num_tokens = (

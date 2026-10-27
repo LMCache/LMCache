@@ -95,7 +95,8 @@ class LookupMixin:
 
     if TYPE_CHECKING:
         # State owned by BlendModule.__init__ and the sibling mixins.
-        UNRETRIEVED_KEYS_EXTRA: str
+        unretrieved_locks: dict[str, dict[str, Any]]
+        sparse_l1_owners: dict[str, dict[ObjectKey, int]]
         _ctx: "MPCacheServerContext"
         _event_bus: Any
         _cb_jobs: dict[str, "_CBUnifiedJob"]
@@ -306,22 +307,26 @@ class LookupMixin:
                 for r in found_cb_match_result
                 if r.hash in per_hash_obj_keys
             }
-            session = self._ctx.session_manager.get_or_create(key.request_id)
+            # The stash is released when the request's session ends, so the
+            # session must exist to deliver that signal even when this lookup
+            # never stored tokens on it.
+            self._ctx.session_manager.get_or_create(key.request_id)
             # A repeat lookup replaces the stash; release the superseded
             # reservation first or its locks leak.
-            prev = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
+            prev = self.unretrieved_locks.pop(key.request_id, None)
             if prev:
                 self._ctx.storage_manager.finish_read_prefetched(
                     [k for ks in prev["per_hash"].values() for k in ks],
                     read_locks=prev["read_locks"],
                     l1_owners=prev.get("l1_owners"),
                 )
-            session.extras[self.UNRETRIEVED_KEYS_EXTRA] = {
+            self.unretrieved_locks[key.request_id] = {
                 "read_locks": key.require_num_kv_readers(),
                 "per_hash": cache_entry,
                 "l1_owners": l1_owners,
             }
-            session.extras["cb.sparse_l1_owners"] = l1_owners
+            if l1_owners is not None:
+                self.sparse_l1_owners[key.request_id] = l1_owners
 
         return found_cb_match_result
 
@@ -401,7 +406,9 @@ class LookupMixin:
         row_windows = tuple(row.sliding_window_size for row in spec.key_groups)
         session = self._ctx.session_manager.get_or_create(rid)
         session.set_tokens(key.token_bytes)
-        session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
+        self._ctx.lookup_ledger.begin_lookup(
+            rid, key, tuple(attn_desc.num_chunks_in_sw)
+        )
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec,
             external_request_id=rid,
@@ -451,8 +458,9 @@ class LookupMixin:
             leading, retained = 0, ([] if segmented else None)
         # Publish the lock model so free_lookup_locks releases exactly what
         # this leg locked.
-        session = self._ctx.session_manager.get_or_create(rid)
-        session.record_prefetch_result(leading, job.prefix_lock_gids, owners)
+        self._ctx.lookup_ledger.record_prefetch_result(
+            rid, leading, job.prefix_lock_gids, owners
+        )
         self._event_bus.publish(
             Event(
                 event_type=EventType.CB_PREFIX_LOOKUP_END,
