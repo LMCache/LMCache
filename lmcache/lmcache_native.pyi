@@ -344,6 +344,12 @@ def unfold_grouped(
     """
     ...
 
+def cache_flush_supported() -> bool:
+    """Return whether :func:`cache_flush_range` works on this CPU."""
+
+def cache_flush_range(ptr: int, size: int) -> None:
+    """Write back and invalidate the CPU cache lines of ``[ptr, ptr + size)``."""
+
 class ParallelPatternMatcher:
     """
     Pattern matcher for integer vectors.
