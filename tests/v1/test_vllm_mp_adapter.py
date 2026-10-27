@@ -1873,6 +1873,54 @@ def test_recover_callback_skips_register_after_stop_requested(
     assert contexts[-1].register.call_count == 1  # no second REGISTER
 
 
+@pytest.mark.parametrize("stop_during_register", [False, True])
+def test_reregistration_publishes_only_a_registered_context(
+    fake_adapter, monkeypatch, stop_during_register: bool
+) -> None:
+    """Re-registration keeps the old transfer context visible until the
+    server accepts the new one, so no submission can use an unregistered
+    context. If shutdown begins during registration, the new context is
+    unregistered and closed instead of published."""
+    adapter, _req_client, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.register_kv_caches({"layer.0": fake_tensor})
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+    heartbeat = FakeHeartbeatThread.instances[0]
+    old_ctx = contexts[-1]
+    published_during_register: list[object] = []
+
+    def mint_next(*_args, **_kwargs) -> MagicMock:
+        new_ctx = MagicMock(name="new_ctx")
+
+        def register(*_a, **_kw) -> None:
+            published_during_register.append(adapter.transfer_ctx)
+            if stop_during_register:
+                heartbeat.stop()
+
+        new_ctx.register.side_effect = register
+        new_ctx.unregister.return_value = None
+        contexts.append(new_ctx)
+        return new_ctx
+
+    monkeypatch.setattr(adapter_mod, "create_transfer_context", mint_next)
+
+    adapter._send_register_kv_caches_request(adapter.kv_caches)
+
+    new_ctx = contexts[-1]
+    assert published_during_register == [old_ctx]
+    if stop_during_register:
+        assert adapter.transfer_ctx is old_ctx
+        new_ctx.unregister.assert_called_once_with()
+        new_ctx.close.assert_called_once_with()
+    else:
+        assert adapter.transfer_ctx is new_ctx
+        new_ctx.unregister.assert_not_called()
+        new_ctx.close.assert_not_called()
+
+
 def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     monkeypatch,
 ) -> None:

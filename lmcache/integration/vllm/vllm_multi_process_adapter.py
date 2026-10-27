@@ -1623,11 +1623,10 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches = kv_caches
         transfer_ctx = self._create_transfer_context(kv_caches)
         layout_hints = self._layout_hints
-        self.transfer_ctx = transfer_ctx
         try:
-            # Register on the local, not self.transfer_ctx: a concurrent
-            # shutdown() may null self.transfer_ctx between publish and this
-            # call. The local is always non-None.
+            # Register before publishing: a submission reads
+            # self.transfer_ctx, so publishing first let it use a context the
+            # server had not yet accepted.
             transfer_ctx.register(
                 kv_caches,
                 self.model_name,
@@ -1640,11 +1639,44 @@ class LMCacheMPWorkerAdapter:
                 lmcache_chunk_tokens=self.lmcache_tokens_per_chunk,
             )
         except TimeoutError:
+            transfer_ctx.close()
             raise ConnectionError(
                 "LMCache server did not respond to "
                 "register_kv_caches within "
                 f"{self._mq_timeout}s. Is the server running?"
             ) from None
+        except Exception:
+            transfer_ctx.close()
+            raise
+
+        # shutdown() stops the heartbeat under this lock, then unregisters
+        # whatever context is published. A shutdown that started during
+        # registration would miss this context, so discard it here instead
+        # of publishing it.
+        with self._heartbeat_lock:
+            if not self._heartbeat_stop_requested():
+                self.transfer_ctx = transfer_ctx
+                return
+        logger.info("Shutdown began during registration; discarding the new context")
+        self._discard_transfer_context(transfer_ctx)
+
+    def _discard_transfer_context(self, transfer_ctx: TransferContext) -> None:
+        """Unregister and close a registered context that was never published.
+
+        Args:
+            transfer_ctx: The context to discard.
+        """
+        try:
+            future = transfer_ctx.unregister()
+            if future is not None:
+                future.result(timeout=self._mq_timeout)
+        except Exception:
+            logger.warning(
+                "Failed to unregister a discarded transfer context; the server "
+                "reaps it after its liveness timeout",
+                exc_info=True,
+            )
+        transfer_ctx.close()
 
     def _ensure_heartbeat_started(self) -> None:
         """Lazily start the heartbeat on first store, retrieve, or event poll.
