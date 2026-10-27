@@ -45,7 +45,11 @@ class _FakeManager:
 
 
 def _request(request_id: str, logical: int, *, token_drop: bool):
-    config = {"lmcache.token_drop": {"algorithm": "rkv", "config": {}}} if token_drop else {}
+    config = (
+        {"lmcache.token_drop": {"algorithm": "rkv", "config": {}}}
+        if token_drop
+        else {}
+    )
     return SimpleNamespace(
         request_id=request_id,
         num_computed_tokens=logical,
