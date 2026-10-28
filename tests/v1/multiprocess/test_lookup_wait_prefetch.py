@@ -16,6 +16,7 @@ import threading
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import PrefetchHandle, PrefetchResult
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
+from lmcache.v1.multiprocess.tp_reshard import HeteroTPView
 
 
 def _result(found):
@@ -42,9 +43,11 @@ def _make_ctx(wait_result=True, found=None):
 
 def _make_module(ctx):
     # Bypass __init__ (which wires up otel metrics needing a full context); the
-    # handler methods only touch _ctx, _prefetch_jobs, and _prefetch_job_lock.
+    # handler methods only touch _ctx, _prefetch, _prefetch_jobs, and
+    # _prefetch_job_lock. Without a hetero TP source the view passes through.
     module = object.__new__(LookupModule)
     module._ctx = ctx
+    module._prefetch = HeteroTPView(ctx.storage_manager, ctx.layout_desc_registry, None)
     module._prefetch_jobs = {}
     module._prefetch_job_lock = threading.Lock()
     return module
@@ -87,7 +90,12 @@ def test_wait_prefetch_status_timeout_returns_none_and_keeps_job():
     ctx = _make_ctx(wait_result=False)
     module = _make_module(ctx)
     job = _PrefetchJob(
-        handle=mock.sentinel.handle,
+        handle=PrefetchHandle(
+            prefetch_request_id=0,
+            external_request_id="req",
+            total_requested_keys=0,
+            submit_time=0.0,
+        ),
         row_windows=(-1,),
         request_id="req",
         requested_tokens=0,

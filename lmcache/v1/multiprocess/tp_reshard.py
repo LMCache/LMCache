@@ -14,12 +14,13 @@ engine-specific rule, so it is not supported.
 
 :class:`L1Resharder` runs such a reshard against the storage manager: it
 reads read-locked source objects and writes the destination objects into L1,
-read-locked for the lookup's readers, on its own threads. :class:`HeteroTP`
-decides whether a lookup may complete its hit from another TP size and, if
-so, runs the rest of the lookup in the background: wait for the same-TP
-stage, prefetch the rest at the source TP size, reshard that hit and merge
-it. The lookup only waits for one future, so it never deals with stages,
-heads or TP sizes.
+read-locked for the prefetch's readers, on its own threads.
+:class:`HeteroTPView` wraps the storage manager's prefetch interface: a
+prefetch that may complete its hit from another TP size runs in the
+background (wait for its own prefetch, prefetch the miss at the source TP
+size, reshard that hit and merge it) and reads, to its caller, like a plain
+prefetch that hit more. The caller never deals with stages, heads or TP
+sizes.
 """
 
 # Standard
@@ -38,19 +39,19 @@ import torch
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
+    FULL_ATTENTION_WINDOW_CHUNKS,
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchLockMode,
     PrefetchResult,
     PrefetchTaskSpec,
-    ipc_key_to_grouped_object_keys,
-    ipc_key_to_object_keys,
+    lookup_kv_ranks,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
 logger = init_logger(__name__)
@@ -70,6 +71,27 @@ def _kernel_group_tensors(obj: MemoryObj) -> list[torch.Tensor]:
     return cast(
         list[torch.Tensor], [obj.get_tensor(i) for i in range(len(obj.get_shapes()))]
     )
+
+
+def _group_rows(rows: list[GroupedObjectKeys]) -> list[list[GroupedObjectKeys]]:
+    """Split prefetch rows into one list per object group, keeping row order."""
+    groups: list[list[GroupedObjectKeys]] = []
+    for row in rows:
+        if groups and groups[-1][0].object_group_id == row.object_group_id:
+            groups[-1].append(row)
+        else:
+            groups.append([row])
+    return groups
+
+
+def _object_keys(
+    rows: list[GroupedObjectKeys], start: int, end: int
+) -> list[ObjectKey]:
+    """Keys of chunks ``[start, end)`` of one object group's rank rows.
+
+    Chunk-major and rank-minor, as :class:`ReshardTask` takes them.
+    """
+    return [row.keys[c] for c in range(start, end) for row in rows]
 
 
 def _check_tp(num_kv_heads: int, tp: int) -> None:
@@ -261,7 +283,8 @@ class ReshardTask:
     Attributes:
         src_keys: Source object keys, each read-locked once by a prefetch.
         dst_keys: Destination object keys.
-        dst_layout_descs: Layout of one destination object, per object group.
+        dst_layout_descs: Layout of one destination object, per object
+            group, in the order of the key lists.
         read_locks: Read locks to take per destination object, for the
             readers of the lookup's hit.
         num_kv_heads: KV heads of the whole model.
@@ -273,7 +296,7 @@ class ReshardTask:
 
     src_keys: list[list[ObjectKey]]
     dst_keys: list[list[ObjectKey]]
-    dst_layout_descs: dict[int, MemoryLayoutDesc]
+    dst_layout_descs: list[MemoryLayoutDesc]
     read_locks: int
     num_kv_heads: int
     src_tp: int
@@ -484,10 +507,10 @@ class L1Resharder:
             ]
             dst_heads = local_kv_heads(task.num_kv_heads, dst_tp)
             src_by_key = dict(zip(flat_src, src_objs, strict=True))
-            for gid, (g_src, g_dst) in enumerate(
-                zip(task.src_keys, task.dst_keys, strict=True)
+            for g_src, g_dst, layout_desc in zip(
+                task.src_keys, task.dst_keys, task.dst_layout_descs, strict=True
             ):
-                reserved = sm.reserve_write(g_dst, task.dst_layout_descs[gid])
+                reserved = sm.reserve_write(g_dst, layout_desc)
                 for chunk in range(len(g_src) // src_tp):
                     srcs = {
                         a: _kernel_group_tensors(src_by_key[g_src[chunk * src_tp + a]])
@@ -514,36 +537,18 @@ class L1Resharder:
         return nbytes
 
 
-@dataclass(frozen=True)
-class PrefetchStage:
-    """One prefetch a lookup submits as a stage, over every object group.
-
-    Attributes:
-        key: Key whose model, world size and salt name the objects.
-        chunk_hashes: Chunk hashes to prefetch, in order.
-        group_layout_descs: Per-object-group layouts at ``key``'s world size.
-        attn_desc: Attention windows at ``key``'s world size.
-        num_kv_readers: Read locks to take per object.
-    """
-
-    key: IPCCacheServerKey
-    chunk_hashes: list[bytes]
-    group_layout_descs: dict[int, MemoryLayoutDesc]
-    attn_desc: AttnWindowDesc
-    num_kv_readers: int
-
-
 class HeteroTPPlan:
-    """How one lookup completes its hit from objects stored at another TP size.
+    """How one prefetch completes its hit from objects stored at another TP size.
 
-    Created by :meth:`HeteroTP.plan` from the lookup's same-TP stage. After the
-    same-TP stage hits its first ``k`` chunks, :class:`HeteroTP` submits
-    :meth:`cross_tp_stage` for the rest; if that hits, :meth:`convert` reshards
-    the hit into the lookup's own TP size in L1, and :meth:`merge` appends it
-    to the same-TP stage's result. Call them in that order, at most once each.
+    Created by :meth:`HeteroTPView.plan` from the prefetch's spec. After the
+    spec's own prefetch hits its first ``k`` chunks, :class:`HeteroTPView`
+    submits :meth:`cross_tp_spec` for the rest; if that hits, :meth:`convert`
+    reshards the hit into the spec's TP size in L1, and :meth:`merge` appends
+    it to the first prefetch's result. Call them in that order, at most once
+    each.
 
     Args:
-        same_tp: The lookup's same-TP stage.
+        spec: The prefetch's spec, with every row at the destination TP size.
         num_kv_heads: KV heads of the whole model.
         source_tp: TP size the source objects are stored with.
         resharder: Runs the reshard of a source hit.
@@ -551,92 +556,105 @@ class HeteroTPPlan:
 
     def __init__(
         self,
-        same_tp: PrefetchStage,
+        spec: PrefetchTaskSpec,
         num_kv_heads: int,
         source_tp: int,
         resharder: L1Resharder,
     ) -> None:
-        self._same_tp = same_tp
+        self._spec = spec
+        self._groups = _group_rows(spec.key_groups)
         self._num_kv_heads = num_kv_heads
+        self._dst_tp = len(self._groups[0])
         self._source_tp = source_tp
         self._resharder = resharder
         self._start = 0
-        self._cross_tp_hashes: list[bytes] = []
+        self._cross_tp_groups: list[list[GroupedObjectKeys]] = []
 
-    def cross_tp_stage(self, start: int) -> PrefetchStage:
-        """Describe the prefetch of the same-TP stage's chunks from ``start`` on.
+    @property
+    def num_chunks(self) -> int:
+        """Chunks the spec prefetches."""
+        return self._spec.group_size
+
+    def cross_tp_spec(self, start: int) -> PrefetchTaskSpec:
+        """Describe the prefetch of the spec's chunks from ``start`` on.
 
         Args:
-            start: Chunks the same-TP stage hit; the cross-TP stage covers the
-                rest.
+            start: Chunks the spec's own prefetch hit; the cross-TP prefetch
+                covers the rest.
 
         Returns:
-            The stage at the source TP size, on every tier, with one read lock
-            per object: only the reshard reads the source objects.
+            The spec's rows rewritten to the source TP size's ranks and
+            layouts, with one read lock per object: only the reshard reads
+            the source objects. Policy and tier filters are the spec's own.
         """
-        same_tp = self._same_tp
         self._start = start
-        self._cross_tp_hashes = same_tp.chunk_hashes[start:]
-        return PrefetchStage(
-            key=replace(same_tp.key, world_size=self._source_tp),
-            chunk_hashes=self._cross_tp_hashes,
-            group_layout_descs={
-                gid: reshard_layout_desc(
-                    desc, self._num_kv_heads, same_tp.key.world_size, self._source_tp
+        self._cross_tp_groups = [
+            [
+                GroupedObjectKeys(
+                    keys=[replace(k, kv_rank=rank) for k in rows[0].keys[start:]],
+                    object_group_id=rows[0].object_group_id,
+                    layout_desc=reshard_layout_desc(
+                        rows[0].layout_desc,
+                        self._num_kv_heads,
+                        self._dst_tp,
+                        self._source_tp,
+                    ),
+                    sliding_window_size=rows[0].sliding_window_size,
                 )
-                for gid, desc in same_tp.group_layout_descs.items()
-            },
-            attn_desc=replace(same_tp.attn_desc, world_size=self._source_tp),
+                for rank in lookup_kv_ranks(self._source_tp)
+            ]
+            for rows in self._groups
+        ]
+        return replace(
+            self._spec,
+            key_groups=[row for rows in self._cross_tp_groups for row in rows],
             num_kv_readers=1,
         )
 
-    def convert(self, found: int, result: PrefetchResult) -> Future[ReshardResult]:
-        """Reshard the cross-TP stage's hit into the lookup's TP size, in L1.
+    def convert(
+        self, found: int, result: PrefetchResult, request_id: str
+    ) -> Future[ReshardResult]:
+        """Reshard the cross-TP prefetch's hit into the spec's TP size, in L1.
 
-        Runs on a reshard thread, releases the cross-TP stage's read locks and
-        leaves the new objects read-locked ``num_kv_readers`` times, as the
-        same-TP stage left its own; see :meth:`L1Resharder.submit`.
+        Runs on a reshard thread, releases the cross-TP prefetch's read locks
+        and leaves the new objects read-locked ``num_kv_readers`` times, as
+        the spec's own prefetch left its hit; see :meth:`L1Resharder.submit`.
 
         Args:
-            found: Leading chunks the cross-TP stage hit.
-            result: The cross-TP stage's result.
+            found: Leading chunks the cross-TP prefetch hit.
+            result: The cross-TP prefetch's result.
+            request_id: Request the reshard serves; used only for logging.
 
         Returns:
             A future resolving to what the reshard left read-locked.
         """
-        same_tp = self._same_tp
-        hashes = self._cross_tp_hashes[:found]
-        groups = list(range(same_tp.attn_desc.num_object_groups))
+        start = self._start
         return self._resharder.submit(
             ReshardTask(
-                src_keys=ipc_key_to_object_keys(
-                    replace(same_tp.key, world_size=self._source_tp), hashes, groups
-                ),
-                dst_keys=ipc_key_to_object_keys(same_tp.key, hashes, groups),
-                dst_layout_descs=same_tp.group_layout_descs,
-                read_locks=same_tp.num_kv_readers,
+                src_keys=[_object_keys(g, 0, found) for g in self._cross_tp_groups],
+                dst_keys=[_object_keys(g, start, start + found) for g in self._groups],
+                dst_layout_descs=[rows[0].layout_desc for rows in self._groups],
+                read_locks=self._spec.num_kv_readers,
                 num_kv_heads=self._num_kv_heads,
                 src_tp=self._source_tp,
-                dst_tp=same_tp.key.world_size,
+                dst_tp=self._dst_tp,
                 l1_owners=result.l1_owners,
-                request_id=same_tp.key.request_id,
+                request_id=request_id,
             )
         )
 
-    def merge(
-        self, same_tp: PrefetchResult, resharded: ReshardResult
-    ) -> PrefetchResult:
-        """Append a reshard's hit to the same-TP stage's result.
+    def merge(self, first: PrefetchResult, resharded: ReshardResult) -> PrefetchResult:
+        """Append a reshard's hit to the spec's own prefetch result.
 
         Args:
-            same_tp: The same-TP stage's result; it hit the chunks before the
-                cross-TP stage's start.
+            first: The spec's own prefetch result; it hit the chunks before
+                the cross-TP prefetch's start.
             resharded: What :meth:`convert` left read-locked.
 
         Returns:
-            One result over the same-TP stage's rows, as if the same-TP stage had
-            hit both. The resharded chunks count as L2 hits: the lookup's TP
-            size did not have them in L1.
+            One result over the spec's rows, as if the spec's own prefetch
+            had hit both. The resharded chunks count as L2 hits: the spec's
+            TP size did not have them in L1.
         """
         end = self._start + resharded.num_chunks
 
@@ -647,68 +665,96 @@ class HeteroTPPlan:
             return out
 
         return PrefetchResult(
-            hit_cells=extend(same_tp.hit_cells),
-            l1_hit_cells=[row.copy() for row in same_tp.l1_hit_cells],
-            l2_hit_cells=extend(same_tp.l2_hit_cells),
-            l1_owners={**same_tp.l1_owners, **resharded.l1_owners},
+            hit_cells=extend(first.hit_cells),
+            l1_hit_cells=[row.copy() for row in first.l1_hit_cells],
+            l2_hit_cells=extend(first.l2_hit_cells),
+            l1_owners={**first.l1_owners, **resharded.l1_owners},
         )
 
 
-class HeteroTP:
-    """Decides which lookups may complete their hit from another TP size.
+class HeteroTPView:
+    """The storage manager's prefetch interface, completing hits across TP sizes.
+
+    Same contract as :meth:`StorageManager.submit_prefetch_task`,
+    :meth:`StorageManager.query_prefetch_status` and
+    :meth:`StorageManager.wait_prefetch_status`, so a caller swaps it in for
+    the storage manager without other changes. A prefetch that qualifies (see
+    :meth:`plan`) finishes in the background: once its own prefetch is done,
+    the chunks it missed are prefetched at the source TP size, resharded into
+    L1 at the spec's TP size and appended, so its result reads as if the spec
+    had hit them itself. Any other prefetch goes straight to the storage
+    manager.
 
     Args:
+        storage_manager: Storage manager serving the prefetches and holding
+            the resharded objects.
         registry: Layout registry holding the KV head count engines report.
-        storage_manager: Storage manager the reshards read and write.
         source_world_size: TP size other engines of the same model store
-            with; ``None`` turns cross-TP lookups off.
+            with; ``None`` makes this view a plain pass-through.
     """
 
     def __init__(
         self,
-        registry: LayoutDescRegistry,
         storage_manager: StorageManager,
+        registry: LayoutDescRegistry,
         source_world_size: int | None,
     ) -> None:
-        self._registry = registry
         self._sm = storage_manager
+        self._registry = registry
         self._source_world_size = source_world_size
         self._resharder = L1Resharder(storage_manager)
         # Threads start on first use, as in L1Resharder.
         self._lookups = ThreadPoolExecutor(
             max_workers=_LOOKUP_WORKERS, thread_name_prefix="hetero-tp-lookup"
         )
+        # Background prefetches by request id; each owns its handle's result.
+        self._running: dict[int, Future[PrefetchResult]] = {}
+        self._running_lock = threading.Lock()
         # KV head counts the source world size was already warned about.
         self._warned_heads: set[int] = set()
 
-    def plan(self, same_tp: PrefetchStage) -> HeteroTPPlan | None:
-        """Build the cross-TP plan of a lookup, or ``None`` if it has none.
+    def plan(self, spec: PrefetchTaskSpec) -> HeteroTPPlan | None:
+        """Build the cross-TP plan of a prefetch, or ``None`` if it has none.
 
-        A lookup qualifies when a source world size other than its own is
-        configured, the engine reported the model-wide KV head count (it does
-        so only for attention-only models whose world size equals their TP
-        size), both world sizes divide that head count, and no object group
-        has a sliding window. A source world size that does not divide the
-        head count is warned about once per head count.
+        A prefetch qualifies when it is a locked prefix prefetch of at least
+        one chunk whose rows fan out to every rank of one world size (a
+        lookup), a source world size other than that one is configured, the
+        engine reported the model-wide KV head count (it does so only for
+        attention-only models whose world size equals their TP size), both
+        world sizes divide that head count, and no row has a sliding window.
+        A source world size that does not divide the head count is warned
+        about once per head count.
 
         Args:
-            same_tp: The lookup's same-TP stage.
+            spec: The prefetch's spec.
 
         Returns:
-            The plan, or ``None`` if the lookup does not qualify.
+            The plan, or ``None`` if the prefetch does not qualify.
         """
         source = self._source_world_size
-        key = same_tp.key
-        if source is None or source == key.world_size:
-            return None
-        num_heads = self._registry.find_total_num_kv_heads(
-            key.model_name, key.world_size
-        )
         if (
-            num_heads is None
-            or not is_valid_tp(num_heads, key.world_size)
-            or any(w >= 0 for w in same_tp.attn_desc.num_chunks_in_sw)
+            source is None
+            or spec.fetching_policy != "prefix"
+            or spec.lock_mode != PrefetchLockMode.LOCK
+            or spec.group_size == 0
+            or any(
+                row.sliding_window_size != FULL_ATTENTION_WINDOW_CHUNKS
+                for row in spec.key_groups
+            )
         ):
+            return None
+        first = spec.key_groups[0].keys[0]
+        world_size = ObjectKey.WorldSizeFromKVRank(first.kv_rank)
+        if world_size == source:
+            return None
+        ranks = lookup_kv_ranks(world_size)
+        if any(
+            [row.keys[0].kv_rank for row in rows] != ranks
+            for rows in _group_rows(spec.key_groups)
+        ):
+            return None
+        num_heads = self._registry.find_total_num_kv_heads(first.model_name, world_size)
+        if num_heads is None or not is_valid_tp(num_heads, world_size):
             return None
         if not is_valid_tp(num_heads, source):
             if num_heads not in self._warned_heads:
@@ -719,38 +765,72 @@ class HeteroTP:
                     num_heads,
                 )
             return None
-        return HeteroTPPlan(same_tp, num_heads, source, self._resharder)
+        return HeteroTPPlan(spec, num_heads, source, self._resharder)
 
-    def submit(
-        self,
-        same_tp: PrefetchStage,
-        handle: PrefetchHandle,
-        row_windows: tuple[int, ...],
-    ) -> Future[PrefetchResult] | None:
-        """Complete a lookup's hit from the source TP size, in the background.
-
-        Takes over the same-TP stage's result: once it finishes, a partial
-        hit keeps its locks, the rest is prefetched at the source TP size,
-        and a hit there is resharded into L1 and appended. A failed cross-TP
-        stage is logged and answers with the same-TP hit.
+    def submit_prefetch_task(
+        self, spec: PrefetchTaskSpec, external_request_id: str = ""
+    ) -> PrefetchHandle:
+        """Prefetch objects into L1 asynchronously, completing the hit across TP.
 
         Args:
-            same_tp: The lookup's same-TP stage.
-            handle: Handle of ``same_tp``'s prefetch, already submitted. Its
-                result belongs to the returned future; do not query it.
-            row_windows: Sliding window of each row ``same_tp`` was submitted
-                with.
+            spec: The request (see :class:`PrefetchTaskSpec`).
+            external_request_id: Caller id for end-to-end log tracing.
 
         Returns:
-            A future resolving to the lookup's result, over the same rows as
-            the same-TP stage, with every hit chunk read-locked; it never
-            raises. ``None`` if the lookup does not qualify (see
-            :meth:`plan`), and the caller keeps ``handle``.
+            Handle to query or wait on through this view. A qualifying
+            prefetch's result belongs to the view: querying the handle on
+            the storage manager directly would steal it.
         """
-        plan = self.plan(same_tp)
-        if plan is None:
-            return None
-        return self._lookups.submit(self._complete, same_tp, plan, handle, row_windows)
+        plan = self.plan(spec)
+        handle = self._sm.submit_prefetch_task(spec, external_request_id)
+        if plan is not None:
+            with self._running_lock:
+                self._running[handle.prefetch_request_id] = self._lookups.submit(
+                    self._complete, plan, handle
+                )
+        return handle
+
+    def query_prefetch_status(self, handle: PrefetchHandle) -> PrefetchResult | None:
+        """Query the status of a prefetch submitted through this view.
+
+        Args:
+            handle: The prefetch.
+
+        Returns:
+            The prefetch's result once it has finished, with every hit chunk
+            read-locked; None while it is still in progress. A qualifying
+            prefetch is in progress until its cross-TP prefetch and reshard
+            finish.
+
+        Note:
+            Each result is returned once; later calls for the same handle
+            return None.
+        """
+        with self._running_lock:
+            future = self._running.get(handle.prefetch_request_id)
+            if future is None:
+                return self._sm.query_prefetch_status(handle)
+            if not future.done():
+                return None
+            del self._running[handle.prefetch_request_id]
+        return future.result()
+
+    def wait_prefetch_status(self, handle: PrefetchHandle, timeout: float) -> bool:
+        """Block until a prefetch submitted through this view has a result.
+
+        Args:
+            handle: The prefetch.
+            timeout: Maximum number of seconds to wait.
+
+        Returns:
+            True if a result is available within the timeout, False if the
+            wait timed out.
+        """
+        with self._running_lock:
+            future = self._running.get(handle.prefetch_request_id)
+        if future is None:
+            return self._sm.wait_prefetch_status(handle, timeout)
+        return bool(wait_futures([future], timeout).done)
 
     def close(self) -> None:
         """Stop the lookup and reshard threads after every submitted one finishes.
@@ -761,100 +841,76 @@ class HeteroTP:
         self._lookups.shutdown(wait=True)
         self._resharder.close()
 
-    def _complete(
-        self,
-        same_tp: PrefetchStage,
-        plan: HeteroTPPlan,
-        handle: PrefetchHandle,
-        row_windows: tuple[int, ...],
-    ) -> PrefetchResult:
-        """Wait for the same-TP stage, then fill its miss from the source TP.
+    def _complete(self, plan: HeteroTPPlan, handle: PrefetchHandle) -> PrefetchResult:
+        """Wait for the spec's own prefetch, then fill its miss from the source TP.
 
         Args:
-            same_tp: The lookup's same-TP stage.
-            plan: Its cross-TP plan.
-            handle: Handle of ``same_tp``'s prefetch.
-            row_windows: Sliding window of each row of ``same_tp``.
+            plan: The prefetch's cross-TP plan.
+            handle: Handle of the spec's own prefetch.
 
         Returns:
-            The same-TP result, with the resharded chunks appended.
+            Its result, with the resharded chunks appended; it never raises.
         """
         result = self._wait(handle)
-        found, _ = fold_unfold_grouped(result.hit_cells, row_windows)
-        if found == len(same_tp.chunk_hashes):
+        found, _ = fold_unfold_grouped(result.hit_cells, handle.sliding_windows)
+        if found == plan.num_chunks:
             return result
         try:
-            return self._complete_from_source(plan, found, result)
+            return self._complete_from_source(plan, found, result, handle)
         except Exception:
-            # The same-TP locks are still held, so its hit stays a valid
+            # The spec's own locks are still held, so its hit stays a valid
             # answer.
             logger.exception(
-                "Cross-TP stage failed for request %s; answering with the same-TP hit",
-                same_tp.key.request_id,
+                "Cross-TP prefetch failed for request %s; answering with the "
+                "same-TP hit",
+                handle.external_request_id,
             )
             return result
 
     def _complete_from_source(
-        self, plan: HeteroTPPlan, start: int, same_tp: PrefetchResult
+        self,
+        plan: HeteroTPPlan,
+        start: int,
+        first: PrefetchResult,
+        handle: PrefetchHandle,
     ) -> PrefetchResult:
         """Prefetch chunks ``start`` on at the source TP, reshard and merge.
 
         Args:
-            plan: The lookup's cross-TP plan.
-            start: Chunks the same-TP stage hit.
-            same_tp: The same-TP stage's result.
+            plan: The prefetch's cross-TP plan.
+            start: Chunks the spec's own prefetch hit.
+            first: The spec's own prefetch result.
+            handle: Handle of the spec's own prefetch.
 
         Returns:
-            ``same_tp`` with the resharded chunks appended.
+            ``first`` with the resharded chunks appended.
 
         Raises:
             Exception: A failure to start the reshard propagates, after the
                 source locks are released.
         """
-        cross_tp = plan.cross_tp_stage(start)
-        handle, row_windows = self._submit_stage(cross_tp)
-        result = self._wait(handle)
-        found, _ = fold_unfold_grouped(result.hit_cells, row_windows)
+        request_id = handle.external_request_id
+        spec = plan.cross_tp_spec(start)
+        cross_handle = self._sm.submit_prefetch_task(spec, request_id)
+        result = self._wait(cross_handle)
+        found, _ = fold_unfold_grouped(result.hit_cells, cross_handle.sliding_windows)
         if found == 0:
-            return same_tp
+            return first
         try:
-            reshard = plan.convert(found, result)
+            reshard = plan.convert(found, result, request_id)
         except Exception:
             # The source objects are this call's to release until a reshard
             # owns them.
-            self._release_stage(cross_tp, found, result)
+            self._sm.finish_read_prefetched(
+                [k for row in spec.key_groups for k in row.keys[:found]],
+                read_locks=spec.num_kv_readers,
+                l1_owners=result.l1_owners,
+            )
             raise
-        return plan.merge(same_tp, reshard.result())
-
-    def _submit_stage(
-        self, stage: PrefetchStage
-    ) -> tuple[PrefetchHandle, tuple[int, ...]]:
-        """Submit a stage's prefetch.
-
-        Args:
-            stage: The stage to submit.
-
-        Returns:
-            The prefetch handle and the per-row windows to fold its result
-            with.
-        """
-        spec = PrefetchTaskSpec(
-            key_groups=ipc_key_to_grouped_object_keys(
-                stage.key,
-                stage.chunk_hashes,
-                list(range(stage.attn_desc.num_object_groups)),
-                stage.group_layout_descs,
-                stage.attn_desc,
-            ),
-            num_kv_readers=stage.num_kv_readers,
-        )
-        handle = self._sm.submit_prefetch_task(
-            spec, external_request_id=stage.key.request_id
-        )
-        return handle, tuple(row.sliding_window_size for row in spec.key_groups)
+        return plan.merge(first, reshard.result())
 
     def _wait(self, handle: PrefetchHandle) -> PrefetchResult:
-        """Block until a prefetch finishes and take its result.
+        """Block until a storage manager prefetch finishes and take its result.
 
         Args:
             handle: The prefetch.
@@ -867,27 +923,3 @@ class HeteroTP:
         while not self._sm.wait_prefetch_status(handle, 1.0):
             pass
         return cast(PrefetchResult, self._sm.query_prefetch_status(handle))
-
-    def _release_stage(
-        self, stage: PrefetchStage, found: int, result: PrefetchResult
-    ) -> None:
-        """Drop the read locks a stage took on its first ``found`` chunks.
-
-        Args:
-            stage: The finished stage.
-            found: Leading chunks it hit.
-            result: Its result.
-        """
-        self._sm.finish_read_prefetched(
-            [
-                k
-                for group in ipc_key_to_object_keys(
-                    stage.key,
-                    stage.chunk_hashes[:found],
-                    list(range(stage.attn_desc.num_object_groups)),
-                )
-                for k in group
-            ],
-            read_locks=stage.num_kv_readers,
-            l1_owners=result.l1_owners,
-        )

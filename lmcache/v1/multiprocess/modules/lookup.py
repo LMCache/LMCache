@@ -2,8 +2,6 @@
 """LookupModule: lookup, prefetch polling, and session lifecycle."""
 
 # Standard
-from concurrent.futures import Future
-from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass, replace
 from functools import partial
 import threading
@@ -16,7 +14,6 @@ from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     ObjectKey,
     PrefetchHandle,
-    PrefetchResult,
     PrefetchTaskSpec,
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
@@ -40,7 +37,7 @@ from lmcache.v1.multiprocess.kv_load_policy import (
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
-from lmcache.v1.multiprocess.tp_reshard import HeteroTP, PrefetchStage
+from lmcache.v1.multiprocess.tp_reshard import HeteroTPView
 
 logger = init_logger(__name__)
 
@@ -128,9 +125,6 @@ class _PrefetchJob:
     # Names the ``lookup()`` branch that returned before submitting a prefetch
     # task; empty on the normal path.
     early_exit_reason: str = ""
-    # Set when the lookup completes its hit from another TP size: the future
-    # owns ``handle``'s result and resolves to the merged one.
-    hetero: Future[PrefetchResult] | None = None
 
 
 class LookupModule(DiscoverableModule):
@@ -172,11 +166,13 @@ class LookupModule(DiscoverableModule):
     ) -> None:
         self._ctx = ctx
         self._load_policy = load_policy
+        # Every prefetch goes through the view, so a lookup can complete its
+        # hit from another TP size without knowing it.
+        self._prefetch = HeteroTPView(
+            ctx.storage_manager, ctx.layout_desc_registry, hetero_tp_source_world_size
+        )
         self._prefetch_jobs: dict[str, _PrefetchJob] = {}
         self._prefetch_job_lock = threading.Lock()
-        self._hetero_tp = HeteroTP(
-            ctx.layout_desc_registry, ctx.storage_manager, hetero_tp_source_world_size
-        )
         self._setup_metrics()
 
     @property
@@ -195,8 +191,8 @@ class LookupModule(DiscoverableModule):
         }
 
     def close(self) -> None:
-        """Stop the cross-TP lookup threads; see :meth:`HeteroTP.close`."""
-        self._hetero_tp.close()
+        """Stop the cross-TP lookup threads; see :meth:`HeteroTPView.close`."""
+        self._prefetch.close()
 
     # -----------------------------------------------------------------
     # Handlers
@@ -374,15 +370,14 @@ class LookupModule(DiscoverableModule):
             ),
             num_kv_readers=num_kv_readers,
         )
-        handle = self._ctx.storage_manager.submit_prefetch_task(
+        handle = self._prefetch.submit_prefetch_task(
             spec,
             external_request_id=key.request_id,
         )
-        row_windows = tuple(row.sliding_window_size for row in spec.key_groups)
         self._register_prefetch_job(
             _PrefetchJob(
                 handle=handle,
-                row_windows=row_windows,
+                row_windows=tuple(row.sliding_window_size for row in spec.key_groups),
                 request_id=key.request_id,
                 requested_tokens=looked_up_tokens,
                 num_object_groups=attn_desc.num_object_groups,
@@ -397,17 +392,6 @@ class LookupModule(DiscoverableModule):
                 ),
                 model_name=model_name,
                 cache_salt=key.cache_salt,
-                hetero=self._hetero_tp.submit(
-                    PrefetchStage(
-                        key,
-                        suffix_hashes,
-                        group_layout_descs,
-                        attn_desc,
-                        num_kv_readers,
-                    ),
-                    handle,
-                    row_windows,
-                ),
             )
         )
 
@@ -422,9 +406,6 @@ class LookupModule(DiscoverableModule):
         if it is still in progress.  The job entry is automatically
         removed once a non-None result is returned (exactly-once
         semantics).
-
-        A lookup that completes its hit from another TP size is in progress
-        until its cross-TP stage and reshard finish.
 
         Args:
             request_id: The external request ID passed in the lookup key.
@@ -475,10 +456,7 @@ class LookupModule(DiscoverableModule):
             )
             return 0
 
-        if job.hetero is not None:
-            if not wait_futures([job.hetero], timeout).done:
-                return None
-        elif not self._ctx.storage_manager.wait_prefetch_status(job.handle, timeout):
+        if not self._prefetch.wait_prefetch_status(job.handle, timeout):
             return None
         return self.query_prefetch_status(request_id)
 
@@ -507,11 +485,7 @@ class LookupModule(DiscoverableModule):
         session (hit length, lock model, L1 owners). If that result has not
         been consumed yet it is handed over here first. While the prefetch
         is still running nothing is released: its locks still belong to the
-        prefetch controller and expire with the read-lock TTL. A lookup that
-        completes its hit from another TP size is the exception: its
-        same-TP locks already left the prefetch controller, so this call
-        blocks (no timeout) until the lookup finishes, then releases every
-        lock it took.
+        prefetch controller and expire with the read-lock TTL.
 
         Args:
             key: Cache key whose read locks should be released.
@@ -536,10 +510,7 @@ class LookupModule(DiscoverableModule):
             # so leave them to the controller and the read-lock TTL.
             with self._prefetch_job_lock:
                 job = self._prefetch_jobs.get(key.request_id)
-            if (
-                job is not None
-                and self._consume_prefetch_result(job, block_on_hetero=True) is None
-            ):
+            if job is not None and self._consume_prefetch_result(job) is None:
                 logger.warning(
                     "free_lookup_locks for request %s while its prefetch is "
                     "still running; leaving its locks to the prefetch controller",
@@ -719,9 +690,7 @@ class LookupModule(DiscoverableModule):
             )
         )
 
-    def _consume_prefetch_result(
-        self, job: _PrefetchJob, block_on_hetero: bool = False
-    ) -> int | None:
+    def _consume_prefetch_result(self, job: _PrefetchJob) -> int | None:
         """Hand a finished prefetch result over to the request's session.
 
         Takes the result from the storage manager (each result is returned
@@ -731,28 +700,11 @@ class LookupModule(DiscoverableModule):
         so ``query_prefetch_status`` and ``free_lookup_locks`` cannot disagree
         about what a lookup locked.
 
-        Args:
-            job: The lookup's job.
-            block_on_hetero: Wait for a running cross-TP lookup instead of
-                returning None.
-
         Returns:
             The hit chunk count, or None while the prefetch is still running
             (the job is kept so a later call can resolve it).
         """
-        result: PrefetchResult | None
-        if job.hetero is not None:
-            if not (block_on_hetero or job.hetero.done()):
-                return None
-            result = job.hetero.result()
-            # The future hands its result to every caller; the first one to
-            # drop the job is the one that consumes it.
-            with self._prefetch_job_lock:
-                if self._prefetch_jobs.get(job.request_id) is not job:
-                    return None
-                del self._prefetch_jobs[job.request_id]
-        else:
-            result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        result = self._prefetch.query_prefetch_status(job.handle)
         if result is None:
             return None
         if job.row_windows:

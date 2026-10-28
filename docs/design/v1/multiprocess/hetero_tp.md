@@ -129,23 +129,29 @@ Phase 1 below implements the cross-TP stage in the lookup.
 
 ## Lookup stages
 
-The work splits so that `LookupModule` never deals with heads or TP sizes:
+`LookupModule` never deals with heads or TP sizes. It sends every prefetch
+through `tp_reshard.HeteroTPView`, which has the storage manager's prefetch
+interface (`submit_prefetch_task`, `query_prefetch_status`,
+`wait_prefetch_status`), so the lookup code is the same as without hetero TP:
 
-- `tp_reshard.PrefetchStage` is one prefetch: key, chunk hashes, layouts
-  and `num_kv_readers`.
-- `tp_reshard.HeteroTP.plan` decides whether a lookup qualifies (a source TP
-  configured and different from the lookup's, head count reported, both TP
-  sizes divide it, no sliding window) and returns a per-lookup
-  `HeteroTPPlan`.
-- `HeteroTPPlan.cross_tp_stage(k)` gives the cross-TP stage for the chunks from
-  `k` on (key, layouts and windows at the source TP); `convert` reshards a
-  source hit through `L1Resharder`; `merge` appends the resharded chunks to
-  the same-TP stage's result.
-- `HeteroTP.submit` runs the stages in order on a background thread
-  (`hetero-tp-lookup`, 32 threads) and returns one future of the merged
-  result. `LookupModule` submits the same-TP stage as an ordinary prefetch,
-  hands its handle to `HeteroTP.submit`, and from then on waits only for
-  that future.
+```
+LookupModule --spec(B keys)--> HeteroTPView --same-TP spec--> StorageManager
+                               (background)  --cross-TP spec->      |
+                               merged result <---- L1Resharder <----+
+```
+
+- `HeteroTPView.plan(spec)` decides whether a prefetch qualifies: a locked
+  `prefix` prefetch whose rows fan out to every rank of one world size (a
+  lookup), a source TP configured and different from it, head count
+  reported, both TP sizes divide it, no sliding window. Anything else,
+  including every other module's prefetches, passes through unchanged.
+- `HeteroTPPlan.cross_tp_spec(k)` rewrites the spec's rows for chunks from
+  `k` on to the source TP's ranks and layouts, keeping the spec's policy and
+  tier filters; `convert` reshards a source hit through `L1Resharder`;
+  `merge` appends the resharded chunks to the same-TP result.
+- A qualifying prefetch runs its stages on a background thread
+  (`hetero-tp-lookup`, 32 threads). The view returns the storage manager's
+  own handle and answers `query`/`wait` for it from the merged result, once.
 
 1. **Same-TP stage** (B keys, all chunks, every tier): a full hit is final.
    Otherwise its locks stay held, as part of the answer, and the cross-TP
@@ -168,8 +174,9 @@ objects.
 
 The stages run as one sequential function rather than being advanced by the
 engine's polls, so the lookup keeps no stage state:
-`query_prefetch_status` returns None until the future is done, and
-`wait_prefetch_status` waits on it, with `timeout` covering every stage. Each
+`query_prefetch_status` returns None until every stage is done, and
+`wait_prefetch_status` waits for all of them, with `timeout` covering every
+stage. Each
 lookup holds a thread while it waits for its prefetches, so the pool size
 bounds the cross-TP lookups in flight; a lookup past that queues before its
 cross-TP stage. The copy runs in `L1Resharder`, on its own thread pool (4
@@ -183,11 +190,10 @@ second lookup of a prefix would miss. Each reshard logs its cost (Qwen3-0.6B,
 Resharded 8 chunks from TP1 to TP2 for request <id>: wrote 224.0 MiB in 38.36 ms (queued 0.20 ms, waited 0.00 ms on 0 other reshards)
 ```
 
-`free_lookup_locks` on a cross-TP lookup waits (no timeout) for the future:
-the same-TP stage's locks left the prefetch controller with its result, so
-only this release can drop them, and it also sees the locks the reshard took.
-A free that arrives early therefore still runs the cross-TP stage and the
-reshard, and releases their locks right after. An exception in the cross-TP
+`free_lookup_locks` on a cross-TP lookup that is still running behaves as for
+any running prefetch: it returns at once, and the result keeps its locks for
+a later poll or until the read-lock TTL. A finished result is handed over and
+released as usual, including the locks the reshard took. An exception in the cross-TP
 stage, or a failed reshard, is logged and the same-TP stage answers, so the
 future always resolves and every lock it took is released. If a reshard fails
 mid-group, the destination objects reserved for that group stay reserved
@@ -234,7 +240,7 @@ operator sets it. A lookup whose own TP equals it skips the cross-TP stage.
 ## Later: a PD source
 
 The cross-TP stage is the single extension point for native PD. Two things
-change there, inside `HeteroTP`, and `LookupModule` does not:
+change there, inside `HeteroTPView`, and `LookupModule` does not:
 
 - **Where A comes from.** From the request (the PD coordinator knows which P
   served it) or from a P2P RPC that asks the peer for its layout, instead of
@@ -250,7 +256,7 @@ P's connector in `request_finished`) into D's request. The plan:
 1. P's `LMCacheMPConnector.request_finished` adds its KV world size to the
    returned params; today it returns only `num_lmcache_extra_cached_tokens`.
 2. The proxy forwards the params to D unchanged, as it already does.
-3. D's connector passes the value in the lookup RPC, and `HeteroTP.plan`
+3. D's connector passes the value in the lookup RPC, and `HeteroTPView.plan`
    uses it instead of `--hetero-tp-source-world-size`.
 
 The same channel can name the P instance, which xPyD needs: today the P2P
