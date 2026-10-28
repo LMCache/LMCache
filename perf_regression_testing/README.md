@@ -20,26 +20,33 @@ exit 0 pass | 1 regressed (nightly only) | 2 invalid run / no images / host setu
 
 ## What a run measures
 
-Workload `agentic`: a Claude Code session replay
+Workload `agentic`: a replay of 393 Claude Code sessions
 (`semianalysisai/cc-traces-weka-062126-256k`, pinned revision), closed loop.
-Each model is a frontier open-weight release on 8 x H200 (TP8 + EP, FP8 KV), served
-with its vLLM recipe's flags and replaced when a newer one appears:
-Trinity-Large-Thinking-FP8-Block (hybrid sliding-window, 8 KV heads) at 340 concurrent
-sessions; `vllm_lmcache_ssm` serves Qwen3.8-Flash-Next-FP8 (Gated DeltaNet +
-sparse GQA, MTP) instead, at 230 on 4 x H200 (TP4 + EP) with 800 GiB DRAM +
-1500 GiB disk. Every other deployment runs the same stock
-vLLM image and the same budget, 1500 GiB DRAM + 6000 GiB disk (`vllm_simple`: the DRAM only;
-`vllm_simple_l2`: the disk, with the DRAM as page cache under a memory cap);
+A model with a 1M context replays the same sessions uncapped
+(`semianalysisai/cc-traces-weka-062126`, requests up to 996,579 tokens).
+Each model is a frontier open-weight release on H200, served with its vLLM
+recipe's flags and replaced when a newer one appears. DeepSeek-V4.1-Flash-1017
+(MLA with compressed and sliding-window KV) runs the recipe's single-node TEP
+layout (TP8 + EP on 8 x H200) with DSpark speculative decoding, on the uncapped
+trace at 393 concurrent sessions (all of them) and a 1500 GiB DRAM budget.
+Every attention cache is whole on each TP rank, so the GPU KV is one rank's
+pool, below the sessions' context. Two weekly deployments keep other models and
+the 256k trace, and add disk:
+`vllm_lmcache_ssm` serves Qwen3.8-Flash-Next-FP8 (Gated DeltaNet + sparse GQA,
+MTP) at 230 on 4 x H200 (TP4 + EP) with 800 GiB DRAM + 1500 GiB disk, and
+`vllm_lmcache_swa_l2` serves Trinity-Large-Thinking-FP8-Block (hybrid
+sliding-window, TP8 + EP) at 340 with 1500 GiB DRAM + 6000 GiB disk. The
+competitors run the same stock vLLM image, model and budget as `vllm_lmcache`;
 only the cache layer differs:
 
 | deployment | suite | cache layer |
 |---|---|---|
-| `vllm_lmcache` | nightly, gates | LMCache MP server, L1 + `fs_native` L2 |
-| `vllm_native` | weekly | vLLM `OffloadingConnector`, CPU + fs tier |
-| `vllm_simple` | weekly | vLLM `SimpleCPUOffloadConnector`, CPU only (one tier by design) |
-| `vllm_simple_l2` | weekly | the same connector's disk backend, page cache as the DRAM tier (container memory capped) |
-| `vllm_mooncake` | weekly | Mooncake store, 4 clients, CPU pool + SSD offload |
-| `vllm_lmcache_ssm` | weekly | as `vllm_lmcache`, on the hybrid linear-attention model |
+| `vllm_lmcache` | nightly, gates | LMCache MP server, L1 |
+| `vllm_native` | weekly | vLLM `OffloadingConnector`, CPU tier |
+| `vllm_simple` | weekly | vLLM `SimpleCPUOffloadConnector`, CPU |
+| `vllm_mooncake` | weekly | Mooncake store, 4 clients, CPU pool |
+| `vllm_lmcache_ssm` | weekly | LMCache, L1 + `fs_native` L2, on the hybrid linear-attention model |
+| `vllm_lmcache_swa_l2` | weekly | LMCache, L1 + `fs_native` L2, on the hybrid sliding-window model |
 
 Tested metrics: decode p10/p50 (tok/s per request) and TTFT p50/p95.
 Recorded only: request count, errors, preemptions, prompt tokens by source
@@ -77,15 +84,21 @@ Host paths come from the environment:
 # missing one first (runner/hf.py), so this only saves that time. Under
 # $PRT_ROOT, a suite also deletes models no longer in [models].
 HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
+    deepseek-ai/DeepSeek-V4.1-Flash-1017 \
+    --revision 1bae0e1088993b9b82de08f59de5be5a34e42170
+HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
     arcee-ai/Trinity-Large-Thinking-FP8-Block \
     --revision 6412c1ad1588c664977b0f830b80a20273173318
 HF_HOME=${PRT_HF_CACHE:-/root/.cache/huggingface} hf download \
     Qwen/Qwen3.8-Flash-Next-FP8 \
     --revision 236dfdf285828023ca3bcd3f37366c58a3469b13
 
-# Trace, verified against the pinned sha256 and dir_digest.
+# Traces, verified against the pinned sha256 and dir_digest. A suite builds
+# a missing one first, in the serving image.
 python3.11 perf_regression_testing/workloads/agentic/fetch_trace.py \
     build $PRT_ROOT/work/weka-062126-256k-dir
+python3.11 perf_regression_testing/workloads/agentic/fetch_trace.py \
+    build $PRT_ROOT/work/weka-062126-dir
 ```
 
 Needs docker with the NVIDIA runtime, Python >= 3.11 (standard

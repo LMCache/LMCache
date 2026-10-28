@@ -23,6 +23,13 @@ sequence is reproduced up to BPE re-tokenization. Outputs are decoded from
 token ids because the reasoning parser strips ``</think>`` and detokenization
 skips special tokens.
 
+DeepSeek-V4.1 (``PRT_LIVE_HISTORY_DIALECT=deepseek_v41``) generates after
+``<｜Assistant｜><think>`` and renders an earlier assistant message as
+``reasoning + "</think>" + content``, but by default drops the reasoning of
+every turn before the last user message. So each request sets
+``chat_template_kwargs.drop_thinking`` to false, and the output goes in
+``reasoning`` with empty content.
+
 Outputs are kept in memory and in ``$PRT_LIVE_HISTORY_LOG_DIR/store/``, shared
 by all worker processes; the tokenizer is
 ``$PRT_LIVE_HISTORY_TOKENIZER/tokenizer.json``.
@@ -96,8 +103,9 @@ class LiveHistoryChatEndpoint(ChatEndpoint):
         self._prt_tok = Tokenizer.from_file(
             os.path.join(os.environ["PRT_LIVE_HISTORY_TOKENIZER"], "tokenizer.json")
         )
-        # Value: [ids, render cache (trace_n, content) or None].
+        # Value: [ids, render cache (trace_n, text) or None].
         self._prt_outputs: OrderedDict[OutputKey, list[Any]] = OrderedDict()
+        self._prt_v41 = os.environ.get("PRT_LIVE_HISTORY_DIALECT") == "deepseek_v41"
 
     def format_payload(self, request_info: RequestInfo) -> dict[str, Any]:
         """Format as the base endpoint, with tagged assistant messages substituted.
@@ -122,11 +130,16 @@ class LiveHistoryChatEndpoint(ChatEndpoint):
             if text is None:
                 # Copy: ``msg`` aliases the session's raw_messages.
                 messages.append({k: v for k, v in msg.items() if k != SRC_KEY})
+            elif self._prt_v41:
+                messages.append({"role": "assistant", "reasoning": text, "content": ""})
             else:
                 messages.append({"role": "assistant", "reasoning": "", "content": text})
         _prt_marker_to_front(messages, request_info.cache_bust_marker)
         payload["messages"] = messages
         payload["return_token_ids"] = True
+        if self._prt_v41:
+            kwargs = payload.setdefault("chat_template_kwargs", {})
+            kwargs["drop_thinking"] = False
         return payload
 
     def process_responses(
@@ -179,10 +192,20 @@ class LiveHistoryChatEndpoint(ChatEndpoint):
         return result
 
     def _prt_render(self, out: list[Any], trace_n: int) -> str | None:
-        """Return the content for output ``out``, or None when nothing fits.
+        """Return the message text for output ``out``, or None when nothing fits.
 
-        Cut to ``trace_n`` tokens (``<think>\\n`` counts) so ISL never exceeds
-        the trace's; a prefix of the ids is still a cached prefix.
+        Cut to ``trace_n`` tokens so ISL never exceeds the trace's; a prefix of
+        the ids is still a cached prefix. The two tokens kept free are
+        ``<think>\\n``, or for DeepSeek-V4.1 the ``</think>`` and end of
+        sentence its template appends.
+
+        Args:
+            out: ``[ids, cached]``, the stored output ids and the last
+                ``(trace_n, text)`` rendered; ``cached`` is updated in place.
+            trace_n: The trace's token count for this turn.
+
+        Returns:
+            The text, or None when ``trace_n`` leaves no room for any id.
         """
         ids, cached = out
         if cached is not None and cached[0] == trace_n:
@@ -191,7 +214,7 @@ class LiveHistoryChatEndpoint(ChatEndpoint):
         if keep <= 0:
             return None
         text = self._prt_tok.decode(list(ids[:keep]), skip_special_tokens=False)
-        out[1] = (trace_n, _THINK_PREFIX + text)
+        out[1] = (trace_n, text if self._prt_v41 else _THINK_PREFIX + text)
         return out[1][1]
 
     def _prt_store(self, key: OutputKey, ids: array) -> None:

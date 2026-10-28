@@ -251,6 +251,20 @@ def suite(name: str, out: Path, deployments: list[str] | None = None) -> int:
             )
         except RuntimeError as e:
             model_errors[model] = str(e)
+    # Likewise a trace dir that was never built.
+    trace_errors = {}
+    traces = {resolve(cfg, w, d).trace_dir for w in plan["workloads"] for d in deps}
+    for trace_dir in sorted(t for t in traces if not t.is_dir()):
+        try:
+            hf.fetch_trace(
+                trace_dir,
+                cfg["host"]["hf_cache"],
+                im["serving"],
+                cfg["container"],
+                out / f"download_{trace_dir.name}.log",
+            )
+        except RuntimeError as e:
+            trace_errors[trace_dir] = str(e)
     reg = cfg["regression"]
     alpha = reg["false_alarm_rate"] / len(reg["metrics"])
     hist_path = root / "prt-results" / "history.jsonl"
@@ -268,6 +282,8 @@ def suite(name: str, out: Path, deployments: list[str] | None = None) -> int:
                 skip = f"no mooncake image: {mooncake_error}"
             elif model in model_errors:
                 skip = f"no {model} snapshot: {model_errors[model]}"
+            elif spec.trace_dir in trace_errors:
+                skip = f"no {spec.trace_dir.name}: {trace_errors[spec.trace_dir]}"
             if skip:
                 # The page keys a run's setup on these, as run() records them.
                 summary = {

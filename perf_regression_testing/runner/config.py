@@ -291,7 +291,7 @@ def resolve(cfg: dict[str, Any], workload: str, deployment: str) -> RunSpec:
         )
         for s in raw_services
     ]
-    trace = w["trace"]
+    trace = m.get("trace", w["trace"])
     trace_dir = Path(host["root"]) / trace["dir"]
     aiperf_args = substitute(
         {
@@ -314,7 +314,11 @@ def resolve(cfg: dict[str, Any], workload: str, deployment: str) -> RunSpec:
         served_name=m["served_name"],
         vllm_port=cfg["vllm"]["port"],
         vllm_startup_timeout_s=cfg["vllm"]["startup_timeout_s"],
-        vllm_env={**cfg["vllm"]["env"], **d.get("vllm_env", {})},
+        vllm_env={
+            **cfg["vllm"]["env"],
+            **m.get("vllm_env", {}),
+            **d.get("vllm_env", {}),
+        },
         vllm_args=substitute(
             {
                 **cfg["vllm"]["args"],
@@ -332,7 +336,12 @@ def resolve(cfg: dict[str, Any], workload: str, deployment: str) -> RunSpec:
         cap_add=d.get("cap_add", []),
         files=d.get("files", {}),
         aiperf_env=substitute(
-            {**cfg["aiperf"]["env"], **w["aiperf"].get("env", {})}, msubst
+            {
+                **cfg["aiperf"]["env"],
+                **m.get("aiperf_env", {}),
+                **w["aiperf"].get("env", {}),
+            },
+            msubst,
         ),
         aiperf_args=aiperf_args,
         aiperf_timeout_s=cfg["aiperf"]["timeout_s"],

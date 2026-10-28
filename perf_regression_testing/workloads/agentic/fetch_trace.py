@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Build the agentic workload's trace directory, or print its digest.
+"""Build an agentic trace directory, or print its digest.
 
-The trace is the HF dataset ``semianalysisai/cc-traces-weka-062126-256k`` at a
-pinned revision: one ``traces.jsonl``, one session tree per line. AIPerf's
-``weka_trace`` loader reads a directory with one ``<id>.json`` per tree, so
-this script splits the file by ``id``, writing each line unchanged.
+Each trace is an HF dataset at a pinned revision: one ``traces.jsonl``, one
+session tree per line. AIPerf's ``weka_trace`` loader reads a directory with
+one ``<id>.json`` per tree, so this script splits the file by ``id``, writing
+each line unchanged. The directory's name picks the dataset (``TRACES``):
+the same 393 sessions with requests capped at 256k tokens, or uncapped (up to
+990,016) for models with a 1M context.
 
 Usage::
 
@@ -21,11 +23,22 @@ writes.
 import hashlib
 import json
 import os
+import shutil
 import sys
 
-REPO_ID = "semianalysisai/cc-traces-weka-062126-256k"
-REVISION = "8fecd2fc56694469f758f0afbbb6335ad3043740"
-TRACES_SHA256 = "e39cd2ff3eba21d4a3664be51da743ac3d2149a1933898cafc7bfeac8147eeef"
+# Directory name -> (HF dataset, revision, sha256 of traces.jsonl).
+TRACES = {
+    "weka-062126-256k-dir": (
+        "semianalysisai/cc-traces-weka-062126-256k",
+        "8fecd2fc56694469f758f0afbbb6335ad3043740",
+        "e39cd2ff3eba21d4a3664be51da743ac3d2149a1933898cafc7bfeac8147eeef",
+    ),
+    "weka-062126-dir": (
+        "semianalysisai/cc-traces-weka-062126",
+        "23f152f6f0f9399a85901b89a6458def0ef16729",
+        "29b6a19e751ff5230771519aab755f80a0f43a4ba9cf96b72d3a6a437ec99276",
+    ),
+}
 
 
 def dir_digest(trace_dir: str) -> str:
@@ -44,8 +57,11 @@ def dir_digest(trace_dir: str) -> str:
     return h.hexdigest()
 
 
-def load_lines() -> list[str]:
-    """Download the pinned ``traces.jsonl`` and return its lines.
+def load_lines(name: str) -> list[str]:
+    """Download the pinned ``traces.jsonl`` of one trace and return its lines.
+
+    Args:
+        name: A key of ``TRACES``.
 
     Returns:
         One JSON string per session tree.
@@ -57,28 +73,40 @@ def load_lines() -> list[str]:
     # Third Party
     from huggingface_hub import hf_hub_download
 
-    path = hf_hub_download(
-        REPO_ID, "traces.jsonl", repo_type="dataset", revision=REVISION
-    )
+    repo, revision, sha256 = TRACES[name]
+    path = hf_hub_download(repo, "traces.jsonl", repo_type="dataset", revision=revision)
     with open(path, "rb") as f:
         data = f.read()
     digest = hashlib.sha256(data).hexdigest()
-    if digest != TRACES_SHA256:
-        sys.exit(f"traces.jsonl sha256 {digest} != pinned {TRACES_SHA256}")
+    if digest != sha256:
+        sys.exit(f"traces.jsonl sha256 {digest} != pinned {sha256}")
     return data.decode().splitlines()
 
 
 def build(out_dir: str) -> None:
     """Write one ``<id>.json`` per tree into a new directory ``out_dir``.
 
+    The files go to ``<out_dir>.partial`` first, renamed when complete, so an
+    interrupted build never leaves a directory that looks finished.
+
     Args:
-        out_dir: Directory to create; must not exist.
+        out_dir: Directory to create; must not exist. Its name is a key of
+            ``TRACES``.
+
+    Raises:
+        SystemExit: when the name is not in ``TRACES``.
     """
-    lines = load_lines()
-    os.makedirs(out_dir)
+    name = os.path.basename(os.path.normpath(out_dir))
+    if name not in TRACES:
+        sys.exit(f"{name}: not one of {', '.join(TRACES)}")
+    lines = load_lines(name)
+    tmp = out_dir.rstrip("/") + ".partial"
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
     for line in lines:
-        with open(os.path.join(out_dir, json.loads(line)["id"] + ".json"), "w") as f:
+        with open(os.path.join(tmp, json.loads(line)["id"] + ".json"), "w") as f:
             f.write(line)
+    os.rename(tmp, out_dir)
     print(f"built {out_dir}: {len(lines)} trees")
 
 

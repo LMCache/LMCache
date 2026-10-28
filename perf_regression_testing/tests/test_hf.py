@@ -10,6 +10,7 @@ import pytest
 # First Party
 from perf_regression_testing.runner import hf
 from perf_regression_testing.runner.config import load
+from perf_regression_testing.workloads.agentic import fetch_trace as trace_builder
 
 
 @pytest.mark.parametrize("rc", [0, 1])
@@ -45,6 +46,58 @@ def test_fetch_marks_only_a_finished_download_and_always_removes_its_container(
     assert f"{cache}:{cache}" in args and f"HF_HOME={cache}" in args
     assert removed == [args[args.index("--name") + 1]]
     assert Path(m["done"]).exists() == (rc == 0)
+
+
+@pytest.mark.parametrize("rc", [0, 1])
+def test_fetch_trace_builds_the_dir_in_the_serving_image(
+    rc: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = load()
+    cache = cfg["host"]["hf_cache"]
+    trace_dir = tmp_path / "work" / "weka-062126-dir"
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, rc)
+
+    monkeypatch.setattr(hf.subprocess, "run", fake_run)
+    monkeypatch.setattr(hf.docker, "remove", lambda names, stop_s: [])
+    log = tmp_path / "t.log"
+    log.write_text("")
+    if rc:
+        with pytest.raises(RuntimeError, match="weka-062126-dir.*t.log"):
+            hf.fetch_trace(trace_dir, cache, "prt-serving:x", cfg["container"], log)
+    else:
+        hf.fetch_trace(trace_dir, cache, "prt-serving:x", cfg["container"], log)
+    (args,) = calls
+    assert args[-2:] == ["build", str(trace_dir)]
+    script = Path(args[-3])
+    assert script.name == "fetch_trace.py" and script.is_file()
+    assert f"{script.parent}:{script.parent}:ro" in args
+    assert f"{trace_dir.parent}:{trace_dir.parent}" in args
+    assert f"HF_HOME={cache}" in args
+
+
+def test_a_trace_build_names_its_dataset_by_dir_and_never_leaves_half_a_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lines = ['{"id": "a", "requests": []}', '{"id": "b", "requests": []}']
+    asked: list[str] = []
+
+    def load_lines(name: str) -> list[str]:
+        asked.append(name)
+        return lines
+
+    monkeypatch.setattr(trace_builder, "load_lines", load_lines)
+    with pytest.raises(SystemExit, match="not one of"):
+        trace_builder.build(str(tmp_path / "other-dir"))
+    out = tmp_path / "weka-062126-dir"
+    (tmp_path / "weka-062126-dir.partial").mkdir()  # left by a killed build
+    trace_builder.build(str(out))
+    assert asked == ["weka-062126-dir"]
+    assert sorted(p.name for p in out.iterdir()) == ["a.json", "b.json"]
+    assert not (tmp_path / "weka-062126-dir.partial").exists()
 
 
 def _repo_dir(cache: Path, repo: str) -> Path:

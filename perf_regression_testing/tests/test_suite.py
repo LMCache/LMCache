@@ -11,6 +11,21 @@ import pytest
 from perf_regression_testing import suite
 
 
+@pytest.fixture(autouse=True)
+def built_traces(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Trace builds succeed without docker; returns the dirs built, in order."""
+    built: list[str] = []
+
+    def fetch_trace(
+        trace_dir: Path, hf_cache: str, image: str, container: dict, log: Path
+    ) -> None:
+        built.append(trace_dir.name)
+        trace_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(suite.hf, "fetch_trace", fetch_trace)
+    return built
+
+
 def _fetch_models(cfg: dict[str, Any]) -> None:
     for m in cfg["models"].values():
         Path(m["done"]).parent.mkdir(parents=True, exist_ok=True)
@@ -74,7 +89,7 @@ def test_missing_models_are_downloaded_and_a_failed_one_skips_its_pairs(
     deps = ["vllm_simple", "vllm_lmcache_ssm"]
     assert suite.suite("weekly", tmp_path / "s", deps) == suite.EXIT_SUITE_INVALID
     assert fetched == [
-        "arcee-ai/Trinity-Large-Thinking-FP8-Block",
+        "deepseek-ai/DeepSeek-V4.1-Flash-1017",
         "Qwen/Qwen3.8-Flash-Next-FP8",
     ]
     assert ran == ["vllm_simple"]
@@ -87,7 +102,7 @@ def test_missing_models_are_downloaded_and_a_failed_one_skips_its_pairs(
     assert shown["vllm_simple"] == {
         "label": "vLLM simple",
         "desc": "vLLM SimpleCPUOffloadConnector · CPU 1500 GiB",
-        "model": "Trinity-Large-Thinking-FP8-Block",
+        "model": "DeepSeek-V4.1-Flash-1017",
         "gated": False,
     }
     assert shown["vllm_lmcache_ssm"]["model"] == "Qwen3.8-Flash-Next-FP8"
@@ -96,6 +111,54 @@ def test_missing_models_are_downloaded_and_a_failed_one_skips_its_pairs(
     root = Path(suite.load()["host"]["root"])
     history = (root / "prt-results" / "history.jsonl").read_text().splitlines()
     assert [json.loads(h)["suite"] for h in history] == ["weekly"]
+
+
+def test_a_missing_trace_is_built_once_and_a_failed_one_skips_its_pairs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fetch_models(suite.load())
+    monkeypatch.setattr(suite.docker, "root_free_gb", lambda: 1e9)
+    monkeypatch.setattr(suite.docker, "image_label", lambda image, key: "x")
+
+    def tonight(root: Path, src: Path, out: Path, need_lmcache: bool) -> dict:
+        im = {"usable": True, "vllm_source": "nightly", "time": 0.0}
+        im |= {"serving": "prt-serving:x", "vllm_commit": "v"}
+        return im | {"lmcache": "prt-lmcache:x", "lmcache_commit": "l"}
+
+    built: list[str] = []
+
+    def fetch_trace(
+        trace_dir: Path, hf_cache: str, image: str, container: dict, log: Path
+    ) -> None:
+        built.append(trace_dir.name)
+        if trace_dir.name == "weka-062126-dir":
+            raise RuntimeError("hub unreachable")
+        trace_dir.mkdir(parents=True)
+
+    ran: list[str] = []
+
+    def run(spec: Any, out: Path, image: str, aiperf: str) -> int:
+        ran.append(spec.deployment)
+        out.mkdir(parents=True)
+        summary = {"invalid": [], "vllm_commit": "v", "lmcache_commit": "l"}
+        (out / "summary.json").write_text(json.dumps(summary))
+        return suite.EXIT_VALID
+
+    monkeypatch.setattr(suite.images, "tonight", tonight)
+    monkeypatch.setattr(suite.images, "build", lambda args, log: f"prt-{args[0]}")
+    monkeypatch.setattr(suite.images, "prune", lambda keep: [])
+    monkeypatch.setattr(suite.hf, "fetch_trace", fetch_trace)
+    monkeypatch.setattr(suite, "run", run)
+    deps = ["vllm_native", "vllm_simple", "vllm_lmcache_ssm"]
+    assert suite.suite("weekly", tmp_path / "s", deps) == suite.EXIT_SUITE_INVALID
+    # V4.1 replays the uncapped trace, the SSM model the workload's 256k one.
+    assert built == ["weka-062126-256k-dir", "weka-062126-dir"]
+    assert ran == ["vllm_lmcache_ssm"]
+    rep = json.loads((tmp_path / "s" / "report.json").read_text())
+    skipped = [r for r in rep["runs"] if r["deployment"] != "vllm_lmcache_ssm"]
+    assert len(skipped) == 2
+    for r in skipped:
+        assert "hub unreachable" in r["summary"]["invalid"][0]
 
 
 @pytest.mark.parametrize(

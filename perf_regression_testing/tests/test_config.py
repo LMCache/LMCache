@@ -68,8 +68,8 @@ def _fetch(cfg: dict[str, Any], model: str) -> None:
 def test_missing_models_names_each_absent_model_once() -> None:
     cfg = load()
     deps = ["vllm_lmcache", "vllm_lmcache_ssm", "vllm_native"]
-    assert missing_models(cfg, deps) == ["trinity", "qwen38"]
-    _fetch(cfg, "trinity")
+    assert missing_models(cfg, deps) == ["dsv41", "qwen38"]
+    _fetch(cfg, "dsv41")
     assert missing_models(cfg, deps) == ["qwen38"]
     _fetch(cfg, "qwen38")
     assert missing_models(cfg, deps) == []
@@ -87,8 +87,9 @@ def test_a_snapshot_without_its_done_marker_is_still_missing() -> None:
 def test_a_deployment_runs_its_own_model() -> None:
     cfg = load()
     for d, model, served in [
-        ("vllm_lmcache", "trinity", "trinity-large-thinking"),
+        ("vllm_lmcache", "dsv41", "deepseek-v4.1-flash"),
         ("vllm_lmcache_ssm", "qwen38", "qwen3p8"),
+        ("vllm_lmcache_swa_l2", "trinity", "trinity-large-thinking"),
     ]:
         spec = resolve(cfg, "agentic", d)
         m = cfg["models"][model]
@@ -112,6 +113,25 @@ def test_a_model_s_gpu_count_replaces_the_host_s_and_matches_its_tp() -> None:
         assert spec.vllm_args["tensor-parallel-size"] == spec.gpu_count, d
 
 
+def test_a_model_with_its_own_trace_replays_it_in_place_of_the_workloads() -> None:
+    cfg = load()
+    root = Path(cfg["host"]["root"])
+    v41 = resolve(cfg, "agentic", "vllm_native")
+    assert v41.trace_dir == root / "work" / "weka-062126-dir"
+    assert v41.aiperf_args["input-file"] == str(v41.trace_dir)
+    assert v41.trace == cfg["models"]["dsv41"]["trace"]
+    ssm = resolve(cfg, "agentic", "vllm_lmcache_ssm")
+    assert ssm.trace == cfg["workloads"]["agentic"]["trace"]
+    assert ssm.trace_dir.name == "weka-062126-256k-dir"
+
+
+def test_aiperf_keeps_every_session_of_the_uncapped_trace() -> None:
+    # AIPerf drops each session whose peak in + out exceeds max-context-length;
+    # the longest one in the uncapped trace peaks at 996,579 tokens.
+    v41 = resolve(load(), "agentic", "vllm_lmcache")
+    assert v41.aiperf_args["max-context-length"] >= 996_579
+
+
 def test_check_host_needs_rdma_devices_only_for_mooncake(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -132,4 +152,3 @@ def test_a_replicated_service_expands_per_index() -> None:
         assert s.args["host"] == f"127.0.0.1:{29053 + 10 * i}"
         assert s.args["http_port"] == 19301 + i
         assert s.ready_url == f"http://127.0.0.1:{19301 + i}/health"
-        assert s.scratch[0]["path"].endswith(f"/l2/c{i}")

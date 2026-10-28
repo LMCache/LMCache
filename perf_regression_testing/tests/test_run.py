@@ -23,7 +23,7 @@ def test_busy_gpus_make_the_run_invalid(
     assert code == run.EXIT_GPU_BUSY
     assert "busy" in summary["invalid"][0]
     # The results page draws one line per model and load.
-    assert summary["concurrency"] == spec.aiperf_args["concurrency"] == 340
+    assert summary["concurrency"] == spec.aiperf_args["concurrency"] == 393
 
 
 def _fake_smi(
@@ -60,8 +60,10 @@ def test_pick_gpus_gives_up_when_too_few_are_free(
     assert run.pick_gpus(4, wait_s=0) is None
 
 
-def test_only_mooncake_clients_run_without_seccomp(tmp_path: Path) -> None:
-    spec = resolve(load(), "agentic", "vllm_mooncake")
+def test_only_a_service_with_a_seccomp_profile_gets_one(tmp_path: Path) -> None:
+    cfg = load()
+    cfg["deployments"]["vllm_mooncake"]["services"][1]["seccomp"] = "unconfined"
+    spec = resolve(cfg, "agentic", "vllm_mooncake")
     cmds = run.build_commands(spec, [0, 1, 2, 3], "t", tmp_path, "img", "aiperf")
     for role, cmd in cmds.items():
         opts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--security-opt"]
@@ -71,14 +73,16 @@ def test_only_mooncake_clients_run_without_seccomp(tmp_path: Path) -> None:
             assert opts == []
 
 
-@pytest.mark.parametrize(
-    ("deployment", "dropped"),
-    [("vllm_native", ["DAC_OVERRIDE"]), ("vllm_lmcache", [])],
-)
+@pytest.mark.parametrize(("cap_gb", "dropped"), [(6000, ["DAC_OVERRIDE"]), (None, [])])
 def test_a_capped_vllm_cannot_override_dir_permissions(
-    tmp_path: Path, deployment: str, dropped: list[str]
+    tmp_path: Path, cap_gb: int | None, dropped: list[str]
 ) -> None:
-    spec = resolve(load(), "agentic", deployment)
+    cfg = load()
+    scratch = {"path": str(tmp_path / "l2"), "min_free_gb": 1}
+    if cap_gb is not None:
+        scratch["cap_gb"] = cap_gb
+    cfg["deployments"]["vllm_native"]["vllm_scratch"] = [scratch]
+    spec = resolve(cfg, "agentic", "vllm_native")
     cmd = run.build_commands(spec, [0, 1, 2, 3], "t", tmp_path, "img", "aiperf")["vllm"]
     assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--cap-drop"] == dropped
 
@@ -139,13 +143,14 @@ def test_heartbeat_counts_a_fixed_duration_phase_across_midnight(
     )
 
 
-@pytest.mark.parametrize(
-    ("deployment", "limit"), [("vllm_simple_l2", ["1532g"]), ("vllm_lmcache", [])]
-)
+@pytest.mark.parametrize(("memory_gb", "limit"), [(1532, ["1532g"]), (None, [])])
 def test_only_a_deployment_with_a_memory_cap_gets_one(
-    tmp_path: Path, deployment: str, limit: list[str]
+    tmp_path: Path, memory_gb: int | None, limit: list[str]
 ) -> None:
-    spec = resolve(load(), "agentic", deployment)
+    cfg = load()
+    if memory_gb is not None:
+        cfg["deployments"]["vllm_simple"]["vllm_memory_gb"] = memory_gb
+    spec = resolve(cfg, "agentic", "vllm_simple")
     cmd = run.build_commands(spec, [0, 1, 2, 3], "t", tmp_path, "img", "aiperf")["vllm"]
     assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--memory"] == limit
     # Swap counts toward the cap, so the page cache cannot spill past it.

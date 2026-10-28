@@ -22,7 +22,8 @@ min_docker_free_gb = 10
 
 # Served offline from the HF cache snapshot. `vllm_args` go on top of
 # [vllm.args], `aiperf_args` on top of [aiperf.args], `gpu_count` replaces
-# [host].gpu_count.
+# [host].gpu_count, `trace` replaces the workload's trace. A missing trace dir
+# is built by the suite (workloads/agentic/fetch_trace.py).
 # Each model is a frontier open-weight release, served the way its vLLM recipe
 # serves it, and replaced when a newer one appears.
 # Hybrid SWA: 15 full-attention and 45 sliding-window (4096) layers, 8 KV heads.
@@ -33,7 +34,7 @@ served_name = "trinity-large-thinking"
 # 220 left LMCache 18% of prompt tokens (build 45; Step-3.7 had 47%): its 18.5M
 # token GPU cache holds most sessions. Scaled by KV capacity; the knee is still
 # to be measured. The trace has 393 sessions.
-aiperf_args = { concurrency = 340 }
+aiperf_args = { concurrency = 340, max-context-length = 262144 }
 
 [models.trinity.vllm_args]
 # Matches LMCache's chunk-size; at the default 0 MooncakeStoreConnector never
@@ -42,6 +43,36 @@ prefix-cache-retention-interval = 1024
 reasoning-parser = "deepseek_r1"
 enable-auto-tool-choice = true
 tool-call-parser = "qwen3_coder"
+
+# MLA with compressed and sliding-window (128) KV, one KV head, MoE. The
+# recipe's single-node TEP layout (TP8 + EP): every attention cache is whole on
+# each rank, so the GPU KV is one rank's pool, below the sessions' context.
+[models.dsv41]
+repo = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+revision = "1bae0e1088993b9b82de08f59de5be5a34e42170"
+served_name = "deepseek-v4.1-flash"
+# Every session of the trace at once (393); the knee is still to be measured.
+aiperf_args = { concurrency = 393, max-context-length = 1048576 }
+# Its 1M context replays the same sessions uncapped (requests up to 996,579
+# tokens), in place of the workload's 256k trace.
+trace = { dir = "work/weka-062126-dir", dir_digest = "f80f847c48e5b21047f817c7a01623b4de2343865a581e9fb46d2ea890710ca6" }
+
+[models.dsv41.vllm_args]
+tokenizer-mode = "deepseek_v41"
+enable-ep-weight-filter = true
+# The recipe sets no KV dtype on H200: the checkpoint's own KV format.
+kv-cache-dtype = "auto"
+speculative-config = '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}'
+prefix-cache-retention-interval = 1024
+reasoning-parser = "deepseek_v41"
+enable-auto-tool-choice = true
+tool-call-parser = "deepseek_v41"
+
+[models.dsv41.vllm_env]
+VLLM_ENGINE_READY_TIMEOUT_S = "3600"
+
+[models.dsv41.aiperf_env]
+PRT_LIVE_HISTORY_DIALECT = "deepseek_v41"
 
 # Hybrid linear: 36 Gated DeltaNet layers and 12 sparse GQA (QSA) layers with
 # 2 KV heads. Chosen over GLM-5.3-Flash, whose MLA layers TP replicates on every
@@ -53,7 +84,7 @@ served_name = "qwen3p8"
 # Kept on the 4-GPU setup it was first measured on: its GPU KV cache (12.2M
 # tokens) was within 6% of Step-3.7-Flash's, so the same load.
 gpu_count = 4
-aiperf_args = { concurrency = 230 }
+aiperf_args = { concurrency = 230, max-context-length = 262144 }
 
 [models.qwen38.vllm_args]
 tensor-parallel-size = 4
@@ -81,7 +112,8 @@ mounts = [
 # docker/Dockerfile stage `serving`: stock vLLM nightly; every deployment
 # image is built FROM it.
 port = 18000
-startup_timeout_s = 2400
+# The longest engine start, DeepSeek-V4.1's VLLM_ENGINE_READY_TIMEOUT_S.
+startup_timeout_s = 3600
 
 [vllm.env]
 VLLM_USE_V2_MODEL_RUNNER = "1"
@@ -155,9 +187,9 @@ invalid_log_patterns = ["unhealthy"]
 # publish.py records them with each run, so edit them with the tiers.
 
 [deployments.vllm_lmcache]
-model = "trinity"
-label = "LMCache, hybrid SWA"
-desc = "LMCache MP server · CPU 1500 GiB + disk 6000 GiB"
+model = "dsv41"
+label = "LMCache"
+desc = "LMCache MP server · CPU 1500 GiB"
 image_target = "lmcache"
 
 [deployments.vllm_lmcache.vllm_args]
@@ -169,9 +201,45 @@ command = ["lmcache", "server"]
 ready_url = "http://127.0.0.1:18080/metrics"
 ready_timeout_s = 1800
 env = { LMCACHE_LOG_LEVEL = "WARNING" }
-scratch = [{ path = "<root>/l2", min_free_gb = 6000 }]
 
 [deployments.vllm_lmcache.services.args]
+host = "127.0.0.1"
+port = 16555
+http-port = 18080
+chunk-size = 1024
+separate-object-groups = true
+# Pinned lazily, in 64 MiB chunks after the first 20 GiB: one 1500 GiB
+# cudaHostRegister fails and leaves L1 pageable, and LMCache then fell minutes
+# behind until loads failed (builds 43 and 44).
+l1-size-gb = 1500
+eviction-policy = "LRU"
+disable-observability = true
+eviction-trigger-watermark = 0.95
+eviction-ratio = 0.05
+# One GPU and one CPU worker by default: all TP ranks' stores and loads queue
+# on a single thread. One worker per TP8 rank, so none shares a slot.
+max-workers = 8
+
+[deployments.vllm_lmcache_swa_l2]
+# The L2 write path on the hybrid sliding-window model, the setup
+# vllm_lmcache ran before DeepSeek-V4.1.
+model = "trinity"
+label = "LMCache, hybrid SWA + L2"
+desc = "LMCache MP server · CPU 1500 GiB + disk 6000 GiB"
+image_target = "lmcache"
+
+[deployments.vllm_lmcache_swa_l2.vllm_args]
+kv-transfer-config = '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://localhost","lmcache.mp.port":16555,"lmcache.mp.mq_timeout":1500}}'
+
+[[deployments.vllm_lmcache_swa_l2.services]]
+name = "lmcache"
+command = ["lmcache", "server"]
+ready_url = "http://127.0.0.1:18080/metrics"
+ready_timeout_s = 1800
+env = { LMCACHE_LOG_LEVEL = "WARNING" }
+scratch = [{ path = "<root>/l2", min_free_gb = 6000 }]
+
+[deployments.vllm_lmcache_swa_l2.services.args]
 host = "127.0.0.1"
 port = 16555
 http-port = 18080
@@ -190,7 +258,7 @@ l2-prefetch-policy = "retain"
 # on a single thread. One worker per TP8 rank, so none shares a slot.
 max-workers = 8
 
-[deployments.vllm_lmcache.services.args.l2-adapter]
+[deployments.vllm_lmcache_swa_l2.services.args.l2-adapter]
 type = "fs_native"
 base_path = "<root>/l2"
 # Bypass the page cache, which would serve L2 from RAM outside the L1 budget.
@@ -246,26 +314,21 @@ max_capacity_gb = 1500
 eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 0.1 }
 
 [deployments.vllm_native]
-model = "trinity"
+model = "dsv41"
 label = "vLLM native"
-desc = "vLLM OffloadingConnector · CPU 1500 GiB + disk 6000 GiB"
-# Both tiers live in the vLLM workers. CPU tier 1500 GiB total over the TP
-# ranks. vLLM's fs tier has no capacity limit, so cap_gb freezes the dir at
-# 6000 GiB (runner/disk_cap.py): full means no new entries, not eviction.
-# block_size 1024 matches LMCache's chunk-size; the retention interval must
-# be a multiple of it.
+desc = "vLLM OffloadingConnector · CPU 1500 GiB"
+# CPU tier 1500 GiB total over the TP ranks. block_size 1024 matches LMCache's
+# chunk-size; the retention interval must be a multiple of it.
 image_target = "serving"
-vllm_scratch = [{ path = "<root>/l2", min_free_gb = 6000, cap_gb = 6000 }]
 # vLLM maps its CPU tier in /dev/shm, and the host's has about 1000 GiB free:
 # vllm_shm_gb gives the container a private one (no LMCache here to share IPC).
 vllm_shm_gb = 1600
 
 [deployments.vllm_native.vllm_args]
-# Per-rank fs dirs are <root_dir>_r<rank>, so root_dir sits inside the scratch.
-kv-transfer-config = '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","block_size":1024,"cpu_bytes_to_use":1610612736000,"eviction_policy":"lru","secondary_tiers":[{"type":"fs","root_dir":"<root>/l2/fs"}]}}'
+kv-transfer-config = '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"block_size":1024,"cpu_bytes_to_use":1610612736000,"eviction_policy":"lru"}}'
 
 [deployments.vllm_simple]
-model = "trinity"
+model = "dsv41"
 label = "vLLM simple"
 desc = "vLLM SimpleCPUOffloadConnector · CPU 1500 GiB"
 # vLLM SimpleCPUOffloadConnector. Its offload pool is one tier, CPU or disk,
@@ -275,29 +338,14 @@ image_target = "serving"
 [deployments.vllm_simple.vllm_args]
 kv-transfer-config = '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":1610612736000}}'
 
-[deployments.vllm_simple_l2]
-model = "trinity"
-label = "vLLM simple L2"
-desc = "vLLM SimpleCPUOffloadConnector · disk 6000 GiB, page cache 1500 GiB"
-# SimpleCPUOffloadConnector's disk backend, 6000 GiB (750 GiB per TP rank),
-# read through the page cache. That cache is the DRAM tier: vllm_memory_gb
-# caps the container's memory, page cache included, at 1500 GiB plus the
-# headroom vLLM itself needs (summary vllm_mem_peak_gb.anon measures it).
-image_target = "serving"
-vllm_scratch = [{ path = "<root>/l2", min_free_gb = 6000 }]
-vllm_memory_gb = 1532
-
-[deployments.vllm_simple_l2.vllm_args]
-kv-transfer-config = '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"kv_offload_backend":"disk","disk_path":"<root>/l2/simple","disk_capacity_bytes":805306368000,"use_page_cache":true}}'
-
 [deployments.vllm_mooncake]
-model = "trinity"
+model = "dsv41"
 label = "Mooncake"
-desc = "Mooncake store · CPU 1500 GiB + disk 6000 GiB"
+desc = "Mooncake store · CPU 1500 GiB"
 # Tuned through Mooncake's own config only. Standalone-store layout:
-# mooncake_client owns the CPU pool and SSD tier. Budget 1500 GiB pool, 6000
-# GiB disk, split over four clients since one client writes SSD from a single
-# thread. SYS_NICE lets Mooncake mbind its segments under docker's seccomp.
+# mooncake_client owns the CPU pool, 1500 GiB split over four clients (the
+# layout tuned with its SSD tier). SYS_NICE lets Mooncake mbind its segments
+# under docker's seccomp.
 image_target = "mooncake"
 devices = ["/dev/infiniband"]
 cap_add = ["SYS_NICE"]
@@ -320,7 +368,6 @@ global_segment_size = 0
 local_buffer_size = "4GB"
 protocol = "rdma"
 device_name = "<rdma_devices>"
-enable_offload = true
 
 [[deployments.vllm_mooncake.services]]
 name = "mooncake_master"
@@ -332,9 +379,6 @@ ready_timeout_s = 60
 # Below the ephemeral port range, where TIME_WAIT can block the bind.
 rpc_port = 29051
 metrics_port = 19003
-enable_offload = true
-# The master silently skips offload for puts beyond this queue.
-offloading_queue_limit = 1000000
 eviction_high_watermark_ratio = 0.95  # use the whole pool
 
 # Template for four clients, each a quarter of the budget. runner/config.py
@@ -347,27 +391,7 @@ command = ["mooncake_client"]
 # Not Mooncake's default 19300, which may be taken on a shared host.
 ready_url = "http://127.0.0.1:<19301+i>/health"
 ready_timeout_s = 600
-scratch = [{ path = "<root>/l2/c<i>", min_free_gb = 6000 }]
-# Docker's default profile blocks io_uring_setup, needed for SSD reads.
-seccomp = "unconfined"
-
-[deployments.vllm_mooncake.services.env]
-MOONCAKE_OFFLOAD_FILE_STORAGE_PATH = "<root>/l2/c<i>"
-MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR = "bucket_storage_backend"
-MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE = "1610612736000"
-# Partial buckets are dropped each heartbeat; lower lets the writer fall
-# behind, above IOV_MAX (1024) every SSD write fails.
-MOONCAKE_OFFLOAD_BUCKET_KEYS_LIMIT = "16"
-MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES = "1610612736000"
-# The client drains the master's offload queue once per heartbeat.
-MOONCAKE_OFFLOAD_HEARTBEAT_INTERVAL_SECONDS = "1"
-MOONCAKE_OFFLOAD_DISK_EVICTION_HIGH_WATERMARK_RATIO = "0.98"  # use the quota
-MOONCAKE_OFFLOAD_DISK_EVICTION_LOW_WATERMARK_RATIO = "0.95"
-MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY = "lru"
-# SSD read staging; the connector reads up to 1280 MiB per GET.
-MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES = "2147483648"
-MOONCAKE_OFFLOAD_USE_URING = "true"
-MC_ENABLE_DEST_DEVICE_AFFINITY = "1"
+env = { MC_ENABLE_DEST_DEVICE_AFFINITY = "1" }
 
 [deployments.vllm_mooncake.services.args]
 master_server_address = "127.0.0.1:29051"
@@ -377,12 +401,11 @@ port = "<29052+10i>"
 protocol = "rdma"
 device_names = "<rdma_devices>"
 global_segment_size = "375GB"
-enable_offload = true
 enable_http_server = true
 http_port = "<19301+i>"
 
 # Every (workload, deployment) pair of a suite, on tonight's images. LMCache
-# nightly gates; competitors and the hybrid model run weekly and never gate.
+# nightly gates; competitors and the other models run weekly and never gate.
 
 [suites.nightly]
 workloads = ["agentic"]
@@ -394,9 +417,9 @@ workloads = ["agentic"]
 deployments = [
   "vllm_native",
   "vllm_simple",
-  "vllm_simple_l2",
   "vllm_mooncake",
   "vllm_lmcache_ssm",
+  "vllm_lmcache_swa_l2",
 ]
 gate = false
 
@@ -432,7 +455,8 @@ unsafe-override = true
 tokenizer = "<model_repo>"
 tokenizer-revision = "<model_revision>"
 custom-dataset-type = "weka_trace"
-max-context-length = 262144
+# max-context-length is set per model: AIPerf drops every session that peaks
+# above it.
 prompt-corpus = "coding"
 # Per-session marker after the shared header the loader declares as the system
 # prompt: sessions share that header, and nothing else (the scenario wants
