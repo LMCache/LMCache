@@ -83,6 +83,8 @@ def try_get_vllm_kv_cache_layout(
     """Return vLLM's resolved KV cache layout as LMCache's name.
 
     Returns ``None`` when vLLM is unavailable (i.e. the MP server).
+    Legacy CPU, Neuron, and MLU backends use physical HND caches even when
+    vLLM's generic backend query reports NHD. Resolved layouts take precedence.
 
     Raises:
         ValueError: from vLLM, if the layout has not been resolved yet;
@@ -122,8 +124,8 @@ def try_get_vllm_kv_cache_layout(
     # Legacy vLLM could report NHD on CPU even though the CPU attention backend
     # physically allocated [B, H, N, C] (HND). Post-vllm#51718 layouts are
     # returned from CacheConfig above, so normalize only this legacy fallback.
-    # vllm-neuron likewise reports NHD but allocates [2, NB, NH, BS, HS].
-    if torch_device_type in ("cpu", "neuron") and kv_layout in ("NHD", "HND"):
+    # vllm-neuron and vllm-mlu likewise allocate [2, NB, NH, BS, HS].
+    if torch_device_type in ("cpu", "neuron", "mlu") and kv_layout in ("NHD", "HND"):
         return "HND"
     return kv_layout
 

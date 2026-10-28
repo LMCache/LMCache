@@ -196,6 +196,10 @@ For gRPC, register generated services against the concrete ``grpc.Server``:
                server,
            )
 
+With ``--grpc-server-mode native`` the server is still a ``grpc.Server``, but
+it sits behind the native front on a private Unix socket: ``context.peer()``
+in its handlers is that socket, not the client.
+
 For ZMQ, register or start a package-owned ZMQ service against the concrete
 ``MessageQueueServer``:
 

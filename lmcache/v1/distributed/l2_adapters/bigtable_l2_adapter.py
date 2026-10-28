@@ -42,8 +42,14 @@ from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
 )
+from lmcache.v1.distributed.l2_adapters.bigtable_config import (
+    BigtablePluginConfig,
+)
 from lmcache.v1.distributed.l2_adapters.bigtable_key_encoder import (
     BigtableL2KeyEncoder,
+)
+from lmcache.v1.distributed.l2_adapters.bigtable_sharder import (
+    BigtablePayloadSharder,
 )
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -54,12 +60,6 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
-from lmcache.v1.storage_backend.connector.bigtable_config import (
-    BigtablePluginConfig,
-)
-from lmcache.v1.storage_backend.connector.bigtable_sharder import (
-    BigtablePayloadSharder,
-)
 
 logger = init_logger(__name__)
 

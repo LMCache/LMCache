@@ -34,6 +34,7 @@ from lmcache.inprocess.v1.gpu_connector.gpu_connectors import GPUConnectorInterf
 from lmcache.inprocess.v1.gpu_connector.utils import assert_layerwise_gpu_connector
 from lmcache.inprocess.v1.hidden_state_store import HiddenStateStore
 from lmcache.inprocess.v1.pin_monitor import PinMonitor
+from lmcache.inprocess.v1.storage_backend.storage_manager import StorageManager
 from lmcache.inprocess.v1.token_database import (
     ChunkedTokenDatabase,
     SegmentTokenDatabase,
@@ -64,7 +65,6 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.platform import current_device_spec
-from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.system_detection import NUMADetector, NUMAMapping
 
 logger = init_logger(__name__)
@@ -1458,7 +1458,7 @@ class LMCacheEngine:
             return 0
 
         # First Party
-        from lmcache.v1.storage_backend.naive_serde import CreateSerde
+        from lmcache.inprocess.v1.storage_backend.naive_serde import CreateSerde
 
         serializer, _ = CreateSerde(method, self.metadata, self.config)
 
@@ -1517,7 +1517,7 @@ class LMCacheEngine:
             return 0
 
         # First Party
-        from lmcache.v1.storage_backend.naive_serde import CreateSerde
+        from lmcache.inprocess.v1.storage_backend.naive_serde import CreateSerde
 
         _, deserializer = CreateSerde(method, self.metadata, self.config)
 
