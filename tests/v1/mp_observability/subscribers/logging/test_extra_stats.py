@@ -138,6 +138,82 @@ class TestExtraStatsLoggingSubscriber:
         )
         assert "retrieve ops=0 tokens=0 size=0.00GB avg_copy=n/a" in window_lines[0]
 
+    def test_reported_duration_is_preferred_over_start_end_pairing(self):
+        """The engine-driven path can have several chunks of one request in
+        flight per rank, so it reports its own window; pairing timestamps
+        would overstate the copy time."""
+        subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
+        with _capture_logs() as handler:
+            subs[EventType.MP_STORE_START](
+                _start(EventType.MP_STORE_START, "req-rd", 100.0)
+            )
+            end = _end(
+                EventType.MP_STORE_END,
+                "req-rd",
+                110.0,  # 10 s by pairing
+                total_bytes=5_000_000_000,
+                num_tokens=24576,
+            )
+            end.metadata["duration_seconds"] = 0.5  # publisher says 0.5 s
+            subs[EventType.MP_STORE_END](end)
+            time.sleep(_WAIT)
+            subs[EventType.L1_EVICTION_LOOP_TICK](_tick())
+
+        window_lines = [m for m in handler.messages() if "last" in m]
+        assert len(window_lines) == 1
+        # 5 GB / 0.5 s = 10 GB/s, not the 0.50 GB/s the timestamps imply.
+        assert "avg_copy=10.00GB/s" in window_lines[0]
+
+    def test_end_with_reported_duration_and_no_start_is_fully_counted(self):
+        """The engine-driven path publishes no START at all, so an END must
+        stand on its own: the reported duration is the only timing there."""
+        subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
+        with _capture_logs() as handler:
+            end = _end(
+                EventType.MP_STORE_END,
+                "req-nostart",
+                100.0,
+                total_bytes=2_000_000_000,
+                num_tokens=8192,
+            )
+            end.metadata["duration_seconds"] = 0.25
+            subs[EventType.MP_STORE_END](end)
+            time.sleep(_WAIT)
+            subs[EventType.L1_EVICTION_LOOP_TICK](_tick())
+
+        window_lines = [m for m in handler.messages() if "last" in m]
+        assert len(window_lines) == 1
+        # 2 GB / 0.25 s = 8 GB/s, counted without any START to pair against.
+        assert (
+            "store ops=1 tokens=8192 size=2.00GB avg_copy=8.00GB/s" in window_lines[0]
+        )
+
+    def test_reported_duration_still_consumes_the_pending_start(self):
+        """A reported duration must clear the START, so the next transfer on
+        the same rank cannot pair against a stale one."""
+        subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
+        with _capture_logs() as handler:
+            subs[EventType.MP_STORE_START](
+                _start(EventType.MP_STORE_START, "req-rd2", 100.0)
+            )
+            first = _end(EventType.MP_STORE_END, "req-rd2", 100.5, total_bytes=10**9)
+            first.metadata["duration_seconds"] = 1.0
+            subs[EventType.MP_STORE_END](first)
+            # Second END for the same session/device, no START and no duration:
+            # it must contribute bytes but no copy time.
+            subs[EventType.MP_STORE_END](
+                _end(EventType.MP_STORE_END, "req-rd2", 200.0, total_bytes=10**9)
+            )
+            time.sleep(_WAIT)
+            subs[EventType.L1_EVICTION_LOOP_TICK](_tick())
+
+        window_lines = [m for m in handler.messages() if "last" in m]
+        assert len(window_lines) == 1
+        # Both ops counted, but only the first one's 1.0 s is timed:
+        # 1 GB / 1.0 s = 1 GB/s.
+        assert "store ops=2" in window_lines[0]
+        assert "avg_copy=1.00GB/s" in window_lines[0]
+
     def test_retrieve_window_logs_tokens_size_and_throughput(self):
         subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
         # Wall-clock anchoring, same reason as the store-throughput test.

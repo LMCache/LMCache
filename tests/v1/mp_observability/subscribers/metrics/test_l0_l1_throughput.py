@@ -229,6 +229,60 @@ class TestLoadThroughput:
 # ---------------------------------------------------------------------------
 
 
+class TestReportedDuration:
+    """END events may carry the publisher's own ``duration_seconds``.
+
+    The engine-driven path can have several chunks of one request in flight
+    on one rank, so it measures each transfer itself instead of relying on
+    pairing by request and device.
+    """
+
+    def test_reported_duration_is_used_instead_of_pairing(self, subscriber):
+        count_before = _total_count(_STORE_METRIC)
+        sum_before = _sum(_STORE_METRIC)
+        end = _end_event(EventType.MP_STORE_END, "req-rd", 9.0, total_bytes=2 * 10**9)
+        end.metadata["duration_seconds"] = 4.0
+        # No START published at all: the reported duration stands alone.
+        subscriber._on_store_end(end)
+        assert _total_count(_STORE_METRIC) == count_before + 1
+        # 2 GB / 4 s = 0.5 GB/s, not the 9 s implied by the timestamps.
+        assert _sum(_STORE_METRIC) == pytest.approx(sum_before + 0.5)
+
+    def test_reported_duration_wins_over_start_timestamp(self, subscriber):
+        sum_before = _sum(_LOAD_METRIC)
+        subscriber._on_retrieve_start(
+            _start_event(EventType.MP_RETRIEVE_START, "req-rd2", 0.0)
+        )
+        end = _end_event(EventType.MP_RETRIEVE_END, "req-rd2", 10.0, total_bytes=10**9)
+        end.metadata["duration_seconds"] = 2.0
+        subscriber._on_retrieve_end(end)
+        assert _sum(_LOAD_METRIC) == pytest.approx(sum_before + 0.5)
+
+    def test_reported_duration_consumes_the_pending_start(self, subscriber):
+        """A reported duration must still clear the START, so the next
+        transfer on the same rank cannot pair against a stale one."""
+        subscriber._on_store_start(
+            _start_event(EventType.MP_STORE_START, "req-rd3", 0.0)
+        )
+        first = _end_event(EventType.MP_STORE_END, "req-rd3", 1.0, total_bytes=10**9)
+        first.metadata["duration_seconds"] = 1.0
+        subscriber._on_store_end(first)
+
+        count_before = _total_count(_STORE_METRIC)
+        # Second END for the same request/device, no START and no duration.
+        subscriber._on_store_end(
+            _end_event(EventType.MP_STORE_END, "req-rd3", 2.0, total_bytes=10**9)
+        )
+        assert _total_count(_STORE_METRIC) == count_before
+
+    def test_nonpositive_reported_duration_is_noop(self, subscriber):
+        count_before = _total_count(_STORE_METRIC)
+        end = _end_event(EventType.MP_STORE_END, "req-rd4", 1.0, total_bytes=10**9)
+        end.metadata["duration_seconds"] = 0.0
+        subscriber._on_store_end(end)
+        assert _total_count(_STORE_METRIC) == count_before
+
+
 class TestEdgeCases:
     def test_end_without_start_is_noop(self, subscriber):
         count_before = _total_count(_STORE_METRIC)

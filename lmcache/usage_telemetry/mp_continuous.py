@@ -14,8 +14,9 @@ never pulls in :mod:`lmcache.v1.mp_observability`.
 
 Note:
     The default metrics are sourced from ``MP_RETRIEVE_END`` /
-    ``MP_STORE_END``, which only the lmcache-driven transfer path emits;
-    engine-driven transfers are not counted.
+    ``MP_STORE_END``, which both the lmcache-driven and the engine-driven
+    transfer paths emit. An engine-driven END whose volume the server could
+    not determine omits those fields and contributes no sample.
 """
 
 # Future

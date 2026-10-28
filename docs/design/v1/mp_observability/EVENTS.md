@@ -181,8 +181,8 @@ thread processes them in strict order before any GPU-callback events.
 | EventType | Metadata keys | Types | Published by / when |
 |---|---|---|---|
 | `MP_REQUEST_START` | *(none)* | — | `MPServer.handle_request` — at request arrival, before any GPU work |
-| `MP_STORE_SUBMITTED` | `device` | `str` | `MPServer.store` — CPU-synchronous, before the GPU store is enqueued |
-| `MP_RETRIEVE_SUBMITTED` | `device` | `str` | `MPServer.retrieve` — CPU-synchronous, before the GPU retrieve is enqueued |
+| `MP_STORE_SUBMITTED` | `device` | `str` | `MPServer.store` — CPU-synchronous, before the GPU store is enqueued; `EngineDrivenTransferModule.commit_store` on the engine-driven path (see below) |
+| `MP_RETRIEVE_SUBMITTED` | `device` | `str` | `MPServer.retrieve` — CPU-synchronous, before the GPU retrieve is enqueued; `EngineDrivenTransferModule.commit_retrieve` on the engine-driven path (see below) |
 | `MP_REQUEST_END` | *(none)* | — | `MPServer.handle_request` — after all CPU work; may precede GPU callbacks |
 
 ---
@@ -228,6 +228,78 @@ Denormalized token count (`num_chunks * chunk_size`) so subscribers need
 not know `chunk_size`.  Fail-closed, matching `total_bytes`: `0` when the
 store committed nothing (`stored_count == 0`) or the retrieve did not
 fully succeed.
+
+### Engine-driven transfers
+
+`EngineDrivenTransferModule` publishes transfer events for the transfers it
+drives, so the throughput histograms, the extra-stats log and the continuous
+usage report also cover the transport used wherever CUDA IPC is unavailable
+(XPU and other non-CUDA accelerators) or
+`LMCACHE_MP_TRANSFER_MODE=engine_driven` is set.  Four differences from the
+GPU path:
+
+- **END only, both events at `commit_*`** — there is no `MP_*_START`, and
+  `MP_*_SUBMITTED` is published from `commit_*` immediately before the END
+  rather than from `prepare_*`.  The GPU path needs a START because its
+  subscribers infer a duration by pairing START with END per
+  `(session_id, device)`; this path reports `duration_seconds` instead (see
+  below), so a START would contribute nothing but correlation state.  That
+  state cannot be reclaimed here: a prepared transfer is not guaranteed to
+  commit (a worker whose gather raises never commits and is never reaped,
+  since it stays registered and healthy), and nothing in the publisher can
+  reach a subscriber's pending map, the submitted/finished counters, or an
+  open tracing span.  Publishing nothing until the transfer is known to have
+  completed leaves nothing to strand.  SUBMITTED is still paired with the END
+  so the submitted-minus-finished difference stays balanced; it reads zero in
+  flight, which is honest -- the server learns of an engine-driven transfer
+  only once it is done.  The consequence is that engine-driven transfers get
+  no `mp.store` / `mp.retrieve` child span until
+  `MPServerTracingSubscriber` keys its pending spans per transfer rather
+  than per `(session_id, event_type)`.
+
+- **`duration_seconds` (`float`, END events only)** — the server's own
+  measurement of the `prepare_*` → `commit_*` window, in which the worker
+  performs the device copies.  It is the only duration available here, since
+  there is no START to pair against -- and pairing per
+  `(session_id, device)` would be wrong anyway, as it assumes one transfer
+  at a time per rank, which does not hold where several chunks of one
+  request can be in flight on a rank.  The GPU path does not report it, and
+  there the pairing fallback stands.
+- **No `transfer_key`** — that key correlates an END with the native
+  copy-engine phase samples (`MP_TRANSFER_PHASE_SAMPLES`), which only the
+  lmcache-driven path records.  `TransferPhaseTracingSubscriber` skips a
+  transfer without one.
+- **Absent rather than zero** — `stored_count` / `retrieved_count`,
+  `total_bytes`, `num_tokens` and `duration_seconds` are omitted from an END
+  whose volume the server cannot determine, which means exactly one case: a
+  commit with no recorded prepare, because its worker was reaped, the commit
+  arrived without a prepare, or the entry was evicted under the in-flight
+  cap.  The requested range is not a safe substitute, because an SHM store
+  reserves only the chunks that were missing.  Consumers read an absent field
+  as "unknown", not as zero.
+
+  `total_bytes` is otherwise always exact, from whichever source the
+  transport offers: over SHM the summed byte length of the reserved slots,
+  over inline the length of the payload carried.  An inline store learns it
+  only at commit, when the payload arrives; everything else is fixed at
+  prepare.
+
+  The chunk count -- and so `num_tokens` -- is exact except for one case: a
+  **multi-group inline store** omits both.  Such a store leaves out chunks
+  that are all-null in a group, and the worker does not tell the server
+  which (`_prepare_multigroup_store` calls `prepare_store` with only the key
+  and instance id, so `skipped_chunks` arrives empty); the chunk list
+  travels inside the payload, which only `commit_store` decodes.  Counting
+  the range there would report chunks that never moved.  Retrieves are
+  unaffected -- they are all-or-nothing over keys resolved before the
+  payload exists, so the count is the union of every group's served window,
+  which for a hybrid model spans far more chunks than any one group's.
+
+`stored_count` / `retrieved_count` count **distinct LMCache chunks** here,
+so `num_tokens == count * chunk_size` holds.  The lmcache-driven path counts
+object-group entries instead, which for a hybrid-KV model is
+`chunks * groups`; only `num_tokens` is comparable across the two paths for
+such a model.  `total_bytes` is exact on both (summed object sizes).
 
 ### `MP_LOOKUP_PREFETCH_END` metadata
 

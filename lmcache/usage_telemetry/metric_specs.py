@@ -23,6 +23,31 @@ from typing import Callable, Sequence
 from lmcache.v1.mp_observability.event import Event, EventType
 
 
+def _optional_int(event: Event, field: str) -> int | None:
+    """Read an int metadata field, or ``None`` when the event omits it.
+
+    An engine-driven transfer END omits its volume fields when the server
+    cannot determine them (see
+    ``docs/design/v1/mp_observability/EVENTS.md``); such an event
+    contributes no sample rather than a fabricated zero.
+
+    Args:
+        event: The END event being sampled.
+        field: Metadata key to read.
+
+    Returns:
+        The field as an int, or ``None`` if it is absent.
+    """
+    value = event.metadata.get(field)
+    return None if value is None else int(value)
+
+
+def _chunks(event: Event, field: str, get_chunk_size: Callable[[], int]) -> int | None:
+    """Convert a chunk-count metadata field to tokens, or ``None`` if absent."""
+    chunks = _optional_int(event, field)
+    return None if chunks is None else chunks * get_chunk_size()
+
+
 @dataclass(frozen=True)
 class MetricSpec:
     """Map-reduce definition of one continuous usage metric.
@@ -61,19 +86,19 @@ def default_metric_specs(get_chunk_size: Callable[[], int]) -> list[MetricSpec]:
         MetricSpec(
             event_type=EventType.MP_RETRIEVE_END,
             field="interval_num_hit_tokens",
-            extract=lambda e: int(e.metadata["retrieved_count"]) * get_chunk_size(),
+            extract=lambda e: _chunks(e, "retrieved_count", get_chunk_size),
             reduce=sum,
         ),
         MetricSpec(
             event_type=EventType.MP_STORE_END,
             field="interval_num_stored_tokens",
-            extract=lambda e: int(e.metadata["stored_count"]) * get_chunk_size(),
+            extract=lambda e: _chunks(e, "stored_count", get_chunk_size),
             reduce=sum,
         ),
         MetricSpec(
             event_type=EventType.MP_STORE_END,
             field="interval_stored_kv_size",
-            extract=lambda e: int(e.metadata["total_bytes"]),
+            extract=lambda e: _optional_int(e, "total_bytes"),
             reduce=sum,
         ),
     ]

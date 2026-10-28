@@ -354,6 +354,14 @@ per-worker, per-device, and per-model slicing in Prometheus (e.g.
 | `lmcache_mp.l0_l1_store_throughput` | `lmcache_mp_l0_l1_store_throughput_GB_per_second` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
 | `lmcache_mp.l0_l1_load_throughput` | `lmcache_mp_l0_l1_load_throughput_GB_per_second` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
 
+On the engine-driven path (XPU and other devices without CUDA IPC, or
+`LMCACHE_MP_TRANSFER_MODE=engine_driven`) the same two histograms are fed by
+`EngineDrivenTransferModule`, which publishes no START at all: its END events
+carry their own `duration_seconds` and the subscriber records from that
+alone (see [EVENTS.md](EVENTS.md) for why there is no START).  `device` is
+the worker's KV cache device, so the ranks of a tensor-parallel worker are
+still separable; a worker too old to report one is labeled `instance:<id>`.
+
 **What it answers:** What GPU↔CPU throughput is each vLLM worker actually
 achieving for KV store/load? Does it match the theoretical PCIe bandwidth?
 Are some workers or GPUs underperforming?
@@ -445,7 +453,10 @@ is read as "this transfer met a busy engine" rather than as a rate.
 Submitted/finished counter pairs for the LMCache-driven GPU transfers, via
 `MPTransferCountersSubscriber`.  The SUBMITTED events are published
 CPU-synchronously right before the copy is enqueued; the END events are
-published *from* the device stream once the copy has run.  Subtracting the
+published *from* the device stream once the copy has run.  (The
+engine-driven path publishes both events together at `commit_*`, so the
+subtraction below reads zero in flight for it — the server learns of such a
+transfer only once it is done.  See [EVENTS.md](EVENTS.md).)  Subtracting the
 two gives the number of transfers currently in flight on each GPU:
 
 ```promql

@@ -140,23 +140,35 @@ class L0L1ThroughputSubscriber(EventSubscriber):
         pending: dict[tuple[str, str], float],
         hist: Any,
     ) -> None:
-        """Record one throughput sample from a matched START/END pair.
+        """Record one throughput sample from an END event.
 
-        Unpaired or degenerate events (no bytes, non-positive window) are
-        dropped without recording.
+        Prefers the publisher's own ``duration_seconds`` and falls back to
+        the START/END timestamp difference. Pairing by request and device
+        assumes one transfer at a time per rank, which holds for the GPU
+        path but not for the engine-driven one, where several chunks of a
+        request can be in flight on a rank: there the publisher measures the
+        window itself. The START is popped either way, so a pending entry is
+        never left behind for a later transfer to consume.
+
+        Degenerate events (no bytes, non-positive window) and, without a
+        reported duration, unpaired ones are dropped without recording.
         """
         key = cls._correlation_key(event)
         if key is None:
             return
         t_start = pending.pop(key, None)
-        if t_start is None:
-            return  # No matching START event
 
         total_bytes = event.metadata.get("total_bytes", 0)
         if total_bytes <= 0:
             return
 
-        dt = event.timestamp - t_start
+        reported = event.metadata.get("duration_seconds")
+        if reported is not None:
+            dt = float(reported)
+        elif t_start is not None:
+            dt = event.timestamp - t_start
+        else:
+            return  # No reported duration and no matching START event
         if dt <= 0:
             return
 

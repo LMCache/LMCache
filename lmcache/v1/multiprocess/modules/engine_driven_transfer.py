@@ -2,7 +2,9 @@
 """Engine-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 import threading
 import time
 
@@ -17,6 +19,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
+from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     PrepareRetrieveResponse,
@@ -42,6 +45,12 @@ from .server_transfer import (
 
 logger = init_logger(__name__)
 
+# In-flight prepare->commit timings tracked per server. A prepared transfer is
+# not guaranteed to commit, so this is a cap rather than a precise bound: it
+# sits far above the transfers a deployment can have genuinely in flight
+# (workers x ranks x chunks), so eviction only ever discards abandoned entries.
+_MAX_TRACKED_TRANSFERS = 4096
+
 
 @dataclass
 class EngineDrivenContextEntry:
@@ -51,6 +60,13 @@ class EngineDrivenContextEntry:
         metadata: Layout metadata describing the non-CUDA chunk format.
         model_name: The name of the model associated with this context.
         world_size: The world size associated with this context.
+        device: Label identifying the worker's KV cache device, used to
+            correlate and label its transfer events. Falls back to the
+            instance id for clients that do not report a device.
+        chunk_bytes: Size of one single-group chunk object in bytes. Only the
+            single-group fallback uses it; a multi-group transfer's volume is
+            read off the SHM slots it actually reserved, because its groups
+            have different per-chunk sizes.
         last_seen: ``time.monotonic()`` of the most recent activity from this
             instance (register, PING, prepare/commit). Drives reaping.
         has_liveness_signal: True once the instance has sent at least one
@@ -60,6 +76,8 @@ class EngineDrivenContextEntry:
     metadata: EngineDrivenContextMetadata
     model_name: str
     world_size: int
+    device: str
+    chunk_bytes: int
     last_seen: float = 0.0
     has_liveness_signal: bool = False
 
@@ -100,6 +118,18 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             tuple[int, IPCCacheServerKey], list[ObjectKey]
         ] = {}
         self._pending_shm_lock = threading.Lock()
+        # Transfer timing state; see _timing_key for the key. Bounded, because
+        # a prepared transfer is not guaranteed to commit: a multi-group store
+        # whose gather fails returns without committing, and a live worker is
+        # never reaped, so its abandoned entries would otherwise accumulate for
+        # the process lifetime. Insertion order is start order, so the oldest
+        # entry is the front one; over the cap the oldest loses its timing
+        # sample, which degrades a metric instead of leaking. Leaf lock, never
+        # held with _lock.
+        self._transfer_starts: dict[
+            tuple[str, int, str, int, int], tuple[float, int | None, int | None]
+        ] = {}
+        self._transfer_starts_lock = threading.Lock()
         self._shm_pool_info: ShmPoolInfo = self._ctx.shm_pool_info
 
     @property
@@ -234,13 +264,17 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     def _release_entry(self, instance_id: int, entry: EngineDrivenContextEntry) -> None:
         """Release resources for a popped entry (run outside the lock).
 
-        Sweeps the instance's pending SHM transfers and unregisters its
-        layout descriptor.
+        Sweeps the instance's in-flight transfer timings and pending SHM
+        transfers, then unregisters its layout descriptor.
 
         Args:
             instance_id: The popped instance ID.
             entry: The popped entry.
         """
+        with self._transfer_starts_lock:
+            for state_key in [k for k in self._transfer_starts if k[1] == instance_id]:
+                del self._transfer_starts[state_key]
+
         with self._pending_shm_lock:
             stale_writes = [k for k in self._pending_shm_writes if k[0] == instance_id]
             stale_reads = [k for k in self._pending_shm_reads if k[0] == instance_id]
@@ -290,6 +324,309 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         if not layouts or len(layouts) < 2:
             return None
         return self._resolve_obj_keys_by_group(key, len(layouts))
+
+    def _publish_transfer_event(
+        self,
+        event_type: EventType,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        entry: EngineDrivenContextEntry,
+        **metadata: object,
+    ) -> None:
+        """Publish one engine-driven transfer END event.
+
+        Only END is published, and only from ``commit_*``. It carries the
+        server-measured ``duration_seconds`` -- the ``prepare_*`` to
+        ``commit_*`` window, in which the worker drives the device copies, so
+        it covers that copy plus the transport and is what the matching log
+        line reports.
+
+        There is deliberately no START. The GPU path needs one because its
+        subscribers infer a duration by pairing START with END per request
+        and device, which assumes one transfer at a time per rank; that does
+        not hold here, where several chunks of one request can be in flight
+        on a rank. Since this path reports the duration itself and both
+        subscribers prefer a reported one, a START would contribute nothing
+        but correlation state -- state that a prepare which never commits
+        (a worker whose gather fails is never reaped) would leave behind in
+        every subscriber, unbounded. Publishing nothing until the transfer is
+        known to have completed leaves nothing to clean up.
+
+        Each rank of a tensor-parallel worker reports its own ``device``, so a
+        consumer can tell their transfers of one request apart.
+
+        No ``transfer_key`` is reported: that key correlates an END with the
+        native copy-engine phase samples, which only the lmcache-driven path
+        records.
+
+        Args:
+            event_type: The ``MP_STORE_*`` / ``MP_RETRIEVE_*`` type to publish.
+            key: Cache key of the transfer.
+            instance_id: Worker instance identifier.
+            entry: The worker's registered context.
+            metadata: Event-type specific fields merged into the metadata,
+                e.g. ``total_bytes`` and ``num_tokens`` on the END events.
+                Fields passed as ``None`` are omitted, so consumers see an
+                absent field rather than a null one.
+        """
+        self._ctx.event_bus.publish(
+            Event(
+                event_type=event_type,
+                session_id=key.request_id,
+                metadata={
+                    "device": entry.device,
+                    "engine_id": instance_id,
+                    "model_name": entry.model_name,
+                    **{k: v for k, v in metadata.items() if v is not None},
+                },
+            )
+        )
+
+    def _publish_transfer_submitted(
+        self,
+        event_type: EventType,
+        key: IPCCacheServerKey,
+        entry: EngineDrivenContextEntry,
+    ) -> None:
+        """Publish a ``MP_*_SUBMITTED`` sentinel for one transfer.
+
+        Published from ``commit_*``, immediately before the END, rather than
+        from ``prepare_*`` as the GPU path does. It exists only to keep the
+        submitted/finished counters balanced: they are subtracted per device
+        to give transfers in flight, and feeding only the END side would
+        drive that difference negative. Pairing them at commit reports zero
+        in flight, which is honest here -- the server learns of an
+        engine-driven transfer only once it has completed -- and means a
+        prepare that never commits publishes nothing to strand.
+
+        Carries only ``device``, matching what the lmcache-driven path
+        reports: a richer label set on one side would force a consumer to
+        aggregate it away before subtracting.
+
+        Args:
+            event_type: ``MP_STORE_SUBMITTED`` or ``MP_RETRIEVE_SUBMITTED``.
+            key: Cache key of the transfer.
+            entry: The worker's registered context.
+        """
+        self._ctx.event_bus.publish(
+            Event(
+                event_type=event_type,
+                session_id=key.request_id,
+                metadata={"device": entry.device},
+            )
+        )
+
+    @staticmethod
+    def _timing_key(
+        phase: str, key: IPCCacheServerKey, instance_id: int
+    ) -> tuple[str, int, str, int, int]:
+        """Identify one in-flight transfer for timing purposes.
+
+        One entry per transfer, not per request: every rank of a
+        tensor-parallel worker transfers under one request_id, and a rank can
+        have several of its chunks in flight, so a coarser key loses
+        durations. ``IPCCacheServerKey`` cannot serve as the key on its own
+        because it excludes ``request_id`` from equality by design, so two
+        concurrent requests over the same token range would share one entry:
+        the second prepare would overwrite the first's start and the first
+        commit would consume the replacement. Within one request_id the token
+        range pins the transfer, so the key's ``(start, end)`` completes the
+        identity without hashing the request's whole token block.
+
+        Args:
+            phase: ``"store"`` or ``"retrieve"``.
+            key: Cache key of the transfer.
+            instance_id: Worker instance identifier.
+
+        Returns:
+            The timing-dict key for this transfer.
+        """
+        return (phase, instance_id, key.request_id, key.start, key.end)
+
+    def _begin_transfer(
+        self,
+        phase: str,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        prepared: "tuple[int | None, int | None] | None",
+    ) -> None:
+        """Record the start of one prepared transfer.
+
+        Args:
+            phase: ``"store"`` or ``"retrieve"``.
+            key: Cache key of the transfer.
+            instance_id: Worker instance identifier.
+            prepared: ``(chunks, bytes)`` the transfer will move. ``bytes`` is
+                ``None`` for an inline store, whose payload -- and so its byte
+                count -- only arrives at commit. ``None`` for an untracked
+                transfer.
+        """
+        chunks, nbytes = prepared if prepared is not None else (None, None)
+        with self._transfer_starts_lock:
+            while len(self._transfer_starts) >= _MAX_TRACKED_TRANSFERS:
+                self._transfer_starts.pop(next(iter(self._transfer_starts)))
+            self._transfer_starts[self._timing_key(phase, key, instance_id)] = (
+                time.perf_counter(),
+                chunks,
+                nbytes,
+            )
+
+    def _finish_transfer(
+        self, phase: str, key: IPCCacheServerKey, instance_id: int
+    ) -> "tuple[float, int | None, int | None] | None":
+        """Close one transfer and return what it took.
+
+        Args:
+            phase: ``"store"`` or ``"retrieve"``.
+            key: Cache key of the transfer.
+            instance_id: Worker instance identifier.
+
+        Returns:
+            ``(elapsed_seconds, chunks, bytes)``, or ``None`` when the
+            transfer has no recorded start: its instance was reaped, the commit
+            arrived without a prepare, or the entry was evicted under the
+            tracking cap. ``chunks``/``bytes`` are ``None`` within a found
+            entry when the strategy does not report them, which is a different
+            thing from the transfer being untracked -- callers must not
+            conflate them, because the whole requested range is the right
+            count only in the former case.
+        """
+        with self._transfer_starts_lock:
+            state = self._transfer_starts.pop(
+                self._timing_key(phase, key, instance_id), None
+            )
+        if state is None:
+            return None
+        start, chunks, nbytes = state
+        return time.perf_counter() - start, chunks, nbytes
+
+    @staticmethod
+    def _committed_volume(
+        timing: "tuple[float, int | None, int | None] | None",
+        moved: bool,
+        wire_bytes: int | None = None,
+    ) -> "tuple[float | None, int | None, int | None]":
+        """Resolve what a finished transfer moved, or ``None`` if unknowable.
+
+        Both quantities are fixed at prepare, except the inline store's byte
+        count, which is only known once its payload arrives at commit --
+        ``wire_bytes`` supplies it there. An untracked transfer (its worker
+        was reaped, the commit arrived without a prepare, or the entry was
+        evicted under the tracking cap) reports nothing: the requested range
+        is not a safe substitute, since an SHM store reserves only the chunks
+        that were missing and counting the range would report already-cached
+        chunks as newly stored. The completion event is still published so
+        consumers see the transfer finish.
+
+        Args:
+            timing: Result of :meth:`_finish_transfer`.
+            moved: Whether the transfer actually moved data.
+            wire_bytes: Bytes the transport actually carried, for a strategy
+                that only knows them at commit. Ignored when the prepare
+                already reported a byte count.
+
+        Returns:
+            ``(elapsed_seconds, chunk_count, total_bytes)``. Every element is
+            ``None`` when the transfer was not tracked.
+        """
+        if timing is None:
+            return None, None, None
+        elapsed, chunks, nbytes = timing
+        if not moved:
+            return elapsed, 0, 0
+        return elapsed, chunks, nbytes if nbytes is not None else wire_bytes
+
+    def _inline_store_chunks(
+        self,
+        key: IPCCacheServerKey,
+        group_keys: "list[list[ObjectKey]] | None",
+    ) -> int | None:
+        """Count the distinct chunks an inline store will carry, if knowable.
+
+        A single-group inline store carries every object key of the range, so
+        the count is exact. A multi-group one does not: the worker leaves out
+        chunks that are all-null in a group, and it does not tell the server
+        which -- ``_prepare_multigroup_store`` calls ``prepare_store`` with
+        only the key and instance id, so ``skipped_chunks`` arrives empty and
+        counting the range would report chunks that never travel. The chunk
+        list lives in the payload instead, which only ``commit_store``
+        decodes, so report nothing rather than the range. ``total_bytes``
+        still comes from the payload length, which is what the throughput
+        histograms need.
+
+        Args:
+            key: Cache key of the transfer.
+            group_keys: Group-major object keys, or ``None`` for single-group.
+
+        Returns:
+            The distinct chunk count, or ``None`` for a multi-group store.
+        """
+        if group_keys is None:
+            return len(self._resolve_single_group_obj_keys(key))
+        return None
+
+    def _served_retrieve_chunks(
+        self,
+        key: IPCCacheServerKey,
+        group_keys: "list[list[ObjectKey]] | None",
+        group_first_chunk: "Sequence[int]",
+    ) -> int:
+        """Count the distinct chunk positions a successful retrieve serves.
+
+        A retrieve is all-or-nothing over the keys resolved for it, so the
+        positions are known before the payload exists. Single-group serves
+        the whole resolved range. Multi-group serves each group's in-window
+        suffix, which differ: a recurrent or sliding-window group may carry
+        one trailing chunk while a full-attention group carries the whole
+        prefix, so the answer is the union over groups -- not group 0's
+        length, which would report that one trailing chunk for the lot.
+
+        Args:
+            key: Cache key of the transfer.
+            group_keys: Per group, the narrowed keys served, or ``None`` for
+                single-group.
+            group_first_chunk: Per group, the absolute position of its first
+                narrowed key. Empty means every group starts at 0.
+
+        Returns:
+            The number of distinct chunk positions served.
+        """
+        if group_keys is None:
+            return len(self._resolve_single_group_obj_keys(key))
+        firsts = list(group_first_chunk) or [0] * len(group_keys)
+        served: set[int] = set()
+        for first, g_keys in zip(firsts, group_keys, strict=True):
+            served.update(range(first, first + len(g_keys)))
+        return len(served)
+
+    @staticmethod
+    def _prepared_volume(
+        context: dict[str, Any],
+    ) -> "tuple[int, int] | None":
+        """Return ``(chunks, bytes)`` the prepared transfer will move.
+
+        The SHM strategy reserves only the chunks that still need the
+        transfer and describes each as a slot in its response context; the
+        inline strategy reserves nothing at prepare and reports no slots, so
+        the caller derives the volume from the object keys instead.
+
+        Args:
+            context: ``PrepareStoreResponse`` / ``PrepareRetrieveResponse``
+                context.
+
+        Returns:
+            The chunk and byte counts, or ``None`` when the strategy does not
+            report slots.
+        """
+        slots = context.get("slots")
+        if slots is None:
+            return None
+        # One slot per chunk per group, so a multi-group response has several
+        # slots at the same chunk position; tokens follow the distinct chunks
+        # (the response reports them only when it spans groups).
+        chunk_indices = context.get("chunk_indices")
+        chunks = len(set(chunk_indices)) if chunk_indices is not None else len(slots)
+        return chunks, sum(int(slot["length"]) for slot in slots)
 
     @request_handler()
     def register_kv_cache_engine_driven_context(
@@ -403,6 +740,8 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             metadata=metadata,
             model_name=payload.model_name,
             world_size=payload.world_size,
+            device=payload.device or f"instance:{payload.instance_id}",
+            chunk_bytes=shape.numel() * dtype.itemsize,
             last_seen=now,
             has_liveness_signal=False,
         )
@@ -539,8 +878,21 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             group_keys=group_keys,
             skipped_chunks=skipped_chunks,
         )
-        session = self._ctx.session_manager.get_or_create(key.request_id)
-        session.extras["store_start_time"] = time.perf_counter()
+        prepared: "tuple[int | None, int | None] | None" = self._prepared_volume(
+            response.context
+        )
+        if prepared is None:
+            # Inline: no slots to count, and its byte count only arrives with
+            # the payload at commit.
+            prepared = (self._inline_store_chunks(key, group_keys), None)
+        # An unknown count (multi-group inline) is not zero: the worker only
+        # prepares when it has something to store, so the transfer is tracked.
+        if prepared[0] == 0:
+            # Every chunk is already cached or all-null, so the strategy
+            # reserved nothing and the worker returns without committing.
+            # Recording a start here would leave an entry no commit ever pops.
+            return response
+        self._begin_transfer("store", key, instance_id, prepared)
         return response
 
     @request_handler(
@@ -569,8 +921,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 instance ID.
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
-        session = self._ctx.session_manager.get_or_create(key.request_id)
-        st = session.extras.pop("store_start_time", None)
+        timing = self._finish_transfer("store", key, instance_id)
         result = strategy.commit_store(
             key=key,
             instance_id=instance_id,
@@ -579,15 +930,39 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             resolve_obj_keys=self._resolve_single_group_obj_keys,
             group_keys=self._group_keys_for(entry, key),
         )
-        if st is not None and result:
-            num_tokens = (
-                len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
-            )
-            logger.info(
-                "Stored %d tokens in %.3f seconds",
-                num_tokens,
-                time.perf_counter() - st,
-            )
+        elapsed, stored_count, total_bytes = self._committed_volume(
+            timing, moved=result, wire_bytes=len(cpu_data) or None
+        )
+        self._publish_transfer_submitted(EventType.MP_STORE_SUBMITTED, key, entry)
+        self._publish_transfer_event(
+            EventType.MP_STORE_END,
+            key,
+            instance_id,
+            entry,
+            stored_count=stored_count,
+            total_bytes=total_bytes,
+            num_tokens=None
+            if stored_count is None
+            else stored_count * self._ctx.chunk_size,
+            duration_seconds=elapsed,
+        )
+        if elapsed is not None and result:
+            # A multi-group inline store cannot count its chunks (see
+            # _inline_store_chunks), but its byte count is exact -- report
+            # that rather than logging nothing, so a completed store stays
+            # visible on the one transport that has no alternative.
+            if stored_count is not None:
+                logger.info(
+                    "Stored %d tokens in %.3f seconds",
+                    stored_count * self._ctx.chunk_size,
+                    elapsed,
+                )
+            elif total_bytes is not None:
+                logger.info(
+                    "Stored %.1f MiB in %.3f seconds",
+                    total_bytes / (1 << 20),
+                    elapsed,
+                )
         return result
 
     @request_handler(
@@ -634,8 +1009,17 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             group_keys=group_keys,
             group_first_chunk=group_first_chunk,
         )
-        session = self._ctx.session_manager.get_or_create(key.request_id)
-        session.extras["retrieve_start_time"] = time.perf_counter()
+        prepared: "tuple[int | None, int | None]" = (0, 0)
+        if response.success:
+            from_slots = self._prepared_volume(response.context)
+            # Inline answers with the payload itself: its length is exactly
+            # what moved, and a retrieve is all-or-nothing over the chunks
+            # narrowed above, so both numbers are known here.
+            prepared = from_slots or (
+                self._served_retrieve_chunks(key, group_keys, group_first_chunk),
+                len(response.data),
+            )
+        self._begin_transfer("retrieve", key, instance_id, prepared)
         return response
 
     @request_handler(
@@ -657,17 +1041,32 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         Returns:
             Always ``True``.
         """
-        _, strategy = self._resolve_for_transfer(instance_id)
-        session = self._ctx.session_manager.get_or_create(key.request_id)
-        st = session.extras.pop("retrieve_start_time", None)
+        entry, strategy = self._resolve_for_transfer(instance_id)
+        timing = self._finish_transfer("retrieve", key, instance_id)
         result = strategy.commit_retrieve(key=key, instance_id=instance_id)
-        if st is not None:
-            num_tokens = (
-                len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
-            )
+        elapsed, retrieved_count, total_bytes = self._committed_volume(
+            timing, moved=True
+        )
+        self._publish_transfer_submitted(EventType.MP_RETRIEVE_SUBMITTED, key, entry)
+        self._publish_transfer_event(
+            EventType.MP_RETRIEVE_END,
+            key,
+            instance_id,
+            entry,
+            retrieved_count=retrieved_count,
+            cache_salt=key.cache_salt,
+            total_bytes=total_bytes,
+            num_tokens=None
+            if retrieved_count is None
+            else retrieved_count * self._ctx.chunk_size,
+            duration_seconds=elapsed,
+        )
+        # A miss commits nothing: skip the log line rather than report zero
+        # tokens on every lookup that found no cache, as the GPU path does.
+        if elapsed is not None and retrieved_count:
             logger.info(
                 "Retrieved %d tokens in %.3f seconds",
-                num_tokens,
-                time.perf_counter() - st,
+                retrieved_count * self._ctx.chunk_size,
+                elapsed,
             )
         return result

@@ -457,6 +457,36 @@ class TestMPContinuous:
         assert sender.sent
         reporter.shutdown()
 
+    def test_end_without_volume_fields_contributes_no_sample(self, usage_env):
+        """An engine-driven END whose volume the server could not determine
+        omits its count and byte fields; the default specs must skip it
+        rather than fail the whole callback."""
+        sender = RecordingSender()
+        bus = EventBus(EventBusConfig(enabled=True))
+        bus.start()
+        reporter = InitializeMPContinuousUsage(bus, chunk_size=256, sender=sender)
+        assert reporter is not None
+
+        publish_mp_traffic(bus)
+        for event_type in (EventType.MP_RETRIEVE_END, EventType.MP_STORE_END):
+            bus.publish(
+                Event(
+                    event_type=event_type,
+                    metadata={
+                        "device": f"{torch_device_type}:0",
+                        "engine_id": 1,
+                        "model_name": "test_model",
+                    },
+                )
+            )
+        bus.stop()
+
+        payload = sender.sent[0][1]
+        # Exactly the countable traffic, unchanged by the fieldless events.
+        assert payload["interval_num_hit_tokens"] == 4 * 256
+        assert payload["interval_num_stored_tokens"] == 2 * 256
+        assert payload["interval_stored_kv_size"] == 1000
+
     def test_specs_must_cover_message_fields(self, usage_env):
         incomplete = [
             MetricSpec(

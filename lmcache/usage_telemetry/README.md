@@ -51,7 +51,7 @@ phone home is a dataclass there, and nowhere else. The contract:
 | Single-process one-shot | `LMCacheEngine.__init__` → `InitializeUsageContext` | `EnvMessage`, `EngineMessage`, `MetadataMessage` |
 | MP server one-shot | `run_cache_server` → `InitializeMPUsageContext` | `EnvMessage`, `MPServerMessage` |
 | Continuous (single-process) | `LMCacheStatsLogger.log_worker`, every `LMCACHE_USAGE_TRACK_INTERVAL` s (default 600) | `ContinuousContextMessage`, `CacheLifespanMessage` |
-| Continuous (MP server) | EventBus (`MP_RETRIEVE_END`, `MP_STORE_END`; lmcache-driven transfers only), flushed every `LMCACHE_USAGE_TRACK_INTERVAL` s | `ContinuousContextMessage`; empty intervals double as heartbeats |
+| Continuous (MP server) | EventBus (`MP_RETRIEVE_END`, `MP_STORE_END`; both the lmcache-driven and engine-driven transfer paths), flushed every `LMCACHE_USAGE_TRACK_INTERVAL` s | `ContinuousContextMessage`; empty intervals double as heartbeats |
 | L2 connector usage (MP server) | EventBus traffic (`L2_STORE_COMPLETED`, `L2_LOAD_TASK_SUBMITTED`) + flush-time `StorageManager` occupancy probe, same interval | `L2ConnectorUsageMessage`, one per active L2 adapter type |
 | L1 usage (MP server) | Flush-time `StorageManager` occupancy probe, same interval | `L1UsageMessage`, one per interval |
 

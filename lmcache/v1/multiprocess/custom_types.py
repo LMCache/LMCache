@@ -248,6 +248,10 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
             in protocol group order. Empty means legacy single-group; the
             top-level ``num_layers``/``hidden_dim_size``/``dtype_str`` then
             describe the sole group.
+        device: The worker's KV cache device (e.g. ``"xpu:0"``), used only as
+            the metric and trace label that distinguishes this worker's
+            transfers from its peers'. ``None`` accepts the legacy protocol,
+            where the server labels them by instance id instead.
     """
 
     instance_id: int
@@ -260,6 +264,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     use_mla: bool
     num_physical_slots: int | None = None
     group_layouts: list[GroupLayout] = []
+    device: str | None = None
 
 
 @dataclass

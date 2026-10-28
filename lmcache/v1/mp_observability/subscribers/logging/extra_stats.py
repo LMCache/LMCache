@@ -129,8 +129,20 @@ class ExtraStatsLoggingSubscriber(EventSubscriber):
         device = key[1]
         tokens = int(event.metadata.get("num_tokens", 0))
         total_bytes = int(event.metadata.get("total_bytes", 0))
+        # Pop the START either way, so a later transfer on the same rank
+        # cannot pair against a stale one.
         t_start = pending.pop(key, None)
-        dt = event.timestamp - t_start if t_start is not None else 0.0
+        # Prefer the publisher's own measurement. Pairing START/END per request
+        # and device assumes one transfer at a time per rank, which holds for
+        # the GPU path but not the engine-driven one, where several chunks of a
+        # request can be in flight: there the publisher times the window itself.
+        reported = event.metadata.get("duration_seconds")
+        if reported is not None:
+            dt = float(reported)
+        elif t_start is not None:
+            dt = event.timestamp - t_start
+        else:
+            dt = 0.0
         timed = dt > 0 and total_bytes > 0
         for stats in (
             window.setdefault(device, _TransferStats()),

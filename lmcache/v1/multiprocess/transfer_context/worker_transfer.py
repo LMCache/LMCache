@@ -1041,6 +1041,7 @@ class EngineDrivenTransferContext(TransferContext):
                     use_mla=use_mla_flag,
                     num_physical_slots=num_physical_slots,
                     group_layouts=group_layouts,
+                    device=str(_get_kv_device(kv_caches)),
                 )
             )
         )

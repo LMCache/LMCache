@@ -3,8 +3,9 @@
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from enum import IntEnum
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol, cast
 from unittest.mock import MagicMock, PropertyMock, patch
+import logging
 import os
 import sys
 
@@ -17,6 +18,7 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
@@ -36,6 +38,7 @@ from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextI
 from lmcache.v1.multiprocess.transfer_context.shm import EngineDrivenContextShm
 from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
     decode_tensors,
+    encode_grouped_tensors,
     encode_tensors,
 )
 import lmcache.lmcache_native as lmcache_native
@@ -953,9 +956,10 @@ def test_engine_driven_register_sends_num_physical_slots(
     req_client = MagicMock()
     req_client.register_kv_cache_engine_driven_context.return_value = future
 
+    kv_caches = _make_fused_nhd_kv_caches()
     context = EngineDrivenTransferContext(1, req_client)
     context.register(
-        kv_caches=_make_fused_nhd_kv_caches(),
+        kv_caches=kv_caches,
         model_name="m",
         world_size=1,
         blocks_in_chunk=8,
@@ -968,6 +972,8 @@ def test_engine_driven_register_sends_num_physical_slots(
     payload = req_client.register_kv_cache_engine_driven_context.call_args.args[0]
     assert isinstance(payload, RegisterEngineDrivenContextPayload)
     assert payload.num_physical_slots == 128
+    # The server labels this worker's transfer metrics by its KV device.
+    assert payload.device == str(next(iter(kv_caches.values())).device)
     assert (
         unregister_future
         is req_client.unregister_kv_cache_engine_driven_context.return_value
@@ -1961,7 +1967,7 @@ def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
     mock_session = MagicMock()
     mock_session.get_hashes.return_value = [b"h"]
 
-    module, _, _, _ = server_module_factory(
+    module, _, _, ctx = server_module_factory(
         storage_manager_config=_make_storage_manager_config(
             shm_name="lmcache_test_pool", pool_size=1024
         ),
@@ -1978,6 +1984,565 @@ def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
 
     # commit_store without a matching prepare must fail (no entry leaked).
     assert module.commit_store(key, 3, b"") is False
+
+
+def _published(ctx: Any, event_type: EventType) -> list[Any]:
+    """Every event of ``event_type`` the module published on ``ctx``'s bus."""
+    return [
+        call.args[0]
+        for call in cast(MagicMock, ctx.event_bus.publish).call_args_list
+        if call.args[0].event_type is event_type
+    ]
+
+
+def test_concurrent_same_content_stores_are_timed_independently(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Two in-flight requests over the same token range must both be timed.
+
+    ``IPCCacheServerKey`` excludes ``request_id`` from equality by design, so
+    timing state keyed on content alone would collide: the second prepare would
+    overwrite the first's start and the first commit would consume the
+    replacement, leaving the second commit with no duration to report.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h"]
+    module, _, _, ctx = server_module_factory(mock_session=mock_session)
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=7)
+    )
+    key_a, key_b = (
+        IPCCacheServerKey.from_token_ids(
+            "m", 1, 0, [1] * 8, start=0, end=8, request_id=rid
+        )
+        for rid in ("req-a", "req-b")
+    )
+    # Equal as cache identities, distinct as transfers.
+    assert key_a == key_b
+
+    # Both prepares are outstanding before either commits.
+    chunk = encode_tensors([torch.ones(2, 2, 8, 16)])
+    module.prepare_store(key_a, 7)
+    module.prepare_store(key_b, 7)
+    module.commit_store(key_a, 7, chunk)
+    module.commit_store(key_b, 7, chunk)
+
+    durations = [
+        end.metadata.get("duration_seconds")
+        for end in _published(ctx, EventType.MP_STORE_END)
+    ]
+    assert len(durations) == 2
+    assert all(d is not None for d in durations)
+
+
+def test_concurrent_chunks_of_one_request_are_timed_independently(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """One rank can have several chunks of a request in flight at once.
+
+    Keying timing state by request and device alone would let the second
+    prepare overwrite the first's start, so one of the two commits would
+    report no duration.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h"]
+    module, _, _, ctx = server_module_factory(mock_session=mock_session)
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=9)
+    )
+    first, second = (
+        IPCCacheServerKey.from_token_ids(
+            "m", 1, 0, [1] * 16, start=start, end=start + 8, request_id="req-chunks"
+        )
+        for start in (0, 8)
+    )
+
+    chunk = encode_tensors([torch.ones(2, 2, 8, 16)])
+    module.prepare_store(first, 9)
+    module.prepare_store(second, 9)
+    module.commit_store(first, 9, chunk)
+    module.commit_store(second, 9, chunk)
+
+    durations = [
+        end.metadata.get("duration_seconds")
+        for end in _published(ctx, EventType.MP_STORE_END)
+    ]
+    assert len(durations) == 2
+    assert all(d is not None for d in durations)
+
+
+def test_a_prepare_that_never_commits_publishes_nothing(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """A prepared transfer that is abandoned must leave no event behind.
+
+    A worker whose gather raises never commits, and it is never reaped
+    either -- it stays registered and healthy. Publishing anything at
+    prepare would strand that event's correlation state in every
+    subscriber: the throughput subscribers keep an unmatched START
+    forever, and the submitted/finished counters stay inflated. Neither
+    the publisher's in-flight cap nor its reap sweep can reach them, so
+    the transfer must stay invisible until it is known to have completed.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h"]
+    module, _, _, ctx = server_module_factory(mock_session=mock_session)
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=17)
+    )
+
+    for i in range(8):
+        module.prepare_store(
+            IPCCacheServerKey.from_token_ids(
+                "m", 1, 0, [1] * 8, start=0, end=8, request_id=f"req-{i}"
+            ),
+            17,
+        )
+
+    assert cast(MagicMock, ctx.event_bus.publish).call_args_list == []
+
+
+@pytest.mark.parametrize(
+    ("reported_device", "expected_label"),
+    [("xpu:3", "xpu:3"), (None, "instance:21")],
+    ids=["reported", "legacy-fallback"],
+)
+def test_transfer_events_are_labeled_by_the_workers_device(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+    reported_device: "str | None",
+    expected_label: str,
+) -> None:
+    """Each rank reports its own device so its transfers are separable.
+
+    A worker too old to report one is labeled by its instance id instead of
+    being left unlabeled, which would collapse every rank onto one series.
+    """
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h"]
+    module, _, _, ctx = server_module_factory(mock_session=mock_session)
+    payload = _default_register_payload(instance_id=21)
+    payload.device = reported_device
+    module.register_kv_cache_engine_driven_context(payload)
+
+    key = _default_key()
+    module.prepare_store(key, 21)
+    module.commit_store(key, 21, encode_tensors([torch.ones(2, 2, 8, 16)]))
+
+    for event_type in (EventType.MP_STORE_SUBMITTED, EventType.MP_STORE_END):
+        (event,) = _published(ctx, event_type)
+        assert event.metadata["device"] == expected_label
+    # The SUBMITTED sentinel carries only the device, as the GPU path's does.
+    (submitted,) = _published(ctx, EventType.MP_STORE_SUBMITTED)
+    assert set(submitted.metadata) == {"device"}
+
+
+def test_abandoned_prepares_do_not_grow_without_bound(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Prepared stores that never commit must not retain state forever.
+
+    A multi-group store whose gather fails returns without committing, and a
+    live worker is never reaped, so these entries would otherwise accumulate
+    for the process lifetime -- one per request_id once the key distinguishes
+    requests. Past the cap the oldest is dropped, which is observable: its
+    commit can no longer report what it moved, while a transfer still inside
+    the cap reports normally.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+        _MAX_TRACKED_TRANSFERS,
+    )
+
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h"]
+    module, _, _, ctx = server_module_factory(mock_session=mock_session)
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=11)
+    )
+
+    def key_for(i: int) -> Any:
+        return IPCCacheServerKey.from_token_ids(
+            "m", 1, 0, [1] * 8, start=0, end=8, request_id=f"req-{i}"
+        )
+
+    # One more than the cap, so the first prepared transfer is evicted.
+    for i in range(_MAX_TRACKED_TRANSFERS + 1):
+        module.prepare_store(key_for(i), 11)
+
+    payload = encode_tensors([torch.ones(2, 2, 8, 16)])
+    module.commit_store(key_for(0), 11, payload)
+    module.commit_store(key_for(_MAX_TRACKED_TRANSFERS), 11, payload)
+
+    evicted, retained = _published(ctx, EventType.MP_STORE_END)
+    assert "duration_seconds" not in evicted.metadata
+    assert "stored_count" not in evicted.metadata
+    assert retained.metadata["duration_seconds"] > 0
+    assert retained.metadata["stored_count"] == 1
+
+
+@pytest.fixture
+def partial_shm_store_module(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> tuple["EngineDrivenTransferModule", "MPCacheServerContext", "IPCCacheServerKey"]:
+    """An SHM store of two chunks where only the second one is missing."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+    mock_storage = MagicMock()
+    memory_obj = MagicMock()
+    memory_obj.tensor = torch.zeros(2, 1, 8, 16)
+    memory_obj.shm_offset = 0
+    memory_obj.shm_byte_length = memory_obj.tensor.numel() * 4
+    # Two chunks requested, one already cached: only the second is reserved,
+    # so exactly one chunk is newly stored.
+    mock_storage.reserve_write.side_effect = lambda obj_keys, *_a, **_k: {
+        obj_key: memory_obj for obj_key in list(obj_keys)[1:]
+    }
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h0", b"h1"]
+    module, _, _, ctx = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=4096
+        ),
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+        object_keys=["obj-0", "obj-1"],
+    )
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=5)
+    )
+    key = IPCCacheServerKey.from_token_ids(
+        "m", 1, 0, [1] * 8, start=0, end=8, request_id="req-partial"
+    )
+    prepare_response = module.prepare_store(key, 5)
+    # A genuine partial store: 2 chunks requested, 1 reserved.
+    assert prepare_response.context["chunk_indices"] == [1]
+    return module, ctx, key
+
+
+def test_partial_store_reports_only_the_chunks_it_reserved(
+    partial_shm_store_module: tuple[
+        "EngineDrivenTransferModule", "MPCacheServerContext", "IPCCacheServerKey"
+    ],
+) -> None:
+    """An SHM store must count what it reserved, not the requested range.
+
+    Counting every chunk of the range would report the already-cached chunk as
+    newly stored and double the derived bytes and tokens with it.
+    """
+    module, ctx, key = partial_shm_store_module
+    assert module.commit_store(key, 5, b"") is True
+
+    (end,) = _published(ctx, EventType.MP_STORE_END)
+    assert end.metadata["stored_count"] == 1
+    # One reserved slot of 2*1*8*16 float32 elements.
+    assert end.metadata["total_bytes"] == 2 * 1 * 8 * 16 * 4
+    assert end.metadata["num_tokens"] == 8  # one chunk at chunk_size=8
+    assert end.metadata["duration_seconds"] > 0
+
+
+def test_multigroup_store_counts_distinct_chunks_and_every_groups_bytes(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """A hybrid-KV store reports chunk-based tokens and exact bytes.
+
+    Its groups have different per-chunk sizes and a windowed group stores
+    only its trailing chunks, so neither the slot count nor one group's
+    chunk size describes the transfer. ``stored_count`` must stay the
+    distinct-chunk count that ``num_tokens`` is derived from, while
+    ``total_bytes`` sums every reserved slot.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import GroupLayout, IPCCacheServerKey
+
+    def _reserve(obj_keys: Any, layout: Any, *_a: Any, **_k: Any) -> dict:
+        nbytes = layout.shapes[0].numel() * layout.dtypes[0].itemsize
+        reserved = {}
+        for obj_key in obj_keys:
+            # The recurrent group keeps only the trailing chunk; its earlier
+            # chunk is never stored.
+            if obj_key.startswith("g1") and not obj_key.endswith("c1"):
+                continue
+            memory_obj = MagicMock()
+            memory_obj.tensor = torch.zeros(nbytes // 4, dtype=torch.float32)
+            memory_obj.shm_offset = 0
+            memory_obj.shm_byte_length = nbytes
+            reserved[obj_key] = memory_obj
+        return reserved
+
+    mock_storage = MagicMock()
+    mock_storage.reserve_write.side_effect = _reserve
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h0", b"h1"]
+    module, _, _, ctx = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=1 << 16
+        ),
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+    )
+    payload = _default_register_payload(instance_id=31)
+    payload.group_layouts = [
+        # Full attention: 2 planes x 2 layers x 8 tokens x 16 -> 2048 B/chunk.
+        GroupLayout(
+            num_layers=2,
+            hidden_dim_size=16,
+            dtype_str="float32",
+            tokens_per_block=4,
+            window_tokens=8,
+            kv_size=2,
+        ),
+        # Recurrent state: 1 plane x 1 layer x 8 tokens x 8 -> 256 B/chunk.
+        GroupLayout(
+            num_layers=1,
+            hidden_dim_size=8,
+            dtype_str="float32",
+            tokens_per_block=4,
+            window_tokens=8,
+            kv_size=1,
+            window_chunks=1,
+            recurrent=True,
+        ),
+    ]
+    with patch(
+        "lmcache.v1.multiprocess.engine_context.ipc_key_to_object_keys",
+        side_effect=lambda _key, hashes, gids: [
+            [f"g{g}-c{c}" for c in range(len(hashes))] for g in gids
+        ],
+    ):
+        module.register_kv_cache_engine_driven_context(payload)
+        key = IPCCacheServerKey.from_token_ids(
+            "m", 1, 0, [1] * 16, start=0, end=16, request_id="req-hybrid"
+        )
+        prepare_response = module.prepare_store(key, 31)
+        # Group 0 stores both chunks, group 1 only the trailing one.
+        assert prepare_response.context["chunk_indices"] == [0, 1, 1]
+        assert prepare_response.context["group_ids"] == [0, 0, 1]
+        assert module.commit_store(key, 31, b"") is True
+
+    (end,) = _published(ctx, EventType.MP_STORE_END)
+    assert end.metadata["stored_count"] == 2  # distinct chunks, not 3 slots
+    assert end.metadata["num_tokens"] == 2 * 8
+    assert end.metadata["total_bytes"] == 2048 + 2048 + 256
+
+
+def test_inline_multigroup_store_reports_payload_bytes_and_carried_chunks(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """A hybrid store over the inline transport reports bytes, not chunks.
+
+    Inline reserves no slots at prepare, so there is nothing to measure
+    there, and the worker does not say which chunks it leaves out -- it
+    calls prepare with only the key and instance id, so ``skipped_chunks``
+    arrives empty and the range would count chunks that never travel. The
+    byte count is still exact (the payload the transport carried), which is
+    what the throughput histograms need, so the END reports it and omits the
+    chunk-derived fields rather than guessing them.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import GroupLayout, IPCCacheServerKey
+
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h0", b"h1"]
+    module, _, _, ctx = server_module_factory(mock_session=mock_session)
+    payload = _default_register_payload(instance_id=41)
+    payload.group_layouts = [
+        GroupLayout(
+            num_layers=2,
+            hidden_dim_size=16,
+            dtype_str="float32",
+            tokens_per_block=4,
+            window_tokens=8,
+            kv_size=2,
+        ),
+        GroupLayout(
+            num_layers=1,
+            hidden_dim_size=8,
+            dtype_str="float32",
+            tokens_per_block=4,
+            window_tokens=8,
+            kv_size=1,
+            window_chunks=1,
+            recurrent=True,
+        ),
+    ]
+    # The LMCache loggers set propagate=False, so caplog cannot see them;
+    # attach a handler to the module's own logger instead.
+    logged: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: logged.append(  # type: ignore[method-assign]
+        record.getMessage()
+    )
+    mod_logger = logging.getLogger(
+        "lmcache.v1.multiprocess.modules.engine_driven_transfer"
+    )
+    mod_logger.addHandler(handler)
+    with patch(
+        "lmcache.v1.multiprocess.engine_context.ipc_key_to_object_keys",
+        side_effect=lambda _key, hashes, gids: [
+            [f"g{g}-c{c}" for c in range(len(hashes))] for g in gids
+        ],
+    ):
+        module.register_kv_cache_engine_driven_context(payload)
+        key = IPCCacheServerKey.from_token_ids(
+            "m", 1, 0, [1] * 16, start=0, end=16, request_id="req-inline-hybrid"
+        )
+        # Group 1 is recurrent: its chunk 0 is all-null and is not stored.
+        # Chunk 0 still travels for group 0, so two distinct chunks move.
+        module.prepare_store(key, 41, skipped_chunks=((), (0,)))
+        # Group-major envelope: group 0 carries both chunks, group 1 only
+        # chunk 1, each sized by its own registered layout.
+        wire = encode_grouped_tensors(
+            [
+                ([0, 1], [torch.ones(2, 2, 8, 16), torch.ones(2, 2, 8, 16)]),
+                ([1], [torch.ones(1, 8, 8)]),
+            ]
+        )
+        module.commit_store(key, 41, wire)
+    mod_logger.removeHandler(handler)
+
+    (end,) = _published(ctx, EventType.MP_STORE_END)
+    assert end.metadata["total_bytes"] == len(wire)
+    assert end.metadata["duration_seconds"] > 0
+    # Not guessed from the range: the worker never said what it skipped.
+    assert "stored_count" not in end.metadata
+    assert "num_tokens" not in end.metadata
+    # A completed store must still be visible in the log, by byte count.
+    assert any("Stored" in m and "MiB" in m for m in logged), logged
+
+
+def test_inline_single_group_retrieve_counts_the_whole_served_range(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """A single-group inline retrieve serves its whole resolved range.
+
+    There are no groups to narrow and no slots to count, so the count comes
+    from the resolved keys. Reporting zero would suppress the retrieve log
+    line that operators and the test kit grep for, and would zero out the
+    hit-token count in the continuous usage report.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+    memory_obj = MagicMock()
+    memory_obj.tensor = torch.ones(2, 2, 8, 16)
+    read_ctx = MagicMock()
+    read_ctx.__enter__ = MagicMock(return_value=[memory_obj, memory_obj])
+    read_ctx.__exit__ = MagicMock(return_value=False)
+    mock_storage = MagicMock()
+    mock_storage.read_prefetched_results.return_value = read_ctx
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h0", b"h1"]
+    module, _, _, ctx = server_module_factory(
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+        object_keys=["obj-0", "obj-1"],
+    )
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=51)
+    )
+    key = IPCCacheServerKey.from_token_ids(
+        "m", 1, 0, [1] * 16, start=0, end=16, request_id="req-single-retr"
+    )
+    assert module.prepare_retrieve(key, 51).success
+    module.commit_retrieve(key, 51)
+
+    (end,) = _published(ctx, EventType.MP_RETRIEVE_END)
+    assert end.metadata["retrieved_count"] == 2
+    assert end.metadata["num_tokens"] == 2 * 8
+
+
+def test_multigroup_retrieve_counts_the_union_of_every_groups_window(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Groups serve different windows, so the count is their union.
+
+    A recurrent group needs only its last chunk while a full-attention group
+    needs the whole prefix. Taking group 0's length reports that one
+    trailing chunk for the entire retrieve -- a 22-chunk restore logged as
+    one -- so the count must span every group.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import GroupLayout, IPCCacheServerKey
+
+    memory_obj = MagicMock()
+    memory_obj.tensor = torch.ones(2, 1, 8, 16)
+    memory_obj.shm_offset = 0
+    memory_obj.shm_byte_length = memory_obj.tensor.numel() * 4
+
+    def _read(keys: Any, **_k: Any) -> Any:
+        rc = MagicMock()
+        rc.__enter__ = MagicMock(return_value=[memory_obj] * len(list(keys)))
+        rc.__exit__ = MagicMock(return_value=False)
+        return rc
+
+    mock_storage = MagicMock()
+    mock_storage.read_prefetched_results.side_effect = _read
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h0", b"h1", b"h2", b"h3"]
+    module, _, _, ctx = server_module_factory(
+        mock_storage=mock_storage, mock_session=mock_session
+    )
+    payload = _default_register_payload(instance_id=52)
+    payload.group_layouts = [
+        # Recurrent: only the trailing chunk is needed or stored.
+        GroupLayout(
+            num_layers=1,
+            hidden_dim_size=8,
+            dtype_str="float32",
+            tokens_per_block=4,
+            window_tokens=8,
+            kv_size=1,
+            window_chunks=1,
+            recurrent=True,
+        ),
+        # Full attention: the whole prefix.
+        GroupLayout(
+            num_layers=2,
+            hidden_dim_size=16,
+            dtype_str="float32",
+            tokens_per_block=4,
+            window_tokens=8,
+            kv_size=2,
+        ),
+    ]
+    with patch(
+        "lmcache.v1.multiprocess.engine_context.ipc_key_to_object_keys",
+        side_effect=lambda _key, hashes, gids: [
+            [f"g{g}-c{c}" for c in range(len(hashes))] for g in gids
+        ],
+    ):
+        module.register_kv_cache_engine_driven_context(payload)
+        key = IPCCacheServerKey.from_token_ids(
+            "m", 1, 0, [1] * 32, start=0, end=32, request_id="req-union"
+        )
+        assert module.prepare_retrieve(key, 52).success
+        module.commit_retrieve(key, 52)
+
+    (end,) = _published(ctx, EventType.MP_RETRIEVE_END)
+    # Group 0 serves only chunk 3; group 1 serves 0..3. Union = 4.
+    assert end.metadata["retrieved_count"] == 4
+    assert end.metadata["num_tokens"] == 4 * 8
 
 
 def test_server_prepare_store_releases_unused_reserved_write_locks(

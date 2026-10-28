@@ -306,3 +306,78 @@ Retrieve:
 Notes:
 - SHM pool metadata is computed once in `MPCacheServerContext` init, not per registration.
 - `chunk_indices` optimization reduces unnecessary gather/copy work on partial cache hits.
+
+## 4. Observability
+
+The module publishes transfer events so the L0↔L1 throughput histograms, the
+extra-stats log and the continuous usage report cover the engine-driven
+transport too (before, they were empty exactly where the transfer cost is
+highest — the devices that have no other transport). See
+[EVENTS.md](../mp_observability/EVENTS.md) for the metadata contract and the
+ways an engine-driven END differs from a GPU one.
+
+- **Everything is published at `commit_*`; `prepare_*` publishes nothing.**
+  `commit_store` / `commit_retrieve` publish `MP_*_SUBMITTED` immediately
+  followed by `MP_*_END`. There is no `MP_*_START`.
+
+  The GPU path brackets a transfer with START and END because its
+  subscribers infer the duration from the timestamp difference. This path
+  measures the window itself and reports `duration_seconds`, which both
+  subscribers prefer, so a START would add no information — only correlation
+  state. And that state is unreclaimable here: a prepared transfer is not
+  guaranteed to commit, and the common abandonment is a worker whose gather
+  raised, which keeps pinging and so is *never reaped*. Nothing on the
+  publisher side can reach what such a START left behind — a pending entry
+  in `L0L1ThroughputSubscriber` / `ExtraStatsLoggingSubscriber`, an inflated
+  submitted-minus-finished difference, an open `mp.store` span. Measured:
+  4200 abandoned prepares retained 4200 entries in each of those four
+  structures, against a 4096-entry publisher cap. Publishing only once the
+  transfer is known to have completed leaves nothing to strand.
+
+  SUBMITTED is kept, paired with the END, so the submitted/finished counters
+  stay balanced; feeding only the END side would drive the in-flight
+  subtraction negative. It reads zero in flight, which is honest — the
+  server learns of an engine-driven transfer only once it is done.
+
+  Cost: no `mp.store` / `mp.retrieve` child span for engine-driven
+  transfers. That span is currently wrong for *any* overlapping transfers,
+  including on the GPU path — `MPServerTracingSubscriber` keys pending spans
+  by `(session_id, event_type)`, so two ranks of one request cross-wire
+  their durations and leak a span. Emitting nothing is better than emitting
+  that; the span becomes available once the subscriber keys per transfer.
+- A store that prepared nothing — every chunk already cached, or all-null in
+  every group — records no start, because the worker then returns without
+  committing and the entry would never be popped.
+- Each END carries `duration_seconds` measured by the server: the
+  `prepare_*` → `commit_*` window, which is the worker's device copy plus
+  the transport, and is what the matching `Stored/Retrieved N tokens` log
+  line reports.
+- Timing lives in a dict keyed by
+  `(phase, instance_id, request_id, key.start, key.end)`, not in the
+  per-request session: `IPCCacheServerKey` excludes `request_id` from
+  equality, so two concurrent requests over the same token range would share
+  one entry, and one rank can have several chunks of one request in flight,
+  so the request alone is too coarse. It is capped
+  (`_MAX_TRACKED_TRANSFERS`) because a prepared transfer is not guaranteed to
+  commit and a live worker is never reaped; a reaped worker's entries are
+  swept with its registration.
+- An END whose entry is missing (reaped, unprepared, or evicted) omits
+  `stored_count`/`retrieved_count`, `total_bytes`, `num_tokens` and
+  `duration_seconds` rather than falling back to the requested range: an SHM
+  store reserves only the chunks that were missing, so the range would
+  report already-cached chunks as newly stored.
+- Bytes come from whichever source the transport offers, and are always
+  exact: SHM sums its reserved slots, inline takes the payload length
+  (`len(cpu_data)` at `commit_store`, `len(response.data)` at
+  `prepare_retrieve`). This matters because a non-CUDA accelerator with no
+  SHM pool runs inline by default, and deriving nothing there left the
+  throughput histograms empty on the one configuration with no alternative
+  transport.
+- Chunk counts are exact too, with one exception. A retrieve is
+  all-or-nothing over keys resolved before the payload exists, so the count
+  is the union of every group's served window — never group 0's length,
+  which on a hybrid model is a recurrent group's single trailing chunk and
+  would log a 22-chunk restore as one. A multi-group **inline store** is the
+  exception: it omits chunks that are all-null in a group without telling the
+  server which, so its count and `num_tokens` are omitted rather than
+  guessed from the range. Its bytes are still reported.
