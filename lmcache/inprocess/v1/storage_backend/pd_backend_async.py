@@ -1649,7 +1649,9 @@ class PDBackendAsync(AllocatorBackendInterface):
 
     def close(self) -> None:
         """
-        Close the storage backend.
+        Close the storage backend and stop its background loops.
+
+        Repeated calls do not queue receiver shutdown work on a stopped loop.
         """
         self.running = False
         # Wake up any threads blocked on the sender staging condition so they
@@ -1680,7 +1682,7 @@ class PDBackendAsync(AllocatorBackendInterface):
         if hasattr(self, "_recv_loop"):
             # Wait for any in-flight allocation tasks to finish gracefully
             # before tearing down the loop.
-            if hasattr(self, "_pending_alloc_tasks"):
+            if hasattr(self, "_pending_alloc_tasks") and self._recv_loop.is_running():
                 try:
 
                     async def _wait_pending() -> None:
