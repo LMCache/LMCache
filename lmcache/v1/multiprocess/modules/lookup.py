@@ -28,6 +28,7 @@ from lmcache.v1.multiprocess.engine_module import (
     EngineModule,
     ModuleBuildContext,
 )
+from lmcache.v1.multiprocess.hetero_kv_view import HeteroKVView
 from lmcache.v1.multiprocess.kv_load_policy import (
     DefaultKVLoadPolicy,
     KVLoadContext,
@@ -37,7 +38,6 @@ from lmcache.v1.multiprocess.kv_load_policy import (
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
-from lmcache.v1.multiprocess.tp_reshard import HeteroTPView
 
 logger = init_logger(__name__)
 
@@ -168,7 +168,7 @@ class LookupModule(DiscoverableModule):
         self._load_policy = load_policy
         # Every prefetch goes through the view, so a lookup can complete its
         # hit from another TP size without knowing it.
-        self._prefetch = HeteroTPView(
+        self._prefetch = HeteroKVView(
             ctx.storage_manager, ctx.layout_desc_registry, hetero_tp_source_world_size
         )
         self._prefetch_jobs: dict[str, _PrefetchJob] = {}
@@ -191,7 +191,7 @@ class LookupModule(DiscoverableModule):
         }
 
     def close(self) -> None:
-        """Stop the cross-TP lookup threads; see :meth:`HeteroTPView.close`."""
+        """Stop the cross-TP lookup threads; see :meth:`HeteroKVView.close`."""
         self._prefetch.close()
 
     # -----------------------------------------------------------------
