@@ -239,6 +239,11 @@ class StorageManager:
             target=start_loop_in_thread_with_exceptions,
             args=(self.loop,),
             name="storage-manager-event-loop",
+            # Daemon so a host that never reaches close() cannot be kept alive
+            # by this thread at interpreter exit. close() stops the loop
+            # explicitly and already tolerates the thread outliving its join
+            # timeout, so shutdown does not depend on a join here.
+            daemon=True,
         )
         self.thread.start()
 
