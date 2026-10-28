@@ -86,6 +86,16 @@ class LMCBlender:
         attn_layer = layer.self_attn
         q, k = attn_layer.rotary_emb(self.metadata.positions, q, k)
 
+        # Separator ("gap") positions belong to no cached segment, so the loader
+        # zero-fills their KV. Zero keys/values at delimiter tokens corrupt the
+        # blended context, so recompute them instead: copy the fresh rows while
+        # every token is computed, and keep them in the recompute set afterwards.
+        gap_positions = getattr(self.gpu_connector, "current_gap_positions", None)
+        has_gaps = gap_positions is not None and gap_positions.numel() > 0
+        if has_gaps and self.metadata.imp_indices is None:
+            old_k[gap_positions] = k[gap_positions]
+            old_v[gap_positions] = v[gap_positions]
+
         if layer_id in self.common_metadata.check_layers:
             diff_k = torch.sum(
                 (k.to(torch.float32) - old_k.to(torch.float32)) ** 2, dim=[1]
@@ -99,7 +109,13 @@ class LMCBlender:
             topk_num = max(topk_num, 1)
 
             top_indices = torch.topk(diff_k, k=topk_num).indices
-            top_indices, _ = torch.sort(top_indices)
+            if has_gaps:
+                top_indices = torch.cat(
+                    [top_indices, gap_positions.to(top_indices.device)]
+                )
+            # unique() also sorts, which the attention metadata relies on
+            top_indices = torch.unique(top_indices)
+            topk_num = top_indices.numel()
 
             k, v = k[top_indices], v[top_indices]
             q = q[top_indices]
