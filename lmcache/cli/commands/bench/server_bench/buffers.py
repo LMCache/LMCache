@@ -81,6 +81,40 @@ class KVCacheBuffers:
             for block_id in block_ids:
                 yield tensor.narrow(dim, block_id, 1)
 
+    def fill_deterministic_kv(
+        self,
+        block_ids_per_group: Sequence[Sequence[int]],
+        token_ids: Sequence[int],
+        worker_id: int,
+    ) -> None:
+        """Fill bound blocks with reproducible pseudorandom KV in [1, 127]."""
+        prefix = hashlib.sha256()
+        seeds = []
+        for start in range(0, len(token_ids) - self.block_size + 1, self.block_size):
+            prefix.update(
+                str(tuple(token_ids[start : start + self.block_size])).encode()
+            )
+            seeds.append(prefix.hexdigest())
+        for tensor_index, tensor, dim, block_ids in self._iter_group_tensors(
+            block_ids_per_group
+        ):
+            generator = torch.Generator(device=tensor.device)
+            for logical_block, block_id in enumerate(block_ids):
+                identity = f"{seeds[logical_block]}:{worker_id}:{tensor_index}".encode()
+                seed = int.from_bytes(hashlib.sha256(identity).digest()[:8], "little")
+                generator.manual_seed(seed)
+                view = tensor.narrow(dim, block_id, 1)
+                view.copy_(
+                    torch.randint(
+                        1,
+                        128,
+                        view.shape,
+                        dtype=tensor.dtype,
+                        device=tensor.device,
+                        generator=generator,
+                    )
+                )
+
     def set_blocks_to_zero(self, block_ids_per_group: Sequence[Sequence[int]]) -> None:
         """Set bound blocks to zero."""
         for view in self.block_views(block_ids_per_group):

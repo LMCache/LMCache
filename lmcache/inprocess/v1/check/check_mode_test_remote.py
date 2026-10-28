@@ -17,13 +17,13 @@ from lmcache.inprocess.v1.check.utils import (
     run_common_test_framework,
     validate_get_results,
 )
-from lmcache.integration.vllm.utils import lmcache_get_or_create_config
-from lmcache.v1.memory_management import MemoryObj
 
 # Import from lmcache with absolute paths
-from lmcache.v1.storage_backend import RemoteBackend
-from lmcache.v1.storage_backend.connector import InstrumentedRemoteConnector
-from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.inprocess.v1.storage_backend import RemoteBackend
+from lmcache.inprocess.v1.storage_backend.connector import InstrumentedRemoteConnector
+from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.integration.vllm.utils import lmcache_get_or_create_config
+from lmcache.v1.memory_management import MemoryObj
 
 
 async def async_contains_backend(backend, key):

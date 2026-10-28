@@ -121,9 +121,10 @@ API at the cost of one local hop; `grpc_server_workers` sizes it. The socket
 is only created when a module has a registrar. In their handlers
 `context.peer()` is that socket rather than the client.
 
-`native` needs the `pygrpc-native` package (`pip install pygrpc-native`), a
-general-purpose gRPC server kept outside LMCache so that LMCache carries no
-Rust code for it. The Docker images do not include it yet. grpc-core sends a Unix socket's path
+`native` needs the `pygrpc-native` package (`pip install "lmcache[grpc-native]"`),
+a general-purpose gRPC server kept outside LMCache so that LMCache carries no
+Rust code for it. The `lmcache/vllm-openai` and `lmcache/standalone` images
+include it. grpc-core sends a Unix socket's path
 as `:authority`, which the Rust HTTP/2 stack rejects, so a `grpc+unix://`
 native server only serves clients that set `grpc.default_authority`;
 `GrpcMultiprocessClient` does not, so use TCP with it.

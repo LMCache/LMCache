@@ -161,3 +161,44 @@ def test_release_drops_ownership_and_preserves_external_views(
     del view
     gc.collect()
     assert all(ref() is None for ref in refs)
+
+
+@pytest.mark.parametrize("dtype", ["float16", "bfloat16", "uint8"])
+def test_fill_depends_on_logical_identity_not_physical_location(dtype: str) -> None:
+    buffers = KVCacheBuffers(
+        parse_kvcache_shape_spec(f"(2,8,2,2,4):{dtype}:2;(1,8,2,1,8):{dtype}:1"),
+        device="cpu",
+    )
+    source = ((2, 0), (1, 4))
+    target = ((7, 5), (6, 3))
+    tokens = (10, 11, 12, 13)
+    outside = ((1, 3, 4, 5, 6, 7), (0, 2, 3, 5, 6, 7))
+    untouched = [view.clone() for view in buffers.block_views(outside)]
+    buffers.fill_deterministic_kv(source, tokens, worker_id=0)
+    torch.testing.assert_close(
+        list(buffers.block_views(outside)), untouched, rtol=0, atol=0
+    )
+    expected = buffers.checksum(source)
+    buffers.fill_deterministic_kv(target, tokens, worker_id=0)
+    assert buffers.checksum(target) == expected
+    buffers.fill_deterministic_kv(target, tokens, worker_id=1)
+    assert buffers.checksum(target) != expected
+    buffers.fill_deterministic_kv(target, (10, 11, 12, 14), worker_id=0)
+    assert buffers.checksum(target) != expected
+
+
+def test_fill_uses_registered_tensor_identity_across_traversal_orders() -> None:
+    """Reordering tensor traversal preserves each registered tensor's contents."""
+    groups = parse_kvcache_shape_spec("(2,4,2,1,4):float32:2")
+    original = KVCacheBuffers(groups, device="cpu")
+    groups[0].layer_indices.reverse()
+    reordered = KVCacheBuffers(groups, device="cpu")
+    original.fill_deterministic_kv(((0, 1),), (10, 11, 12, 13), worker_id=0)
+    reordered.fill_deterministic_kv(((3, 2),), (10, 11, 12, 13), worker_id=0)
+    for name in ("tensor.0", "tensor.1"):
+        torch.testing.assert_close(
+            original.kv_caches[name][:, [0, 1]],
+            reordered.kv_caches[name][:, [3, 2]],
+            rtol=0,
+            atol=0,
+        )

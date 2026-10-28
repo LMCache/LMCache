@@ -55,9 +55,9 @@ jobs:
               - 'lmcache/v1/distributed/l2_adapters/raw_block/**'
               - 'lmcache/v1/distributed/l2_adapters/raw_block_l2_adapter.py'
               - 'lmcache/v1/multiprocess/**'
-              - 'tests/v1/distributed/raw_block/**'
-              - 'tests/v1/storage_backend/test_raw_block_uring_cmd.py'
-              - 'tests/v1/storage_backend/test_rust_raw_block_backend.py'
+              - 'tests/v1/distributed/raw_block/test_*.py'
+              - 'tests/v1/distributed/raw_block/test_utils.py'
+              - 'tests/inprocess/v1/storage_backend/test_raw_block_uring_cmd.py'
               - 'tests/v1/multiprocess/test_raw_block_l2_adapter.py'
               - '.github/workflows/test.yml'
 
