@@ -42,8 +42,14 @@ from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
 )
+from lmcache.v1.distributed.l2_adapters.bigtable_config import (
+    BigtablePluginConfig,
+)
 from lmcache.v1.distributed.l2_adapters.bigtable_key_encoder import (
     BigtableL2KeyEncoder,
+)
+from lmcache.v1.distributed.l2_adapters.bigtable_sharder import (
+    BigtablePayloadSharder,
 )
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -54,12 +60,6 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
-from lmcache.v1.storage_backend.connector.bigtable_config import (
-    BigtablePluginConfig,
-)
-from lmcache.v1.storage_backend.connector.bigtable_sharder import (
-    BigtablePayloadSharder,
-)
 
 logger = init_logger(__name__)
 
@@ -685,6 +685,8 @@ class BigtableL2Adapter(L2AdapterInterface):
         """Internal coroutine to write a batch of keys and objects to Bigtable.
 
         Applies sharding if enabled and filters out oversized payloads.
+        Rejecting any payload fails the task, while valid writes still
+        contribute to usage accounting and stored-key notifications.
 
         Args:
             keys: The list of ObjectKeys to store.
@@ -720,6 +722,7 @@ class BigtableL2Adapter(L2AdapterInterface):
                 if sharding_enabled:
                     limit_bytes = 240 * 1024 * 1024
                     if size > limit_bytes:
+                        success = False
                         logger.warning(
                             "Skipping write to Bigtable for key %s "
                             "because total payload size %d bytes exceeds "
@@ -731,6 +734,7 @@ class BigtableL2Adapter(L2AdapterInterface):
                 else:
                     limit_bytes = int(self._config.max_chunk_size_mb * 1024 * 1024)
                     if size > limit_bytes:
+                        success = False
                         logger.warning(
                             "Skipping write to Bigtable for key %s "
                             "because payload size %d bytes exceeds the limit "

@@ -27,12 +27,12 @@ from lmcache.inprocess.v1.cache_controller.message import (
 )
 from lmcache.inprocess.v1.cache_controller.observability import PrometheusLogger
 from lmcache.inprocess.v1.cache_controller.utils import RegistryTree
-from lmcache.logging import init_logger
-from lmcache.v1.rpc_utils import (
+from lmcache.inprocess.v1.rpc_utils import (
     close_zmq_socket,
     get_zmq_context,
     get_zmq_socket,
 )
+from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 

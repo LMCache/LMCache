@@ -53,18 +53,24 @@ Server Configuration
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
-   * - ``--http-api-key-file``
+   * - ``--api-key-file``
      - unset
      - Read a bearer API key from a file. Repeat the option to accept multiple
        keys during rotation. Authentication is disabled when no CLI or
        environment key source is configured.
 
-The environment variables ``LMCACHE_HTTP_API_KEY_FILE`` and
-``LMCACHE_HTTP_API_KEY`` provide deployment-friendly alternatives for one key
+The environment variables ``LMCACHE_API_KEY_FILE`` and
+``LMCACHE_API_KEY`` provide deployment-friendly alternatives for one key
 file or one key value. Environment sources and repeated
-``--http-api-key-file`` options are cumulative, so old and new keys can overlap
-during rotation. The ``/env`` endpoint redacts ``LMCACHE_HTTP_API_KEY`` while
+``--api-key-file`` options are cumulative, so old and new keys can overlap
+during rotation. The ``/env`` endpoint redacts ``LMCACHE_API_KEY`` while
 leaving the non-secret key-file path visible.
+
+``--http-api-key-file`` remains a compatibility alias. The legacy
+``LMCACHE_HTTP_API_KEY`` and ``LMCACHE_HTTP_API_KEY_FILE`` variables are used
+when their corresponding ``LMCACHE_API_KEY`` variables are unset or empty.
+The unified key sources are shared by authentication-enabled HTTP and request
+transport adapters; separate per-protocol keys are not configured.
 
 Example:
 
@@ -73,11 +79,13 @@ Example:
     lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
         --http-host 0.0.0.0 --http-port 8080 \
-        --http-api-key-file /run/secrets/lmcache-http-api-key
+        --api-key-file /run/secrets/lmcache-http-api-key
 
 All examples below assume the server is reachable at
 ``http://localhost:8080``. When authentication is enabled, include the key as
-``Authorization: Bearer <api-key>``. The ``/`` and ``/healthcheck`` routes
+``Authorization: Bearer <api-key>`` or ``X-LMCache-API-Key: <api-key>``.
+Both headers use the same accepted keys; if both are present, either valid
+key authenticates the request. The ``/`` and ``/healthcheck`` routes
 remain public for liveness and readiness probes; every other route requires a
 valid key. For example:
 
@@ -85,6 +93,10 @@ valid key. For example:
 
     curl -H "Authorization: Bearer $(cat /run/secrets/lmcache-http-api-key)" \
         http://localhost:8080/status
+
+For proxies that consume ``Authorization``, such as the Kubernetes API-server
+proxy, send the raw LMCache key in ``X-LMCache-API-Key`` instead. Treat this
+header as a secret in proxy and access-log configurations as well.
 
 Use a high-entropy value such as ``openssl rand -hex 32`` and restrict the key
 file so only the LMCache server process can read it. API-key authentication
