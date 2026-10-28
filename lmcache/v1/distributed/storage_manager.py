@@ -69,6 +69,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 from lmcache.v1.distributed.storage_controllers.utils import (
     L1ManagerDescriptor,
     L2AdapterDescriptor,
+    resolve_l1_affinity,
 )
 from lmcache.v1.distributed.storage_controllers.write_policy import OrderedWritePolicy
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
@@ -132,8 +133,16 @@ class StorageManager:
             else:
                 created: list[L1ManagerInterface] = []
                 for manager_config in config.l1_manager_configs:
-                    path = manager_config.memory_config.devdax_path
-                    if path and any(m.owns_device(path) for m in created):
+                    memory = manager_config.memory_config
+                    path = memory.devdax_path
+                    if path and any(
+                        m.owns_range(
+                            path,
+                            memory.devdax_offset_in_bytes,
+                            memory.devdax_size_in_bytes or memory.size_in_bytes,
+                        )
+                        for m in created
+                    ):
                         raise ValueError(
                             f"Device-DAX path already owned by an L1: {path}"
                         )
@@ -190,6 +199,7 @@ class StorageManager:
             self._l2_adapters: dict[int, L2AdapterInterface] = {}
             self._adapter_descriptors: dict[int, L2AdapterDescriptor] = {}
             for ac in config.l2_adapter_config.adapters:
+                self._check_dax_devices_unowned(ac)
                 adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
                 cleanup.callback(adapter.close)
                 self._l2_adapters[adapter_id] = adapter
@@ -245,7 +255,7 @@ class StorageManager:
                 descriptors = [
                     d
                     for d in self._adapter_descriptors.values()
-                    if d.config.affinity_tag == c.tag
+                    if resolve_l1_affinity(d.config, self._l1_by_tag) == c.tag
                 ]
                 controller = StoreController(
                     manager,
@@ -266,7 +276,7 @@ class StorageManager:
                 l2_adapters=list(self._l2_adapters.values()),
                 adapter_descriptors=list(self._adapter_descriptors.values()),
                 policy=create_prefetch_policy(config.prefetch_policy),
-                max_in_flight=config.prefetch_max_in_flight,
+                inflight_watermark=config.prefetch_inflight_watermark,
             )
             self._prefetch_controller.start()
             cleanup.callback(self._prefetch_controller.stop)
@@ -590,30 +600,32 @@ class StorageManager:
         self,
         spec: PrefetchTaskSpec,
         external_request_id: str = "",
-        skip_l2: bool = False,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
         Args:
             spec: The request (see :class:`PrefetchTaskSpec`).
             external_request_id: Caller id for end-to-end log tracing.
-            skip_l2: If True, serve from L1 only. The result is available
-                as soon as this returns.
 
         Returns:
             PrefetchHandle to track the task.
+
+        Note:
+            A spec that allows no L2 adapter (an empty
+            ``allowed_l2_memory_tags``) is served from L1 only, and its result
+            is available as soon as this returns.
         """
-        prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-            spec, skip_l2=skip_l2
-        )
+        prefetch_request_id = self._prefetch_controller.submit_prefetch_request(spec)
         logger.debug(
             "Prefetch request submitted: %d keys in %d groups "
-            "(external_request_id=%s, prefetch_request_id=%d, skip_l2=%s)",
+            "(external_request_id=%s, prefetch_request_id=%d, "
+            "allowed_l1_memory_tags=%s, allowed_l2_memory_tags=%s)",
             len(spec.key_groups) * spec.group_size,
             len(spec.key_groups),
             external_request_id,
             prefetch_request_id,
-            skip_l2,
+            spec.allowed_l1_memory_tags,
+            spec.allowed_l2_memory_tags,
         )
         return PrefetchHandle(
             prefetch_request_id=prefetch_request_id,
@@ -687,16 +699,21 @@ class StorageManager:
             handle.prefetch_request_id, timeout
         )
 
-    def touch_l1_keys(self, keys: list[ObjectKey]):
-        """
-        Touch the keys in L1 storage, marking the keys
-        as accessed(retrieved or stored).
+    def touch_cached_keys(self, keys: list[ObjectKey]) -> None:
+        """Refresh eviction recency in L1 *and* L2, without I/O.
+
+        A real load refreshes both tiers, so an L1-only touch would leave
+        the keys cold to L2.
 
         Args:
             keys (list[ObjectKey]): List of object keys to touch.
         """
         for manager in self._l1_managers_by_id.values():
             manager.touch_keys(keys)
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            adapter.submit_touch(keys)
 
     def delete_l1_keys(
         self, keys: list[ObjectKey], force: bool = False
@@ -888,8 +905,9 @@ class StorageManager:
         self,
         device_path: str,
         size_in_bytes: int,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
-        """Add a Device-DAX device to the L1 arena pool.
+        """Add a Device-DAX range to the L1 arena pool.
 
         A successful addition publishes the current whole capacity topology.
 
@@ -900,6 +918,7 @@ class StorageManager:
         Args:
             device_path: Path of the Device-DAX device to map.
             size_in_bytes: Number of bytes to map.
+            offset_in_bytes: Byte offset into the device.
 
         Returns:
             Status of the newly added arena.
@@ -923,7 +942,9 @@ class StorageManager:
                     f"({', '.join(incompatible)}); their transfers cover "
                     "only the primary arena",
                 )
-            device_owners = self._l2_device_owner_names(device_path)
+            device_owners = self._l2_device_owner_names(
+                device_path, offset_in_bytes, size_in_bytes
+            )
             if device_owners:
                 raise L1ReconfigureError(
                     409,
@@ -931,7 +952,9 @@ class StorageManager:
                     "is already mapped by L2 adapter(s) "
                     f"({', '.join(device_owners)})",
                 )
-            status = self._l1_manager.add_devdax_device(device_path, size_in_bytes)
+            status = self._l1_manager.add_devdax_device(
+                device_path, size_in_bytes, offset_in_bytes
+            )
         self._publish_capacity_changed()
         return status
 
@@ -939,8 +962,9 @@ class StorageManager:
         self,
         device_path: str,
         mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
-        """Remove a Device-DAX device from the L1 arena pool.
+        """Remove a Device-DAX arena from the L1 arena pool.
 
         Whenever the call changes usable capacity, it publishes the current
         whole topology. This includes a drain transition whose later device
@@ -949,6 +973,7 @@ class StorageManager:
         Args:
             device_path: Path of the mapped Device-DAX device.
             mode: Removal strategy. Only drain mode is currently supported.
+            offset_in_bytes: Device offset the arena was added with.
 
         Returns:
             Status of the arena after the removal request.
@@ -963,16 +988,20 @@ class StorageManager:
             ValueError: This legacy operation requires a single L1 manager.
         """
         self._require_single_l1()
-        target_was_active = self._l1_devdax_arena_is_active(device_path)
+        target_was_active = self._l1_devdax_arena_is_active(
+            device_path, offset_in_bytes
+        )
         try:
-            status = self._l1_manager.remove_devdax_device(device_path, mode)
+            status = self._l1_manager.remove_devdax_device(
+                device_path, mode, offset_in_bytes
+            )
         except Exception:
             # Draining begins before an empty arena is synchronized and
             # unmapped. If that cleanup raises, usable capacity has still
             # changed and the coordinator must not retain the old topology.
             try:
                 if target_was_active and not self._l1_devdax_arena_is_active(
-                    device_path
+                    device_path, offset_in_bytes
                 ):
                     self._publish_capacity_changed()
             except Exception:
@@ -997,14 +1026,18 @@ class StorageManager:
             if (name := requires_single_l1_memory_region(descriptor.config)) is not None
         ]
 
-    def _l1_devdax_arena_is_active(self, device_path: str) -> bool:
-        """Return whether an ACTIVE Device-DAX arena is mapped at ``device_path``.
+    def _l1_devdax_arena_is_active(
+        self, device_path: str, offset_in_bytes: int
+    ) -> bool:
+        """Return whether an ACTIVE Device-DAX arena is at ``(device_path, offset)``.
 
-        The path must match the one used when adding the arena. ``False``
-        when L1 is not Device-DAX backed or nothing is registered there.
+        Both must match the values used when adding the arena. ``False`` when
+        L1 is not Device-DAX backed or nothing is registered there.
         """
         try:
-            status = self._l1_manager.get_devdax_arena_status(device_path)
+            status = self._l1_manager.get_devdax_arena_status(
+                device_path, offset_in_bytes
+            )
         except L1ReconfigureError:
             return False
         return status.state is DevDaxArenaState.ACTIVE
@@ -1106,12 +1139,14 @@ class StorageManager:
         Returns:
             JSON-serializable operation result.
         """
-        with self._lifecycle_lock if operation == "add" else nullcontext():
+        with self._lifecycle_lock if operation in ("add", "resize") else nullcontext():
             adapter = self._get_reconfigurable_l2_adapter(adapter_index)
             result = adapter.reconfigure(
                 operation,
                 payload,
-                device_owners=lambda path: self._device_owner_names(path, adapter),
+                device_owners=lambda path, offset, size: self._device_owner_names(
+                    path, offset, size, adapter
+                ),
             )
         result["adapter_index"] = adapter_index
         self._publish_capacity_changed()
@@ -1127,20 +1162,18 @@ class StorageManager:
             The stable id assigned to the new adapter.
 
         Raises:
-            ValueError: If the adapter registers a single L1 memory region
-                while L1 spans more than one (hybrid DRAM + Device-DAX, or
-                more than one Device-DAX arena), or a DAX device is already
-                mapped by L1 or another L2 adapter.
+            ValueError: If no L1 has the memory tags the adapter wants, the
+                adapter registers a single L1 memory region while L1 spans
+                more than one (hybrid DRAM + Device-DAX, or more than one
+                Device-DAX arena), or a DAX device is already mapped by L1 or
+                another L2 adapter.
         """
         with self._lifecycle_lock:
             # Mirror of the check in add_l1_devdax_device: a single-region
             # adapter may only be added while L1 is exactly one memory region.
             adapter_name = requires_single_l1_memory_region(config)
-            if config.affinity_tag not in self._l1_by_tag:
-                raise ValueError(f"Unknown L1 affinity_tag: {config.affinity_tag}")
-            if self._l1_by_tag[config.affinity_tag].config.gds_l1_config is not None:
-                raise ValueError("L2 affinity requires a host-backed DRAM or DEVDAX L1")
-            region_count = self._l1_by_tag[config.affinity_tag].memory_region_count()
+            manager = self._l1_by_tag[resolve_l1_affinity(config, self._l1_by_tag)]
+            region_count = manager.memory_region_count()
             if adapter_name is not None and region_count > 1:
                 raise ValueError(
                     f"{adapter_name} registers a single L1 memory region, but "
@@ -1148,23 +1181,14 @@ class StorageManager:
                     "Device-DAX, or more than one Device-DAX arena); remove the "
                     "additional Device-DAX regions before adding it"
                 )
-            # Check all DAX devices before the constructor maps any.
-            device_config = unwrap_l2_adapter_config(config)
-            if get_type_name_for_config(device_config) == "dax":
-                for device in cast(Any, device_config).devices:
-                    owners = self._device_owner_names(device.device_path)
-                    if owners:
-                        raise ValueError(
-                            f"device {device.device_path} is already mapped by "
-                            f"{', '.join(owners)}"
-                        )
+            self._check_dax_devices_unowned(config)
             adapter_id, adapter, descriptor = self._build_l2_adapter(config)
             for listener in self._registered_l2_listeners:
                 adapter.register_listener(listener)
             with self._adapters_lock:
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
-            owner = self._l1_by_tag[config.affinity_tag].l1_manager_id
+            owner = manager.l1_manager_id
             self._store_controllers[owner].add_adapter(adapter_id, adapter, descriptor)
             self._prefetch_controller.add_adapter(adapter_id, adapter, descriptor)
             if self._should_enable_l2_eviction(adapter, config.eviction_config):
@@ -1203,7 +1227,9 @@ class StorageManager:
                 raise ValueError(f"No L2 adapter with id {adapter_id}")
 
             deadline = time.monotonic() + timeout
-            affinity = self._adapter_descriptors[adapter_id].config.affinity_tag
+            affinity = resolve_l1_affinity(
+                self._adapter_descriptors[adapter_id].config, self._l1_by_tag
+            )
             owner = self._l1_by_tag[affinity].l1_manager_id
             store_done = self._store_controllers[owner].request_remove_adapter(
                 adapter_id
@@ -1469,10 +1495,11 @@ class StorageManager:
             A ``(adapter_id, adapter, descriptor)`` tuple. ``adapter_id`` is
             the freshly allocated stable id, ``adapter`` is the new adapter
             instance, and ``descriptor`` is its descriptor carrying that id.
+
+        Raises:
+            ValueError: If no L1 has the memory tags the adapter wants.
         """
-        if config.affinity_tag not in self._l1_by_tag:
-            raise ValueError(f"Unknown L1 affinity_tag: {config.affinity_tag}")
-        manager = self._l1_by_tag[config.affinity_tag]
+        manager = self._l1_by_tag[resolve_l1_affinity(config, self._l1_by_tag)]
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
         adapter: L2AdapterInterface = create_l2_adapter(
@@ -1488,6 +1515,12 @@ class StorageManager:
         # Stamp the registered type name so the adapter's cache events on
         # the observability bus carry their backend identity.
         adapter.set_backend_identity(descriptor.type_name, shared=config.shared)
+        logger.info(
+            "L2 adapter %d (%s) uses L1 %s",
+            adapter_id,
+            descriptor.type_name,
+            manager.config.tag,
+        )
         return adapter_id, adapter, descriptor
 
     def _should_enable_l2_eviction(
@@ -1531,32 +1564,66 @@ class StorageManager:
 
         return None
 
+    def _check_dax_devices_unowned(self, config: L2AdapterConfigBase) -> None:
+        """Reject a dax adapter config whose device range is already mapped.
+
+        Runs before the adapter constructor maps anything. The caller holds
+        ``_lifecycle_lock`` or runs single-threaded in ``__init__``.
+
+        Raises:
+            ValueError: If L1 or another L2 adapter maps an overlapping range.
+        """
+        device_config = unwrap_l2_adapter_config(config)
+        if get_type_name_for_config(device_config) != "dax":
+            return
+        for device in cast(Any, device_config).devices:
+            owners = self._device_owner_names(
+                device.device_path, device.offset_bytes, device.max_dax_size_bytes
+            )
+            if owners:
+                raise ValueError(
+                    f"device {device.device_path} is already mapped by "
+                    f"{', '.join(owners)}"
+                )
+
     def _device_owner_names(
-        self, device_path: str, exclude: Optional[L2ReconfigurableAdapter] = None
+        self,
+        device_path: str,
+        offset_in_bytes: int,
+        size_in_bytes: int,
+        exclude: Optional[L2ReconfigurableAdapter] = None,
     ) -> list[str]:
         """Return other L1/L2 owners while the caller holds the lifecycle lock."""
         owners = [
             f"L1[{tag}]" if self.is_multi_l1 else "L1"
             for tag, manager in self._l1_by_tag.items()
-            if manager.owns_device(device_path)
+            if manager.owns_range(device_path, offset_in_bytes, size_in_bytes)
         ]
-        return owners + self._l2_device_owner_names(device_path, exclude)
+        return owners + self._l2_device_owner_names(
+            device_path, offset_in_bytes, size_in_bytes, exclude
+        )
 
     def _l2_device_owner_names(
-        self, device_path: str, exclude: Optional[L2ReconfigurableAdapter] = None
+        self,
+        device_path: str,
+        offset_in_bytes: int,
+        size_in_bytes: int,
+        exclude: Optional[L2ReconfigurableAdapter] = None,
     ) -> list[str]:
-        """Return L2 type names that own the physical device at a path.
+        """Return L2 type names whose mappings overlap a device byte range.
 
         The caller holds ``_lifecycle_lock`` so registered adapters cannot be
         added or deleted between this check and the mapping attempt.
 
         Args:
             device_path: Candidate Device-DAX path.
+            offset_in_bytes: Start of the candidate range on that device.
+            size_in_bytes: Length of the candidate range.
             exclude: L2 adapter whose own mappings are ignored.
 
         Returns:
-            Registered adapter type names whose open device has the same
-            physical identity.
+            Registered adapter type names mapping an overlapping range of the
+            same physical device.
         """
         owners: list[str] = []
         for _adapter_id, descriptor, adapter in self._snapshot_adapters():
@@ -1564,7 +1631,7 @@ class StorageManager:
             if (
                 owner is not exclude
                 and isinstance(owner, L2DeviceOwner)
-                and owner.owns_device(device_path)
+                and owner.owns_range(device_path, offset_in_bytes, size_in_bytes)
             ):
                 owners.append(descriptor.type_name)
         return owners

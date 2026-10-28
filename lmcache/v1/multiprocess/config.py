@@ -13,6 +13,7 @@ import uuid
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.security.api_key import add_api_key_args
 from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleSpec,
     parse_server_module_specs,
@@ -51,6 +52,15 @@ class MPServerConfig:
 
     grpc_server_workers: int = 32
     """Worker threads for gRPC request dispatch. Only used by gRPC transport."""
+
+    grpc_server_mode: Literal["sync", "aio", "native"] = "sync"
+    """gRPC server implementation. ``aio`` receives requests on one event loop
+    and hands only the handlers to worker threads. ``native`` does the HTTP/2
+    and gRPC framing in Rust, off the GIL, and needs the
+    ``pygrpc-native`` package. Only used by gRPC transport."""
+
+    api_key_files: list[str] = field(default_factory=list)
+    """Key files shared by authentication-enabled HTTP and request entry points."""
 
     hash_algorithm: str = "blake3"
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
@@ -144,10 +154,6 @@ class MPServerConfig:
     """Silence budget (seconds) for a worker that registered but has never
     sent a PING (model warmup, or death before its first request). Must be
     >= worker_reap_timeout_seconds."""
-
-    enable: list[str] = field(default_factory=list)
-    """List of experimental transfer modules to enable. Options: transfer_query
-    (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
 
     kv_event_log_size: int = 32768
     """CPU store/eviction records retained for KV-event subscribers; 0 disables it."""
@@ -359,6 +365,7 @@ def add_mp_server_args(
     Returns:
         The same parser with MP server arguments added.
     """
+    add_api_key_args(parser)
     mp_group = parser.add_argument_group(
         "MP Server", "Configuration for the multiprocess cache server"
     )
@@ -431,6 +438,16 @@ def add_mp_server_args(
         default=32,
         help="Worker threads for gRPC request dispatch. Only used by "
         "--transport grpc. Default is 32.",
+    )
+    mp_group.add_argument(
+        "--grpc-server-mode",
+        choices=("sync", "aio", "native"),
+        default="sync",
+        help="gRPC server implementation. aio receives requests on one event "
+        "loop and hands only the handlers to worker threads. native does the "
+        "HTTP/2 and gRPC framing in Rust, off the GIL, and needs the "
+        "pygrpc-native package. Only used by --transport grpc. "
+        "Default is sync.",
     )
     mp_group.add_argument(
         "--hash-algorithm",
@@ -573,15 +590,6 @@ def add_mp_server_args(
         "orders a prompt so it starts with an exact copy of a cached prompt.",
     )
     mp_group.add_argument(
-        "--enable",
-        type=str,
-        nargs="*",
-        default=[],
-        help="List of experimental transfer modules to enable. "
-        "Options: transfer_query (see lmcache.v1.multiprocess.modules."
-        "experimental.__init___.py).",
-    )
-    mp_group.add_argument(
         "--kv-event-log-size",
         type=int,
         default=MPServerConfig.kv_event_log_size,
@@ -592,10 +600,14 @@ def add_mp_server_args(
         "--server-module",
         action="append",
         default=[],
-        help="JSON object describing an out-of-tree server module. "
+        help="JSON object describing a server module to load. "
         "Repeat to load multiple Python modules. Example: "
         '\'{"module_path":"my_pkg.server_module",'
-        '"config":{"name":"demo"}}\'.',
+        '"config":{"name":"demo"}}\'. '
+        "Opt-in modules shipped with LMCache live under "
+        "lmcache.v1.multiprocess.plugin_modules, e.g. "
+        '\'{"module_path":"lmcache.v1.multiprocess.plugin_modules.qstore"}\' '
+        "for query-tensor transfer.",
     )
     return parser
 
@@ -630,6 +642,8 @@ def parse_args_to_mp_server_config(
         max_gpu_workers=max_gpu,
         max_cpu_workers=max_cpu,
         grpc_server_workers=args.grpc_server_workers,
+        grpc_server_mode=args.grpc_server_mode,
+        api_key_files=args.api_key_file,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
@@ -650,7 +664,6 @@ def parse_args_to_mp_server_config(
         session_ttl_seconds=args.session_ttl_seconds,
         kv_load_policy=args.kv_load_policy,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
-        enable=args.enable or [],
         kv_event_log_size=args.kv_event_log_size,
         server_modules=parse_server_module_specs(args.server_module or []),
     )
@@ -751,16 +764,6 @@ def add_http_frontend_args(
         type=int,
         default=8080,
         help="Port to bind the HTTP server. Default is 8080.",
-    )
-    http_group.add_argument(
-        "--http-api-key-file",
-        action="append",
-        default=[],
-        metavar="PATH",
-        help="Read an HTTP bearer API key from PATH. Repeat this option to "
-        "accept multiple keys during rotation. The environment alternatives "
-        "are LMCACHE_HTTP_API_KEY_FILE and LMCACHE_HTTP_API_KEY. "
-        "Authentication is disabled when no key source is configured.",
     )
     return parser
 

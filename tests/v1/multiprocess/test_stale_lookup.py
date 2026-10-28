@@ -23,7 +23,7 @@ from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 
 def _key() -> IPCCacheServerKey:
-    return IPCCacheServerKey(
+    return IPCCacheServerKey.from_token_ids(
         model_name="model",
         world_size=1,
         worker_id=0,

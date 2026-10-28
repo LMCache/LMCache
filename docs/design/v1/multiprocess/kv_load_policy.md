@@ -78,14 +78,15 @@ tokens the engine already holds in its own prefix cache, to the
 identity (`IPCCacheServerKey.request_configs` has `compare=False`), so the
 hint does not change which chunks match. The server does not interpret the
 key; it passes `request_configs` through to the policy, which reads whatever
-hints it needs.
+hints it needs. The lookup module also reports the hint as
+`engine_hit_tokens` on `MP_LOOKUP_PREFETCH_END` for the request-level hit
+rate (see [EVENTS.md](../mp_observability/EVENTS.md)).
 
 | Integration | Sets the hint |
 |---|---|
 | `integration/vllm/lmcache_mp_connector.py` | scheduler-time lookups; not eager-prefetch lookups, which run before the engine checks its prefix cache |
 | `integration/sglang/unified_lmcache_mp_connector.py` | every lookup (`local_hit_tokens`) |
 | `integration/tensorrt_llm/tensorrt_mp_adapter.py` | every lookup (`num_computed_tokens`) |
-| `integration/sglang/multi_process_adapter.py` | no (local hit not known at lookup) |
 
 Clients can also send `lmcache.*` keys, so a policy must treat hints as
 advisory.

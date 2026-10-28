@@ -299,7 +299,9 @@ def test_single_manager_legacy_finish_and_read(storage_factory: StorageFactory) 
     assert tensor is not None
     tensor.fill_(7)
     store.finish_write([key(1)])
-    handle = store.submit_prefetch_task(single_row_spec([key(1)], LAYOUT), skip_l2=True)
+    handle = store.submit_prefetch_task(
+        single_row_spec([key(1)], LAYOUT, allowed_l2_memory_tags=frozenset())
+    )
     result = store.query_prefetch_status(handle)
     assert result is not None and result.hit_cells[0].popcount() == 1
     with store.read_prefetched_results([key(1)]) as read:
@@ -457,12 +459,16 @@ def test_overlapping_reads_preserve_each_selected_owner(
     fallback.reserve_write([key(1)], [False], LAYOUT)
     fallback.finish_write([key(1)])
     first = store.query_prefetch_status(
-        store.submit_prefetch_task(single_row_spec([key(1)], LAYOUT), skip_l2=True)
+        store.submit_prefetch_task(
+            single_row_spec([key(1)], LAYOUT, allowed_l2_memory_tags=frozenset())
+        )
     )
     primary.reserve_write([key(1)], [False], LAYOUT)
     primary.finish_write([key(1)])
     second = store.query_prefetch_status(
-        store.submit_prefetch_task(single_row_spec([key(1)], LAYOUT), skip_l2=True)
+        store.submit_prefetch_task(
+            single_row_spec([key(1)], LAYOUT, allowed_l2_memory_tags=frozenset())
+        )
     )
     assert first is not None and second is not None
     assert first.l1_owners == {key(1): fallback.l1_manager_id}

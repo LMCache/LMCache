@@ -384,7 +384,8 @@ class MPCacheServerContext:
             request_id: Request whose cached lookup would be consumed.
 
         Returns:
-            Whether the lookup is too old to consume or release safely; unknown sessions are rejected.
+            Whether the lookup is too old to consume or release safely;
+            unknown sessions are rejected.
         """
         session = self._session_manager.get(request_id)
         return session is None or session.lookup_expired(
@@ -431,7 +432,7 @@ class MPCacheServerContext:
             ValueError: If ``key.worker_id`` is ``None``.
         """
         session = self.session_manager.get_or_create(key.request_id)
-        session.set_tokens(list(key.token_ids))
+        session.set_tokens(key.token_bytes)
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
         chunk_hashes = [

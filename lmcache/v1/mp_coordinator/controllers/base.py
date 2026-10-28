@@ -8,13 +8,17 @@ break as soon as that one shipped elsewhere.
 """
 
 # Standard
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 # Third Party
 import httpx
+
+# First Party
+from lmcache.v1.mp_coordinator.background_loops import BackgroundLoops
+from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 
 if TYPE_CHECKING:
     # First Party
@@ -27,15 +31,48 @@ if TYPE_CHECKING:
 class ControllerRuntime:
     """What a controller can only be handed once the app is running.
 
-    One field today. It stays a struct so that a second loop-bound
-    collaborator can be added without touching the signature of every
-    controller that never asked for it.
+    A struct, so a loop-bound collaborator can be added without touching
+    the signature of every controller that never asked for it.
 
     Attributes:
         http_client: Shared client for outbound calls to mp servers.
+        background_loops: Where a controller starts its periodic work, so a
+            failed pass is counted and the loop keeps running, and the loop
+            is reported with the coordinator's own. Defaults to a private
+            runner, so a runtime built with only ``http_client`` still works.
     """
 
     http_client: httpx.AsyncClient
+    background_loops: BackgroundLoops = field(default_factory=BackgroundLoops)
+
+
+class ControllerStatus:
+    """Which controllers started.
+
+    Every controller starts out not started; the app marks each one whose
+    ``run()`` it entered without an error.
+    """
+
+    def __init__(self, controller_names: Iterable[str]) -> None:
+        """Track ``controller_names``, none of them started yet.
+
+        Args:
+            controller_names: The class name of every controller built.
+        """
+        self._up = {name: False for name in controller_names}
+        register_metric_source(self)
+
+    def mark_up(self, controller_name: str) -> None:
+        """Record that the named controller started.
+
+        Args:
+            controller_name: The controller's class name.
+        """
+        self._up[controller_name] = True
+
+    def stats(self) -> dict[str, bool]:
+        """Return whether each controller, keyed by class name, started."""
+        return dict(self._up)
 
 
 class Controller:
