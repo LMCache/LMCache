@@ -104,6 +104,9 @@ PY
     if [[ "${VLLM_TRUST_REMOTE_CODE:-0}" == "1" ]]; then
         VLLM_MODEL_ARGS+=(--trust-remote-code)
     fi
+    if [[ -n "${VLLM_MAX_LOGPROBS:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--max-logprobs "$VLLM_MAX_LOGPROBS")
+    fi
 
     VLLM_BLOCK_ARGS=()
     if [[ -n "${VLLM_BLOCK_SIZE:-}" ]]; then

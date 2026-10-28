@@ -149,6 +149,7 @@ steps:
           VLLM_KV_LOAD_FAILURE_POLICY: "fail"
           ENGINE_DRIVEN_TRANSPORT: "{{matrix.transport}}"
           VLLM_TRUST_REMOTE_CODE: "1"
+          VLLM_MAX_LOGPROBS: "100"
           VLLM_BLOCK_SIZE: "128"
           CHUNK_SIZE: "128"
           MAX_NUM_BATCHED_TOKENS: "8192"
@@ -181,6 +182,7 @@ steps:
         env:
           <<: *mp-env
           MODEL: "unsloth/gemma-3-270m-it"
+          VLLM_MAX_LOGPROBS: "100"
           VLLM_KV_LOAD_FAILURE_POLICY: "fail"
           ENGINE_DRIVEN_TRANSPORT: "{{matrix.transport}}"
           CPU_BUFFER_SIZE: "4"

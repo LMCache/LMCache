@@ -2,9 +2,10 @@
 """Compare hybrid-model GPU APC and LMCache results in three stages.
 
 Cold prefill populates both caches. The second request hits GPU APC and supplies
-the reference token IDs and logprobs. Reset only GPU APC before the third request,
-which must retrieve the same prefix from LMCache and reproduce the reference
-exactly. Cold prefill is not the numerical reference because full and cached
+the reference token IDs, selected-token logprobs, and top-100 candidate logprobs
+at every output position. Reset only GPU APC before the third request, which
+must retrieve the same prefix from LMCache and reproduce the reference exactly.
+Cold prefill is not the numerical reference because full and cached
 prefills can differ in BF16. Equal block/chunk sizes and measured hit lengths
 ensure both cached runs recompute the same suffix.
 """
@@ -27,11 +28,12 @@ import requests
 
 @dataclass
 class Result:
-    """One generation with its GPU and external cache-hit token counts."""
+    """Generation and cache hits, with top-logprob keys encoded as token IDs."""
 
     prompt_tokens: int
     token_ids: list[int]
     logprobs: list[float]
+    top_logprobs: list[dict[str, float]]
     gpu_hit_tokens: int
     lmcache_hit_tokens: int
 
@@ -45,6 +47,10 @@ def verify_results(
 ) -> None:
     """Reject incomplete generations, wrong cache paths, and numerical drift.
 
+    All stages must contain 32 generated tokens and 100 finite candidate
+    logprobs per position. GPU APC and LMCache must match exactly, including
+    candidate token identities, independently of dictionary insertion order.
+
     Args:
         cold: Initial request, which must miss both caches.
         gpu: GPU APC reference request, without LMCache retrievals.
@@ -53,7 +59,8 @@ def verify_results(
         sliding_window: Sliding-window length, or zero for a non-SWA hybrid.
 
     Raises:
-        ValueError: If hit lengths, output token IDs, or logprobs are invalid.
+        ValueError: If hit lengths, output token IDs, selected-token logprobs,
+            or top-100 candidate logprobs are invalid or differ.
     """
     for result in (cold, gpu, restored):
         if (
@@ -62,6 +69,14 @@ def verify_results(
             or not all(math.isfinite(value) for value in result.logprobs)
         ):
             raise ValueError("Expected 32 output token IDs and finite logprobs")
+        if len(result.top_logprobs) != 32 or any(
+            len(candidates) != 100
+            or not all(math.isfinite(value) for value in candidates.values())
+            for candidates in result.top_logprobs
+        ):
+            raise ValueError(
+                "Expected 100 finite candidate logprobs at all 32 positions"
+            )
     if not (cold.prompt_tokens == gpu.prompt_tokens == restored.prompt_tokens):
         raise ValueError("Prompt lengths differ")
     # At least the final prompt token must be computed to produce logits.
@@ -81,6 +96,10 @@ def verify_results(
         )
     if gpu.token_ids != restored.token_ids or gpu.logprobs != restored.logprobs:
         raise ValueError("GPU APC and LMCache token IDs or logprobs differ")
+    if gpu.top_logprobs != restored.top_logprobs:
+        raise ValueError(
+            "GPU APC and LMCache top-100 candidate tokens or logprobs differ"
+        )
 
 
 def main(workload: str = "hma_swa_correctness") -> None:
@@ -154,8 +173,10 @@ def main(workload: str = "hma_swa_correctness") -> None:
         "ignore_eos": True,
         "temperature": 0,
         "seed": 0,
-        "logprobs": 1,
+        "logprobs": 100,
         "return_token_ids": True,
+        # Decoded strings can collide for distinct vocabulary tokens.
+        "return_tokens_as_token_ids": True,
     }
     (output / "request.json").write_text(json.dumps(request, indent=2))
     results = []
@@ -202,6 +223,7 @@ def main(workload: str = "hma_swa_correctness") -> None:
                     data["usage"]["prompt_tokens"],
                     choice["token_ids"],
                     choice["logprobs"]["token_logprobs"],
+                    choice["logprobs"]["top_logprobs"],
                     gpu - previous_gpu,
                     retrieved - previous_retrieved,
                 )
@@ -213,7 +235,10 @@ def main(workload: str = "hma_swa_correctness") -> None:
             )
             previous_gpu, previous_retrieved = gpu, retrieved
     verify_results(results[0], results[1], results[2], chunk_size, sliding_window)
-    print("PASS: GPU APC and LMCache token IDs and logprobs match exactly.")
+    print(
+        "PASS: GPU APC and LMCache token IDs, selected-token logprobs, "
+        "and top-100 candidate logprobs match exactly."
+    )
 
 
 if __name__ == "__main__":
