@@ -142,19 +142,19 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     """Non-CUDA equivalent of allocating shared memory pinned pointer.
     Uses multiprocessing.shared_memory for cross-platform POSIX shm.
     Attempts to pin the buffer via cudaHostRegister for async D2H;
-    if pinning fails, continues without pinning."""
+    if pinning fails, continues without pinning.
+
+    The segment is created exclusively (``O_CREAT | O_EXCL``): a name
+    that already exists -- live or stale -- raises ``FileExistsError``
+    instead of being unlinked, so callers can surface the collision
+    (see the L1 pool retry loop in
+    ``lmcache.v1.distributed.memory_manager``). Reclaiming a
+    pre-existing segment is a naming-policy decision that belongs to
+    the caller, not this allocator.
+    """
 
     # Strip leading '/' for SharedMemory name
     name = shm_name.lstrip("/") if shm_name else None
-
-    # Clean up stale shm segment if it exists
-    if name:
-        try:
-            stale = shared_memory.SharedMemory(name=name, create=False)
-            stale.close()
-            stale.unlink()
-        except FileNotFoundError:
-            pass
 
     shm = shared_memory.SharedMemory(name=name, create=True, size=size)
 

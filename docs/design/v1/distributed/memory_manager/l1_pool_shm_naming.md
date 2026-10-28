@@ -44,14 +44,26 @@ Constants live on `lmcache.v1.distributed.config`:
 Operators may set `shm_name` to a fixed string (with or without the
 `lmcache_l1_pool_` prefix; `create_memory_allocator` normalizes bare names).
 Pinned names are for tooling that must attach to a known segment. On create,
-`_unlink_stale_shm` removes a **stale** segment with that name before
-`MixedMemoryAllocator` maps a new pool. A name collision with a **live**
-segment from another process is not masked: creation fails without drawing a
-new UUID.
+`_unlink_stale_shm` removes any pre-existing segment with that name before
+`MixedMemoryAllocator` maps a new pool — this is the stale-segment recovery
+path for pinned names. POSIX SHM exposes no portable liveness signal
+(`flock`/`fcntl` record locks are rejected on SHM fds on macOS), so stale and
+live segments are indistinguishable: a pinned name always reclaims whatever
+currently holds its name. Operators running multiple live processes on one
+host must coordinate pinned names themselves.
 
 **Generated names never call `_unlink_stale_shm`.** A stale segment left by a
 crashed process with the same random name is not reclaimed by name; collision
 handling retries with a fresh UUID instead of unlinking.
+
+## Creation is exclusive end to end
+
+`alloc_shm_pinned_ptr` (in `lmcache/v1/platform/torch_ops/mem_alloc.py`)
+creates its segment with `O_CREAT | O_EXCL` and **never unlinks a
+pre-existing name**: a taken name raises `FileExistsError` up through
+`MixedMemoryAllocator`, which is what makes the retry loop above observable.
+Reclaiming a pre-existing segment is a naming-policy decision that belongs to
+`create_memory_allocator`, not to the allocator.
 
 ## Crash / orphan segments
 
