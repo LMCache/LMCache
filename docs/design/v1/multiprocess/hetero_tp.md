@@ -1,14 +1,124 @@
-# Heterogeneous TP lookup (MP mode)
+# Heterogeneous KV view and TP reshard (MP mode)
 
-A decode engine at TP=B can serve KV that a prefill engine stored at TP=A.
-Two cases are covered: each engine has its own LMCache server joined by P2P
-(the native PD data path of RFC #5969, `lmcache_driven` mode), or both
-engines share one server. RFC #5969 leaves asymmetric TP open; this design
-keeps the store in each rank's native layout and reshards on D. This
-document covers phase 1: vLLM to vLLM, attention-only, non-MLA models.
+Engines that share KV through LMCache need not store it the same way. The
+first case this design covers: a decode engine at TP=B serves KV that a
+prefill engine stored at TP=A. Two setups are covered: each engine has its
+own LMCache server joined by P2P (the native PD data path of RFC #5969,
+`lmcache_driven` mode), or both engines share one server. RFC #5969 leaves
+asymmetric TP open.
+
+The design has two parts:
+
+1. **`HeteroKVView`** (`multiprocess/hetero_kv_view.py`): a layer between the
+   modules that prefetch and the storage manager. It has the storage
+   manager's prefetch interface, so a caller asks for objects in its own form
+   and gets a result as if they were stored that way. The storage manager
+   stays unaware of the difference. How one form maps to another is a plan.
+2. **The TP plan** (`multiprocess/tp_reshard.py`): keep the store in each
+   rank's native layout and reshard on D, in L1.
+
+This document covers phase 1: vLLM to vLLM, attention-only, non-MLA models.
 Later phases are listed under [Next phases](#next-phases).
 
-## Problem
+## Part 1: HeteroKVView
+
+### Why a layer above the storage manager
+
+Objects stored in another engine's form can sit in any tier, L1 included.
+For TP (A is the writer's TP size, B the reader's):
+
+- **Peer L1 over P2P.** The P2P adapter reads the peer's DRAM L1 (tag
+  `DRAM, REMOTE`); in PD that is P's L1, written at A.
+- **Shared L1.** Several servers map one region through the memory
+  orchestrator; servers whose engines differ in TP write both A and B keys
+  into it.
+- **Local L1 and L2.** A server or an L2 shared by engines at different TP.
+
+So the translation sits in a layer just above the storage manager,
+`HeteroKVView`, which calls `submit_prefetch_task` over every tier, the same
+way the P2P controller serves a peer's lookup (`p2p_controller.py`). The root
+cause is that keys match exactly and `kv_rank` encodes the TP; every placement
+has to map B keys to A keys and reshape the data somewhere. The placements
+considered for TP:
+
+| Placement | Why not |
+| --- | --- |
+| Head-range keys and a cover lookup in L1 (the heads x layers `kv_rank` bitmap in `ComputeKVRank`'s TODO); retrieve reads strided head ranges | No reshard copy and one lookup, but it changes key encoding, the L1 index and the GPU connector, and orphans every persisted L2 object |
+| An L2 adapter wrapper that reshards on load, like `SerdeL2AdapterWrapper` | Sees only the adapter it wraps, never L1 |
+| An L2 adapter that maps B keys to A keys and looks them up in its own storage manager | No L2 adapter reads local L1 today, and the lookup re-enters the prefetch controller it is serving |
+| Reshard on P: P's P2P controller sees B's world size in the keys and serves B objects | Covers P2P only, not local or shared L1. Kept as an option for native PD, where it would remove the source TP setting on D |
+
+### Interface and flow
+
+`LookupModule` never deals with heads or TP sizes. It sends every prefetch
+through `HeteroKVView`, which has the storage manager's prefetch interface
+(`submit_prefetch_task`, `query_prefetch_status`, `wait_prefetch_status`), so
+the lookup code is the same as without it:
+
+```
+LookupModule --spec(B keys)--> HeteroKVView --same-TP spec--> StorageManager
+                               (background)  --cross-TP spec->      |
+                               merged result <---- L1Resharder <----+
+```
+
+- `HeteroKVView.plan(spec)` accepts only what it can merge, a locked
+  `prefix` prefetch, and asks the TP plan for the rest
+  ([Planner and stages](#planner-and-stages)). Anything else, including
+  every other module's prefetches, passes through unchanged.
+- A plan has three steps. `cross_tp_spec(k)` rewrites the spec's rows for
+  chunks from `k` on into the source form, keeping the spec's policy and
+  tier filters; `convert` turns the source hit into objects of the spec's
+  form in L1; `merge` appends them to the first result.
+- A prefetch with a plan runs on a background thread (`hetero-kv-lookup`, 32
+  threads): wait for the spec's own prefetch; if it missed chunks, submit
+  `cross_tp_spec`, then `convert` and `merge`. The view returns the storage
+  manager's own handle and answers `query`/`wait` for it from the merged
+  result, once.
+
+The stages run as one sequential function rather than being advanced by the
+engine's polls, so the lookup keeps no stage state: `query_prefetch_status`
+returns None until every stage is done, and `wait_prefetch_status` waits for
+all of them, with `timeout` covering every stage. Each lookup holds a thread
+while it waits for its prefetches, so the pool size bounds the cross-TP
+lookups in flight; a lookup past that queues before its cross-TP stage.
+
+### Locks, free and failures
+
+The retrieve path needs exactly what a prefetch leaves: every hit object
+read-locked `num_kv_readers` times, plus one result with its L1 owners. The
+conversion leaves the same, so no further prefetch is needed to lock the new
+objects.
+
+`free_lookup_locks` on a cross-TP lookup that is still running behaves as for
+any running prefetch: it returns at once, and the result keeps its locks for
+a later poll or until the read-lock TTL. A finished result is handed over
+and released as usual, including the locks the conversion took. An exception
+in the cross-TP stage, or a failed conversion, is logged and the same-TP stage
+answers, so every prefetch with a plan finishes and every lock it took is
+released.
+
+### Extensions
+
+TP is the view's first plan. Where the rest would go, none of it built yet:
+
+- **More forms (vertical).** Another difference between the asking engine
+  and the stored objects (hybrid groups, phase 2 below; KV dtype) is another
+  plan next to `HeteroTPPlanner`, with the same
+  `cross_tp_spec`/`convert`/`merge` steps. `LookupModule` does not change.
+- **GPU conversion (performance).** `convert` is the only step that moves
+  bytes, so phase 3's GPU path replaces it: instead of writing B objects
+  into L1, it hands retrieve the A keys and a head mapping. The view and the
+  lookup stay as they are; retrieve is what changes.
+- **Parallel stages (performance).** The view runs the two prefetches one
+  after the other. For PD it can submit both at once; only the view changes.
+- **More callers (horizontal).** Other modules (warm prefetch, blend) call
+  the storage manager directly. If hetero TP grows beyond PD, so that A and B
+  objects live side by side in a shared L2, they switch to the view; the
+  view then has to merge `full` and `NO_LOCK` prefetches too.
+
+## Part 2: The TP plan
+
+### Problem
 
 1. **Keys do not match.** `ObjectKey.kv_rank` packs `world_size`
    (`distributed/api.py`). A lookup at TP=B expands into B keys with
@@ -22,7 +132,7 @@ Later phases are listed under [Next phases](#next-phases).
 Pure MLA with PP=1 and DCP=1 already works: `kv_world_size` is 1 for any TP,
 so P and D read and write the same key.
 
-## Decision: reshard in the reader's L1
+### Decision: reshard in the reader's L1
 
 The store path is unchanged. A lookup at TP=B first counts what it already
 hits with its own keys, on every tier. For the chunks after that prefix it
@@ -41,7 +151,7 @@ retrieve                   ── unchanged
 ```
 
 Why here (the rejected placements are under
-[Where hetero TP lives](#where-hetero-tp-lives)):
+[Why a layer above the storage manager](#why-a-layer-above-the-storage-manager)):
 
 - **Retrieve is unchanged.** Locks and the GPU kernel see ordinary B
   objects. The network moves exactly P's bytes, once.
@@ -67,9 +177,9 @@ puts heads outside tokens, which makes a rank's share one large run.
 The cost is one CPU copy of the hit bytes on D, plus transient L1 for both
 copies. Measured on Qwen3-0.6B, 2048 tokens (224 MiB written): about 12 ms
 alone and 15-73 ms under 12 concurrent requests. Each reshard logs its cost
-(see [Lookup stages](#lookup-stages)).
+(see [Planner and stages](#planner-and-stages)).
 
-## Head mapping
+### Head mapping
 
 An object does not record which KV heads it holds. With H the model's KV
 head count, both TP sizes must divide H, and rank `r` holds the contiguous
@@ -101,61 +211,12 @@ the reshard is valid:
 
 Without the hint the cross-TP stage is off.
 
-## Where hetero TP lives
+### Planner and stages
 
-Source-TP objects can sit in any tier, L1 included:
-
-- **Peer L1 over P2P.** The P2P adapter reads the peer's DRAM L1 (tag
-  `DRAM, REMOTE`); in PD that is P's L1, written at A.
-- **Shared L1.** Several servers map one region through the memory
-  orchestrator; servers whose engines differ in TP write both A and B keys
-  into it.
-- **Local L1 and L2.** A server or an L2 shared by engines at different TP.
-
-So the cross-TP stage sits in a layer just above the storage manager
-(`HeteroKVView`) and calls `submit_prefetch_task` over every tier, the same
-way the P2P controller serves a peer's lookup (`p2p_controller.py`). The root
-cause is that keys match exactly and `kv_rank` encodes the TP; every placement
-has to map B keys to A keys and reshape the data somewhere.
-
-| Placement | Why not |
-| --- | --- |
-| Head-range keys and a cover lookup in L1 (the heads x layers `kv_rank` bitmap in `ComputeKVRank`'s TODO); retrieve reads strided head ranges | No reshard copy and one lookup, but it changes key encoding, the L1 index and the GPU connector, and orphans every persisted L2 object |
-| An L2 adapter wrapper that reshards on load, like `SerdeL2AdapterWrapper` | Sees only the adapter it wraps, never L1 |
-| An L2 adapter that maps B keys to A keys and looks them up in its own storage manager | No L2 adapter reads local L1 today, and the lookup re-enters the prefetch controller it is serving |
-| Reshard on P: P's P2P controller sees B's world size in the keys and serves B objects | Covers P2P only, not local or shared L1. Kept as an option for native PD, where it would remove the source TP setting on D |
-
-Phase 1 below implements the cross-TP stage in `HeteroKVView`, between
-`LookupModule` and the storage manager.
-
-## Lookup stages
-
-`LookupModule` never deals with heads or TP sizes. It sends every prefetch
-through `hetero_kv_view.HeteroKVView`, which has the storage manager's
-prefetch interface (`submit_prefetch_task`, `query_prefetch_status`,
-`wait_prefetch_status`), so the lookup code is the same as without hetero TP:
-
-```
-LookupModule --spec(B keys)--> HeteroKVView --same-TP spec--> StorageManager
-                               (background)  --cross-TP spec->      |
-                               merged result <---- L1Resharder <----+
-```
-
-The view is generic; the TP knowledge lives in `tp_reshard`:
-
-- `HeteroKVView.plan(spec)` accepts only what it can merge, a locked
-  `prefix` prefetch, and asks `HeteroTPPlanner.plan` for the rest: rows that
-  fan out to every rank of one world size (a lookup), a source TP configured
-  and different from it, head count reported, both TP sizes divide it, no
-  sliding window. Anything else, including every other module's prefetches,
-  passes through unchanged.
-- `HeteroTPPlan.cross_tp_spec(k)` rewrites the spec's rows for chunks from
-  `k` on to the source TP's ranks and layouts, keeping the spec's policy and
-  tier filters; `convert` reshards a source hit through `L1Resharder`;
-  `merge` appends the resharded chunks to the same-TP result.
-- A prefetch with a plan runs its stages on a background thread
-  (`hetero-kv-lookup`, 32 threads). The view returns the storage manager's
-  own handle and answers `query`/`wait` for it from the merged result, once.
+`HeteroTPPlanner.plan` gives a prefetch a TP plan when its rows fan out to
+every rank of one world size (a lookup), a source TP is configured and
+differs from it, the engine reported the head count, both TP sizes divide
+it, and no row has a sliding window. The plan's stages:
 
 1. **Same-TP stage** (B keys, all chunks, every tier): a full hit is final.
    Otherwise its locks stay held, as part of the answer, and the cross-TP
@@ -171,39 +232,21 @@ The view is generic; the TP knowledge lives in `tp_reshard`:
    still being written); locks past it are released. The lookup answers
    with the same-TP result plus these chunks, counted as L2 hits.
 
-The retrieve path needs exactly what a prefetch leaves: every hit object
-read-locked `num_kv_readers` times, plus one result with its L1 owners. The
-reshard leaves the same, so no further prefetch is needed to lock the new
-objects.
-
-The stages run as one sequential function rather than being advanced by the
-engine's polls, so the lookup keeps no stage state: `query_prefetch_status`
-returns None until every stage is done, and `wait_prefetch_status` waits for
-all of them, with `timeout` covering every stage. Each lookup holds a thread
-while it waits for its prefetches, so the pool size bounds the cross-TP
-lookups in flight; a lookup past that queues before its cross-TP stage. The
-copy runs in `L1Resharder`, on its own thread pool (4 threads), which bounds
-concurrent copies. A reshard whose destination keys another running reshard is
-writing waits for that one and writes only the rest; otherwise it would find
-the keys reserved and the second lookup of a prefix would miss. Each reshard
-logs its cost (Qwen3-0.6B, 2048 tokens, measured):
+The copy runs in `L1Resharder`, on its own thread pool (4 threads), which
+bounds concurrent copies. A reshard whose destination keys another running
+reshard is writing waits for that one and writes only the rest; otherwise it
+would find the keys reserved and the second lookup of a prefix would miss.
+Each reshard logs its cost (Qwen3-0.6B, 2048 tokens, measured):
 
 ```
 Resharded 8 chunks from TP1 to TP2 for request <id>: wrote 224.0 MiB in 38.36 ms (queued 0.20 ms, waited 0.00 ms on 0 other reshards)
 ```
 
-`free_lookup_locks` on a cross-TP lookup that is still running behaves as for
-any running prefetch: it returns at once, and the result keeps its locks for
-a later poll or until the read-lock TTL. A finished result is handed over
-and released as usual, including the locks the reshard took. An exception in
-the cross-TP stage, or a failed reshard, is logged and the same-TP stage
-answers, so every prefetch with a plan finishes and every lock it took is
-released. If a reshard fails
-mid-group, the destination objects reserved for that group stay reserved
-until the write TTL, because the storage manager cannot abandon a
-reservation.
+If a reshard fails mid-group, the destination objects reserved for that group
+stay reserved until the write TTL, because the storage manager cannot abandon
+a reservation.
 
-## After a reshard: only B stays, in L1
+### After a reshard: only B stays, in L1
 
 D keeps only the converted B objects; the A copies it pulled are dropped.
 The B objects are admitted as prefetched, not as written, so they are not
@@ -217,7 +260,7 @@ a TP=A engine sharing this server, are not temporary and stay. With
 `--l2-prefetch-policy retain` the A copies stay until eviction, as every L2
 load does under that policy.
 
-## Configuration
+### Configuration
 
 ```bash
 lmcache server ... --hetero-tp-source-world-size 1
@@ -226,7 +269,7 @@ lmcache server ... --hetero-tp-source-world-size 1
 The TP size the other engine stores at. Phase 1 has no discovery: the
 operator sets it. A lookup whose own TP equals it skips the cross-TP stage.
 
-## Constraints (phase 1)
+### Constraints (phase 1)
 
 - Attention-only, non-MLA models without sliding-window object groups.
 - Both TP sizes divide the model's KV head count.
@@ -240,7 +283,7 @@ operator sets it. A lookup whose own TP equals it skips the cross-TP stage.
 - The engine must send the KV head count. vLLM does; the SGLang MP connector
   sends only `kv_list_layout`, so the cross-TP stage is off for SGLang.
 
-## Later: a PD source
+### Later: a PD source
 
 The cross-TP stage is the single extension point for native PD. Two things
 change there, inside `HeteroKVView`'s TP plan, and `LookupModule` does not:
@@ -265,26 +308,6 @@ P's connector in `request_finished`) into D's request. The plan:
 The same channel can name the P instance, which xPyD needs: today the P2P
 controller builds one adapter per peer the coordinator lists, and a lookup
 asks all of them.
-
-## Extensions
-
-`HeteroKVView` is named for heterogeneous engines in general, not for TP:
-TP is its first plan. Where the rest would go, none of it built yet:
-
-- **More forms (vertical).** Another difference between the asking engine
-  and the stored objects (hybrid groups, phase 2 below; KV dtype) is another
-  plan next to `HeteroTPPlanner`, with the same
-  `cross_tp_spec`/`convert`/`merge` steps. `LookupModule` does not change.
-- **GPU conversion (performance).** `convert` is the only step that moves
-  bytes, so phase 3's GPU path replaces it: instead of writing B objects
-  into L1, it hands retrieve the A keys and a head mapping. The view and the
-  lookup stay as they are; retrieve is what changes.
-- **Parallel stages (performance).** The view runs the two prefetches one
-  after the other. For PD it can submit both at once; only the view changes.
-- **More callers (horizontal).** Other modules (warm prefetch, blend) call
-  the storage manager directly. If hetero TP grows beyond PD, so that A and B
-  objects live side by side in a shared L2, they switch to the view; the
-  view then has to merge `full` and `NO_LOCK` prefetches too.
 
 ## Verification
 
