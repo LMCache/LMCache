@@ -128,6 +128,12 @@ that wrote the change does not satisfy this gate.
 
 #### AI-assisted update loop
 
+Use `/create-pr-explainer` in Claude Code or `$create-pr-explainer` in Codex
+to generate the reviewer guide. Codex discovers the repository skill through
+`.agents/skills/create-pr-explainer`, a symlink to
+[the shared workflow](.claude/skills/create-pr-explainer/SKILL.md).
+Both tools use that file for content, validation, and publication requirements.
+
 For a PR containing AI-generated code, the same gate applies after every AI-assisted update,
 not just when the PR is first opened:
 
