@@ -7,7 +7,7 @@ from prometheus_client import REGISTRY
 import pytest
 
 # First Party
-from lmcache.observability import (
+from lmcache.inprocess.observability import (
     LMCStatsMonitor,
     PrometheusLogger,
 )

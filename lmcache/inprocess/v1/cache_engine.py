@@ -29,6 +29,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.inprocess.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
@@ -43,7 +44,6 @@ from lmcache.inprocess.v1.token_database import (
     TokenDatabase,
 )
 from lmcache.logging import init_logger
-from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_telemetry import InitializeUsageContext
 from lmcache.utils import (
     CacheEngineKey,

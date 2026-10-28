@@ -18,8 +18,8 @@ from lmcache.inprocess.integration.vllm.vllm_v1_adapter import (
     LoadSpec,
     ReqMeta,
 )
+from lmcache.inprocess.observability import LMCStatsMonitor
 from lmcache.inprocess.v1.cache_engine import LMCacheEngine
-from lmcache.observability import LMCStatsMonitor
 
 # Local
 from .test_retrieve_pin_ownership import (  # noqa: F401 -- register shared fixtures

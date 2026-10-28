@@ -11,6 +11,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.inprocess.v1.cache_controller.message import OpType
 from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.metadata import LMCacheMetadata
@@ -24,7 +25,6 @@ from lmcache.inprocess.v1.storage_backend.cache_policy import get_cache_policy
 from lmcache.inprocess.v1.system_detection import NUMADetector, SystemMemoryDetector
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (

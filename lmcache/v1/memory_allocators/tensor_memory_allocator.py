@@ -7,7 +7,6 @@ from typing import List, Optional, Union
 import torch
 
 # First Party
-from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
 from lmcache.v1.memory_management import (
     AddressManager,
@@ -55,8 +54,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         # For debugging purposes
         self.num_active_allocations = 0
 
-        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
-
     @property
     def total_allocated_size(self) -> int:
         """Return the total currently allocated bytes."""
@@ -95,12 +92,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         # For debug
         self.num_active_allocations += 1
-
-        # Update stats
-        self.stats_monitor.update_local_cache_usage(
-            self.address_manager.total_allocated_size
-        )
-        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
         # Allocate the block
         raw_data = self._get_buffer_slice(block_start, raw_size)
@@ -166,12 +157,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         # For debug
         self.num_active_allocations += batch_size
 
-        # Update stats
-        self.stats_monitor.update_local_cache_usage(
-            self.address_manager.total_allocated_size
-        )
-        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
-
         tensor_mem_objs = []
         for raw_data, address in zip(raw_datas, addresses, strict=True):
             tensor_mem_objs.append(
@@ -210,12 +195,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         # For debug
         self.num_active_allocations -= 1
-
-        # Update stats
-        self.stats_monitor.update_local_cache_usage(
-            self.address_manager.total_allocated_size
-        )
-        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
     @_lmcache_nvtx_annotate
     def batched_free(
@@ -277,14 +256,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         # For debug
         self.num_active_allocations -= total_count
-
-        if update_stats:
-            self.stats_monitor.update_local_cache_usage(
-                self.address_manager.total_allocated_size
-            )
-            self.stats_monitor.update_active_memory_objs_count(
-                self.num_active_allocations
-            )
 
     def memcheck(self) -> bool:
         """Check allocator consistency for debugging.

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING
+from typing import Any, Protocol, Sequence
 import os
 import time
 
@@ -31,12 +31,30 @@ from lmcache.usage_telemetry.transport import (
     usage_server_url,
 )
 
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.inprocess.v1.metadata import LMCacheMetadata
-    from lmcache.observability import LMCacheStats
-
 logger = init_logger(__name__)
+
+
+class ContinuousMetadata(Protocol):
+    """Metadata fields consumed by the single-process usage reporter."""
+
+    @property
+    def kv_shape(self) -> Sequence[int]: ...
+
+    @property
+    def kv_dtype(self) -> Any: ...
+
+
+class ContinuousStats(Protocol):
+    """Stats fields consumed by the single-process usage reporter."""
+
+    @property
+    def interval_request_cache_lifespan(self) -> list[float]: ...
+
+    @property
+    def interval_hit_tokens(self) -> int: ...
+
+    @property
+    def interval_stored_tokens(self) -> int: ...
 
 
 class ContinuousUsageContext:
@@ -53,7 +71,7 @@ class ContinuousUsageContext:
 
     def __init__(
         self,
-        metadata: LMCacheMetadata,
+        metadata: ContinuousMetadata,
         sender: UsageMessageSender | None = None,
         mode: DeploymentMode = DeploymentMode.SINGLE_PROCESS,
     ) -> None:
@@ -84,7 +102,7 @@ class ContinuousUsageContext:
             2500,
             5000,
         ]
-        self.metadata: LMCacheMetadata = metadata
+        self.metadata: ContinuousMetadata = metadata
         self.cache_usage_url: str = usage_server_url(ContinuousContextMessage.ENDPOINT)
         self.cache_lifespan_url: str = usage_server_url(CacheLifespanMessage.ENDPOINT)
         try:
@@ -117,7 +135,7 @@ class ContinuousUsageContext:
         self._start_monotonic: float = time.monotonic()
 
     @staticmethod
-    def GetOrCreate(metadata: LMCacheMetadata) -> ContinuousUsageContext:
+    def GetOrCreate(metadata: ContinuousMetadata) -> ContinuousUsageContext:
         """Return the process-wide instance, creating it on first call.
 
         Args:
@@ -191,7 +209,7 @@ class ContinuousUsageContext:
         }
 
     @swallow_telemetry_errors
-    def incr_or_send_stats(self, stats: LMCacheStats) -> None:
+    def incr_or_send_stats(self, stats: ContinuousStats) -> None:
         """Accumulate interval stats and flush when the interval elapsed.
 
         No-op when usage tracking is disabled; never raises into the

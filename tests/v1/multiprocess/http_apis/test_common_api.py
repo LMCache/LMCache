@@ -60,6 +60,13 @@ class TestCommonApiAggregation:
         paths = set(app.openapi()["paths"])
         assert "/config" in paths
 
+    def test_metrics_reset_is_not_exposed_by_mp(self):
+        """The reset operation belongs to the InProcess metrics owner."""
+        app = _app_with_all_apis()
+        metrics_operations = app.openapi()["paths"]["/metrics"]
+        assert "get" in metrics_operations
+        assert "post" not in metrics_operations
+
 
 @dataclass
 class _FakeAdapterConfig:
