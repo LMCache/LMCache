@@ -38,6 +38,12 @@ I/O queue depth on a single Python thread.
   ``num_read_workers`` x object size, so ``num_read_workers`` must be
   large enough for the budget to bind.  Sizing notes:
   ``docs/design/v1/distributed/l2_adapters/fs_native_read_depth.md``.
+- ``held_fd_capacity`` (int, default ``0``): Read-only file descriptors
+  kept open for reuse, least recently used first.  A read of a held object
+  skips the ``open`` and ``close``, and the existence check skips its
+  ``stat``.  On NFS and pNFS that removes an OPEN and a CLOSE round trip
+  to the server per read, plus the attribute check.  ``0`` opens and closes
+  each object per read.  See *Held descriptors* below.
 
 .. important::
 
@@ -66,6 +72,18 @@ I/O queue depth on a single Python thread.
    If unsure, start with ``use_odirect: false`` and confirm correctness
    before enabling ``O_DIRECT``.
 
+**Held descriptors.**  Objects are published by an atomic rename and
+their keys name their content, so a descriptor opened on a published file
+always reads a valid value for its key.  It keeps doing so after another
+process or host evicts the file.  Deletes through this adapter invalidate
+the descriptor first, so eviction by this server returns misses at once,
+and a descriptor that fails or reads short is dropped and the path reopened
+once.  A descriptor held for an evicted file keeps its storage allocated
+until it is evicted from this cache.  Size the capacity for the hot set:
+each held descriptor costs one open file, and on NFSv4 one open state on
+the server.  Descriptors in use are never closed, so the open count can
+exceed the capacity by the reads in flight.
+
 **Configuration examples:**
 
 .. code-block:: bash
@@ -75,6 +93,9 @@ I/O queue depth on a single Python thread.
 
     # Many worker threads for a parallel filesystem (e.g. GPFS, Lustre)
     --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2", "num_workers": 32}'
+
+    # Shared NFS or pNFS directory: keep 4096 hot objects open between reads
+    --l2-adapter '{"type": "fs_native", "base_path": "/mnt/pnfs/lmcache/l2", "use_odirect": true, "held_fd_capacity": 4096}'
 
     # O_DIRECT for real-disk benchmarking
     --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2", "num_workers": 32, "use_odirect": true}'
