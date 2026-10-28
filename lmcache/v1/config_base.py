@@ -11,6 +11,7 @@ from dataclasses import make_dataclass
 from typing import Any, Callable, Dict, Optional, Protocol, Union
 import ast
 import json
+import math
 import os
 import threading
 import uuid
@@ -738,6 +739,21 @@ def validate_and_set_config_value(config, config_key, value, override: bool = Tr
         return False
 
 
+def _to_strict_json(value: Any) -> Any:
+    """Replace non-finite floats (inf, -inf, nan) with None, recursively.
+
+    Such values are not valid JSON, and ``requests`` refuses to encode
+    them (``allow_nan=False``), so they must not reach the request body.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: _to_strict_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_strict_json(v) for v in value]
+    return value
+
+
 def fetch_remote_config(
     remote_config_url: str,
     app_id: Optional[str],
@@ -748,6 +764,8 @@ def fetch_remote_config(
 
     The config server protocol:
     - Request: POST with JSON body containing 'current_config' and 'env_variables'
+      (non-finite float values in 'current_config', e.g. an infinite timeout,
+      are sent as null so the body is strict JSON)
     - Query parameter: 'appId' if app_id is provided
     - Response: JSON with 'configs' array, each item has 'key', 'value', 'override'
 
@@ -765,7 +783,7 @@ def fetch_remote_config(
     try:
         # Build request payload with current config and env variables
         payload: dict[str, Any] = {
-            "current_config": config.to_dict(),
+            "current_config": _to_strict_json(config.to_dict()),
             "env_variables": {k: v for k, v in os.environ.items()},
         }
 
