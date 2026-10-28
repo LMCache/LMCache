@@ -7,16 +7,25 @@ Tests for engine-driven multi-group (uniform coverage) transfers.
 from contextlib import contextmanager
 from typing import Any
 from unittest.mock import MagicMock
+from uuid import uuid4
 import threading
 
 # Third Party
 import msgspec
 import pytest
 import torch
+import zmq
 
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     GroupLayout,
     IPCCacheServerKey,
@@ -24,7 +33,12 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+    EngineDrivenTransferModule,
+)
+from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.server_transfer import (
     InlineTransferStrategy,
     ShmTransferStrategy,
@@ -43,6 +57,8 @@ from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
 )
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.multiprocess.transport.zmq_impl.server import build_zmq_request_server
 
 
 def _detected_block_size(kv_caches: dict[str, torch.Tensor]) -> int:
@@ -640,6 +656,102 @@ def test_inline_strategy_store_shape_mismatch_releases_reservations() -> None:
     assert set(sm.deleted) == set(group_keys[1])
     assert _obj_key(1, 1) not in sm.objs
     assert _obj_key(2, 1) not in sm.objs
+
+
+@pytest.mark.parametrize("use_shm", [False, True], ids=["inline", "shm"])
+@pytest.mark.parametrize("window_tokens", [-1, 512], ids=["full", "sliding"])
+def test_single_compressed_group_worker_server_roundtrip(
+    use_shm: bool, window_tokens: int
+) -> None:
+    """A single compressed group survives real RPC, storage and retrieval.
+
+    Both transports must preserve the physical slot layout and the absolute
+    chunk positions when a sliding window drops the leading chunks.
+    """
+    chunk_tokens = 512
+    tokens_per_block = 256
+    slots_per_block = 2
+    num_blocks = 6
+    shm_name = f"lmcache_l1_pool_test_compressed_{uuid4().hex}" if use_shm else ""
+    config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=8 * 1024 * 1024,
+                use_lazy=False,
+                shm_name=shm_name,
+            )
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+    )
+    engine = MPCacheServerContext(config, chunk_size=chunk_tokens)
+    module = EngineDrivenTransferModule(engine)
+    lookup = LookupModule(engine)
+    server = build_zmq_request_server(
+        [module, lookup], MPServerConfig(host="127.0.0.1", port=0)
+    )
+    server.start()
+    client = RequestClientFactory.create(
+        server.socket.getsockopt_string(zmq.LAST_ENDPOINT)
+    )
+    worker = EngineDrivenTransferContext(1, client)
+    source = {
+        "layer_0": torch.arange(
+            (2 * num_blocks + 1) * slots_per_block * 16, dtype=torch.float32
+        ).reshape(-1, slots_per_block, 16)
+    }
+    destination = {"layer_0": torch.full_like(source["layer_0"], -1)}
+    store_ids = list(range(1, num_blocks + 1))
+    retrieve_ids = list(range(num_blocks + 1, 2 * num_blocks + 1))
+    key = IPCCacheServerKey.from_token_ids(
+        "compressed", 1, 0, [1] * 1536, start=0, end=1536, request_id="compressed"
+    )
+    try:
+        worker.register(
+            source,
+            "compressed",
+            1,
+            2,
+            5.0,
+            engine_group_infos=[
+                EngineGroupInfo(
+                    0,
+                    (0,),
+                    tokens_per_block=tokens_per_block,
+                    sw_size_tokens=window_tokens,
+                )
+            ],
+            lmcache_chunk_tokens=chunk_tokens,
+        )
+        for _ in range(2):
+            assert worker.submit_store(
+                key.request_id, key, source, [store_ids], None, 2
+            ).result(timeout=5)
+
+        client.lookup(key, 1).result(timeout=5)
+        assert client.wait_prefetch_status(key.request_id, 5).result(timeout=10) == 3
+        assert worker.submit_retrieve(
+            key.request_id, key, destination, [retrieve_ids], None, 2
+        ).result(timeout=5)
+
+        expected = torch.full_like(source["layer_0"], -1)
+        first_block = (
+            0 if window_tokens < 0 else num_blocks - window_tokens // tokens_per_block
+        )
+        expected[retrieve_ids[first_block:]] = source["layer_0"][
+            store_ids[first_block:]
+        ]
+        assert torch.equal(destination["layer_0"], expected)
+        client.end_session(key.request_id).result(timeout=5)
+        unregistration = worker.unregister()
+        assert unregistration is not None
+        unregistration.result(timeout=5)
+    finally:
+        worker.close()
+        client.close()
+        server.close()
+        lookup.close()
+        module.close()
+        engine.close()
 
 
 def test_register_payload_carries_group_layouts() -> None:

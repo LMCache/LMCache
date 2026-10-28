@@ -285,9 +285,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     def _group_keys_for(
         self, entry: "EngineDrivenContextEntry", key: IPCCacheServerKey
     ) -> "list[list[ObjectKey]] | None":
-        """Group-major keys when ``entry`` registered multi-group, else None."""
+        """Return group-major keys for any explicit group layouts, else None."""
         layouts = entry.metadata.group_layouts
-        if not layouts or len(layouts) < 2:
+        if not layouts:
             return None
         return self._resolve_obj_keys_by_group(key, len(layouts))
 
@@ -508,7 +508,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             skipped_chunks: Per LMCache group, the chunk positions the worker
                 will not store because every engine block in them is the null
                 block. Empty means none; otherwise one entry per registered
-                group. Only multi-group workers send it.
+                group. Only grouped-protocol workers send it.
 
         Returns:
             PrepareStoreResponse with empty slots for inline mode.
