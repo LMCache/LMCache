@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU pinned-DRAM L1 memory manager."""
 
-# Standard
-from multiprocessing import shared_memory
-
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc
@@ -25,30 +22,40 @@ from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryObj,
 )
-from lmcache.v1.multiprocess.posix_shm import is_shm_name_collision
+from lmcache.v1.multiprocess.posix_shm import (
+    is_shm_name_collision,
+    shm_segment_is_live,
+    shm_unlink,
+)
 
 logger = init_logger(__name__)
 
 
 # HELPER FUNCTIONS
 def _unlink_stale_shm(shm_name: str) -> None:
-    """Remove a stale LMCache shm segment if it exists."""
+    """Remove a stale LMCache shm segment if it exists.
+
+    A segment whose advisory liveness lock is held by a live process is
+    never unlinked: the subsequent exclusive create surfaces the
+    collision instead. A stale segment (its holder crashed, so the
+    kernel released the lock) is reclaimed. Kernels that reject
+    ``flock`` on SHM fds (macOS) cannot express liveness and always
+    reclaim the name.
+    """
     normalized = shm_name.lstrip("/")
     if "/" in normalized or "\\" in normalized:
         logger.warning("Refusing to unlink invalid shm name %s", shm_name)
         return
     if not normalized.startswith("lmcache_l1_pool_"):
         return
-    try:
-        shm = shared_memory.SharedMemory(name=normalized, create=False)
-        shm.close()
-        shm.unlink()
-    except FileNotFoundError:
-        return
-    except OSError:
-        logger.warning(
-            "Failed to remove stale shm segment %s", normalized, exc_info=True
+    if shm_segment_is_live(normalized):
+        logger.info(
+            "Skipping unlink of live shm segment %s; creation must "
+            "surface the collision",
+            normalized,
         )
+        return
+    shm_unlink(normalized)
 
 
 def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInterface:

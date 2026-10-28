@@ -43,14 +43,27 @@ Constants live on `lmcache.v1.distributed.config`:
 
 Operators may set `shm_name` to a fixed string (with or without the
 `lmcache_l1_pool_` prefix; `create_memory_allocator` normalizes bare names).
-Pinned names are for tooling that must attach to a known segment. On create,
-`_unlink_stale_shm` removes any pre-existing segment with that name before
-`MixedMemoryAllocator` maps a new pool — this is the stale-segment recovery
-path for pinned names. POSIX SHM exposes no portable liveness signal
-(`flock`/`fcntl` record locks are rejected on SHM fds on macOS), so stale and
-live segments are indistinguishable: a pinned name always reclaims whatever
-currently holds its name. Operators running multiple live processes on one
-host must coordinate pinned names themselves.
+Pinned names are for tooling that must attach to a known segment.
+
+### Live vs stale: the advisory liveness lock
+
+`alloc_shm_pinned_ptr` holds an exclusive `flock` on the segment for as long
+as it maps the pool, and `free_shm_pinned_ptr` (or the death of the process,
+which closes the fd and makes the kernel release the lock) drops it.
+`_unlink_stale_shm` probes the lock via `shm_segment_is_live`
+(`posix_shm.py`) before unlinking:
+
+| Segment state | Probe | Outcome |
+|---------------|-------|---------|
+| No segment | — | Nothing to unlink; create proceeds |
+| Live holder (lock held) | `flock` blocked | Unlink **skipped**; exclusive create raises `EEXIST`, which a pinned name surfaces as an error |
+| Stale (holder crashed; kernel released the lock) | `flock` acquired | Unlinked; create proceeds |
+
+On macOS the kernel rejects `flock` on SHM fds (`EOPNOTSUPP`), so no
+liveness signal exists: the probe falls back to reclaiming the name and a
+pinned name always takes over whatever holds it. Operators running multiple
+live processes under one pinned name on such hosts must coordinate the names
+themselves; on Linux the collision is surfaced as `FileExistsError`.
 
 **Generated names never call `_unlink_stale_shm`.** A stale segment left by a
 crashed process with the same random name is not reclaimed by name; collision
@@ -71,7 +84,9 @@ Each new `L1MemoryManagerConfig()` with the default factory gets a **fresh**
 random name. A process that dies without `L1MemoryManager.close()` may leave
 its segment in `/dev/shm` until the kernel reaps it or an operator unlinks it;
 the next process does **not** reuse that name automatically. Graceful
-`close()` unlinks the pool segment.
+`close()` unlinks the pool segment. A crash under a **pinned** name is
+recovered automatically: the kernel's lock release marks the segment stale,
+so the next creation under that name reclaims it (see the table above).
 
 ## Collision retries
 

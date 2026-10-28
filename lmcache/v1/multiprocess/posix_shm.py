@@ -35,6 +35,7 @@ from __future__ import annotations
 import atexit
 import ctypes
 import errno
+import fcntl
 import logging
 import mmap as _mmap
 import os
@@ -260,6 +261,62 @@ def is_shm_name_collision(exc: BaseException) -> bool:
     if isinstance(exc, FileExistsError):
         return True
     return isinstance(exc, OSError) and exc.errno == errno.EEXIST
+
+
+def shm_acquire_liveness_lock(name: str) -> int | None:
+    """Hold the advisory liveness lock for an existing SHM segment.
+
+    The returned fd must stay open for as long as the segment is
+    mapped; closing it — or the death of the process — releases the
+    lock. ``alloc_shm_pinned_ptr`` holds this lock so
+    ``shm_segment_is_live`` can tell a live pool from a crashed one.
+
+    Args:
+        name: Segment name, with or without a leading ``/``.
+
+    Returns:
+        The locked fd, or ``None`` when the kernel rejects ``flock``
+        on SHM fds (macOS raises ``EOPNOTSUPP``) and no liveness
+        signal can exist.
+    """
+    fd = _posixshmem.shm_open(_slashed(name), os.O_RDWR, mode=0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # flock is rejected on SHM fds on this kernel (macOS raises
+        # EOPNOTSUPP): no liveness signal exists, so stale-segment
+        # probes fall back to reclaiming by name.
+        os.close(fd)
+        return None
+    return fd
+
+
+def shm_segment_is_live(name: str) -> bool:
+    """Return whether a live process holds the segment's liveness lock.
+
+    Args:
+        name: Segment name, with or without a leading ``/``.
+
+    Returns:
+        ``True`` when a live holder's lock blocks the probe. ``False``
+        when the segment is missing, unlocked (stale — e.g. its holder
+        crashed and the kernel released the lock), or the kernel
+        cannot express liveness for SHM segments at all.
+    """
+    try:
+        fd = _posixshmem.shm_open(_slashed(name), os.O_RDWR, mode=0o600)
+    except FileNotFoundError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        return False
+    finally:
+        os.close(fd)
 
 
 def _atexit_cleanup() -> None:

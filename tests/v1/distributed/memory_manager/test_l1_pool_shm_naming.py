@@ -280,3 +280,82 @@ def test_l1_pool_generated_name_real_collision_retries():
             manager.close()
     finally:
         squatter.close()
+
+
+def test_stale_pinned_segment_is_reclaimed():
+    """A crashed holder's leftover segment is reclaimed by pinned name.
+
+    A stale segment carries no liveness lock (the kernel released it
+    when the holder died), so the stale-unlink probe reclaims the name
+    and creation under the same pinned name succeeds.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.posix_shm import (
+        shm_create_readwrite,
+        shm_munmap,
+    )
+
+    name = f"lmcache_l1_pool_stale_{os.getpid()}"
+    addr = shm_create_readwrite(name, 4096)
+    shm_munmap(addr)  # leave the named segment behind, unlocked
+
+    layout = MemoryLayoutDesc(
+        shapes=[torch.Size([8, 2, 64])],
+        dtypes=[torch.bfloat16],
+    )
+    manager = L1MemoryManager(
+        L1MemoryManagerConfig(
+            size_in_bytes=_POOL_SIZE,
+            use_lazy=False,
+            shm_name=name,
+        )
+    )
+    try:
+        error, objects = manager.allocate(layout, 1)
+        assert error == L1Error.SUCCESS
+        manager.free(objects)
+    finally:
+        manager.close()
+
+
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="macOS kernels reject flock on SHM fds, so a live pinned "
+    "collision reclaims the name instead of surfacing an error",
+)
+def test_pinned_name_live_collision_surfaces_error():
+    """A second manager on a live pinned segment must fail, not steal.
+
+    The first pool holds the segment's advisory liveness lock, so
+    ``_unlink_stale_shm`` sees the name as live, skips the unlink, and
+    the exclusive create surfaces ``FileExistsError`` for the pinned
+    name instead of silently destroying the first pool.
+    """
+    name = f"lmcache_l1_pool_live2_{os.getpid()}"
+    first = L1MemoryManager(
+        L1MemoryManagerConfig(
+            size_in_bytes=_POOL_SIZE,
+            use_lazy=False,
+            shm_name=name,
+        )
+    )
+    try:
+        with pytest.raises(FileExistsError):
+            L1MemoryManager(
+                L1MemoryManagerConfig(
+                    size_in_bytes=_POOL_SIZE,
+                    use_lazy=False,
+                    shm_name=name,
+                )
+            )
+
+        # The first pool survived the failed takeover attempt.
+        layout = MemoryLayoutDesc(
+            shapes=[torch.Size([8, 2, 64])],
+            dtypes=[torch.bfloat16],
+        )
+        error, objects = first.allocate(layout, 1)
+        assert error == L1Error.SUCCESS
+        first.free(objects)
+    finally:
+        first.close()
