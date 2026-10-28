@@ -9,12 +9,14 @@ read this file by hand is the operator who wrote its contents.
 
 # Standard
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import cast
 import json
 import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
@@ -33,6 +35,27 @@ class MetadataFormatError(Exception):
     """A metadata document is malformed or of an unknown version."""
 
 
+class MetadataWriteError(Exception):
+    """The metadata document could not be written.
+
+    The change that prompted the save is live in memory but would be lost
+    on restart, so whoever made it undoes it and tells the caller (503).
+    """
+
+
+@dataclass(frozen=True)
+class MetadataStats:
+    """What the metadata document has done since this process started.
+
+    Attributes:
+        writes: Saves by result, ``ok`` or ``error``; both are present,
+            from 0. An ``error`` is a pin or quota change that could not
+            be saved.
+    """
+
+    writes: dict[str, int]
+
+
 class MetadataPersister:
     """Keeps the metadata document in step with its components.
 
@@ -47,6 +70,9 @@ class MetadataPersister:
         """
         self._store = store
         self._components: list[DurableComponent] = []
+        # Only request handlers on the event loop save, so one writer.
+        self._writes = dict.fromkeys(("ok", "error"), 0)
+        register_metric_source(self)
 
     def register(self, component: DurableComponent) -> None:
         """Add ``component`` to the document; call before :meth:`load`.
@@ -108,18 +134,35 @@ class MetadataPersister:
 
         Called by whatever changed one of them, so a ``200`` from an API
         that sets a pin or a quota means the change survives a restart.
-        Failures are logged rather than raised.
+
+        Raises:
+            MetadataWriteError: If the document could not be written (no
+                permission, no space, a read-only or missing volume). The
+                caller undoes its change and answers 503, rather than
+                reporting success for a change a restart would lose.
         """
         document = {
             "version": _FORMAT_VERSION,
             "saved_at": time.time(),
             "components": {c.name: c.capture() for c in self._components},
         }
+        # Outside the ``try``: a component that cannot be serialized is a
+        # bug, not a storage failure, and must not read as "try again".
+        payload = json.dumps(document, indent=2).encode()
         try:
             with self._store.open_write() as stream:
-                stream.write(json.dumps(document, indent=2).encode())
-        except (OSError, TypeError, ValueError) as e:
-            logger.warning("Failed to write metadata %s: %s", self._store.location(), e)
+                stream.write(payload)
+        except OSError as e:
+            self._writes["error"] += 1
+            logger.exception("Failed to write metadata %s", self._store.location())
+            raise MetadataWriteError(
+                f"could not write {self._store.location()}: {e}"
+            ) from e
+        self._writes["ok"] += 1
+
+    def stats(self) -> MetadataStats:
+        """Return a copy of :class:`MetadataStats`."""
+        return MetadataStats(writes=dict(self._writes))
 
     # -- Internals ----------------------------------------------------------------
 

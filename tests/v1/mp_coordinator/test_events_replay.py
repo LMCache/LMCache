@@ -10,6 +10,7 @@ in-process ASGI transport. Everything runs on CPU.
 from __future__ import annotations
 
 # Standard
+from pathlib import Path
 from typing import Any
 import asyncio
 import time
@@ -17,6 +18,7 @@ import time
 # Third Party
 from fastapi import FastAPI
 import httpx
+import msgspec
 import pytest
 
 # First Party
@@ -43,6 +45,11 @@ from lmcache.v1.mp_coordinator.events_replay import (
 from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_observability.trace.decorator import set_tracing_enabled
+from lmcache.v1.mp_observability.trace.format import (
+    TRACE_SCHEMA_VERSION,
+    decode_header,
+    encode_header,
+)
 from lmcache.v1.mp_observability.trace.recorder import (
     EventsTraceRecorder,
     StorageTraceRecorder,
@@ -96,14 +103,34 @@ def _write(
     path: str,
     records: list[tuple[float, str, dict[str, Any]]],
     schema: int = CACHE_EVENT_SCHEMA_VERSION,
+    trace_schema: int = TRACE_SCHEMA_VERSION,
 ) -> str:
-    """Write an events file with the given ``(t_wall, qualname, args)`` records."""
+    """Write an events file with the specified payload and storage schema versions.
+
+    Args:
+        path: Output file path.
+        records: Wall times, record names and argument dictionaries to record.
+        schema: Cache-event payload schema in the level metadata.
+        trace_schema: Storage schema counter stamped in the shared header.
+
+    Returns:
+        The output path, ready to load through the public trace reader.
+    """
     recorder = EventsTraceRecorder(
         path, level_meta={"cache_event_schema_version": schema}
     )
     for t_wall, qualname, args in records:
         recorder.write_record(qualname, args, t_wall=t_wall, t_mono=t_wall)
     recorder.close()
+    data = Path(path).read_bytes()
+    header_length = int.from_bytes(data[:4], "big")
+    header = decode_header(data[4 : 4 + header_length])
+    frame = encode_header(
+        msgspec.structs.replace(header, trace_schema_version=trace_schema)
+    )
+    Path(path).write_bytes(
+        len(frame).to_bytes(4, "big") + frame + data[4 + header_length :]
+    )
     return path
 
 
@@ -185,8 +212,14 @@ def test_load_refuses_a_storage_level_file(tmp_path):
         EventsTrace.load([path])
 
 
-def test_load_refuses_another_cache_event_schema(tmp_path):
-    path = _write(str(tmp_path / "future.lct"), [], schema=99)
+@pytest.mark.parametrize("trace_schema", [1, TRACE_SCHEMA_VERSION, 99])
+def test_load_refuses_another_cache_event_schema(
+    tmp_path: Path, trace_schema: int
+) -> None:
+    """Event payload validation is independent of the storage schema counter."""
+    path = _write(
+        str(tmp_path / "future.lct"), [], schema=99, trace_schema=trace_schema
+    )
 
     with pytest.raises(ValueError, match="99"):
         EventsTrace.load([path])
@@ -332,7 +365,11 @@ async def _placements(client: httpx.AsyncClient, chunk: str) -> int:
     return len(response.json()["results"][0]["placements"])
 
 
-def test_coordinator_target_registers_reports_and_deregisters(tmp_path):
+@pytest.mark.parametrize("trace_schema", [1, TRACE_SCHEMA_VERSION, 99])
+def test_coordinator_target_registers_reports_and_deregisters(
+    tmp_path: Path, trace_schema: int
+) -> None:
+    """Event traces replay independently of the recorded storage schema version."""
     running = _write(
         str(tmp_path / "running.lct"),
         [
@@ -340,10 +377,12 @@ def test_coordinator_target_registers_reports_and_deregisters(tmp_path):
             (2.0, EVENTS_TRACE_BATCH, _batch("node-a", 1, 1, chunk="aa")),
             (3.0, EVENTS_TRACE_BATCH, _batch("node-a", 1, 1, chunk="aa")),
         ],
+        trace_schema=trace_schema,
     )
     stopping = _write(
         str(tmp_path / "stopping.lct"),
         [(4.0, EVENTS_TRACE_LIFECYCLE, _stop("node-a"))],
+        trace_schema=trace_schema,
     )
 
     async def scenario() -> tuple:

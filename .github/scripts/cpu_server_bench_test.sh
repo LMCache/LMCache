@@ -12,7 +12,7 @@
 # Environment variables (all optional, defaults shown):
 #   LMCACHE_BENCH_TRANSFER_MODE  lmcache_driven|engine_driven
 #                                (default: engine_driven)
-#   LMCACHE_REQUEST_TRANSPORT    zmq|grpc (default: zmq)
+#   LMCACHE_REQUEST_TRANSPORT    zmq|grpc|grpc-native (default: zmq)
 #   LMCACHE_HTTP_PORT            HTTP port            (default: 18080)
 #   LMCACHE_REQUEST_PORT         request RPC port     (default: 15555)
 #   LMCACHE_LOG_FILE             server log path      (default: /tmp/...)
@@ -44,12 +44,18 @@ case "${TRANSFER_MODE}" in
     ;;
 esac
 
+# grpc-native is the gRPC transport served by --grpc-server-mode native.
+TRANSPORT_ARGS=(--transport "${REQUEST_TRANSPORT}")
 case "${REQUEST_TRANSPORT}" in
   zmq) REQUEST_SCHEME="tcp" ;;
   grpc) REQUEST_SCHEME="grpc" ;;
+  grpc-native)
+    REQUEST_SCHEME="grpc"
+    TRANSPORT_ARGS=(--transport grpc --grpc-server-mode native)
+    ;;
   *)
     echo "!! Unknown LMCACHE_REQUEST_TRANSPORT='${REQUEST_TRANSPORT}'"
-    echo "   Valid values: zmq, grpc"
+    echo "   Valid values: zmq, grpc, grpc-native"
     exit 1
     ;;
 esac
@@ -79,7 +85,7 @@ if [ "${TRANSFER_MODE}" = "engine_driven" ]; then
 fi
 
 lmcache server \
-  --transport "${REQUEST_TRANSPORT}" \
+  "${TRANSPORT_ARGS[@]}" \
   --port "${REQUEST_PORT}" \
   --http-port "${HTTP_PORT}" \
   --l1-size-gb 1 \
