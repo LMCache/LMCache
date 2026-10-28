@@ -16,6 +16,8 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.gds_backend import (
     _DATA_FILE_SUFFIX,
     _METADATA_FILE_SUFFIX,
@@ -27,9 +29,7 @@ from lmcache.inprocess.v1.storage_backend.gds_backend import (
     unpack_metadata,
 )
 from lmcache.utils import CacheEngineKey, LayerCacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
 from tests.v1.utils import create_test_memory_obj, has_cufile, has_hipfile
 
 # Optional override for tempfile root. In CI we point this at a GDS-capable

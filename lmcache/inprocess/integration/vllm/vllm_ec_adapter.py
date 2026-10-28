@@ -13,11 +13,11 @@ import torch
 
 # First Party
 from lmcache import torch_device_type
-from lmcache.inprocess.v1.ec_engine import ECCacheEngine
-from lmcache.integration.vllm.utils import (
+from lmcache.inprocess.integration.vllm.utils import (
     create_lmcache_ec_config,
     create_lmcache_metadata,
 )
+from lmcache.inprocess.v1.ec_engine import ECCacheEngine
 
 if TYPE_CHECKING:
     # Third Party

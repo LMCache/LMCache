@@ -34,11 +34,11 @@ if TYPE_CHECKING:
     import builtins
 
     # First Party
+    from lmcache.inprocess.v1.config import LMCacheEngineConfig
+    from lmcache.inprocess.v1.metadata import LMCacheMetadata
     from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
     from lmcache.utils import CacheEngineKey
-    from lmcache.v1.config import LMCacheEngineConfig
     from lmcache.v1.memory_management import MemoryObj
-    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 

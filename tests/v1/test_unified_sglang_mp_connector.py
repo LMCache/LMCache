@@ -123,7 +123,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
                 {adapter_module_name: adapter_module},
             ),
             patch(
-                "lmcache.v1.config.load_engine_config_with_overrides",
+                "lmcache.v1.multiprocess.client_config.load_mp_client_config",
                 return_value=config,
             ),
             patch(

@@ -21,8 +21,8 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.inprocess.v1.cache_controller.worker import LMCacheWorker
     from lmcache.inprocess.v1.cache_engine import LMCacheEngine
+    from lmcache.inprocess.v1.config import LMCacheEngineConfig
     from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-    from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
