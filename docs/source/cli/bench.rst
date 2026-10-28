@@ -1047,8 +1047,9 @@ What it does
 For each sequence in ``[--start, --end)``, the tool runs two passes. Each
 pass reserves request-exclusive KV blocks and releases them when it finishes.
 
-1. **Cold pass** -- ``LOOKUP`` is expected to miss. The benchmark records
-   local per-chunk checksums before ``STORE``.
+1. **Cold pass** -- ``LOOKUP`` is expected to miss. The benchmark fills
+   request blocks with deterministic KV and records local per-chunk checksums
+   before ``STORE``.
 2. **Warm pass** -- ``LOOKUP`` is expected to hit. The benchmark clears the
    allocated destination blocks, retrieves the cached KV, and compares each
    reader's checksums with the cold-pass reference. The two passes may use
@@ -1063,6 +1064,11 @@ The full RPC path exercised is::
 Both transfer modes verify local buffers. ``--url`` remains accepted for
 compatibility but is unused.
 
+
+STORE/RETRIEVE runs enabled workers concurrently; latency covers dispatch through
+completion of all workers. ``--transfer-timeout`` bounds each call's wait. After a
+timeout or transfer exception, close the client before reuse. Shutdown waits for
+running transfers and may block if a native call hangs.
 
 Quick start
 ~~~~~~~~~~~
@@ -1123,6 +1129,9 @@ Options
    * - ``--block-allocation {sequential,random}``
      - ``sequential``
      - Allocate the lowest free block IDs or sample from all free IDs.
+   * - ``--transfer-timeout SECS``
+     - ``10``
+     - Positive, finite wait budget for each STORE or RETRIEVE call.
    * - ``--num-blocks N``
      - ``1024``
      - Fallback block capacity per KV group; overridden by the shape spec.
@@ -1317,6 +1326,7 @@ Example: MLA + TP=2, exercising rank 0 STORE + both-rank RETRIEVE:
        --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:8" \
        --tp-size 2
 
+Replicated readers use their writer's KV identity for deterministic filling.
 The bench verifies retrieved data on every rank and reports the rank and
 chunk for checksum mismatches.
 
@@ -2075,6 +2085,20 @@ One line of the sample, pretty-printed with the token array shortened:
               {"intValue": "151644"}, {"intValue": "872"}, {"intValue": "198"}]}}}
          ]}]}]}]}
 
+dynamo
+^^^^^^
+
+The Dynamo frontend's ``request_payload`` records, sent as OTLP logs by its
+request trace ``otel`` sink (``DYN_REQUEST_TRACE_RECORDS=request_payload``,
+``DYN_REQUEST_TRACE_SINKS=otel``) and written by the Collector's ``file``
+exporter with no processing. Sample:
+``tests/tools/data/trace_formats/dynamo.jsonl``.
+
+Each record gives the request id (``rid``), the model, the arrival time
+(``timeUnixNano``) and the chat request (``payload.request``). The request is
+text, not token ids: its tools, then each message's role and text, are packed
+four UTF-8 bytes per integer, about one per token.
+
 
 What it does
 ~~~~~~~~~~~~
@@ -2140,6 +2164,8 @@ Options
    * - ``--trace-format {lmcache}``
      - Producer format of the input spans. ``lmcache`` is the MP
        server's ``mp.request.trace`` span (default).
+   * - ``--trace-format {dynamo}``
+     - ``dynamo`` is the Dynamo frontend's ``request_payload`` record.
    * - ``--model NAME``
      - Only analyze requests for this model name. Use it when one trace
        mixes models, since the simulated cache is shared.

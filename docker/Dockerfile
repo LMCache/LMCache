@@ -105,6 +105,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     bash docker/build_nixl_wheel.sh dist_lmcache && \
     uv pip install ./dist_lmcache/*.whl --verbose && \
     python3 -c 'import lmcache_rust_raw_block_io' && \
+    uv pip install -r requirements/grpc_native.txt && \
+    python3 -c 'import pygrpc_native' && \
     python3 -c 'import nixl, lmcache_nixl'
 
 WORKDIR /workspace
@@ -122,7 +124,8 @@ ARG CUDA_VERSION
 
 ARG LMCACHE_VERSION
 
-RUN . /opt/venv/bin/activate && \
+RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_native.txt \
+    . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
     CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
     VER=$(echo "${LMCACHE_VERSION}" | sed 's/^v//') && \
@@ -139,6 +142,8 @@ RUN . /opt/venv/bin/activate && \
     LMCACHE_INSTALLED=$(python3 -c 'import importlib.metadata as m; print(m.version("lmcache"))') && \
     uv pip install "lmcache-rust-raw-block-io==${LMCACHE_INSTALLED}" && \
     python3 -c 'import lmcache_rust_raw_block_io' && \
+    uv pip install -r /tmp/grpc_native.txt && \
+    python3 -c 'import pygrpc_native' && \
     python3 -c 'import nixl, lmcache_nixl'
 
 WORKDIR /workspace
@@ -155,7 +160,8 @@ FROM base AS image-release-cu129
 ARG CUDA_VERSION=12.9
 ARG LMCACHE_VERSION
 
-RUN . /opt/venv/bin/activate && \
+RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_native.txt \
+    . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
     CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
     VER=$(echo ${LMCACHE_VERSION} | sed 's/^v//') && \
@@ -170,6 +176,8 @@ RUN . /opt/venv/bin/activate && \
         --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu129 \
         --index-strategy unsafe-best-match --verbose && \
     python3 -c 'import lmcache_rust_raw_block_io' && \
+    uv pip install -r /tmp/grpc_native.txt && \
+    python3 -c 'import pygrpc_native' && \
     python3 -c 'import nixl, lmcache_nixl'
 
 WORKDIR /workspace

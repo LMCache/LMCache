@@ -2,12 +2,11 @@
 """Mooncake Transfer Engine implementation of the transfer channel abstraction."""
 
 # Standard
-from typing import Union
+from typing import TYPE_CHECKING, Union
 import os
 import threading
 
 # Third Party
-from mooncake.engine import TransferEngine
 import msgspec
 import zmq
 
@@ -27,6 +26,10 @@ from lmcache.v1.distributed.transfer_channel.factory import (
     register_transfer_channel_factory,
 )
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
+
+if TYPE_CHECKING:
+    # Third Party
+    from mooncake.engine import TransferEngine
 
 logger = init_logger(__name__)
 
@@ -316,11 +319,21 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
         """
         Creates the transfer channel context using mooncake_te.
 
+        Import the optional SDK only when creating this context, so discovering
+        transfer-channel factories does not load Mooncake's native libraries.
+
         Args:
             l1_memory_desc: The description of the local L1 memory buffer to register.
             listen_url: The URL to listen on for incoming connections.
             advertise_url: The URL to advertise to peers for them to connect to us.
+
+        Raises:
+            ImportError: If the Mooncake SDK or one of its dependencies cannot
+                be imported.
         """
+        # Third Party
+        from mooncake.engine import TransferEngine
+
         self._l1_memory_desc = l1_memory_desc
         self.listen_url = listen_url
         self.advertise_url = advertise_url
@@ -377,7 +390,7 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
         return self._l1_memory_desc
 
     @property
-    def mooncake_te_engine(self) -> TransferEngine:
+    def mooncake_te_engine(self) -> "TransferEngine":
         """Return the Mooncake Transfer Engine owned by this context."""
         return self._mooncake_te_engine
 
