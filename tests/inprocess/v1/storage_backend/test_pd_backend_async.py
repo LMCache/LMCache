@@ -812,6 +812,16 @@ def test_close_stops_thread(role, async_sender, async_receiver):
     backend.running = False
 
 
+def test_receiver_close_does_not_submit_to_stopped_loop(
+    async_receiver: PDBackendAsync,
+) -> None:
+    """Do not enqueue shutdown work after a receiver has already stopped."""
+    async_receiver.close()
+    with patch("asyncio.run_coroutine_threadsafe") as submit:
+        async_receiver.close()
+    submit.assert_not_called()
+
+
 # ── pd_max_prefill_len init check ────────────────────────────────────────
 
 
