@@ -52,9 +52,9 @@ from lmcache.v1.distributed.storage_manager import L1WriteCompletion, StorageMan
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.hetero_kv_view import HeteroKVView
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.tp_reshard import (
-    HeteroTPView,
     L1Resharder,
     ReshardResult,
     ReshardTask,
@@ -380,15 +380,15 @@ def _same_tp_spec(windows: list[int], **kwargs: object) -> PrefetchTaskSpec:
 
 
 @pytest.fixture
-def view(mp_ctx: MPCacheServerContext) -> Iterator[HeteroTPView]:
+def view(mp_ctx: MPCacheServerContext) -> Iterator[HeteroKVView]:
     """A view completing hits from source TP 2, model registered at TP 4."""
     mp_ctx.layout_desc_registry.register(MODEL, 4, _layout(4, 4), total_num_kv_heads=4)
-    view = HeteroTPView(mp_ctx.storage_manager, mp_ctx.layout_desc_registry, 2)
+    view = HeteroKVView(mp_ctx.storage_manager, mp_ctx.layout_desc_registry, 2)
     yield view
     view.close()
 
 
-def test_cross_tp_spec_covers_the_rest_at_the_source_tp(view: HeteroTPView) -> None:
+def test_cross_tp_spec_covers_the_rest_at_the_source_tp(view: HeteroKVView) -> None:
     """The cross-TP prefetch starts after the first hit, keyed and shaped for A,
     and keeps the spec's policy and tier filters."""
     tags = frozenset[MemoryTags]()
@@ -417,13 +417,13 @@ def test_cross_tp_spec_covers_the_rest_at_the_source_tp(view: HeteroTPView) -> N
     ],
 )
 def test_plan_requires_a_locked_full_attention_prefix_prefetch(
-    view: HeteroTPView, windows: list[int], kwargs: dict, qualifies: bool
+    view: HeteroKVView, windows: list[int], kwargs: dict, qualifies: bool
 ) -> None:
     """Sliding windows, a full-policy or an unlocked prefetch pass through."""
     assert (view.plan(_same_tp_spec(windows, **kwargs)) is not None) == qualifies
 
 
-def test_plan_skips_a_worker_specific_prefetch(view: HeteroTPView) -> None:
+def test_plan_skips_a_worker_specific_prefetch(view: HeteroKVView) -> None:
     """A prefetch of one worker's shard is not a lookup; it passes through."""
     spec = _same_tp_spec([-1])
     one_rank = PrefetchTaskSpec(key_groups=spec.key_groups[:1], num_kv_readers=1)

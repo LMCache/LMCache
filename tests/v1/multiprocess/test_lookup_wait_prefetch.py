@@ -15,8 +15,8 @@ import threading
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import PrefetchHandle, PrefetchResult
+from lmcache.v1.multiprocess.hetero_kv_view import HeteroKVView
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
-from lmcache.v1.multiprocess.tp_reshard import HeteroTPView
 
 
 def _result(found):
@@ -47,7 +47,7 @@ def _make_module(ctx):
     # _prefetch_job_lock. Without a hetero TP source the view passes through.
     module = object.__new__(LookupModule)
     module._ctx = ctx
-    module._prefetch = HeteroTPView(ctx.storage_manager, ctx.layout_desc_registry, None)
+    module._prefetch = HeteroKVView(ctx.storage_manager, ctx.layout_desc_registry, None)
     module._prefetch_jobs = {}
     module._prefetch_job_lock = threading.Lock()
     return module
