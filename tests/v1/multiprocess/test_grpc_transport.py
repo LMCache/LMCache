@@ -924,8 +924,11 @@ def test_client_reports_a_zmq_server_instead_of_waiting() -> None:
             in_flight.result(timeout=10)
         with pytest.raises(ConnectionError, match="speaks ZMQ"):
             next(stream)
-        with pytest.raises(ConnectionError, match="speaks ZMQ"):
+        with pytest.raises(ConnectionError, match="speaks ZMQ") as first:
             client.noop().result(timeout=1)
+        with pytest.raises(ConnectionError, match="speaks ZMQ") as second:
+            client.noop().result(timeout=1)
+        assert first.value is not second.value
     finally:
         client.close()
         router.close(linger=0)

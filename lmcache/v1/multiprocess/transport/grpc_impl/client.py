@@ -141,7 +141,7 @@ class GrpcMultiprocessClient(RequestClient):
         self._channel = grpc.insecure_channel(target, options=_GRPC_OPTIONS)
         # Calls wait for the server to come up (wait_for_ready), so a ZMQ
         # server on the port would otherwise look like one that never starts.
-        self._wrong_transport: ConnectionError | None = None
+        self._wrong_transport: str | None = None
         self._pending: set[grpc.Future] = set()
         self._pending_lock = threading.Lock()
         self._next_probe_at = 0.0
@@ -231,7 +231,7 @@ class GrpcMultiprocessClient(RequestClient):
     def _probe_peer(self, host: str, port: int) -> None:
         if not _peer_speaks_zmtp(host, port):
             return
-        self._wrong_transport = ConnectionError(
+        self._wrong_transport = (
             f"The server at {self._server_url} speaks ZMQ, not gRPC. Use "
             f"tcp://{host}:{port}, or start the server with --transport grpc."
         )
@@ -259,7 +259,7 @@ class GrpcMultiprocessClient(RequestClient):
                     return rpc.codec.response_decoder(next(call))
                 except grpc.RpcError as exc:
                     if self._wrong_transport is not None:
-                        raise self._wrong_transport from exc
+                        raise ConnectionError(self._wrong_transport) from exc
                     if exc.code() in (
                         grpc.StatusCode.UNAVAILABLE,
                         grpc.StatusCode.CANCELLED,
@@ -270,7 +270,7 @@ class GrpcMultiprocessClient(RequestClient):
             return MessagingStream(read, call.cancel)
         future: MessagingFuture[Any] = MessagingFuture()
         if self._wrong_transport is not None:
-            future.set_exception(self._wrong_transport)
+            future.set_exception(ConnectionError(self._wrong_transport))
             return future
         call = rpc.stub_method.future(
             request,
@@ -280,7 +280,7 @@ class GrpcMultiprocessClient(RequestClient):
 
         def on_done(grpc_future: grpc.Future[Any]) -> None:
             if grpc_future.cancelled() and self._wrong_transport is not None:
-                future.set_exception(self._wrong_transport)
+                future.set_exception(ConnectionError(self._wrong_transport))
                 return
             try:
                 result = rpc.codec.response_decoder(grpc_future.result())
