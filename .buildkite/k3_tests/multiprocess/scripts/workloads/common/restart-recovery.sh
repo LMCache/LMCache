@@ -8,7 +8,7 @@
 #   2. Snapshot lmcache_mp_l1_write_chunks_total via /metrics.
 #   3. Kill the LMCache server, relaunch on the same port.
 #   4. Wait for the new server to be ready and for the worker to
-#      re-register (poll /status until cache_context_meta is non-empty).
+#      re-register (poll /status until transfer-context metadata is non-empty).
 #   5. Run the same bench round again.
 #   6. Snapshot the metric again.
 #   7. Assert run2 > 0 and run2 >= 0.8 * run1.
@@ -55,6 +55,10 @@ run_bench_round() {
     local label="$1"
     local seed=$2
     local out_subdir="$OUT_DIR/$label"
+    local -a token_budget_args=()
+    if [[ -n "${RR_TOKENS_PER_GB:-}" ]]; then
+        token_budget_args=(--tokens-per-gb-kvcache "$RR_TOKENS_PER_GB")
+    fi
     mkdir -p "$out_subdir"
     echo "--- bench round: $label ---"
 
@@ -65,6 +69,7 @@ run_bench_round() {
         --rp-num-requests "$NUM_REQUESTS" \
         --rp-request-length "$REQUEST_LEN" \
         --kv-cache-volume "$KV_CACHE_VOLUME" \
+        "${token_budget_args[@]}" \
         --no-interactive \
         --no-csv \
         --json \
@@ -76,16 +81,13 @@ run_bench_round() {
         return 1
     fi
 
-    # Quick sanity from JSON summary
-    if [ -f "$out_subdir/bench_summary.json" ]; then
-        local successful failed
-        successful=$(python3 -c "import json; print(json.load(open('$out_subdir/bench_summary.json')).get('successful_requests', 0))")
-        failed=$(python3 -c "import json; print(json.load(open('$out_subdir/bench_summary.json')).get('failed_requests', 0))")
-        echo "$label: successful=$successful failed=$failed"
-        if [ "$failed" -ne 0 ]; then
-            echo "FAIL: $failed requests failed in '$label'"
-            return 1
-        fi
+    local successful failed
+    successful=$(python3 -c "import json; print(json.load(open('$out_subdir/bench_summary.json'))['results']['successful_requests'])") || return 1
+    failed=$(python3 -c "import json; print(json.load(open('$out_subdir/bench_summary.json'))['results']['failed_requests'])") || return 1
+    echo "$label: successful=$successful failed=$failed"
+    if [ "$failed" -ne 0 ] || [ "$successful" -ne "$NUM_REQUESTS" ]; then
+        echo "FAIL: '$label' completed $successful/$NUM_REQUESTS requests with $failed failures"
+        return 1
     fi
     return 0
 }
@@ -136,8 +138,11 @@ wait_for_lmcache_http() {
 }
 
 wait_for_worker_reregister() {
-    # Poll /status until cache_context_meta has at least one entry,
-    # which proves an engine worker re-registered with the new server.
+    # Each transfer mode exposes its registered contexts under a different key.
+    local context_meta_key="cache_context_meta"
+    if [[ "${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}" == "engine_driven" ]]; then
+        context_meta_key="non_cuda_context_meta"
+    fi
     local deadline=$(( $(date +%s) + RECOVER_TIMEOUT ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
         local count
@@ -146,13 +151,13 @@ import json, urllib.request
 try:
     body = urllib.request.urlopen("http://localhost:${LMCACHE_HTTP_PORT}/status", timeout=5).read()
     data = json.loads(body)
-    print(len(data.get("cache_context_meta", {})))
+    print(len(data.get("${context_meta_key}", {})))
 except Exception:
     print(0)
 EOF
 )
         if [ "$count" -gt 0 ]; then
-            echo "Worker re-registered (cache_context_meta entries: $count)"
+            echo "Worker re-registered (${context_meta_key} entries: $count)"
             return 0
         fi
         sleep 2
@@ -181,6 +186,18 @@ restart_lmcache() {
         server_environment+=("${DEVICE_AFFINITY_VAR}=${GPU_FOR_ENGINE}")
     fi
     engine_add_lmcache_server_environment server_environment
+    local -a transfer_args=(
+        --supported-transfer-mode "${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
+    )
+    if [[ -n "${CHUNK_SIZE:-}" ]]; then
+        transfer_args+=(--chunk-size "$CHUNK_SIZE")
+    fi
+    if [[ "${L1_USE_LAZY:-true}" == "false" ]]; then
+        transfer_args+=(--no-l1-use-lazy)
+        if [[ "${LMCACHE_MP_TRANSFER_MODE:-}" == "engine_driven" ]]; then
+            transfer_args+=(--shm-name "mp_${BUILD_ID}")
+        fi
+    fi
     env "${server_environment[@]}" lmcache server \
         --transport "$LMCACHE_REQUEST_TRANSPORT" \
         --l1-size-gb "$CPU_BUFFER_SIZE" \
@@ -188,6 +205,7 @@ restart_lmcache() {
         --max-workers "$MAX_WORKERS" \
         --port "$LMCACHE_PORT" \
         --http-port "$LMCACHE_HTTP_PORT" \
+        "${transfer_args[@]}" \
         > "/tmp/build_${BUILD_ID}_lmcache_restart.log" 2>&1 &
 
     local new_pid=$!

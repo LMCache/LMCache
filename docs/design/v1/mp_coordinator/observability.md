@@ -53,7 +53,7 @@ flowchart TB
     subgraph C["Coordinator"]
         G["Event gate<br/>dedup, fence, flag gaps<br/><i>(new) counts loss and freshness per server</i>"]
         V["Views<br/>key directory, usage, registry<br/><i>(new) report size, lookups, failures</i>"]
-        K["Controllers<br/>eviction, prefetch, pins<br/>built-in or from a private package<br/><i>(new) report work, failures, up/down</i>"]
+        K["Controllers<br/>eviction, prefetch, pins<br/>built-in or loaded from a package<br/><i>(new) report work, failures, up/down</i>"]
         L["Background loops<br/>health, checkpoint, eviction<br/><i>(new) record last success, survive errors</i>"]
         O["(new) Metrics and /status<br/>read every part's stats()"]
     end
@@ -182,6 +182,16 @@ Prefix lookups (`/directory/lookup`) and non-prefix lookups
 (`/directory/blend-lookup`) share one set of lookup metrics, told apart by
 `lookup_type`. Both take tokens and return the chunks the fleet holds, so a
 chunk is the unit for both; a lookup by keys counts each key as one chunk.
+The two lookup endpoints count each request they serve through
+`KeyDirectory.record_lookup`; counting inside `lookup()` would also count the
+coordinator's own lookups (eviction routing, deletes).
+
+**Histograms.** OpenTelemetry has no instrument read at scrape time for a
+histogram, so a component keeps a `Histogram` (fixed bucket bounds, counts,
+sum, count) in its `stats()`, and `observability.py` exports it as
+`<name>_bucket` (cumulative, labelled `le`), `<name>_sum` and `<name>_count`
+counters. `histogram_quantile` works on them as on a native histogram; in
+Prometheus each carries the counter's `_total` suffix.
 
 **Requirement: keep these counts as you go (P0).** The directory gauges call
 `KeyDirectory.stats()` on every scrape, and it holds the directory's and the
@@ -197,22 +207,9 @@ would block ingest and lookups for a time that grows with the cache. So:
 
 ### Controllers: what the coordinator does
 
-Controllers can be built in or loaded from a private package
-(`extra_config.controller_packages`). The private `EvictionController` in
-coordinator-controllers replaces the built-in `FleetEvictionController`. It
-adds an L1 budget, sends each delete to the server that holds the copy, and
-skips keys no server can delete. So controller metrics follow three rules:
-
-- **Named by role, not by class.** Whichever controller enforces eviction emits
-  `eviction.*`, `quota.*` and `pins.*`. A swap keeps every dashboard and alert
-  working.
-- **A replacement may add, never rename.** It can add label values
-  (`tier="l1"`, `reason="unreachable"`) and new metrics under the same role. It
-  must emit every metric the built-in one does.
-- **Names are part of the versioned contract.** Upstream keeps the names,
-  labels and bucket boundaries as constants in `mp_coordinator/observability.py`;
-  the private package imports them. Its `vX.Y.Z` targets LMCache `vX.Y.Z`, so a
-  rename is a breaking change for both.
+Controllers can be built in or loaded from a package
+(`extra_config.controller_packages`). Each one's `controller.up` says whether
+it started; prefetch reports its own work below.
 
 A controller that runs its own loop starts it with
 `runtime.background_loops.start(...)` (from `ControllerRuntime`), named after
@@ -222,16 +219,6 @@ metrics and gets the same catch-and-continue as the coordinator's own loops.
 | Role | Metric | Type | Labels | Tells you | Phase |
 | --- | --- | --- | --- | --- | --- |
 | Every controller | `controller.up` | gauge | `controller` (class name) | 0 if it failed to start (above) | P0 |
-| Eviction | `eviction.sweeps_run` | counter | `tier`, `outcome` = idle, planned, no_target | Sweeps that found work, or found no server to send it to | P1 |
-| Eviction | `eviction.keys_selected`, `eviction.bytes_selected` | counter | `tier`, `cache_salt` (explicit quotas only) | Keys and bytes picked for eviction | P1 |
-| Eviction | `eviction.keys_skipped` | counter | `tier`, `reason` = pinned, unreachable, stale | Keys passed over: pinned; every copy on a server that left; or nothing holds it any more | P1 |
-| Eviction | `eviction.delete_requests_sent` | counter | `tier`, `target` = any_server, owner; `result` = ok, error | Deletes sent, to any server (shared pool) or to the server holding the copy | P1 |
-| Eviction | `eviction.delete_requests_skipped` | counter | `tier`, `reason` = owner_left, no_server | Deletes not sent: the owner left mid-cycle, or no server is registered | P1 |
-| Eviction | `eviction.delete_requests_in_flight` | gauge | | Deletes not yet answered | P1 |
-| Eviction | `eviction.lru_keys_tracked` | gauge | `tier` | Keys in each tier's eviction LRU | P1 |
-| Eviction | `eviction.tenants_over_watermark` | gauge | `tier` | Tenants due for eviction now | P1 |
-| Eviction | `quota.tenant_bytes_used`, `quota.tenant_bytes_limit` | gauge | `tier`, `cache_salt` (explicit quotas only; the rest roll up to one series) | Headroom per tenant | P1 |
-| Eviction | `pins.keys_pinned` | gauge | | Keys that cannot be evicted from L2 | P1 |
 | Prefetch | `prefetch.requests_submitted` | counter | `result` = submitted, noop, unknown_server, server_error | Prefetches asked for, and why some never started: too short to fill a chunk, server not registered, server refused or unreachable | P1 |
 | Prefetch | `prefetch.chunks_requested_per_request` | histogram | | How big each prefetch is | P1 |
 | Prefetch | `prefetch.submit_duration_seconds` | histogram | | Time for the mp server to accept a prefetch | P1 |
@@ -241,24 +228,17 @@ metrics and gets the same catch-and-continue as the coordinator's own loops.
 | Prefetch | `prefetch.status_polls` | counter | `result` = pending, completed, unknown_request, server_error | Polling load. `unknown_request` means the server lost the job (restart) or it was already collected | P1 |
 | Prefetch | `prefetch.requests_abandoned` | counter | | Submitted but never polled to completion within 10 minutes: the caller gave up, or the server left | P1 |
 
-What each eviction controller emits:
-
-| Label value | Built-in `FleetEvictionController` | Private `EvictionController` |
-| --- | --- | --- |
-| `tier` | `l2` | `l1`, `l2` |
-| `eviction.keys_skipped` `reason` | `pinned` | `pinned`, `unreachable`, `stale` |
-| `eviction.delete_requests_sent` `target` | `any_server` | `any_server` (shared pool), `owner` (local L2, L1) |
-| `eviction.delete_requests_skipped` `reason` | `no_server` | `owner_left`, `no_server` |
-
-The metadata rule applies to both: if saving a pin or quota fails, the endpoint
-undoes the change and returns 503. The private controller's `/quota` and
-`/cache/pins` handlers need the same change as the built-in ones.
+The metadata rule: if saving a pin or quota fails, the endpoint undoes the
+change and returns 503. A controller loaded from a package that serves
+`/quota` or `/cache/pins` needs the same.
 
 **Prefetch tracking.** The coordinator only relays prefetches today, so it
 cannot time them. To measure duration, in-flight and abandoned prefetches, it
-keeps a small in-memory table: `(instance_id, request_id)` → submit time and
-keys requested. An entry leaves on the first completed poll, a 404, the server
-leaving, or after 10 minutes (counted as abandoned). The table is as big as the
+keeps a small in-memory table: `(instance_id, request_id)` → submit time. An
+entry leaves on the first completed poll, a 404, or after 10 minutes (counted
+as abandoned; a server that left ends up here, since its prefetches are never
+polled to completion). Keys requested and found come from the completed
+poll. The table is as big as the
 number of prefetches in flight and is not checkpointed; a coordinator restart
 forgets in-flight prefetches without counting them.
 
@@ -276,8 +256,13 @@ The mp server sees that, and can report it as `lmcache_mp.prefetch_keys_used`.
 | `checkpoint_file.restored_on_start` | gauge | `outcome` = cold, restored, ignored | 1 for what happened at startup |
 | `metadata_file.writes` | counter | `result` = ok, error | Pin and quota changes not saved |
 
+`save_checkpoint` reports each write's result, phase timings and size, and
+`load_checkpoint` what startup did; a `CheckpointMonitor` keeps them for the
+metrics. A failed periodic write also fails that pass of the `checkpoint`
+background loop, so the loop metrics and `/status` show it.
+
 A failed metadata write undoes the change and returns 503, so the caller knows
-and can retry safely. Today it returns 200 and the change is lost on restart.
+and can retry safely.
 
 ### HTTP (P2)
 
@@ -300,7 +285,7 @@ check.
 
 ## 4. Alerts
 
-Thirteen alerts cover the three questions plus the basics. **Page** means wake
+Eleven alerts cover the three questions plus the basics. **Page** means wake
 someone up: the coordinator is giving wrong answers or has stopped acting.
 **Ticket** means look at it today. Thresholds are starting points; they ship as
 an example Prometheus rules file. Names leave out the prefix, as in section 3.
@@ -318,8 +303,6 @@ an example Prometheus rules file. Names leave out the prefix, as in section 3.
 | Event loop stalled | `rate(event_loop_blocked_seconds_total[5m]) > 0.1` (stalled more than 10% of the time) | Ticket | P0 | `checkpoint_file_write_duration_seconds`, `/events` load |
 | Checkpoint stale | `time() - checkpoint_file_last_write_timestamp_seconds > 600` | Ticket | P1 | `/status` checkpoint `last_error`, disk |
 | Pin or quota not saved | `increase(metadata_file_writes_total{result="error"}[1h]) > 0` | Ticket | P1 | Disk at the metadata path (callers already got a 503) |
-| Evictions failing | `rate(eviction_delete_requests_sent_total{result="error"}[10m]) > 0` | Ticket | P1 | Target mp server reachable; its `DELETE /cache/objects` |
-| Eviction not catching up | `eviction_tenants_over_watermark > 0` for 30 min | Ticket | P1 | `eviction_keys_skipped_total` by `reason`: `unreachable` means copies on servers that left; deletes sent to the wrong server (built-in controller on local L2) also look like this |
 
 Right after a cold start the coordinator has missed every server's history.
 `event_batches_missing` does not count a stream's first batch, so "Events being
@@ -359,7 +342,7 @@ Three steps, each one or more small PRs. Tests read public state only:
 | Step | Scope | Tests |
 | --- | --- | --- |
 | P0 | `lmcache_coordinator.` names and the rename of the two existing gauges; `dropped_events` on each batch, counted by the mp server; ingest counters and per-server gauges; consumer errors and apply time; running totals in the key directory and blend index so gauges never walk them; Kafka lag, partitions, bad records; loop watchdog and the catch-and-continue fix; controller up; event-loop blocked time; event delivery delay; `/status`; example alert rules | `test_event_gate.py`, `test_event_broadcaster.py`, `test_kafka_event_source.py`, `test_kafka_event_sink.py`, `test_cache_events.py`, `test_health.py`, `test_observability.py`, `test_metrics_api.py` |
-| P1 | View and controller metrics (registry, directory, blend, usage, eviction, quota, pins, prefetch); checkpoint metrics; if P0 shows a blocked event loop (`event_loop.blocked_seconds` rate above 0.05, i.e. stalled more than 5% of the time), move `POST /events` ingest to a worker thread; metric name constants exported for private controllers, and the private `EvictionController` emitting the same eviction metrics (in coordinator-controllers, released against the same LMCache version); metadata write failures undo the change and return 503 | `persistence/` tests, `test_eviction_controller.py`, `test_quota_api.py`, `test_registry.py` |
+| P1 | View and controller metrics (registry, directory, blend, usage, prefetch); checkpoint metrics; if P0 shows a blocked event loop (`event_loop.blocked_seconds` rate above 0.05, i.e. stalled more than 5% of the time), move `POST /events` ingest to a worker thread; metadata write failures undo the change and return 503 | `persistence/` tests, `test_eviction_controller.py`, `test_quota_api.py`, `test_registry.py` |
 | P2 | HTTP server and outbound metrics; tracing once trace context exists | `test_metrics_api.py`, `test_directory_api.py`, `test_cache_api.py` |
 
 Components keep plain running totals and `stats()` snapshots and create no
