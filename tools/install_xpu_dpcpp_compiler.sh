@@ -19,7 +19,7 @@ The script preserves the detected runtime and does not upgrade installed
 packages. It may install compiler-required support packages.
 
 Usage:
-  sudo env PYTHON="$(command -v python)" bash .buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh
+  sudo env PYTHON="$(command -v python)" bash tools/install_xpu_dpcpp_compiler.sh
 
 After installation, load oneAPI in each shell before building:
   source /opt/intel/oneapi/setvars.sh

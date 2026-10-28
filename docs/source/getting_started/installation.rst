@@ -101,7 +101,8 @@ runtime, see :doc:`compatibility` before installing.
                     .. tab-item:: Intel XPU
 
                         The Intel XPU wheel is ABI-matched to the upstream
-                        ``vllm/vllm-openai-xpu:v0.26.0`` image (torch 2.12.0+xpu and oneAPI/SYCL).
+                        ``vllm/vllm-openai-xpu:v0.32.0`` image (torch 2.14.0+xpu
+                        and oneAPI/SYCL runtime 2026.1.1).
                         It is published to a dedicated
                         `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
 
@@ -111,9 +112,9 @@ runtime, see :doc:`compatibility` before installing.
                         .. code-block:: bash
 
                             docker run -it --device /dev/dri --shm-size=4g \
-                                --entrypoint bash vllm/vllm-openai-xpu:v0.26.0
+                                --entrypoint bash vllm/vllm-openai-xpu:v0.32.0
 
-                            VERSION=0.5.3  # replace with target release
+                            VERSION=0.5.7  # use an XPU release built for vLLM 0.32.0
                             pip install lmcache==${VERSION}+xpu --no-deps \
                                 --no-index \
                                 --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-xpu
@@ -349,19 +350,32 @@ runtime, see :doc:`compatibility` before installing.
 
                     .. tab-item:: Intel XPU
 
+                        Build in the Python environment that already provides vLLM,
+                        XPU torch, and the matching oneAPI/SYCL runtime. The upstream
+                        runtime image does not include the DPC++ compiler. If ``icpx``
+                        is missing, the helper below installs a compiler matching the
+                        installed runtime without upgrading it. Run the helper as root
+                        in the container, or with ``sudo`` on a host.
+
                         .. code-block:: bash
+
+                            docker run -it --device /dev/dri --shm-size=4g \
+                                --entrypoint bash vllm/vllm-openai-xpu:v0.32.0
 
                             git clone https://github.com/LMCache/LMCache.git
                             cd LMCache
 
-                            uv venv --python 3.12
-                            source .venv/bin/activate
+                            python3 -m pip install -r requirements/build.txt
+                            if [ -f /opt/intel/oneapi/setvars.sh ]; then
+                                source /opt/intel/oneapi/setvars.sh
+                            fi
+                            if ! command -v icpx >/dev/null 2>&1; then
+                                PYTHON="$(command -v python3)" \
+                                    bash tools/install_xpu_dpcpp_compiler.sh
+                                source /opt/intel/oneapi/setvars.sh
+                            fi
 
-                            # Need to install these packages manually to avoid build isolation
-                            uv pip install -r requirements/build.txt
-
-                            # Build LMCache with SYCL backend.
-                            BUILD_WITH_SYCL=1 uv pip install --no-build-isolation -e .
+                            BUILD_WITH_SYCL=1 python3 -m pip install --no-build-isolation -e .
 
                     .. tab-item:: MetaX MACA
 
@@ -471,7 +485,7 @@ runtime, see :doc:`compatibility` before installing.
 
                 .. code-block:: bash
 
-                    docker pull vllm/vllm-openai-xpu:v0.26.0
+                    docker pull vllm/vllm-openai-xpu:v0.32.0
 
         The official CUDA vLLM and standalone images default to the non-root
         ``lmcache`` user (uid 1000). Mount the Hugging Face cache at

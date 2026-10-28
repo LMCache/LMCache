@@ -68,6 +68,18 @@ _path_filter_should_skip_for_pipeline() {
         return 1
     fi
 
+    # Only XPU builds use this compiler; other known suites do not depend on it.
+    if [[ "$changed_file" == tools/install_xpu_dpcpp_compiler.sh ]]; then
+        case "$pipeline_kind" in
+            unit|integration|correctness|multiprocess|comprehensive|blend|amd|musa|rbln|neuron)
+                return 0
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    fi
+
     case "$pipeline_kind" in
         unit)
             case "$changed_file" in
