@@ -306,3 +306,20 @@ Retrieve:
 Notes:
 - SHM pool metadata is computed once in `MPCacheServerContext` init, not per registration.
 - `chunk_indices` optimization reduces unnecessary gather/copy work on partial cache hits.
+
+### 3.4 Transfer observability
+
+The server publishes `MP_STORE_SUBMITTED` / `MP_STORE_START` after a store
+prepare returns buffers, and `MP_STORE_END` when its commit finishes. Retrieve
+uses the corresponding events between a successful prepare and commit. Empty
+SHM stores and retrieve misses do not start transfers because the worker does
+not commit them. Failed commits and abandoned transfers (unregister, reaping,
+or shutdown) close their events with zero bytes and chunks.
+
+These are CPU-timestamped worker-handoff windows: they include worker
+gather/scatter, RPC and serialization, not pure device DMA. `device="cpu"`
+names the server endpoint, and `transfer_mode="engine_driven"` identifies
+the timing contract. Byte counts use SHM slot lengths or registered inline
+layouts, excluding serialization metadata. Each operation has a unique
+`transfer_key`, so simultaneous transfers from workers serving the same request
+cannot overwrite the throughput subscriber's timing state.

@@ -3,6 +3,7 @@
 
 # Standard
 from dataclasses import dataclass
+from typing import Any
 import threading
 import time
 
@@ -17,6 +18,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
+from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     PrepareRetrieveResponse,
@@ -69,7 +71,8 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
     Owns non-GPU context registrations and provides handlers for
     register, unregister, prepare/commit store, and prepare/commit retrieve
-    of CPU-serialized KV caches.
+    of CPU-serialized KV caches. Publishes MP transfer events from successful
+    preparation through commit, including worker copies and RPC overhead.
 
     Args:
         ctx: The shared engine context.
@@ -101,6 +104,10 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         ] = {}
         self._pending_shm_lock = threading.Lock()
         self._shm_pool_info: ShmPoolInfo = self._ctx.shm_pool_info
+        # Includes request_id because IPCCacheServerKey equality excludes it.
+        self._pending_transfers: dict[
+            tuple[EventType, int, str, IPCCacheServerKey], Event
+        ] = {}
 
     @property
     def context(self) -> MPCacheServerContext:
@@ -134,10 +141,14 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         }
 
     def close(self) -> None:
-        """Release resources owned by this module."""
+        """Release registrations and close pending transfer observations."""
         with self._lock:
             self._engine_driven_contexts.clear()
             self._strategies.clear()
+            pending = list(self._pending_transfers.values())
+            self._pending_transfers.clear()
+        for event in pending:
+            self._publish_transfer_end(event, False)
 
     def touch_instance(self, instance_id: int) -> None:
         """Refresh the worker's last-seen time and mark it ping-proven.
@@ -234,13 +245,18 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     def _release_entry(self, instance_id: int, entry: EngineDrivenContextEntry) -> None:
         """Release resources for a popped entry (run outside the lock).
 
-        Sweeps the instance's pending SHM transfers and unregisters its
-        layout descriptor.
+        Closes pending transfer observations, sweeps the instance's pending
+        SHM transfers and unregisters its layout descriptor.
 
         Args:
             instance_id: The popped instance ID.
             entry: The popped entry.
         """
+        with self._lock:
+            stale = [k for k in self._pending_transfers if k[1] == instance_id]
+            pending = [self._pending_transfers.pop(k) for k in stale]
+        for event in pending:
+            self._publish_transfer_end(event, False)
         with self._pending_shm_lock:
             stale_writes = [k for k in self._pending_shm_writes if k[0] == instance_id]
             stale_reads = [k for k in self._pending_shm_reads if k[0] == instance_id]
@@ -497,7 +513,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         instance_id: int,
         skipped_chunks: tuple[tuple[int, ...], ...] = (),
     ) -> PrepareStoreResponse:
-        """Prepare a store operation.
+        """Prepare a store and begin observing a non-empty worker transfer.
 
         Args:
             key: Cache key for the token range to store.
@@ -541,6 +557,15 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["store_start_time"] = time.perf_counter()
+        self._start_transfer(
+            key,
+            instance_id,
+            entry,
+            EventType.MP_STORE_START,
+            response.context,
+            group_keys,
+            skipped_chunks,
+        )
         return response
 
     @request_handler(
@@ -554,7 +579,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         instance_id: int,
         cpu_data: bytes,
     ) -> bool:
-        """Commit serialized CPU chunks to storage.
+        """Commit CPU chunks and publish completion, including failed commits.
 
         Args:
             key: Cache key for the token range to store.
@@ -571,14 +596,18 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         entry, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("store_start_time", None)
-        result = strategy.commit_store(
-            key=key,
-            instance_id=instance_id,
-            cpu_data=cpu_data,
-            context=entry.metadata,
-            resolve_obj_keys=self._resolve_single_group_obj_keys,
-            group_keys=self._group_keys_for(entry, key),
-        )
+        result = False
+        try:
+            result = strategy.commit_store(
+                key=key,
+                instance_id=instance_id,
+                cpu_data=cpu_data,
+                context=entry.metadata,
+                resolve_obj_keys=self._resolve_single_group_obj_keys,
+                group_keys=self._group_keys_for(entry, key),
+            )
+        finally:
+            self._finish_transfer(key, instance_id, EventType.MP_STORE_START, result)
         if st is not None and result:
             num_tokens = (
                 len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
@@ -600,7 +629,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         key: IPCCacheServerKey,
         instance_id: int,
     ) -> PrepareRetrieveResponse:
-        """Retrieve prefetched chunks and return serialized CPU tensors.
+        """Prepare prefetched chunks and begin observing a successful transfer.
 
         Args:
             key: Cache key for the token range to retrieve.
@@ -636,6 +665,15 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["retrieve_start_time"] = time.perf_counter()
+        if response.success:
+            self._start_transfer(
+                key,
+                instance_id,
+                entry,
+                EventType.MP_RETRIEVE_START,
+                response.context,
+                group_keys,
+            )
         return response
 
     @request_handler(
@@ -648,11 +686,11 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         key: IPCCacheServerKey,
         instance_id: int,
     ) -> bool:
-        """Finalize a retrieve operation.
+        """Finalize a retrieve and publish its transfer completion.
 
         Args:
-            key: Cache key (unused for inline transfer).
-            instance_id: Worker instance identifier (unused for inline transfer).
+            key: Cache key identifying the prepared retrieve.
+            instance_id: Worker instance identifier.
 
         Returns:
             Always ``True``.
@@ -660,7 +698,11 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         _, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("retrieve_start_time", None)
-        result = strategy.commit_retrieve(key=key, instance_id=instance_id)
+        result = False
+        try:
+            result = strategy.commit_retrieve(key=key, instance_id=instance_id)
+        finally:
+            self._finish_transfer(key, instance_id, EventType.MP_RETRIEVE_START, result)
         if st is not None:
             num_tokens = (
                 len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
@@ -671,3 +713,130 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 time.perf_counter() - st,
             )
         return result
+
+    def _start_transfer(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        entry: EngineDrivenContextEntry,
+        event_type: EventType,
+        context: dict[str, Any],
+        group_keys: list[list[ObjectKey]] | None,
+        skipped_chunks: tuple[tuple[int, ...], ...] = (),
+    ) -> None:
+        """Observe the worker handoff after prepare, through its commit.
+
+        CPU timestamps include RPC, worker gather/scatter and serialization,
+        not just device DMA. The device label names the server's CPU endpoint.
+        SHM responses report only reserved slots; empty stores need no commit.
+
+        Args:
+            key: Request and token range identifying the transfer.
+            instance_id: Registered worker instance identifier.
+            entry: Worker metadata defining inline object layouts.
+            event_type: Store or retrieve START event type.
+            context: Prepare response context, including slots for SHM.
+            group_keys: Per-group object keys, already windowed for retrieve,
+                or ``None`` for the single-group token range.
+            skipped_chunks: Validated per-group chunk positions omitted by store.
+        """
+        slots = context.get("slots")
+        if slots is not None:
+            # SHM Path: Slots already exclude skipped chunks and describe
+            # reserved bytes.
+            count = len(slots)
+            total_bytes = sum(slot["length"] for slot in slots)
+        else:
+            # Inline Path: Derive payload bytes from unskipped group
+            # counts and layouts, using the already-windowed keys for retrieve.
+            counts = (
+                [len(keys) for keys in group_keys]
+                if group_keys is not None
+                else [(key.end - key.start) // self._ctx.chunk_size]
+            )
+            if skipped_chunks:
+                counts = [
+                    count - len(set(skips))
+                    for count, skips in zip(counts, skipped_chunks, strict=True)
+                ]
+            layouts = entry.metadata.group_layouts or [entry.metadata.layout_desc]
+            count = sum(counts)
+            total_bytes = sum(
+                n
+                * sum(
+                    shape.numel() * dtype.itemsize
+                    for shape, dtype in zip(layout.shapes, layout.dtypes, strict=True)
+                )
+                for n, layout in zip(counts, layouts, strict=True)
+            )
+        if count == 0:
+            return
+        count_name = (
+            "stored_count"
+            if event_type == EventType.MP_STORE_START
+            else "retrieved_count"
+        )
+        event = Event(
+            event_type=event_type,
+            session_id=key.request_id,
+            metadata={
+                "device": "cpu",
+                "engine_id": instance_id,
+                "model_name": entry.model_name,
+                "cache_salt": key.cache_salt,
+                "transfer_key": next_transfer_key(key.request_id),
+                "transfer_mode": "engine_driven",
+                "total_bytes": total_bytes,
+                "num_tokens": key.end - key.start,
+                count_name: count,
+            },
+        )
+        submitted = (
+            EventType.MP_STORE_SUBMITTED
+            if event_type == EventType.MP_STORE_START
+            else EventType.MP_RETRIEVE_SUBMITTED
+        )
+        with self._lock:
+            self._pending_transfers[(event_type, instance_id, key.request_id, key)] = (
+                event
+            )
+            self._ctx.event_bus.publish(
+                Event(submitted, session_id=key.request_id, metadata={"device": "cpu"})
+            )
+            self._ctx.event_bus.publish(event)
+
+    def _finish_transfer(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        start_type: EventType,
+        success: bool,
+    ) -> None:
+        """Finish a prepared transfer, including failed commits."""
+        with self._lock:
+            event = self._pending_transfers.pop(
+                (start_type, instance_id, key.request_id, key), None
+            )
+        if event is not None:
+            self._publish_transfer_end(event, success)
+
+    def _publish_transfer_end(self, start: Event, success: bool) -> None:
+        """Close a transfer; failed or abandoned transfers report zero volume."""
+        metadata = start.metadata.copy()
+        if not success:
+            for name in (
+                "total_bytes",
+                "num_tokens",
+                "stored_count",
+                "retrieved_count",
+            ):
+                if name in metadata:
+                    metadata[name] = 0
+        end_type = (
+            EventType.MP_STORE_END
+            if start.event_type == EventType.MP_STORE_START
+            else EventType.MP_RETRIEVE_END
+        )
+        self._ctx.event_bus.publish(
+            Event(end_type, session_id=start.session_id, metadata=metadata)
+        )

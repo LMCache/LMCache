@@ -17,6 +17,7 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
@@ -1923,6 +1924,135 @@ def test_server_store_and_retrieve_cpu_chunks(
     assert torch.allclose(recovered_chunks[0], payload)
 
 
+@pytest.mark.parametrize("use_shm", [False, True], ids=["inline", "shm"])
+def test_server_publishes_transfer_events(
+    server_module_factory: ServerModuleFactory,
+    use_shm: bool,
+) -> None:
+    """Prepare/commit pairs report payload bytes and successful object counts."""
+    tensors = [torch.ones(2, 2, 8, 16) for _ in range(2)]
+    objects = []
+    for index, tensor in enumerate(tensors):
+        memory_obj = MagicMock()
+        memory_obj.tensor = tensor
+        memory_obj.shm_offset = index * tensor.nbytes
+        memory_obj.shm_byte_length = tensor.nbytes
+        objects.append(memory_obj)
+    keys = ["obj0", "obj1"]
+    storage = MagicMock()
+    storage.reserve_write.return_value = dict(zip(keys, objects, strict=True))
+    storage.unsafe_read.return_value = (keys, objects)
+
+    @contextmanager
+    def read_prefetched(
+        _keys: object, l1_owners: object = None
+    ) -> Iterator[list[MagicMock]]:
+        yield objects
+
+    storage.read_prefetched_results.side_effect = read_prefetched
+    module, _, _, ctx = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="events" if use_shm else "", pool_size=8192
+        ),
+        object_keys=keys,
+        mock_storage=storage,
+    )
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=2)
+    )
+    key = _default_key(tokens=16)
+    events: list[Event] = []
+    with patch.object(ctx.event_bus, "publish", side_effect=events.append):
+        module.prepare_store(key, 2)
+        assert module.commit_store(key, 2, b"" if use_shm else encode_tensors(tensors))
+        assert module.prepare_retrieve(key, 2).success
+        assert module.commit_retrieve(key, 2)
+    assert [event.event_type for event in events] == [
+        EventType.MP_STORE_SUBMITTED,
+        EventType.MP_STORE_START,
+        EventType.MP_STORE_END,
+        EventType.MP_RETRIEVE_SUBMITTED,
+        EventType.MP_RETRIEVE_START,
+        EventType.MP_RETRIEVE_END,
+    ]
+    for start, end, count_name in (
+        (events[1], events[2], "stored_count"),
+        (events[4], events[5], "retrieved_count"),
+    ):
+        assert start.session_id == end.session_id == key.request_id
+        assert start.metadata["transfer_key"] == end.metadata["transfer_key"]
+        assert end.metadata[count_name] == 2
+        assert end.metadata["total_bytes"] == sum(tensor.nbytes for tensor in tensors)
+        assert end.metadata["num_tokens"] == 16
+        assert end.metadata["engine_id"] == 2
+        assert end.metadata["device"] == "cpu"
+    assert events[1].metadata["transfer_key"] != events[4].metadata["transfer_key"]
+
+
+@pytest.mark.parametrize("finish", ["invalid_commit", "unregister", "reap", "close"])
+def test_server_closes_failed_transfer_events(
+    server_module_factory: ServerModuleFactory,
+    finish: str,
+) -> None:
+    """Failed commits and worker teardown close pending spans without volume."""
+    module, _, _, ctx = server_module_factory(
+        storage_manager_config=_make_storage_manager_config()
+    )
+    module.register_kv_cache_engine_driven_context(_default_register_payload())
+    key = _default_key()
+    events: list[Event] = []
+    with patch.object(ctx.event_bus, "publish", side_effect=events.append):
+        module.prepare_store(key, 1)
+        if finish == "invalid_commit":
+            with pytest.raises(msgspec.DecodeError):
+                module.commit_store(key, 1, b"invalid")
+        elif finish == "unregister":
+            module.unregister_kv_cache(1)
+        elif finish == "reap":
+            module.touch_instance(1)
+            assert module.reap_stale_instances(0.0, 0.0) == [1]
+        else:
+            module.close()
+    assert [event.event_type for event in events] == [
+        EventType.MP_STORE_SUBMITTED,
+        EventType.MP_STORE_START,
+        EventType.MP_STORE_END,
+    ]
+    assert events[-1].metadata["total_bytes"] == 0
+    assert events[-1].metadata["stored_count"] == 0
+
+
+def test_server_pairs_interleaved_worker_transfers(
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Workers sharing a request retain distinct transfer keys through commit."""
+    storage = MagicMock()
+    storage.reserve_write.return_value = {}
+    module, _, _, ctx = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(),
+        mock_storage=storage,
+    )
+    for instance_id in (1, 2):
+        module.register_kv_cache_engine_driven_context(
+            _default_register_payload(instance_id)
+        )
+    key = _default_key()
+    data = encode_tensors([torch.ones(2, 2, 8, 16)])
+    events: list[Event] = []
+    with patch.object(ctx.event_bus, "publish", side_effect=events.append):
+        for instance_id in (1, 2):
+            module.prepare_store(key, instance_id)
+        for instance_id in (1, 2):
+            assert module.commit_store(key, instance_id, data)
+    starts = [event for event in events if event.event_type == EventType.MP_STORE_START]
+    ends = [event for event in events if event.event_type == EventType.MP_STORE_END]
+    assert len(starts) == len(ends) == 2
+    assert starts[0].metadata["transfer_key"] != starts[1].metadata["transfer_key"]
+    for start, end in zip(starts, ends, strict=True):
+        assert start.metadata["engine_id"] == end.metadata["engine_id"]
+        assert start.metadata["transfer_key"] == end.metadata["transfer_key"]
+
+
 def test_server_commit_store_rejects_untyped_payload_before_storage_access(
     stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
@@ -1961,7 +2091,7 @@ def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
     mock_session = MagicMock()
     mock_session.get_hashes.return_value = [b"h"]
 
-    module, _, _, _ = server_module_factory(
+    module, _, _, ctx = server_module_factory(
         storage_manager_config=_make_storage_manager_config(
             shm_name="lmcache_test_pool", pool_size=1024
         ),
@@ -1972,12 +2102,15 @@ def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
         _default_register_payload(instance_id=3)
     )
     key = _default_key()
-    prepare_response = module.prepare_store(key, 3)
-    # Server signals all-cached via empty slots list (not missing "slots" key).
-    assert prepare_response.context == {"slots": [], "chunk_indices": []}
+    with patch.object(ctx.event_bus, "publish") as publish:
+        prepare_response = module.prepare_store(key, 3)
+        # Server signals all-cached via empty slots list (not missing "slots" key).
+        assert prepare_response.context == {"slots": [], "chunk_indices": []}
 
-    # commit_store without a matching prepare must fail (no entry leaked).
-    assert module.commit_store(key, 3, b"") is False
+        # commit_store without a matching prepare must fail (no entry leaked).
+        assert module.commit_store(key, 3, b"") is False
+        module.unregister_kv_cache(3)
+    publish.assert_not_called()
 
 
 def test_server_prepare_store_releases_unused_reserved_write_locks(
