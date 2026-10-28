@@ -168,6 +168,45 @@ def test_update_config_from_env_error_handling():
     del os.environ["LMCACHE_CONTROLLER_PULL_URL"]
 
 
+def test_from_env_invalid_value_falls_back_to_default():
+    os.environ["LMCACHE_CHUNK_SIZE"] = "invalid_number"
+    try:
+        config = LMCacheEngineConfig.from_env()
+        assert config.chunk_size == 256
+    finally:
+        del os.environ["LMCACHE_CHUNK_SIZE"]
+
+
+def test_from_file_invalid_value_falls_back_to_default(tmp_path: Path):
+    config_path = tmp_path / "lmcache.yaml"
+    config_path.write_text("chunk_size: invalid_number\n")
+    config = LMCacheEngineConfig.from_file(config_path)
+    assert config.chunk_size == 256
+
+
+def test_from_file_empty_value_falls_back_to_default(tmp_path: Path):
+    # A key present without a value (e.g. the value was commented out)
+    # parses as None and must not override the non-nullable default.
+    config_path = tmp_path / "lmcache.yaml"
+    config_path.write_text(
+        "chunk_size:\nlocal_cpu:\nmax_local_cpu_size:\n",
+    )
+    config = LMCacheEngineConfig.from_file(config_path)
+    assert config.chunk_size == 256
+    assert config.local_cpu is True
+    assert config.max_local_cpu_size == 5.0
+    config.validate()
+
+
+def test_from_file_explicit_null_preserved_for_optional_field(tmp_path: Path):
+    # remote_serde is Optional[str]: an explicit null must stay None
+    # even though the field's default is "naive".
+    config_path = tmp_path / "lmcache.yaml"
+    config_path.write_text("remote_serde: null\n")
+    config = LMCacheEngineConfig.from_file(config_path)
+    assert config.remote_serde is None
+
+
 @pytest.mark.parametrize("use_mla", [True, False])
 def test_get_lookup_server_worker_ids(use_mla):
     config = LMCacheEngineConfig.from_defaults()
