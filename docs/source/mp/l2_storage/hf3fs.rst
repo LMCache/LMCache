@@ -117,17 +117,22 @@ The **BUILD_HF3FS** environment variable controls compilation:
 **In-Memory Key Buffer**
 
 When ``enable_key_buffer`` is ``True`` (the default), the connector maintains an
-in-memory cache of all key filenames. Lookup operations respond from the cache instead
-of issuing remote 3FS metadata calls. This dramatically reduces lookup latency.
+in-memory cache of key filenames. Lookups of cached keys respond without issuing
+remote 3FS metadata calls. This dramatically reduces lookup latency.
 
 The cache is built by scanning ``base_paths`` at startup and grows with every
 store. A key that is not in the cache costs one 3FS metadata call, and is added
 to the cache if its file exists. This keeps chunks written by other LMCache
 instances that share the same ``base_paths`` visible after startup.
 
+A key deleted by another instance stays in the cache until this instance
+restarts, so a lookup can report it as present and the load of that key then
+fails.
+
 - **Trade-offs**
-   - **Enable** for workloads with many concurrent lookups (prefetch,batch exists). 
-  The latency savings outweigh the memory cost.
+   - **Enable** for workloads with many concurrent lookups of stored keys
+     (prefetch, batch exists). Lookups of keys not in the cache cost the same
+     3FS metadata call as with the buffer disabled.
    - **Disable**  when memory is constrained.
 
 To disable the buffer cache:
