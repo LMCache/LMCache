@@ -1492,9 +1492,10 @@ class LMCacheMPWorkerAdapter:
         # Registration and recovery work in flight on req_client. shutdown()
         # waits, within a bound, for it to reach zero before unregistering
         # and closing the client. The work checks the flag before each server
-        # call, so after shutdown begins it makes at most the call already in
-        # flight plus one discarding UNREGISTER. Heartbeat pings are not
-        # tracked here.
+        # call. A check and its call are not atomic, so after shutdown begins
+        # the work makes at most one call it had already passed the check
+        # for, plus one discarding UNREGISTER. Heartbeat pings are not tracked
+        # here.
         self._client_work_in_flight = 0
         self._client_work_done = threading.Condition(self._heartbeat_lock)
         # One registration at a time, so a registration can tell whether a
@@ -2575,8 +2576,8 @@ class LMCacheMPWorkerAdapter:
         # stop() gives up joining after a few seconds; registration or
         # recovery still running then must finish before req_client closes.
         # That work checks the flag before each server call, so it makes at
-        # most the call in flight now, then one discarding UNREGISTER: two
-        # server waits.
+        # most one more call it had already passed the check for, then one
+        # discarding UNREGISTER: two server waits.
         drain_timeout = 2 * self._mq_timeout
         with self._client_work_done:
             if not self._client_work_done.wait_for(

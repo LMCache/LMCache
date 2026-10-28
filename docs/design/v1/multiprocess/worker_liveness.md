@@ -194,8 +194,9 @@ then on, registration and recovery refuse to start, and a registration already i
 flight discards its new context instead of publishing it. `shutdown()` then stops
 the heartbeat outside the lock and waits for registration and recovery work in
 flight to finish before sending UNREGISTER and closing the client. That work
-checks the flag before each server call, so after shutdown begins it makes at
-most the call already in flight plus one discarding UNREGISTER. The wait is
+checks the flag before each server call; a check and its call are not atomic, so
+after shutdown begins the work makes at most one call it had already passed the
+check for, plus one discarding UNREGISTER. The wait is
 therefore bounded at twice `mq_timeout`. Heartbeat pings are not tracked: a ping
 still in flight when the heartbeat's join gives up can fail on the closed client,
 as before. Past

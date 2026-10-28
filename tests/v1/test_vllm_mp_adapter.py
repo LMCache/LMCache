@@ -1914,6 +1914,13 @@ def test_registration_publishes_only_a_registered_context(
         old_ctx = contexts[-1]
     published_during_register: list[object] = []
     shutdown_thread: list[threading.Thread] = []
+    thread_errors: list[BaseException] = []
+
+    def shutdown() -> None:
+        try:
+            adapter.shutdown()
+        except BaseException as exc:  # surfaced to the test below
+            thread_errors.append(exc)
 
     def mint_next(*_args, **_kwargs) -> MagicMock:
         new_ctx = MagicMock(name="new_ctx")
@@ -1923,12 +1930,13 @@ def test_registration_publishes_only_a_registered_context(
             if during_register == "shutdown":
                 # The real shutdown() waits for this registration, so it
                 # runs on its own thread; give it time to set its flag.
-                thread = threading.Thread(target=adapter.shutdown)
+                thread = threading.Thread(target=shutdown)
                 thread.start()
                 shutdown_thread.append(thread)
-                deadline = time.time() + 5.0
-                while not adapter._shutdown_requested and time.time() < deadline:
-                    time.sleep(0.01)
+                deadline = time.monotonic() + 10.0
+                while not adapter._shutdown_requested and time.monotonic() < deadline:
+                    time.sleep(0.001)
+                assert adapter._shutdown_requested
             elif during_register == "timeout":
                 raise TimeoutError
 
@@ -1948,6 +1956,7 @@ def test_registration_publishes_only_a_registered_context(
     for thread in shutdown_thread:
         thread.join(timeout=10.0)
         assert not thread.is_alive()
+    assert thread_errors == []
 
     new_ctx = contexts[-1]
     assert published_during_register == [old_ctx]
