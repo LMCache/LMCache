@@ -1874,17 +1874,20 @@ def test_recover_callback_skips_register_after_stop_requested(
 
 
 @pytest.mark.parametrize(
-    ("first", "during_register", "expect_published"),
+    ("first", "during_register", "expect_published", "expect_unregister"),
     [
         # Re-registration: the old context stays visible until the new one
         # is registered, then the new one is published.
-        (False, None, True),
-        # Re-registration with shutdown arriving mid-registration.
-        (False, "shutdown", False),
-        # First registration (no heartbeat yet) with shutdown arriving.
-        (True, "shutdown", False),
-        # The server's answer times out; it may still have registered.
-        (False, "timeout", False),
+        (False, None, True, False),
+        # Re-registration abandoned by shutdown or a timeout: closed, but not
+        # unregistered, since that would drop the registration the published
+        # context still uses (the server keys it by instance ID).
+        (False, "shutdown", False, False),
+        (False, "timeout", False, False),
+        # First registration abandoned: nothing else holds the instance ID,
+        # and the server may have registered it, so it is unregistered.
+        (True, "shutdown", False, True),
+        (True, "timeout", False, True),
     ],
 )
 def test_registration_publishes_only_a_registered_context(
@@ -1893,12 +1896,12 @@ def test_registration_publishes_only_a_registered_context(
     first: bool,
     during_register: str | None,
     expect_published: bool,
+    expect_unregister: bool,
 ) -> None:
     """A transfer context is published only after the server registers it,
-    so no submission can use an unregistered one. If the real shutdown()
-    runs during registration, first or re-registration, or registration
-    times out, the new context is unregistered and closed instead, and is
-    never published."""
+    so no submission can use an unregistered one. A registration abandoned
+    because shutdown() ran during it, or because it timed out, is closed
+    and never published; it is unregistered only when it was the first."""
     adapter, _req_client, _ = fake_adapter
     contexts = _patch_transfer_context_factory(monkeypatch)
     fake_tensor = MagicMock()
@@ -1910,6 +1913,7 @@ def test_registration_publishes_only_a_registered_context(
         adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
         old_ctx = contexts[-1]
     published_during_register: list[object] = []
+    shutdown_thread: list[threading.Thread] = []
 
     def mint_next(*_args, **_kwargs) -> MagicMock:
         new_ctx = MagicMock(name="new_ctx")
@@ -1917,7 +1921,14 @@ def test_registration_publishes_only_a_registered_context(
         def register(*_a, **_kw) -> None:
             published_during_register.append(adapter.transfer_ctx)
             if during_register == "shutdown":
-                adapter.shutdown()
+                # The real shutdown() waits for this registration, so it
+                # runs on its own thread; give it time to set its flag.
+                thread = threading.Thread(target=adapter.shutdown)
+                thread.start()
+                shutdown_thread.append(thread)
+                deadline = time.time() + 5.0
+                while not adapter._shutdown_requested and time.time() < deadline:
+                    time.sleep(0.01)
             elif during_register == "timeout":
                 raise TimeoutError
 
@@ -1932,18 +1943,72 @@ def test_registration_publishes_only_a_registered_context(
         with pytest.raises(ConnectionError):
             adapter._send_register_kv_caches_request(kv_caches)
     else:
-        adapter._send_register_kv_caches_request(kv_caches)
+        published = adapter._send_register_kv_caches_request(kv_caches)
+        assert published is expect_published
+    for thread in shutdown_thread:
+        thread.join(timeout=10.0)
+        assert not thread.is_alive()
 
     new_ctx = contexts[-1]
     assert published_during_register == [old_ctx]
-    if expect_published:
-        assert adapter.transfer_ctx is new_ctx
-        new_ctx.unregister.assert_not_called()
-        new_ctx.close.assert_not_called()
-    else:
-        assert adapter.transfer_ctx is not new_ctx
-        new_ctx.unregister.assert_called_once_with()
-        new_ctx.close.assert_called_once_with()
+    assert (adapter.transfer_ctx is new_ctx) is expect_published
+    assert new_ctx.unregister.called is expect_unregister
+    assert new_ctx.close.called is not expect_published
+
+
+def test_shutdown_waits_for_registration_before_closing_the_client(
+    fake_adapter, monkeypatch
+) -> None:
+    """shutdown() waits for a registration still in flight to finish, and
+    to discard its context with an UNREGISTER, before closing req_client, so
+    that UNREGISTER is never sent on a closed client. Work that starts after
+    shutdown began is refused."""
+    adapter, req_client, _ = fake_adapter
+    events: list[str] = []
+    in_register = threading.Event()
+    release_register = threading.Event()
+
+    def mint(*_args, **_kwargs) -> MagicMock:
+        ctx = MagicMock(name="first_ctx")
+
+        def register(*_a, **_kw) -> None:
+            in_register.set()
+            assert release_register.wait(timeout=10.0)
+
+        def unregister() -> None:
+            events.append("unregister")
+
+        ctx.register.side_effect = register
+        ctx.unregister.side_effect = unregister
+        return ctx
+
+    monkeypatch.setattr(adapter_mod, "create_transfer_context", mint)
+    req_client.close.side_effect = lambda: events.append("client.close")
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+
+    registrar = threading.Thread(
+        target=adapter._send_register_kv_caches_request,
+        args=({"layer.0": fake_tensor},),
+    )
+    registrar.start()
+    assert in_register.wait(timeout=10.0)
+    stopper = threading.Thread(target=adapter.shutdown)
+    stopper.start()
+    deadline = time.time() + 5.0
+    while not adapter._shutdown_requested and time.time() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.2)
+    assert events == []  # still waiting for the registration
+    assert adapter._send_register_kv_caches_request({"layer.0": fake_tensor}) is False
+
+    release_register.set()
+    registrar.join(timeout=10.0)
+    stopper.join(timeout=10.0)
+
+    assert not registrar.is_alive() and not stopper.is_alive()
+    assert events == ["unregister", "client.close"]
+    assert adapter.transfer_ctx is None
 
 
 def test_register_uses_local_context_when_self_transfer_ctx_nulled(

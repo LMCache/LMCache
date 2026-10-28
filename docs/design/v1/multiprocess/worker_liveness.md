@@ -189,10 +189,19 @@ registration, so it pings throughout an idle spell.
 
 ### 6.3 Shutdown
 
-`shutdown()` stops the heartbeat before sending UNREGISTER, so no stray ping
-lands on a closing client. The heartbeat cycle skips the recover callback and
-`health_event.set()` once stopped, and the callback skips re-registration when a
-stop is already requested — a straggling cycle cannot re-create a ghost context.
+`shutdown()` first sets a shutdown flag under the adapter's heartbeat lock. From
+then on, registration and recovery refuse to start, and a registration already in
+flight discards its new context instead of publishing it. `shutdown()` then stops
+the heartbeat outside the lock and waits, up to `mq_timeout`, for registration and
+recovery work in flight to finish before sending UNREGISTER and closing the
+client. No ping, REGISTER or UNREGISTER is sent on a closed client. The heartbeat
+cycle skips the recover callback and `health_event.set()` once stopped, so a
+straggling cycle cannot re-create a ghost context.
+
+A discarded or failed registration is closed. It is also unregistered only when
+it was the worker's first: on re-registration a context is already published
+under the same instance ID, and the server keys registrations by that ID, so
+unregistering the replacement would drop the registration still in use.
 
 ## 7. Failure Modes
 
