@@ -981,6 +981,32 @@ class TestHf3fsNativeConnector:
         assert _wait_for_completions(reader)[0][3] == [True]
         assert bytes(buf) == data
 
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses permissions")
+    def test_key_buffer_miss_check_error_is_per_key(
+        self, hf3fs_native_client: tuple["LMCacheHf3fsClient", str, str]
+    ) -> None:
+        """A 3FS check error on a buffer miss is a miss for that key only.
+
+        The batch still succeeds, and buffered keys are still found.
+        """
+        client, _, base_paths = hf3fs_native_client
+        own_key = _object_key_to_string(create_object_key(520))
+        absent_key = _object_key_to_string(create_object_key(521))
+        data = bytes(create_memory_obj(512).byte_array)
+        client.submit_batch_set([own_key], [memoryview(data)])
+        assert _wait_for_completions(client)[0][1]
+
+        base_path = Path(base_paths)
+        mode = base_path.stat().st_mode
+        base_path.chmod(0)
+        try:
+            client.submit_batch_exists([own_key, absent_key])
+            completion = _wait_for_completions(client)[0]
+        finally:
+            base_path.chmod(mode)
+        assert completion[1]
+        assert completion[3] == [True, False]
+
     def test_key_buffer_scan_multipath_no_missing(self):
         """Regression: scan_and_build_buffer_ must scan every base_path even
         when there are more base_paths than worker threads.

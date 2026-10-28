@@ -543,6 +543,9 @@ void Hf3fsConnector::do_single_set(WorkerHf3fsConn& conn,
  * base_paths keep writing after this instance's startup scan; a key found
  * that way is added to the buffer so later lookups hit in memory.
  *
+ * A filesystem error (e.g. EACCES, EIO) is reported as a miss for this key
+ * only, so it does not fail the whole batch.
+ *
  * @param conn Connection to use
  * @param key Key to check
  * @return true if key exists, false otherwise
@@ -553,7 +556,13 @@ bool Hf3fsConnector::do_single_exists(WorkerHf3fsConn& conn,
   if (buffer_enabled_ && buffer_contains_(key)) {
     return true;
   }
-  if (!std::filesystem::exists(key_to_path(key))) {
+  std::string file_path = key_to_path(key);
+  std::error_code ec;
+  if (!std::filesystem::exists(file_path, ec)) {
+    if (ec) {
+      fprintf(stderr, "[LMCache HF3FS] Check %s failed: %s\n",
+              file_path.c_str(), ec.message().c_str());
+    }
     return false;
   }
   if (buffer_enabled_) {
