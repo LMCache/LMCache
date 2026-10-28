@@ -1047,8 +1047,9 @@ What it does
 For each sequence in ``[--start, --end)``, the tool runs two passes. Each
 pass reserves request-exclusive KV blocks and releases them when it finishes.
 
-1. **Cold pass** -- ``LOOKUP`` is expected to miss. The benchmark records
-   local per-chunk checksums before ``STORE``.
+1. **Cold pass** -- ``LOOKUP`` is expected to miss. The benchmark fills
+   request blocks with deterministic KV and records local per-chunk checksums
+   before ``STORE``.
 2. **Warm pass** -- ``LOOKUP`` is expected to hit. The benchmark clears the
    allocated destination blocks, retrieves the cached KV, and compares each
    reader's checksums with the cold-pass reference. The two passes may use
@@ -1317,6 +1318,7 @@ Example: MLA + TP=2, exercising rank 0 STORE + both-rank RETRIEVE:
        --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:8" \
        --tp-size 2
 
+Replicated readers use their writer's KV identity for deterministic filling.
 The bench verifies retrieved data on every rank and reports the rank and
 chunk for checksum mismatches.
 
