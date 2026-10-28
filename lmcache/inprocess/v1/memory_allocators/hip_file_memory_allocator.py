@@ -2,7 +2,9 @@
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
+from lmcache.inprocess.v1.memory_allocators.gpu_memory_allocator import (
+    GPUMemoryAllocator,
+)
 
 
 class HipFileMemoryAllocator(GPUMemoryAllocator):

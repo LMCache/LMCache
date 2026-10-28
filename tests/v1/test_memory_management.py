@@ -8,7 +8,9 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
+from lmcache.inprocess.v1.memory_allocators.gpu_memory_allocator import (
+    GPUMemoryAllocator,
+)
 from lmcache.v1.memory_allocators.host_memory_allocator import HostMemoryAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (

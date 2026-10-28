@@ -17,9 +17,11 @@ from lmcache.inprocess.v1.gpu_connector.gpu_connectors import (
     VLLMPagedMemGPUConnectorV3,
     VLLMPagedMemLayerwiseGPUConnector,
 )
+from lmcache.inprocess.v1.memory_allocators.gpu_memory_allocator import (
+    GPUMemoryAllocator,
+)
 from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.v1.gpu_connector.utils import get_dtype
-from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
     PagedTensorMemoryAllocator,
 )

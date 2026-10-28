@@ -9,6 +9,9 @@ import torch
 from lmcache import device_ops
 from lmcache.inprocess.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.inprocess.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
+from lmcache.inprocess.v1.memory_allocators.gpu_memory_allocator import (
+    GPUMemoryAllocator,
+)
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
@@ -20,7 +23,6 @@ from lmcache.v1.gpu_connector.utils import (
     get_tokens_per_layer,
     normalize_kv_and_discover_format,
 )
-from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 import lmcache.lmcache_native as lmcache_native
 
