@@ -25,7 +25,7 @@ that environment (see the *Rebellions RBLN* tab of :ref:`installation_guide`):
 
 .. code-block:: bash
 
-   VERSION=0.5.7  # replace with target release
+   VERSION=X.Y.Z  # target LMCache release
    pip install lmcache==${VERSION}+rbln \
        --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-rbln
 
