@@ -10,12 +10,12 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.inprocess.v1.lookup_client.chunk_statistics_lookup_client import (
     ChunkStatisticsLookupClient,
 )
 from lmcache.inprocess.v1.lookup_client.record_strategies import _get_strategies
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.utils.bloom_filter import BloomFilter
 
 

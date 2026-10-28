@@ -13,6 +13,7 @@ from lmcache.cli.commands.bench.server_bench.client import (
     LookupResult,
     TransferResult,
 )
+from lmcache.cli.commands.bench.server_bench.command import add_server_arguments
 from lmcache.cli.commands.bench.server_bench.config import (
     WorkerSpec,
     parse_args_to_config,
@@ -111,3 +112,25 @@ def test_transfer_result_requires_exact_worker_partition() -> None:
 def test_bench_config_rejects_non_positive_concurrency() -> None:
     with pytest.raises(ValueError, match="concurrency must be positive"):
         parse_args_to_config(_args(concurrency=0))
+
+
+def test_allocation_cli_option_reaches_config() -> None:
+    parser = argparse.ArgumentParser()
+    add_server_arguments(parser)
+    args = parser.parse_args(["--block-allocation", "random"])
+    config = parse_args_to_config(args)
+    assert config.block_allocation == "random"
+
+
+def test_timeout_cli_option_reaches_config() -> None:
+    parser = argparse.ArgumentParser()
+    add_server_arguments(parser)
+    args = parser.parse_args(["--transfer-timeout", "0.5"])
+    config = parse_args_to_config(args)
+    assert config.transfer_timeout_s == 0.5
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan")])
+def test_transfer_timeout_must_be_finite_and_positive(timeout: float) -> None:
+    with pytest.raises(ValueError, match="finite and positive"):
+        parse_args_to_config(_args(transfer_timeout=timeout))

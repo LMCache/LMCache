@@ -1461,7 +1461,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.lookup_started_at = time.monotonic()
         submitted = self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
-            token_ids=tracker.get_token_ids(),
+            packed_token_ids=tracker.packed_token_ids(),
             cache_salt=tracker.cache_salt,
             # vLLM's prefix-cache hit, for the server's KV load policy.
             request_configs=self._lookup_request_configs(tracker, num_computed_tokens),
@@ -1517,7 +1517,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.num_lmcache_hit_tokens = 0
             if self.scheduler_adapter.maybe_submit_lookup_request(
                 request.request_id,
-                token_ids=tracker.get_token_ids(),
+                packed_token_ids=tracker.packed_token_ids(),
                 cache_salt=tracker.cache_salt,
                 request_configs=self._lookup_request_configs(
                     tracker, num_computed_tokens
@@ -1537,7 +1537,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # vLLM already shares part of the unfull chunk; loading it would
             # overwrite blocks other requests read, so release it instead.
             self.scheduler_adapter.free_lookup_locks(
-                token_ids=tracker.get_token_ids(),
+                packed_token_ids=tracker.packed_token_ids(),
                 start=full_chunk_tokens,
                 end=ret,
                 request_id=request.request_id,
@@ -1603,7 +1603,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.lookup_started_at = time.monotonic()
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
-            token_ids=tracker.get_token_ids(),
+            packed_token_ids=tracker.packed_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
             reserve_last_token=self._reserve_last_token_for_lookup,
@@ -1689,7 +1689,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             if free_end > 0 or tracker.pending_free_ranges:
                 self.scheduler_adapter.free_lookup_locks(
-                    token_ids=tracker.get_token_ids(),
+                    packed_token_ids=tracker.packed_token_ids(),
                     start=0,
                     end=free_end,
                     request_id=request.request_id,

@@ -13,6 +13,7 @@ import time
 from lmcache.utils import init_logger
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.token_codec import num_packed_tokens
 from lmcache.v1.multiprocess.transport.base import RequestClient
 
 logger = init_logger(__name__)
@@ -396,7 +397,9 @@ class LookupState:
                 tail_key = replace(
                     self._key,
                     start=common_tokens,
-                    end=min(server.hit_tokens, len(self._key.token_ids)),
+                    end=min(
+                        server.hit_tokens, num_packed_tokens(self._key.token_bytes)
+                    ),
                 )
                 server.client.free_lookup_locks(tail_key, self._tp_size)
 

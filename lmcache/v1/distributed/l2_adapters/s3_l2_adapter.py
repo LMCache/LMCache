@@ -445,6 +445,12 @@ class S3L2Adapter(L2AdapterInterface):
     connection-class errors, ``connection_disabled`` is set; all
     subsequent submits short-circuit and record failure without
     touching S3.
+
+    Load sizes: a key counts as loaded only when the object delivered
+    exactly ``obj.get_size()`` bytes. A GET body that would run past the
+    destination is refused before the copy, and a shorter object is a
+    miss, as in the valkey and fs adapters. The object on S3 is left
+    alone; the adapter only forgets its cached size for that key.
     """
 
     max_connection_failures = 3
@@ -881,10 +887,30 @@ class S3L2Adapter(L2AdapterInterface):
     def _get_request(self, key_str: str, mem_obj: MemoryObj):
         req = self._make_request("GET", key_str)
         data_ptr = mem_obj.data_ptr
+        capacity = mem_obj.get_size()
+        # Bytes copied into ``mem_obj`` so far. ``_execute_load`` compares
+        # the total with the destination size once the transfer is over.
+        # The comparison cannot live in ``on_done``: the CRT completes
+        # ``finished_future`` (which ``_execute_load`` awaits) before it
+        # invokes ``on_done``, so an error raised there arrives too late
+        # to change the load result.
+        progress = {"received": 0}
 
         def on_body(chunk, offset, **kwargs):
+            n = len(chunk)
+            if offset < 0 or offset + n > capacity:
+                # Never write outside the caller's buffer. Raising here
+                # makes the CRT abort the transfer and surface the error
+                # through ``finished_future``, so the key is reported as
+                # a miss and nothing past ``capacity`` is touched.
+                raise RuntimeError(
+                    f"S3 GET for {key_str} returned bytes outside the "
+                    f"destination buffer: offset={offset} len={n} "
+                    f"capacity={capacity}"
+                )
             # Write chunk into the caller-provided MemoryObj buffer.
-            ctypes.memmove(data_ptr + offset, chunk, len(chunk))
+            ctypes.memmove(data_ptr + offset, chunk, n)
+            progress["received"] += n
 
         def on_done(error=None, status_code=None, **kwargs):
             ok = (status_code in (200, 206)) or (status_code is None and error is None)
@@ -902,7 +928,7 @@ class S3L2Adapter(L2AdapterInterface):
             credential_provider=self._credentials_provider,
             region=self._region,
         )
-        return s3_req
+        return s3_req, progress
 
     def _put_request(self, key_str: str, mem_obj: MemoryObj):
         stream = MemoryViewStream(mem_obj.byte_array)
@@ -1207,14 +1233,34 @@ class S3L2Adapter(L2AdapterInterface):
     ) -> None:
         bitmap = Bitmap(len(keys))
         futures = []
-        launched_indices = []
+        # (index, key string, expected byte count, GET progress) per GET.
+        launched: list[tuple[int, str, int, dict]] = []
 
         for i, (key, obj) in enumerate(zip(keys, objects, strict=True)):
             try:
                 key_str = _object_key_to_string(key)
-                s3_req = self._get_request(key_str, obj)
+                expected = obj.get_size()
+                with self._lock:
+                    cached_size = self._object_size_cache.get(key_str)
+                if cached_size is not None and cached_size != expected:
+                    # The object on S3 is not the size this load expects:
+                    # written under another layout or serde, or truncated.
+                    # Reading it would fill the destination with the wrong
+                    # bytes, so report a miss and forget the cached size so
+                    # that a later lookup asks S3 again.
+                    logger.warning(
+                        "S3L2Adapter: object %s is %d bytes on S3 but the "
+                        "load expects %d; treating it as a miss",
+                        key_str,
+                        cached_size,
+                        expected,
+                    )
+                    with self._lock:
+                        self._object_size_cache.pop(key_str, None)
+                    continue
+                s3_req, progress = self._get_request(key_str, obj)
                 futures.append(asyncio.wrap_future(s3_req.finished_future))
-                launched_indices.append(i)
+                launched.append((i, key_str, expected, progress))
             except Exception:
                 logger.exception("S3L2Adapter failed to launch GET")
 
@@ -1222,9 +1268,32 @@ class S3L2Adapter(L2AdapterInterface):
         last_error: Optional[str] = None
         any_success = False
 
-        for idx, result in zip(launched_indices, results, strict=True):
+        for (idx, key_str, expected, progress), result in zip(
+            launched, results, strict=True
+        ):
             if isinstance(result, Exception):
                 last_error = str(result)
+                # Whatever failed, the cached size is no longer trustworthy
+                # (the object may have grown or vanished): forget it so the
+                # next lookup asks S3 instead of launching the same GET.
+                with self._lock:
+                    self._object_size_cache.pop(key_str, None)
+                continue
+            received = progress["received"]
+            if received != expected:
+                # The transfer completed but delivered fewer bytes than the
+                # destination holds (more is rejected in ``on_body``). The
+                # buffer is only partly written, so this is a miss, as in
+                # the valkey adapter, not a hit with a stale tail.
+                logger.warning(
+                    "S3L2Adapter: GET for %s delivered %d bytes, expected %d; "
+                    "treating it as a miss",
+                    key_str,
+                    received,
+                    expected,
+                )
+                with self._lock:
+                    self._object_size_cache.pop(key_str, None)
                 continue
             bitmap.set(idx)
             any_success = True

@@ -383,7 +383,7 @@ __global__ void multi_layer_block_transfer_kernel(
 template <typename ScalarType>
 void multi_layer_block_kv_transfer_templated(
     const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
+    std::vector<uintptr_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
     EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
@@ -518,7 +518,7 @@ int64_t calculate_kernel_section_bytes(
 
 void multi_layer_block_kv_transfer(
     const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
+    std::vector<uintptr_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
     EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
@@ -631,7 +631,7 @@ void execute_object_group_transfer(
         const at::Tensor block_ids = at::from_blob(
             reinterpret_cast<void*>(block_ids_addr),
             {static_cast<int64_t>(launch.total_blocks)}, int64_opts);
-        std::vector<int64_t> lmcache_objects_ptrs(
+        std::vector<uintptr_t> lmcache_objects_ptrs(
             group.lmcache_objects_ptrs.begin(),
             group.lmcache_objects_ptrs.begin() + launch.num_objects);
 
@@ -721,6 +721,7 @@ bool resolve_block_addressing(EngineKVFormat format,
     case EngineKVFormat::NL_X_NBBS_ONE_HS:      // SGLang MLA [NBBS, 1, HS]
     case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:  // fused NHD [NB, BS, NH, 2HS]
     case EngineKVFormat::NL_X_NB_BS_NH_CS:      // fused NHD [NB, BS, NH, CS]
+    case EngineKVFormat::NL_X_NB_BS_NH_HS:  // SGLang component [NB, BS, NH, HS]
       out = {B::kPerLayer, 0, 0, blk, tight};
       return true;
     case EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS:  // SGLang MHA, K then V ptrs

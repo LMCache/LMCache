@@ -26,6 +26,7 @@ import pytest
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 # Test helpers
 from tests.v1.mp_scheduler_adapter_test_utils import (
@@ -65,11 +66,11 @@ class _FakeRequest:
 
 def _make_key(n_chunks: int, start_chunks: int = 0) -> IPCCacheServerKey:
     n_tokens = n_chunks * CHUNK_SIZE
-    return IPCCacheServerKey(
+    return IPCCacheServerKey.from_token_ids(
         model_name="m",
         world_size=1,
         worker_id=None,
-        token_ids=tuple(range(n_tokens)),
+        token_ids=range(n_tokens),
         start=start_chunks * CHUNK_SIZE,
         end=n_tokens,
         request_id="r",
@@ -80,7 +81,7 @@ def _make_key(n_chunks: int, start_chunks: int = 0) -> IPCCacheServerKey:
 def _ctx_with_hashes(n_chunks: int) -> MagicMock:
     ctx = MagicMock()
     ctx.chunk_size = CHUNK_SIZE
-    ctx.token_hasher.compute_chunk_hashes.return_value = [
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = [
         bytes([i]) * 4 for i in range(n_chunks)
     ]
     return ctx
@@ -129,7 +130,7 @@ def test_submit_sends_key_start_and_reports_whether_it_sent(
     token_ids = list(range(8 * CHUNK_SIZE))
 
     assert adapter.maybe_submit_lookup_request(
-        "req", token_ids=token_ids, start=3 * CHUNK_SIZE
+        "req", packed_token_ids=pack_token_ids(token_ids), start=3 * CHUNK_SIZE
     )
     client.lookup.assert_called_once()
     key = client.lookup.call_args.args[0]
@@ -137,7 +138,7 @@ def test_submit_sends_key_start_and_reports_whether_it_sent(
 
     # Second poll: the lookup is still in flight, so nothing is sent.
     assert not adapter.maybe_submit_lookup_request(
-        "req", token_ids=token_ids, start=3 * CHUNK_SIZE
+        "req", packed_token_ids=pack_token_ids(token_ids), start=3 * CHUNK_SIZE
     )
     client.lookup.assert_called_once()
 

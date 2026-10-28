@@ -40,6 +40,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     trim_and_stage_unfull_chunk_block_ids,
 )
 from lmcache.v1.multiprocess.session import SessionManager
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
@@ -53,7 +54,7 @@ LAYOUT = MemoryLayoutDesc(shapes=[torch.Size([CHUNK_SIZE, 1, 8])], dtypes=[torch
 def test_unfull_chunk_key_differs_from_the_full_chunk_it_starts():
     hasher = TokenHasher(chunk_size=4)
     session = SessionManager(hasher, cleanup_interval=None).get_or_create("req")
-    session.set_tokens(list(range(8)))
+    session.set_tokens(pack_token_ids(range(8)))
 
     full_chunk = session.get_hashes(4, 8)[0]
 
@@ -65,7 +66,7 @@ def test_session_unfull_chunk_hash_chains_from_full_chunks():
     hasher = TokenHasher(chunk_size=4)
     session = SessionManager(hasher, cleanup_interval=None).get_or_create("req")
     tokens = list(range(10))
-    session.set_tokens(tokens)
+    session.set_tokens(pack_token_ids(tokens))
 
     expected = hasher.hash_tokens(
         tokens[8:10], hasher.hash_tokens(tokens[4:8], hasher.hash_tokens(tokens[:4]))
@@ -84,7 +85,7 @@ def test_key_has_unfull_chunk_only_with_flag_and_unaligned_end():
             model_name=MODEL,
             world_size=1,
             worker_id=None,
-            token_ids=tuple(range(40)),
+            token_bytes=pack_token_ids(range(40)),
             start=0,
             end=end,
             request_id="req",
@@ -445,7 +446,7 @@ def _key(
         model_name=MODEL,
         world_size=1,
         worker_id=None,
-        token_ids=tuple(tokens),
+        token_bytes=pack_token_ids(tokens),
         start=start,
         end=end,
         request_id=request_id,

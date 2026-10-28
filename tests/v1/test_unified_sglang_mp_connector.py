@@ -22,6 +22,7 @@ from lmcache.integration.sglang.unified_lmcache_mp_connector import (
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import ipc_key_to_object_keys
 from lmcache.v1.gpu_connector.kv_format import detect_format
+from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -73,11 +74,6 @@ class _TransferContext:
         return _Future(True)
 
 
-class _IPCCacheServerKey:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-
-
 class TestUnifiedLMCacheMPConnector(unittest.TestCase):
     def setUp(self):
         heartbeat_patcher = patch.object(
@@ -127,7 +123,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
                 {adapter_module_name: adapter_module},
             ),
             patch(
-                "lmcache.v1.config.load_engine_config_with_overrides",
+                "lmcache.v1.multiprocess.client_config.load_mp_client_config",
                 return_value=config,
             ),
             patch(
@@ -255,6 +251,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         connector.model_name = "test-model"
         connector.kv_world_size = 2
         connector.blocks_in_chunk = 4
+        connector.chunk_size = 256
         connector._mq_timeout = 5.0
         connector._mp_transfer_mode = "engine_driven"
         transfer_ctx = Mock()
@@ -280,6 +277,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             layout_hints={"kv_list_layout": "unified"},
             engine_group_infos=[],
             engine_type=EngineType.SGLANG,
+            lmcache_chunk_tokens=256,
         )
         self.assertIs(connector._transfer_ctx, transfer_ctx)
         self.assertTrue(connector._registered)
@@ -1100,17 +1098,11 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             local_hit_tokens=0,
             cache_salt="salt",
         )
-        custom_types = ModuleType("lmcache.v1.multiprocess.custom_types")
-        custom_types.IPCCacheServerKey = _IPCCacheServerKey
-
-        with patch.dict(
-            "sys.modules",
-            {"lmcache.v1.multiprocess.custom_types": custom_types},
-        ):
-            key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
+        key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
 
         self.assertEqual(key.num_kv_readers, 1)
         self.assertEqual(key.world_size, 2)
+        self.assertEqual(unpack_token_ids(key.token_bytes), [1, 2, 3, 4])
 
     def test_create_key_reserves_one_read_lock_per_tp_replica(self):
         self.connector.model_name = "model"
@@ -1122,14 +1114,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             local_hit_tokens=0,
             cache_salt="salt",
         )
-        custom_types = ModuleType("lmcache.v1.multiprocess.custom_types")
-        custom_types.IPCCacheServerKey = _IPCCacheServerKey
-
-        with patch.dict(
-            "sys.modules",
-            {"lmcache.v1.multiprocess.custom_types": custom_types},
-        ):
-            key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
+        key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
 
         self.assertEqual(key.num_kv_readers, 4)
         self.assertEqual(key.world_size, 1)
