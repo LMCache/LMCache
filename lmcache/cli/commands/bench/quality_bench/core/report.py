@@ -30,6 +30,7 @@ from lmcache.cli.commands.bench.quality_bench.core.runner import ArmRun
 from lmcache.cli.commands.bench.quality_bench.core.verdict import (
     ArmComparison,
     QualityVerdict,
+    ReuseReport,
 )
 from lmcache.logging import init_logger
 
@@ -134,6 +135,7 @@ def write_results(
         "evidence_sources": plan.evidence_coverage(),
         "measured_earlier_share": plan.measured_earlier_share(),
         "padding": _padding_record(plan),
+        "reuse": _reuse_record(verdict.reuse),
         "num_store_requests": len(plan.store_requests),
         "verdict": verdict.verdict.value,
         "invalid_reasons": verdict.invalid_reasons,
@@ -213,6 +215,25 @@ def format_summary(
             f"padding: --filler {plan.padding.filler}, "
             f"{plan.padding.share:.1%} of measured prompt tokens"
         )
+    reuse = verdict.reuse
+    if reuse is not None:
+        expected = (
+            f"expected {reuse.expected_tokens}"
+            if reuse.expected_tokens is not None
+            else "expected unknown"
+        )
+        ratio = reuse.observed_over_expected
+        lines.append(
+            f"reuse: {expected} tokens, observed {reuse.observed_tokens:.0f} "
+            f"(prefix {reuse.observed_prefix_tokens:.0f}, blended "
+            f"{reuse.observed_blended_tokens:.0f})"
+            + (f" = {ratio:.2f} of expected" if ratio is not None else "")
+        )
+        for group in reuse.groups:
+            lines.append(
+                f"  {group.kind.value:<8} {group.questions:>4} questions  "
+                f"delta {group.delta:+.3f}  2*SE {2 * group.standard_error:.3f}"
+            )
     coverage = plan.evidence_coverage()
     lines.append(
         "evidence passages identified: "
@@ -242,6 +263,30 @@ def format_summary(
         verdict_line += f" ({'; '.join(verdict.invalid_reasons)})"
     lines.append(verdict_line)
     return "\n".join(lines)
+
+
+def _reuse_record(reuse: ReuseReport | None) -> dict[str, object] | None:
+    """Return the reuse report as JSON, or ``None`` when unmeasured."""
+    if reuse is None:
+        return None
+    return {
+        "expected_tokens": reuse.expected_tokens,
+        "observed_tokens": reuse.observed_tokens,
+        "observed_prefix_tokens": reuse.observed_prefix_tokens,
+        "observed_blended_tokens": reuse.observed_blended_tokens,
+        "observed_over_expected": reuse.observed_over_expected,
+        "groups": [
+            {
+                "kind": group.kind.value,
+                "questions": group.questions,
+                "delta": group.delta,
+                "standard_error": (
+                    None if math.isinf(group.standard_error) else group.standard_error
+                ),
+            }
+            for group in reuse.groups
+        ],
+    }
 
 
 def _padding_record(plan: QualityPlan) -> dict[str, object] | None:

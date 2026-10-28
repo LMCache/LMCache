@@ -426,3 +426,89 @@ class TestFiller:
         assert "would lose cache reuse" in error
         assert engines[REF_URL].sent == []
         assert not os.path.exists(out)
+
+
+class TestConcatenatedRun:
+    def test_filler_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="--filler"):
+            run_stage.run_config_from_args(
+                parse_run(
+                    "--reference-url",
+                    REF_URL,
+                    "--model",
+                    "m",
+                    "--dataset",
+                    "d",
+                    "--scenario",
+                    "concatenated",
+                    "--filler",
+                    "dots",
+                )  # fmt: skip
+            )
+
+    def test_settings_record_the_unit_size_and_no_filler(self) -> None:
+        config = run_stage.run_config_from_args(
+            parse_run(
+                "--reference-url",
+                REF_URL,
+                "--model",
+                "m",
+                "--dataset",
+                "d",
+                "--scenario",
+                "concatenated",
+                "--min-unit-tokens",
+                "4096",
+            )  # fmt: skip
+        )
+        settings = config.plan_settings()
+        assert settings["filler"] == "none"
+        assert settings["min_unit_tokens"] == 4096
+
+    def test_other_scenarios_do_not_record_the_unit_size(self) -> None:
+        config = run_stage.run_config_from_args(
+            parse_run("--reference-url", REF_URL, "--model", "m", "--dataset", "d")
+        )
+        assert "min_unit_tokens" not in config.plan_settings()
+
+    def test_reuse_is_reported_by_kind(
+        self, dataset, engines, tmp_path, monkeypatch, judge_client, capsys
+    ) -> None:
+        blending = BlendCounters(requested_tokens=100.0, non_prefix_hit_tokens=60.0)
+        monkeypatch.setattr(
+            run_stage, "PrometheusBlendCounters", lambda url: SteppingCounters(blending)
+        )
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
+        out = str(tmp_path / "out")
+        run_both(
+            dataset, out,
+            "--scenario", "concatenated", "--min-unit-tokens", "64",
+            "--capture-blend-metrics", METRICS_URL,
+        )  # fmt: skip
+        analyze(out)
+
+        assert "reuse: expected" in capsys.readouterr().out
+        reuse = summary(out)["reuse"]
+        assert reuse["expected_tokens"] > 0
+        assert reuse["observed_blended_tokens"] > 0
+        assert reuse["observed_prefix_tokens"] == 0
+        assert [g["kind"] for g in reuse["groups"]] == ["blended"]
+        with open(os.path.join(out, "rows.jsonl")) as f:
+            rows = [json.loads(line) for line in f]
+        assert {row["reuse"]["kind"] for row in rows} == {"blended"}
+        assert all(row["reuse"]["expected_tokens"] is not None for row in rows)
+        manifest = [json.loads(line) for line in open(os.path.join(out, MANIFEST_FILE))]
+        assert all(entry["unit_position"] is not None for entry in manifest)
+
+    def test_without_counters_only_the_expectation_is_reported(
+        self, dataset, engines, tmp_path, judge_client
+    ) -> None:
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
+        out = str(tmp_path / "out")
+        run_both(dataset, out)
+        analyze(out)
+        assert summary(out)["reuse"] is None
+        with open(os.path.join(out, "rows.jsonl")) as f:
+            row = json.loads(f.readline())
+        assert row["reuse"]["expected_tokens"] > 0
+        assert row["reuse"]["kind"] is None

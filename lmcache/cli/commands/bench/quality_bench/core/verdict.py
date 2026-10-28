@@ -123,6 +123,86 @@ class ArmComparison:
     standard_error: float
 
 
+class ReuseKind(enum.Enum):
+    """How the candidate reused KV for one question, by its counters."""
+
+    PREFIX = "prefix"
+    """Mostly exact-prefix hits (including segmented-prefix loads)."""
+
+    BLENDED = "blended"
+    """Mostly non-prefix hits: KV reused at new positions and blended."""
+
+    NONE = "none"
+    """No reuse recorded."""
+
+
+def reuse_kind(counters: BlendCounters) -> ReuseKind:
+    """Classify one question's reuse from its counter deltas.
+
+    Args:
+        counters: The candidate's counters for the question.
+
+    Returns:
+        ``PREFIX`` or ``BLENDED`` by which served more tokens (a tie counts
+        as prefix), or ``NONE`` when neither served any.
+    """
+    prefix = counters.prefix_hit_tokens + counters.segmented_prefix_hit_tokens
+    blended = counters.non_prefix_hit_tokens
+    if prefix <= 0 and blended <= 0:
+        return ReuseKind.NONE
+    return ReuseKind.PREFIX if prefix >= blended else ReuseKind.BLENDED
+
+
+@dataclass(frozen=True)
+class ReuseGroup:
+    """The candidate's score gap over the questions with one reuse kind.
+
+    Attributes:
+        kind: The reuse kind.
+        questions: Scored questions in the group.
+        delta: Mean candidate minus reference score over them.
+        standard_error: Standard error of that paired difference (``inf``
+            below two questions).
+    """
+
+    kind: ReuseKind
+    questions: int
+    delta: float
+    standard_error: float
+
+
+@dataclass(frozen=True)
+class ReuseReport:
+    """Reuse the plan expected against what the blend server reported.
+
+    Attributes:
+        expected_tokens: The plan's ``expected_reused_tokens`` total, or
+            ``None`` for plans that predate it.
+        observed_prefix_tokens: Tokens the candidate pass served as an exact
+            prefix (including segmented-prefix loads).
+        observed_blended_tokens: Tokens it served by blending.
+        groups: The score gap per reuse kind present, in
+            :class:`ReuseKind` order.
+    """
+
+    expected_tokens: int | None
+    observed_prefix_tokens: float
+    observed_blended_tokens: float
+    groups: list[ReuseGroup]
+
+    @property
+    def observed_tokens(self) -> float:
+        """Tokens reused either way."""
+        return self.observed_prefix_tokens + self.observed_blended_tokens
+
+    @property
+    def observed_over_expected(self) -> float | None:
+        """Observed over expected reuse, or ``None`` with no expectation."""
+        if not self.expected_tokens:
+            return None
+        return self.observed_tokens / self.expected_tokens
+
+
 @dataclass(frozen=True)
 class QualityVerdict:
     """The run's conclusion.
@@ -143,6 +223,8 @@ class QualityVerdict:
         unscored: Questions left out of every comparison because some run
             had no score for them.
         invalid_reasons: Why the verdict is INVALID. Otherwise, empty.
+        reuse: Expected against observed reuse, with the gap per reuse kind;
+            ``None`` when the candidate's blend counters were not captured.
     """
 
     verdict: Verdict
@@ -155,6 +237,7 @@ class QualityVerdict:
     engagement: EngagementCheck
     unscored: int = 0
     invalid_reasons: list[str] = field(default_factory=list)
+    reuse: ReuseReport | None = None
 
 
 def score(answer: ArmAnswer, references: list[str], metric: VerdictMetric) -> float:
@@ -406,6 +489,65 @@ def decide(
         engagement=engagement,
         unscored=unscored,
         invalid_reasons=invalid_reasons,
+        reuse=_reuse_report(plan, runs, table, candidate, references[0]),
+    )
+
+
+def _reuse_report(
+    plan: QualityPlan,
+    runs: list[ArmRun],
+    table: ScoreTable,
+    candidate: ArmRun,
+    reference: ArmRun,
+) -> ReuseReport | None:
+    """Compare expected and observed reuse, and split the gap by reuse kind.
+
+    Questions are grouped by :func:`reuse_kind` of the candidate's
+    per-question counters, which can lag by one question (a lookup recorded
+    after its response). Only questions every run scored are compared, as
+    in :func:`decide`.
+
+    Returns:
+        The report, or ``None`` when the candidate's counters were not
+        captured.
+    """
+    if not candidate.engagement_measured:
+        return None
+    differences: dict[ReuseKind, list[float]] = {kind: [] for kind in ReuseKind}
+    for index, answer in enumerate(candidate.answers):
+        candidate_score = table[candidate.label][index]
+        reference_score = table[reference.label][index]
+        if (
+            candidate_score is None
+            or reference_score is None
+            or any(table[run.label][index] is None for run in runs)
+        ):
+            continue
+        differences[reuse_kind(answer.counters)].append(
+            candidate_score - reference_score
+        )
+    groups = [
+        ReuseGroup(
+            kind=kind,
+            questions=len(values),
+            delta=sum(values) / len(values),
+            standard_error=(
+                statistics.stdev(values) / math.sqrt(len(values))
+                if len(values) > 1
+                else math.inf
+            ),
+        )
+        for kind, values in differences.items()
+        if values
+    ]
+    counters = candidate.counters
+    return ReuseReport(
+        expected_tokens=plan.expected_reused_tokens(),
+        observed_prefix_tokens=(
+            counters.prefix_hit_tokens + counters.segmented_prefix_hit_tokens
+        ),
+        observed_blended_tokens=counters.non_prefix_hit_tokens,
+        groups=groups,
     )
 
 
@@ -437,8 +579,10 @@ def build_rows(
         ``answers`` (label -> extracted answer), ``loss_tag`` (candidate versus
         the first reference run), ``reference_flipped`` (bool, or ``None``
         with one reference run), ``blend_share`` (this question's share, or
-        ``None`` when unmeasured) and ``evidence`` (the manifest's evidence
-        passages with their origin and positions).
+        ``None`` when unmeasured), ``reuse`` (``expected_tokens`` from the
+        plan; the candidate's ``kind``, ``prefix_tokens`` and
+        ``blended_tokens``, ``None`` when unmeasured) and ``evidence`` (the
+        manifest's evidence passages with their origin and positions).
 
     Raises:
         ValueError: If *runs* lacks a reference or candidate run.
@@ -489,6 +633,25 @@ def build_rows(
                     if candidate.engagement_measured
                     else None
                 ),
+                "reuse": {
+                    "expected_tokens": sample_plan.expected_reused_tokens,
+                    "kind": (
+                        reuse_kind(candidate_answer.counters).value
+                        if candidate.engagement_measured
+                        else None
+                    ),
+                    "prefix_tokens": (
+                        candidate_answer.counters.prefix_hit_tokens
+                        + candidate_answer.counters.segmented_prefix_hit_tokens
+                        if candidate.engagement_measured
+                        else None
+                    ),
+                    "blended_tokens": (
+                        candidate_answer.counters.non_prefix_hit_tokens
+                        if candidate.engagement_measured
+                        else None
+                    ),
+                },
                 "evidence": [
                     {
                         "passage_id": p.passage_id,

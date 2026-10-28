@@ -10,7 +10,7 @@ its cached KV came from (the reuse manifest).
 
 # Standard
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 import enum
 import hashlib
@@ -71,6 +71,11 @@ class StoreOrigin(enum.Enum):
     """Stored together with the rest of this question's passages, in dataset
     order, so its cached KV saw different neighbors than it has when
     measured."""
+
+    IN_UNIT = "in_unit"
+    """Stored inside a ``concatenated`` unit: its question's context, in
+    request order, after other questions' contexts and without the system
+    prompt."""
 
 
 class EvidenceSource(enum.Enum):
@@ -145,6 +150,14 @@ class SamplePlan:
         messages: The measured chat messages. Byte-identical on every arm.
         passages: Provenance of each passage, in measured order.
         evidence_source: How ``is_evidence`` was decided.
+        expected_reused_tokens: Tokens of the measured prompt covered by a
+            whole stored chunk (see :func:`build_plan`), i.e. what a cache
+            matching chunks anywhere in the prompt could reuse. ``None`` in
+            plans made before this was recorded.
+        unit_position: ``concatenated`` only: the index of this question's
+            context within its unit (``0`` = first).
+        duplicate_of: ``concatenated`` only: the question whose identical
+            context was stored in its place, or ``None``.
     """
 
     sample: Sample
@@ -152,6 +165,9 @@ class SamplePlan:
     messages: list[dict[str, str]]
     passages: list[PassageProvenance]
     evidence_source: EvidenceSource
+    expected_reused_tokens: int | None = None
+    unit_position: int | None = None
+    duplicate_of: str | None = None
 
     @property
     def prompt_hash(self) -> str:
@@ -175,7 +191,9 @@ class SamplePlan:
         Returns:
             A JSON-serializable record with keys ``qid``, ``scenario``,
             ``chunk_size``, ``request_id``, ``prompt_hash``,
-            ``evidence_source``, ``evidence_passage_ids`` and ``passages``
+            ``evidence_source``, ``evidence_passage_ids``,
+            ``expected_reused_tokens``, ``unit_position``, ``duplicate_of``
+            and ``passages``
             (one dict per passage: ``passage_id``, ``origin``,
             ``store_request_id``, ``stored_position``, ``measured_position``,
             ``is_evidence``, ``measured_earlier_in``, ``pad_tokens``).
@@ -190,6 +208,9 @@ class SamplePlan:
             "evidence_passage_ids": [
                 p.passage_id for p in self.passages if p.is_evidence
             ],
+            "expected_reused_tokens": self.expected_reused_tokens,
+            "unit_position": self.unit_position,
+            "duplicate_of": self.duplicate_of,
             "passages": [
                 {
                     "passage_id": p.passage_id,
@@ -257,6 +278,17 @@ class QualityPlan:
             sort_keys=True,
         )
         return _digest(material)
+
+    def expected_reused_tokens(self) -> int | None:
+        """Sum of every question's ``expected_reused_tokens``.
+
+        Returns:
+            The total, or ``None`` when the plan predates the field.
+        """
+        values = [s.expected_reused_tokens for s in self.samples]
+        if any(v is None for v in values):
+            return None
+        return sum(v for v in values if v is not None)
 
     def evidence_coverage(self) -> dict[str, int]:
         """Count questions by how their evidence passages were identified.
@@ -401,12 +433,17 @@ def _sample_plan_from_record(record: Mapping[str, Any]) -> SamplePlan:
         )
         for p in record["passages"]
     ]
+    expected = record.get("expected_reused_tokens")
+    position = record.get("unit_position")
     return SamplePlan(
         sample=sample,
         request_id=record["request_id"],
         messages=record["messages"],
         passages=passages,
         evidence_source=EvidenceSource(record["evidence_source"]),
+        expected_reused_tokens=None if expected is None else int(expected),
+        unit_position=None if position is None else int(position),
+        duplicate_of=record.get("duplicate_of"),
     )
 
 
@@ -462,40 +499,63 @@ def build_plan(
     scenario: ReuseScenario,
     chunk_size: int,
     seed: int,
+    unit_samples: list[Sample] | None = None,
+    min_unit_tokens: int = 8192,
 ) -> QualityPlan:
     """Build the store requests, measured prompts, and manifest for a run.
 
     ``INDEPENDENT`` stores every distinct passage once, alone, in order of
     first appearance. ``REORDERED`` stores each question's passages
     together in dataset order (identical passage lists are stored once), and
-    measures them in a new order. Either way, every passage a question uses
+    measures them in a new order. ``CONCATENATED`` is described in
+    :func:`_build_concatenated`. Either way, every passage a question uses
     is stored before any question is measured, so measuring a subset of the
     dataset does not change what the store requests provide. A passage that
     also appeared in an earlier measured question may instead be reused from
     that question's cached prompt (recorded by ``measured_earlier_in``).
 
-    Every prompt is then rendered with the chat template and tokenized as the
-    engine will, and every passage must start on a chunk boundary and
-    tokenize identically wherever it appears (see
-    :meth:`ChunkAligner.place_blocks`). Otherwise the plan is refused: the
-    run would silently measure less reuse than it claims.
+    For ``INDEPENDENT`` and ``REORDERED``, every prompt is then rendered
+    with the chat template and tokenized as the engine will, and every
+    passage must start on a chunk boundary and tokenize identically wherever
+    it appears (see :meth:`ChunkAligner.place_blocks`). Otherwise the plan is
+    refused: the run would silently measure less reuse than it claims.
+
+    Every question also gets ``expected_reused_tokens``: how much of its
+    rendered prompt is covered by whole chunks of the rendered store
+    requests, found at any offset -- the reuse an engine like the LMCache
+    blend server can find (see :func:`_expected_reuse`).
 
     Args:
         samples: Questions to measure, in order.
         aligner: Pads blocks to *chunk_size*. Must have been built with it.
         scenario: How passages are cached.
         chunk_size: The chunk size, recorded in the manifest.
-        seed: Seed for the re-ordering permutations.
+        seed: Seed for the re-ordering permutations and the
+            ``concatenated`` shuffle.
+        unit_samples: ``concatenated`` only: every question units are built
+            from, with *samples* as a prefix, so measuring fewer questions
+            does not change the units. Defaults to *samples*.
+        min_unit_tokens: ``concatenated`` only: the minimum unit size.
 
     Returns:
         The plan.
 
     Raises:
-        ValueError: If *samples* is empty.
+        ValueError: If *samples* is empty, or is not a prefix of
+            *unit_samples*.
         PlanAlignmentError: If any passage would not be reused.
     """
     if not samples:
         raise ValueError("samples must be non-empty")
+    if scenario is ReuseScenario.CONCATENATED:
+        return _build_concatenated(
+            samples,
+            unit_samples if unit_samples is not None else samples,
+            aligner,
+            chunk_size,
+            seed,
+            min_unit_tokens,
+        )
 
     prompt = ANSWER_TAG_PROMPT
     system_block = aligner.system_block(prompt.system)
@@ -585,13 +645,213 @@ def build_plan(
         )
 
     padding = _check_placements(aligner, store_requests, sample_plans, request_blocks)
+    expected, _ = _expected_reuse(aligner, chunk_size, store_requests, sample_plans)
     return QualityPlan(
         scenario=scenario,
         chunk_size=chunk_size,
         store_requests=store_requests,
-        samples=sample_plans,
+        samples=[
+            replace(s, expected_reused_tokens=e)
+            for s, e in zip(sample_plans, expected, strict=True)
+        ],
         padding=padding,
     )
+
+
+def _context_blocks(aligner: ChunkAligner, sample: Sample) -> list[str]:
+    """A question's passages in the unpadded framed layout, dataset order."""
+    return [aligner.framed(p) for p in sample.documents]
+
+
+def _build_concatenated(
+    samples: list[Sample],
+    unit_samples: list[Sample],
+    aligner: ChunkAligner,
+    chunk_size: int,
+    seed: int,
+    min_unit_tokens: int,
+) -> QualityPlan:
+    """Build a ``CONCATENATED`` plan.
+
+    Every question in *unit_samples* is visited in a seeded shuffle. Its
+    context -- its passages, framed and in request order -- joins the
+    current unit until the unit reaches *min_unit_tokens*; a context
+    identical to one already placed is not placed again
+    (``duplicate_of``). Units are stored without the system prompt, so a
+    question's context is never a prefix of its unit: every reuse is a
+    blend, at a new position, of KV computed after other contexts. Only
+    units holding a measured question's context are sent, and they do not
+    depend on how many questions are measured.
+
+    Nothing is padded. A stored chunk is reusable only where all its tokens
+    recur in the measured prompt, so chunks straddling a context's edges are
+    recomputed -- ``expected_reused_tokens`` details expected reuse.
+
+    Args:
+        samples: Questions to measure, a prefix of *unit_samples*.
+        unit_samples: Every question units are built from.
+        aligner: Renders and tokenizes prompts.
+        chunk_size: The engine's chunk size.
+        seed: Seed for the shuffle.
+        min_unit_tokens: Minimum unit size, in tokens.
+
+    Returns:
+        The plan.
+
+    Raises:
+        ValueError: If *samples* is not a prefix of *unit_samples*.
+    """
+    if unit_samples[: len(samples)] != samples:
+        raise ValueError("the measured samples must be a prefix of the unit samples")
+    prompt = ANSWER_TAG_PROMPT
+
+    order = list(range(len(unit_samples)))
+    random.Random(f"{seed}:units").shuffle(order)
+    owner_of: dict[tuple[str, ...], int] = {}
+    units: list[list[int]] = []
+    current: list[int] = []
+    size = 0
+    for index in order:
+        key = tuple(unit_samples[index].documents)
+        if key in owner_of:
+            continue
+        owner_of[key] = index
+        current.append(index)
+        size += aligner.token_length(
+            "".join(_context_blocks(aligner, unit_samples[index]))
+        )
+        if size >= min_unit_tokens:
+            units.append(current)
+            current, size = [], 0
+    if current:
+        units.append(current)
+    unit_of = {
+        member: (unit, position)
+        for unit, members in enumerate(units)
+        for position, member in enumerate(members)
+    }
+
+    owners = [owner_of[tuple(sample.documents)] for sample in samples]
+    store_requests: list[StoreRequest] = []
+    unit_request: dict[int, str] = {}
+    for unit in sorted({unit_of[owner][0] for owner in owners}):
+        request_id = f"{_STORE_REQUEST_PREFIX}{len(store_requests)}"
+        text = "".join(
+            block
+            for member in units[unit]
+            for block in _context_blocks(aligner, unit_samples[member])
+        )
+        store_requests.append(
+            StoreRequest(request_id, [{"role": "user", "content": text}])
+        )
+        unit_request[unit] = request_id
+
+    measured_in: dict[str, list[str]] = {}
+    sample_plans: list[SamplePlan] = []
+    for index, (sample, owner) in enumerate(zip(samples, owners, strict=True)):
+        measured_id = f"{_MEASURED_REQUEST_PREFIX}{index}"
+        unit, position = unit_of[owner]
+        offset = sum(
+            len(unit_samples[member].documents) for member in units[unit][:position]
+        )
+        ids = [_passage_id(p) for p in sample.documents]
+        evidence, evidence_source = _evidence_indices(sample)
+        provenance = [
+            PassageProvenance(
+                passage_id=passage_id,
+                origin=StoreOrigin.IN_UNIT,
+                store_request_id=unit_request[unit],
+                stored_position=offset + measured_position,
+                measured_position=measured_position,
+                is_evidence=measured_position in evidence,
+                measured_earlier_in=tuple(measured_in.get(passage_id, [])),
+            )
+            for measured_position, passage_id in enumerate(ids)
+        ]
+        for passage_id in dict.fromkeys(ids):
+            measured_in.setdefault(passage_id, []).append(measured_id)
+        sample_plans.append(
+            SamplePlan(
+                sample=sample,
+                request_id=measured_id,
+                messages=compose_qa_messages(
+                    prompt.system,
+                    _context_blocks(aligner, sample),
+                    sample.question,
+                    prompt.question_template,
+                ),
+                passages=provenance,
+                evidence_source=evidence_source,
+                unit_position=position,
+                duplicate_of=(
+                    unit_samples[owner].sample_id if owner != index else None
+                ),
+            )
+        )
+
+    expected, prompt_tokens = _expected_reuse(
+        aligner, chunk_size, store_requests, sample_plans
+    )
+    return QualityPlan(
+        scenario=ReuseScenario.CONCATENATED,
+        chunk_size=chunk_size,
+        store_requests=store_requests,
+        samples=[
+            replace(s, expected_reused_tokens=e)
+            for s, e in zip(sample_plans, expected, strict=True)
+        ],
+        padding=PaddingStats("none", 0, prompt_tokens),
+    )
+
+
+# Leading tokens a stored chunk is first looked up by, before a full compare.
+_PROBE_TOKENS = 8
+
+
+def _expected_reuse(
+    aligner: ChunkAligner,
+    chunk_size: int,
+    store_requests: list[StoreRequest],
+    sample_plans: list[SamplePlan],
+) -> tuple[list[int], int]:
+    """Count each measured prompt's tokens covered by a whole stored chunk.
+
+    Mirrors the LMCache blend server's matcher: each rendered store request
+    is cut into full chunks from its first token (a shorter tail is not
+    indexed), and a chunk is reusable wherever all its tokens recur, in
+    order, at any offset of the rendered measured prompt. Chunks the
+    candidate caches from earlier measured prompts are not counted.
+
+    Args:
+        aligner: Renders and tokenizes prompts as the engine will.
+        chunk_size: The engine's chunk size.
+        store_requests: The plan's store requests.
+        sample_plans: The plan's measured requests.
+
+    Returns:
+        Covered tokens per measured prompt, and the measured prompts' total
+        token count.
+    """
+    probe = min(_PROBE_TOKENS, chunk_size)
+    chunks: dict[tuple[int, ...], set[tuple[int, ...]]] = {}
+    for request in store_requests:
+        _, ids = aligner.render_and_encode(request.messages)
+        for start in range(0, len(ids) - chunk_size + 1, chunk_size):
+            chunk = tuple(ids[start : start + chunk_size])
+            chunks.setdefault(chunk[:probe], set()).add(chunk)
+
+    covered_counts: list[int] = []
+    prompt_tokens = 0
+    for sample_plan in sample_plans:
+        _, ids = aligner.render_and_encode(sample_plan.messages)
+        prompt_tokens += len(ids)
+        covered = bytearray(len(ids))
+        for start in range(len(ids) - chunk_size + 1):
+            candidates = chunks.get(tuple(ids[start : start + probe]))
+            if candidates and tuple(ids[start : start + chunk_size]) in candidates:
+                covered[start : start + chunk_size] = b"\x01" * chunk_size
+        covered_counts.append(sum(covered))
+    return covered_counts, prompt_tokens
 
 
 def _check_placements(

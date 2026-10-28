@@ -155,7 +155,18 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         choices=[s.value for s in ReuseScenario],
         default=ReuseScenario.INDEPENDENT.value,
         help="independent: each passage cached alone; reordered: each "
-        "question's passages cached together, then prompted in a new order.",
+        "question's passages cached together, then prompted in a new order; "
+        "concatenated: questions' contexts concatenated into units of at "
+        "least --min-unit-tokens (seeded shuffle, no system prompt, no "
+        "padding), each question then prompted over its own context.",
+    )
+    workload.add_argument(
+        "--min-unit-tokens",
+        type=int,
+        default=8192,
+        help="concatenated only: minimum tokens per stored unit. Below about "
+        "three questions' contexts, most reuse comes from a unit's first "
+        "context (default: 8192).",
     )
     workload.add_argument(
         "--chunk-size",
@@ -180,11 +191,12 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     workload.add_argument(
         "--filler",
         choices=[f.value for f in Filler],
-        default=Filler.DOTS.value,
-        help="What pads passages to whole chunks. dots / dashes: a repeated "
-        "' .' / ' -' between a 'Passage <id>:' label and an 'end of passage "
-        "<id>' marker. words: random single-token words appended to the "
-        "passage, as rag-qa-quality pads (default: dots).",
+        default=None,
+        help="What pads passages to whole chunks (independent and reordered; "
+        "concatenated does not pad). dots / dashes: a repeated ' .' / ' -' "
+        "between a 'Passage <id>:' label and an 'end of passage <id>' "
+        "marker. words: random single-token words appended to the passage, "
+        "as rag-qa-quality pads (default: dots).",
     )
     workload.add_argument(
         "--seed",
@@ -242,8 +254,22 @@ def run_config_from_args(args: argparse.Namespace) -> QualityRunConfig:
         blend_metrics_url=args.blend_metrics_url,
         output_dir=args.output_dir,
         seed=args.seed,
-        filler=Filler(args.filler),
+        filler=_filler(args),
+        min_unit_tokens=args.min_unit_tokens,
     )
+
+
+def _filler(args: argparse.Namespace) -> Filler | None:
+    """Resolve ``--filler``: ``dots`` unless given; none for concatenated.
+
+    Raises:
+        ValueError: If ``--filler`` is given with ``--scenario concatenated``.
+    """
+    if ReuseScenario(args.scenario) is ReuseScenario.CONCATENATED:
+        if args.filler is not None:
+            raise ValueError("--filler does not apply to --scenario concatenated")
+        return None
+    return Filler(args.filler) if args.filler is not None else Filler.DOTS
 
 
 def build_quality_plan(config: QualityRunConfig) -> QualityPlan:
@@ -269,19 +295,27 @@ def build_quality_plan(config: QualityRunConfig) -> QualityPlan:
             f"passages to cache chunks. Install transformers and pass --model "
             f"with a HuggingFace repo ID or a local path."
         )
-    samples = load_samples(resolve_dataset_path(config.dataset))
-    if config.num_samples:
-        samples = samples[: config.num_samples]
+    all_samples = load_samples(resolve_dataset_path(config.dataset))
+    samples = all_samples[: config.num_samples] if config.num_samples else all_samples
     check_task(samples, config.task)
     aligner = ChunkAligner(
         tokenizer,
         config.model,
         config.chunk_size,
         config.seed,
-        filler=config.filler,
+        # concatenated renders unpadded framed blocks; any framed filler works
+        filler=config.filler if config.filler is not None else Filler.DOTS,
         template_kwargs=config.template_kwargs,
     )
-    return build_plan(samples, aligner, config.scenario, config.chunk_size, config.seed)
+    return build_plan(
+        samples,
+        aligner,
+        config.scenario,
+        config.chunk_size,
+        config.seed,
+        unit_samples=all_samples,
+        min_unit_tokens=config.min_unit_tokens,
+    )
 
 
 async def run_arms(
@@ -413,6 +447,12 @@ def run_quality_run(args: argparse.Namespace) -> None:
         print(
             f"padding: --filler {plan.padding.filler}, "
             f"{plan.padding.share:.0%} of measured prompt tokens"
+        )
+    expected = plan.expected_reused_tokens()
+    if expected is not None and plan.padding is not None and plan.padding.prompt_tokens:
+        print(
+            f"expected reuse: {expected} tokens, "
+            f"{expected / plan.padding.prompt_tokens:.0%} of measured prompt tokens"
         )
     print(f"results directory: {results_dir}")
 

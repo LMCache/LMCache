@@ -204,7 +204,9 @@ class TestFillers:
         assert prompt.count("Passage ") == len(plan.samples[0].passages)
 
     @pytest.mark.parametrize("filler", list(Filler))
-    @pytest.mark.parametrize("scenario", list(ReuseScenario))
+    @pytest.mark.parametrize(
+        "scenario", [ReuseScenario.INDEPENDENT, ReuseScenario.REORDERED]
+    )
     def test_every_filler_passes_the_placement_check(self, filler, scenario) -> None:
         plan = _plan(_filler_aligner(filler), scenario)
         assert plan.padding is not None
@@ -244,3 +246,161 @@ class TestFillers:
             _plan(aligner, ReuseScenario.INDEPENDENT)
         assert exc.value.problems
         assert "--filler dots" in str(exc.value)
+
+
+def _contexts(count: int) -> list[Sample]:
+    """*count* questions with distinct three-passage contexts."""
+    return [
+        Sample(
+            f"c{i}",
+            [f"City {i} lies on river {i}.", f"River {i} is long.", f"Mayor {i}."],
+            f"Where is city {i}?",
+            [f"river {i}"],
+        )
+        for i in range(count)
+    ]
+
+
+def _context_text(aligner: ChunkAligner, sample: Sample) -> str:
+    return "".join(aligner.framed(p) for p in sample.documents)
+
+
+class TestConcatenated:
+    @pytest.fixture
+    def framer(self) -> ChunkAligner:
+        return _filler_aligner(Filler.DOTS)
+
+    @staticmethod
+    def _build(framer, samples, unit_samples=None, seed=5, min_unit_tokens=200):
+        return build_plan(
+            samples,
+            framer,
+            ReuseScenario.CONCATENATED,
+            CHUNK,
+            seed,
+            unit_samples=unit_samples,
+            min_unit_tokens=min_unit_tokens,
+        )
+
+    @staticmethod
+    def _unit_text(plan, sample_plan) -> str:
+        unit = sample_plan.passages[0].store_request_id
+        [request] = [r for r in plan.store_requests if r.request_id == unit]
+        return request.messages[0]["content"]
+
+    def test_units_reach_the_minimum_size(self, framer) -> None:
+        plan = self._build(framer, _contexts(8))
+        sizes = [
+            framer.token_length(r.messages[0]["content"]) for r in plan.store_requests
+        ]
+        assert len(sizes) > 1
+        assert all(size >= 200 for size in sizes[:-1])
+
+    def test_each_context_is_stored_whole_without_the_system_prompt(
+        self, framer
+    ) -> None:
+        samples = _contexts(6)
+        plan = self._build(framer, samples)
+        for request in plan.store_requests:
+            content = request.messages[0]["content"]
+            assert content.startswith("Passage ")
+            assert ANSWER_TAG_PROMPT.system not in content
+        for sample, sample_plan in zip(samples, plan.samples, strict=True):
+            assert _context_text(framer, sample) in self._unit_text(plan, sample_plan)
+
+    def test_measured_prompt_is_unpadded(self, framer) -> None:
+        sample = _contexts(1)[0]
+        plan = self._build(framer, [sample])
+        assert plan.samples[0].prompt_text == (
+            ANSWER_TAG_PROMPT.system
+            + _context_text(framer, sample)
+            + ANSWER_TAG_PROMPT.question_template.format(question=sample.question)
+        )
+        assert plan.padding is not None and plan.padding.pad_tokens == 0
+
+    def test_units_do_not_depend_on_how_many_questions_are_measured(
+        self, framer
+    ) -> None:
+        everything = _contexts(8)
+        full = self._build(framer, everything)
+        first_two = self._build(framer, everything[:2], unit_samples=everything)
+        for index in range(2):
+            assert self._unit_text(first_two, first_two.samples[index]) == (
+                self._unit_text(full, full.samples[index])
+            )
+            assert (
+                first_two.samples[index].unit_position
+                == full.samples[index].unit_position
+            )
+        assert len(first_two.store_requests) <= 2
+
+    def test_the_shuffle_is_seeded(self, framer) -> None:
+        samples = _contexts(8)
+        once = self._build(framer, samples, seed=5)
+        again = self._build(framer, samples, seed=5)
+        other = self._build(framer, samples, seed=6)
+        assert once.prompts_digest == again.prompts_digest
+        assert once.prompts_digest != other.prompts_digest
+
+    def test_a_duplicate_context_is_stored_once(self, framer) -> None:
+        samples = _contexts(4)
+        twin = Sample("twin", samples[1].documents, "Same context?", ["x"])
+        plan = self._build(framer, [*samples, twin])
+        first, copy = plan.samples[1], plan.samples[4]
+        # Whichever the shuffle placed first owns the context; the other
+        # names it.
+        pairs = {(first.duplicate_of, copy.duplicate_of)}
+        assert pairs <= {(None, "c1"), ("twin", None)}
+        assert self._unit_text(plan, first) == self._unit_text(plan, copy)
+        stored = "".join(r.messages[0]["content"] for r in plan.store_requests)
+        assert stored.count(_context_text(framer, samples[1])) == 1
+
+    def test_one_context_per_unit_at_zero(self, framer) -> None:
+        plan = self._build(framer, _contexts(4), min_unit_tokens=0)
+        assert len(plan.store_requests) == 4
+        assert [s.unit_position for s in plan.samples] == [0, 0, 0, 0]
+
+    def test_reuse_is_expected_inside_each_context(self, framer) -> None:
+        plan = self._build(framer, _contexts(6))
+        for sample_plan in plan.samples:
+            expected = sample_plan.expected_reused_tokens
+            assert expected is not None and expected >= CHUNK
+        assert plan.expected_reused_tokens() == sum(
+            s.expected_reused_tokens or 0 for s in plan.samples
+        )
+
+    def test_manifest_records_the_unit(self, framer) -> None:
+        plan = self._build(framer, _contexts(6))
+        entry = plan.samples[3].manifest_entry(plan.scenario, plan.chunk_size)
+        assert entry["unit_position"] == plan.samples[3].unit_position
+        assert entry["duplicate_of"] is None
+        passages = entry["passages"]
+        assert isinstance(passages, list)
+        assert {p["origin"] for p in passages} == {"in_unit"}
+        offset = passages[0]["stored_position"]
+        assert [p["stored_position"] for p in passages] == [
+            offset + i for i in range(len(passages))
+        ]
+
+    def test_round_trips(self, framer) -> None:
+        plan = self._build(framer, _contexts(5))
+        assert QualityPlan.from_record(plan.to_record()) == plan
+
+    def test_measured_samples_must_lead_the_unit_samples(self, framer) -> None:
+        samples = _contexts(3)
+        with pytest.raises(ValueError, match="prefix"):
+            self._build(framer, samples[1:], unit_samples=samples)
+
+
+class TestExpectedReuse:
+    def test_independent_expects_the_padded_blocks(self) -> None:
+        plan = _plan(_filler_aligner(Filler.DOTS), ReuseScenario.INDEPENDENT)
+        for sample_plan in plan.samples:
+            assert sample_plan.expected_reused_tokens
+            assert sample_plan.expected_reused_tokens % CHUNK == 0
+
+    def test_older_plans_have_no_expectation(self, aligner) -> None:
+        record = _plan(aligner, ReuseScenario.INDEPENDENT).to_record()
+        for sample in record["samples"]:  # type: ignore[union-attr]
+            del sample["expected_reused_tokens"]
+        assert QualityPlan.from_record(record).expected_reused_tokens() is None

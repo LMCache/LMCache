@@ -218,7 +218,7 @@ or dataset and so that later runs can check they build the same prompts.
      - ``"qa"``.
    * - ``scenario``
      - string
-     - ``"independent"`` or ``"reordered"``.
+     - ``"independent"``, ``"reordered"`` or ``"concatenated"``.
    * - ``num_samples``
      - int
      - ``--limit``; ``0`` means every question. The actual count is
@@ -238,7 +238,11 @@ or dataset and so that later runs can check they build the same prompts.
      - ``--seed``.
    * - ``filler``
      - string
-     - ``--filler``: ``"dots"``, ``"dashes"`` or ``"words"``.
+     - ``--filler``: ``"dots"``, ``"dashes"`` or ``"words"``; ``"none"``
+       for ``concatenated``.
+   * - ``min_unit_tokens``
+     - int
+     - ``--min-unit-tokens``; ``concatenated`` only (absent otherwise).
 
 The arm URLs, ``--reference-repeats`` and ``--capture-blend-metrics`` are not
 settings: runs of different arms into one directory may differ in them.
@@ -326,6 +330,19 @@ it (``plan.json`` holds the same records); it is there to read and grep.
    * - ``evidence_passage_ids``
      - array
      - ``passage_id`` of each evidence passage, in measured order.
+   * - ``expected_reused_tokens``
+     - int or null
+     - Tokens of the rendered request covered by a whole chunk of a
+       rendered store request, at any offset: what the blend server's
+       matcher can reuse. ``null`` in older plans.
+   * - ``unit_position``
+     - int or null
+     - ``concatenated``: this question's context's index in its unit
+       (``0`` = first); ``null`` otherwise.
+   * - ``duplicate_of``
+     - string or null
+     - ``concatenated``: the ``qid`` whose identical context was stored in
+       this question's place; ``null`` when its own was stored.
    * - ``passages``
      - array
      - One per passage, in **measured** order (below).
@@ -345,8 +362,10 @@ it (``plan.json`` holds the same records); it is there to read and grep.
    * - ``origin``
      - string
      - ``"alone"`` (``independent``: stored by a request holding only this
-       passage) or ``"with_sample_passages"`` (``reordered``: stored with
-       the question's other passages, in dataset order).
+       passage), ``"with_sample_passages"`` (``reordered``: stored with
+       the question's other passages, in dataset order) or ``"in_unit"``
+       (``concatenated``: stored in its question's context inside a unit;
+       ``stored_position`` counts passages from the unit's start).
    * - ``store_request_id``
      - string
      - ``store<N>``, the store request that cached it.
@@ -582,6 +601,12 @@ the candidate lost and why.
    * - ``blend_share``
      - number or null
      - This question's blend share (0 to 1).
+   * - ``reuse``
+     - object
+     - ``{expected_tokens, kind, prefix_tokens, blended_tokens}``:
+       ``expected_tokens`` from the manifest; ``kind`` (``"prefix"``,
+       ``"blended"`` or ``"none"``, whichever served more of the question)
+       and the candidate's token counts, ``null`` without captured counters.
    * - ``evidence``
      - array
      - The evidence passages, in measured order:
@@ -650,6 +675,13 @@ The verdict and everything needed to interpret it.
      - object or null
      - ``plan.json``'s ``padding`` plus ``share`` (padding tokens over
        measured prompt tokens); ``null`` for older plans.
+   * - ``reuse``
+     - object or null
+     - ``{expected_tokens, observed_tokens, observed_prefix_tokens,
+       observed_blended_tokens, observed_over_expected, groups}``: the
+       plan's expected reuse against the candidate pass's counters, and
+       ``groups``, one ``{kind, questions, delta, standard_error}`` per reuse
+       kind present. ``null`` without captured counters.
    * - ``num_store_requests``
      - int
      - Store requests in the plan.

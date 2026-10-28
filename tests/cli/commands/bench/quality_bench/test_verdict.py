@@ -18,12 +18,14 @@ from lmcache.cli.commands.bench.quality_bench.core.verdict import (
     ENGAGEMENT_WINDOW,
     MAX_UNSCORED_SHARE,
     LossTag,
+    ReuseKind,
     ScoreTable,
     Verdict,
     build_rows,
     check_engagement,
     decide,
     lexical_scores,
+    reuse_kind,
     run_problems,
     score,
 )
@@ -419,3 +421,30 @@ class TestPrecomputedScores:
         runs = self._runs(plan)
         table = lexical_scores(plan, runs, VerdictMetric.MATCH)
         assert table[runs[0].label] == [1.0] * _N
+
+
+class TestReuseKind:
+    @pytest.mark.parametrize(
+        ("counters", "kind"),
+        [
+            (BlendCounters(), ReuseKind.NONE),
+            (BlendCounters(prefix_hit_tokens=64.0), ReuseKind.PREFIX),
+            (BlendCounters(non_prefix_hit_tokens=64.0), ReuseKind.BLENDED),
+            (
+                BlendCounters(prefix_hit_tokens=64.0, non_prefix_hit_tokens=192.0),
+                ReuseKind.BLENDED,
+            ),
+            (
+                BlendCounters(
+                    segmented_prefix_hit_tokens=128.0, non_prefix_hit_tokens=64.0
+                ),
+                ReuseKind.PREFIX,
+            ),
+            (
+                BlendCounters(prefix_hit_tokens=64.0, non_prefix_hit_tokens=64.0),
+                ReuseKind.PREFIX,
+            ),
+        ],
+    )
+    def test_the_larger_kind_wins(self, counters, kind) -> None:
+        assert reuse_kind(counters) is kind

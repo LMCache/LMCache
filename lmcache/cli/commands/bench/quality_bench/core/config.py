@@ -44,6 +44,14 @@ class ReuseScenario(enum.Enum):
     the question presents them in a seeded new order. This is the "re-ordered
     documents" scenario."""
 
+    CONCATENATED = "concatenated"
+    """Questions' contexts (their passages, in request order) are
+    concatenated, in a seeded shuffle of the dataset, into units of at least
+    ``min_unit_tokens`` and stored without the system prompt; each question
+    then asks over its own context alone. Its KV was computed after other
+    questions' contexts, at another position, and is reused by blending.
+    No padding: chunks straddling a context's edges are recomputed."""
+
 
 class TaskType(enum.Enum):
     """A dataset's task type, which determines how it's scored.
@@ -141,6 +149,10 @@ class QualityRunConfig:
             timestamped directory under ``quality_results``.
         seed: Seed for ``words`` padding and the re-ordering permutations.
         filler: What pads passages and the system block to whole chunks.
+            ``None`` for ``concatenated``, which does not pad.
+        min_unit_tokens: ``concatenated`` only: the minimum size of a
+            stored unit, in tokens. Units hold whole contexts, so the last
+            may be shorter.
     """
 
     model: str
@@ -156,7 +168,8 @@ class QualityRunConfig:
     blend_metrics_url: str = ""
     output_dir: str = ""
     seed: int = 42
-    filler: Filler = Filler.DOTS
+    filler: Filler | None = Filler.DOTS
+    min_unit_tokens: int = 8192
 
     def __post_init__(self) -> None:
         if not self.model:
@@ -186,6 +199,15 @@ class QualityRunConfig:
         if self.max_output_tokens < 1:
             raise ValueError(
                 f"max_output_tokens must be >= 1, got {self.max_output_tokens}"
+            )
+        concatenated = self.scenario is ReuseScenario.CONCATENATED
+        if concatenated and self.filler is not None:
+            raise ValueError("--filler does not apply to --scenario concatenated")
+        if not concatenated and self.filler is None:
+            raise ValueError(f"--scenario {self.scenario.value} needs a filler")
+        if self.min_unit_tokens < 0:
+            raise ValueError(
+                f"min_unit_tokens must be >= 0, got {self.min_unit_tokens}"
             )
 
     def arm(self, role: ArmRole) -> ArmEndpoint:
@@ -228,7 +250,12 @@ class QualityRunConfig:
             "max_output_tokens": self.max_output_tokens,
             "template_kwargs": dict(self.template_kwargs),
             "seed": self.seed,
-            "filler": self.filler.value,
+            "filler": self.filler.value if self.filler is not None else "none",
+            **(
+                {"min_unit_tokens": self.min_unit_tokens}
+                if self.scenario is ReuseScenario.CONCATENATED
+                else {}
+            ),
         }
 
 

@@ -23,6 +23,11 @@ _PIECE_RE = re.compile(r"\n+| ?[^\s]+")
 _BPE_PIECE_RE = re.compile(r"\n+| ?[A-Z]*[a-z]+| ?[A-Z]+| ?\d| ?[^\sA-Za-z\d]+")
 
 
+# Ids for characters of text outside the vocabulary, clear of the
+# vocabulary's own ids.
+_CHAR_ID_BASE = 1_000_000
+
+
 class FakeTokenizer:
     """Minimal HuggingFace-tokenizer stand-in for offline tests."""
 
@@ -110,7 +115,10 @@ class FakeTokenizer:
         return [self.decode(ids) for ids in ids_list]
 
     def decode(self, ids: list[int], **_kwargs) -> str:
-        text = "".join(self._id_to_text[i] for i in ids)
+        text = "".join(
+            self._id_to_text[i] if i in self._id_to_text else chr(i - _CHAR_ID_BASE)
+            for i in ids
+        )
         if self._marker != " ":
             # SentencePiece decoding drops the word-start marker rather than
             # rendering it as a space.
@@ -134,8 +142,9 @@ class FakeTokenizer:
                 # word-initial, so it costs the same single token.
                 ids.append(self._text_to_id[f" {piece}"])
             else:
-                # Unknown text falls back to one token per character.
-                ids.extend(range(len(piece)))
+                # Unknown text falls back to one token per character, with an
+                # id per character so different text gets different ids.
+                ids.extend(_CHAR_ID_BASE + ord(ch) for ch in piece)
         return ids
 
     def __call__(self, texts: list[str], add_special_tokens: bool = False) -> dict:

@@ -43,7 +43,7 @@ mistaken for a quality verdict.
 
 | In scope | Not yet |
 |---|---|
-| Two reuse scenarios: `independent`, `reordered` | Other placements (shared prefix, worst-case position) |
+| Three reuse scenarios: `independent`, `reordered`, `concatenated` | Other placements (shared prefix, worst-case position) |
 | QA datasets: HotpotQA, MuSiQue, FinanceBench, any local QA file | Non-QA task categories (next step) |
 | LLM judge (RAGAS `AnswerAccuracy`) as the reference metric (Section 5); judge-free `match` and token F1 as a screen | Judge-derived loss tags for non-QA tasks |
 | Existing endpoints: the user launches each engine | Launching and restarting engines |
@@ -171,10 +171,63 @@ HotpotQA or FinanceBench `reordered`. `dots` passed on all of them.
 |---|---|---|---|
 | `independent` | each distinct passage alone, once | the sample's passages in dataset order | the basic RAG case: passages cached separately, combined at query time |
 | `reordered` | each sample's passages together, in dataset order | the same passages in a seeded permutation (never the identity) | reuse at a different position *and* with different neighbors |
+| `concatenated` | questions' contexts concatenated into units of ≥ `--min-unit-tokens`, no system prompt, no padding | the sample's passages in dataset order, unpadded | reuse of a whole context computed after unrelated contexts, at a new position |
 
 Every passage a question uses is stored before the first question is
 measured, so `--limit` (measuring a prefix of the dataset) never changes what
 a measured question can reuse.
+
+### Concatenated units
+
+`independent` stores each passage with no neighbours, and needs padding
+because short passages (HotpotQA's median is 118 tokens) are smaller than a
+256-token chunk. `concatenated` stores whole question contexts instead,
+which are 1–3K tokens on the sets checked (gpt-oss tokens: HotpotQA mean
+1,354, FinanceBench 1,949, LongBench 2Wiki 2,549, MuSiQue 2,905), so it
+needs no padding:
+
+1. **Contexts.** A question's context is its passages in request order, each
+   framed as `Passage <id>:\n<text>\n\nend of passage <id>` (the `dots`
+   frame with no filler).
+2. **Units.** Every question in the dataset (not only the `--limit` measured
+   ones) is visited in a shuffle seeded by `--seed`. Its context joins the
+   current unit until the unit reaches `--min-unit-tokens`. A context
+   identical to one already placed is not placed again: the question
+   records the owner as `duplicate_of` (12 of FinanceBench's 150 questions).
+   The shuffle keeps related questions (FinanceBench orders questions by
+   filing, and 113 of its 149 adjacent pairs share a passage) out of the
+   same unit by default.
+3. **Stores.** Each unit holding a measured question's context is sent as
+   one store request, **without the system prompt**. A unit's first context
+   would otherwise sit at the same position as in its request, behind the
+   same chat template and system prompt, and be served as an exact prefix:
+   at sizes up to about one context, that is 80–97% of all reuse. Without
+   it, every reuse is a blend at a new position of KV computed after the
+   unit's earlier contexts.
+4. **Requests.** Each question asks over its own context, unpadded:
+   `system prompt + context + question template`.
+
+A stored chunk is reusable wherever all its tokens recur in a request (the
+blend server's matcher probes every offset), so the chunks straddling a
+context's edges in its unit are recomputed: 18% of HotpotQA context tokens
+and 6% of FinanceBench's at `--min-unit-tokens 8192`. The default, 8192,
+puts about 3–6 contexts in a unit. A larger unit costs only stores (the
+unit must still fit the engine's `--max-model-len`).
+
+This tests something other than `independent`: a question's passages are
+stored together and in order, so their cross-attention in the cached KV is
+already right. What blending has to undo is the position shift and the
+unrelated preceding contexts. Expect smaller gaps than `independent` and
+report the two separately.
+
+### Expected reuse
+
+`build_plan` computes, for every scenario, each question's
+`expected_reused_tokens`: the tokens of its rendered request covered by a
+whole chunk of a rendered store request, found at any offset. This mirrors
+the blend server's matcher; chunks the candidate caches from earlier measured
+prompts are not counted. `run` prints the total, and `analyze` compares it
+with what the server reported (Section 3).
 
 ### Reuse manifest (`manifest.jsonl`)
 
@@ -229,6 +282,17 @@ documents, and requiring dedup mode would measure a configuration nobody
 serves.
 
 ## 3. Engagement (blend-server candidates)
+
+**Reuse report.** With captured counters, `analyze` also reports the
+candidate's reuse as observed against the plan's expected reuse
+(`summary.json` `reuse`): observed prefix and blended tokens, and their
+total over `expected_reused_tokens`. It classifies each question by which
+kind of reuse served more of it (`prefix`, `blended` or `none`, from its
+counter deltas) and reports Δ and SE per kind. In `independent` a question
+mixes both (its system prompt and first passage are a prefix); in
+`concatenated` all reuse should be blended, so a `prefix` group there points
+at the setup. A per-question kind can lag by one question, like the per-row
+blend share.
 
 A candidate served through the LMCache blend server reuses cached KV at new
 positions; one that silently fell back to recompute would score like the
@@ -505,7 +569,7 @@ lmcache/cli/commands/bench/
     └── core/               # runtime, kept out of command discovery's imports
         ├── config.py       # roles, scenarios, QualityRunConfig, QualityAnalyzeConfig
         ├── task.py         # check_task: refuse datasets that are not short-answer QA
-        ├── plan.py         # build_plan, reuse manifest, plan records
+        ├── plan.py         # build_plan (all scenarios), expected reuse, manifest, plan records
         ├── blend_counters.py   # Prometheus counter parsing and sources
         ├── runner.py       # ArmRunner: store, measure, per-question counters
         ├── run_files.py    # the results directory: plan.json, arm files, loaders
@@ -674,3 +738,7 @@ and a dataset entry. It doesn't touch the plan, runner or report.
 5. Sweep mode: `recomp_ratio` / `check_layer` grid with one verdict per point.
 6. Reuse from earlier measured questions (Section 2): settle the open question of
    whether to require `--enable-dedup-content` on the blend server.
+7. `concatenated` with `--enable-blend-reorder`: confirm on a pilot that a
+   question's context, a strict part of its unit, is still blended rather
+   than copied as a prefix (the reuse report's `prefix` group should be
+   empty).

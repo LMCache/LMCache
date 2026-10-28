@@ -1824,6 +1824,12 @@ prompts:
      - Each question's passages are stored together, then measured in a
        seeded new order -- reuse at a different position *and* next to
        different neighbors.
+   * - ``concatenated``
+     - Questions' contexts (their passages, in order) are concatenated, in a
+       seeded shuffle, into units of at least ``--min-unit-tokens`` and
+       stored without the system prompt or any padding. Each question is
+       then measured over its own context -- reuse of a whole context
+       computed after unrelated ones, at a new position.
 
 Prompts are chunk-aligned like ``rag-qa-quality``'s, so for a caching
 candidate set ``--chunk-size`` to its chunk size. ``--filler`` picks what pads
@@ -2090,7 +2096,12 @@ same workload flags (``--model`` through ``--seed``).
      - Questions to measure, in dataset order (0 = all).
    * - ``--scenario``
      - ``independent``
-     - ``independent`` or ``reordered`` (see above).
+     - ``independent``, ``reordered`` or ``concatenated`` (see above).
+   * - ``--min-unit-tokens``
+     - 8192
+     - ``concatenated`` only: minimum tokens per stored unit. Units of about
+       one context make most reuse an exact prefix; the default holds 3--6
+       contexts on HotpotQA and FinanceBench.
    * - ``--chunk-size``
      - 256
      - LMCache chunk size. For a caching candidate, match its chunk size.

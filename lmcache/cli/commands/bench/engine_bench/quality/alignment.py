@@ -239,6 +239,55 @@ class ChunkAligner:
         """
         return self._padded_passage(passage)[1]
 
+    def framed(self, passage: str) -> str:
+        """Return *passage* in the framed layout without padding.
+
+        ``Passage <id>:\n<text>\n\nend of passage <id>``: the same label
+        and end marker as the ``dots`` / ``dashes`` blocks, for prompts that
+        are not chunk-aligned (``bench quality``'s ``concatenated``
+        scenario).
+
+        Args:
+            passage: Raw passage text.
+
+        Returns:
+            The framed passage.
+        """
+        ident = block_id(passage)
+        return f"Passage {ident}:\n{passage}\n\nend of passage {ident}"
+
+    def render_and_encode(
+        self, messages: list[dict[str, str]]
+    ) -> tuple[str, list[int]]:
+        """Render *messages* with the chat template and tokenize the result.
+
+        Args:
+            messages: Chat messages, as sent to the engine.
+
+        Returns:
+            The rendered prompt and its token ids, as the engine sees them.
+        """
+        rendered = self._render(messages)
+        return rendered, self._encode(rendered)
+
+    def token_boundary(
+        self, rendered: str, char_index: int, ids: list[int]
+    ) -> tuple[int, bool]:
+        """Map a character position in a rendered prompt to a token index.
+
+        Args:
+            rendered: A prompt from :meth:`render_and_encode`.
+            char_index: A character position in it.
+            ids: Its token ids.
+
+        Returns:
+            The number of tokens before *char_index*, and whether a token
+            boundary falls exactly there (the text before it tokenizes to a
+            prefix of the whole prompt's tokens).
+        """
+        head = self._encode(rendered[:char_index])
+        return len(head), ids[: len(head)] == head
+
     def place_blocks(
         self, messages: list[dict[str, str]], blocks: list[str]
     ) -> tuple[int, list[BlockPlacement]]:
@@ -258,8 +307,7 @@ class ChunkAligner:
         Returns:
             The rendered prompt's token count, and one placement per block.
         """
-        rendered = self._render(messages)
-        ids = self._encode(rendered)
+        rendered, ids = self.render_and_encode(messages)
         placements: list[BlockPlacement] = []
         cursor = 0
         for block in blocks:
@@ -277,8 +325,8 @@ class ChunkAligner:
                 continue
             end = start + len(block)
             cursor = end
-            first, clean_start = self._token_boundary(rendered, start, ids)
-            last, clean_end = self._token_boundary(rendered, end, ids)
+            first, clean_start = self.token_boundary(rendered, start, ids)
+            last, clean_end = self.token_boundary(rendered, end, ids)
             problems = []
             if not clean_start:
                 problems.append("a token straddles its start")
@@ -332,24 +380,6 @@ class ChunkAligner:
 
     def _encode(self, text: str) -> list[int]:
         return list(self._tokenizer.encode(text, add_special_tokens=False))
-
-    def _token_boundary(
-        self, rendered: str, char_index: int, ids: list[int]
-    ) -> tuple[int, bool]:
-        """Map a character position to a token boundary.
-
-        Args:
-            rendered: The rendered prompt.
-            char_index: A character position in it.
-            ids: The rendered prompt's token ids.
-
-        Returns:
-            The number of tokens before *char_index*, and whether a token
-            boundary falls exactly there (the text before it tokenizes to a
-            prefix of the whole prompt's tokens).
-        """
-        head = self._encode(rendered[:char_index])
-        return len(head), ids[: len(head)] == head
 
     def _chat_prefix_tokens(self) -> int:
         """Count the tokens the chat template inserts before the content.
