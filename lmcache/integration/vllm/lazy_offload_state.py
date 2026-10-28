@@ -10,6 +10,9 @@ Generation, receipt, pin and orphaned are defined in
 from dataclasses import dataclass, replace
 import enum
 
+# First Party
+from lmcache.integration.vllm.lazy_offload_policy.base import PendingStoreItem
+
 
 class RequestPhase(enum.Enum):
     """Lifecycle phase of the request generation currently using an id."""
@@ -25,14 +28,20 @@ class SubmittedStoreBatch:
     Attributes:
         block_ids: The GPU blocks this batch pinned at submission. Its
             completion receipt unpins exactly these.
+        operations: The operations the batch submitted, with their hash
+            snapshots, handed back to the policy if the batch fails.
         orphaned: Whether a preemption reset or an id reuse detached the
             batch from the request generation now using its id. An orphaned
-            batch still owns its pins, but its failure is not charged to the
-            current generation.
+            batch still owns its pins, but a failure of it is not retried:
+            its operations belong to a generation that no longer exists.
+        failed: Whether a worker reported the store failed. The receipt
+            still settles the batch once every worker has reported.
     """
 
     block_ids: tuple[int, ...]
+    operations: PendingStoreItem
     orphaned: bool = False
+    failed: bool = False
 
 
 @dataclass
@@ -116,12 +125,16 @@ class LazyOffloadRequestRegistry:
         slot = self._slots.setdefault(request_id, RequestSlot())
         slot.phase = RequestPhase.FINISHED
 
-    def register_batch(self, request_id: str, block_ids: list[int]) -> None:
+    def register_batch(
+        self, request_id: str, block_ids: list[int], operations: PendingStoreItem
+    ) -> None:
         """Record the batch a submission put in flight.
 
         Args:
             request_id: The request whose store batch was submitted.
             block_ids: The GPU blocks the manager pinned for that batch.
+            operations: The operations the batch submitted, kept so a
+                failed batch can be retried.
 
         Raises:
             RuntimeError: If the request already has a batch in flight.
@@ -133,7 +146,21 @@ class LazyOffloadRequestRegistry:
             raise RuntimeError(
                 f"request {request_id!r} already has an in-flight store batch"
             )
-        slot.in_flight = SubmittedStoreBatch(tuple(block_ids))
+        slot.in_flight = SubmittedStoreBatch(tuple(block_ids), operations)
+
+    def fail_in_flight(self, request_id: str) -> None:
+        """Record that a worker reported the in-flight batch failed.
+
+        Args:
+            request_id: A request with a batch in flight.
+
+        Raises:
+            KeyError: If the request has no slot or no batch in flight.
+        """
+        slot = self._slots[request_id]
+        if slot.in_flight is None:
+            raise KeyError(request_id)
+        slot.in_flight = replace(slot.in_flight, failed=True)
 
     def complete_batch(self, request_id: str) -> SubmittedStoreBatch:
         """Clear the in-flight batch and return it.
@@ -142,8 +169,9 @@ class LazyOffloadRequestRegistry:
             request_id: The request whose batch every worker has reported.
 
         Returns:
-            The closed batch, whose ``block_ids`` the caller unpins and
-            whose ``orphaned`` flag says whether it outlived its generation.
+            The closed batch, whose ``block_ids`` the caller unpins, whose
+            ``orphaned`` flag says whether it outlived its generation, and
+            whose ``failed`` flag says whether its operations need a retry.
 
         Raises:
             KeyError: If the request has no slot or no batch in flight.
@@ -216,22 +244,6 @@ class LazyOffloadRequestRegistry:
         """
         slot = self._slots.get(request_id)
         return slot is not None and slot.in_flight is not None
-
-    def in_flight_is_orphaned(self, request_id: str) -> bool:
-        """Whether a preemption reset or an id reuse detached the batch.
-
-        Args:
-            request_id: The request id to query.
-
-        Returns:
-            True only when a batch is in flight and it no longer belongs to
-            the generation currently using the id, which is when its failure
-            must not break that generation's prefix chain.
-        """
-        slot = self._slots.get(request_id)
-        return (
-            slot is not None and slot.in_flight is not None and slot.in_flight.orphaned
-        )
 
     def in_flight_request_ids(self) -> set[str]:
         """The ids that must stay buffered because a batch is open.

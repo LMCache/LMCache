@@ -235,6 +235,38 @@ def _iter_kv_cache_specs(kv_cache_config: "KVCacheConfig | None") -> Iterable[An
             yield group_spec
 
 
+def _is_mamba_spec(spec: Any) -> bool:
+    """Whether a KV cache spec is vLLM's ``MambaSpec`` or a subclass of it.
+
+    Matched by class name so the check imports nothing from vLLM.
+
+    Args:
+        spec: A KV cache spec.
+
+    Returns:
+        True for a Mamba spec.
+    """
+    return any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__)
+
+
+def _max_step_tokens(vllm_config: VllmConfig) -> int:
+    """Return the scheduler's per-step token budget.
+
+    Older vLLM has no ``max_num_scheduled_tokens`` and budgets the batch size.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+
+    Returns:
+        The most tokens one scheduler step schedules.
+    """
+    scheduler_config = vllm_config.scheduler_config
+    return (
+        getattr(scheduler_config, "max_num_scheduled_tokens", None)
+        or scheduler_config.max_num_batched_tokens
+    )
+
+
 def get_group_tokens_per_block(
     vllm_config: VllmConfig,
     kv_cache_config: "KVCacheConfig | None",
@@ -389,6 +421,95 @@ def get_resolved_attention_block_sizes(
     return {vllm_config.cache_config.block_size}
 
 
+def _hash_block_size(vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig") -> int:
+    """Return the token granularity vLLM hashes and splits prefill at.
+
+    Mirrors ``resolve_kv_cache_block_sizes`` for align-mode Mamba hybrids:
+    ``prefix_match_unit`` if set, else the GCD of the groups' block sizes.
+    Unscaled by DCP, the GCD can only come out finer, which keeps every
+    bound built on it a bound.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        The granularity, in tokens.
+    """
+    prefix_match_unit = getattr(vllm_config.cache_config, "prefix_match_unit", None)
+    if prefix_match_unit:
+        return prefix_match_unit
+    return math.gcd(
+        *(group.kv_cache_spec.block_size for group in kv_cache_config.kv_cache_groups)
+    )
+
+
+def get_mamba_step_extra_blocks(
+    vllm_config: VllmConfig,
+    kv_cache_config: "KVCacheConfig | None",
+) -> dict[int, int]:
+    """Return the align-mode Mamba groups and their extra blocks per step.
+
+    ``MambaManager.allocate_new_blocks`` caps a running request's step at
+    one state block, plus a prefill checkpoint block when the spec has
+    them and a copy-on-write block after a partial hit, which needs a hash
+    granularity finer than the block.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        Group index -> blocks beyond the state block; empty unless the
+        model has Mamba groups in ``align`` cache mode.
+    """
+    if kv_cache_config is None or (
+        getattr(vllm_config.cache_config, "mamba_cache_mode", "none") != "align"
+    ):
+        return {}
+    hash_block_size = _hash_block_size(vllm_config, kv_cache_config)
+    extra: dict[int, int] = {}
+    for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
+        spec = group.kv_cache_spec
+        if not _is_mamba_spec(spec):
+            continue
+        extra[group_idx] = int(
+            getattr(spec, "num_prefill_checkpoint_blocks", 0) > 0
+        ) + int(hash_block_size < spec.block_size)
+    return extra
+
+
+def get_prefill_alignment(
+    vllm_config: VllmConfig,
+    kv_cache_config: "KVCacheConfig | None",
+    mamba_groups: dict[int, int],
+) -> int:
+    """Return what a prefill chunk short of the prompt's end ends on.
+
+    ``Scheduler._mamba_block_aligned_split`` ends such a chunk on a block
+    boundary, or earlier at a stop on the hash grid, unless a block is
+    wider than the prefill chunk limit.
+
+    Args:
+        vllm_config: The active vLLM configuration.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+        mamba_groups: What ``get_mamba_step_extra_blocks`` returned for the
+            same configs; chunks align only when it holds a group.
+
+    Returns:
+        The alignment in tokens, or 0 when chunks may end anywhere.
+    """
+    if kv_cache_config is None or not mamba_groups:
+        return 0
+    max_prefill_tokens = _max_step_tokens(vllm_config)
+    threshold = vllm_config.scheduler_config.long_prefill_token_threshold
+    if threshold > 0:
+        max_prefill_tokens = min(max_prefill_tokens, threshold)
+    if vllm_config.cache_config.block_size > max_prefill_tokens:
+        return 0
+    return _hash_block_size(vllm_config, kv_cache_config)
+
+
 def validate_mamba_step_alignment(
     vllm_config: VllmConfig,
     kv_cache_config: "KVCacheConfig | None" = None,
@@ -425,7 +546,7 @@ def validate_mamba_step_alignment(
     mamba_block_sizes = {
         spec.block_size
         for spec in _iter_kv_cache_specs(kv_cache_config)
-        if any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__)
+        if _is_mamba_spec(spec)
     }
     if len(mamba_block_sizes) > 1:
         raise ValueError(
@@ -846,10 +967,20 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                         f"tokens_per_block {tokens_per_block}"
                     )
             if self.lazy_offload:
+                mamba_groups = get_mamba_step_extra_blocks(vllm_config, kv_cache_config)
                 self._lazy_offload_manager = LazyOffloadManager(
                     vllm_config.kv_transfer_config.kv_connector_extra_config,
                     self._group_tokens_per_block,
                     self.scheduler_adapter,
+                    max_step_tokens=_max_step_tokens(vllm_config),
+                    num_lookahead_tokens=(
+                        (spec_config.num_speculative_tokens or 0) if spec_config else 0
+                    ),
+                    max_model_len=vllm_config.model_config.max_model_len,
+                    mamba_groups=mamba_groups,
+                    prefill_alignment=get_prefill_alignment(
+                        vllm_config, kv_cache_config, mamba_groups
+                    ),
                 )
 
     @property
@@ -1322,7 +1453,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # may poll this method repeatedly before that admission; do not submit
         # another lookup or re-enter WAITING_FOR_REMOTE_KVS in the meantime.
         if tracker.state == LMCacheMPRequestState.BYPASS_LMCACHE:
-            return 0, False
+            return self._report_admission(request, 0, False)
 
         # A completed async load normally leaves num_computed_tokens > 0, so
         # the scheduler does not call this method again.  If vLLM reset the
@@ -1350,7 +1481,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.num_lmcache_hit_tokens = 0
             tracker.apc_covered_tokens = 0
             tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
-            return 0, False
+            return self._report_admission(request, 0, False)
 
         # APC-covered lookup start (0 = none; stays 0 after a shrink):
         # the vLLM hit floored to every group's paged-chunk boundary and the
@@ -1442,7 +1573,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             return None, True
 
         if ret == 0:
-            return 0, False
+            return self._report_admission(request, 0, False)
 
         assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
 
@@ -1480,7 +1611,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         logger.debug(
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
         )
-        return need_to_load, need_to_load > 0
+        return self._report_admission(request, need_to_load, need_to_load > 0)
 
     def on_new_request(self, request: "Request") -> None:
         """Submit an LMCache lookup when a request enters the waiting queue.
@@ -2013,3 +2144,30 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "[KVConnector] Cleaned up request_tracker for request %s",
                 request_id,
             )
+
+    def _report_admission(
+        self,
+        request: "Request",
+        num_external_tokens: int,
+        load_async: bool,
+    ) -> tuple[int, bool]:
+        """Report a resolved lookup to lazy offload and pass its result on.
+
+        vLLM admits the request after ``get_num_new_matched_tokens`` returns
+        a count, if it can allocate its blocks; lazy offload bounds what it
+        allocates once running by its token count.
+
+        Args:
+            request: The request being admitted.
+            num_external_tokens: The external hit beyond the local one.
+            load_async: Whether that hit is loaded asynchronously.
+
+        Returns:
+            ``num_external_tokens`` and ``load_async``, unchanged.
+        """
+        if self.lazy_offload:
+            self._lazy_offload_manager.on_admission(
+                request.request_id,
+                len(request.all_token_ids),
+            )
+        return num_external_tokens, load_async
