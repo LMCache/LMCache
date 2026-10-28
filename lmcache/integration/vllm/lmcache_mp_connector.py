@@ -792,6 +792,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
                 enable_kv_events=self._enable_kv_events,
                 required_chunk_alignment=scheduler_block_size,
+                admit_coalesce_budget=(
+                    vllm_config.scheduler_config.max_num_batched_tokens
+                ),
             )
             # Whether vLLM called get_kv_connector_kv_cache_events this step; it
             # never does for a MultiConnector child (see build_connector_worker_meta).
