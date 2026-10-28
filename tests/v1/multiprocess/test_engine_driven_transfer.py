@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, PropertyMock, patch
 import os
 import sys
+import time
 
 # Third Party
 import msgspec
@@ -23,6 +24,7 @@ from lmcache.v1.multiprocess.custom_types import (
     PrepareStoreResponse,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.posix_shm import (
     shm_create_readwrite,
     shm_munmap,
@@ -479,7 +481,7 @@ def test_auto_npu_context_routes_to_lmcache_driven(
     monkeypatch.setattr(
         worker_transfer,
         "resolve_kv_wrapper_factory",
-        lambda _dt: (lambda tensor: tensor),
+        lambda _dt: lambda tensor: tensor,
     )
 
     context = worker_transfer.create_transfer_context(
@@ -1553,6 +1555,7 @@ def server_module_factory(
             chunk_size=chunk_size,
         )
         module = EngineDrivenTransferModule(ctx)
+        stack.callback(module.close)
 
         return module, mock_storage, mock_session, ctx
 
@@ -2020,6 +2023,126 @@ def test_server_closes_failed_transfer_events(
     ]
     assert events[-1].metadata["total_bytes"] == 0
     assert events[-1].metadata["stored_count"] == 0
+
+
+@pytest.mark.parametrize("reap_timeout", [0.0, 30.0], ids=["no-reap", "reap"])
+@pytest.mark.parametrize("operation", ["store", "retrieve"])
+@pytest.mark.parametrize("use_shm", [False, True], ids=["inline", "shm"])
+def test_transfer_observations_expire_independently_of_worker_reaping(
+    server_module_factory: ServerModuleFactory,
+    reap_timeout: float,
+    operation: str,
+    use_shm: bool,
+) -> None:
+    """Maintenance closes abandoned observations, not live workers or SHM locks.
+
+    Recent observations remain active. Late commits still finalize storage
+    after expiry, without reporting the same transfer's completion twice.
+    """
+    events: list[Event] = []
+    tensor = torch.ones(2, 2, 8, 16)
+    memory_obj = MagicMock(tensor=tensor, shm_offset=0, shm_byte_length=tensor.nbytes)
+
+    @contextmanager
+    def read_prefetched(
+        _keys: object, l1_owners: object = None
+    ) -> Iterator[list[MagicMock]]:
+        yield [memory_obj]
+
+    key = _default_key()
+    with (
+        ExitStack() as patches,
+        patch(
+            "lmcache.v1.multiprocess.modules.engine_driven_transfer."
+            "create_periodic_thread"
+        ) as create_cleanup,
+        patch(
+            "lmcache.v1.multiprocess.modules.management.create_periodic_thread"
+        ) as create_reaper,
+        patch(
+            "lmcache.v1.multiprocess.modules.engine_driven_transfer.time", wraps=time
+        ) as clock,
+    ):
+        module, storage, _, ctx = server_module_factory(
+            storage_manager_config=_make_storage_manager_config(
+                shm_name="expiry" if use_shm else "", pool_size=8192
+            )
+        )
+        patches.enter_context(
+            patch.object(ctx.event_bus, "publish", side_effect=events.append)
+        )
+        storage.reserve_write.return_value = {"obj": memory_obj}
+        storage.unsafe_read.return_value = (["obj"], [memory_obj])
+        storage.read_prefetched_results.side_effect = read_prefetched
+        clock.monotonic.return_value = 1000.0
+        module.register_kv_cache_engine_driven_context(_default_register_payload())
+        management = ManagementModule(
+            ctx,
+            liveness_targets=[module],
+            worker_reap_timeout_seconds=reap_timeout,
+            worker_registration_grace_seconds=3600.0,
+        )
+        try:
+            create_cleanup.assert_called_once()
+            create_cleanup.return_value.start.assert_called_once()
+            cleanup = create_cleanup.call_args.kwargs["execute_fn"]
+            if reap_timeout > 0:
+                create_reaper.assert_called_once()
+            else:
+                create_reaper.assert_not_called()
+            if operation == "store":
+                module.prepare_store(key, 1)
+                end_type = EventType.MP_STORE_END
+                count_name = "stored_count"
+            else:
+                assert module.prepare_retrieve(key, 1).success
+                end_type = EventType.MP_RETRIEVE_END
+                count_name = "retrieved_count"
+
+            clock.monotonic.return_value = 1060.0
+            if reap_timeout > 0:
+                management.ping(1)
+                create_reaper.call_args.kwargs["execute_fn"]()
+            cleanup()
+            assert not any(event.event_type == end_type for event in events)
+
+            clock.monotonic.return_value = 1181.0
+            if reap_timeout > 0:
+                management.ping(1)
+                create_reaper.call_args.kwargs["execute_fn"]()
+            for _ in range(2):
+                cleanup()
+            ends = [event for event in events if event.event_type == end_type]
+            assert len(ends) == 1
+            assert ends[0].metadata["total_bytes"] == 0
+            assert ends[0].metadata["num_tokens"] == 0
+            assert ends[0].metadata[count_name] == 0
+            assert (
+                ends[0].metadata["transfer_key"] == events[1].metadata["transfer_key"]
+            )
+            assert module.tracked_instance_count() == 1
+            assert management.report_status()["worker_liveness"]["enabled"] == (
+                reap_timeout > 0
+            )
+            storage.finish_write.assert_not_called()
+            if use_shm:
+                storage.finish_read_prefetched.assert_not_called()
+
+            if operation == "store":
+                data = b"" if use_shm else encode_tensors([tensor])
+                assert module.commit_store(key, 1, data)
+            else:
+                assert module.commit_retrieve(key, 1)
+            assert sum(event.event_type == end_type for event in events) == 1
+            if use_shm:
+                if operation == "store":
+                    storage.finish_write.assert_called_once_with(["obj"])
+                else:
+                    storage.finish_read_prefetched.assert_called_once_with(["obj"])
+        finally:
+            management.close()
+            module.close()
+        create_cleanup.return_value.stop.assert_called_once()
 
 
 def test_server_pairs_interleaved_worker_transfers(

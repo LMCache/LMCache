@@ -35,6 +35,11 @@ from lmcache.v1.multiprocess.engine_module import (
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
+from lmcache.v1.periodic_thread import (
+    ThreadLevel,
+    ThreadRunSummary,
+    create_periodic_thread,
+)
 
 # Local
 from .server_transfer import (
@@ -43,6 +48,8 @@ from .server_transfer import (
 )
 
 logger = init_logger(__name__)
+
+_TRANSFER_OBSERVATION_TIMEOUT_SECONDS = 120.0
 
 
 @dataclass
@@ -73,6 +80,8 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     register, unregister, prepare/commit store, and prepare/commit retrieve
     of CPU-serialized KV caches. Publishes MP transfer events from successful
     preparation through commit, including worker copies and RPC overhead.
+    Owns a periodic task that expires abandoned observations independently of
+    worker reaping; ``close`` stops it before releasing module state.
 
     Args:
         ctx: The shared engine context.
@@ -109,6 +118,13 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._pending_transfers: dict[
             tuple[EventType, int, str, IPCCacheServerKey], tuple[Event, float]
         ] = {}
+        self._observation_cleanup = create_periodic_thread(
+            name=f"lmcache-mp-transfer-observations-{id(self):x}",
+            interval=_TRANSFER_OBSERVATION_TIMEOUT_SECONDS / 4,
+            execute_fn=self._cleanup_expired_transfer_observations,
+            level=ThreadLevel.MEDIUM,
+        )
+        self._observation_cleanup.start()
 
     @property
     def context(self) -> MPCacheServerContext:
@@ -142,7 +158,8 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         }
 
     def close(self) -> None:
-        """Release registrations and close pending transfer observations."""
+        """Stop observation cleanup, release registrations and end observations."""
+        self._observation_cleanup.stop()
         with self._lock:
             self._engine_driven_contexts.clear()
             self._strategies.clear()
@@ -174,17 +191,13 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float
     ) -> list[int]:
-        """Reap silent registrations and expired transfer observations.
+        """Reap silent registrations and release their resources.
 
         A ping-proven instance is judged against ``reap_timeout_s``; one that
         has never pinged against the larger ``registration_grace_s``.
-        Transfer observations expire after ``reap_timeout_s`` even if the
-        worker keeps pinging. Expiry closes only the observation, not the
-        underlying transfer or its SHM reservations.
 
         Args:
-            reap_timeout_s: Silence budget for ping-proven instances and
-                maximum lifetime of a pending transfer observation.
+            reap_timeout_s: Silence budget for ping-proven instances.
             registration_grace_s: Silence budget for never-pinged instances.
 
         Returns:
@@ -207,18 +220,6 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 entry = self._engine_driven_contexts.pop(iid)
                 self._strategies.pop(iid, None)
                 reaped.append((iid, entry))
-            expired = [
-                key
-                for key, (_, started_at) in self._pending_transfers.items()
-                if now - started_at > reap_timeout_s
-            ]
-            pending = [self._pending_transfers.pop(key)[0] for key in expired]
-        for event in pending:
-            logger.warning(
-                "Expired engine-driven transfer observation %s without commit",
-                event.metadata["transfer_key"],
-            )
-            self._publish_transfer_end(event, False)
         for iid, entry in reaped:
             self._release_entry(iid, entry)
             logger.warning(
@@ -859,3 +860,27 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._ctx.event_bus.publish(
             Event(end_type, session_id=start.session_id, metadata=metadata)
         )
+
+    def _cleanup_expired_transfer_observations(self) -> ThreadRunSummary:
+        """End observations older than 120 seconds without reclaiming transfers.
+
+        Expiry publishes a zero-volume END event independently of worker reaping
+        and heartbeats. Registrations and SHM reservations stay intact: workers
+        may still be accessing those buffers. A late commit finalizes storage
+        normally without publishing a second END event.
+        """
+        now = time.monotonic()
+        with self._lock:
+            expired = [
+                key
+                for key, (_, started_at) in self._pending_transfers.items()
+                if now - started_at > _TRANSFER_OBSERVATION_TIMEOUT_SECONDS
+            ]
+            pending = [self._pending_transfers.pop(key)[0] for key in expired]
+        for event in pending:
+            logger.warning(
+                "Expired engine-driven transfer observation %s without commit",
+                event.metadata["transfer_key"],
+            )
+            self._publish_transfer_end(event, False)
+        return ThreadRunSummary(success=True, message=f"expired={len(pending)}")
