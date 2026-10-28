@@ -42,6 +42,30 @@ group: serving a prefix needs every chunk of it present."""
 _VALID_FETCHING_POLICIES = frozenset(get_args(FetchingPolicy))
 
 
+def lookup_kv_ranks(world_size: int) -> list[int]:
+    """The kv ranks a lookup at ``world_size`` fans out to, in rank order.
+
+    These are the ranks every worker of that world size stores a per-rank
+    object group under (see :class:`ShardReplicationDesc`), so a caller can
+    address another world size's objects with them.
+
+    Args:
+        world_size: World size of the lookup.
+
+    Returns:
+        One kv rank per worker, in worker order.
+    """
+    return [
+        ObjectKey.ComputeKVRank(
+            world_size=world_size,
+            global_rank=worker_id,
+            local_world_size=world_size,
+            local_rank=worker_id,
+        )
+        for worker_id in range(world_size)
+    ]
+
+
 def _lookup_kv_ranks(
     ipc_key: "IPCCacheServerKey", tp_replicas: int, dcp_shards: int
 ) -> list[int]:
