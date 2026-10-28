@@ -97,6 +97,41 @@ class TemporaryPath {
   std::filesystem::path path_;
 };
 
+void publish_temporary_files(
+    const std::vector<TemporaryPath>& temporary_paths,
+    const std::vector<std::filesystem::path>& final_paths,
+    const std::vector<size_t>& lengths) {
+  std::vector<std::filesystem::path> published;
+  try {
+    for (size_t index = 0; index < temporary_paths.size(); ++index) {
+      const std::filesystem::path& temporary_path =
+          temporary_paths[index].path();
+      const std::filesystem::path& final_path = final_paths[index];
+      if (::link(temporary_path.c_str(), final_path.c_str()) == 0) {
+        published.push_back(final_path);
+        std::filesystem::remove(temporary_path);
+        continue;
+      }
+      if (errno != EEXIST) {
+        throw std::runtime_error("atomic NIXL file publication failed: " +
+                                 std::string(std::strerror(errno)));
+      }
+      struct stat existing{};
+      if (::stat(final_path.c_str(), &existing) != 0 || existing.st_size < 0 ||
+          static_cast<size_t>(existing.st_size) != lengths[index]) {
+        throw std::runtime_error(
+            "racing NIXL writer published a different file size");
+      }
+    }
+  } catch (...) {
+    for (const std::filesystem::path& path : published) {
+      std::error_code error;
+      std::filesystem::remove(path, error);
+    }
+    throw;
+  }
+}
+
 class RegisteredMemory {
  public:
   RegisteredMemory(nixlAgent& agent, nixlBackendH* backend,
@@ -239,14 +274,23 @@ void execute_transfer(nixlAgent& agent, nixlBackendH* backend,
   request.execute(stop);
 }
 
-class ObjectTransferOperation final : public NixlPendingOperation {
+class NixlTransferOperation final : public NixlPendingOperation {
  public:
-  ObjectTransferOperation(
-      nixlAgent& agent, nixlBackendH* backend, const std::string& agent_name,
-      nixl_xfer_op_t operation, const nixl_reg_dlist_t& registration,
-      const nixl_xfer_dlist_t& local, const nixl_xfer_dlist_t& storage,
-      const std::vector<uint8_t>& results, const std::vector<size_t>& selected)
-      : results_(results), selected_(selected) {
+  NixlTransferOperation(nixlAgent& agent, nixlBackendH* backend,
+                        const std::string& agent_name, nixl_xfer_op_t operation,
+                        const nixl_reg_dlist_t& registration,
+                        const nixl_xfer_dlist_t& local,
+                        const nixl_xfer_dlist_t& storage,
+                        const std::vector<uint8_t>& results,
+                        const std::vector<size_t>& selected,
+                        std::vector<TemporaryPath> temporary_paths = {},
+                        std::vector<std::filesystem::path> final_paths = {},
+                        std::vector<size_t> final_lengths = {})
+      : results_(results),
+        selected_(selected),
+        temporary_paths_(std::move(temporary_paths)),
+        final_paths_(std::move(final_paths)),
+        final_lengths_(std::move(final_lengths)) {
     if (registration.isEmpty()) return;
     if (local.descCount() != storage.descCount()) {
       throw std::runtime_error("NIXL descriptor lists have different sizes");
@@ -288,10 +332,12 @@ class ObjectTransferOperation final : public NixlPendingOperation {
   }
 
   std::vector<uint8_t> complete() override {
-    discard();
     if (terminal_status_ == NIXL_SUCCESS) {
+      // FILE stores publish only after terminal transfer success.
+      publish_temporary_files(temporary_paths_, final_paths_, final_lengths_);
       for (size_t index : selected_) results_[index] = 1;
     }
+    discard();
     return std::move(results_);
   }
 
@@ -305,6 +351,9 @@ class ObjectTransferOperation final : public NixlPendingOperation {
  private:
   std::vector<uint8_t> results_;
   std::vector<size_t> selected_;
+  std::vector<TemporaryPath> temporary_paths_;
+  std::vector<std::filesystem::path> final_paths_;
+  std::vector<size_t> final_lengths_;
   bool terminal_ = false;
   nixl_status_t terminal_status_ = NIXL_SUCCESS;
   std::unique_ptr<RegisteredMemory> registration_;
@@ -382,8 +431,10 @@ class NixlFileStorage final : public NixlStorageStrategy {
     nixl_xfer_dlist_t storage(FILE_SEG);
     std::vector<TemporaryPath> temporary_paths;
     std::vector<std::filesystem::path> final_paths;
+    std::vector<size_t> lengths;
     temporary_paths.reserve(buffers.size());
     final_paths.reserve(buffers.size());
+    lengths.reserve(buffers.size());
 
     for (size_t index = 0; index < buffers.size(); ++index) {
       const NixlTransferBuffer& buffer = buffers[index];
@@ -393,6 +444,7 @@ class NixlFileStorage final : public NixlStorageStrategy {
       std::filesystem::path temporary_path = make_temporary_path(final_path);
       temporary_paths.emplace_back(temporary_path);
       final_paths.push_back(final_path);
+      lengths.push_back(buffer.length);
       local.addDesc(nixlBasicDesc(reinterpret_cast<uintptr_t>(buffer.data),
                                   buffer.length, 0));
       nixlBlobDesc file_descriptor(
@@ -404,37 +456,7 @@ class NixlFileStorage final : public NixlStorageStrategy {
 
     execute_transfer(agent, backend, agent_name, NIXL_WRITE, local,
                      registration, storage, stop);
-
-    std::vector<std::filesystem::path> published;
-    try {
-      for (size_t index = 0; index < temporary_paths.size(); ++index) {
-        const std::filesystem::path& temporary_path =
-            temporary_paths[index].path();
-        const std::filesystem::path& final_path = final_paths[index];
-        if (::link(temporary_path.c_str(), final_path.c_str()) == 0) {
-          published.push_back(final_path);
-          std::filesystem::remove(temporary_path);
-          continue;
-        }
-        if (errno != EEXIST) {
-          throw std::runtime_error("atomic NIXL file publication failed: " +
-                                   std::string(std::strerror(errno)));
-        }
-        struct stat existing{};
-        if (::stat(final_path.c_str(), &existing) != 0 ||
-            existing.st_size < 0 ||
-            static_cast<size_t>(existing.st_size) != buffers[index].length) {
-          throw std::runtime_error(
-              "racing NIXL writer published a different file size");
-        }
-      }
-    } catch (...) {
-      for (const std::filesystem::path& path : published) {
-        std::error_code error;
-        std::filesystem::remove(path, error);
-      }
-      throw;
-    }
+    publish_temporary_files(temporary_paths, final_paths, lengths);
   }
 
   std::vector<uint8_t> load(nixlAgent& agent, nixlBackendH* backend,
@@ -489,7 +511,78 @@ class NixlFileStorage final : public NixlStorageStrategy {
     return {.query = true,
             .deletion = true,
             .direct_io = use_direct_io_,
-            .atomic_publication = true};
+            .atomic_publication = true,
+            .pending_transfers = true};
+  }
+
+  std::unique_ptr<NixlPendingOperation> prepare_store(
+      nixlAgent& agent, nixlBackendH* backend, const std::string& agent_name,
+      const std::vector<NixlTransferBuffer>& buffers,
+      const NixlDescriptorIdAllocator& allocate_id) override {
+    nixl_reg_dlist_t registration(FILE_SEG);
+    nixl_xfer_dlist_t local(DRAM_SEG);
+    nixl_xfer_dlist_t storage(FILE_SEG);
+    std::vector<TemporaryPath> temporary_paths;
+    std::vector<std::filesystem::path> final_paths;
+    std::vector<size_t> lengths;
+    // Temporary paths remain owned until the operation publishes them.
+    temporary_paths.reserve(buffers.size());
+    final_paths.reserve(buffers.size());
+    lengths.reserve(buffers.size());
+    for (const NixlTransferBuffer& buffer : buffers) {
+      const bool direct_io = should_use_direct_io(buffer);
+      const std::filesystem::path final_path = path_for_key(buffer.key);
+      std::filesystem::create_directories(final_path.parent_path());
+      const std::filesystem::path temporary_path =
+          make_temporary_path(final_path);
+      temporary_paths.emplace_back(temporary_path);
+      final_paths.push_back(final_path);
+      lengths.push_back(buffer.length);
+      local.addDesc(nixlBasicDesc(reinterpret_cast<uintptr_t>(buffer.data),
+                                  buffer.length, 0));
+      nixlBlobDesc file_descriptor(
+          0, buffer.length, allocate_id(),
+          make_store_file_meta_info(temporary_path, direct_io));
+      registration.addDesc(file_descriptor);
+      storage.addDesc(file_descriptor);
+    }
+    return std::make_unique<NixlTransferOperation>(
+        agent, backend, agent_name, NIXL_WRITE, registration, local, storage,
+        std::vector<uint8_t>(), std::vector<size_t>(),
+        std::move(temporary_paths), std::move(final_paths), std::move(lengths));
+  }
+
+  std::unique_ptr<NixlPendingOperation> prepare_load(
+      nixlAgent& agent, nixlBackendH* backend, const std::string& agent_name,
+      const std::vector<NixlTransferBuffer>& buffers,
+      const NixlDescriptorIdAllocator& allocate_id) override {
+    std::vector<uint8_t> results(buffers.size(), 0);
+    std::vector<size_t> selected;
+    selected.reserve(buffers.size());
+    nixl_reg_dlist_t registration(FILE_SEG);
+    nixl_xfer_dlist_t local(DRAM_SEG);
+    nixl_xfer_dlist_t storage(FILE_SEG);
+    for (size_t index = 0; index < buffers.size(); ++index) {
+      const NixlTransferBuffer& buffer = buffers[index];
+      const bool direct_io = should_use_direct_io(buffer);
+      const std::filesystem::path path = path_for_key(buffer.key);
+      selected.push_back(index);
+      local.addDesc(nixlBasicDesc(reinterpret_cast<uintptr_t>(buffer.data),
+                                  buffer.length, 0));
+      nixlBlobDesc file_descriptor(0, buffer.length, allocate_id(),
+                                   make_load_file_meta_info(path, direct_io));
+      registration.addDesc(file_descriptor);
+      storage.addDesc(file_descriptor);
+    }
+    try {
+      return std::make_unique<NixlTransferOperation>(
+          agent, backend, agent_name, NIXL_READ, registration, local, storage,
+          results, selected);
+    } catch (const std::runtime_error& error) {
+      throw NixlLoadPrepareError(
+          "NIXL load preparation failed: " + std::string(error.what()),
+          std::move(results));
+    }
   }
 
  private:
@@ -607,7 +700,7 @@ class NixlObjectStorage final : public NixlStorageStrategy {
       registration.addDesc(object_descriptor);
       storage.addDesc(object_descriptor);
     }
-    return std::make_unique<ObjectTransferOperation>(
+    return std::make_unique<NixlTransferOperation>(
         agent, backend, agent_name, NIXL_WRITE, registration, local, storage,
         std::vector<uint8_t>(), std::vector<size_t>());
   }
@@ -634,7 +727,7 @@ class NixlObjectStorage final : public NixlStorageStrategy {
     }
     std::unique_ptr<NixlPendingOperation> operation;
     try {
-      operation = std::make_unique<ObjectTransferOperation>(
+      operation = std::make_unique<NixlTransferOperation>(
           agent, backend, agent_name, NIXL_READ, registration, local, storage,
           results, selected);
     } catch (const std::runtime_error& error) {
@@ -664,7 +757,7 @@ class NixlObjectStorage final : public NixlStorageStrategy {
     for (const uint8_t bit : present) missing += bit == 0;
     if (missing == buffers.size()) {
       // Nothing to retry: an empty operation completes all keys as false.
-      return std::make_unique<ObjectTransferOperation>(
+      return std::make_unique<NixlTransferOperation>(
           agent, backend, agent_name, NIXL_READ, nixl_reg_dlist_t(OBJ_SEG),
           nixl_xfer_dlist_t(DRAM_SEG), nixl_xfer_dlist_t(OBJ_SEG), results,
           std::vector<size_t>());
@@ -691,7 +784,7 @@ class NixlObjectStorage final : public NixlStorageStrategy {
     }
     std::unique_ptr<NixlPendingOperation> operation;
     try {
-      operation = std::make_unique<ObjectTransferOperation>(
+      operation = std::make_unique<NixlTransferOperation>(
           agent, backend, agent_name, NIXL_READ, registration, local, storage,
           results, selected);
     } catch (const std::runtime_error& error) {

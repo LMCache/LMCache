@@ -750,10 +750,11 @@ def test_posix_client_direct_io_aligned_round_trip(tmp_path: Path) -> None:
     arena[2 * stride : 4 * stride].zero_()
     expected = [bytes(view) for view in source_views]
 
-    client = _make_posix_client(tmp_path, arena)
+    client = _make_posix_client(tmp_path, arena, enable_reactor=True)
     try:
         assert client.supports_direct_io
-        _client_round_trip(client, keys, source_views, destination_views)
+        _client_overlap_store(client, keys, source_views)
+        _client_overlap_load(client, keys, destination_views)
     finally:
         client.close()
 

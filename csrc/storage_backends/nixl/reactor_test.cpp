@@ -606,7 +606,9 @@ void test_reactor_eligibility_matrix() {
   CHECK(!nixl_reactor_eligible("rados", object_caps, true));
   CHECK(!nixl_reactor_eligible("RAD", object_caps, true));
   CHECK(!nixl_reactor_eligible("RADOS", file_caps, true));
-  CHECK(!nixl_reactor_eligible("POSIX", file_caps, true));
+  file_caps.pending_transfers = true;
+  CHECK(nixl_reactor_eligible("POSIX", file_caps, true));
+  CHECK(!nixl_reactor_eligible("POSIX", file_caps, false));
   std::printf("PASS reactor_eligibility_matrix\n");
 }
 

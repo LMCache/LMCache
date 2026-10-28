@@ -47,7 +47,8 @@ class NixlReactorDriver {
 inline bool nixl_reactor_eligible(const std::string& backend,
                                   const NixlStorageCapabilities& capabilities,
                                   bool enable_reactor) {
-  const bool allowlisted = backend == "RADOS" || backend == "REDIS";
+  const bool allowlisted =
+      backend == "POSIX" || backend == "RADOS" || backend == "REDIS";
   return enable_reactor && allowlisted && capabilities.pending_transfers;
 }
 
