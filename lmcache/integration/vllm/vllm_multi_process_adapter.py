@@ -19,6 +19,10 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
+from lmcache.integration.vllm.admission_coalescing import (
+    DEFAULT_BUDGET_TOKENS,
+    AdmissionCoalescer,
+)
 from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.mp_lookup_state import LookupState
 from lmcache.integration.vllm.mp_server_launcher import (
@@ -143,6 +147,10 @@ class ExtraConfigDefault(enum.Enum):
     # Mirrors the ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config
     # key wins when both are set.
     mp_transfer_mode = "auto"
+    # Hold completed retrieves briefly so that several prefill tails
+    # are admitted on the same step boundary and the per-step token
+    # budget is filled (see docs/design/v1/multiprocess/admission_coalescing.md). Default off.
+    admit_coalesce = False
     # Whether IPC mechanisms must work across isolated containers (no
     # shared host IPC namespace or /dev/shm); see
     # lmcache.v1.platform.ipc_policy. Must match the LMCache server's
@@ -161,6 +169,7 @@ class ExtraConfigDefault(enum.Enum):
 # Backward-compatible aliases for callers that still pass these as
 # positional/keyword args.
 DEFAULT_MQ_TIMEOUT: float = ExtraConfigDefault.mq_timeout.default
+
 DEFAULT_HEARTBEAT_INTERVAL: float = ExtraConfigDefault.heartbeat_interval.default
 
 _EXTRA_CONFIG_KEY_PREFIX = "lmcache.mp."
@@ -1250,6 +1259,7 @@ class LMCacheMPWorkerAdapter:
         extra_config: dict[str, Any] | None = None,
         enable_kv_events: bool = False,
         required_chunk_alignment: int | None = None,
+        admit_coalesce_budget: int = DEFAULT_BUDGET_TOKENS,
     ):
         """Initialize the worker adapter for current or legacy vLLM callers.
 
@@ -1326,12 +1336,19 @@ class LMCacheMPWorkerAdapter:
                 self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
             else:
                 self._mp_transfer_mode = None
+            # Hold-K admission coalescing: one switch; K fixed at 2.
+            admit_coalesce = cfg[ExtraConfigDefault.admit_coalesce.name]
             set_ipc_policy(
                 isolated_ipc=cfg[ExtraConfigDefault.isolated_ipc.name],
                 use_vmm_api=cfg[ExtraConfigDefault.use_vmm_api.name],
             )
         else:
             self._mp_transfer_mode = None
+            admit_coalesce = ExtraConfigDefault.admit_coalesce.value
+        self._coalescer = AdmissionCoalescer(
+            enabled=bool(admit_coalesce),
+            budget_tokens=admit_coalesce_budget,
+        )
         self.req_client = RequestClientFactory.create(server_url, context=context)
         self._mq_timeout = mq_timeout
         self._server_url = server_url
@@ -1862,6 +1879,9 @@ class LMCacheMPWorkerAdapter:
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
         self.retrieve_futures[request_id] = (future, op.flat_block_ids)
+        self._coalescer.on_submit(
+            request_id, max(0, num_packed_tokens(op.token_bytes) - op.end)
+        )
         if event is not None:
             self.retrieve_events[request_id] = event
 
@@ -2026,6 +2046,7 @@ class LMCacheMPWorkerAdapter:
             self.retrieve_futures.clear()
             self.store_events.clear()
             self.retrieve_events.clear()
+            self._coalescer.drain()
             self._pending_store_kv_events.clear()
 
             # Retrieves dropped at submit time still must be reported,
@@ -2083,6 +2104,13 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                     r_result,
                 )
+
+        # Admission coalescing: hold ready retrieves for one more step
+        # when that can fill the step (see AdmissionCoalescer). Held ids
+        # stay in retrieve_futures and are re-evaluated next call.
+        finished_retrieves = self._coalescer.select_to_report(
+            finished_retrieves, set(self.retrieve_futures)
+        )
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
@@ -2160,6 +2188,7 @@ class LMCacheMPWorkerAdapter:
             self.retrieve_futures.clear()
             self.store_events.clear()
             self.retrieve_events.clear()
+            self._coalescer.drain()
             self._pending_store_kv_events.clear()
 
             # Retrieves dropped at submit time still must be reported,
@@ -2214,6 +2243,10 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                     r_result,
                 )
+
+        finished_retrieves = self._coalescer.select_to_report(
+            finished_retrieves, set(self.retrieve_futures)
+        )
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
