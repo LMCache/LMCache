@@ -890,6 +890,7 @@ def test_second_server_cannot_bind_a_served_port(grpc_server_mode: str) -> None:
         ),
     )
     try:
+        workers_before = _affinity_workers()
         with pytest.raises(RuntimeError):
             build_grpc_request_server(
                 [],
@@ -900,8 +901,13 @@ def test_second_server_cannot_bind_a_served_port(grpc_server_mode: str) -> None:
                     grpc_server_mode=cast(Any, grpc_server_mode),
                 ),
             )
+        assert _affinity_workers() == workers_before
     finally:
         first.close()
+
+
+def _affinity_workers() -> int:
+    return sum(t.name.startswith("grpc-affinity") for t in threading.enumerate())
 
 
 def test_client_reports_a_zmq_server_instead_of_waiting() -> None:
