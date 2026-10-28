@@ -235,6 +235,7 @@ class BaselineBenchCase:
 
             checksums: dict[int, list[str]] | None = None
             if request_kind == "cold" and miss_tokens > 0:
+                client.fill_deterministic_kv(request)
                 checksums = client.compute_checksums(
                     request,
                     start_token=hit_tokens,

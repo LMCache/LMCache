@@ -1157,7 +1157,7 @@ is written on every change.
    * - ``lmcache_coordinator.metadata_file.writes``
      - ObservableCounter (attr: ``result``)
      - Pin and quota saves, ``ok`` or ``error``.  An ``error`` is a change
-       that will not survive a restart.
+       that could not be saved.
 
 The prefetch metrics cover warm prefetches relayed through
 ``POST /cache/prefetches``.  The coordinator remembers each submitted

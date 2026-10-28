@@ -236,6 +236,7 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
             0, request_id="req-0-cold", request_kind="cold", token_ids=(0, 9906)
         ),
         call.lookup(cold),
+        call.fill_deterministic_kv(cold),
         call.compute_checksums(cold, start_token=0, token_count=2, operation="store"),
         call.store(cold, start_token=0, token_count=2),
         call.release_request(cold),
@@ -420,7 +421,9 @@ def test_run_concurrently_needs_one_client_per_case() -> None:
         )
 
 
-@pytest.mark.parametrize("operation", ["lookup", "store", "release_request"])
+@pytest.mark.parametrize(
+    "operation", ["lookup", "fill_deterministic_kv", "store", "release_request"]
+)
 def test_baseline_releases_request_on_error(operation: str) -> None:
     client = _client("same", "same")
     method = getattr(client, operation)
