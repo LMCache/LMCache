@@ -28,7 +28,7 @@ from lmcache.v1.memory_management import (
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.storage_backend.storage_manager import StorageManager
+    from lmcache.inprocess.v1.storage_backend.storage_manager import StorageManager
 
 logger = init_logger(__name__)
 

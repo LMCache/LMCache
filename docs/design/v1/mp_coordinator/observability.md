@@ -262,7 +262,7 @@ metrics. A failed periodic write also fails that pass of the `checkpoint`
 background loop, so the loop metrics and `/status` show it.
 
 A failed metadata write undoes the change and returns 503, so the caller knows
-and can retry safely. Today it returns 200 and the change is lost on restart.
+and can retry safely.
 
 ### HTTP (P2)
 

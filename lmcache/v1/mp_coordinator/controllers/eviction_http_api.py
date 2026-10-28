@@ -17,6 +17,7 @@ per request like any other collaborator that is not this controller.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
@@ -32,6 +33,8 @@ from lmcache.v1.mp_coordinator.http_apis.dependencies import (
     get_context,
     get_outbound_client,
 )
+from lmcache.v1.mp_coordinator.persistence.durable_component import DurableComponent
+from lmcache.v1.mp_coordinator.persistence.metadata import MetadataWriteError
 from lmcache.v1.mp_coordinator.schemas import (
     DeleteRequest,
     DeleteResponse,
@@ -63,6 +66,33 @@ _DEFAULT_SALT_SENTINEL = "_default"
 _QUOTA_TIER = Tier.L2
 # Usage is accounted on both concrete tiers, so status reads accept either.
 _ACCOUNTED_TIERS = (Tier.L1, Tier.L2)
+
+
+def _save_or_undo(
+    request: Request, component: DurableComponent, before: Mapping[str, object]
+) -> None:
+    """Persist a change to ``component``, or undo it and answer 503.
+
+    Pins and quotas are operator intent: a ``200`` must mean the change
+    survives a restart. If the metadata document cannot be written, the
+    change is rolled back in memory, so the coordinator never runs on
+    intent it would lose, and the caller learns it can retry.
+
+    Args:
+        request: The request that made the change.
+        component: The pin table or quota registry that was changed.
+        before: ``component.capture()`` taken just before the change.
+
+    Raises:
+        HTTPException: 503 if the document could not be written.
+    """
+    try:
+        get_context(request).metadata_persister.save()
+    except MetadataWriteError as exc:
+        component.restore(before)
+        raise HTTPException(
+            status_code=503, detail=f"change not saved and undone: {exc}"
+        ) from None
 
 
 def _resolve_salt_from_api_path(cache_salt: str) -> str:
@@ -152,9 +182,9 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
         default_limit_bytes = (
             None if body.default_limit_gb is None else int(body.default_limit_gb * _GB)
         )
-        ctx = get_context(request)
+        before = controller.quota.capture()
         controller.quota.set_default_limit_bytes(default_limit_bytes)
-        ctx.metadata_persister.save()
+        _save_or_undo(request, controller.quota, before)
         return QuotaConfigResponse(default_limit_gb=body.default_limit_gb)
 
     @router.get("/quota/config")
@@ -195,14 +225,14 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
         _require_quota_tier(body.tier)
         cache_salt = _resolve_salt_from_api_path(cache_salt)
         limit_bytes = int(body.limit_gb * _GB)
-        ctx = get_context(request)
+        before = controller.quota.capture()
         try:
             controller.quota.set_quota(cache_salt, limit_bytes)
         except ValueError:
             return JSONResponse(
                 status_code=400, content={"error": "invalid quota limit"}
             )
-        ctx.metadata_persister.save()
+        _save_or_undo(request, controller.quota, before)
         return QuotaResponse(cache_salt=cache_salt, limit_gb=body.limit_gb, status="ok")
 
     @router.delete("/quota/{cache_salt}")
@@ -220,9 +250,9 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
         """
         _require_quota_tier(tier)
         cache_salt = _resolve_salt_from_api_path(cache_salt)
-        ctx = get_context(request)
+        before = controller.quota.capture()
         removed = controller.quota.delete_quota(cache_salt)
-        ctx.metadata_persister.save()
+        _save_or_undo(request, controller.quota, before)
         return QuotaResponse(
             cache_salt=cache_salt,
             limit_gb=0.0,
@@ -328,8 +358,9 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 
+        before = controller.capture()
         controller.pin(resolved)
-        ctx.metadata_persister.save()
+        _save_or_undo(request, controller, before)
         return PinResponse(
             requested=chunks,
             affected=len(resolved),
@@ -364,8 +395,9 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 
+        before = controller.capture()
         controller.unpin(resolved)
-        ctx.metadata_persister.save()
+        _save_or_undo(request, controller, before)
         return PinResponse(
             requested=chunks,
             affected=len(resolved),
@@ -496,8 +528,23 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
             node_skipped = result.get("skipped", 0)
 
         if touches_l2 and body.force:
+            before = controller.capture()
             controller.drop_pins(resolved)
-            ctx.metadata_persister.save()
+            try:
+                ctx.metadata_persister.save()
+            except MetadataWriteError as exc:
+                # The server already deleted the keys, which cannot be
+                # undone; keep the pins, so memory agrees with the
+                # document, and say exactly what happened.
+                controller.restore(before)
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"{node_deleted} keys deleted on {body.instance_id!r}, "
+                        f"but dropping their pins was not saved; the pins are "
+                        f"kept: {exc}"
+                    ),
+                ) from None
 
         # ``skipped`` = L1 keys the node refused (locks) + L2 keys held back
         # for a pin.
