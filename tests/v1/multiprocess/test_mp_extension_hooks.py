@@ -247,6 +247,7 @@ def test_registration_builds_the_transfer_context_through_the_hook():
     adapter._shutdown_requested = False
     adapter._client_work_in_flight = 0
     adapter._client_work_done = threading.Condition(adapter._heartbeat_lock)
+    adapter._registration_lock = threading.Lock()
     adapter.transfer_ctx = None
     kv_caches = {"layer.0": object()}
 

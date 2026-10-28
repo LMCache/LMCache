@@ -192,9 +192,12 @@ registration, so it pings throughout an idle spell.
 `shutdown()` first sets a shutdown flag under the adapter's heartbeat lock. From
 then on, registration and recovery refuse to start, and a registration already in
 flight discards its new context instead of publishing it. `shutdown()` then stops
-the heartbeat outside the lock and waits, up to `mq_timeout`, for registration and
-recovery work in flight to finish before sending UNREGISTER and closing the
-client. No ping, REGISTER or UNREGISTER is sent on a closed client. The heartbeat
+the heartbeat outside the lock and waits for registration and recovery work in
+flight to finish before sending UNREGISTER and closing the client. The wait is
+bounded at twice `mq_timeout`, the longest that work takes when the server stops
+answering (a REGISTER that times out, then the UNREGISTER that discards it). Past
+that bound shutdown logs a warning and closes the client anyway, and the server
+keeps any registration it accepted until it reaps it. The heartbeat
 cycle skips the recover callback and `health_event.set()` once stopped, so a
 straggling cycle cannot re-create a ghost context.
 

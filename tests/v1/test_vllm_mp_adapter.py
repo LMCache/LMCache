@@ -2011,6 +2011,66 @@ def test_shutdown_waits_for_registration_before_closing_the_client(
     assert adapter.transfer_ctx is None
 
 
+def test_concurrent_registration_keeps_the_first_registration(
+    fake_adapter, monkeypatch
+) -> None:
+    """A second registration that starts while the first is still running,
+    as heartbeat recovery can, waits for it. When the second then times out
+    it is a replacement and is not unregistered, so the first registration,
+    which the server keys by the same instance ID, survives."""
+    adapter, _req_client, _ = fake_adapter
+    in_first = threading.Event()
+    release_first = threading.Event()
+    minted: list[MagicMock] = []
+
+    def mint(*_args, **_kwargs) -> MagicMock:
+        ctx = MagicMock(name=f"ctx_{len(minted)}")
+        if not minted:
+
+            def register_first(*_a, **_kw) -> None:
+                in_first.set()
+                assert release_first.wait(timeout=10.0)
+
+            ctx.register.side_effect = register_first
+        else:
+            ctx.register.side_effect = TimeoutError
+        ctx.unregister.return_value = None
+        minted.append(ctx)
+        return ctx
+
+    monkeypatch.setattr(adapter_mod, "create_transfer_context", mint)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    kv_caches = {"layer.0": fake_tensor}
+    errors: list[BaseException] = []
+
+    def second() -> None:
+        try:
+            adapter._send_register_kv_caches_request(kv_caches)
+        except ConnectionError as exc:
+            errors.append(exc)
+
+    first_thread = threading.Thread(
+        target=adapter._send_register_kv_caches_request, args=(kv_caches,)
+    )
+    first_thread.start()
+    assert in_first.wait(timeout=10.0)
+    second_thread = threading.Thread(target=second)
+    second_thread.start()
+    time.sleep(0.2)
+    assert len(minted) == 1  # the second waits for the first
+    release_first.set()
+    first_thread.join(timeout=10.0)
+    second_thread.join(timeout=10.0)
+
+    assert not first_thread.is_alive() and not second_thread.is_alive()
+    assert len(errors) == 1
+    first_ctx, second_ctx = minted
+    assert adapter.transfer_ctx is first_ctx
+    second_ctx.unregister.assert_not_called()
+    second_ctx.close.assert_called_once_with()
+
+
 def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     monkeypatch,
 ) -> None:

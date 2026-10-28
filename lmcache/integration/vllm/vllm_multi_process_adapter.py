@@ -1494,6 +1494,10 @@ class LMCacheMPWorkerAdapter:
         # client, so that work never runs on a closed client.
         self._client_work_in_flight = 0
         self._client_work_done = threading.Condition(self._heartbeat_lock)
+        # One registration at a time, so a registration can tell whether a
+        # context is already published under this instance ID (see
+        # _send_register_kv_caches_request).
+        self._registration_lock = threading.Lock()
         if 3 * heartbeat_interval > _SERVER_REAP_TIMEOUT_FLOOR_SECONDS:
             logger.warning(
                 "lmcache.mp.heartbeat_interval is %.1fs, so 3 x "
@@ -1575,6 +1579,8 @@ class LMCacheMPWorkerAdapter:
             layout_hints: Engine layout hints forwarded to the server; built
                 here from the ambient vLLM config when not provided.
 
+        Once shutdown() has begun, nothing is registered and this returns.
+
         Raises:
             ConnectionError: if the server does not respond within
                 mq_timeout.
@@ -1653,7 +1659,7 @@ class LMCacheMPWorkerAdapter:
             ConnectionError: if the server does not respond within
                 mq_timeout.
         """
-        with self._client_work() as allowed:
+        with self._client_work() as allowed, self._registration_lock:
             if not allowed:
                 logger.info("Shutdown has begun; not registering KV caches")
                 return False
@@ -2548,14 +2554,18 @@ class LMCacheMPWorkerAdapter:
             heartbeat.stop()
         # stop() gives up joining after a few seconds; registration or
         # recovery still running then must finish before req_client closes.
+        # Its longest path is two server waits: a REGISTER that times out,
+        # then the UNREGISTER that discards it.
+        drain_timeout = 2 * self._mq_timeout
         with self._client_work_done:
             if not self._client_work_done.wait_for(
-                lambda: self._client_work_in_flight == 0, timeout=self._mq_timeout
+                lambda: self._client_work_in_flight == 0, timeout=drain_timeout
             ):
                 logger.warning(
-                    "KV cache registration still running after %ss; "
-                    "proceeding with shutdown",
-                    self._mq_timeout,
+                    "KV cache registration still running after %ss; closing "
+                    "the client anyway, so the server may keep that "
+                    "registration until it reaps it",
+                    drain_timeout,
                 )
 
         if self.transfer_ctx is not None:
