@@ -40,13 +40,15 @@ permissions:
 
 jobs:
     # Resolved once so both architectures build on the same SGLang release and
-    # the image label names it. Reads the release tag lmsysorg/sglang:latest
-    # points to rather than SGLang's GitHub release, whose image is pushed later.
+    # the image label names it. Starts from the release tag lmsysorg/sglang:latest
+    # points to (SGLang's GitHub release is tagged before its image is pushed) and
+    # walks back to the newest release pinning the torch LMCache is built against.
     resolve-sglang-version:
         name: Resolve the newest SGLang release image
         runs-on: ubuntu-24.04
         outputs:
             version: ${{ steps.resolve.outputs.version }}
+            torch: ${{ steps.resolve.outputs.torch }}
 
         steps:
             - name: "Harden Runner"
@@ -55,13 +57,34 @@ jobs:
                 disable-sudo-and-containers: false
                 egress-policy: audit
 
-            - name: Resolve lmsysorg/sglang:latest to its release tag
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+            - name: Resolve the newest SGLang release with LMCache's torch
               id: resolve
               run: |
-                VERSION=$(curl -fsSL "https://hub.docker.com/v2/repositories/lmsysorg/sglang/tags?page_size=100&ordering=last_updated" \
-                  | python3 -c 'import json, re, sys; tags = json.load(sys.stdin)["results"]; latest = next(t["digest"] for t in tags if t["name"] == "latest"); print(next(t["name"] for t in tags if t["digest"] == latest and re.fullmatch(r"v\d+\.\d+\.\d+(\.post\d+)?", t["name"])))')
+                TORCH=$(python3 -c 'import re, tomllib; reqs = tomllib.load(open("pyproject.toml", "rb"))["build-system"]["requires"]; print(next(re.sub(r"^torch\s*==\s*", "", r) for r in reqs if re.match(r"^torch\s*==", r)))')
+                HUB=https://hub.docker.com/v2/repositories/lmsysorg/sglang/tags
+                LATEST=$(curl -fsSL "${HUB}/latest" | jq -r .digest)
+                VERSION= FOUND_LATEST=
+                for TAG in $(git ls-remote --tags --refs https://github.com/sgl-project/sglang.git \
+                    | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$' | sort -rV); do
+                  # A 404 means the release's image is not pushed yet.
+                  DIGEST=$(curl -fsSL "${HUB}/${TAG}" | jq -r .digest) || continue
+                  [[ -n "${FOUND_LATEST}" || "${DIGEST}" == "${LATEST}" ]] || continue
+                  FOUND_LATEST=1
+                  SGLANG_TORCH=$(curl -fsSL "https://raw.githubusercontent.com/sgl-project/sglang/${TAG}/python/pyproject.toml" \
+                    | grep -m1 -oP '^\s*"torch==\K[^"]+')
+                  echo "${TAG}: torch ${SGLANG_TORCH}"
+                  if [[ "${SGLANG_TORCH}" == "${TORCH}" ]]; then VERSION=${TAG}; break; fi
+                done
+                if [[ -z "${VERSION}" ]]; then
+                  echo "::error::No lmsysorg/sglang release at or below latest ships torch ${TORCH}"
+                  exit 1
+                fi
                 echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-                echo "Building on lmsysorg/sglang:${VERSION}"
+                echo "torch=${TORCH}" >> "$GITHUB_OUTPUT"
+                echo "Building on lmsysorg/sglang:${VERSION} (torch ${TORCH})"
 
     build-sglang-image:
         name: Build lmcache/sglang (${{ matrix.arch }})
@@ -120,12 +143,6 @@ jobs:
             - name: Set up Docker Buildx
               uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
-            - name: Read the torch pin
-              run: |
-                TORCH=$(python3 -c 'import re, tomllib; reqs = tomllib.load(open("pyproject.toml", "rb"))["build-system"]["requires"]; print(next(re.sub(r"^torch\s*==\s*", "", r) for r in reqs if re.match(r"^torch\s*==", r)))')
-                echo "EXPECTED_TORCH=${TORCH}" >> "$GITHUB_ENV"
-                echo "lmcache wheels are built against torch ${TORCH}"
-
             # --push streams layers straight to DockerHub; --load would need a
             # second full copy of the image on disk. Without push the result
             # stays in the build cache, which is enough to run the checks.
@@ -135,7 +152,7 @@ jobs:
                   --platform linux/${{ matrix.arch }} \
                   --build-arg SGLANG_VERSION=${{ needs.resolve-sglang-version.outputs.version }} \
                   --build-arg LMCACHE_VERSION=${{ inputs.lmcache_version }} \
-                  --build-arg "EXPECTED_TORCH=${EXPECTED_TORCH}" \
+                  --build-arg EXPECTED_TORCH=${{ needs.resolve-sglang-version.outputs.torch }} \
                   --tag "${IMAGE}" \
                   ${{ inputs.push && '--push' || '' }} \
                   --file docker/Dockerfile.sglang .
