@@ -112,11 +112,11 @@ Source-TP objects can sit in any tier, L1 included:
   into it.
 - **Local L1 and L2.** A server or an L2 shared by engines at different TP.
 
-So the cross-TP stage sits in a module above the storage manager and calls
-`submit_prefetch_task` over every tier, the same way the P2P controller
-serves a peer's lookup (`p2p_controller.py`). The root cause is that keys
-match exactly and `kv_rank` encodes the TP; every placement has to map B
-keys to A keys and reshape the data somewhere.
+So the cross-TP stage sits in a layer just above the storage manager
+(`HeteroKVView`) and calls `submit_prefetch_task` over every tier, the same
+way the P2P controller serves a peer's lookup (`p2p_controller.py`). The root
+cause is that keys match exactly and `kv_rank` encodes the TP; every placement
+has to map B keys to A keys and reshape the data somewhere.
 
 | Placement | Why not |
 | --- | --- |
@@ -125,7 +125,8 @@ keys to A keys and reshape the data somewhere.
 | An L2 adapter that maps B keys to A keys and looks them up in its own storage manager | No L2 adapter reads local L1 today, and the lookup re-enters the prefetch controller it is serving |
 | Reshard on P: P's P2P controller sees B's world size in the keys and serves B objects | Covers P2P only, not local or shared L1. Kept as an option for native PD, where it would remove the source TP setting on D |
 
-Phase 1 below implements the cross-TP stage in the lookup.
+Phase 1 below implements the cross-TP stage in `HeteroKVView`, between
+`LookupModule` and the storage manager.
 
 ## Lookup stages
 
@@ -176,18 +177,16 @@ reshard leaves the same, so no further prefetch is needed to lock the new
 objects.
 
 The stages run as one sequential function rather than being advanced by the
-engine's polls, so the lookup keeps no stage state:
-`query_prefetch_status` returns None until every stage is done, and
-`wait_prefetch_status` waits for all of them, with `timeout` covering every
-stage. Each
-lookup holds a thread while it waits for its prefetches, so the pool size
-bounds the cross-TP lookups in flight; a lookup past that queues before its
-cross-TP stage. The copy runs in `L1Resharder`, on its own thread pool (4
-threads), which bounds concurrent copies. A reshard whose
-destination keys another running reshard is writing waits for that one and
-writes only the rest; otherwise it would find the keys reserved and the
-second lookup of a prefix would miss. Each reshard logs its cost (Qwen3-0.6B,
-2048 tokens, measured):
+engine's polls, so the lookup keeps no stage state: `query_prefetch_status`
+returns None until every stage is done, and `wait_prefetch_status` waits for
+all of them, with `timeout` covering every stage. Each lookup holds a thread
+while it waits for its prefetches, so the pool size bounds the cross-TP
+lookups in flight; a lookup past that queues before its cross-TP stage. The
+copy runs in `L1Resharder`, on its own thread pool (4 threads), which bounds
+concurrent copies. A reshard whose destination keys another running reshard is
+writing waits for that one and writes only the rest; otherwise it would find
+the keys reserved and the second lookup of a prefix would miss. Each reshard
+logs its cost (Qwen3-0.6B, 2048 tokens, measured):
 
 ```
 Resharded 8 chunks from TP1 to TP2 for request <id>: wrote 224.0 MiB in 38.36 ms (queued 0.20 ms, waited 0.00 ms on 0 other reshards)
@@ -195,10 +194,11 @@ Resharded 8 chunks from TP1 to TP2 for request <id>: wrote 224.0 MiB in 38.36 ms
 
 `free_lookup_locks` on a cross-TP lookup that is still running behaves as for
 any running prefetch: it returns at once, and the result keeps its locks for
-a later poll or until the read-lock TTL. A finished result is handed over and
-released as usual, including the locks the reshard took. An exception in the cross-TP
-stage, or a failed reshard, is logged and the same-TP stage answers, so the
-future always resolves and every lock it took is released. If a reshard fails
+a later poll or until the read-lock TTL. A finished result is handed over
+and released as usual, including the locks the reshard took. An exception in
+the cross-TP stage, or a failed reshard, is logged and the same-TP stage
+answers, so every prefetch with a plan finishes and every lock it took is
+released. If a reshard fails
 mid-group, the destination objects reserved for that group stay reserved
 until the write TTL, because the storage manager cannot abandon a
 reservation.
@@ -272,16 +272,13 @@ asks all of them.
 TP is its first plan. Where the rest would go, none of it built yet:
 
 - **More forms (vertical).** Another difference between the asking engine
-  and the stored objects (hybrid models' sliding-window and recurrent groups,
-  KV dtype) is another plan next to `HeteroTPPlanner`, with the same
+  and the stored objects (hybrid groups, phase 2 below; KV dtype) is another
+  plan next to `HeteroTPPlanner`, with the same
   `cross_tp_spec`/`convert`/`merge` steps. `LookupModule` does not change.
 - **GPU conversion (performance).** `convert` is the only step that moves
-  bytes. A GPU version would not write B objects into L1; it would return
-  the A keys with a head mapping, and the retrieve kernel would copy each B
-  rank's heads straight from the A objects into the paged KV. That removes
-  the CPU copy and the extra L1 copy, but retrieve then has to know about A
-  keys, and each B rank reads whole A objects when A < B. Do it only when the
-  reshard log shows the CPU path is the bottleneck.
+  bytes, so phase 3's GPU path replaces it: instead of writing B objects
+  into L1, it hands retrieve the A keys and a head mapping. The view and the
+  lookup stay as they are; retrieve is what changes.
 - **Parallel stages (performance).** The view runs the two prefetches one
   after the other. For PD it can submit both at once; only the view changes.
 - **More callers (horizontal).** Other modules (warm prefetch, blend) call
@@ -313,11 +310,11 @@ The e2e test is native PD on one node: two servers, a coordinator, NIXL P2P,
 
 ## Open questions
 
-1. Source TP discovery for generic hetero TP. The coordinator cannot answer
-   it today: registration carries no model or TP; the coordinator only
-   tells the P2P controller which peers exist. The candidate is a P2P RPC that returns the
-   world sizes the peer has registered for a model. A peer can hold several,
-   so the answer is a list.
+1. Source TP discovery for generic hetero TP. The coordinator cannot answer it
+   today: registration carries no model or TP; the coordinator only tells the
+   P2P controller which peers exist. The candidate is a P2P RPC that returns
+   the world sizes the peer has registered for a model. A peer can hold
+   several, so the answer is a list.
 
 ## Pre-existing P2P gap: no object size check
 
