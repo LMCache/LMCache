@@ -28,7 +28,7 @@ Bench = tuple[ServerBenchClient, list[MagicMock]]
 
 
 def _request(client: ServerBenchClient, sequence: int = 0) -> RequestContext:
-    request = client.create_request(sequence, str(sequence), "test")
+    request = client.create_request(sequence, str(sequence), "test", token_ids=range(8))
     assert request is not None
     return request
 
@@ -75,6 +75,11 @@ def bench(
         client.close()
 
 
+@pytest.mark.parametrize(
+    "bench",
+    [{"block_allocation": order} for order in ("sequential", "random")],
+    indirect=True,
+)
 @pytest.mark.parametrize("operation", ["store", "retrieve"])
 def test_concurrent_transfers_reuse_threads(
     bench: Bench,
@@ -102,7 +107,7 @@ def test_concurrent_transfers_reuse_threads(
     for context in contexts:
         submit_mock = getattr(context, f"submit_{operation}")
         assert submit_mock.call_count == 2
-        assert submit_mock.call_args.args[3] == [[2, 3], [2, 3]]
+        assert submit_mock.call_args.args[3] == request.blocks(4, 4).as_block_ids()
 
 
 @pytest.mark.parametrize("bench", [{"transfer_timeout_s": 0.1}], indirect=True)
@@ -160,8 +165,7 @@ def test_uncertain_transfer_retains_buffers_until_close(
             assert result is not None and result.failed_worker_ranks == (rank,)
             assert result.successful_worker_ranks == (1 - rank,)
         assert time.monotonic() - started < 1
-        with pytest.raises(RuntimeError, match="completion is uncertain"):
-            client.end_session(request)
+        client.release_request(request)
         cleanup.assert_not_called()
         with pytest.raises(RuntimeError, match="completion is uncertain"):
             _request(client, 1)

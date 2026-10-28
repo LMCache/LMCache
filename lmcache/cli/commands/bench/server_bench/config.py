@@ -35,6 +35,7 @@ class BenchConfig:
         block_size: Fallback number of tokens per paged KV block.
         concurrency: Number of clients sending requests at the same time.
         block_allocation: Allocate the lowest free IDs or sample free IDs randomly.
+        transfer_timeout_s: Positive, finite shared wait budget per transfer call.
     """
 
     rpc_url: str

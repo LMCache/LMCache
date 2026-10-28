@@ -386,7 +386,22 @@ class ServerBenchClient:
         start_token: int,
         token_count: int,
     ) -> TransferResult | None:
-        """STORE a token range concurrently on write-enabled workers."""
+        """STORE a token range concurrently on write-enabled workers.
+
+        Args:
+            request: Request to store.
+            start_token: Start offset in the request.
+            token_count: Number of tokens.
+
+        Returns:
+            Worker results, including failed ranks on timeout, or ``None``
+            for an empty range. A timeout or transfer exception prevents
+            further operations until the client is closed.
+
+        Raises:
+            RuntimeError: If the request is inactive or the client is unavailable.
+            ValueError: If a non-empty range is invalid or not chunk-aligned.
+        """
         return self._transfer("store", request, start_token, token_count)
 
     def retrieve(
@@ -395,7 +410,22 @@ class ServerBenchClient:
         start_token: int,
         token_count: int,
     ) -> TransferResult | None:
-        """RETRIEVE a token range concurrently on read-enabled workers."""
+        """RETRIEVE a token range concurrently on read-enabled workers.
+
+        Args:
+            request: Request to retrieve.
+            start_token: Start offset in the request.
+            token_count: Number of tokens.
+
+        Returns:
+            Worker results, including failed ranks on timeout, or ``None``
+            for an empty range. A timeout or transfer exception prevents
+            further operations until the client is closed.
+
+        Raises:
+            RuntimeError: If the request is inactive or the client is unavailable.
+            ValueError: If a non-empty range is invalid or not chunk-aligned.
+        """
         return self._transfer("retrieve", request, start_token, token_count)
 
     def fill_deterministic_kv(self, request: RequestContext) -> None:
@@ -514,7 +544,11 @@ class ServerBenchClient:
         return checksums or None
 
     def close(self) -> None:
-        """Wait for transfer threads, then synchronously release resources."""
+        """Wait for transfer threads, then synchronously release resources.
+
+        Cleanup is idempotent, including after partial startup. A blocked
+        native transfer can delay shutdown until it returns.
+        """
         self._started = False
         if self._transfer_executor is not None:
             self._transfer_executor.shutdown(wait=True, cancel_futures=True)
