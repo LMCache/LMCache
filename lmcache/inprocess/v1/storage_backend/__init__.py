@@ -7,6 +7,8 @@ import importlib  # Added for dynamic import
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.abstract_backend import (
     StorageBackendInterface,
 )
@@ -18,8 +20,6 @@ from lmcache.inprocess.v1.storage_backend.remote_backend import (  # noqa: F401
     RemoteBackend,
 )
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.metadata import LMCacheMetadata
 
 if TYPE_CHECKING:
     # First Party

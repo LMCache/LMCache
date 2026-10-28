@@ -13,7 +13,7 @@ from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.compute.attention.abstract import AttentionInterface
+    from lmcache.inprocess.v1.compute.attention.abstract import AttentionInterface
 
 logger = init_logger(__name__)
 

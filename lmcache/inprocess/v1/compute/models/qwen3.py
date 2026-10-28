@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # First Party
-from lmcache.v1.compute.models.base import LMCBaseModel
+from lmcache.inprocess.v1.compute.models.base import LMCBaseModel
 
 
 class LMCQwen3Model(LMCBaseModel):

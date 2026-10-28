@@ -10,16 +10,16 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.logging import init_logger
-from lmcache.v1.compute.attention.abstract import AttentionInterface
-from lmcache.v1.compute.attention.metadata import (
+from lmcache.inprocess.v1.compute.attention.abstract import AttentionInterface
+from lmcache.inprocess.v1.compute.attention.metadata import (
     LMCAttnMetadata,
     LMCTritonSparseMetadata,
 )
-from lmcache.v1.compute.attention.triton_kernels import (
+from lmcache.inprocess.v1.compute.attention.triton_kernels import (
     block_sparse_attention,
     causal_prefill_attention,
 )
+from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 

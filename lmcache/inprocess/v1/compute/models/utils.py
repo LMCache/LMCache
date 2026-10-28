@@ -15,17 +15,17 @@ def infer_model_from_vllm(vllm_model, blender, enable_sparse: bool = False):
     model_name = type(vllm_model).__name__
     if model_name == "LlamaForCausalLM":
         # First Party
-        from lmcache.v1.compute.models.llama import LMCLlamaModel
+        from lmcache.inprocess.v1.compute.models.llama import LMCLlamaModel
 
         return LMCLlamaModel(vllm_model, blender, enable_sparse)
     elif model_name == "Qwen2ForCausalLM":
         # First Party
-        from lmcache.v1.compute.models.llama import LMCLlamaModel
+        from lmcache.inprocess.v1.compute.models.llama import LMCLlamaModel
 
         return LMCLlamaModel(vllm_model, blender, enable_sparse)
     elif model_name == "Qwen3ForCausalLM":
         # First Party
-        from lmcache.v1.compute.models.qwen3 import LMCQwen3Model
+        from lmcache.inprocess.v1.compute.models.qwen3 import LMCQwen3Model
 
         return LMCQwen3Model(vllm_model, blender, enable_sparse)
     else:
