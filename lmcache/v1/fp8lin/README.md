@@ -10,7 +10,7 @@ Used by two serdes:
 | mode | config | file |
 |---|---|---|
 | multiprocess (`lmcache server`) | `"serde": {"type": "fp8lin", "coder_path": ...}` on an L2 adapter | `lmcache/v1/distributed/serde/fp8lin.py` |
-| in-process (deprecated) | `remote_serde: fp8lin`, `extra_config: {fp8lin.coder_path: ...}` | `lmcache/v1/storage_backend/naive_serde/fp8lin_serde.py` |
+| in-process (deprecated) | `remote_serde: fp8lin`, `extra_config: {fp8lin.coder_path: ...}` | `lmcache/inprocess/v1/storage_backend/naive_serde/fp8lin_serde.py` |
 
 ## How it codes a chunk
 
