@@ -92,6 +92,41 @@ construction fails with::
   **not** combine with ``max_capacity_gb > 0`` (a warning is logged;
   server-side expiry is not reported back to LMCache's byte accounting).
 
+**Fail-open fields** (all off by default; existing configs behave as
+before). Without them, an unreachable shard makes every request to it
+wait the full ``request_timeout`` on one of the ``num_workers`` threads,
+and lookups queue behind stores on the same threads, so a long prompt's
+L2 lookup can take tens of seconds. With them, an outage costs cache
+hits only:
+
+- ``batch_timeout`` (float, default ``0`` = off): Deadline in seconds for
+  a whole lookup / load / store batch. Keys whose request has not
+  started by then are not sent and count as a miss (or a failed store).
+  A request already in flight still waits up to ``request_timeout``.
+  Set it above the normal queueing delay of a healthy cluster, or
+  healthy lookups queued behind a large store burst become misses.
+- ``breaker_failure_threshold`` (int, default ``0`` = off): Open a
+  circuit breaker after this many failed requests within
+  ``breaker_window_s``. While open, lookups and loads return all-miss
+  immediately, stores fail immediately, deletes are skipped, and
+  requests already queued are dropped without contacting Valkey. After
+  the cool-down traffic is let through again; if the backend is still
+  failing the breaker re-trips with the cool-down doubled. Successes do
+  not close it early, so a partial outage (one shard down, the others
+  answering) still trips it.
+- ``breaker_window_s`` (float, default ``10``): Failure-counting window.
+- ``breaker_cooldown_s`` (float, default ``5``): First cool-down.
+- ``breaker_max_cooldown_s`` (float, default ``60``): Cap on the doubling
+  cool-down.
+- ``lazy_connect`` (bool, default ``false``): Do not fail adapter
+  creation (and so the server start) when Valkey is unreachable; serve
+  misses and retry the connection in the background.
+- ``connect_retry_interval_s`` (float, default ``10``): Interval between
+  background connection attempts.
+
+``report_status()`` exposes ``connected`` and a ``circuit_breaker``
+block (``open``, ``open_remaining_s``, ``cooldown_s``, ``trips``).
+
 **Configuration examples:**
 
 .. code-block:: bash
@@ -124,6 +159,19 @@ construction fails with::
         "type": "valkey",
         "startup_nodes": "127.0.0.1:6379",
         "ttl_seconds": 3600
+    }'
+
+    # Valkey Cluster that fails open: a shard outage costs cache hits,
+    # not request latency, and the server starts without the cluster
+    --l2-adapter '{
+        "type": "valkey",
+        "cluster_mode": true,
+        "startup_nodes": "10.0.0.1:6379",
+        "num_workers": 16,
+        "request_timeout": 1.0,
+        "batch_timeout": 2.0,
+        "breaker_failure_threshold": 16,
+        "lazy_connect": true
     }'
 
 Wire key layout
