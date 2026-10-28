@@ -183,9 +183,10 @@ submissions stop while the worker re-registers. Both publish the new transfer
 context only after the server registers it, so a submission already past the
 health check keeps using the old context; ATOM's swap then waits for the
 submissions in flight on it.
-In vLLM, stores in the interval before that PING are still rejected, since its
-heartbeat starts lazily on first traffic. ATOM starts its heartbeat at
-registration, so it pings throughout an idle spell.
+In vLLM the heartbeat starts lazily on first traffic and pings at once (no
+initial wait), so only the stores submitted before that first PING is answered,
+plus the REGISTER time, are rejected. ATOM starts its heartbeat at registration,
+so it pings throughout an idle spell.
 
 ### 6.3 Shutdown
 
@@ -208,7 +209,8 @@ straggling cycle cannot re-create a ghost context.
 A discarded or failed registration is closed. It is also unregistered only when
 it was the worker's first: on re-registration a context is already published
 under the same instance ID, and the server keys registrations by that ID, so
-unregistering the replacement would drop the registration still in use.
+unregistering the replacement would drop the registration still in use. The vLLM
+and ATOM adapters both follow this rule.
 
 ## 7. Failure Modes
 
@@ -216,7 +218,7 @@ unregistering the replacement would drop the registration still in use.
 |---|---|
 | Worker crash (SIGKILL, no UNREGISTER) after serving | Pings stop; reaped within ~`timeout + timeout/4`. Context, IPC handles, layout-desc refcount, and non-GPU strategy released via the same cleanup as a clean unregister; blend rope state dropped via the reap listener. The bug being fixed. |
 | Worker crash during warmup (registered, never pinged) | Reaped on the registration grace. Bounded leak instead of a permanent one. |
-| Worker alive but never pinged, idle past the grace | Reaped while alive only if it never pinged (vLLM's heartbeat never started; ATOM pings from registration). Once traffic starts, its first PING is answered `False` and it re-registers; stores before that PING are rejected. Once the heartbeat is running, pings refresh `last_seen` every interval, so a live worker is not reaped again. |
+| Worker alive but never pinged, idle past the grace | Reaped while alive only if it never pinged (vLLM's heartbeat never started; ATOM pings from registration). Once traffic starts, its first PING, sent at once, is answered `False` and it re-registers; stores submitted before that answer and during REGISTER are rejected. Once the heartbeat is running, pings refresh `last_seen` every interval, so a live worker is not reaped again. |
 | PING times out under load, registration intact | No answer is treated as an outage: degraded at once, with no immediate re-registration. The next PING answered `True` runs the existing recover callback, which hits the NOOP register path on the server. |
 | Heartbeat thread starved, worker transferring | Store/retrieve/prepare/commit refresh `last_seen`; never reaped. |
 | Partition shorter than the reap window | No reap. On heal, the recover callback re-registers; the NOOP path refreshes `last_seen`; zero context churn. |

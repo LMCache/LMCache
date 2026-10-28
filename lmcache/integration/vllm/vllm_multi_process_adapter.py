@@ -631,15 +631,20 @@ class HeartbeatThread(PeriodicThread):
             )
 
         if instance_unknown:
-            logger.warning(
-                "LMCache server no longer holds a registration for instance %s; "
-                "re-registering",
+            # INFO: before the first register_kv_caches every ping answers
+            # False; the recover callback logs the actual re-registration.
+            logger.info(
+                "LMCache server holds no registration for instance %s; re-registering",
                 self._instance_id,
             )
             # Clear the event first, as on the outage path, so no new
             # submissions start while the worker re-registers.
             self._health_event.clear()
-            healthy = self._recover_callback()
+            try:
+                healthy = self._recover_callback()
+            except Exception:
+                logger.exception("LMCache re-registration callback failed")
+                healthy = False
 
         need_trigger_recover = (
             healthy

@@ -1667,6 +1667,44 @@ def test_heartbeat_reregisters_only_on_an_explicit_unknown_answer(
     assert health_event.is_set() is expect_healthy
 
 
+def test_heartbeat_degrades_when_the_reregistration_callback_raises(
+    monkeypatch,
+) -> None:
+    """Real HeartbeatThread: a recover callback that raises on an explicit
+    False leaves the worker degraded and logs it, instead of escaping the
+    cycle. The unknown-worker notice is INFO, not WARNING, since it repeats
+    every interval before the first registration. The module logger does not
+    propagate, so the test spies on it."""
+    monkeypatch.setattr(
+        adapter_mod, "send_ping", lambda req_client, timeout, instance_id=None: False
+    )
+    logged: list[tuple[str, str]] = []
+    for level in ("info", "warning", "exception"):
+        monkeypatch.setattr(
+            adapter_mod.logger,
+            level,
+            lambda msg, *args, _level=level, **kwargs: logged.append(
+                (_level, str(msg))
+            ),
+        )
+    health_event = threading.Event()
+    health_event.set()
+    heartbeat = HeartbeatThread(
+        req_client=MagicMock(name="req_client"),
+        health_event=health_event,
+        interval=60.0,
+        instance_id=7,
+    )
+    heartbeat.register_recover_callback(MagicMock(side_effect=RuntimeError("boom")))
+
+    summary = heartbeat._execute()
+
+    assert summary.success
+    assert not health_event.is_set()
+    assert [lvl for lvl, msg in logged if "holds no registration" in msg] == ["info"]
+    assert ("exception", "LMCache re-registration callback failed") in logged
+
+
 @pytest.mark.parametrize(
     ("result", "expected"),
     [(True, True), (False, False), (TimeoutError(), None), (RuntimeError(), None)],

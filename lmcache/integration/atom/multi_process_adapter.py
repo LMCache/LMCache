@@ -134,8 +134,9 @@ class _HeartbeatThread(PeriodicThread):
                 )
                 # Stop new submissions before re-registering: the worker's
                 # context swap then waits only for submissions already in
-                # flight on the old context.
-                self._publish_unhealthy()
+                # flight on the old context. Publish the edge only once.
+                if was_healthy:
+                    self._publish_unhealthy()
             try:
                 healthy = self._recover_callback()
             except Exception:
@@ -586,6 +587,11 @@ class AtomMPWorkerAdapter:
                 return False
             kv_caches = self._kv_caches
             engine_group_infos = list(self._engine_group_infos)
+            # The server keys registrations by instance ID, so rolling back a
+            # failed replacement would also drop the registration the
+            # published context still uses. Only a first registration is
+            # rolled back.
+            first = self._transfer_context is None
             self._registrations_inflight += 1
 
         transfer_context: TransferContext | None = None
@@ -610,12 +616,11 @@ class AtomMPWorkerAdapter:
         except Exception:
             try:
                 if transfer_context is not None:
-                    # REGISTER completion is ambiguous on timeout. Roll back
-                    # the candidate's wire registration before releasing local
-                    # resources. During recovery the old local context remains
-                    # published (but unhealthy), so a later heartbeat can
-                    # register it again if this removes a pre-existing entry.
-                    self._rollback_candidate_registration(transfer_context)
+                    # REGISTER completion is ambiguous on timeout, so a first
+                    # registration's wire registration is rolled back before
+                    # local resources are released.
+                    if first:
+                        self._rollback_candidate_registration(transfer_context)
                     transfer_context.close()
             except Exception:
                 logger.warning(
