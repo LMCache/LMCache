@@ -190,7 +190,7 @@ compatibility with the vLLM-embedded API server.
    * - POST
      - ``/cache/objects/download``
      - Download one node-local L1 object by exact ``EncodedObjectKey`` as raw
-       bytes. Supports DRAM and Device-DAX; GDS is not yet supported.
+       bytes. Supports DRAM and Device-DAX; GDS/AIS downloads return ``501``.
    * - POST
      - ``/cache/prefetches``
      - Warm a node's L1 by loading a token sequence from L2 ahead of traffic;
@@ -928,8 +928,9 @@ For example, the metadata header may contain:
 
     {"size_bytes":4194304,"backend":"dram","memory_format":"undefined","shapes":[[2,256,8,128]],"dtypes":["torch.bfloat16"]}
 
-DRAM and Device-DAX L1 objects are supported. GDS objects require a separate
-DMA/staging path and return ``501`` in this version.
+Only DRAM and Device-DAX L1 objects are supported in this version.
+GDS/AIS-based downloads are not supported in this version and return HTTP 501.
+Support for these paths may be added in a future release.
 
 **HTTP status codes:**
 
@@ -941,7 +942,7 @@ DMA/staging path and return ``501`` in this version.
 - ``409``: the object exists but is temporarily unreadable, such as while a
   writer holds it.
 - ``422``: request-body schema validation failure.
-- ``501``: the object is backed by unsupported GDS L1 storage.
+- ``501``: the object requires an unsupported GDS/AIS download path.
 - ``503``: the MP server context is not initialized.
 
 **Example:**

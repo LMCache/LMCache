@@ -16,8 +16,9 @@ the endpoint does not convert tokens to keys or route through a coordinator.
 
 The response body contains raw logical bytes and the
 ``X-LMCache-Object-Metadata`` header describes their ordered shapes and dtypes.
-DRAM and Device-DAX are supported. GDS, L2, remote-node routing, and batch
-downloads are not supported in the first version.
+Only DRAM and Device-DAX downloads are supported in this version. GDS/AIS-based
+downloads return HTTP 501; support for these paths may be added in a future
+release. L2, remote-node routing, and batch downloads are not supported.
 
 Raw KV contents can contain sensitive information. Download is **disabled by
 default**; explicitly pass ``--enable-l1-cache-download`` to the HTTP server to
