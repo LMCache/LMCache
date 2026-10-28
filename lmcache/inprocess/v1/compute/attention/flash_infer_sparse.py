@@ -19,12 +19,12 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.compute.attention.abstract import AttentionInterface
-from lmcache.v1.compute.attention.metadata import LMCFlashInferSparseMetadata
+from lmcache.inprocess.v1.compute.attention.abstract import AttentionInterface
+from lmcache.inprocess.v1.compute.attention.metadata import LMCFlashInferSparseMetadata
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
+    from lmcache.inprocess.v1.compute.attention.metadata import LMCAttnMetadata
 
 
 # NOTE(Jiayi): This flashinfer version is 0.3.1.

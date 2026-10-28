@@ -5,7 +5,7 @@
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 
 if TYPE_CHECKING:
     # First Party

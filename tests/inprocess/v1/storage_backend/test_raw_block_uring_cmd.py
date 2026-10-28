@@ -19,6 +19,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.plugins.rust_raw_block_backend import (
     RustRawBlockBackend,
 )
@@ -26,7 +27,6 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.l2_adapters.raw_block.core import (
     RawBlockCore,
 )
-from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 

@@ -13,10 +13,14 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
-from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
+from lmcache.inprocess.v1.storage_backend.legacy_serde.cachegen_decoder import (
+    CacheGenDeserializer,
+)
+from lmcache.inprocess.v1.storage_backend.legacy_serde.cachegen_encoder import (
+    CacheGenSerializer,
+)
 
 # CacheGen has hand-written accelerator kernels and requires the selected
 # torch runtime to be available.

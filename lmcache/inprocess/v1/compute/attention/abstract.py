@@ -8,7 +8,7 @@ import torch
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
+    from lmcache.inprocess.v1.compute.attention.metadata import LMCAttnMetadata
 
 
 class AttentionInterface(metaclass=abc.ABCMeta):

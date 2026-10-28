@@ -187,8 +187,8 @@ def async_sender():
         mock_create_tc.return_value = tc
 
         # First Party
-        from lmcache.v1.config import LMCacheEngineConfig
-        from lmcache.v1.metadata import LMCacheMetadata
+        from lmcache.inprocess.v1.config import LMCacheEngineConfig
+        from lmcache.inprocess.v1.metadata import LMCacheMetadata
 
         config = LMCacheEngineConfig.from_defaults(
             chunk_size=16,
@@ -227,8 +227,8 @@ def async_receiver():
 
     with p1, p2, p3:
         # First Party
-        from lmcache.v1.config import LMCacheEngineConfig
-        from lmcache.v1.metadata import LMCacheMetadata
+        from lmcache.inprocess.v1.config import LMCacheEngineConfig
+        from lmcache.inprocess.v1.metadata import LMCacheMetadata
 
         config = LMCacheEngineConfig.from_defaults(
             chunk_size=16,
@@ -828,8 +828,8 @@ def test_receiver_close_does_not_submit_to_stopped_loop(
 def test_pd_max_prefill_len_check():
     """pd_max_prefill_len > buffer capacity → ValueError on init."""
     # First Party
-    from lmcache.v1.config import LMCacheEngineConfig
-    from lmcache.v1.metadata import LMCacheMetadata
+    from lmcache.inprocess.v1.config import LMCacheEngineConfig
+    from lmcache.inprocess.v1.metadata import LMCacheMetadata
 
     def recv_cfg(max_len):
         return LMCacheEngineConfig.from_defaults(
@@ -1276,8 +1276,8 @@ def test_sender_dedup_calls_ref_count_down_on_skipped_chunks():
         mock_create_tc.return_value = tc
 
         # First Party
-        from lmcache.v1.config import LMCacheEngineConfig
-        from lmcache.v1.metadata import LMCacheMetadata
+        from lmcache.inprocess.v1.config import LMCacheEngineConfig
+        from lmcache.inprocess.v1.metadata import LMCacheMetadata
 
         config = LMCacheEngineConfig.from_defaults(
             chunk_size=16,

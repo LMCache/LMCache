@@ -10,7 +10,7 @@ import torch
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.compute.attention.flash_infer_sparse import HackBSAWrapper
+    from lmcache.inprocess.v1.compute.attention.flash_infer_sparse import HackBSAWrapper
 
 
 @dataclass

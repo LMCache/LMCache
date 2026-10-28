@@ -40,7 +40,7 @@ import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.metadata import LMCacheMetadata
+    from lmcache.inprocess.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 

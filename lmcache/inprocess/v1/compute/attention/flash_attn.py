@@ -15,13 +15,13 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.compute.attention.abstract import AttentionInterface
-from lmcache.v1.compute.attention.metadata import LMCFlashAttnMetadata
-from lmcache.v1.compute.attention.utils import infer_attn_func_from_vllm
+from lmcache.inprocess.v1.compute.attention.abstract import AttentionInterface
+from lmcache.inprocess.v1.compute.attention.metadata import LMCFlashAttnMetadata
+from lmcache.inprocess.v1.compute.attention.utils import infer_attn_func_from_vllm
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
+    from lmcache.inprocess.v1.compute.attention.metadata import LMCAttnMetadata
 
 
 class LMCFlashAttnBackend(AttentionInterface):
