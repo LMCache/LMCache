@@ -1490,8 +1490,11 @@ class LMCacheMPWorkerAdapter:
         # registration, before any heartbeat exists, is still seen.
         self._shutdown_requested = False
         # Registration and recovery work in flight on req_client. shutdown()
-        # waits for it to reach zero before unregistering and closing the
-        # client, so that work never runs on a closed client.
+        # waits, within a bound, for it to reach zero before unregistering
+        # and closing the client. The work checks the flag before each server
+        # call, so after shutdown begins it makes at most the call already in
+        # flight plus one discarding UNREGISTER. Heartbeat pings are not
+        # tracked here.
         self._client_work_in_flight = 0
         self._client_work_done = threading.Condition(self._heartbeat_lock)
         # One registration at a time, so a registration can tell whether a
@@ -1659,58 +1662,70 @@ class LMCacheMPWorkerAdapter:
             ConnectionError: if the server does not respond within
                 mq_timeout.
         """
-        with self._client_work() as allowed, self._registration_lock:
+        with self._client_work() as allowed:
             if not allowed:
                 logger.info("Shutdown has begun; not registering KV caches")
                 return False
-            self.kv_caches = kv_caches
-            transfer_ctx = self._create_transfer_context(kv_caches)
-            layout_hints = self._layout_hints
-            # A context is already published on re-registration. The server
-            # keys registrations by instance ID, so unregistering an abandoned
-            # replacement would also drop the registration that context still
-            # uses. Only a first registration is unregistered when abandoned.
-            first = self.transfer_ctx is None
-            try:
-                # Register before publishing: a submission reads
-                # self.transfer_ctx, so publishing first let it use a context
-                # the server had not yet accepted.
-                transfer_ctx.register(
-                    kv_caches,
-                    self.model_name,
-                    self.world_size,
-                    self.blocks_in_chunk,
-                    self._mq_timeout,
-                    layout_hints=layout_hints,
-                    engine_group_infos=self.engine_group_infos,
-                    engine_type=EngineType.VLLM,
-                    lmcache_chunk_tokens=self.lmcache_tokens_per_chunk,
-                )
-            except TimeoutError:
-                # The server may have registered it after the timeout.
-                self._discard_transfer_context(transfer_ctx, unregister=first)
-                raise ConnectionError(
-                    "LMCache server did not respond to "
-                    "register_kv_caches within "
-                    f"{self._mq_timeout}s. Is the server running?"
-                ) from None
-            except Exception:
-                self._discard_transfer_context(transfer_ctx, unregister=first)
-                raise
+            with self._registration_lock:
+                return self._register_serialized(kv_caches)
 
-            # shutdown() sets the flag under this lock, then waits for this
-            # work before unregistering whatever context is published. A
-            # shutdown that started during registration would miss this
-            # context, so discard it here instead of publishing it.
-            with self._heartbeat_lock:
-                if not self._shutdown_requested:
-                    self.transfer_ctx = transfer_ctx
-                    return True
-            logger.info(
-                "Shutdown began during registration; discarding the new context"
-            )
-            self._discard_transfer_context(transfer_ctx, unregister=first)
+    def _register_serialized(self, kv_caches: dict[str, torch.Tensor]) -> bool:
+        """Body of ``_send_register_kv_caches_request``, run under
+        ``_registration_lock`` as tracked client work.
+
+        Returns:
+            As ``_send_register_kv_caches_request``.
+        """
+        # Shutdown may have begun while this waited for the lock.
+        if self._shutdown_requested:
+            logger.info("Shutdown has begun; not registering KV caches")
             return False
+        self.kv_caches = kv_caches
+        transfer_ctx = self._create_transfer_context(kv_caches)
+        layout_hints = self._layout_hints
+        # A context is already published on re-registration. The server
+        # keys registrations by instance ID, so unregistering an abandoned
+        # replacement would also drop the registration that context still
+        # uses. Only a first registration is unregistered when abandoned.
+        first = self.transfer_ctx is None
+        try:
+            # Register before publishing: a submission reads
+            # self.transfer_ctx, so publishing first let it use a context
+            # the server had not yet accepted.
+            transfer_ctx.register(
+                kv_caches,
+                self.model_name,
+                self.world_size,
+                self.blocks_in_chunk,
+                self._mq_timeout,
+                layout_hints=layout_hints,
+                engine_group_infos=self.engine_group_infos,
+                engine_type=EngineType.VLLM,
+                lmcache_chunk_tokens=self.lmcache_tokens_per_chunk,
+            )
+        except TimeoutError:
+            # The server may have registered it after the timeout.
+            self._discard_transfer_context(transfer_ctx, unregister=first)
+            raise ConnectionError(
+                "LMCache server did not respond to "
+                "register_kv_caches within "
+                f"{self._mq_timeout}s. Is the server running?"
+            ) from None
+        except Exception:
+            self._discard_transfer_context(transfer_ctx, unregister=first)
+            raise
+
+        # shutdown() sets the flag under this lock, then waits for this
+        # work before unregistering whatever context is published. A
+        # shutdown that started during registration would miss this
+        # context, so discard it here instead of publishing it.
+        with self._heartbeat_lock:
+            if not self._shutdown_requested:
+                self.transfer_ctx = transfer_ctx
+                return True
+        logger.info("Shutdown began during registration; discarding the new context")
+        self._discard_transfer_context(transfer_ctx, unregister=first)
+        return False
 
     def _discard_transfer_context(
         self, transfer_ctx: TransferContext, unregister: bool
@@ -1800,7 +1815,7 @@ class LMCacheMPWorkerAdapter:
             As ``_reregister_kv_caches_callback``.
         """
         # Skip all recovery RPCs if shutdown already requested a stop.
-        if self._heartbeat_stop_requested():
+        if self._heartbeat_stop_requested() or self._shutdown_requested:
             logger.info("Heartbeat stop requested; skipping server recovery")
             return False
 
@@ -1836,6 +1851,11 @@ class LMCacheMPWorkerAdapter:
             return False
         logger.warning("Finished re-registering KV caches after server recovery")
 
+        # Each server call checks the flag first, so shutdown's bounded wait
+        # covers at most the call in flight when shutdown began.
+        if self._shutdown_requested:
+            logger.info("Shutdown has begun; skipping dispatcher re-registration")
+            return False
         if self.dispatcher is not None:
             if not self.dispatcher.reregister():
                 logger.warning(
@@ -2554,8 +2574,9 @@ class LMCacheMPWorkerAdapter:
             heartbeat.stop()
         # stop() gives up joining after a few seconds; registration or
         # recovery still running then must finish before req_client closes.
-        # Its longest path is two server waits: a REGISTER that times out,
-        # then the UNREGISTER that discards it.
+        # That work checks the flag before each server call, so it makes at
+        # most the call in flight now, then one discarding UNREGISTER: two
+        # server waits.
         drain_timeout = 2 * self._mq_timeout
         with self._client_work_done:
             if not self._client_work_done.wait_for(

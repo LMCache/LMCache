@@ -193,9 +193,12 @@ registration, so it pings throughout an idle spell.
 then on, registration and recovery refuse to start, and a registration already in
 flight discards its new context instead of publishing it. `shutdown()` then stops
 the heartbeat outside the lock and waits for registration and recovery work in
-flight to finish before sending UNREGISTER and closing the client. The wait is
-bounded at twice `mq_timeout`, the longest that work takes when the server stops
-answering (a REGISTER that times out, then the UNREGISTER that discards it). Past
+flight to finish before sending UNREGISTER and closing the client. That work
+checks the flag before each server call, so after shutdown begins it makes at
+most the call already in flight plus one discarding UNREGISTER. The wait is
+therefore bounded at twice `mq_timeout`. Heartbeat pings are not tracked: a ping
+still in flight when the heartbeat's join gives up can fail on the closed client,
+as before. Past
 that bound shutdown logs a warning and closes the client anyway, and the server
 keeps any registration it accepted until it reaps it. The heartbeat
 cycle skips the recover callback and `health_event.set()` once stopped, so a

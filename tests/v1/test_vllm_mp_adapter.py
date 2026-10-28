@@ -1961,19 +1961,22 @@ def test_shutdown_waits_for_registration_before_closing_the_client(
 ) -> None:
     """shutdown() waits for a registration still in flight to finish, and
     to discard its context with an UNREGISTER, before closing req_client, so
-    that UNREGISTER is never sent on a closed client. Work that starts after
-    shutdown began is refused."""
+    that UNREGISTER is never sent on a closed client. A registration that
+    starts after shutdown began is refused at once, without waiting for the
+    one in flight."""
     adapter, req_client, _ = fake_adapter
     events: list[str] = []
     in_register = threading.Event()
     release_register = threading.Event()
+    thread_errors: list[BaseException] = []
 
     def mint(*_args, **_kwargs) -> MagicMock:
         ctx = MagicMock(name="first_ctx")
 
         def register(*_a, **_kw) -> None:
             in_register.set()
-            assert release_register.wait(timeout=10.0)
+            if not release_register.wait(timeout=10.0):
+                raise AssertionError("registration was never released")
 
         def unregister() -> None:
             events.append("unregister")
@@ -1982,33 +1985,60 @@ def test_shutdown_waits_for_registration_before_closing_the_client(
         ctx.unregister.side_effect = unregister
         return ctx
 
+    def run(target: Callable[..., object], *args: object) -> threading.Thread:
+        def wrapped() -> None:
+            try:
+                target(*args)
+            except BaseException as exc:  # surfaced to the test below
+                thread_errors.append(exc)
+
+        thread = threading.Thread(target=wrapped)
+        thread.start()
+        return thread
+
     monkeypatch.setattr(adapter_mod, "create_transfer_context", mint)
     req_client.close.side_effect = lambda: events.append("client.close")
     fake_tensor = MagicMock()
     fake_tensor.device.type = "cuda"
+    kv_caches = {"layer.0": fake_tensor}
 
-    registrar = threading.Thread(
-        target=adapter._send_register_kv_caches_request,
-        args=({"layer.0": fake_tensor},),
-    )
-    registrar.start()
-    assert in_register.wait(timeout=10.0)
-    stopper = threading.Thread(target=adapter.shutdown)
-    stopper.start()
-    deadline = time.time() + 5.0
-    while not adapter._shutdown_requested and time.time() < deadline:
-        time.sleep(0.01)
-    time.sleep(0.2)
-    assert events == []  # still waiting for the registration
-    assert adapter._send_register_kv_caches_request({"layer.0": fake_tensor}) is False
-
-    release_register.set()
+    try:
+        registrar = run(adapter._send_register_kv_caches_request, kv_caches)
+        assert in_register.wait(timeout=10.0)
+        stopper = run(adapter.shutdown)
+        deadline = time.monotonic() + 10.0
+        while not adapter._shutdown_requested and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert adapter._shutdown_requested
+        # Refused immediately, although the first still holds the lock.
+        assert adapter._send_register_kv_caches_request(kv_caches) is False
+    finally:
+        release_register.set()
     registrar.join(timeout=10.0)
     stopper.join(timeout=10.0)
 
+    assert thread_errors == []
     assert not registrar.is_alive() and not stopper.is_alive()
+    # The UNREGISTER can only run after the release above, so the client
+    # closing after it shows shutdown waited for the registration.
     assert events == ["unregister", "client.close"]
     assert adapter.transfer_ctx is None
+
+
+class _SignallingLock:
+    """A lock that sets an event when a thread starts waiting to acquire it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.waiting = threading.Event()
+
+    def __enter__(self) -> None:
+        if not self._lock.acquire(blocking=False):
+            self.waiting.set()
+            self._lock.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self._lock.release()
 
 
 def test_concurrent_registration_keeps_the_first_registration(
@@ -2019,9 +2049,12 @@ def test_concurrent_registration_keeps_the_first_registration(
     it is a replacement and is not unregistered, so the first registration,
     which the server keys by the same instance ID, survives."""
     adapter, _req_client, _ = fake_adapter
+    lock = _SignallingLock()
+    adapter._registration_lock = lock
     in_first = threading.Event()
     release_first = threading.Event()
     minted: list[MagicMock] = []
+    thread_errors: list[BaseException] = []
 
     def mint(*_args, **_kwargs) -> MagicMock:
         ctx = MagicMock(name=f"ctx_{len(minted)}")
@@ -2029,7 +2062,8 @@ def test_concurrent_registration_keeps_the_first_registration(
 
             def register_first(*_a, **_kw) -> None:
                 in_first.set()
-                assert release_first.wait(timeout=10.0)
+                if not release_first.wait(timeout=10.0):
+                    raise AssertionError("first registration was never released")
 
             ctx.register.side_effect = register_first
         else:
@@ -2042,29 +2076,39 @@ def test_concurrent_registration_keeps_the_first_registration(
     fake_tensor = MagicMock()
     fake_tensor.device.type = "cuda"
     kv_caches = {"layer.0": fake_tensor}
-    errors: list[BaseException] = []
+    second_errors: list[BaseException] = []
+
+    def first() -> None:
+        try:
+            adapter._send_register_kv_caches_request(kv_caches)
+        except BaseException as exc:  # surfaced to the test below
+            thread_errors.append(exc)
 
     def second() -> None:
         try:
             adapter._send_register_kv_caches_request(kv_caches)
         except ConnectionError as exc:
-            errors.append(exc)
+            second_errors.append(exc)
+        except BaseException as exc:  # surfaced to the test below
+            thread_errors.append(exc)
 
-    first_thread = threading.Thread(
-        target=adapter._send_register_kv_caches_request, args=(kv_caches,)
-    )
-    first_thread.start()
-    assert in_first.wait(timeout=10.0)
+    first_thread = threading.Thread(target=first)
     second_thread = threading.Thread(target=second)
-    second_thread.start()
-    time.sleep(0.2)
-    assert len(minted) == 1  # the second waits for the first
-    release_first.set()
+    try:
+        first_thread.start()
+        assert in_first.wait(timeout=10.0)
+        second_thread.start()
+        # The second is now blocked on the lock the first holds.
+        assert lock.waiting.wait(timeout=10.0)
+        assert len(minted) == 1
+    finally:
+        release_first.set()
     first_thread.join(timeout=10.0)
     second_thread.join(timeout=10.0)
 
+    assert thread_errors == []
     assert not first_thread.is_alive() and not second_thread.is_alive()
-    assert len(errors) == 1
+    assert len(second_errors) == 1
     first_ctx, second_ctx = minted
     assert adapter.transfer_ctx is first_ctx
     second_ctx.unregister.assert_not_called()
