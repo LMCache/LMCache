@@ -73,7 +73,7 @@ pytest -xvs --ignore=tests/disagg \
   --ignore=tests/v1/multiprocess/ \
   --ignore=tests/v1/distributed/ \
   --ignore=tests/skipped \
-  --ignore=tests/v1/storage_backend/test_eic.py
+  --ignore=tests/inprocess/v1/storage_backend/test_eic.py
 ```
 
 If you touched anything under `docs/`, also confirm the docs build cleanly — the Sphinx
@@ -271,7 +271,7 @@ pytest -xvs --ignore=tests/disagg \
   --ignore=tests/v1/multiprocess/ \
   --ignore=tests/v1/distributed/ \
   --ignore=tests/skipped \
-  --ignore=tests/v1/storage_backend/test_eic.py
+  --ignore=tests/inprocess/v1/storage_backend/test_eic.py
 
 # Run a single test file
 pytest -xvs tests/v1/test_cache_engine.py
