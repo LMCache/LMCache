@@ -6,13 +6,19 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <list>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace lmcache {
@@ -48,6 +54,82 @@ struct WorkerFSConn {
   size_t read_ahead_size = 0;
 };
 
+// Upper bound on HeldFdCache lock shards.
+static constexpr size_t kHeldFdShards = 16;
+
+// Bounded cache of read-only descriptors for published objects.
+//
+// An object file is published by an atomic rename and its key names its
+// content, so a descriptor opened on a published file always reads a valid
+// value for that key, even after another process evicts the file.  Reusing
+// it skips the open and close (on NFS, an OPEN and a CLOSE round trip to
+// the server) and lets exists() answer without a stat.  Entries are keyed
+// by file name and O_DIRECT mode and reference counted: eviction and
+// invalidation never close a descriptor a read still uses; it is closed
+// when its last reader releases it.  All methods are thread-safe.
+class HeldFdCache {
+ public:
+  explicit HeldFdCache(size_t capacity);
+  ~HeldFdCache() { close_all(); }
+  HeldFdCache(const HeldFdCache&) = delete;
+  HeldFdCache& operator=(const HeldFdCache&) = delete;
+
+  bool enabled() const { return capacity_ > 0; }
+
+  // A descriptor for `path` with one reference, opened with `flags` when
+  // not cached.  Throws if the open fails or the file holds fewer than
+  // `min_size` bytes.
+  int acquire(const std::string& name, const std::filesystem::path& path,
+              int flags, size_t min_size);
+  // Drops one reference.  `stale` removes the entry, so the next acquire
+  // opens the file again.
+  void release(const std::string& name, int flags, int fd, bool stale);
+  // Whether a usable descriptor for `name` is cached.
+  bool contains(const std::string& name);
+  // Removes `name`'s entries, closing each once it has no readers.
+  void invalidate(const std::string& name);
+  // Closes every descriptor.  Only once no reader can be running.
+  void close_all();
+  std::map<std::string, uint64_t> stats();
+
+ private:
+  struct Entry {
+    int fd = -1;
+    size_t refs = 0;
+    std::list<std::string>::iterator lru;
+  };
+  // Entries are split by file name across shards, each with its own lock
+  // and LRU, so readers of different objects do not queue on one mutex.
+  // The capacity is global: an insert that takes the cache over it evicts
+  // from its own shard's LRU first, then from the others, so eviction
+  // order is least recently used per shard.
+  struct Shard {
+    std::mutex mu;
+    std::unordered_map<std::string, Entry> entries;
+    std::list<std::string> lru;               // front: most recently used
+    std::unordered_map<int, size_t> retired;  // fd -> remaining readers
+    // Keys being opened.  Other readers of such a key wait on `opened`
+    // for that open instead of sending their own.
+    std::unordered_set<std::string> opening;
+    std::condition_variable opened;
+    uint64_t opens = 0, hits = 0, evictions = 0, invalidations = 0;
+    uint64_t stale_drops = 0, deferred_closes = 0, open_waits = 0;
+    void retire_locked(Entry& e);  // entry already removed from the map
+    // Evicts unused entries, oldest first, while `total` exceeds `capacity`.
+    void evict_locked(std::atomic<size_t>& total, size_t capacity);
+  };
+  static std::string key_of(const std::string& name, int flags);
+  Shard& shard_of(const std::string& name);
+  // Brings the cache back to its capacity from shards other than `skip`.
+  void evict_others(const Shard* skip);
+  bool release_locked(Shard& sh, const std::string& name, int flags, int fd,
+                      bool stale);
+
+  const size_t capacity_;
+  std::vector<std::unique_ptr<Shard>> shards_;
+  std::atomic<size_t> total_{0};  // cached entries, retired ones excluded
+};
+
 class FSConnector : public ConnectorBase<WorkerFSConn> {
  public:
   // num_read_workers: reader threads, and so the maximum reads in flight.
@@ -56,14 +138,20 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // read_max_bytes_in_flight: bytes kept outstanding, connector-wide.
   //   Zero selects kDefaultReadMaxBytesInFlight when num_read_workers is
   //   positive.
+  // held_fd_capacity: read-only descriptors kept open for reuse
+  //   (HeldFdCache).  Zero, the default, opens and closes per read.
   FSConnector(std::string base_path, int num_workers,
               std::string relative_tmp_dir = "", bool use_odirect = false,
               size_t read_ahead_size = 0, int num_read_workers = 0,
-              size_t read_max_bytes_in_flight = 0);
+              size_t read_max_bytes_in_flight = 0, size_t held_fd_capacity = 0);
   ~FSConnector() override;
 
   // The byte budget in force, or 0 when there is no read pool.
   size_t read_budget_bytes() const;
+
+  // Held-descriptor counters: opens, hits, evictions, invalidations,
+  // stale_drops, deferred_closes, open_waits, open_now and capacity.
+  std::map<std::string, uint64_t> held_fd_stats();
 
  protected:
   WorkerFSConn create_connection() override;
@@ -120,6 +208,13 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   void stop_read_pool();
   void read_thread_main(WorkerFSConn& conn);
 
+  // Reads `len` bytes of an object through a held descriptor, retrying
+  // once with a fresh open if the cached one fails.
+  void get_with_held_fd(const WorkerFSConn& conn, const std::string& filename,
+                        const std::filesystem::path& file_path, int flags,
+                        bool do_odirect, void* buf, size_t len);
+
+  HeldFdCache held_fds_;
   std::string base_path_;
   std::string relative_tmp_dir_;
   bool use_odirect_;

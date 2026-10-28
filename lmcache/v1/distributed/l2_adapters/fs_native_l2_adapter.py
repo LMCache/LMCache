@@ -74,6 +74,12 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
       See docs/source/mp/l2_storage/fs_native.rst for how to size both.
     - read_ahead_size: trigger filesystem readahead by
       reading this many bytes first (optional).
+    - held_fd_capacity: read-only descriptors kept open for reuse.  A hit
+      then skips the open, the close and the existence ``stat``; on NFS
+      that removes an OPEN and a CLOSE round trip to the server per read.
+      A descriptor serves a published object even after another process
+      evicts its file, which is safe because keys name their content.
+      0 (default) opens and closes per read.
     - max_capacity_gb: declared L2 capacity in GB, used for usage
       accounting. ``0`` (default) disables it. A value ``> 0`` does
       **not** bound disk usage on its own -- eviction runs only when
@@ -92,12 +98,14 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         max_capacity_gb: float = 0,
         num_read_workers: int = DEFAULT_NUM_READ_WORKERS,
         read_max_bytes_in_flight: int = 0,
+        held_fd_capacity: int = 0,
     ):
         """Build the config; see the class docstring for each field.
 
         Raises:
-            ValueError: If ``num_read_workers`` or
-                ``read_max_bytes_in_flight`` is not a non-negative integer.
+            ValueError: If ``num_read_workers``,
+                ``read_max_bytes_in_flight`` or ``held_fd_capacity`` is not
+                a non-negative integer.
         """
         self.base_path = base_path
         self.num_workers = num_workers
@@ -110,6 +118,9 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         )
         self.read_max_bytes_in_flight = _validate_non_negative_int(
             "read_max_bytes_in_flight", read_max_bytes_in_flight
+        )
+        self.held_fd_capacity = _validate_non_negative_int(
+            "held_fd_capacity", held_fd_capacity
         )
         if num_read_workers == 0 and read_max_bytes_in_flight > 0:
             logger.warning(
@@ -164,6 +175,7 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             max_capacity_gb=float(max_capacity_gb),
             num_read_workers=d.get("num_read_workers", DEFAULT_NUM_READ_WORKERS),
             read_max_bytes_in_flight=d.get("read_max_bytes_in_flight", 0),
+            held_fd_capacity=d.get("held_fd_capacity", 0),
         )
 
     @classmethod
@@ -187,6 +199,9 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "- read_ahead_size (int): trigger fs "
             "readahead by reading this many bytes "
             "first (optional)\n"
+            "- held_fd_capacity (int): read-only descriptors "
+            "kept open for reuse, skipping open/close/stat on "
+            "a hit (default 0 = open and close per read)\n"
             "- max_capacity_gb (float): declared L2 capacity in GB "
             "for usage accounting (default 0 = disabled). Does not "
             "bound disk usage by itself; add an 'eviction' block "
@@ -226,18 +241,20 @@ def _create_fs_native_l2_adapter(
         config.read_ahead_size or 0,
         config.num_read_workers,
         config.read_max_bytes_in_flight,
+        config.held_fd_capacity,
     )
     effective_read_budget = native_client.read_budget_bytes()
     logger.info(
         "Created FS native L2 adapter: %s (workers=%d, odirect=%s, "
         "read_ahead=%s, num_read_workers=%d, "
-        "read_max_bytes_in_flight=%d)",
+        "read_max_bytes_in_flight=%d, held_fd_capacity=%d)",
         config.base_path,
         config.num_workers,
         config.use_odirect,
         config.read_ahead_size,
         config.num_read_workers,
         effective_read_budget,
+        config.held_fd_capacity,
     )
     residency = MemoryResidency.REMOTE if config.shared else MemoryResidency.LOCAL
     memory_tags = MemoryTags(MemorySegment.STORAGE, residency)
@@ -254,6 +271,7 @@ def _create_fs_native_l2_adapter(
             "read_ahead_size": config.read_ahead_size,
             "num_read_workers": config.num_read_workers,
             "read_max_bytes_in_flight": effective_read_budget,
+            "held_fd_capacity": config.held_fd_capacity,
             "pad_buffers_to_alignment": config.use_odirect,
         },
     )
