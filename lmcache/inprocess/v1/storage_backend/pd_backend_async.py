@@ -27,6 +27,10 @@ from lmcache.inprocess.v1.rpc_utils import get_zmq_context
 from lmcache.inprocess.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
 )
+from lmcache.inprocess.v1.storage_backend.pd_auth import (
+    get_pd_auth_token,
+    pd_auth_token_matches,
+)
 from lmcache.inprocess.v1.transfer_channel import CreateTransferChannel
 from lmcache.inprocess.v1.transfer_channel.transfer_utils import get_correct_device
 from lmcache.integration.vllm.utils import get_size_bytes
@@ -68,6 +72,10 @@ class AllocRequest(PDMsgBase):
     # can release admission and clean up per-request tracking.
     is_last_batch: bool = False
     total_chunks: int = 0  # total chunks for this request (for receiver reservation)
+    # Shared secret proving the sender is allowed to allocate on this
+    # receiver.  Empty when the peer does not authenticate (legacy senders
+    # or deployments that leave authentication disabled).
+    auth_token: bytes = b""
 
 
 class AllocResponse(PDMsgBase):
@@ -92,6 +100,9 @@ class CancelNotif(PDMsgBase):
 
     req_id: str
     keys: list[str]  # keys that receiver should release
+    # Same shared secret as ``AllocRequest``; a cancel without it must not
+    # be allowed to release another request's keys.
+    auth_token: bytes = b""
 
 
 PDMsg = Union[AllocRequest, AllocResponse, ProxyNotif, CancelNotif]
@@ -230,6 +241,9 @@ class PDConfig:
     shutdown_timeout_sec: float
     condition_poll_interval_sec: float
 
+    # ``None`` keeps the allocation plane unauthenticated (legacy default).
+    auth_token: Optional[bytes] = None
+
     @staticmethod
     def from_cache_engine_config(
         config: LMCacheEngineConfig,
@@ -282,6 +296,7 @@ class PDConfig:
             allocation_timeout_sec=config.pd_allocation_timeout_sec,
             shutdown_timeout_sec=config.pd_shutdown_timeout_sec,
             condition_poll_interval_sec=config.pd_condition_poll_interval_sec,
+            auth_token=get_pd_auth_token(config),
         )
 
 
@@ -309,6 +324,8 @@ class PDBackendAsync(AllocatorBackendInterface):
         # Cache timing config values as instance attributes for convenient access.
         self._allocation_timeout = self.pd_config.allocation_timeout_sec
         self._condition_poll_interval = self.pd_config.condition_poll_interval_sec
+        # Shared token for the allocation plane; ``None`` disables checking.
+        self._pd_auth_token = self.pd_config.auth_token
 
         self.corrected_device = get_correct_device(
             config.pd_buffer_device,
@@ -799,6 +816,7 @@ class PDBackendAsync(AllocatorBackendInterface):
             req_id=req_id,
             is_last_batch=is_last_batch,
             total_chunks=total_chunks,
+            auth_token=self._pd_auth_token or b"",
         )
 
     async def _async_transfer_task(
@@ -1137,7 +1155,11 @@ class PDBackendAsync(AllocatorBackendInterface):
             receiver_id = self._req_receiver.get(req_id)
             if receiver_id:
                 try:
-                    cancel_notif = CancelNotif(req_id=req_id, keys=sent_keys)
+                    cancel_notif = CancelNotif(
+                        req_id=req_id,
+                        keys=sent_keys,
+                        auth_token=self._pd_auth_token or b"",
+                    )
                     await self._async_remote_allocate(receiver_id, cancel_notif)
                 except Exception as e:
                     logger.warning(
@@ -1242,6 +1264,30 @@ class PDBackendAsync(AllocatorBackendInterface):
         n_keys = 0
         try:
             msg = msgspec.msgpack.decode(payload, type=PDMsg)
+
+            # Authenticate before the message can touch receiver state: a
+            # forged AllocRequest could hold the whole reservation and a forged
+            # CancelNotif could release another request's keys.
+            if isinstance(msg, (AllocRequest, CancelNotif)) and not (
+                pd_auth_token_matches(self._pd_auth_token, msg.auth_token)
+            ):
+                logger.warning(
+                    "Rejected unauthenticated PD %s from %s",
+                    type(msg).__name__,
+                    identity,
+                )
+                n_keys = len(msg.keys)
+                async with self._router_send_lock:
+                    await socket.send_multipart(
+                        [
+                            identity,
+                            b"",
+                            msgspec.msgpack.encode(
+                                AllocResponse(remote_indexes=[-1] * max(n_keys, 1))
+                            ),
+                        ]
+                    )
+                return
 
             if isinstance(msg, CancelNotif):
                 # Release keys and reservation for the cancelled request.
