@@ -237,6 +237,47 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
+      - label: ":xpu: mp_autostart_tp2 / engine_driven / shm"
+        command: .buildkite/k3_tests/xpu/multiprocess/run.sh mp_autostart_tp2
+        env: *mp-env
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: long_doc_qa / engine_driven / shm"
+        command: .buildkite/k3_tests/xpu/multiprocess/run.sh long_doc_qa
+        env:
+          <<: *mp-env
+          MODEL: "Qwen/Qwen3-8B"
+          MAX_MODEL_LEN: "16384"
+          MAX_NUM_BATCHED_TOKENS: "8192"
+          MAX_INFLIGHT_REQUESTS: "2"
+          NUM_DOCUMENTS: "10"
+          REPEAT_COUNT: "2"
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: p2p / engine_driven"
+        command: |
+          .buildkite/k3_tests/xpu/multiprocess/run.sh p2p
+        env:
+          MODEL: "Qwen/Qwen3-0.6B"
+          LMCACHE_MP_TRANSFER_MODE: "engine_driven"
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          MAX_MODEL_LEN: "4096"
+          VLLM_DISABLE_PREFIX_CACHING: "true"
+          MAX_WAIT_SECONDS: "900"
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
       - label: ":xpu: vllm_bench"
         command: |
           export LMCACHE_MP_TRANSFER_MODE="engine_driven"
@@ -280,13 +321,4 @@ steps:
         retry: *flaky-retry
         agents: { queue: "intel-xpu" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
-        artifact_paths: ["*.log", "ci_results_*/**"]
-
-      - label: ":xpu: mp_autostart_tp2 / engine_driven / shm"
-        command: .buildkite/k3_tests/xpu/multiprocess/run.sh mp_autostart_tp2
-        env: *mp-env
-        timeout_in_minutes: 45
-        retry: *flaky-retry
-        agents: { queue: "intel-xpu" }
-        plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]

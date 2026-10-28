@@ -2075,6 +2075,20 @@ One line of the sample, pretty-printed with the token array shortened:
               {"intValue": "151644"}, {"intValue": "872"}, {"intValue": "198"}]}}}
          ]}]}]}]}
 
+dynamo
+^^^^^^
+
+The Dynamo frontend's ``request_payload`` records, sent as OTLP logs by its
+request trace ``otel`` sink (``DYN_REQUEST_TRACE_RECORDS=request_payload``,
+``DYN_REQUEST_TRACE_SINKS=otel``) and written by the Collector's ``file``
+exporter with no processing. Sample:
+``tests/tools/data/trace_formats/dynamo.jsonl``.
+
+Each record gives the request id (``rid``), the model, the arrival time
+(``timeUnixNano``) and the chat request (``payload.request``). The request is
+text, not token ids: its tools, then each message's role and text, are packed
+four UTF-8 bytes per integer, about one per token.
+
 
 What it does
 ~~~~~~~~~~~~
@@ -2140,6 +2154,8 @@ Options
    * - ``--trace-format {lmcache}``
      - Producer format of the input spans. ``lmcache`` is the MP
        server's ``mp.request.trace`` span (default).
+   * - ``--trace-format {dynamo}``
+     - ``dynamo`` is the Dynamo frontend's ``request_payload`` record.
    * - ``--model NAME``
      - Only analyze requests for this model name. Use it when one trace
        mixes models, since the simulated cache is shared.
