@@ -1005,7 +1005,7 @@ class EngineDrivenTransferContext(TransferContext):
             # Group 0's layout doubles as the legacy top-level layout so
             # single-group readers of the payload keep working.
             layout_desc = group_states[0].layout_desc
-            num_physical_slots = layout_desc.shapes[0][-2]
+            num_physical_slots = chunk_tokens
         else:
             shape = (
                 torch.Size([num_layers, blocks_in_chunk * block_size, hidden_dim_size])
