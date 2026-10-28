@@ -89,6 +89,25 @@ def test_roundtrip_bfloat16_preserves_structure() -> None:
     assert corr > 0.99, f"fp8 round-trip correlation too low: {corr:.4f}"
 
 
+def test_roundtrip_fp8_kv_cache_is_byte_exact() -> None:
+    """An fp8 KV cache (uint8 codes, as vLLM stores it) round-trips unchanged."""
+    shape = torch.Size([2, 4, 64, 128])
+    original = torch.randint(
+        0, 256, shape, dtype=torch.uint8, generator=torch.Generator().manual_seed(0)
+    )
+    src = _FakeMemoryObj(tensor=original.clone())
+    temp = _FakeMemoryObj(tensor=torch.zeros(original.numel(), dtype=torch.uint8))
+
+    n = Fp8QuantizationSerializer().serialize(src, temp, _TEST_KEY)  # type: ignore[arg-type]
+    assert n == original.numel()
+
+    recovered = _FakeMemoryObj(tensor=torch.zeros(shape, dtype=torch.uint8))
+    Fp8QuantizationDeserializer().deserialize(temp, recovered, _TEST_KEY)  # type: ignore[arg-type]
+
+    assert recovered.tensor is not None
+    assert torch.equal(recovered.tensor, original)
+
+
 def test_serialize_raises_on_missing_tensor() -> None:
     """A MemoryObj without ``.tensor`` is rejected rather than silently no-op'd."""
     serializer = Fp8QuantizationSerializer()
