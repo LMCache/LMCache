@@ -168,6 +168,8 @@ steps:
           MAX_MODEL_LEN: "16384"
           MAX_NUM_BATCHED_TOKENS: "8192"
           MAX_INFLIGHT_REQUESTS: "2"
+          NUM_DOCUMENTS: "10"
+          REPEAT_COUNT: "2"
         timeout_in_minutes: 45
         retry: *flaky-retry
         agents: { queue: "intel-xpu" }
