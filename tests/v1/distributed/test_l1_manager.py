@@ -2373,6 +2373,80 @@ class TestStagingAccounting:
         manager.finish_read(keys[2:3])
         manager.close()
 
+    def test_staging_bytes_subtract_the_charge_recorded_at_reserve(
+        self, basic_l1_config, basic_layout
+    ):
+        """A buffer narrowed with set_used_size() while staged (what the serde
+        processor does after serialize()) releases the bytes it was charged,
+        on every release path."""
+        manager = L1Manager(basic_l1_config)
+        keys = [make_object_key(i) for i in range(4)]
+
+        reserved = manager.reserve_write(keys, [True] * 4, basic_layout, tag="w")
+        full = reserved[keys[0]][1].get_size()
+        assert manager.get_staging_memory_usage() == 4 * full
+        for key in keys[:3]:
+            reserved[key][1].set_used_size(full // 2)
+
+        # Discard (store failure, or a temp released after the store).
+        manager.finish_write_and_delete(keys[:1], tag="w")
+        assert manager.get_staging_memory_usage() == 3 * full
+
+        # Admit and read-lock (store path), then release the read lock.
+        manager.finish_write_and_reserve_read(keys[1:2], tag="w")
+        assert manager.get_staging_memory_usage() == 2 * full
+        manager.finish_read(keys[1:2])
+
+        # Plain admission of a narrowed buffer next to an untouched one.
+        manager.finish_write(keys[2:], tag="w")
+        assert manager.get_staging_memory_usage() == 0
+        assert manager.report_status()["staging_bytes"] == 0
+
+        manager.close()
+
+    def test_expired_handover_keeps_the_original_staging_charge(
+        self, short_write_ttl_l1_config, basic_layout
+    ):
+        """Handing an expired, narrowed buffer to a new writer neither
+        re-charges it nor loses the charge recorded at allocation."""
+        manager = L1Manager(short_write_ttl_l1_config)
+        key = make_object_key(1)
+
+        reserved = manager.reserve_write([key], [True], basic_layout, tag="w")
+        obj = reserved[key][1]
+        full = obj.get_size()
+        obj.set_used_size(full // 2)
+        time.sleep(1.2)
+
+        again = manager.reserve_write([key], [True], basic_layout, tag="w")
+        assert again[key][0] == L1Error.SUCCESS
+        assert again[key][1] is obj
+        assert manager.get_staging_memory_usage() == full
+
+        manager.finish_write_and_delete([key], tag="w")
+        assert manager.get_staging_memory_usage() == 0
+
+        manager.close()
+
+    def test_delete_of_expired_narrowed_staging_clears_its_charge(
+        self, short_write_ttl_l1_config, basic_layout
+    ):
+        """Reclaiming an expired reservation subtracts what it was charged."""
+        manager = L1Manager(short_write_ttl_l1_config)
+        key = make_object_key(1)
+
+        reserved = manager.reserve_write([key], [False], basic_layout, tag="w")
+        obj = reserved[key][1]
+        obj.set_used_size(obj.get_size() // 2)
+        time.sleep(1.2)
+
+        assert manager.delete([key])[key] == L1Error.SUCCESS
+        assert manager.get_staging_memory_usage() == 0
+        used, _ = manager.get_memory_usage()
+        assert used == 0
+
+        manager.close()
+
     def test_report_status_counts(self, basic_l1_config, basic_layout):
         """report_status separates resident, read-locked and staging objects."""
         manager = L1Manager(basic_l1_config)
