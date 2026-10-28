@@ -8,20 +8,19 @@ import torch
 
 # First Party
 from lmcache.inprocess.v1.cache_controller.message import BatchedKVOperationMsg, OpType
-from lmcache.inprocess.v1.pin_monitor import PinMonitor
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend import (
     local_cpu_backend as local_cpu_backend_module,
 )
 from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.metadata import LMCacheMetadata
 from tests.v1.utils import create_test_memory_obj
 
 
@@ -88,32 +87,16 @@ def create_test_metadata() -> LMCacheMetadata:
 def local_cpu_backend(memory_allocator):
     """Create a LocalCPUBackend for testing."""
     config = create_test_config()
-
-    # Initialize PinMonitor before creating backend
-    PinMonitor.GetOrCreate(config)
-
     backend = LocalCPUBackend(config=config, memory_allocator=memory_allocator)
-
     yield backend
-
-    # Cleanup: destroy PinMonitor after test
-    PinMonitor.DestroyInstance()
 
 
 @pytest.fixture
 def local_cpu_backend_disabled(memory_allocator):
     """Create a LocalCPUBackend with local_cpu disabled."""
     config = create_test_config(local_cpu=False)
-
-    # Initialize PinMonitor before creating backend
-    PinMonitor.GetOrCreate(config)
-
     backend = LocalCPUBackend(config=config, memory_allocator=memory_allocator)
-
     yield backend
-
-    # Cleanup: destroy PinMonitor after test
-    PinMonitor.DestroyInstance()
 
 
 class TestLocalCPUBackend:
@@ -637,14 +620,12 @@ class TestLocalCPUBackendAllocatorRecovery:
     def teardown_method(self, method):
         LMCStatsMonitor.unregister_all_metrics()
         LMCStatsMonitor.DestroyInstance()
-        PinMonitor.DestroyInstance()
 
     def test_batched_allocate_fails_while_group_pinned_then_recovers(self):
         chunk_bytes = 1024 * 1024
         batch_size = 2
         shape = torch.Size([1, chunk_bytes])
         config = create_test_config()
-        PinMonitor.GetOrCreate(config)
         allocator = MixedMemoryAllocator(chunk_bytes * batch_size)
         backend = LocalCPUBackend(config=config, memory_allocator=allocator)
         layer_keys = create_test_key("batched_pinned").split_layers(batch_size)
@@ -695,7 +676,6 @@ class TestLocalCPUBackendAllocatorRecovery:
         batch_size = 2
         shape = torch.Size([1, chunk_bytes])
         config = create_test_config()
-        PinMonitor.GetOrCreate(config)
         allocator = MixedMemoryAllocator(chunk_bytes * batch_size * 2)
         backend = LocalCPUBackend(config=config, memory_allocator=allocator)
         pinned_group_keys = create_test_key("batched_pinned_group").split_layers(

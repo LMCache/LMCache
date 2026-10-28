@@ -23,15 +23,15 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend import LocalCPUBackend
 from lmcache.inprocess.v1.storage_backend.connector import CreateConnector
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.distributed.l2_adapters.valkey.worker_pool import (
     GET_MISS,
     ValkeyWorkerPool,
 )
 from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
-from lmcache.v1.metadata import LMCacheMetadata
 from tests.conftest import MockSyncGlideClient
 from tests.v1.utils import (
     check_mem_obj_equal,

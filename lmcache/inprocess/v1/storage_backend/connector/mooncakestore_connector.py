@@ -10,16 +10,16 @@ import torch
 
 # First Party
 from lmcache import torch_dev
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.protocol import RemoteMetadata
 from lmcache.inprocess.v1.storage_backend.connector.base_connector import (
     RemoteConnector,
 )
 from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.inprocess.v1.system_detection import NUMADetector
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.system_detection import NUMADetector
 
 logger = init_logger(__name__)
 

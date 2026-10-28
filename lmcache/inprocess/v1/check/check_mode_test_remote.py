@@ -5,6 +5,7 @@
 import asyncio
 
 # First Party
+from lmcache.inprocess.integration.vllm.utils import lmcache_get_or_create_config
 from lmcache.inprocess.v1.check import check_mode
 
 # Import shared utilities
@@ -22,7 +23,6 @@ from lmcache.inprocess.v1.check.utils import (
 from lmcache.inprocess.v1.storage_backend import RemoteBackend
 from lmcache.inprocess.v1.storage_backend.connector import InstrumentedRemoteConnector
 from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.integration.vllm.utils import lmcache_get_or_create_config
 from lmcache.v1.memory_management import MemoryObj
 
 

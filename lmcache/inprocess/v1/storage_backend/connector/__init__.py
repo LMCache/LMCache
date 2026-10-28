@@ -9,6 +9,8 @@ import importlib
 import inspect
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.connector.base_connector import (
     RemoteConnector,
 )
@@ -17,8 +19,6 @@ from lmcache.inprocess.v1.storage_backend.connector.instrumented_connector impor
 )
 from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
 logger = init_logger(__name__)

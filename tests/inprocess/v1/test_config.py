@@ -9,8 +9,11 @@ import pytest
 
 # First Party
 from lmcache import torch_device_type
-from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
-from lmcache.v1.config_base import apply_remote_configs, validate_and_set_config_value
+from lmcache.inprocess.v1.config import LMCacheEngineConfig, load_ec_engine_config
+from lmcache.inprocess.v1.config_base import (
+    apply_remote_configs,
+    validate_and_set_config_value,
+)
 
 BASE_DIR = Path(__file__).parent
 
@@ -739,8 +742,8 @@ class TestValidateAndSetConfigValueTypeConversion:
 
 def test_lmcache_get_or_create_config_validates_pd_settings():
     # First Party
-    from lmcache.integration.vllm.utils import lmcache_get_or_create_config
-    import lmcache.integration.vllm.utils as vllm_utils
+    from lmcache.inprocess.integration.vllm.utils import lmcache_get_or_create_config
+    import lmcache.inprocess.integration.vllm.utils as vllm_utils
 
     os.environ["LMCACHE_ENABLE_PD"] = "true"
     os.environ["LMCACHE_PD_ROLE"] = "sender"

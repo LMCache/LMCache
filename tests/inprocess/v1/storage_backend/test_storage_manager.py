@@ -31,7 +31,9 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.event_manager import EventManager, EventType
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
 )
@@ -40,9 +42,7 @@ from lmcache.inprocess.v1.storage_backend.storage_manager import (
     allocate_and_copy_objects,
 )
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
 
 
 class MockMemoryObj:

@@ -62,6 +62,8 @@ import torch
 
 # First Party
 from lmcache import torch_dev
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
 )
@@ -71,7 +73,6 @@ from lmcache.inprocess.v1.transfer_channel.transfer_utils import get_correct_dev
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
     PagedTensorMemoryAllocator,
@@ -84,7 +85,6 @@ from lmcache.v1.memory_management import (
     _allocate_gpu_memory,
     _free_cpu_memory,
 )
-from lmcache.v1.metadata import LMCacheMetadata
 
 if TYPE_CHECKING:
     # First Party

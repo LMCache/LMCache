@@ -33,8 +33,8 @@ from lmcache.usage_telemetry.transport import (
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.inprocess.v1.metadata import LMCacheMetadata
     from lmcache.observability import LMCacheStats
-    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 

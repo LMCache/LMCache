@@ -26,15 +26,15 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.inprocess.integration.base_service_factory import BaseServiceFactory
 from lmcache.inprocess.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.health_monitor.base import HealthMonitor
 from lmcache.inprocess.v1.internal_api_server.api_server import InternalAPIServer
 from lmcache.inprocess.v1.lookup_client.abstract_client import (
     LookupClientInterface,
 )
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
 logger = init_logger(__name__)
@@ -64,7 +64,7 @@ class VllmServiceFactory(BaseServiceFactory):
 
     def get_engine_instance_id(self) -> str:
         # First Party
-        from lmcache.integration.vllm.utils import ENGINE_NAME
+        from lmcache.inprocess.integration.vllm.utils import ENGINE_NAME
 
         return ENGINE_NAME
 
@@ -73,7 +73,7 @@ class VllmServiceFactory(BaseServiceFactory):
             return self.metadata
 
         # First Party
-        from lmcache.integration.vllm.utils import (
+        from lmcache.inprocess.integration.vllm.utils import (
             calculate_draft_layers,
             calculate_local_rank_and_world_size,
             mla_enabled,
@@ -183,8 +183,8 @@ class VllmServiceFactory(BaseServiceFactory):
             return None
 
         # First Party
+        from lmcache.inprocess.integration.vllm.utils import ENGINE_NAME
         from lmcache.inprocess.v1.gpu_connector import CreateGPUConnector
-        from lmcache.integration.vllm.utils import ENGINE_NAME
         from lmcache.utils import EngineType
 
         if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
@@ -202,7 +202,7 @@ class VllmServiceFactory(BaseServiceFactory):
 
             tpg = get_tp_group()
             # First Party
-            from lmcache.integration.vllm.utils import vllm_layout_hints
+            from lmcache.inprocess.integration.vllm.utils import vllm_layout_hints
 
             vllm_gpu_connector = CreateGPUConnector(
                 self.lmcache_config,
@@ -305,7 +305,7 @@ class VllmServiceFactory(BaseServiceFactory):
         self,
     ) -> Optional[RuntimePluginLauncher]:
         # First Party
-        from lmcache.integration.vllm.utils import is_dp_rank0
+        from lmcache.inprocess.integration.vllm.utils import is_dp_rank0
 
         # Only DP rank 0 needs runtime plugin launcher
         if not is_dp_rank0(self.vllm_config):
@@ -327,7 +327,7 @@ class VllmServiceFactory(BaseServiceFactory):
         self, lmcache_manager: "LMCacheManager"
     ) -> Optional[InternalAPIServer]:
         # First Party
-        from lmcache.integration.vllm.utils import is_dp_rank0
+        from lmcache.inprocess.integration.vllm.utils import is_dp_rank0
 
         # Only DP rank 0 needs internal API server
         if not is_dp_rank0(self.vllm_config):

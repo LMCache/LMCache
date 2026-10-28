@@ -14,8 +14,8 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.compute.attention.metadata import _block_mask_to_csr
-from lmcache.v1.compute.attention.triton_kernels import (
+from lmcache.inprocess.v1.compute.attention.metadata import _block_mask_to_csr
+from lmcache.inprocess.v1.compute.attention.triton_kernels import (
     block_sparse_attention,
     causal_prefill_attention,
     merge_attention_outputs,
