@@ -25,6 +25,7 @@ from lmcache.v1.mp_coordinator.background_loops import (
 )
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers.base import ControllerStatus
+from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
@@ -33,12 +34,19 @@ from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
 )
 from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 from lmcache.v1.mp_coordinator.observability import init_coordinator_metrics
+from lmcache.v1.mp_coordinator.persistence.checkpoint import (
+    CheckpointMonitor,
+    CheckpointWrite,
+)
+from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
+from lmcache.v1.mp_coordinator.persistence.store import NullArtifactStore
 from lmcache.v1.mp_coordinator.views.instance_registry import (
     InstanceRegistry,
     MPInstance,
 )
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
 # Local
 from .otel_reader import labels, private_meter, read_values
@@ -455,3 +463,185 @@ def test_a_registered_component_without_metrics_is_rejected() -> None:
 
     with pytest.raises(TypeError, match="_NoMetrics"):
         observability.register_coordinator_metrics(meter)
+
+
+def _mp_instance(instance_id: str) -> MPInstance:
+    return MPInstance(
+        instance_id=instance_id,
+        ip="10.0.0.1",
+        http_port=8000,
+        registration_time=time.time(),
+        last_heartbeat_time=time.monotonic(),
+    )
+
+
+def test_registry_metrics_report_membership_and_its_churn() -> None:
+    registry = InstanceRegistry()
+    registry.register(_mp_instance("mp-0"))
+    registry.register(_mp_instance("mp-0"))
+    registry.update_heartbeat("ghost", time.monotonic())
+    meter, reader = private_meter()
+
+    observability.register_coordinator_metrics(meter)
+
+    values = read_values(reader)
+    assert values["lmcache_coordinator.registry.servers_registered"] == {labels(): 1}
+    assert values["lmcache_coordinator.registry.server_membership_changes"] == {
+        labels(change="registered"): 1,
+        labels(change="re_registered"): 1,
+        labels(change="deregistered"): 0,
+        labels(change="timed_out"): 0,
+        labels(change="unknown_heartbeat"): 1,
+    }
+
+
+def test_key_directory_metrics_report_keys_and_each_server_s_l1_keys() -> None:
+    directory = KeyDirectory()
+    directory.consume(
+        _batch(tier=Tier.L1, keys=[_key(1), _key(2)], size_bytes=100, seq=1)
+    )
+    meter, reader = private_meter()
+
+    observability.register_coordinator_metrics(meter)
+
+    values = read_values(reader)
+    assert values["lmcache_coordinator.key_directory.keys_tracked"] == {labels(): 2}
+    assert values["lmcache_coordinator.key_directory.server_l1_keys"] == {
+        labels(instance_id="node-a"): 2
+    }
+
+
+def test_blend_index_metrics_report_only_while_blend_lookup_is_on() -> None:
+    directory = KeyDirectory()
+    meter, reader = private_meter()
+    observability.register_coordinator_metrics(meter)
+    names = (
+        "lmcache_coordinator.blend_index.chunks_indexed",
+        "lmcache_coordinator.blend_index.unique_chunk_contents",
+        "lmcache_coordinator.blend_index.namespaces",
+    )
+
+    assert not set(names) & set(read_values(reader))
+
+    directory.enable_blend_lookup(chunk_size=2, probe_stride=1)
+
+    values = read_values(reader)
+    assert {name: values[name] for name in names} == {
+        name: {labels(): 0} for name in names
+    }
+
+
+def test_lookup_metrics_report_counts_and_the_found_per_request_histogram() -> None:
+    directory = KeyDirectory()
+    directory.record_lookup("prefix", chunks_requested=4, chunks_found=3)
+    meter, reader = private_meter()
+
+    observability.register_coordinator_metrics(meter)
+
+    values = read_values(reader)
+    prefix = "lmcache_coordinator.key_directory."
+    assert values[prefix + "lookups"] == {
+        labels(lookup_type="prefix"): 1,
+        labels(lookup_type="non_prefix"): 0,
+    }
+    assert values[prefix + "lookup_chunks_requested"][labels(lookup_type="prefix")] == 4
+    assert values[prefix + "lookup_chunks_found"][labels(lookup_type="prefix")] == 3
+    histogram = prefix + "lookup_chunks_found_per_request"
+    buckets = values[histogram + "_bucket"]
+    assert buckets[labels(lookup_type="prefix", le="2")] == 0
+    assert buckets[labels(lookup_type="prefix", le="4")] == 1
+    assert buckets[labels(lookup_type="prefix", le="+Inf")] == 1
+    assert values[histogram + "_sum"][labels(lookup_type="prefix")] == 3
+    assert values[histogram + "_count"] == {
+        labels(lookup_type="prefix"): 1,
+        labels(lookup_type="non_prefix"): 0,
+    }
+
+
+def test_usage_metric_reports_the_fleet_bytes_per_tier() -> None:
+    usage = CacheUsageManager()
+    usage.consume(
+        _batch(tier=Tier.L2, backend="fs", keys=[_key(1)], size_bytes=400, seq=1)
+    )
+    meter, reader = private_meter()
+
+    observability.register_coordinator_metrics(meter)
+
+    assert read_values(reader)["lmcache_coordinator.usage.bytes_stored"] == {
+        labels(tier="l1"): 0,
+        labels(tier="l2"): 400,
+    }
+
+
+def test_checkpoint_metrics_report_writes_phases_and_the_restore() -> None:
+    monitor = CheckpointMonitor()
+    monitor.record_restore("restored")
+    monitor.record_write(
+        CheckpointWrite(
+            result="ok",
+            pause_ingest_seconds=0.001,
+            copy_seconds=0.002,
+            write_seconds=0.003,
+            size_bytes=4096,
+        )
+    )
+    monitor.record_write(CheckpointWrite(result="quiesce_timeout", error="boom"))
+    meter, reader = private_meter()
+
+    observability.register_coordinator_metrics(meter)
+
+    values = read_values(reader)
+    prefix = "lmcache_coordinator.checkpoint_file."
+    assert values[prefix + "writes"] == {
+        labels(result="ok"): 1,
+        labels(result="quiesce_timeout"): 1,
+        labels(result="error"): 0,
+    }
+    assert values[prefix + "size_bytes"] == {labels(): 4096}
+    assert set(values[prefix + "last_write_timestamp_seconds"]) == {labels()}
+    assert values[prefix + "write_duration_seconds_count"] == {
+        labels(phase="pause_ingest"): 1,
+        labels(phase="copy"): 1,
+        labels(phase="write"): 1,
+    }
+    assert values[prefix + "restored_on_start"] == {
+        labels(outcome="cold"): 0,
+        labels(outcome="restored"): 1,
+        labels(outcome="ignored"): 0,
+    }
+
+
+def test_metadata_metric_reports_saves_by_result() -> None:
+    MetadataPersister(NullArtifactStore()).save()
+    meter, reader = private_meter()
+
+    observability.register_coordinator_metrics(meter)
+
+    assert read_values(reader)["lmcache_coordinator.metadata_file.writes"] == {
+        labels(result="ok"): 1,
+        labels(result="error"): 0,
+    }
+
+
+def test_prefetch_metrics_report_submits_and_polls() -> None:
+    prefetch = PrefetchManager()
+    prefetch.record_unknown_server()
+    meter, reader = private_meter()
+
+    observability.register_coordinator_metrics(meter)
+
+    values = read_values(reader)
+    assert values["lmcache_coordinator.prefetch.requests_submitted"] == {
+        labels(result="submitted"): 0,
+        labels(result="noop"): 0,
+        labels(result="unknown_server"): 1,
+        labels(result="server_error"): 0,
+    }
+    assert (
+        values["lmcache_coordinator.prefetch.status_polls"][labels(result="pending")]
+        == 0
+    )
+    assert values["lmcache_coordinator.prefetch.requests_abandoned"] == {labels(): 0}
+    assert values["lmcache_coordinator.prefetch.submit_duration_seconds_count"] == {
+        labels(): 0
+    }

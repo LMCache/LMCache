@@ -57,6 +57,9 @@ from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
 from lmcache.v1.mp_coordinator.ingest.stream_position import StreamPosition
 from lmcache.v1.mp_coordinator.observability import register_coordinator_metrics
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
+    CheckpointMonitor,
+    CheckpointWrite,
+    CheckpointWriteError,
     load_checkpoint,
     save_checkpoint,
 )
@@ -144,7 +147,10 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         metadata_persister.register(component)
     # Before the checkpoint, so a restored key arrives already pinned.
     metadata_persister.load()
-    load_checkpoint(checkpoint_store, checkpoint_components)
+    checkpoint_monitor = CheckpointMonitor()
+    checkpoint_monitor.record_restore(
+        load_checkpoint(checkpoint_store, checkpoint_components)
+    )
     background_loops = BackgroundLoops()
     event_loop_monitor = EventLoopMonitor()
     # Whether each controller's run() was entered; the lifespan marks it.
@@ -164,19 +170,28 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         metadata_persister=metadata_persister,
     )
 
-    async def _write_checkpoint() -> None:
-        """One pass of the checkpoint loop.
-
-        Only derived state runs on a timer: it changes continuously, so a
-        cadence is the only sensible cost. Operator intent is written when
-        it changes instead (see ``MetadataPersister``).
-        """
-        await asyncio.to_thread(
+    async def _save_checkpoint() -> CheckpointWrite:
+        """Write the checkpoint off the event loop and record how it went."""
+        checkpoint_write = await asyncio.to_thread(
             save_checkpoint,
             checkpoint_store,
             quiesce,
             checkpoint_components,
         )
+        checkpoint_monitor.record_write(checkpoint_write)
+        return checkpoint_write
+
+    async def _write_checkpoint() -> None:
+        """One pass of the checkpoint loop.
+
+        Only derived state runs on a timer: it changes continuously, so a
+        cadence is the only sensible cost. Operator intent is written when
+        it changes instead (see ``MetadataPersister``). A failed write
+        raises, so the loop counts the pass as failed and keeps its error.
+        """
+        checkpoint_write = await _save_checkpoint()
+        if checkpoint_write.error is not None:
+            raise CheckpointWriteError(checkpoint_write.error)
 
     async def _evict_stale_instances() -> None:
         """One pass of the health loop.
@@ -220,13 +235,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
             if config.checkpoint_path:
                 # One last write on the way out, so a clean restart
                 # resumes here rather than at an interval-old copy.
-                stack.push_async_callback(
-                    asyncio.to_thread,
-                    save_checkpoint,
-                    checkpoint_store,
-                    quiesce,
-                    checkpoint_components,
-                )
+                stack.push_async_callback(_save_checkpoint)
             # One controller is not allowed to take the coordinator down
             # with it: the endpoints belonging to no controller keep
             # working, and whatever the failed one does simply is not
@@ -309,11 +318,9 @@ def _evict_stale(registry: InstanceRegistry, instance_timeout: float) -> list[st
     Returns:
         The ids of instances evicted in this sweep.
     """
-    evicted = []
-    for instance_id in registry.stale(instance_timeout):
-        if registry.deregister(instance_id) is not None:
-            logger.warning("Instance %s timed out; evicted", instance_id)
-            evicted.append(instance_id)
+    evicted = registry.remove_stale(instance_timeout)
+    for instance_id in evicted:
+        logger.warning("Instance %s timed out; evicted", instance_id)
     return evicted
 
 

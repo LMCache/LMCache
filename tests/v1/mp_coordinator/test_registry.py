@@ -121,3 +121,35 @@ def test_stats_report_each_server_s_heartbeat_age():
 
     assert set(ages) == {"a"}
     assert 7.0 <= ages["a"] < 10.0
+
+
+def test_stats_count_each_kind_of_membership_change():
+    registry = InstanceRegistry()
+    registry.register(_instance("a"))
+    registry.register(_instance("a"))
+    registry.register(_instance("b"))
+    registry.update_heartbeat("ghost", time.monotonic())
+    registry.deregister("b")
+    registry.deregister("never-registered")
+
+    stats = registry.stats()
+
+    assert stats.servers_registered == 1
+    assert stats.membership_changes == {
+        "registered": 2,
+        "re_registered": 1,
+        "deregistered": 1,
+        "timed_out": 0,
+        "unknown_heartbeat": 1,
+    }
+
+
+def test_remove_stale_removes_only_expired_instances_and_counts_them():
+    registry = InstanceRegistry()
+    registry.register(_instance("old", heartbeat=time.monotonic() - 100.0))
+    registry.register(_instance("fresh", heartbeat=time.monotonic()))
+
+    assert registry.remove_stale(timeout=30.0) == ["old"]
+    assert registry.contains("fresh")
+    assert not registry.contains("old")
+    assert registry.stats().membership_changes["timed_out"] == 1

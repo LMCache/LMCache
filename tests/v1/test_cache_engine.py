@@ -1885,7 +1885,7 @@ def test_compress_decompress_unpin_not_pinned() -> None:
     engine.storage_manager.batched_get.return_value = [mock_mem_obj]
 
     with patch(
-        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        "lmcache.inprocess.v1.storage_backend.naive_serde.CreateSerde",
         return_value=(mock_serializer, mock_deserializer),
     ):
         # Call compress on the engine
@@ -1919,7 +1919,7 @@ def test_compress_decompress_unpin_not_pinned() -> None:
     engine.storage_manager.batched_get.return_value = [mock_compressed_mem_obj]
 
     with patch(
-        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        "lmcache.inprocess.v1.storage_backend.naive_serde.CreateSerde",
         return_value=(mock_serializer, mock_deserializer),
     ):
         res_decomp = LMCacheEngine.decompress(
@@ -1973,7 +1973,7 @@ def test_compress_decompress_unpin_when_pinned() -> None:
     # Test compress
     engine.storage_manager.batched_get.return_value = [mock_mem_obj]
     with patch(
-        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        "lmcache.inprocess.v1.storage_backend.naive_serde.CreateSerde",
         return_value=(mock_serializer, mock_deserializer),
     ):
         LMCacheEngine.compress(
@@ -1989,7 +1989,7 @@ def test_compress_decompress_unpin_when_pinned() -> None:
     engine.storage_manager.reset_mock()
     engine.storage_manager.batched_get.return_value = [mock_compressed_mem_obj]
     with patch(
-        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        "lmcache.inprocess.v1.storage_backend.naive_serde.CreateSerde",
         return_value=(mock_serializer, mock_deserializer),
     ):
         LMCacheEngine.decompress(
