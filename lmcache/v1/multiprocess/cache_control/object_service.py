@@ -232,17 +232,17 @@ class ObjectService:
         pure ``l1`` delete works on an L1-only server.
 
         Returns:
-            ``{"deleted", "skipped", "ok"}``: ``deleted`` is the total keys
-            removed across the requested tiers (L1 removals plus the L2 batch
+            ``{"deleted", "skipped", "ok"[, "error"]}``: ``deleted`` is the total
+            keys removed across the requested tiers (L1 removals plus the L2 batch
             size); ``skipped`` is the L1 keys refused because they were locked
-            (non-force only).
+            (non-force only); ``ok`` is ``False`` with ``error`` set when the L2
+            adapter raised (a structured failure, not a crash).
 
         Raises:
             InvalidRequest: batch too large, or an ``ObjectKey`` invariant
                 violation.
             Unavailable / NotFound: L2 adapter resolution (only when ``tier``
                 includes L2).
-            Exception: An unexpected L2 adapter failure is propagated.
         """
         if len(keys) > MAX_DELETE_BATCH:
             raise InvalidRequest(
@@ -258,6 +258,8 @@ class ObjectService:
 
         deleted = 0
         skipped = 0
+        ok = True
+        error: str | None = None
 
         if tier in (Tier.L1, Tier.ALL):
             l1_deleted, l1_skipped = self._engine.storage_manager.delete_l1_keys(
@@ -268,7 +270,14 @@ class ObjectService:
 
         if tier in (Tier.L2, Tier.ALL):
             _, adapter = self._resolve_adapter(adapter_selector)
-            await asyncio.to_thread(adapter.delete, parsed)
-            deleted += len(parsed)
+            try:
+                await asyncio.to_thread(adapter.delete, parsed)
+                deleted += len(parsed)
+            except Exception as exc:  # noqa: BLE001 - structured result, not a crash
+                ok = False
+                error = str(exc)
 
-        return {"deleted": deleted, "skipped": skipped, "ok": True}
+        result: dict[str, object] = {"deleted": deleted, "skipped": skipped, "ok": ok}
+        if error is not None:
+            result["error"] = error
+        return result

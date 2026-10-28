@@ -25,11 +25,13 @@ enable it. Deploy the MP HTTP interface on a **trusted network**. This flag does
 not provide authentication. The default limits are 64 MiB per object and two
 concurrent downloads per HTTP process; see :doc:`http_api` for configuration.
 
-The server copies the object into an independent snapshot under temporary read
-protection, releases that protection, and only then sends the HTTP response.
-This inspection does not update LRU state or count as a normal cache retrieve.
-The snapshot is rejected if read protection expires, release fails, or the
-object is removed or replaced before the post-copy identity check.
+The server holds an inspection pin on the source allocation while copying it
+into an independent snapshot, then releases the pin before sending the HTTP
+response. The pin does not expire with the normal read-lock TTL. Ordinary
+deletion and eviction cannot reclaim the object; force deletion removes the key
+but defers freeing the allocation until copying finishes. This inspection does not
+update LRU state or count as a normal cache retrieve. The snapshot is rejected
+if the object is removed or replaced during copying.
 
 Legacy management
 -----------------

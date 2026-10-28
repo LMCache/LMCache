@@ -366,13 +366,14 @@ class TestDeleteObjectsEndpoint:
         assert resp.status_code == 404
         assert "nope" in resp.json()["detail"]
 
-    def test_adapter_failure_returns_500(self):
+    def test_propagates_adapter_failure_in_body(self):
         adapter = _FakeAdapter(delete_raises=RuntimeError("s3 down"))
-        client = TestClient(
-            _make_app(_sm_with(("s3", adapter))), raise_server_exceptions=False
-        )
+        client = TestClient(_make_app(_sm_with(("s3", adapter))))
         resp = client.request("DELETE", "/cache/objects", json={"keys": []})
-        assert resp.status_code == 500
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["ok"] is False
+        assert "s3 down" in body["error"]
 
     def test_tier_l1_deletes_l1_only(self):
         """tier=l1 deletes from L1 and never touches an L2 adapter."""

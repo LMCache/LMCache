@@ -24,9 +24,6 @@ from lmcache.v1.multiprocess.config import (
     KafkaCacheEventSinkConfig,
     MPServerConfig,
 )
-from lmcache.v1.multiprocess.config import HTTPFrontendConfig
-from lmcache.v1.multiprocess import http_server as http_server_module
-from lmcache.v1.multiprocess.config import HTTPFrontendConfig
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_server import app
 import lmcache.lmcache_native as lmcache_native

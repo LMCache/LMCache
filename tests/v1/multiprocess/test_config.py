@@ -19,12 +19,9 @@ from lmcache.v1.multiprocess.config import (
     DEFAULT_KAFKA_CACHE_EVENT_TOPIC,
     DEFAULT_KAFKA_DELIVERY_TIMEOUT,
     CoordinatorConfig,
-<<<<<<< HEAD
     HttpCacheEventSinkConfig,
-    KafkaCacheEventSinkConfig,
-=======
     HTTPFrontendConfig,
->>>>>>> 2570aca5 (fix(mp): harden L1 KV cache object downloads)
+    KafkaCacheEventSinkConfig,
     MPServerConfig,
     add_coordinator_args,
     add_http_frontend_args,
@@ -232,6 +229,14 @@ def test_api_key_files_share_one_option_and_legacy_alias() -> None:
     )
     assert config.api_key_files == ["current-key", "next-key"]
     assert config.grpc_server_mode == "aio"
+
+
+def test_http_and_mp_args_register_api_key_alias_once() -> None:
+    parser = argparse.ArgumentParser()
+    add_http_frontend_args(parser)
+    add_mp_server_args(parser)
+    args = parser.parse_args(["--http-api-key-file", "service-key"])
+    assert args.api_key_file == ["service-key"]
 
 
 def test_server_module_flags_are_parsed():

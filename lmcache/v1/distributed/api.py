@@ -176,35 +176,6 @@ class L1ObjectSnapshot:
     dtypes: tuple[str, ...]
 
 
-class TrimPolicy(enum.Enum):
-    """How to pick the retained subset of found keys for a prefetch.
-
-    PREFIX retains the longest contiguous run from index 0; SEGMENTED_PREFIX
-    keeps the keys that loaded when an L2 hit failed to load into L1 mid-prefix
-    (gaps and all); SPARSE retains every found key for an intentional scatter.
-    """
-
-    PREFIX = enum.auto()
-    SEGMENTED_PREFIX = enum.auto()
-    SPARSE = enum.auto()
-
-
-class PrefetchMode(enum.Enum):
-    """The intent of a prefetch request.
-
-    ``LOOKUP`` -- prefetch for an imminent reader: loaded keys are read-locked
-    for the requesting workers, and whether they persist or are dropped after
-    use follows the configured prefetch policy.
-
-    ``WARM`` -- speculative pre-warm with no imminent reader: loaded keys are
-    retained and left unlocked (immediately resident and evictable), so a later
-    lookup can hit them.
-    """
-
-    LOOKUP = enum.auto()
-    WARM = enum.auto()
-
-
 @dataclass(frozen=True)
 class ObjectKeyIdentity:
     """Matching fields shared by local objects and internal wire messages."""

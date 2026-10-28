@@ -114,7 +114,8 @@ compatibility with the vLLM-embedded API server.
 .. note::
 
    Several handlers report failure in the response **body** rather than via a
-   non-200 status code (e.g. ``/periodic-threads-health`` returns ``200`` with
+   non-200 status code (e.g. ``DELETE /cache/objects`` returns ``200`` with
+   ``ok=false``, and ``/periodic-threads-health`` returns ``200`` with
    ``healthy=false``).
    The error-field name is also not uniform: ``/healthcheck`` and
    ``/cache/clear`` use ``reason`` on failure, while ``/status``, ``/config``,
@@ -826,7 +827,9 @@ are optional for backward compatibility with older wire payloads.
 
 ``deleted`` is the total keys removed across the requested tiers (L1 removals
 plus the L2 batch size); ``skipped`` is the L1 keys refused because they were
-locked (non-force only). Unexpected L2 adapter failures return ``500``.
+locked (non-force only). For an L2 adapter failure, the response remains
+``200`` with ``"ok": false`` and an ``"error"`` message; the deletion counts
+reflect completed work.
 
 **HTTP status codes:**
 
@@ -837,7 +840,6 @@ locked (non-force only). Unexpected L2 adapter failures return ``500``.
 - ``404``: ``adapter`` (body) does not match any configured adapter.
 - ``422``: Pydantic-level body-shape failure (missing ``keys``,
   wrong field types).
-- ``500``: unexpected L2 adapter failure.
 - ``503``: engine not initialized, or no L2 adapters configured (only when
   ``tier`` includes L2).
 
@@ -885,12 +887,14 @@ These settings are also available as ``HTTPFrontendConfig`` fields:
 ``enable_l1_cache_download``, ``l1_cache_download_max_size_bytes``, and
 ``l1_cache_download_max_concurrency``.
 
-The source object is protected only while its logical bytes and layout metadata
-are copied. Protection is released before the HTTP response is sent. Inspection
-does not update LRU state and is not counted as a normal cache retrieve.
-After copying, the server verifies that the key still refers to the same object
-before releasing its read protection. Removal, replacement, or a failed release
-(including expired read TTL) invalidates the snapshot and returns ``409``.
+An inspection pin prevents the source allocation from being freed or reused
+while its logical bytes and layout metadata are copied, without holding the
+L1 manager lock for the copy. Ordinary deletion and eviction respect this pin;
+force deletion removes the key immediately but defers freeing the allocation
+until copying finishes. Inspection does not update LRU state or count as a
+normal cache retrieve. If the key was removed or replaced during copying, the
+snapshot is discarded and the endpoint returns ``409``. The pin is released
+before the HTTP response is sent.
 Copying runs in a worker thread, but ``tobytes()`` may hold the GIL throughout
 the copy, so this does not guarantee a non-blocking event loop.
 

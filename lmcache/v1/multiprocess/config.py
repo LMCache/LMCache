@@ -797,16 +797,6 @@ def add_http_frontend_args(
         type=int,
         default=DEFAULT_HTTP_FRONTEND_CONFIG.l1_cache_download_max_concurrency,
         help="Concurrent L1 downloads per HTTP process (default 2).",
-            )
-    http_group.add_argument(
-        "--http-api-key-file",
-        action="append",
-        default=[],
-        metavar="PATH",
-        help="Read an HTTP bearer API key from PATH. Repeat this option to "
-        "accept multiple keys during rotation. The environment alternatives "
-        "are LMCACHE_HTTP_API_KEY_FILE and LMCACHE_HTTP_API_KEY. "
-        "Authentication is disabled when no key source is configured.",
     )
     return parser
 

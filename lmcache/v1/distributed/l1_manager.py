@@ -1484,43 +1484,6 @@ class L1Manager(L1ManagerInterface):
                 ready.append(obj)
         self._memory_manager.free(ready)
 
-    def _reserve_read_locked(
-        self,
-        keys: list[ObjectKey],
-        total: int,
-        notify: bool,
-    ) -> dict[ObjectKey, L1OperationResult]:
-        """Acquire read locks while the caller holds the manager lock."""
-        ret: dict[ObjectKey, L1OperationResult] = {}
-        successful_keys: list[ObjectKey] = []
-        for key in keys:
-            entry = self._objects.get(key, None)
-            if entry is None:
-                ret[key] = (L1Error.KEY_NOT_EXIST, None)
-                continue
-
-            if entry.write_lock.is_locked():
-                ret[key] = (L1Error.KEY_NOT_READABLE, None)
-                continue
-
-            # TODO(perf): support a count argument in TTLLock.lock() to avoid
-            # Python for-loop overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.lock()
-            ret[key] = (L1Error.SUCCESS, entry.memory_obj)
-            successful_keys.append(key)
-
-        if notify:
-            for listener in self._registered_listeners:
-                listener.on_l1_keys_reserved_read(successful_keys)
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.L1_READ_RESERVED,
-                    metadata={"l1_tag": self._config.tag, "keys": successful_keys},
-                )
-            )
-        return ret
-
     def _finish_read_locked(
         self,
         keys: list[ObjectKey],
