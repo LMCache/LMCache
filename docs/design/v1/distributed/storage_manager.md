@@ -41,13 +41,15 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
 
 ### Contract
 
-- `submit_prefetch_task(spec, external_request_id, skip_l2) -> PrefetchHandle`
+- `submit_prefetch_task(spec, external_request_id) -> PrefetchHandle`
   makes the objects the policy retains resident in L1: L1 hits are
   read-locked (under `LOCK`) and the rest is loaded from every attached L2
-  adapter, planned in one step over the union of what L1 and L2 hold.
-  `skip_l2` restricts the prefetch to what is already in L1; such a request,
-  or one submitted with no L2 adapter attached, is served on the calling
-  thread and its result is available when the call returns.
+  adapter, planned in one step over the union of what L1 and L2 hold. The
+  spec's `allowed_l1_memory_tags` / `allowed_l2_memory_tags` restrict which
+  L1 managers count as hit sources and which L2 adapters are used (see
+  `memory_tags.md`). A spec that allows no L2 adapter, or one submitted with
+  no L2 adapter attached, is served on the calling thread and its result is
+  available when the call returns.
 - `query_prefetch_status(handle) -> PrefetchResult | None` returns `None`
   while loading, otherwise the result: bit `i` of `hit_cells[k]` is set iff
   `key_groups[k].keys[i]` is resident (and read-locked under `LOCK`), split
@@ -69,7 +71,7 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
 | `multiprocess/modules/lookup.py` (engine lookup) | every registered object group x every kv rank, via `ipc_key_to_grouped_object_keys` | `"prefix"`, `LOCK` |
 | blend prefix leg (`modules/blend/lookup.py`) | the leg's read groups (attention + recurrent) x ranks | `"prefix"`, `LOCK` |
 | blend sparse leg | the blend read groups (attention + aux) x ranks over the de-duplicated matched chunk hashes | `"full"`, `LOCK` |
-| P2P receiver (`modules/p2p_controller.py`) | **one row per object group** holding the peer's keys in request order, ranks mixed. The peer only asks "are these resident"; it carries no chunk layout. If the groups receive different numbers of keys, or a group has no layout, the lookup logs an error and reports every key as a miss. | `"full"`, `LOCK`, `skip_l2=True` |
+| P2P receiver (`modules/p2p_controller.py`) | **one row per object group** holding the peer's keys in request order, ranks mixed. The peer only asks "are these resident"; it carries no chunk layout. If the groups receive different numbers of keys, or a group has no layout, the lookup logs an error and reports every key as a miss. | `"full"`, `LOCK`, `allowed_l1_memory_tags={(DRAM, LOCAL)}`, `allowed_l2_memory_tags=frozenset()` |
 | warm prefetch (`warm_prefetch.py`, `cache_control/key_resolver.py`) | every registered object group x every kv rank, via `ipc_key_to_grouped_object_keys` -- the same rows as engine lookup | `"full"`, `NO_LOCK` |
 
 ### Fold
@@ -159,11 +161,14 @@ configurations. The legacy singular config aliases the first entry. Each manager
 owns its allocator, eviction controller, and store controller. Initialization
 rolls back already-created managers, adapters, and controllers on failure.
 
-L2 affinity is a fixed mapping from `L2AdapterConfigBase.affinity_tag` to an L1
-identity. Stores and serde use that L1, and prefetch reloads allocate there. There
-is no pluggable affinity policy. Unknown targets and GDS targets for host-buffer
-adapters are rejected. Runtime adapter attachment updates the controller's
-mapping on its own loop thread; removal drops it after draining.
+L2 affinity is resolved from memory tags (see `memory_tags.md`): each adapter's
+config lists the L1 memory tags it wants, most preferred first, and
+`resolve_l1_affinity` picks the first L1 in placement order that has the most
+preferred matching tags. Stores and serde use that L1, and prefetch reloads
+allocate there. There is no pluggable affinity policy. An adapter that no L1
+matches, such as a host-buffer adapter in a GDS-only server, is rejected.
+Runtime adapter attachment updates the controller's mapping on its own loop
+thread; removal drops it after draining.
 
 Prefetch uses synchronous L1 calls and the existing per-manager lock maps. Its
 policy discards redundant copies and returns `PrefetchResult.l1_owners` for retained

@@ -76,19 +76,19 @@ def _install_nixl_mock_if_absent() -> list[str]:
 _NIXL_MOCK_KEYS = _install_nixl_mock_if_absent()
 
 # First Party
+from lmcache.inprocess.v1.storage_backend.nixl_storage_backend import (  # noqa: E402
+    NixlDesc,
+    NixlDynamicStorageAgent,
+    NixlDynamicStorageBackend,
+    NixlKeyMetadata,
+    NixlStaticStorageBackend,
+)
 from lmcache.utils import CacheEngineKey  # noqa: E402
 from lmcache.v1.memory_management import (  # noqa: E402
     MemoryFormat,
     MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
-)
-from lmcache.v1.storage_backend.nixl_storage_backend import (  # noqa: E402
-    NixlDesc,
-    NixlDynamicStorageAgent,
-    NixlDynamicStorageBackend,
-    NixlKeyMetadata,
-    NixlStaticStorageBackend,
 )
 
 # The backend module has captured the real or temporary NIXL symbols. Remove

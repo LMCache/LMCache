@@ -13,6 +13,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
 )
@@ -24,7 +25,12 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
-from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    InstanceLivenessTarget,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 
@@ -58,7 +64,7 @@ class EngineDrivenContextEntry:
     has_liveness_signal: bool = False
 
 
-class EngineDrivenTransferModule(InstanceLivenessTarget):
+class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     """Handles Engine-driven KV cache transfer operations.
 
     Owns non-GPU context registrations and provides handlers for
@@ -68,6 +74,16 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
     Args:
         ctx: The shared engine context.
     """
+
+    module_name = "engine_driven_transfer"
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        """Build unless the transfer mode excludes the engine-driven path."""
+        mode = build_ctx.mp_config.supported_transfer_mode
+        if mode == "lmcache_driven":
+            return None
+        return cls(build_ctx.engine_context)
 
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
@@ -251,6 +267,30 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         non-GPU transfers."""
         return self._ctx.resolve_obj_keys(key, [0])[0]
 
+    def _resolve_obj_keys_by_group(
+        self, key: IPCCacheServerKey, num_groups: int
+    ) -> list[list[ObjectKey]]:
+        """Resolve object keys for every LMCache group, group-major.
+
+        Args:
+            key: Cache key for the token range.
+            num_groups: Number of LMCache groups the worker registered.
+
+        Returns:
+            ``keys[g][c]`` is chunk ``c``'s key in group ``g``
+            (``ObjectKey.object_group_id == g``).
+        """
+        return self._ctx.resolve_obj_keys(key, list(range(num_groups)))
+
+    def _group_keys_for(
+        self, entry: "EngineDrivenContextEntry", key: IPCCacheServerKey
+    ) -> "list[list[ObjectKey]] | None":
+        """Group-major keys when ``entry`` registered multi-group, else None."""
+        layouts = entry.metadata.group_layouts
+        if not layouts or len(layouts) < 2:
+            return None
+        return self._resolve_obj_keys_by_group(key, len(layouts))
+
     @request_handler()
     def register_kv_cache_engine_driven_context(
         self,
@@ -280,7 +320,9 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                     payload.instance_id,
                 )
                 return RegisterEngineDrivenContextResponse(
-                    shm_name=shm_name, pool_size=pool_size
+                    shm_name=shm_name,
+                    pool_size=pool_size,
+                    null_block_id=self._ctx.null_block_id,
                 )
 
         dtype = getattr(torch, payload.dtype_str, None)
@@ -311,14 +353,52 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             )
         )
         layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+        group_layouts: list[MemoryLayoutDesc] | None = None
+        if payload.group_layouts:
+            group_layouts = []
+            for gl in payload.group_layouts:
+                g_dtype = getattr(torch, gl.dtype_str, None)
+                if g_dtype is None or not isinstance(g_dtype, torch.dtype):
+                    raise ValueError(
+                        f"Invalid group dtype_str '{gl.dtype_str}' in "
+                        "engine-driven registration"
+                    )
+                # Sliding-window groups store a reduced token window per chunk;
+                # size the per-chunk object to that window (fall back to the full
+                # chunk when the worker didn't report one, e.g. legacy payloads).
+                g_tokens = gl.window_tokens or self._ctx.chunk_size
+                # Plane count is per group: a two-plane K/V group can sit
+                # beside a one-plane index cache. Legacy workers report 0, so
+                # fall back to the top-level flag they were sized by.
+                g_single_plane = gl.kv_size == 1 if gl.kv_size else payload.use_mla
+                g_shape = (
+                    torch.Size([gl.num_layers, g_tokens, gl.hidden_dim_size])
+                    if g_single_plane
+                    else torch.Size([2, gl.num_layers, g_tokens, gl.hidden_dim_size])
+                )
+                group_layouts.append(
+                    MemoryLayoutDesc(shapes=[g_shape], dtypes=[g_dtype])
+                )
+        group_windows: list[int] | None = None
+        if payload.group_layouts:
+            group_windows = []
+            for gl in payload.group_layouts:
+                if gl.window_chunks < 0:
+                    raise ValueError(
+                        f"Invalid group window_chunks {gl.window_chunks} in "
+                        "engine-driven registration"
+                    )
+                group_windows.append(gl.window_chunks or -1)
         metadata = EngineDrivenContextMetadata(
             layout_desc=layout_desc,
             block_size=payload.block_size,
             use_mla=payload.use_mla,
+            group_layouts=group_layouts,
+            group_windows=group_windows,
         )
         # Build the entry and strategy outside the lock, then insert the pair
         # atomically so a concurrent reap can never strand one without the
-        # other. REGISTER is SYNC-serialized, so it is the sole inserter.
+        # other. REGISTER is SERIALIZED, so it is the sole inserter.
         entry = EngineDrivenContextEntry(
             metadata=metadata,
             model_name=payload.model_name,
@@ -347,11 +427,42 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             payload.world_size,
         )
 
-        self._ctx.layout_desc_registry.register(
-            payload.model_name, payload.world_size, layout_desc
-        )
+        if group_layouts:
+            # The lookup/prefetch path fans its object-group lookups out over
+            # the registered AttnWindowDesc's group count. A hybrid-KV worker
+            # stores and retrieves ``len(group_layouts)`` object groups, but the
+            # default single-group desc makes lookup prefetch only group 0 --
+            # every later group then misses at retrieve (unsafe_read finds no
+            # read-locked objects) and vLLM consumes the unloaded blocks. Match
+            # the desc's group count to the worker's, with each group's own
+            # window and kind: sliding-window and recurrent-state groups need
+            # only their trailing chunks for a hit, and the worker never stores
+            # their all-null earlier chunks, so a full-prefix window would make
+            # every lookup on such a model miss.
+            assert group_windows is not None
+            attn_desc = AttnWindowDesc(
+                num_chunks_in_sw=group_windows,
+                world_size=payload.world_size,
+                group_kinds=tuple(
+                    "recurrent" if gl.recurrent else "attention"
+                    for gl in payload.group_layouts
+                ),
+            )
+            self._ctx.layout_desc_registry.register(
+                payload.model_name,
+                payload.world_size,
+                layout_desc,
+                attn_desc=attn_desc,
+                group_layout_descs=dict(enumerate(group_layouts)),
+            )
+        else:
+            self._ctx.layout_desc_registry.register(
+                payload.model_name, payload.world_size, layout_desc
+            )
         return RegisterEngineDrivenContextResponse(
-            shm_name=shm_name, pool_size=pool_size
+            shm_name=shm_name,
+            pool_size=pool_size,
+            null_block_id=self._ctx.null_block_id,
         )
 
     @request_handler(operation="unregister_kv_cache_engine_driven_context")
@@ -384,22 +495,49 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         self,
         key: IPCCacheServerKey,
         instance_id: int,
+        skipped_chunks: tuple[tuple[int, ...], ...] = (),
     ) -> PrepareStoreResponse:
         """Prepare a store operation.
 
         Args:
             key: Cache key for the token range to store.
             instance_id: Worker instance identifier.
+            skipped_chunks: Per LMCache group, the chunk positions the worker
+                will not store because every engine block in them is the null
+                block. Empty means none; otherwise one entry per registered
+                group. Only multi-group workers send it.
 
         Returns:
-            PrepareStoreResponse with empty slots for pickle mode.
+            PrepareStoreResponse with empty slots for inline mode.
+
+        Raises:
+            ValueError: If ``skipped_chunks`` does not have one entry per
+                registered group or names a chunk outside the key's range.
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
+        group_keys = self._group_keys_for(entry, key)
+        if skipped_chunks:
+            if group_keys is None or len(skipped_chunks) != len(group_keys):
+                raise ValueError(
+                    f"skipped_chunks has {len(skipped_chunks)} groups for "
+                    f"{0 if group_keys is None else len(group_keys)} registered "
+                    f"groups (instance_id={instance_id})"
+                )
+            for gid, (skips, g_keys) in enumerate(
+                zip(skipped_chunks, group_keys, strict=True)
+            ):
+                if any(not 0 <= idx < len(g_keys) for idx in skips):
+                    raise ValueError(
+                        f"skipped_chunks for group {gid} is outside its "
+                        f"{len(g_keys)} chunks (instance_id={instance_id})"
+                    )
         response = strategy.prepare_store(
             key=key,
             instance_id=instance_id,
             context=entry.metadata,
             resolve_obj_keys=self._resolve_single_group_obj_keys,
+            group_keys=group_keys,
+            skipped_chunks=skipped_chunks,
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["store_start_time"] = time.perf_counter()
@@ -421,7 +559,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         Args:
             key: Cache key for the token range to store.
             instance_id: Worker instance identifier.
-            cpu_data: Pickled list of CPU tensors produced by the worker.
+            cpu_data: Typed inline CPU tensor payload produced by the worker.
 
         Returns:
             ``True`` when all reserved objects are written, otherwise ``False``.
@@ -439,6 +577,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             cpu_data=cpu_data,
             context=entry.metadata,
             resolve_obj_keys=self._resolve_single_group_obj_keys,
+            group_keys=self._group_keys_for(entry, key),
         )
         if st is not None and result:
             num_tokens = (
@@ -474,11 +613,26 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             ValueError: If no non-GPU context is registered for the given
                 instance ID.
         """
-        _, strategy = self._resolve_for_transfer(instance_id)
+        entry, strategy = self._resolve_for_transfer(instance_id)
+        group_keys = self._group_keys_for(entry, key)
+        group_first_chunk: list[int] = []
+        windows = entry.metadata.group_windows
+        if group_keys is not None and windows is not None:
+            # Serve each group's in-window suffix only, as prefetch locked it:
+            # a sliding-window or recurrent group's earlier chunks are not
+            # needed and were never stored.
+            narrowed: list[list[ObjectKey]] = []
+            for g_keys, window in zip(group_keys, windows, strict=True):
+                first = 0 if window < 0 else max(0, len(g_keys) - window)
+                group_first_chunk.append(first)
+                narrowed.append(g_keys[first:])
+            group_keys = narrowed
         response = strategy.prepare_retrieve(
             key=key,
             instance_id=instance_id,
             resolve_obj_keys=self._resolve_single_group_obj_keys,
+            group_keys=group_keys,
+            group_first_chunk=group_first_chunk,
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["retrieve_start_time"] = time.perf_counter()
@@ -497,8 +651,8 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         """Finalize a retrieve operation.
 
         Args:
-            key: Cache key (unused for pickle).
-            instance_id: Worker instance identifier (unused for pickle).
+            key: Cache key (unused for inline transfer).
+            instance_id: Worker instance identifier (unused for inline transfer).
 
         Returns:
             Always ``True``.

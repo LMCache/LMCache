@@ -3,8 +3,9 @@
 lmcache bench
 =============
 
-The ``lmcache bench`` command runs sustained performance benchmarks. It has
-three sub-commands, each targeting a different layer of the stack:
+The ``lmcache bench`` command runs sustained performance benchmarks and
+offline cache analyses. It has four sub-commands, each targeting a different
+layer of the stack:
 
 .. list-table::
    :header-rows: 1
@@ -21,10 +22,14 @@ three sub-commands, each targeting a different layer of the stack:
    * - ``l2``
      - Throughput / latency benchmark against an L2 cache adapter
        (store / lookup / load).
+   * - ``trace-analyze``
+     - Offline replay of a recorded request trace through a simulated
+       cache: prefix and CacheBlend hit tokens over a capacity and
+       chunk-size grid, as an HTML report.
 
 .. code-block:: bash
 
-   lmcache bench {engine,server,l2} [options]
+   lmcache bench {engine,server,l2,trace-analyze} [options]
 
 
 .. _lmcache-bench-engine:
@@ -35,8 +40,10 @@ engine
 The ``lmcache bench engine`` command runs sustained performance benchmarks
 against an inference engine (e.g., vLLM). It supports multiple workload types
 that exercise different caching patterns and reports TTFT, decoding speed, and
-throughput metrics. One workload, :ref:`rag-qa-quality
-<bench-rag-qa-quality>`, measures answer *correctness* instead of speed.
+throughput metrics. TTFT starts at the first non-empty content or reasoning
+text, including streams with an empty ``content`` field. One workload,
+:ref:`rag-qa-quality <bench-rag-qa-quality>`, measures answer *correctness*
+instead of speed.
 
 .. code-block:: bash
 
@@ -715,9 +722,12 @@ the files by ``sample_id``:
    lmcache bench engine --engine-url http://localhost:8001 $ARGS --rag-output b.json
 
 The files are comparable **only when their ``run_fingerprint`` values match**.
-It covers dataset, sample ids, budget, template kwargs, model, and chunk
-alignment, so a mismatch means the diff would report an input delta as a
-quality delta.
+It covers the selected samples' ids, rendered prompts and gold answers,
+along with the dataset path, budget, template kwargs, model, seed and chunk
+alignment. Editing a selected question, document or reference at the same
+dataset path changes the fingerprint; output paths and unmeasured records
+do not. Fingerprints from older versions that covered only sample ids are
+not comparable with these content-based fingerprints.
 
 .. note::
 
@@ -1018,8 +1028,7 @@ server
 The ``lmcache bench server`` command is an end-to-end sanity test for the
 LMCache Multi-Process (MP) cache server. It connects to a running server
 over ZMQ and exercises the full KV-cache data path for a sequence of
-synthetic requests, then optionally verifies per-chunk checksums through
-the HTTP API.
+synthetic requests, then verifies per-chunk checksums in local worker buffers.
 
 .. code-block:: bash
 
@@ -1027,7 +1036,7 @@ the HTTP API.
 
 Unlike :ref:`lmcache bench engine <lmcache-bench-engine>`, this command does
 **not** require an inference engine. It only needs a running LMCache MP
-server (ZMQ + HTTP). GPU mode additionally requires a CUDA-capable device.
+server (ZMQ). GPU mode additionally requires a CUDA-capable device.
 It also requires the full ``lmcache`` install (not the lightweight
 ``lmcache-cli`` package).
 
@@ -1035,13 +1044,16 @@ It also requires the full ``lmcache`` install (not the lightweight
 What it does
 ~~~~~~~~~~~~
 
-For each sequence in ``[--start, --end)``, the tool runs two passes:
+For each sequence in ``[--start, --end)``, the tool runs two passes. Each
+pass reserves request-exclusive KV blocks and releases them when it finishes.
 
-1. **Cold pass** -- ``LOOKUP`` is expected to miss, so the generated KV
-   tensors are ``STORE``\ d on the server.
-2. **Warm pass** -- ``LOOKUP`` is expected to hit; the tool issues
-   ``RETRIEVE`` and compares the retrieved KV chunks' checksums to the
-   originals.
+1. **Cold pass** -- ``LOOKUP`` is expected to miss. The benchmark fills
+   request blocks with deterministic KV and records local per-chunk checksums
+   before ``STORE``.
+2. **Warm pass** -- ``LOOKUP`` is expected to hit. The benchmark clears the
+   allocated destination blocks, retrieves the cached KV, and compares each
+   reader's checksums with the cold-pass reference. The two passes may use
+   different physical block IDs.
 
 The full RPC path exercised is::
 
@@ -1049,11 +1061,14 @@ The full RPC path exercised is::
      → QUERY_PREFETCH_STATUS → RETRIEVE → STORE
      → END_SESSION
 
-When ``--url`` points to the server's HTTP endpoint, per-chunk checksums
-are additionally cross-checked against the server-side computation, so a
-mismatch between producer and consumer surfaces as a loud
-``CHECKSUM MISMATCH`` log line.
+Both transfer modes verify local buffers. ``--url`` remains accepted for
+compatibility but is unused.
 
+
+STORE/RETRIEVE runs enabled workers concurrently; latency covers dispatch through
+completion of all workers. ``--transfer-timeout`` bounds each call's wait. After a
+timeout or transfer exception, close the client before reuse. Shutdown waits for
+running transfers and may block if a native call hangs.
 
 Quick start
 ~~~~~~~~~~~
@@ -1094,8 +1109,7 @@ Options
      - ZMQ endpoint of the MP cache server.
    * - ``--url URL``
      - ``http://localhost:8080``
-     - HTTP base URL of the server's checksum API. Used to
-       verify per-chunk checksums end-to-end.
+     - Accepted for compatibility; unused by local checksum verification.
    * - ``--mode {gpu,cpu}``
      - ``gpu``
      - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
@@ -1112,12 +1126,18 @@ Options
    * - ``--num-tokens N``
      - ``512``
      - Tokens per synthetic request.
+   * - ``--block-allocation {sequential,random}``
+     - ``sequential``
+     - Allocate the lowest free block IDs or sample from all free IDs.
+   * - ``--transfer-timeout SECS``
+     - ``10``
+     - Positive, finite wait budget for each STORE or RETRIEVE call.
    * - ``--num-blocks N``
      - ``1024``
-     - Number of paged blocks allocated on the GPU.
+     - Fallback block capacity per KV group; overridden by the shape spec.
    * - ``--block-size N``
      - ``16``
-     - Tokens per paged block.
+     - Fallback tokens per block; overridden by the shape spec.
    * - ``--start N``
      - ``0``
      - First sequence number to run.
@@ -1128,6 +1148,9 @@ Options
    * - ``--interval SECS``
      - ``0.5``
      - Delay between successive sub-passes.
+   * - ``--concurrency N``
+     - ``1``
+     - Number of clients sending requests at the same time (see below).
    * - ``--kvcache-shape-spec SPEC``
      - ``(2,1024,16,8,128):float16:32``
      - KV cache shape spec (see below).
@@ -1146,6 +1169,29 @@ Options
        via ``--output``).
 
 
+Block allocation
+~~~~~~~~~~~~~~~~
+
+Each KV group has an independent block pool. Active requests reserve
+exclusive blocks; all TP ranks use the same block IDs for a group in their
+separate KV buffers. Each concurrent client owns its own pools.
+Blocks are currently not shared between requests, even when their token
+prefixes match.
+
+``--block-allocation sequential`` selects the lowest free IDs; ``random``
+samples free IDs to exercise non-contiguous block mappings. Blocks become
+reusable after request release. Allocation fails immediately if any group
+lacks capacity, without reserving blocks in other groups.
+
+Capacity and block size come from ``NB`` and ``BS`` in
+``--kvcache-shape-spec``, overriding ``--num-blocks`` and ``--block-size``.
+For example, 512 tokens in complete chunks with a block size of 16 require
+32 blocks per group.
+
+If transfer completion is uncertain, the client rejects further operations
+and retains its blocks until teardown.
+
+
 CPU mode (no GPU)
 ~~~~~~~~~~~~~~~~~
 
@@ -1153,7 +1199,7 @@ CPU mode (no GPU)
 runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates regular
 CPU KV tensors and exercises the full RPC path through ``TransferContext``.
 The engine-driven context uses server-owned SHM staging when available and
-falls back to pickle transport. In ``lmcache_driven`` mode, the CPU wrapper
+falls back to typed inline tensor transport. In ``lmcache_driven`` mode, the CPU wrapper
 migrates the tensors to POSIX SHM during registration.
 
 By default ``--mode cpu`` uses the engine-driven gather/scatter path
@@ -1280,14 +1326,39 @@ Example: MLA + TP=2, exercising rank 0 STORE + both-rank RETRIEVE:
        --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:8" \
        --tp-size 2
 
-The bench's client-side checksum aggregates writer-rank bytes only,
-so a cold-vs-warm mismatch pinpoints the exact rank whose round trip
-went wrong -- useful for verifying that a new server-side change
-handles per-rank ``instance_id`` routing correctly.
+Replicated readers use their writer's KV identity for deterministic filling.
+The bench verifies retrieved data on every rank and reports the rank and
+chunk for checksum mismatches.
 
 See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
 for the authoritative parsing rules and validation errors.
 
+
+Concurrent clients
+~~~~~~~~~~~~~~~~~~
+
+With the default ``--concurrency 1`` a single client sends one request at a
+time, so the run measures per-request latency but never queues work on the
+server. ``--concurrency N`` runs ``N`` clients in parallel, each with its own
+connection and KV tensors, and its Workers registered under their own
+``instance_id`` block. Sequences are dealt round-robin (client ``k`` runs
+``start + k``, ``start + k + N``, ...), so no two clients touch the same
+keys and the cold/warm checks stay valid.
+
+.. code-block:: bash
+
+   lmcache bench server \
+       --rpc-url tcp://localhost:5555 --mode cpu \
+       --start 0 --end 400 --interval 0 --concurrency 8
+
+The summary adds ``Concurrency``, ``Elapsed (s)``, and ``Requests / s``.
+Use ``--interval 0`` when comparing throughput, otherwise the delay
+dominates. ``Requests / s`` counts cold/warm sequence pairs, matching
+``Total requests``.
+
+Size the server's L1 to hold the whole run. If stores arrive faster than
+the eviction controller frees memory, the server drops them, and the
+affected warm lookups miss and fail their checks.
 
 Profiling the server
 ~~~~~~~~~~~~~~~~~~~~~
@@ -1332,8 +1403,9 @@ After the run completes (or is interrupted with ``Ctrl-C``), a structured
 metrics summary is printed. The summary includes:
 
 * **Configuration** -- RPC URL, mode, transfer mode, tokens per request,
-  interval.
-* **Results** -- total requests, checksum OK / FAIL counts, pass rate.
+  interval, concurrency.
+* **Results** -- total requests, checksum OK / FAIL counts, checksum pass rate,
+  elapsed time, requests per second.
 * **Latency sections** -- per-operation latency statistics (count, mean,
   min, max, p50, p99) for cold lookup, cold store, warm lookup, and warm
   retrieve.
@@ -1354,7 +1426,7 @@ to save the summary to a file.
    Total requests:                   3
    Checksum OK:                      3
    Checksum FAIL:                    0
-   Pass rate (%):                    100.0
+   Checksum pass rate (%):           100.0
    -------------------- Cold Lookup (ms) ---------------
    count:                            3
    mean:                             1.647
@@ -1858,3 +1930,242 @@ Exit codes
        env var was missing or could not be parsed, an option value was
        invalid, or ``--flamegraph on`` was requested but the profiling
        toolchain is unavailable.
+
+
+.. _lmcache-bench-trace-analyze:
+
+trace-analyze
+-------------
+
+The ``lmcache bench trace-analyze`` command answers "what hit rate would
+this workload get at cache size X with chunk size Y?" from a recorded
+request trace, without a GPU or a running server. It requires the full
+``lmcache`` install (the replay uses the server's token hasher and
+CacheBlend matcher).
+
+.. code-block:: bash
+
+   lmcache bench trace-analyze --input FILE [FILE ...] [options]
+
+
+Collecting a trace
+~~~~~~~~~~~~~~~~~~
+
+Start the MP server with ``--enable-token-trace``. Each lookup then
+emits a zero-duration ``mp.request.trace`` span under the request's root
+span, carrying ``lmcache.model``, ``lmcache.input_ids`` (the prompt token
+ids) and ``session_id``; the span's start time is the lookup timestamp.
+A request the engine looks up again (for example after preemption) emits
+one span per lookup; the analyzer keeps only its earliest span.
+
+This is the ``lmcache`` trace format, the default value of
+``--trace-format``; its contract is in :ref:`trace-analyze-formats`.
+When no span matches, the tool reports what the files did hold.
+
+Persist the spans with the Collector's ``file`` exporter. Starting from
+``examples/observability``, add the exporter to the traces pipeline in
+``otel-collector.yml``:
+
+.. code-block:: yaml
+
+   exporters:
+     file/traces:
+       path: /var/log/otel/lmcache-traces.jsonl
+
+   service:
+     pipelines:
+       traces:
+         receivers: [otlp]
+         exporters: [otlp/tempo, file/traces]
+
+The collector image has no writable directory of its own and runs as
+user ``10001``, so the exporter cannot create that path until a host
+directory is mounted there. Create one the collector can write to and
+mount it in ``docker-compose.yml``:
+
+.. code-block:: bash
+
+   mkdir -p otel-data && chmod a+w otel-data
+
+.. code-block:: yaml
+
+   services:
+     otel-collector:
+       volumes:
+         - ./otel-collector.yml:/etc/otel-collector.yml:ro
+         - ./otel-data:/var/log/otel
+
+The file then appears as ``otel-data/lmcache-traces.jsonl`` on the host.
+It holds OTLP JSON, one export batch per line. Prompt token ids are
+only exported when ``--enable-token-trace`` is set; treat the file as
+sensitive.
+
+
+.. _trace-analyze-formats:
+
+Trace formats
+~~~~~~~~~~~~~
+
+``--trace-format`` names the producer whose records the input holds.
+Whatever the producer and its collector pipeline emit, the analyzer needs
+only this from each request, in order of importance:
+
+* **token ids**, as the engine prefilled them with the chat template
+  applied. The replay works on nothing else.
+* **a timestamp**, which fixes the replay order.
+* **a request id**, to collapse a request that was recorded more than
+  once. The LMCache server emits one span per lookup rather than per
+  request, and the engine looks a request up again after preemption, so
+  that format needs it. A producer that records each request once can use
+  any unique value.
+* **a model name**, only for ``--model``; it may be empty.
+
+How those are packaged is the producer's choice: OTLP spans, OTLP logs or
+flat JSON lines all work, as long as the file is one JSON value per
+line. Each format is a small adapter that turns a parsed line into
+records, kept honest by a sample file under
+``tests/tools/data/trace_formats/`` that the test suite replays. A new
+format adds the adapter, its sample file and an entry here.
+
+lmcache
+^^^^^^^
+
+The MP server's token-trace span, as the Collector's ``file`` exporter
+writes it with no processing. Sample:
+``tests/tools/data/trace_formats/lmcache.jsonl``.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 26 18 56
+
+   * - Field
+     - Type
+     - Meaning
+   * - span ``name``
+     - string
+     - ``mp.request.trace``. Spans with any other name are ignored.
+   * - ``startTimeUnixNano``
+     - int64
+     - Lookup time; sets the replay order.
+   * - ``session_id``
+     - string
+     - Request id. A request looked up more than once keeps its earliest
+       span.
+   * - ``lmcache.model``
+     - string
+     - Model name as the engine reports it; ``--model`` filters on it.
+   * - ``lmcache.input_ids``
+     - int64 array, or string
+     - Prompt token ids after the chat template, as the engine prefilled
+       them: the OTLP integer array as emitted, or one JSON string of the
+       same integers as a collector ``transform`` may write it.
+
+Everything else on a line (the resource block, the span's trace, span
+and parent ids, kind, flags and status) is OTLP packaging and is ignored.
+One line of the sample, pretty-printed with the token array shortened:
+
+.. code-block:: json
+
+   {"resourceSpans": [{
+     "resource": {"attributes": [
+       {"key": "service.name", "value": {"stringValue": "lmcache"}}]},
+     "scopeSpans": [{
+       "scope": {"name": "lmcache_mp.server"},
+       "spans": [{
+         "name": "mp.request.trace",
+         "startTimeUnixNano": "1792617070080115968",
+         "endTimeUnixNano": "1792617070080115968",
+         "attributes": [
+           {"key": "session_id",
+            "value": {"stringValue": "chatcmpl-ab53be3e1411e41a-81c1fd35"}},
+           {"key": "lmcache.model",
+            "value": {"stringValue": "Qwen/Qwen3-1.7B"}},
+           {"key": "lmcache.input_ids",
+            "value": {"arrayValue": {"values": [
+              {"intValue": "151644"}, {"intValue": "872"}, {"intValue": "198"}]}}}
+         ]}]}]}]}
+
+dynamo
+^^^^^^
+
+The Dynamo frontend's ``request_payload`` records, sent as OTLP logs by its
+request trace ``otel`` sink (``DYN_REQUEST_TRACE_RECORDS=request_payload``,
+``DYN_REQUEST_TRACE_SINKS=otel``) and written by the Collector's ``file``
+exporter with no processing. Sample:
+``tests/tools/data/trace_formats/dynamo.jsonl``.
+
+Each record gives the request id (``rid``), the model, the arrival time
+(``timeUnixNano``) and the chat request (``payload.request``). The request is
+text, not token ids: its tools, then each message's role and text, are packed
+four UTF-8 bytes per integer, about one per token.
+
+
+What it does
+~~~~~~~~~~~~
+
+Requests are sorted by timestamp and replayed, for every ``(chunk size,
+capacity)`` pair in the grid, through one LRU cache keyed by chained chunk
+hashes (the trailing partial chunk is never cached):
+
+* **Prefix hit tokens** -- the leading run of chunks already in the cache,
+  as the prefix lookup counts them. Hits are touched, every chunk of the
+  request is inserted, and the least recently used chunks are evicted
+  over capacity.
+* **Non-prefix (CacheBlend) hit tokens** -- each stored request is also
+  registered with the real ``BlendTokenRangeMatcher``; each lookup probes
+  it and the matches are reconciled like the blend lookup: matches inside
+  the prefix are dropped, then a non-overlapping subset of the rest is
+  kept. Evicted chunks are removed from the matcher. Only matched tokens
+  are reported; CacheBlend's recompute is not modelled.
+
+Capacity is a token budget, since the trace carries no KV shape.
+
+
+Quick start
+~~~~~~~~~~~
+
+.. code-block:: bash
+
+   lmcache bench trace-analyze \
+     --input /var/log/otel/lmcache-traces.jsonl \
+     --chunk-size 256 512 \
+     --capacity 64k 256k 1M \
+     --html trace_analysis.html
+
+The HTML report is self-contained: two sliders (token budget, chunk
+size) select a precomputed grid cell and show its prefix and non-prefix
+hit rates with their token counts, request count and token totals, plus
+a table of every budget at the selected chunk size. Each cell is a full
+replay, so the slider steps over the capacities given; pass more for a
+smoother sweep. A plain-text summary with the same
+grid goes to stdout (``--format json`` for machine-readable output).
+
+
+Options
+~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Option
+     - Description
+   * - ``-i``, ``--input FILE [FILE ...]``
+     - OTLP JSON file(s) written by the Collector's ``file`` exporter.
+       Required.
+   * - ``--html FILE``
+     - Where to write the HTML report (default ``trace_analysis.html``).
+   * - ``--chunk-size TOKENS [TOKENS ...]``
+     - Chunk size(s) to simulate (default ``256``).
+   * - ``--capacity TOKENS [TOKENS ...]``
+     - Cache token budgets to simulate. ``K`` and ``M`` suffixes are
+       binary (``64k``, ``1M``). Default: half-octave steps from 4096
+       tokens up to the trace size.
+   * - ``--trace-format {lmcache}``
+     - Producer format of the input spans. ``lmcache`` is the MP
+       server's ``mp.request.trace`` span (default).
+   * - ``--trace-format {dynamo}``
+     - ``dynamo`` is the Dynamo frontend's ``request_payload`` record.
+   * - ``--model NAME``
+     - Only analyze requests for this model name. Use it when one trace
+       mixes models, since the simulated cache is shared.

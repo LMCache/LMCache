@@ -6,9 +6,10 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 import itertools
+import threading
 import time
 
 # First Party
@@ -37,7 +38,7 @@ class _RequestOutcome:
     """Outcome of one cold or warm request."""
 
     lookup: LookupResult
-    checksums: list[str] | None = None
+    checksums: dict[int, list[str]] | None = None
     retrieve: TransferResult | None = None
     store: TransferResult | None = None
 
@@ -48,7 +49,10 @@ class BaselineBenchCase:
 
     sequence_count: int | None
     interval_seconds: float
+    num_tokens: int = field(default=512, kw_only=True)
     sequence_id_offset: int = 0
+    sequence_id_stride: int = 1
+    stop: threading.Event | None = field(default=None, compare=False)
     name: str = "baseline"
 
     def __post_init__(self) -> None:
@@ -59,6 +63,10 @@ class BaselineBenchCase:
         if self.interval_seconds < 0:
             raise ValueError(
                 f"interval_seconds must be non-negative, got {self.interval_seconds}"
+            )
+        if self.sequence_id_stride < 1:
+            raise ValueError(
+                f"sequence_id_stride must be positive, got {self.sequence_id_stride}"
             )
 
     def run(
@@ -73,24 +81,29 @@ class BaselineBenchCase:
             log: Progress logger.
 
         Returns:
-            Structured checks and operation latencies. An interrupted run
-            contains results from completed sequences.
+            Structured checks and operation latencies. An interrupted or
+            stopped run contains results from completed sequences.
         """
         result = BenchResult(case_name=self.name)
         try:
             for sequence_id in self._sequence_ids():
+                if self.stop is not None and self.stop.is_set():
+                    result.interrupted = True
+                    break
                 self._run_sequence(client, sequence_id, result, log)
         except KeyboardInterrupt:
             result.interrupted = True
         return result
 
     def _sequence_ids(self) -> Iterator[int]:
+        stride = self.sequence_id_stride
         if self.sequence_count is None:
-            return itertools.count(self.sequence_id_offset)
+            return itertools.count(self.sequence_id_offset, stride)
         return iter(
             range(
                 self.sequence_id_offset,
-                self.sequence_id_offset + self.sequence_count,
+                self.sequence_id_offset + self.sequence_count * stride,
+                stride,
             )
         )
 
@@ -179,76 +192,87 @@ class BaselineBenchCase:
             return
 
         log("  [seq %d] CHECKSUM MISMATCH!" % sequence_id)
-        for index, (cold_checksum, warm_checksum) in enumerate(
-            zip(cold_checksums, warm_checksums, strict=False)
-        ):
-            log(
-                "    chunk %d: cold=%s warm=%s %s"
-                % (
-                    index,
-                    cold_checksum[:12],
-                    warm_checksum[:12],
-                    "OK" if cold_checksum == warm_checksum else "FAIL",
+        for rank, reference in cold_checksums.items():
+            for index, (cold_checksum, warm_checksum) in enumerate(
+                zip(reference, warm_checksums[rank], strict=False)
+            ):
+                log(
+                    "    rank %d chunk %d: cold=%s warm=%s %s"
+                    % (
+                        rank,
+                        index,
+                        cold_checksum[:12],
+                        warm_checksum[:12],
+                        "OK" if cold_checksum == warm_checksum else "FAIL",
+                    )
                 )
-            )
 
-    @staticmethod
     def _execute_request(
+        self,
         client: ServerBenchClient,
         sequence_id: int,
         request_kind: Literal["cold", "warm"],
     ) -> _RequestOutcome | None:
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import _build_token_ids
+
         request = client.create_request(
             sequence_id,
             request_id="req-%d-%s" % (sequence_id, request_kind),
             request_kind=request_kind,
+            token_ids=_build_token_ids(sequence_id, self.num_tokens),
         )
         if request is None:
             return None
 
-        lookup = client.lookup(request)
-        if not lookup.succeeded:
-            return _RequestOutcome(lookup=lookup)
+        try:
+            lookup = client.lookup(request)
+            if not lookup.succeeded:
+                return _RequestOutcome(lookup=lookup)
 
-        hit_tokens = lookup.hit_chunks * request.chunk_size
-        miss_tokens = request.num_full_tokens - hit_tokens
+            hit_tokens = lookup.hit_chunks * request.chunk_size
+            miss_tokens = request.num_full_tokens - hit_tokens
 
-        checksums: list[str] | None = None
-        if request_kind == "cold" and miss_tokens > 0:
-            checksums = client.compute_checksums(
+            checksums: dict[int, list[str]] | None = None
+            if request_kind == "cold" and miss_tokens > 0:
+                client.fill_deterministic_kv(request)
+                checksums = client.compute_checksums(
+                    request,
+                    start_token=hit_tokens,
+                    token_count=miss_tokens,
+                    operation="store",
+                )
+            if request_kind == "warm" and hit_tokens > 0:
+                client.zero_destination(
+                    request,
+                    start_token=0,
+                    token_count=hit_tokens,
+                )
+
+            retrieve = client.retrieve(
+                request,
+                start_token=0,
+                token_count=hit_tokens,
+            )
+            store = client.store(
                 request,
                 start_token=hit_tokens,
                 token_count=miss_tokens,
             )
-        if request_kind == "warm" and hit_tokens > 0:
-            client.zero_destination(
-                request,
-                start_token=0,
-                token_count=hit_tokens,
+
+            if request_kind == "warm" and hit_tokens > 0:
+                checksums = client.compute_checksums(
+                    request,
+                    start_token=0,
+                    token_count=hit_tokens,
+                    operation="retrieve",
+                )
+
+            return _RequestOutcome(
+                lookup=lookup,
+                checksums=checksums,
+                retrieve=retrieve,
+                store=store,
             )
-
-        retrieve = client.retrieve(
-            request,
-            start_token=0,
-            token_count=hit_tokens,
-        )
-        store = client.store(
-            request,
-            start_token=hit_tokens,
-            token_count=miss_tokens,
-        )
-
-        if request_kind == "warm" and hit_tokens > 0:
-            checksums = client.compute_checksums(
-                request,
-                start_token=0,
-                token_count=hit_tokens,
-            )
-
-        client.end_session(request)
-        return _RequestOutcome(
-            lookup=lookup,
-            checksums=checksums,
-            retrieve=retrieve,
-            store=store,
-        )
+        finally:
+            client.release_request(request)

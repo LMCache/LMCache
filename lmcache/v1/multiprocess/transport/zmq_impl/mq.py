@@ -546,7 +546,7 @@ class SyncRequestHandler(RequestHandlerBase[ResponseType]):
         return self.response_cls
 
     def get_handler_type(self) -> HandlerType:
-        return HandlerType.SYNC
+        return HandlerType.SERIALIZED
 
 
 class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
@@ -748,7 +748,7 @@ class MessageQueueServer(RequestServer):
         prefix_frames: list[bytes],
     ) -> Any:
         match handler_entry.get_handler_type():
-            case HandlerType.SYNC:
+            case HandlerType.SERIALIZED:
                 assert isinstance(handler_entry, SyncRequestHandler)
                 self._call_sync_handler(handler_entry, payloads, prefix_frames)
             case HandlerType.BLOCKING:
@@ -925,7 +925,7 @@ class MessageQueueServer(RequestServer):
             )
 
         match handler_type:
-            case HandlerType.SYNC:
+            case HandlerType.SERIALIZED:
                 self.add_sync_handler(rpc_spec, handler)
             case HandlerType.BLOCKING:
                 self.add_blocking_handler(rpc_spec, handler)

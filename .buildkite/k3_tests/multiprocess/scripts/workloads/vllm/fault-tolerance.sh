@@ -15,11 +15,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../../.." && pwd)"
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 
 # Configuration (inherited from run-mp-test.sh)
-VLLM_PORT="${VLLM_PORT:-8000}"
-MODEL="${MODEL:-Qwen/Qwen3-14B}"
-BUILD_ID="${BUILD_ID:-local_$$}"
+export VLLM_PORT="${VLLM_PORT:-8000}"
+export MODEL="${MODEL:-Qwen/Qwen3-14B}"
+export BUILD_ID="${BUILD_ID:-local_$$}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
-LMCACHE_PORT="${LMCACHE_PORT:-6555}"
+export LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 
 # Bench parameters
 NUM_PROMPTS="${NUM_PROMPTS:-50}"
@@ -27,8 +27,8 @@ RANDOM_INPUT_LEN="${RANDOM_INPUT_LEN:-10000}"
 RANDOM_OUTPUT_LEN="${RANDOM_OUTPUT_LEN:-1}"
 RANDOM_SEED="${RANDOM_SEED:-42}"
 
-CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
-MAX_WORKERS="${MAX_WORKERS:-4}"
+export CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
+export MAX_WORKERS="${MAX_WORKERS:-4}"
 
 # Output directory
 FT_DIR="$RESULTS_DIR/fault_tolerance"
@@ -50,74 +50,32 @@ echo "=== Restarting LMCache + vLLM ==="
 echo "============================================"
 
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
-GPU_DEVICE="${GPU_FOR_VLLM:-0}"
 
 # The launcher is a separate shell, so these PIDs are not our children.
 # Poll their termination rather than using shell wait before reusing ports.
 OLD_PIDS=()
 if [ -f "$PID_FILE" ]; then
-    while IFS= read -r pid; do
-        [[ -n "$pid" ]] && OLD_PIDS+=("$pid")
-    done < <(head -n 2 "$PID_FILE")
+    mapfile -t OLD_PIDS < "$PID_FILE"
 fi
-if ! python3 "${SCRIPT_DIR}/../../stop-processes.py" "${OLD_PIDS[@]}" \
+if ! python3 "${SCRIPT_DIR}/../../stop-processes.py" "${OLD_PIDS[@]:0:2}" \
     --ports "$LMCACHE_PORT" 8080 "$VLLM_PORT"; then
     echo "FAIL: Previous LMCache + vLLM processes did not release their ports"
     exit 1
 fi
 
-# Launch LMCache with L1 config
-CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
-lmcache server \
-    --transport "$LMCACHE_REQUEST_TRANSPORT" \
-    --l1-size-gb "$CPU_BUFFER_SIZE" \
-    --eviction-policy LRU \
-    --max-workers "$MAX_WORKERS" \
-    --port "$LMCACHE_PORT" \
-    > "/tmp/build_${BUILD_ID}_lmcache_ft.log" 2>&1 &
-
-NEW_LMCACHE_PID=$!
-echo "LMCache server started (PID=$NEW_LMCACHE_PID)"
-sleep 10
-
-# Launch vLLM with LMCache
-GPU_MEMORY_UTIL_ARG=""
-GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_DEVICE}" | tr -d ' ')
-GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
-if [ "$GPU_MEMORY_GB" -gt 90 ]; then
-    GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
+export VLLM_KV_LOAD_FAILURE_POLICY=recompute
+launch_status=0
+LAUNCH_BASELINE=false "${SCRIPT_DIR}/../../launch-processes.sh" || launch_status=$?
+# The comprehensive runner still owns its existing baseline server.
+if [ "${#OLD_PIDS[@]}" -gt 2 ]; then
+    printf '%s\n' "${OLD_PIDS[@]:2}" >> "$PID_FILE"
 fi
-
-env -u VLLM_PORT \
-    CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
-    VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-    VLLM_SERVER_DEV_MODE=1 \
-    VLLM_BATCH_INVARIANT=1 \
-    PYTHONHASHSEED=0 \
-vllm serve "$MODEL" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
-    --attention-backend FLASH_ATTN \
-    --port "$VLLM_PORT" \
-    --no-async-scheduling \
-    $GPU_MEMORY_UTIL_ARG \
-    > "/tmp/build_${BUILD_ID}_vllm_ft.log" 2>&1 &
-
-NEW_VLLM_PID=$!
-echo "vLLM started (PID=$NEW_VLLM_PID)"
-
-# Update PID file
-if [ -f "$PID_FILE" ]; then
-    sed -i "1s/.*/$NEW_LMCACHE_PID/" "$PID_FILE"
-    sed -i "2s/.*/$NEW_VLLM_PID/" "$PID_FILE"
-else
-    echo "$NEW_LMCACHE_PID" > "$PID_FILE"
-    echo "$NEW_VLLM_PID" >> "$PID_FILE"
+if [ "$launch_status" -ne 0 ]; then
+    echo "FAIL: Could not restart LMCache + vLLM"
+    exit 1
 fi
-
-if ! wait_for_server "$VLLM_PORT" 300; then
-    echo "vLLM failed to start"
-    tail -50 "/tmp/build_${BUILD_ID}_lmcache_ft.log" || true
-    tail -50 "/tmp/build_${BUILD_ID}_vllm_ft.log" || true
+if ! LAUNCH_BASELINE=false "${SCRIPT_DIR}/../../wait-for-servers.sh"; then
+    echo "FAIL: Restarted vLLM failed to become ready"
     exit 1
 fi
 echo ""
