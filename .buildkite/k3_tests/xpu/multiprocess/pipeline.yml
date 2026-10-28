@@ -204,6 +204,22 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
+      - label: ":xpu: long_doc_qa_l2 / engine_driven / shm"
+        command: .buildkite/k3_tests/xpu/multiprocess/run.sh long_doc_qa_l2
+        env:
+          <<: *mp-env
+          MODEL: "Qwen/Qwen3-8B"
+          MAX_MODEL_LEN: "16384"
+          MAX_NUM_BATCHED_TOKENS: "8192"
+          MAX_INFLIGHT_REQUESTS: "2"
+          NUM_DOCUMENTS: "10"
+          REPEAT_COUNT: "2"
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
       # Pin both the block size and count: 1280 * 16 = 20K resident tokens,
       # independent of XPU memory. The workload asserts no baseline preemption,
       # real preemption + resume-load with LMCache, and byte-identical answers.
