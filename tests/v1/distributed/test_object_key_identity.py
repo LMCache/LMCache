@@ -10,8 +10,7 @@ import msgspec
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import ObjectKey, ObjectKeyIdentity
 
 
 def test_existing_constructors_share_one_identity() -> None:

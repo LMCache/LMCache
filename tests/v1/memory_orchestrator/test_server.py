@@ -13,7 +13,7 @@ import grpc
 import pytest
 
 # First Party
-from lmcache.v1.cache_identity import ObjectKeyIdentity
+from lmcache.v1.distributed.api import ObjectKeyIdentity
 from lmcache.v1.memory_orchestrator._proto_gen import memory_orchestrator_pb2 as pb2
 from lmcache.v1.memory_orchestrator._proto_gen.memory_orchestrator_pb2_grpc import (
     MemoryOrchestratorStub,
