@@ -56,10 +56,12 @@ Requirements
   which ships as the optional ``lmcache[nixl]`` extra — install it with
   ``uv pip install lmcache[nixl]`` (or ``pip install lmcache[nixl]``) before
   enabling P2P.
-* **A single, contiguous L1 region.** The transfer channel registers the whole
-  L1 buffer for RDMA, so P2P is incompatible with the GDS L1 tier
-  (``--gds-l1-path``) and the Device-DAX L1 tier (``--l1-devdax-path``); the
-  server refuses to start in those configurations.
+* **A contiguous DRAM L1 region.** P2P uses the first local DRAM L1 with a
+  single registerable region in configuration order for peer lookups and loads.
+  It skips GDS, Device-DAX, and hybrid DRAM/Device-DAX managers; objects held
+  only there are misses. For example, with a hybrid pool followed by a plain
+  DRAM pool, P2P uses the plain DRAM pool. Startup fails if no eligible pool exists.
+  See :doc:`multi_l1`.
 
 Configuration
 -------------

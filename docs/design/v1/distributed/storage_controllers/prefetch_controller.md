@@ -56,7 +56,7 @@ leaves nothing behind.
 PrefetchController(l1_managers, l1_manager_descriptors,
                    l2_adapters, adapter_descriptors, policy, inflight_watermark=0.5)
 
-submit_prefetch_request(spec: PrefetchTaskSpec, skip_l2=False) -> PrefetchRequestId
+submit_prefetch_request(spec: PrefetchTaskSpec, skip_l2=False, *, l1_manager_id=None) -> PrefetchRequestId
 query_prefetch_result(request_id) -> PrefetchResult | None   # consume-once
 wait_prefetch_result(request_id, timeout) -> bool            # does not consume
 add_adapter(adapter_id, adapter, descriptor) / request_remove_adapter(adapter_id)
@@ -67,7 +67,8 @@ start() / stop()
 adapter is attached, the request is served from L1 on the calling thread and
 its result is queryable when the call returns. Otherwise it is queued for the
 background loop and admitted in arrival order under the in-flight watermark
-(see [Admission](#admission)).
+(see [Admission](#admission)). With `skip_l2=True`, `l1_manager_id` restricts
+the lookup to one manager; omitted IDs search all L1s.
 
 `PrefetchResult` carries `hit_cells` (one bitmap per key group, in
 `key_groups` order), split into the disjoint `l1_hit_cells` (L1 already held

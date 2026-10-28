@@ -18,10 +18,14 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
     MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
     ObjectKey,
     PrefetchHandle,
     PrefetchTaskSpec,
 )
+from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel import (
     delete_transfer_channel_context,
@@ -223,10 +227,18 @@ class P2PController(DiscoverableModule):
 
         Args:
             coordinator_config: Coordinator connection used for peer discovery.
+
+        Raises:
+            ValueError: No single-region local DRAM manager is available.
         """
+        manager = self._p2p_l1_manager
+        if manager is None:
+            raise ValueError("P2P requires a local DRAM L1 with a single memory region")
+        l1_memory_desc = manager.get_l1_memory_desc()
+        assert l1_memory_desc is not None  # A single DRAM region exposes a buffer.
         initialize_transfer_channel_context(
             self._p2p_config.transfer_engine,
-            self._ctx.storage_manager.l1_memory_desc,
+            l1_memory_desc,
             listen_url=self._p2p_config.effective_listen_url,
             advertise_url=self._p2p_config.advertise_url,
         )
@@ -292,8 +304,9 @@ class P2PController(DiscoverableModule):
     ) -> int:
         """Submit a lookup and lock.
 
-        Read-locks every L1-resident key (sparse; gaps allowed), not only
-        the contiguous prefix.
+        Read-locks keys resident in the DRAM L1 registered with the transfer
+        channel (sparse; gaps allowed). Other L1 managers are not searched.
+        If no eligible DRAM manager exists, all requested keys are misses.
 
         Args:
             keys: the list of object keys to look up and lock.
@@ -313,16 +326,18 @@ class P2PController(DiscoverableModule):
             self._next_task_id += 1
 
         key_groups = _group_keys_by_object_group(keys, group_layout_descs)
-        if key_groups:
-            # NOTE: skip_l2=True -- only objects already resident in L1 are
-            # locked; "full" keeps every resident key, gaps allowed.
+        manager = self._p2p_l1_manager
+        if key_groups and manager is not None:
+            # Only the registered DRAM region can be addressed by the peer.
             handle = self._ctx.storage_manager.submit_prefetch_task(
                 PrefetchTaskSpec(key_groups=key_groups, fetching_policy="full"),
                 external_request_id=f"p2p-{task_id}",
                 skip_l2=True,
+                l1_manager_id=manager.l1_manager_id,
             )
         else:
-            # Nothing to look up: an already-complete empty handle.
+            key_groups = []
+            # No eligible pool or keys: an already-complete empty handle.
             handle = PrefetchHandle(
                 prefetch_request_id=-1,
                 external_request_id=f"p2p-{task_id}",
@@ -394,18 +409,31 @@ class P2PController(DiscoverableModule):
         self,
         keys: list[ObjectKey],
     ) -> None:
-        """Unlock the specified object keys.
+        """Unlock the specified keys, or do nothing if no eligible DRAM exists.
 
         Args:
             keys: the list of object keys to unlock.
         """
         if not keys:
             return
-        self._ctx.storage_manager.finish_read_prefetched(keys)
+        manager = self._p2p_l1_manager
+        if manager is None:
+            return
+        self._ctx.storage_manager.finish_read_prefetched(
+            keys, l1_owners=dict.fromkeys(keys, manager.l1_manager_id)
+        )
 
     # -----------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------
+
+    @property
+    def _p2p_l1_manager(self) -> L1ManagerInterface | None:
+        """Return the first single-region local DRAM manager, or ``None``."""
+        return self._ctx.storage_manager.get_l1_manager_by_memory_tags(
+            MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL),
+            memory_region_count=1,
+        )
 
     def _drop_abandoned_jobs(self, now: float) -> None:
         """Drop finished jobs older than the lookup timeout, draining results.
@@ -450,7 +478,8 @@ class P2PController(DiscoverableModule):
         ``found_rows`` is parallel to ``job.key_groups``; the keys at its set
         bits are the locked L1 hits, whose addresses are read via
         ``unsafe_read``. Every other key gets an invalid address. Addresses
-        are returned in ``job.keys`` (request) order.
+        are returned in ``job.keys`` (request) order. If no eligible manager
+        exists, every address is invalid.
         """
         addresses = [_INVALID_ADDRESS] * len(job.keys)
         if not job.key_groups:
@@ -463,7 +492,13 @@ class P2PController(DiscoverableModule):
         if not found_keys:
             return addresses
 
-        good_keys, good_objs = self._ctx.storage_manager.unsafe_read(found_keys)
+        manager = self._p2p_l1_manager
+        if manager is None:
+            return addresses
+        good_keys, good_objs = self._ctx.storage_manager.unsafe_read(
+            found_keys,
+            l1_owners=dict.fromkeys(found_keys, manager.l1_manager_id),
+        )
         obj_by_key = dict(zip(good_keys, good_objs, strict=True))
 
         positions: dict[ObjectKey, list[int]] = {}

@@ -18,6 +18,7 @@ from lmcache.v1.distributed.api import (
     CapacitySnapshot,
     L1BackendType,
     MemoryLayoutDesc,
+    MemoryTags,
     ModuleMemoryCapacity,
     ObjectKey,
     PrefetchHandle,
@@ -601,6 +602,8 @@ class StorageManager:
         spec: PrefetchTaskSpec,
         external_request_id: str = "",
         skip_l2: bool = False,
+        *,
+        l1_manager_id: int | None = None,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
@@ -609,12 +612,14 @@ class StorageManager:
             external_request_id: Caller id for end-to-end log tracing.
             skip_l2: If True, serve from L1 only. The result is available
                 as soon as this returns.
+            l1_manager_id: Restrict an L1-only lookup to this manager. Requires
+                ``skip_l2=True``; omitted means search all L1 managers.
 
         Returns:
             PrefetchHandle to track the task.
         """
         prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-            spec, skip_l2=skip_l2
+            spec, skip_l2=skip_l2, l1_manager_id=l1_manager_id
         )
         logger.debug(
             "Prefetch request submitted: %d keys in %d groups "
@@ -767,6 +772,18 @@ class StorageManager:
         storage manager creates the registry at construction time.
         """
         return self._quota_manager
+
+    def get_l1_manager_by_memory_tags(
+        self, tags: MemoryTags, *, memory_region_count: int | None = None
+    ) -> L1ManagerInterface | None:
+        """Find the first L1 matching the requested tags and region count."""
+        for manager in self._l1_by_tag.values():
+            if manager.get_memory_tags() == tags and (
+                memory_region_count is None
+                or manager.memory_region_count() == memory_region_count
+            ):
+                return manager
+        return None
 
     @property
     def l1_memory_desc(self) -> L1MemoryDesc:

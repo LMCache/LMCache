@@ -414,3 +414,11 @@ def test_close_is_idempotent():
         # The second close is a no-op: no duplicate teardown of shared resources.
         req_client.close.assert_called_once()
         tc_ctx.remove_transfer_channel_client.assert_called_once_with("peer:7600")
+
+
+def test_p2p_affinity_requires_local_dram() -> None:
+    """P2P destinations must use the same DRAM region as the transfer channel."""
+    config = P2PL2AdapterConfig("tcp://peer:5555", "peer:7600")
+    assert config.get_wanted_l1_memory_tags() == (
+        MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL),
+    )

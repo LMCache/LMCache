@@ -589,6 +589,8 @@ class PrefetchController(StorageControllerInterface):
         self,
         spec: PrefetchTaskSpec,
         skip_l2: bool = False,
+        *,
+        l1_manager_id: int | None = None,
     ) -> PrefetchRequestId:
         """
         Submit a prefetch request.
@@ -599,6 +601,8 @@ class PrefetchController(StorageControllerInterface):
             spec: The prefetch request inputs (see :class:`PrefetchTaskSpec`).
             skip_l2: If True, the request will only prefetch from L1 and
                 skip the L2 lookup and load phases.
+            l1_manager_id: Restrict an L1-only request to this manager; ``None``
+                searches all managers. Requires ``skip_l2=True``.
 
         Returns:
             A request ID for tracking via query_prefetch_result.
@@ -608,13 +612,19 @@ class PrefetchController(StorageControllerInterface):
             request is served from L1 on the calling thread and its result
             is queryable via query_prefetch_result once this returns.
         """
+        if l1_manager_id is not None:
+            if not skip_l2:
+                raise ValueError("Selecting an L1 manager requires skip_l2=True")
+            if l1_manager_id not in self._l1_managers:
+                raise ValueError(f"Unknown L1 manager ID: {l1_manager_id}")
+
         with self._submission_lock:
             request_id = self._next_request_id
             self._next_request_id += 1
 
         if skip_l2 or not self._l2_adapters:
             request = _build_request(request_id, spec)
-            self._lock_l1_keys(request)
+            self._lock_l1_keys(request, l1_manager_id)
             self._plan_load(request, {})
             self._finish_request(request)
             return request_id
@@ -1137,12 +1147,15 @@ class PrefetchController(StorageControllerInterface):
             )
         )
 
-    def _lock_l1_keys(self, request: InFlightPrefetchRequest) -> None:
+    def _lock_l1_keys(
+        self, request: InFlightPrefetchRequest, l1_manager_id: int | None = None
+    ) -> None:
         """Read-lock every key of the request that is resident in an L1
         manager and record the hits in ``l1_locked_keys``.
 
         Args:
             request: The request whose keys are looked up.
+            l1_manager_id: Only lock keys in this manager when specified.
 
         Note:
             Locks are taken regardless of the lock mode; under ``NO_LOCK``
@@ -1154,6 +1167,8 @@ class PrefetchController(StorageControllerInterface):
         completed = False
         try:
             for l1_idx, l1_manager in self._l1_managers.items():
+                if l1_manager_id is not None and l1_idx != l1_manager_id:
+                    continue
                 result = l1_manager.reserve_read(flattened_keys, request.num_kv_readers)
                 res_bitmap = Bitmap(len(flattened_keys))
                 for i, key in enumerate(flattened_keys):

@@ -12,6 +12,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.distributed.config import parse_args as parse_storage_args
 from lmcache.v1.mp_coordinator import cache_events as cache_events_module
 from lmcache.v1.mp_coordinator.cache_events import (
     CacheEventSink,
@@ -23,10 +24,79 @@ from lmcache.v1.multiprocess.config import (
     HTTPFrontendConfig,
     KafkaCacheEventSinkConfig,
     MPServerConfig,
+    P2PConfig,
 )
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_server import app
 import lmcache.lmcache_native as lmcache_native
+
+
+@pytest.mark.parametrize(
+    "storage_args, expected_error",
+    [
+        (["--l1-size-gb", "0.01"], None),
+        (
+            [
+                "--l1-manager",
+                '{"type":"GDS","tag":"gds","size_gb":0.01,"path":"/tmp/gds"}',
+                "--l1-manager",
+                '{"type":"DRAM","tag":"dram","size_gb":0.01}',
+            ],
+            None,
+        ),
+        (
+            [
+                "--l1-manager",
+                '{"type":"DRAM","tag":"dram","size_gb":0.01}',
+                "--l1-manager",
+                '{"type":"GDS","tag":"gds","size_gb":0.01,"path":"/tmp/gds"}',
+            ],
+            None,
+        ),
+        (
+            [
+                "--l1-manager",
+                '{"type":"DEVDAX","tag":"dax","size_gb":0.01,"path":"/dev/dax0.0"}',
+                "--l1-manager",
+                '{"type":"DRAM","tag":"dram","size_gb":0.01}',
+            ],
+            None,
+        ),
+        (["--l1-size-gb", "0.01", "--gds-l1-path", "/tmp/gds"], "P2P requires"),
+        (
+            [
+                "--l1-manager",
+                '{"type":"DEVDAX","tag":"dax","size_gb":0.01,"path":"/dev/dax0.0"}',
+            ],
+            "P2P requires",
+        ),
+    ],
+    ids=["dram", "gds-first", "dram-first", "dax-first", "gds", "dax"],
+)
+def test_p2p_http_startup_validates_selected_dram(
+    monkeypatch: pytest.MonkeyPatch,
+    storage_args: list[str],
+    expected_error: str | None,
+) -> None:
+    """P2P accepts mixed L1s but requires a single-region local DRAM pool."""
+    storage_config = parse_storage_args(["--eviction-policy", "noop", *storage_args])
+    server = MagicMock()
+    monkeypatch.setattr(http_server_module, "_configs", {})
+    monkeypatch.setattr(http_server_module.uvicorn, "Server", server)
+    configs = (
+        HTTPFrontendConfig(),
+        MPServerConfig(p2p_config=P2PConfig(advertise_url="127.0.0.1:7600")),
+        storage_config,
+        ObservabilityConfig(),
+        CoordinatorConfig(url="http://coordinator:9300"),
+    )
+    if expected_error is not None:
+        with pytest.raises(ValueError, match=expected_error):
+            http_server_module.run_http_server(*configs)
+        server.assert_not_called()
+    else:
+        http_server_module.run_http_server(*configs)
+        server.return_value.run.assert_called_once_with()
 
 
 def test_lifespan_owns_transport_neutral_request_server(
