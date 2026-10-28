@@ -104,9 +104,10 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         ] = {}
         self._pending_shm_lock = threading.Lock()
         self._shm_pool_info: ShmPoolInfo = self._ctx.shm_pool_info
+        # Values retain the START event and monotonic preparation time.
         # Includes request_id because IPCCacheServerKey equality excludes it.
         self._pending_transfers: dict[
-            tuple[EventType, int, str, IPCCacheServerKey], Event
+            tuple[EventType, int, str, IPCCacheServerKey], tuple[Event, float]
         ] = {}
 
     @property
@@ -147,7 +148,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             self._strategies.clear()
             pending = list(self._pending_transfers.values())
             self._pending_transfers.clear()
-        for event in pending:
+        for event, _ in pending:
             self._publish_transfer_end(event, False)
 
     def touch_instance(self, instance_id: int) -> None:
@@ -173,13 +174,17 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float
     ) -> list[int]:
-        """Reap non-GPU registrations that have gone silent.
+        """Reap silent registrations and expired transfer observations.
 
         A ping-proven instance is judged against ``reap_timeout_s``; one that
         has never pinged against the larger ``registration_grace_s``.
+        Transfer observations expire after ``reap_timeout_s`` even if the
+        worker keeps pinging. Expiry closes only the observation, not the
+        underlying transfer or its SHM reservations.
 
         Args:
-            reap_timeout_s: Silence budget for ping-proven instances.
+            reap_timeout_s: Silence budget for ping-proven instances and
+                maximum lifetime of a pending transfer observation.
             registration_grace_s: Silence budget for never-pinged instances.
 
         Returns:
@@ -202,6 +207,18 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 entry = self._engine_driven_contexts.pop(iid)
                 self._strategies.pop(iid, None)
                 reaped.append((iid, entry))
+            expired = [
+                key
+                for key, (_, started_at) in self._pending_transfers.items()
+                if now - started_at > reap_timeout_s
+            ]
+            pending = [self._pending_transfers.pop(key)[0] for key in expired]
+        for event in pending:
+            logger.warning(
+                "Expired engine-driven transfer observation %s without commit",
+                event.metadata["transfer_key"],
+            )
+            self._publish_transfer_end(event, False)
         for iid, entry in reaped:
             self._release_entry(iid, entry)
             logger.warning(
@@ -255,7 +272,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         with self._lock:
             stale = [k for k in self._pending_transfers if k[1] == instance_id]
             pending = [self._pending_transfers.pop(k) for k in stale]
-        for event in pending:
+        for event, _ in pending:
             self._publish_transfer_end(event, False)
         with self._pending_shm_lock:
             stale_writes = [k for k in self._pending_shm_writes if k[0] == instance_id]
@@ -797,9 +814,11 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             else EventType.MP_RETRIEVE_SUBMITTED
         )
         with self._lock:
-            self._pending_transfers[(event_type, instance_id, key.request_id, key)] = (
-                event
-            )
+            pending_key = (event_type, instance_id, key.request_id, key)
+            previous = self._pending_transfers.pop(pending_key, None)
+            if previous is not None:
+                self._publish_transfer_end(previous[0], False)
+            self._pending_transfers[pending_key] = (event, time.monotonic())
             self._ctx.event_bus.publish(
                 Event(submitted, session_id=key.request_id, metadata={"device": "cpu"})
             )
@@ -814,11 +833,11 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     ) -> None:
         """Finish a prepared transfer, including failed commits."""
         with self._lock:
-            event = self._pending_transfers.pop(
+            pending = self._pending_transfers.pop(
                 (start_type, instance_id, key.request_id, key), None
             )
-        if event is not None:
-            self._publish_transfer_end(event, success)
+        if pending is not None:
+            self._publish_transfer_end(pending[0], success)
 
     def _publish_transfer_end(self, start: Event, success: bool) -> None:
         """Close a transfer; failed or abandoned transfers report zero volume."""
