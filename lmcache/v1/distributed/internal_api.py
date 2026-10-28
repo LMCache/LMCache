@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import enum
 
 # First Party
-from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    L1BackendType,
+    MemoryLayoutDesc,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.memory_management import MemoryObj
 
@@ -346,6 +351,10 @@ class L1ManagerInterface(Protocol):
         """Describe a registerable L1 buffer, or None when there is none."""
         ...
 
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this L1's primary pool."""
+        ...
+
     def get_devdax_arena_statuses(self) -> list["DevDaxArenaStatus"]:
         """Return Device-DAX arena statuses for hot-pluggable L1s."""
         ...
@@ -356,8 +365,10 @@ class L1ManagerInterface(Protocol):
         """Return the status of the arena at ``(device_path, offset)``."""
         ...
 
-    def owns_device(self, device_path: str) -> bool:
-        """Whether this L1 maps the physical device at ``device_path``."""
+    def owns_range(
+        self, device_path: str, offset_in_bytes: int, size_in_bytes: int
+    ) -> bool:
+        """Whether this L1 maps a range of the device overlapping the given one."""
         ...
 
     def memory_region_count(self) -> int:

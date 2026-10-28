@@ -65,7 +65,8 @@ Available Commands
    * - :doc:`bench`
      - Run sustained benchmarks against an inference engine
        (``engine``), an LMCache MP server (``server``), or an L2 cache
-       adapter (``l2``).
+       adapter (``l2``), or analyze a recorded request trace offline
+       (``trace-analyze``).
    * - :doc:`kvcache`
      - Manage KV cache state (e.g. clear L1 cache) on a running server.
    * - :doc:`quota`

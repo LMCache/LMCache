@@ -23,7 +23,7 @@ staging copy's line rate, so the kernel dominates the transfer.
 | Mechanism | `cudaMemcpyAsync` to temp buffer + block kernel | one `cudaMemcpyBatchAsync` per chunk, host <-> pages |
 | GPU resources | temp buffer (4 slots), SMs | copy engine only |
 | CPU cost | ~1 launch + 1 copy per chunk | ~0.6 us per (kv, layer, block) entry |
-| Layouts | all `EngineKVFormat`s | token-major, contiguous block: formats 0, 1, 2, 3, 4, 5, 9, 11, 13 |
+| Layouts | all `EngineKVFormat`s | token-major, contiguous block: formats 0, 1, 2, 3, 4, 5, 9, 11, 13, 18 |
 | Requirements | any CUDA / HIP | CUDA runtime and driver >= 12.8, or ROCm/HIP >= 7.15 (opt-in) |
 
 On ROCm the direct path is **opt-in**: it is built when HIP >= 7.15 but stays
