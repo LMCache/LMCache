@@ -86,6 +86,17 @@ def _object_keys(
     return [row.keys[c] for c in range(start, end) for row in rows]
 
 
+def _at_kv_rank(key: ObjectKey, kv_rank: int) -> ObjectKey:
+    """The same chunk's key at another kv rank."""
+    return ObjectKey(
+        chunk_hash=key.chunk_hash,
+        model_name=key.model_name,
+        kv_rank=kv_rank,
+        object_group_id=key.object_group_id,
+        cache_salt=key.cache_salt,
+    )
+
+
 def _check_tp(num_kv_heads: int, tp: int) -> None:
     if not is_valid_tp(num_kv_heads, tp):
         raise ValueError(f"tp={tp} must divide num_kv_heads={num_kv_heads}")
@@ -583,7 +594,7 @@ class HeteroTPPlan:
         self._cross_tp_groups = [
             [
                 GroupedObjectKeys(
-                    keys=[replace(k, kv_rank=rank) for k in rows[0].keys[start:]],
+                    keys=[_at_kv_rank(k, rank) for k in rows[0].keys[start:]],
                     object_group_id=rows[0].object_group_id,
                     layout_desc=reshard_layout_desc(
                         rows[0].layout_desc,
