@@ -22,6 +22,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import cast
 import threading
 
@@ -29,6 +30,7 @@ import threading
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch, CacheEventType
+from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
@@ -43,6 +45,18 @@ logger = init_logger(__name__)
 # for a shared pool — fleet-scoped bytes that outlive any one member, so
 # no owner's fencing removes them.
 _PlacementId = tuple[Tier, ObjectKey, str, str]
+
+
+@dataclass(frozen=True)
+class UsageStats:
+    """Fleet bytes per tier.
+
+    Attributes:
+        bytes_stored: Reported bytes held, keyed by tier (``l1``, ``l2``);
+            both are present, from 0.
+    """
+
+    bytes_stored: dict[str, int]
 
 
 class CacheUsageManager(View):
@@ -61,6 +75,7 @@ class CacheUsageManager(View):
         # L1 placements by owning instance, so fencing one costs its own
         # placements rather than a full scan.
         self._l1_by_instance: dict[str, set[_PlacementId]] = {}
+        register_metric_source(self)
 
     def consume(self, batch: CacheEventBatch) -> None:
         """Account one gate-admitted batch: ``STORE`` upserts placement
@@ -148,6 +163,18 @@ class CacheUsageManager(View):
                 for (placement_tier, _), n_bytes in self._salt_bytes.items()
                 if placement_tier == tier
             )
+
+    def stats(self) -> UsageStats:
+        """Return the fleet's bytes per tier; see :class:`UsageStats`.
+
+        Sums the per-salt totals, so its cost grows with the number of
+        tenants, not keys.
+        """
+        bytes_stored = {Tier.L1.value: 0, Tier.L2.value: 0}
+        with self._lock:
+            for (tier, _), n_bytes in self._salt_bytes.items():
+                bytes_stored[tier.value] += n_bytes
+        return UsageStats(bytes_stored=bytes_stored)
 
     def get_durable_components(self) -> tuple[DurableComponent, ...]:
         """Return this view: the bytes it accounts are its own section.

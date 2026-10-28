@@ -19,6 +19,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
+from lmcache.v1.mp_coordinator.background_loops import BackgroundLoops
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers import build_controllers
 from lmcache.v1.mp_coordinator.controllers.base import ControllerRuntime
@@ -825,6 +826,25 @@ async def test_the_loop_evicts_on_each_tick_until_stopped():
     assert dispatched[0] == "http://10.0.0.1:8000/cache/objects"
 
 
+def _ok(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json={"requested": 0, "adapter": "s3", "ok": True})
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_is_reported_as_the_eviction_background_loop():
+    ctrl, _, _ = _setup(eviction_ratio=1.0, check_interval=0.01)
+    loops = BackgroundLoops()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_ok)) as client:
+        async with ctrl.run(
+            ControllerRuntime(http_client=client, background_loops=loops)
+        ):
+            while not loops.stats()["eviction"].passes_ok:
+                await asyncio.sleep(0.005)
+
+    assert loops.stats()["eviction"].interval_seconds == 0.01
+
+
 @pytest.mark.asyncio
 async def test_the_loop_sleeps_before_the_first_check():
     """Startup must not race the first pass: nothing is dispatched before
@@ -921,7 +941,7 @@ async def test_the_controller_dispatches_to_the_shared_membership_view():
 
 
 def _in_group(key: ObjectKey, group: int) -> ObjectKey:
-    return replace(key, object_group_id=group)
+    return replace(key, identity=replace(key.identity, object_group_id=group))
 
 
 def test_a_pin_covers_its_chunk_in_every_object_group():

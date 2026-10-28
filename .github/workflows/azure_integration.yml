@@ -12,18 +12,18 @@ on:
       - "dev"
       - "release-**"
     paths:
-      - "lmcache/v1/storage_backend/connector/azure_connector.py"
-      - "tests/v1/storage_backend/test_azure_connector.py"
-      - "tests/v1/storage_backend/test_azure_connector_azurite.py"
+      - "lmcache/inprocess/v1/storage_backend/connector/azure_connector.py"
+      - "tests/inprocess/v1/storage_backend/test_azure_connector.py"
+      - "tests/inprocess/v1/storage_backend/test_azure_connector_azurite.py"
       - ".github/workflows/azure_integration.yml"
   pull_request:
     branches:
       - "dev"
       - "release-**"
     paths:
-      - "lmcache/v1/storage_backend/connector/azure_connector.py"
-      - "tests/v1/storage_backend/test_azure_connector.py"
-      - "tests/v1/storage_backend/test_azure_connector_azurite.py"
+      - "lmcache/inprocess/v1/storage_backend/connector/azure_connector.py"
+      - "tests/inprocess/v1/storage_backend/test_azure_connector.py"
+      - "tests/inprocess/v1/storage_backend/test_azure_connector_azurite.py"
       - ".github/workflows/azure_integration.yml"
   workflow_dispatch:
 
@@ -42,7 +42,7 @@ permissions:
 jobs:
   azure-blob-azurite:
     name: Azure connector (Azurite)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
@@ -101,7 +101,7 @@ jobs:
       - name: Run Azure connector integration test
         run: |
           pytest -v --tb=short \
-            tests/v1/storage_backend/test_azure_connector_azurite.py
+            tests/inprocess/v1/storage_backend/test_azure_connector_azurite.py
 
       - name: Stop Azurite
         if: always()

@@ -37,17 +37,26 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 
 WORKDIR /workspace
 
+# The NGC Ubuntu base reserves uid 1000 for its default ubuntu account.
+# Replace that account with a dedicated user to reduce container privileges.
+RUN if [ "$(getent passwd 1000 | cut -d: -f1)" = "ubuntu" ]; then userdel ubuntu; fi \
+    && useradd --create-home --uid 1000 --shell /usr/sbin/nologin lmcache \
+    && mkdir -p /home/lmcache/.cache/huggingface \
+    && chown -R lmcache:lmcache /workspace /home/lmcache/.cache
+
 # Install small non-torch runtime dependencies; torch is installed in lmcache-build
 # against the exact CUDA version so the compiled C extensions match at runtime.
 # The CLI requirements (e.g. ``openai`` for the bench client) are also installed
 # here so ``lmcache`` subcommand discovery in ``lmcache.cli.commands`` -- which
 # eagerly imports every command module -- does not crash with
 # ``ModuleNotFoundError: No module named 'openai'`` when the standalone image
-# boots ``lmcache server``. See LMCache#3353.
+# boots ``lmcache server``. See LMCache#3353. pygrpc-native lets the server
+# run with ``--grpc-server-mode native``.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=requirements/cli.txt,target=/tmp/cli.txt \
+    --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_native.txt \
     . /opt/venv/bin/activate && \
-    uv pip install ray nvidia-ml-py -r /tmp/cli.txt
+    uv pip install ray nvidia-ml-py -r /tmp/cli.txt -r /tmp/grpc_native.txt
 
 # CUDA arch list used by torch
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
@@ -121,7 +130,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     . /opt/venv/bin/activate && \
     export LMCACHE_CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
-    python3 setup.py bdist_wheel --dist-dir=dist_lmcache
+    python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
+    bash docker/build_raw_block_wheel.sh dist_lmcache
 
 #################### LMCache Final Image ##########################
 # Clean install of LMCache from wheel
@@ -142,9 +152,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r /torch.pin \
         --index-url https://download.pytorch.org/whl/${CUDA_TAG} && \
     uv pip install /tmp/*.whl --verbose && \
+    python3 -c 'import lmcache_rust_raw_block_io' && \
     rm -rf /tmp/*.whl /torch.pin
 
 WORKDIR /workspace
+USER lmcache
 
 # Default shell entrypoint (no vLLM server)
 CMD ["/bin/bash"]

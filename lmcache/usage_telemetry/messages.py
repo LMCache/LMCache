@@ -35,9 +35,9 @@ from lmcache import torch_device_type
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.inprocess.v1.config import LMCacheEngineConfig
+    from lmcache.inprocess.v1.metadata import LMCacheMetadata
     from lmcache.v1.distributed.config import StorageManagerConfig
-    from lmcache.v1.metadata import LMCacheMetadata
     from lmcache.v1.multiprocess.config import MPServerConfig
 
 
@@ -52,8 +52,7 @@ class DeploymentMode(Enum):
     """
 
     SINGLE_PROCESS = "single_process"
-    """LMCache runs inside the serving engine (vLLM/SGLang/TRT-LLM
-    integrations)."""
+    """LMCache runs inside the serving engine (vLLM/TRT-LLM integrations)."""
 
     MP_SERVER = "mp_server"
     """LMCache runs as a standalone multiprocess cache server."""

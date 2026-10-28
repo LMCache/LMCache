@@ -49,6 +49,10 @@ from lmcache.v1.multiprocess.http_api_registry import (
 )
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_apis.error_handlers import register_error_handlers
+from lmcache.v1.multiprocess.http_auth import (
+    HTTPAuthenticationConfig,
+    HTTPAuthenticationMiddleware,
+)
 from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
     MPRuntimePluginLauncher,
 )
@@ -139,6 +143,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 p2p_advertised_url=mp_config.p2p_config.advertise_url,
                 mq_port=mp_config.port if mp_config.p2p_config.enabled else 0,
                 on_registered=engine.storage_manager.publish_capacity,
+                chunk_size_provider=lambda: engine.context.finalized_chunk_size,
             )
         )
     # Optionally emit cache events: to the coordinator, to an events-level
@@ -178,6 +183,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="LMCache HTTP API", version="1.0.0", lifespan=lifespan)
+app.state.http_authentication = HTTPAuthenticationConfig()
+app.add_middleware(HTTPAuthenticationMiddleware)
 
 # Automatically discover and register all HTTP API endpoints
 registry = HTTPAPIRegistry(app)
@@ -194,6 +201,7 @@ def run_http_server(
     storage_manager_config: StorageManagerConfig,
     obs_config: ObservabilityConfig,
     coordinator_config: CoordinatorConfig,
+    http_authentication: HTTPAuthenticationConfig | None = None,
 ) -> None:
     """
     Run the LMCache HTTP server with an integrated MP request server.
@@ -205,6 +213,8 @@ def run_http_server(
         obs_config: Configuration for the observability stack
         coordinator_config: Configuration for MP coordinator registration
             (an empty URL disables registration)
+        http_authentication: Bearer API keys accepted by the HTTP frontend.
+            ``None`` leaves authentication disabled.
 
     Raises:
         ValueError: If P2P is enabled without a coordinator URL, or with an L1
@@ -242,6 +252,7 @@ def run_http_server(
     _configs["http"] = http_config
     _configs["coordinator"] = coordinator_config
     app.state.configs = _configs
+    app.state.http_authentication = http_authentication or HTTPAuthenticationConfig()
 
     config = uvicorn.Config(
         app=app,
@@ -280,10 +291,12 @@ if __name__ == "__main__":
     storage_manager_config = parse_args_to_config(args)
     obs_config = parse_args_to_observability_config(args)
     coordinator_config = parse_args_to_coordinator_config(args)
+    http_authentication = HTTPAuthenticationConfig.from_sources(args.api_key_file)
     run_http_server(
         http_config=http_config,
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         obs_config=obs_config,
         coordinator_config=coordinator_config,
+        http_authentication=http_authentication,
     )

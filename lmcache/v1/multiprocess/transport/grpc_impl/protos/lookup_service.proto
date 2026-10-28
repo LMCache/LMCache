@@ -32,9 +32,16 @@ message WaitPrefetchStatusResponse {
   optional int64 chunk_count = 1;
 }
 
+// A token range left locked by an abandoned lookup; ends at its hit boundary.
+message TokenRange {
+  int64 start = 1;
+  int64 end = 2;
+}
+
 message FreeLookupLocksRequest {
   IpcCacheServerKey key = 1;
   int64 tp_size = 2;
+  repeated TokenRange extra_ranges = 3;
 }
 
 message FreeLookupLocksResponse {}

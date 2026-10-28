@@ -355,6 +355,22 @@ class FakeKafkaConsumer:
         time.sleep(min(timeout or 0.0, 0.005))
         return None
 
+    def get_watermark_offsets(
+        self,
+        partition: FakeTopicPartition,
+        timeout: float | None = None,
+        cached: bool = False,
+    ) -> tuple[int, int]:
+        """Return ``(low, high)`` watermarks: the topic's first offset and
+        one past its last record, as a real consumer reports them.
+
+        Args:
+            partition: The partition to report.
+            timeout: Ignored; nothing here waits on a broker.
+            cached: Ignored; the fake always knows the current watermarks.
+        """
+        return 0, len(self._broker.records(partition.topic))
+
     def close(self) -> None:
         """Mark the consumer closed."""
         self._closed = True

@@ -10,10 +10,10 @@
 # Environment variables:
 #   LMCACHE_BENCH_TRANSFER_MODE  engine_driven|lmcache_driven
 #                                (default: engine_driven)
-#   LMCACHE_E2E_TRANSPORT_MODE   engine_driven|lmcache_driven|shm|pickle
+#   LMCACHE_E2E_TRANSPORT_MODE   engine_driven|lmcache_driven|shm|inline
 #                                (default: engine_driven)
-#   LMCACHE_E2E_DATA_MODE        shm|pickle (default: shm)
-#   LMCACHE_REQUEST_TRANSPORT    zmq|grpc (default: zmq)
+#   LMCACHE_E2E_DATA_MODE        shm|inline (default: shm)
+#   LMCACHE_REQUEST_TRANSPORT    zmq|grpc|grpc-native (default: zmq)
 #   LMCACHE_HTTP_PORT_BENCH      HTTP port for bench (default: 18080)
 #   LMCACHE_REQUEST_PORT_BENCH   request port for bench (default: 15555)
 #   LMCACHE_HTTP_PORT_E2E        HTTP port for e2e (default: 18081)
@@ -50,16 +50,16 @@ case "${BENCH_TRANSFER_MODE}" in
 esac
 
 case "${REQUEST_TRANSPORT}" in
-  zmq|grpc) ;;
+  zmq|grpc|grpc-native) ;;
   *)
     echo "!! Unknown LMCACHE_REQUEST_TRANSPORT='${REQUEST_TRANSPORT}'"
-    echo "   Valid values: zmq, grpc"
+    echo "   Valid values: zmq, grpc, grpc-native"
     exit 1
     ;;
 esac
 
 # Map user-facing LMCACHE_E2E_TRANSPORT_MODE to internal representation.
-# shm/pickle are aliases for lmcache_driven mode with sub-mode selection.
+# shm/inline select the corresponding engine-driven sub-mode.
 case "${E2E_TRANSPORT_MODE}" in
   lmcache_driven|engine_driven)
     MAPPED_TRANSPORT_MODE="${E2E_TRANSPORT_MODE}"
@@ -69,13 +69,13 @@ case "${E2E_TRANSPORT_MODE}" in
     MAPPED_TRANSPORT_MODE="engine_driven"
     MAPPED_DATA_MODE="shm"
     ;;
-  pickle)
+  inline)
     MAPPED_TRANSPORT_MODE="engine_driven"
-    MAPPED_DATA_MODE="pickle"
+    MAPPED_DATA_MODE="inline"
     ;;
   *)
     echo "!! Unknown LMCACHE_E2E_TRANSPORT_MODE='${E2E_TRANSPORT_MODE}'"
-    echo "   Valid values: engine_driven, lmcache_driven, shm, pickle"
+    echo "   Valid values: engine_driven, lmcache_driven, shm, inline"
     exit 1
     ;;
 esac

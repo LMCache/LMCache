@@ -647,6 +647,12 @@ Set / read the default limit applied to salts with no explicit quota entry.
 
     {"default_limit_gb": 0.0}
 
+**HTTP status codes:**
+
+- ``200``: applied.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
+
 **Example:**
 
 .. code-block:: bash
@@ -695,6 +701,8 @@ empty salt).
 - ``200``: quota applied.
 - ``400``: invalid limit (negative or non-finite).
 - ``422``: request body fails field-level validation.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
 
 **Example:**
 
@@ -729,6 +737,8 @@ When no quota was registered for the salt, ``status`` is ``"not_found"`` (still
 **HTTP status codes:**
 
 - ``200``: removed, or ``not_found`` if no quota existed.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
 
 **Example:**
 
@@ -1211,6 +1221,8 @@ of L2 keys pinned (chunks times the per-rank fan-out).
 - ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt`` violates
   its invariants.
 - ``422``: request body fails field-level validation.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
 
 **Example:**
 
@@ -1348,6 +1360,8 @@ sequence returns ``status`` ``"noop"``.
 - ``200``: deleted (or a ``noop``).
 - ``404``: no server is registered under ``instance_id``.
 - ``502``: the target server was unreachable or rejected the delete.
+- ``503``: a forced delete removed the keys, but dropping their pins could not
+  be written to the metadata file; the pins are kept.
 
 **Example:**
 

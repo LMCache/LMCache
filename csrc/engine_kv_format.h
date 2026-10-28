@@ -171,6 +171,15 @@ enum class EngineKVFormat : int {
   Each entry is one component plane; K and V are separate list entries.
   */
   NL_X_NB_BS_NH_HS = 18,
+
+  /*
+  used by:
+  - vLLM-RBLN default attention kernels (HND layout), blocks-first
+  physical shape per layer: [num_blocks, 2, num_heads, 1, block_size, head_size]
+  Axis 3 is always 1 (an RBLN attention-backend requirement), so the bytes and
+  strides are those of NL_X_NB_TWO_NH_BS_HS one axis short.
+  */
+  NL_X_NB_TWO_NH_ONE_BS_HS = 19,
 };
 
 // __host__ __device__ under CUDA/HIP so the kernels can call these; the guard
@@ -294,6 +303,10 @@ LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
       break;
     case EngineKVFormat::NL_X_NB_BS_NH_HS:
       facts.is_layer_list = true;
+      break;
+    case EngineKVFormat::NL_X_NB_TWO_NH_ONE_BS_HS:
+      facts.is_layer_list = true;
+      facts.is_hnd = true;
       break;
     default:
       unsupported_engine_kv_format();
