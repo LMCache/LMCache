@@ -14,7 +14,6 @@ import threading
 import msgspec
 import pytest
 import torch
-import zmq
 
 # First Party
 from lmcache import torch_dev, torch_device_type
@@ -58,7 +57,7 @@ from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
 )
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
-from lmcache.v1.multiprocess.transport.zmq_impl.server import build_zmq_request_server
+from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 
 
 def _detected_block_size(kv_caches: dict[str, torch.Tensor]) -> int:
@@ -661,7 +660,7 @@ def test_inline_strategy_store_shape_mismatch_releases_reservations() -> None:
 @pytest.mark.parametrize("use_shm", [False, True], ids=["inline", "shm"])
 @pytest.mark.parametrize("window_tokens", [-1, 512], ids=["full", "sliding"])
 def test_single_compressed_group_worker_server_roundtrip(
-    use_shm: bool, window_tokens: int
+    use_shm: bool, window_tokens: int, unused_tcp_port: int
 ) -> None:
     """A single compressed group survives real RPC, storage and retrieval.
 
@@ -686,13 +685,11 @@ def test_single_compressed_group_worker_server_roundtrip(
     engine = MPCacheServerContext(config, chunk_size=chunk_tokens)
     module = EngineDrivenTransferModule(engine)
     lookup = LookupModule(engine)
-    server = build_zmq_request_server(
-        [module, lookup], MPServerConfig(host="127.0.0.1", port=0)
+    server = create_request_server(
+        [module, lookup], MPServerConfig(host="127.0.0.1", port=unused_tcp_port)
     )
     server.start()
-    client = RequestClientFactory.create(
-        server.socket.getsockopt_string(zmq.LAST_ENDPOINT)
-    )
+    client = RequestClientFactory.create(f"tcp://127.0.0.1:{unused_tcp_port}")
     worker = EngineDrivenTransferContext(1, client)
     source = {
         "layer_0": torch.arange(
