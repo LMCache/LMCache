@@ -16,6 +16,8 @@ from lmcache.cli.commands.bench.quality_bench.core.plan import build_plan
 from lmcache.cli.commands.bench.quality_bench.core.runner import ArmAnswer, ArmRun
 from lmcache.cli.commands.bench.quality_bench.core.verdict import (
     ENGAGEMENT_WINDOW,
+    GATE_BLEND_SHARE,
+    GATE_REUSE,
     MAX_UNSCORED_SHARE,
     LossTag,
     ReuseKind,
@@ -309,6 +311,135 @@ class TestEngagement:
         idle = [_answer(s, s.answers[0], share=0.0) for s in samples]
         verdict, _ = _decide(plan, idle)
         assert "L2" not in verdict.invalid_reasons[0]
+
+
+class TestReuseGate:
+    """``concatenated`` is gated on observed against expected reuse."""
+
+    @pytest.fixture
+    def concatenated(self, aligner):
+        return build_plan(
+            _samples(),
+            aligner,
+            ReuseScenario.CONCATENATED,
+            CHUNK,
+            1,
+            min_unit_tokens=200,
+        )
+
+    @staticmethod
+    def _reusing(plan, fraction=1.0, blended=False, **extra):
+        """Answers whose counters reuse *fraction* of each expectation."""
+        answers = []
+        for s in plan.samples:
+            tokens = fraction * (s.expected_reused_tokens or 0)
+            counters = BlendCounters(
+                requested_tokens=4 * CHUNK + tokens,
+                **({"non_prefix_hit_tokens": tokens} if blended else {}),
+                **({} if blended else {"prefix_hit_tokens": tokens}),
+                **extra,
+            )
+            answers.append(
+                ArmAnswer(
+                    sample_id=s.sample.sample_id,
+                    request_id="q",
+                    successful=True,
+                    response=f"<answer>{s.sample.answers[0]}</answer>",
+                    answer=s.sample.answers[0],
+                    ttft=0.1,
+                    num_output_tokens=4,
+                    counters=counters,
+                )
+            )
+        return answers
+
+    def _decide(self, plan, answers, **kwargs):
+        samples = [s.sample for s in plan.samples]
+        runs = [
+            _run(ArmRole.REFERENCE, _correct(samples)),
+            _run(ArmRole.CANDIDATE, answers, measured=True),
+        ]
+        return decide(plan, runs, VerdictMetric.MATCH, 0.05, 0.3, **kwargs)
+
+    def test_expected_reuse_served_as_prefix_passes(self, concatenated) -> None:
+        """No blending at all, yet the run reused what the plan offered."""
+        verdict = self._decide(concatenated, self._reusing(concatenated))
+        assert verdict.verdict is Verdict.PASS
+        engagement = verdict.engagement
+        assert engagement.gate == GATE_REUSE
+        assert engagement.blend_share == 0.0
+        assert engagement.reuse_ratio == pytest.approx(1.0)
+        assert engagement.min_window_reuse_ratio == pytest.approx(1.0)
+
+    def test_reuse_beyond_the_expectation_is_not_penalized(self, concatenated) -> None:
+        answers = self._reusing(concatenated, fraction=1.5, blended=True)
+        verdict = self._decide(concatenated, answers)
+        assert verdict.verdict is Verdict.PASS
+        assert verdict.engagement.reuse_ratio == pytest.approx(1.5)
+
+    def test_too_little_reuse_is_invalid(self, concatenated) -> None:
+        answers = self._reusing(concatenated, fraction=0.5, blended=True)
+        verdict = self._decide(concatenated, answers)
+        assert verdict.verdict is Verdict.INVALID
+        assert verdict.invalid_reasons == [
+            "observed reuse 0.50 of expected (min window 0.50) is below 0.8"
+        ]
+
+    def test_the_minimum_is_configurable(self, concatenated) -> None:
+        answers = self._reusing(concatenated, fraction=0.5, blended=True)
+        verdict = self._decide(concatenated, answers, min_reuse_ratio=0.4)
+        assert verdict.verdict is Verdict.PASS
+
+    def test_collapse_mid_run_is_caught_by_a_window(self, concatenated) -> None:
+        answers = self._reusing(concatenated, blended=True)
+        idle = self._reusing(concatenated, fraction=0.0)
+        answers[-ENGAGEMENT_WINDOW:] = idle[-ENGAGEMENT_WINDOW:]
+        check = check_engagement(
+            _run(ArmRole.CANDIDATE, answers, measured=True),
+            0.3,
+            [s.expected_reused_tokens or 0 for s in concatenated.samples],
+        )
+        assert check.reuse_ratio is not None and check.reuse_ratio > 0.7
+        assert check.min_window_reuse_ratio == 0.0
+        assert not check.engaged
+
+    def test_stale_chunks_point_at_the_cache_size(self, concatenated) -> None:
+        answers = self._reusing(
+            concatenated, fraction=0.5, blended=True, stale_chunks=2.0
+        )
+        verdict = self._decide(concatenated, answers)
+        [reason] = verdict.invalid_reasons
+        assert "80 stale chunks (check the cache size)" in reason
+
+    def test_a_plan_expecting_no_reuse_is_invalid(self) -> None:
+        samples = _samples(4)
+        run = _run(ArmRole.CANDIDATE, _correct(samples), measured=True)
+        check = check_engagement(run, 0.3, [0] * len(samples))
+        assert check.reuse_ratio is None
+        assert not check.engaged
+
+    def test_unmeasured_is_reported_not_invalid(self, concatenated) -> None:
+        samples = [s.sample for s in concatenated.samples]
+        runs = [
+            _run(ArmRole.REFERENCE, _correct(samples)),
+            _run(ArmRole.CANDIDATE, _correct(samples)),
+        ]
+        verdict = decide(concatenated, runs, VerdictMetric.MATCH, 0.05, 0.3)
+        assert verdict.verdict is Verdict.PASS
+        assert verdict.engagement.gate == GATE_REUSE
+        assert verdict.engagement.engaged
+
+    def test_other_scenarios_keep_the_blend_share_gate(self, plan) -> None:
+        samples = [s.sample for s in plan.samples]
+        verdict, _ = _decide(plan, _correct(samples))
+        assert verdict.engagement.gate == GATE_BLEND_SHARE
+        assert verdict.engagement.reuse_ratio is None
+
+    def test_expectations_must_line_up_with_the_answers(self) -> None:
+        samples = _samples(4)
+        run = _run(ArmRole.CANDIDATE, _correct(samples), measured=True)
+        with pytest.raises(ValueError, match="one value per"):
+            check_engagement(run, 0.3, [64] * 3)
 
 
 class TestBuildRows:

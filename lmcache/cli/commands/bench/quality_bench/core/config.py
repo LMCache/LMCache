@@ -9,6 +9,12 @@ import enum
 # First Party
 from lmcache.cli.commands.bench.engine_bench.quality.alignment import Filler
 
+# Default for ``QualityAnalyzeConfig.min_reuse_ratio``: observed over expected
+# reuse for the ``concatenated`` scenario. Below 1 to absorb counters that
+# lag a question and chunks evicted by the cache, well above the near-zero
+# ratio of a candidate that does not reuse at all.
+DEFAULT_MIN_REUSE_RATIO = 0.8
+
 
 class ArmRole(enum.Enum):
     """The serving stack an arm runs, and how its answers are used.
@@ -277,7 +283,14 @@ class QualityAnalyzeConfig:
         min_blend_share: When blend metrics were captured, the smallest
             share of looked-up prompt tokens the blend server must serve by
             blending, overall and in every window of questions, for a
-            verdict to be valid. Unused otherwise.
+            verdict to be valid. Unused otherwise, and for the
+            ``concatenated`` scenario, which is gated on
+            ``min_reuse_ratio`` instead.
+        min_reuse_ratio: For the ``concatenated`` scenario, when blend
+            metrics were captured, the smallest ratio of observed reused
+            tokens (prefix and blended) to the plan's expected reuse,
+            overall and in every window of questions, for a verdict to be
+            valid. Unused otherwise.
     """
 
     results_dir: str
@@ -285,6 +298,7 @@ class QualityAnalyzeConfig:
     judge: JudgeSettings | None = None
     tolerance: float = 0.05
     min_blend_share: float = 0.3
+    min_reuse_ratio: float = DEFAULT_MIN_REUSE_RATIO
 
     def __post_init__(self) -> None:
         if not self.results_dir:
@@ -294,6 +308,10 @@ class QualityAnalyzeConfig:
         if not 0.0 <= self.min_blend_share <= 1.0:
             raise ValueError(
                 f"min_blend_share must be in [0, 1], got {self.min_blend_share}"
+            )
+        if not 0.0 <= self.min_reuse_ratio <= 1.0:
+            raise ValueError(
+                f"min_reuse_ratio must be in [0, 1], got {self.min_reuse_ratio}"
             )
         if self.verdict_metric is VerdictMetric.JUDGE:
             if self.judge is None:

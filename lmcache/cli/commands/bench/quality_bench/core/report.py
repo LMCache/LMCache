@@ -28,6 +28,7 @@ from lmcache.cli.commands.bench.quality_bench.core.run_files import (
 )
 from lmcache.cli.commands.bench.quality_bench.core.runner import ArmRun
 from lmcache.cli.commands.bench.quality_bench.core.verdict import (
+    GATE_REUSE,
     ArmComparison,
     QualityVerdict,
     ReuseReport,
@@ -122,6 +123,7 @@ def write_results(
             ),
             "tolerance": config.tolerance,
             "min_blend_share": config.min_blend_share,
+            "min_reuse_ratio": config.min_reuse_ratio,
             "blend_metrics_url": candidate.blend_metrics_url,
         },
         "arms": {arm.run.label: arm.metadata() for arm in arms},
@@ -196,8 +198,10 @@ def format_summary(
         lines.append(f"reference flip rate: {verdict.reference_flip_rate:.3f}")
     engagement = verdict.engagement
     if engagement.measured:
+        # Under the reuse gate the blend share is context, not a criterion.
+        ungated = " (not gated)" if engagement.gate == GATE_REUSE else ""
         lines.append(
-            f"blend share: {engagement.blend_share:.3f} "
+            f"blend share{ungated}: {engagement.blend_share:.3f} "
             f"(min window {engagement.min_window_share:.3f}), "
             f"stale chunks: {engagement.stale_chunks:.0f}, "
             f"fingerprints registered: {engagement.fingerprints_registered:.0f}"
@@ -228,6 +232,11 @@ def format_summary(
             f"(prefix {reuse.observed_prefix_tokens:.0f}, blended "
             f"{reuse.observed_blended_tokens:.0f})"
             + (f" = {ratio:.2f} of expected" if ratio is not None else "")
+            + (
+                f" (min window {engagement.min_window_reuse_ratio:.2f})"
+                if engagement.min_window_reuse_ratio is not None
+                else ""
+            )
         )
         for group in reuse.groups:
             lines.append(

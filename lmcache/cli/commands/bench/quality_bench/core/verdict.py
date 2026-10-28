@@ -5,7 +5,8 @@ The verdict acts as a gatekeeper for quality checking. That is, a gap passes
 on tolerance, fails only when it also clears its own error bar, and is
 otherwise UNDERPOWERED with the sample count that would settle it. Additionally,
 a run that is unfit to compare (e.g. an unreachable arm, or a candidate
-whose captured blend metrics show it did not blend) is INVALID. The
+whose captured blend metrics show it did not reuse what the scenario
+offers) is INVALID. The
 reference is run twice so its flip rate is reported as the noise floor.
 """
 
@@ -23,7 +24,12 @@ from lmcache.cli.commands.bench.engine_bench.quality.scoring import (
     normalize_answer,
 )
 from lmcache.cli.commands.bench.quality_bench.core.blend_counters import BlendCounters
-from lmcache.cli.commands.bench.quality_bench.core.config import ArmRole, VerdictMetric
+from lmcache.cli.commands.bench.quality_bench.core.config import (
+    DEFAULT_MIN_REUSE_RATIO,
+    ArmRole,
+    ReuseScenario,
+    VerdictMetric,
+)
 from lmcache.cli.commands.bench.quality_bench.core.plan import QualityPlan, SamplePlan
 from lmcache.cli.commands.bench.quality_bench.core.runner import ArmAnswer, ArmRun
 
@@ -43,6 +49,10 @@ ENGAGEMENT_WINDOW = 10
 # random. Past this share, they are likely to track the answers (e.g. long
 # candidate answers failing to parse), which would bias the comparison.
 MAX_UNSCORED_SHARE = 0.05
+
+# Values of :attr:`EngagementCheck.gate`.
+GATE_BLEND_SHARE = "blend_share"
+GATE_REUSE = "reuse"
 
 
 class Verdict(enum.Enum):
@@ -79,7 +89,15 @@ class LossTag(enum.Enum):
 
 @dataclass(frozen=True)
 class EngagementCheck:
-    """Whether the blend server actually blended during the measured pass.
+    """Whether the blend server reused KV as the scenario intends.
+
+    Two gates, by scenario. ``independent`` and ``reordered`` store each
+    passage on its own, so every measured prompt is a blending opportunity
+    and the gate is the blend share. In ``concatenated``, reuse the plan
+    expects can legitimately be served as an exact prefix (an earlier
+    measured prompt with the same leading passages, or the blend server's
+    reorder turning a match into a prefix copy), so the blend share says
+    little there and the gate is observed against expected reuse instead.
 
     Attributes:
         measured: Whether counters were read at all.
@@ -92,8 +110,20 @@ class EngagementCheck:
             gap (see :class:`BlendCounters`) -- not blending, so outside
             ``blend_share``.
         fingerprints_registered: Chunks indexed during the pass.
-        engaged: Whether both shares reach the minimum. ``True`` when not
-            measured, so an unmeasured run is reported (not invalidated).
+        engaged: Whether the gate's run-wide and minimum-window values reach
+            its minimum. ``True`` when not measured, so an unmeasured run is
+            reported (not invalidated).
+        gate: What ``engaged`` was decided on: :data:`GATE_BLEND_SHARE`, or
+            :data:`GATE_REUSE` for the ``concatenated`` scenario. The blend
+            share is reported under either gate.
+        reuse_ratio: For :data:`GATE_REUSE`, observed reused tokens (prefix,
+            segmented prefix and blended) over the plan's expected reuse,
+            run-wide. ``None`` under the other gate, unmeasured, or when the
+            plan expects no reuse.
+        min_window_reuse_ratio: The lowest ``reuse_ratio`` over consecutive
+            windows of :data:`ENGAGEMENT_WINDOW` questions, leaving out
+            windows that expect no reuse. Equals ``reuse_ratio`` when no
+            window qualifies.
     """
 
     measured: bool
@@ -103,6 +133,9 @@ class EngagementCheck:
     segmented_prefix_hit_tokens: float
     fingerprints_registered: float
     engaged: bool
+    gate: str = GATE_BLEND_SHARE
+    reuse_ratio: float | None = None
+    min_window_reuse_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -343,19 +376,40 @@ def run_problems(run: ArmRun) -> list[str]:
     return problems
 
 
-def check_engagement(candidate: ArmRun, min_blend_share: float) -> EngagementCheck:
-    """Decide whether a candidate blended enough for its scores to count.
+def check_engagement(
+    candidate: ArmRun,
+    min_blend_share: float,
+    expected_reuse: list[int] | None = None,
+    min_reuse_ratio: float = DEFAULT_MIN_REUSE_RATIO,
+) -> EngagementCheck:
+    """Decide whether a candidate reused enough KV for its scores to count.
 
     Uses the blend metrics captured during the candidate pass; a candidate
     run without them is reported as unmeasured, never invalidated.
 
+    Without *expected_reuse*, the gate is the blend share. With it (the
+    ``concatenated`` scenario), the gate is observed over expected reuse:
+    the blend server must serve, as exact prefix or by blending, close to
+    every token the plan's matcher model says it can. Reuse beyond the
+    expectation (e.g. prefix hits on an earlier measured prompt) is not
+    penalized.
+
     Args:
         candidate: The candidate arm's run.
-        min_blend_share: Required share, run-wide and per window.
+        min_blend_share: Required blend share, run-wide and per window,
+            without *expected_reuse*.
+        expected_reuse: Per question, in answer order, the plan's
+            ``expected_reused_tokens``; selects the reuse gate.
+        min_reuse_ratio: Required observed-over-expected ratio, run-wide
+            and per window, with *expected_reuse*.
 
     Returns:
         The check.
+
+    Raises:
+        ValueError: If *expected_reuse* does not have one value per answer.
     """
+    gate = GATE_BLEND_SHARE if expected_reuse is None else GATE_REUSE
     if not candidate.engagement_measured:
         return EngagementCheck(
             measured=False,
@@ -365,9 +419,13 @@ def check_engagement(candidate: ArmRun, min_blend_share: float) -> EngagementChe
             segmented_prefix_hit_tokens=0.0,
             fingerprints_registered=0.0,
             engaged=True,
+            gate=gate,
         )
+    if expected_reuse is not None and len(expected_reuse) != len(candidate.answers):
+        raise ValueError("expected_reuse needs one value per candidate answer")
     share = candidate.counters.blend_share
     windows: list[float] = []
+    reuse_windows: list[float] = []
     for start in range(
         0, len(candidate.answers) - ENGAGEMENT_WINDOW + 1, ENGAGEMENT_WINDOW
     ):
@@ -375,7 +433,31 @@ def check_engagement(candidate: ArmRun, min_blend_share: float) -> EngagementChe
         for answer in candidate.answers[start : start + ENGAGEMENT_WINDOW]:
             total = total + answer.counters
         windows.append(total.blend_share)
+        if expected_reuse is not None:
+            expected = sum(expected_reuse[start : start + ENGAGEMENT_WINDOW])
+            if expected > 0:
+                reuse_windows.append(_reused_tokens(total) / expected)
     min_window = min(windows) if windows else share
+
+    if expected_reuse is None:
+        reuse_ratio = None
+        min_window_reuse = None
+        engaged = share >= min_blend_share and min_window >= min_blend_share
+    else:
+        expected_total = sum(expected_reuse)
+        reuse_ratio = (
+            _reused_tokens(candidate.counters) / expected_total
+            if expected_total > 0
+            else None
+        )
+        min_window_reuse = min(reuse_windows) if reuse_windows else reuse_ratio
+        # A plan that expects no reuse measures nothing about reuse.
+        engaged = (
+            reuse_ratio is not None
+            and min_window_reuse is not None
+            and reuse_ratio >= min_reuse_ratio
+            and min_window_reuse >= min_reuse_ratio
+        )
     return EngagementCheck(
         measured=True,
         blend_share=share,
@@ -383,7 +465,19 @@ def check_engagement(candidate: ArmRun, min_blend_share: float) -> EngagementChe
         stale_chunks=candidate.counters.stale_chunks,
         segmented_prefix_hit_tokens=candidate.counters.segmented_prefix_hit_tokens,
         fingerprints_registered=candidate.counters.fingerprints_registered,
-        engaged=share >= min_blend_share and min_window >= min_blend_share,
+        engaged=engaged,
+        gate=gate,
+        reuse_ratio=reuse_ratio,
+        min_window_reuse_ratio=min_window_reuse,
+    )
+
+
+def _reused_tokens(counters: BlendCounters) -> float:
+    """Tokens served from cache either way: prefix, segmented prefix, blended."""
+    return (
+        counters.prefix_hit_tokens
+        + counters.segmented_prefix_hit_tokens
+        + counters.non_prefix_hit_tokens
     )
 
 
@@ -394,6 +488,7 @@ def decide(
     tolerance: float,
     min_blend_share: float,
     scores: ScoreTable | None = None,
+    min_reuse_ratio: float = DEFAULT_MIN_REUSE_RATIO,
 ) -> QualityVerdict:
     """Compare every arm with the first reference run and reach a verdict.
 
@@ -405,14 +500,19 @@ def decide(
         metric: Score to compare.
         tolerance: Acceptable candidate score difference, either direction, in
             score units.
-        min_blend_share: Engagement minimum for a valid verdict.
+        min_blend_share: Engagement minimum for a valid verdict, except
+            for the ``concatenated`` scenario.
         scores: Precomputed scores per run label (required for ``JUDGE``).
             Computed from *metric* when omitted. Questions any run has no
             score for are left out of every comparison.
+        min_reuse_ratio: Engagement minimum for the ``concatenated``
+            scenario: observed over expected reuse (see
+            :func:`check_engagement`).
 
     Returns:
         The verdict. It is INVALID, whatever the scores, when the candidate arm
-        was measured (by captured blend metrics) not to blend enough, when an
+        was measured (by captured blend metrics) not to blend enough (for
+        ``concatenated``: not to reuse what the plan expects), when an
         arm run had no successful
         request (an unreachable engine scores like a wrong one), when a
         store request failed (the arm did not measure the chosen scenario),
@@ -454,9 +554,21 @@ def decide(
         flips = sum(1 for a, b in zip(reference_scores, second, strict=True) if a != b)
         flip_rate = flips / len(reference_scores)
 
-    engagement = check_engagement(candidate, min_blend_share)
+    expected_reuse = (
+        [s.expected_reused_tokens or 0 for s in plan.samples]
+        if plan.scenario is ReuseScenario.CONCATENATED
+        else None
+    )
+    engagement = check_engagement(
+        candidate, min_blend_share, expected_reuse, min_reuse_ratio
+    )
     invalid_reasons = _invalid_reasons(
-        runs, engagement, min_blend_share, unscored, len(plan.samples)
+        runs,
+        engagement,
+        min_blend_share,
+        min_reuse_ratio,
+        unscored,
+        len(plan.samples),
     )
     # Two-sided: reusing KV should not improve answers, so a large gain flags
     # the setup like a large loss does.
@@ -695,6 +807,7 @@ def _invalid_reasons(
     runs: list[ArmRun],
     engagement: EngagementCheck,
     min_blend_share: float,
+    min_reuse_ratio: float,
     unscored: int,
     num_questions: int,
 ) -> list[str]:
@@ -707,7 +820,9 @@ def _invalid_reasons(
         )
     for run in runs:
         reasons.extend(run_problems(run))
-    if not engagement.engaged:
+    if not engagement.engaged and engagement.gate == GATE_REUSE:
+        reasons.append(_reuse_reason(engagement, min_reuse_ratio))
+    elif not engagement.engaged:
         reason = (
             f"blend share {engagement.blend_share:.3f} (min window "
             f"{engagement.min_window_share:.3f}) is below {min_blend_share}"
@@ -721,6 +836,25 @@ def _invalid_reasons(
             )
         reasons.append(reason)
     return reasons
+
+
+def _reuse_reason(engagement: EngagementCheck, min_reuse_ratio: float) -> str:
+    """Explain a failed reuse gate (the ``concatenated`` scenario)."""
+    ratio = engagement.reuse_ratio
+    window = engagement.min_window_reuse_ratio
+    if ratio is None or window is None:
+        return "the plan expects no reused tokens, so the run measures no reuse"
+    reason = (
+        f"observed reuse {ratio:.2f} of expected (min window {window:.2f}) "
+        f"is below {min_reuse_ratio}"
+    )
+    if engagement.stale_chunks:
+        # Matched but evicted before the lookup: the store is too small for
+        # the units, not a blending problem.
+        reason += (
+            f", with {engagement.stale_chunks:.0f} stale chunks (check the cache size)"
+        )
+    return reason
 
 
 def _compare(

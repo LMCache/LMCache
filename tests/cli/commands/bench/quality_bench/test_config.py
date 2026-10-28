@@ -100,7 +100,12 @@ class TestQualityAnalyzeConfig:
 
     @pytest.mark.parametrize(
         ("field", "value"),
-        [("results_dir", ""), ("tolerance", 1.5), ("min_blend_share", -0.1)],
+        [
+            ("results_dir", ""),
+            ("tolerance", 1.5),
+            ("min_blend_share", -0.1),
+            ("min_reuse_ratio", 1.5),
+        ],
     )
     def test_invalid_values_are_rejected(self, field: str, value: object) -> None:
         with pytest.raises(ValueError, match=field):

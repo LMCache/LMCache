@@ -14,6 +14,7 @@ import os
 
 # First Party
 from lmcache.cli.commands.bench.quality_bench.core.config import (
+    DEFAULT_MIN_REUSE_RATIO,
     JudgeSettings,
     QualityAnalyzeConfig,
     VerdictMetric,
@@ -81,7 +82,17 @@ def add_analyze_arguments(parser: argparse.ArgumentParser) -> None:
         default=0.3,
         help="When blend metrics were captured (run --capture-blend-metrics): "
         "minimum share of looked-up tokens served by blending, overall and per "
-        "window of questions, for a valid verdict.",
+        "window of questions, for a valid verdict. Not applied to --scenario "
+        "concatenated (see --min-reuse-ratio).",
+    )
+    verdict.add_argument(
+        "--min-reuse-ratio",
+        type=float,
+        default=DEFAULT_MIN_REUSE_RATIO,
+        help="For --scenario concatenated, when blend metrics were captured: "
+        "minimum ratio of observed reused tokens (prefix and blended) to the "
+        "plan's expected reuse, overall and per window of questions, for a "
+        "valid verdict.",
     )
     judge = parser.add_argument_group("judge")
     judge.add_argument(
@@ -149,6 +160,7 @@ def analyze_config_from_args(
         judge=judge,
         tolerance=args.tolerance,
         min_blend_share=args.min_blend_share,
+        min_reuse_ratio=args.min_reuse_ratio,
     )
 
 
@@ -258,6 +270,7 @@ def run_quality_analyze(args: argparse.Namespace) -> None:
         config.tolerance,
         config.min_blend_share,
         scores=scores,
+        min_reuse_ratio=config.min_reuse_ratio,
     )
     rows = build_rows(plan, runs, config.verdict_metric, scores=scores)
     summary_path = write_results(config, plan_record, arms, verdict, rows)

@@ -289,10 +289,12 @@ candidate's reuse as observed against the plan's expected reuse
 total over `expected_reused_tokens`. It classifies each question by which
 kind of reuse served more of it (`prefix`, `blended` or `none`, from its
 counter deltas) and reports Δ and SE per kind. In `independent` a question
-mixes both (its system prompt and first passage are a prefix); in
-`concatenated` all reuse should be blended, so a `prefix` group there points
-at the setup. A per-question kind can lag by one question, like the per-row
-blend share.
+mixes both (its system prompt and first passage are a prefix). In
+`concatenated` the stored units carry no system prompt, so reuse from a unit
+is blended; a `prefix` group there comes from an earlier measured prompt
+that shares the question's leading passages, or from the blend server's
+reorder (`--enable-blend-reorder`) serving a match as a prefix copy. A
+per-question kind can lag by one question, like the per-row blend share.
 
 A candidate served through the LMCache blend server reuses cached KV at new
 positions; one that silently fell back to recompute would score like the
@@ -315,6 +317,24 @@ questions, is below `--min-blend-share` (default 0.3). The windowed check
 catches a run that blended early and then stopped (e.g. the fingerprint table
 filled). Without a metrics URL, engagement is reported as unmeasured and
 cannot make the verdict `INVALID`.
+
+**Reuse gate (`concatenated`).** The blend share is the wrong gate for
+`concatenated`. Its expected reuse can legitimately arrive as a prefix (see
+the reuse report above), and how much of a prompt is reusable at all depends
+on the dataset: a FinanceBench run that reused 0.97 of what the plan
+expected had a blend share of 0.38 and windows near 0.2. So for that
+scenario the gate is *observed over expected reuse*: prefix, segmented-prefix
+and blended tokens over the plan's `expected_reused_tokens`, run-wide and in
+every 10-question window (windows that expect no reuse are skipped), must
+reach `--min-reuse-ratio` (default 0.8). The margin below 1 absorbs counters
+that lag a question and a few evicted chunks. A recompute fallback reuses
+nothing and lands near 0. Reuse above the expectation is not penalized: an
+earlier measured prompt can add prefix hits the plan does not count. A plan
+that expects no reuse at all is `INVALID`, since it measures nothing. The
+blend share is still reported, marked as not gated, and the `INVALID` reason
+names stale chunks when there are any (matched but evicted, which points at
+the cache size rather than at blending). `independent` and `reordered` keep
+the blend-share gate.
 
 Segmented-prefix tokens stay outside the share's numerator: they are reused
 at their original positions, not blended. They still count in the
@@ -458,7 +478,7 @@ differences.
 
 | Verdict | Condition |
 |---|---|
-| `INVALID` | blend metrics captured and blend share below `--min-blend-share` (overall or any window) / an arm run with no successful request / a failed store request / more than 5% of questions unscored. `invalid_reasons` lists which |
+| `INVALID` | blend metrics captured and blend share below `--min-blend-share` (overall or any window); for `concatenated`, observed over expected reuse below `--min-reuse-ratio` instead / an arm run with no successful request / a failed store request / more than 5% of questions unscored. `invalid_reasons` lists which |
 | `PASS` | \|Δ\| ≤ `--tolerance` (default 0.05) |
 | `FAIL` | \|Δ\| > tolerance **and** \|Δ\| > 2·SE |
 | `UNDERPOWERED` | otherwise. Reports `samples_needed` = ⌈(2·sd/\|Δ\|)²⌉ |

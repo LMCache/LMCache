@@ -647,7 +647,8 @@ The verdict and everything needed to interpret it.
      - ``plan.json``'s settings plus ``verdict_metric`` (``"match"``,
        ``"f1"`` or ``"judge"``), ``judge_model`` (judge metric only),
        ``reference_repeats`` (reference passes analyzed), ``tolerance``,
-       ``min_blend_share`` and ``blend_metrics_url`` (from the candidate arm).
+       ``min_blend_share``, ``min_reuse_ratio`` and ``blend_metrics_url``
+       (from the candidate arm).
    * - ``arms``
      - object
      - ``{label: {url, engine_version, lmcache_version, started_at,
@@ -771,8 +772,23 @@ The verdict and everything needed to interpret it.
      - The pass's counters (see `arm_<label>.json`_).
    * - ``engaged``
      - bool
-     - Whether both shares reach ``min_blend_share``; ``false`` makes the
-       verdict INVALID.
+     - Whether the gate's run-wide and minimum-window values reach its
+       minimum (``min_blend_share``, or ``min_reuse_ratio`` for the reuse
+       gate); ``false`` makes the verdict INVALID.
+   * - ``gate``
+     - string
+     - What ``engaged`` was decided on: ``"blend_share"``, or ``"reuse"``
+       for the ``concatenated`` scenario (where the blend share is reported
+       only).
+   * - ``reuse_ratio``
+     - number or null
+     - Reuse gate only: observed reused tokens (prefix, segmented prefix and
+       blended) over the plan's expected reuse, over the pass. ``null``
+       otherwise, or when the plan expects no reuse.
+   * - ``min_window_reuse_ratio``
+     - number or null
+     - Reuse gate only: lowest ``reuse_ratio`` over consecutive windows of 10
+       questions, skipping windows that expect no reuse.
 
 .. code-block:: json
 
@@ -782,7 +798,7 @@ The verdict and everything needed to interpret it.
      "settings": {"model": "Qwen/Qwen3-8B", "dataset": "hotpotqa", "...": "...",
                   "verdict_metric": "judge", "judge_model": "openai/gpt-oss-120b",
                   "reference_repeats": 2, "tolerance": 0.05, "min_blend_share": 0.3,
-                  "blend_metrics_url": "http://gpu1:9090/metrics"},
+                  "min_reuse_ratio": 0.8, "blend_metrics_url": "http://gpu1:9090/metrics"},
      "arms": {"candidate": {"url": "http://gpu1:8000", "engine_version": "0.11.0",
                         "lmcache_version": "0.4.0-1a2b3c4",
                         "started_at": "2026-10-19T10:52:40-05:00",
@@ -799,7 +815,9 @@ The verdict and everything needed to interpret it.
                  "standard_error": 0.0095}],
      "engagement": {"measured": true, "blend_share": 0.912, "min_window_share": 0.874,
                     "stale_chunks": 0.0, "segmented_prefix_hit_tokens": 0.0,
-                    "fingerprints_registered": 4180.0, "engaged": true},
+                    "fingerprints_registered": 4180.0, "engaged": true,
+                    "gate": "blend_share", "reuse_ratio": null,
+                    "min_window_reuse_ratio": null},
      "arm_counts": {"candidate": {"answered": 200, "empty": 0, "abstained": 9}, "...": "..."},
      "store_failures": {"reference_1": 0, "reference_2": 0, "candidate": 0},
      "loss_tags": {"none": 168, "candidate_higher": 4, "abstention": 9, "wording": 19}

@@ -500,6 +500,35 @@ class TestConcatenatedRun:
         manifest = [json.loads(line) for line in open(os.path.join(out, MANIFEST_FILE))]
         assert all(entry["unit_position"] is not None for entry in manifest)
 
+    def test_too_little_reuse_is_invalid_whatever_the_blend_share(
+        self, dataset, engines, tmp_path, monkeypatch, judge_client, capsys
+    ) -> None:
+        """All-blended counters pass the blend share but reuse 1 token a read."""
+        trickle = BlendCounters(requested_tokens=1.0, non_prefix_hit_tokens=1.0)
+        monkeypatch.setattr(
+            run_stage, "PrometheusBlendCounters", lambda url: SteppingCounters(trickle)
+        )
+        engines[CANDIDATE_URL] = FakeSender(answering(RIGHT))
+        out = str(tmp_path / "out")
+        run_both(
+            dataset, out,
+            "--scenario", "concatenated", "--min-unit-tokens", "64",
+            "--capture-blend-metrics", METRICS_URL,
+        )  # fmt: skip
+        with pytest.raises(SystemExit) as exc:
+            analyze(out)
+        assert exc.value.code == 1
+        assert "blend share (not gated): 1.000" in capsys.readouterr().out
+        result = summary(out)
+        assert result["verdict"] == "INVALID"
+        [reason] = result["invalid_reasons"]
+        assert reason.startswith("observed reuse ")
+        assert result["engagement"]["gate"] == "reuse"
+        assert result["settings"]["min_reuse_ratio"] == 0.8
+
+        analyze(out, "--min-reuse-ratio", "0")
+        assert summary(out)["verdict"] == "PASS"
+
     def test_without_counters_only_the_expectation_is_reported(
         self, dataset, engines, tmp_path, judge_client
     ) -> None:

@@ -1853,6 +1853,13 @@ position. The verdict is ``INVALID`` if the share is below
 ``--min-blend-share``, over the whole run or in any window of 10 consecutive
 questions (which catches a run that stopped blending partway).
 
+For ``--scenario concatenated``, part of the expected reuse can arrive as an
+exact prefix, so the blend share is reported but not gated. Instead, the
+tokens served from cache (prefix and blended) must reach
+``--min-reuse-ratio`` (default 0.8) of the plan's expected reuse, over the
+whole run and in every 10-question window. A candidate that fell back to
+recompute reuses nothing and fails this check.
+
 With ``--enable-segmented-prefix`` on the blend server, prefix chunks loaded
 past an L2 load failure are reused at their original positions. That is not
 blending, so those tokens lower the blend share; the summary reports them as
@@ -1870,7 +1877,9 @@ reference run, and SE is the standard error of the per-question differences.
      - Condition
    * - ``INVALID``
      - The runs cannot be compared: blend metrics were captured and the
-       blend share is below ``--min-blend-share``, an arm run had no
+       blend share is below ``--min-blend-share`` (for ``concatenated``,
+       observed reuse is below ``--min-reuse-ratio`` of expected), an arm
+       run had no
        successful request (for example an unreachable engine), a store
        request failed, or more than 5% of questions are unscored. The summary lists the reasons.
    * - ``PASS``
@@ -2150,7 +2159,13 @@ Quality analyze options
    * - ``--min-blend-share``
      - 0.3
      - When blend metrics were captured (``run --capture-blend-metrics``):
-       minimum blend share, overall and per 10-question window.
+       minimum blend share, overall and per 10-question window. Not applied
+       to ``concatenated``.
+   * - ``--min-reuse-ratio``
+     - 0.8
+     - ``concatenated`` with blend metrics captured: minimum observed
+       reused tokens (prefix and blended) over the plan's expected reuse,
+       overall and per 10-question window.
    * - ``--judge-url``
      - *(unset)*
      - OpenAI-compatible endpoint serving the judge model.
