@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 # Third Party
 import aiofiles
 import aiofiles.os
+import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -85,6 +86,23 @@ def _readinto_full(
             break
         total += n
     return total
+
+
+def _is_short_byte_buffer(obj: MemoryObj, num_read: int) -> bool:
+    """True if ``obj`` is a flat uint8 buffer (a serde's serialized bytes, sized
+    from an upper-bound estimate) and ``num_read`` is a plausible object length.
+
+    Variable-size serdes (e.g. ``fp8lin``) store fewer bytes than the estimate, so a
+    short read into such a buffer is a complete object, not a truncated one. KV-
+    shaped objects keep the strict full-size check.
+    """
+    shapes, dtypes = obj.get_shapes(), obj.get_dtypes()
+    return (
+        num_read > 0
+        and len(shapes) == 1
+        and len(shapes[0]) == 1
+        and dtypes[0] == torch.uint8
+    )
 
 
 async def _async_readinto_full(
@@ -764,7 +782,9 @@ class FSL2Adapter(L2AdapterInterface):
                         else:
                             num_read = n_head
 
-                    if num_read != expected:
+                    if num_read != expected and not _is_short_byte_buffer(
+                        objects[i], num_read
+                    ):
                         logger.warning(
                             "Incomplete read for %s: expected %d, got %d",
                             file_path.name,
@@ -772,6 +792,9 @@ class FSL2Adapter(L2AdapterInterface):
                             num_read,
                         )
                         continue
+                    if num_read != expected:
+                        # A variable-size serialized object: narrow the buffer
+                        objects[i].set_used_size(num_read)
 
                     bitmap.set(i)
                     logger.debug(

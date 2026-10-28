@@ -307,8 +307,15 @@ class RemoteBackend(StorageBackendInterface):
 
             compressed_memory_objs = []
             try:
-                for memory_obj in memory_objs:
-                    compressed_memory_objs.append(self.serializer.serialize(memory_obj))
+                batched_serialize = getattr(self.serializer, "batched_serialize", None)
+                if batched_serialize is not None:
+                    # GPU codecs (e.g. fp8lin) code many chunks in one pass
+                    compressed_memory_objs = batched_serialize(memory_objs)
+                else:
+                    for memory_obj in memory_objs:
+                        compressed_memory_objs.append(
+                            self.serializer.serialize(memory_obj)
+                        )
             finally:
                 # Always decrement reference counts for all objects,
                 # regardless of whether serialization succeeded or failed
@@ -488,14 +495,24 @@ class RemoteBackend(StorageBackendInterface):
             )
         decompressed_memory_objs: list[Optional[MemoryObj]] = []
         error_happened = False
-        for memory_obj in memory_objs:
-            if memory_obj is None:
-                error_happened = True
-                decompressed_memory_objs.append(None)
-            else:
-                decompressed_memory_objs.append(
-                    self.deserializer.deserialize(memory_obj)
-                )
+        batched_deserialize = getattr(self.deserializer, "batched_deserialize", None)
+        if batched_deserialize is not None:
+            # GPU codecs (e.g. fp8lin) decode many chunks in one pass
+            present = [m for m in memory_objs if m is not None]
+            decoded = iter(batched_deserialize(present) if present else [])
+            for memory_obj in memory_objs:
+                out = next(decoded) if memory_obj is not None else None
+                error_happened |= out is None
+                decompressed_memory_objs.append(out)
+        else:
+            for memory_obj in memory_objs:
+                if memory_obj is None:
+                    error_happened = True
+                    decompressed_memory_objs.append(None)
+                else:
+                    decompressed_memory_objs.append(
+                        self.deserializer.deserialize(memory_obj)
+                    )
         if error_happened:
             self._get_blocking_failed_count += 1
 

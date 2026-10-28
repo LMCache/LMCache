@@ -64,6 +64,11 @@ serde factory.
      - ``preset`` (default ``turboquant_k8v4``), ``head_dim`` (optional,
        default 128), ``block_size`` (default 16), ``max_workers`` (thread
        pool size, default 1)
+   * - ``fp8lin``
+     - Lossless predictive coding of FP8 KV on the GPU (1.7–1.9x smaller than
+       fp8; bf16 KV is rounded to fp8 first). See :doc:`fp8lin`.
+     - ``coder_path`` (required), ``chunk_size`` (default 256), ``device``
+       (default: current CUDA device)
    * - ``aesgcm``
      - AES-GCM authenticated encryption of KV bytes at rest in L2, keyed
        per ``cache_salt``.
@@ -209,6 +214,14 @@ Notes
   upper bound on the actual serialized output — include any safety
   margin directly in the estimate (e.g., the built-in fp8 serializer
   returns ``1.5 * num_elements``).
+- **Variable-size output.** ``serialize`` returns the bytes actually written;
+  the buffer is narrowed to them before the L2 store. The filesystem adapter
+  accepts a short read back into the serialized buffer, so the deserializer
+  must be able to find its own length (e.g., from a header), as ``fp8lin`` does.
+- **Batching.** A serializer may also implement
+  ``serialize_batch(srcs, dsts, keys) -> list[int]`` (and a deserializer
+  ``deserialize_batch(srcs, dsts, keys)``); the async processor then hands it a
+  whole task at once, which GPU codecs need for efficiency.
 - **Raw-byte output.** If your serde writes bytes directly (rather than
   through ``MemoryObj.tensor`` like the quantizers), reach the buffer via
   ``MemoryObj.byte_array`` and **cast it to the native format first**:
@@ -246,3 +259,4 @@ serde mechanism:
    :maxdepth: 1
 
    cachegen
+   fp8lin

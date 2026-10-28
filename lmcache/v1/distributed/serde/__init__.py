@@ -44,6 +44,12 @@ from lmcache.v1.distributed.serde.utils import (
     serialized_layout_desc,
 )
 
+try:  # fp8lin needs Triton; registers the "fp8lin" serde type when available
+    # First Party
+    from lmcache.v1.distributed.serde import fp8lin as _fp8lin  # noqa: F401
+except ImportError:  # pragma: no cover - CPU-only installs
+    pass
+
 __all__ = [
     "AesGcmDeserializer",
     "AesGcmSerializer",
