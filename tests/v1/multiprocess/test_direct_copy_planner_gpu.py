@@ -21,6 +21,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.utils import EngineType
 
 pytest.importorskip("cupy", reason="GPU cache context tests require cupy")
 pytest.importorskip("lmcache.cuda_ops", reason="Requires lmcache.cuda_ops")
@@ -91,6 +92,14 @@ _CASES = {
         256,
         6,
     ),
+    # SGLang unified MP registers each K/V component independently as one
+    # token-major [NB, BS, NH, HS] tensor.
+    "sglang_component": (
+        [96, 16, 8, 128],
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS,
+        256,
+        6,
+    ),
 }
 _NUM_LAYERS = 4
 
@@ -100,9 +109,12 @@ def _make_context(name: str) -> tuple[GPUCacheContext, list[torch.Tensor]]:
     tensors = [
         torch.rand(shape, dtype=_DTYPE, device=_DEVICE) for _ in range(_NUM_LAYERS)
     ]
+    is_sglang = name == "sglang_component"
     ctx = GPUCacheContext(
         [_FakeIPCWrapper(t) for t in tensors],  # type: ignore
         lmcache_tokens_per_chunk=chunk_tokens,
+        engine_type=EngineType.SGLANG if is_sglang else EngineType.VLLM,
+        layout_hints={"kv_list_layout": "unified"} if is_sglang else None,
     )
     assert ctx.get_engine_kv_format(0) == expected_fmt
     return ctx, tensors

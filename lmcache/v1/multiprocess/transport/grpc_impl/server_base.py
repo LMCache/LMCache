@@ -89,8 +89,10 @@ class GrpcMultiprocessServerBase(RequestServer):
         if self._closed.is_set():
             return
         self._closed.set()
-        self._stop_server()
-        self._release_threads(wait=False)
+        try:
+            self._stop_server()
+        finally:
+            self._release_threads(wait=False)
 
     def _bind(self, server: Any) -> None:
         self._bound_port = server.add_insecure_port(parse_grpc_target(self._bind_url))

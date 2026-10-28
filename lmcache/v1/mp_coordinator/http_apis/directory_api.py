@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 # First Party
 from lmcache.v1.distributed.api import Tier
-from lmcache.v1.mp_coordinator.api import BlendNamespace
+from lmcache.v1.mp_coordinator.api import BlendMatch, BlendNamespace
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
 from lmcache.v1.mp_coordinator.schemas import (
     BlendLookupRequest,
@@ -81,6 +81,20 @@ async def lookup_placements(
         obj_keys = directory.get_keys_across_object_groups(obj_keys)
         encoded_keys = [key.to_encoded_object_key() for key in obj_keys]
     placements = directory.lookup(obj_keys)
+    keys_with_placements = [
+        key
+        for key, key_placements in zip(obj_keys, placements, strict=True)
+        if key_placements
+    ]
+    # By tokens, a chunk counts once across its ranks and object groups.
+    chunks_found = (
+        len(keys_with_placements)
+        if body.keys
+        else len({key.chunk_hash for key in keys_with_placements})
+    )
+    directory.record_lookup(
+        "prefix", chunks_requested=chunks, chunks_found=chunks_found
+    )
     token_ids = directory.get_token_ids([key.chunk_hash for key in obj_keys])
     access_counts = directory.get_access_counts(obj_keys)
     return DirectoryLookupResponse(
@@ -119,7 +133,8 @@ async def blend_lookup(
     Returns:
         Matched chunks, ascending by query position.
     """
-    directory = get_context(request).views.get(KeyDirectory)
+    ctx = get_context(request)
+    directory = ctx.views.get(KeyDirectory)
     tokens = decode_tokens(body.tokens_b64)
     namespace = BlendNamespace(
         model_name=body.model_name,
@@ -127,8 +142,16 @@ async def blend_lookup(
         world_size=body.world_size,
     )
 
+    chunk_size = ctx.token_hasher.chunk_size
+
     def _match() -> BlendLookupResponse:
-        """Run the fragment match and shape it for the wire."""
+        """Run the fragment match, count it, and shape it for the wire."""
+        matches = directory.blend_match(tokens, namespace)
+        directory.record_lookup(
+            "non_prefix",
+            chunks_requested=len(tokens) // chunk_size,
+            chunks_found=_covered_chunks(matches, chunk_size),
+        )
         return BlendLookupResponse(
             matches=[
                 BlendMatchModel(
@@ -136,7 +159,7 @@ async def blend_lookup(
                     old_st=match.old_st,
                     cur_st=match.cur_st,
                 )
-                for match in directory.blend_match(tokens, namespace)
+                for match in matches
             ]
         )
 
@@ -210,3 +233,29 @@ async def directory_stats(request: Request) -> DirectoryStats:
         exposed yet.
     """
     return get_context(request).views.get(KeyDirectory).stats()
+
+
+def _covered_chunks(matches: list[BlendMatch], chunk_size: int) -> int:
+    """Return how many chunks' worth of the query the matches cover.
+
+    Matches can overlap in the query (two stored chunks sharing tokens), so
+    their count can exceed the chunks the query holds; the tokens they
+    cover together, overlaps counted once, cannot.
+
+    Args:
+        matches: Matches in ascending ``cur_st`` order, each covering
+            ``chunk_size`` query tokens from ``cur_st``.
+        chunk_size: Tokens per chunk.
+
+    Returns:
+        Covered query tokens divided by ``chunk_size``, rounded down.
+    """
+    covered_tokens = 0
+    covered_until = 0
+    for match in matches:
+        start = max(match.cur_st, covered_until)
+        end = match.cur_st + chunk_size
+        if end > start:
+            covered_tokens += end - start
+            covered_until = end
+    return covered_tokens // chunk_size

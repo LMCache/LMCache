@@ -395,7 +395,7 @@ jobs:
           release_notes: |
             Nightly ROCm 7.2 wheels built from `dev` on {{date}},
             for AMD Instinct gfx942 (MI300X/MI325X) and gfx950 (MI350X/MI355X),
-            ABI-matched to the upstream `vllm/vllm-openai-rocm` image (torch 2.11, cp312).
+            ABI-matched to the upstream `vllm/vllm-openai-rocm` image (torch 2.13, cp312).
 
             Install into an upstream vLLM ROCm container:
             ```

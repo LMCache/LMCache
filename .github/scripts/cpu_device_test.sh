@@ -13,7 +13,7 @@
 #   LMCACHE_E2E_TRANSPORT_MODE   engine_driven|lmcache_driven|shm|inline
 #                                (default: engine_driven)
 #   LMCACHE_E2E_DATA_MODE        shm|inline (default: shm)
-#   LMCACHE_REQUEST_TRANSPORT    zmq|grpc (default: zmq)
+#   LMCACHE_REQUEST_TRANSPORT    zmq|grpc|grpc-native (default: zmq)
 #   LMCACHE_HTTP_PORT_BENCH      HTTP port for bench (default: 18080)
 #   LMCACHE_REQUEST_PORT_BENCH   request port for bench (default: 15555)
 #   LMCACHE_HTTP_PORT_E2E        HTTP port for e2e (default: 18081)
@@ -50,10 +50,10 @@ case "${BENCH_TRANSFER_MODE}" in
 esac
 
 case "${REQUEST_TRANSPORT}" in
-  zmq|grpc) ;;
+  zmq|grpc|grpc-native) ;;
   *)
     echo "!! Unknown LMCACHE_REQUEST_TRANSPORT='${REQUEST_TRANSPORT}'"
-    echo "   Valid values: zmq, grpc"
+    echo "   Valid values: zmq, grpc, grpc-native"
     exit 1
     ;;
 esac

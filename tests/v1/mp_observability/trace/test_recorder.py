@@ -8,6 +8,7 @@ without requiring a real ``StorageManager`` or any GPU code.
 
 # Standard
 from dataclasses import dataclass
+from pathlib import Path
 import os
 import time
 
@@ -66,6 +67,26 @@ def _flush(bus: EventBus) -> None:
     time.sleep(0.25)
     # Force a final drain in case the wake event was missed.
     bus._drain_all()
+
+
+@pytest.mark.parametrize("level", ["storage", "events"])
+def test_unsupported_file_format_rejected(tmp_path: Path, level: str) -> None:
+    """Every trace level rejects incompatible shared framing versions."""
+    header = Header(
+        magic=MAGIC,
+        format_version=FORMAT_VERSION + 1,
+        level=level,
+        trace_schema_version=TRACE_SCHEMA_VERSION,
+        t_mono_start=0.0,
+        t_wall_start=0.0,
+        sm_config_json="",
+        sm_config_digest="",
+    )
+    frame = encode_header(header)
+    path = tmp_path / "future-format.lct"
+    path.write_bytes(len(frame).to_bytes(4, "big") + frame)
+    with pytest.raises(ValueError, match="unsupported format_version"):
+        TraceReader(str(path))
 
 
 class TestHeader:
@@ -232,14 +253,16 @@ class TestReaderRobustness:
         with pytest.raises(ValueError, match="bad magic"):
             TraceReader(trace_path)
 
-    def test_older_trace_schema_rejected(self, trace_path):
-        """A trace recorded under schema 1 (whose prefetch calls carry
-        ``skip_l2``) is refused with a clear version error."""
+    @pytest.mark.parametrize("schema", [1, TRACE_SCHEMA_VERSION + 1])
+    def test_unsupported_storage_schema_rejected(
+        self, trace_path: str, schema: int
+    ) -> None:
+        """Old and future storage call schemas are refused before replay."""
         old = Header(
             magic=MAGIC,
             format_version=FORMAT_VERSION,
             level="storage",
-            trace_schema_version=1,
+            trace_schema_version=schema,
             t_mono_start=0.0,
             t_wall_start=0.0,
             sm_config_json="",
@@ -248,7 +271,9 @@ class TestReaderRobustness:
         frame = encode_header(old)
         with open(trace_path, "wb") as fh:
             fh.write(len(frame).to_bytes(4, "big") + frame)
-        with pytest.raises(ValueError, match="unsupported trace_schema_version 1"):
+        with pytest.raises(
+            ValueError, match=f"unsupported trace_schema_version {schema}"
+        ):
             TraceReader(trace_path)
 
 

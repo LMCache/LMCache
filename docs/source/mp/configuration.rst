@@ -112,9 +112,15 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - gRPC request-dispatch threads. Used only with ``--transport grpc``.
    * - ``--grpc-server-mode``
      - ``sync``
-     - gRPC server implementation: ``sync`` or ``aio``. ``aio`` receives
-       requests on one event loop and hands only the handlers to worker
-       threads. Used only with ``--transport grpc``.
+     - gRPC server implementation: ``sync``, ``aio`` or ``native``.
+       ``aio`` receives requests on one event loop and hands only the
+       handlers to worker threads. ``native`` does the HTTP/2 and gRPC
+       framing in Rust, outside the GIL; it needs the ``pygrpc-native``
+       package (``pip install "lmcache[grpc-native]"``), which the
+       ``lmcache/vllm-openai`` and ``lmcache/standalone`` images include.
+       All three serve the same clients over TCP.
+       In ``native`` mode the grpcio runtime metrics only cover
+       out-of-tree services. Used only with ``--transport grpc``.
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.
