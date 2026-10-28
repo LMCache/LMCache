@@ -478,7 +478,7 @@ def test_auto_npu_context_routes_to_lmcache_driven(
     monkeypatch.setattr(
         worker_transfer,
         "resolve_kv_wrapper_factory",
-        lambda _dt: (lambda tensor: tensor),
+        lambda _dt: lambda tensor: tensor,
     )
 
     context = worker_transfer.create_transfer_context(
@@ -1676,6 +1676,37 @@ def test_register_multigroup_sizes_object_group_count(
     group_descs = ctx.layout_desc_registry.find_group_layout_descs("m", 1)
     assert group_descs is not None
     assert set(group_descs) == {0, 1}
+
+
+@pytest.mark.parametrize("physical_slots", [None, 2, 64])
+def test_register_group_physical_slots(
+    server_module_factory: ServerModuleFactory, physical_slots: int | None
+) -> None:
+    """Group object sizes use physical slots without changing logical windows."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import GroupLayout
+
+    module, _, _, ctx = server_module_factory(chunk_size=512)
+    payload = _default_register_payload(instance_id=1)
+    payload.group_layouts = [
+        GroupLayout(
+            num_layers=1,
+            hidden_dim_size=16,
+            dtype_str="uint8",
+            tokens_per_block=256,
+            window_tokens=256,
+            kv_size=1,
+            window_chunks=1,
+            num_physical_slots=physical_slots,
+        )
+    ]
+    module.register_kv_cache_engine_driven_context(payload)
+    layouts = ctx.layout_desc_registry.find_group_layout_descs("m", 1)
+    assert layouts is not None
+    assert layouts[0].shapes == [
+        torch.Size([1, 256 if physical_slots is None else physical_slots, 16])
+    ]
+    assert layouts[0].dtypes == [torch.uint8]
 
 
 def _group_obj_key(group: int, chunk: int) -> Any:

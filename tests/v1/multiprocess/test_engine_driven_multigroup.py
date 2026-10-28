@@ -20,7 +20,9 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.multiprocess.custom_types import (
     GroupLayout,
     IPCCacheServerKey,
+    PrepareRetrieveResponse,
     RegisterEngineDrivenContextPayload,
+    RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.server_transfer import (
@@ -745,24 +747,123 @@ def test_register_payload_carries_per_group_kv_size() -> None:
     assert [len(s.layout_desc.shapes[0]) for s in ctx._group_states] == [4, 3]
 
 
-def test_register_rejects_compressed_group() -> None:
-    """A group whose block covers more tokens than it has slots (compressed
-    paging, e.g. DeepSeek V4 indexer pages) must fail at registration: its
-    layout would be sized in tokens while gather produces fewer slots, so
-    registration would succeed and every store would then fail."""
-    kv = {f"layer_{i}": torch.zeros(2, 4, 4, 2, 8) for i in range(2)}
-    slots = _detected_block_size(kv)
-
-    with pytest.raises(NotImplementedError, match="compressed"):
-        _register_capturing_payload(
-            kv,
-            [
-                EngineGroupInfo(engine_group_id=0, layer_indices=(0,)),
-                EngineGroupInfo(
-                    engine_group_id=1, layer_indices=(1,), tokens_per_block=4 * slots
-                ),
-            ],
+@pytest.mark.parametrize("device", sorted({"cpu", torch_device_type}))
+@pytest.mark.parametrize("mixed_groups", [False, True])
+@pytest.mark.parametrize("skip_tokens", [0, 768])
+def test_compressed_groups_roundtrip(
+    device: str, mixed_groups: bool, skip_tokens: int
+) -> None:
+    """Compressed, padded pages retain their bytes and logical skip boundaries."""
+    chunk_tokens = 512
+    # (logical tokens/block, physical slots/block, dtype, sliding window)
+    geometry = [(256, 2, torch.float32, -1)]
+    if mixed_groups:
+        geometry += [
+            (256, 64, torch.uint8, -1),
+            (64, 64, torch.uint8, 256),
+            (256, 2, torch.float32, 256),
+        ]
+    source: dict[str, torch.Tensor] = {}
+    destination: dict[str, torch.Tensor] = {}
+    destination_pools: list[torch.Tensor] = []
+    infos: list[EngineGroupInfo] = []
+    store_ids: list[list[int]] = []
+    retrieve_ids: list[list[int]] = []
+    expected_layouts: list[tuple[torch.Size, torch.dtype, int]] = []
+    for gid, (tokens, slots, dtype, window) in enumerate(geometry):
+        count = 3 * chunk_tokens // tokens
+        width = slots * 16
+        pool = (
+            (torch.arange((2 * count + 2) * (width + 32)) % 251)
+            .to(device=device, dtype=dtype)
+            .reshape(2 * count + 2, width + 32)
         )
+        target = torch.full_like(pool, 255)
+        name = f"layer_{gid}"
+        source[name] = pool[:, :width].view(-1, slots, 16)
+        destination[name] = target[:, :width].view(-1, slots, 16)
+        destination_pools.append(target)
+        infos.append(
+            EngineGroupInfo(gid, (gid,), tokens_per_block=tokens, sw_size_tokens=window)
+        )
+        store_ids.append(list(range(1, count + 1)))
+        retrieve_ids.append(list(range(count + 1, 2 * count + 1)))
+        window_tokens = chunk_tokens if window < 0 else min(chunk_tokens, window)
+        expected_layouts.append(
+            (torch.Size([1, window_tokens * slots // tokens, 16]), dtype, 3)
+        )
+
+    client = MagicMock()
+    client.register_kv_cache_engine_driven_context.return_value.result.return_value = (
+        RegisterEngineDrivenContextResponse("", 0)
+    )
+    client.commit_store.return_value.result.return_value = True
+    ctx = EngineDrivenTransferContext(1, client)
+    ctx.register(
+        source,
+        "compressed",
+        1,
+        2,
+        1.0,
+        engine_group_infos=infos,
+        lmcache_chunk_tokens=chunk_tokens,
+    )
+    try:
+        payload = client.register_kv_cache_engine_driven_context.call_args.args[0]
+        assert [g.num_physical_slots for g in payload.group_layouts] == [
+            shape[-2] for shape, _, _ in expected_layouts
+        ]
+        key = IPCCacheServerKey.from_token_ids(
+            "compressed", 1, 0, [1] * 1536, start=0, end=1536, request_id="compressed"
+        )
+        assert ctx.submit_store("compressed", key, source, store_ids, None, 2).result()
+        stored = decode_grouped_tensors(
+            client.commit_store.call_args.args[2], expected=expected_layouts
+        )
+        retrieved = []
+        for gid, (indices, chunks) in enumerate(stored):
+            tokens, slots, _, window = geometry[gid]
+            blocks_per_chunk = chunk_tokens // tokens
+            keep = (
+                blocks_per_chunk if window < 0 else min(window, chunk_tokens) // tokens
+            )
+            for index, chunk in zip(indices, chunks, strict=True):
+                ids = store_ids[gid][
+                    (index + 1) * blocks_per_chunk - keep : (index + 1)
+                    * blocks_per_chunk
+                ]
+                expected = (
+                    source[f"layer_{gid}"][ids].reshape(1, keep * slots, 16).cpu()
+                )
+                assert torch.equal(chunk, expected)
+            first = 0 if window < 0 else 3 - (window + chunk_tokens - 1) // chunk_tokens
+            retrieved.append((indices[first:], chunks[first:]))
+        client.prepare_retrieve.return_value.result.return_value = (
+            PrepareRetrieveResponse(
+                success=True, data=encode_grouped_tensors(retrieved), context={}
+            )
+        )
+        assert ctx.submit_retrieve(
+            "compressed",
+            key,
+            destination,
+            retrieve_ids,
+            None,
+            2,
+            skip_first_n_tokens=skip_tokens,
+        ).result()
+        for gid, (tokens, _, _, window) in enumerate(geometry):
+            expected = torch.full_like(destination[f"layer_{gid}"], 255)
+            first_token = max(skip_tokens, 0 if window < 0 else 1536 - window)
+            for pos, (src, dst) in enumerate(
+                zip(store_ids[gid], retrieve_ids[gid], strict=True)
+            ):
+                if pos * tokens >= first_token:
+                    expected[dst] = source[f"layer_{gid}"][src]
+            assert torch.equal(destination[f"layer_{gid}"], expected)
+            assert torch.all(destination_pools[gid][:, -32:] == 255)
+    finally:
+        ctx.close()
 
 
 @pytest.mark.parametrize(

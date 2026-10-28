@@ -871,19 +871,17 @@ class EngineDrivenTransferContext(TransferContext):
         ``engine_type`` selects the KV layout normalization used during
         registration and subsequent gather/scatter operations.
 
-        With multiple ``engine_group_infos`` (hybrid-KV models), the layers
+        With multiple ``engine_group_infos`` or a single compressed group, the layers
         are partitioned by :class:`KVLayerGroupsManager` and each group is
         described by its own :class:`GroupLayout` and gathered/scattered with
         that group's block-id list (uniform coverage: every group stores and
         retrieves every chunk; sliding-window groups keep only the trailing
         window of each chunk). Works over both transports: SHM gathers into
         server-reserved slots, inline sends a typed group-major envelope.
-        Single-group registration keeps the legacy path (see
-        ``_single_group_block_ids``).
+        Uncompressed single-group registration keeps the legacy path (see
+        ``_single_group_block_ids``). Compressed groups size their buffers in
+        physical slots while block counts and windows remain in logical tokens.
         """
-        # TODO: per-group compression (tokens_per_block > the detected slot
-        # count, e.g. DeepSeek V4 indexer pages) is validated by the manager
-        # but not yet threaded through gather/scatter buffer sizing.
         (
             block_size,
             num_layers,
@@ -906,7 +904,9 @@ class EngineDrivenTransferContext(TransferContext):
 
         group_layouts: list[GroupLayout] = []
         group_states: list[_GroupState] = []
-        if len(engine_group_infos) > 1:
+        if len(engine_group_infos) > 1 or (
+            engine_group_infos and engine_group_infos[0].tokens_per_block > block_size
+        ):
             # One LMCache chunk must cover a whole number of blocks of EVERY
             # group. Prefer the chunk size the adapter knows: blocks_in_chunk
             # is counted in the engine's global block size, and a pipeline
@@ -945,17 +945,6 @@ class EngineDrivenTransferContext(TransferContext):
             for gid in range(manager.num_kernel_groups):
                 kernel_group = manager.kernel_groups[gid]
                 assert kernel_group.engine_kv_format is not None
-                # Compressed groups (see the TODO above) would register a
-                # layout sized in tokens while gather produces fewer slots, so
-                # every store would fail on a shape mismatch. Refuse them here.
-                group_tokens = kernel_group.tokens_per_block
-                group_slots = kernel_group.slots_per_block
-                if group_tokens > group_slots:
-                    raise NotImplementedError(
-                        f"KV group {gid} is compressed ({group_tokens} tokens per "
-                        f"block over {group_slots} slots); engine-driven transfer "
-                        "does not support compressed groups yet"
-                    )
                 tokens_per_block = (
                     kernel_group.tokens_per_block or kernel_group.slots_per_block
                 )
@@ -963,6 +952,7 @@ class EngineDrivenTransferContext(TransferContext):
                 # chunk; for full attention the window is the whole chunk and
                 # everything below collapses to full-coverage behaviour.
                 window_tokens = manager.get_subchunk_sw_size_tokens(gid)
+                window_slots = kernel_group.calculate_slots(window_tokens)
                 # Trailing chunks this group needs for a hit; the server sizes
                 # lookup/prefetch and the retrieve by it (-1 = full prefix).
                 window_chunks = manager.get_kernel_group_window_chunks(gid)
@@ -971,7 +961,7 @@ class EngineDrivenTransferContext(TransferContext):
                     torch.Size(
                         [
                             kernel_group.num_layers,
-                            window_tokens,
+                            window_slots,
                             kernel_group.hidden_dim_size,
                         ]
                     )
@@ -980,7 +970,7 @@ class EngineDrivenTransferContext(TransferContext):
                         [
                             2,
                             kernel_group.num_layers,
-                            window_tokens,
+                            window_slots,
                             kernel_group.hidden_dim_size,
                         ]
                     )
@@ -995,6 +985,7 @@ class EngineDrivenTransferContext(TransferContext):
                         kv_size=kernel_group.shape_desc.kv_size,
                         window_chunks=max(window_chunks, 0),
                         recurrent=kernel_group.recurrent_state,
+                        num_physical_slots=window_slots,
                     )
                 )
                 group_states.append(
@@ -1014,7 +1005,7 @@ class EngineDrivenTransferContext(TransferContext):
             # Group 0's layout doubles as the legacy top-level layout so
             # single-group readers of the payload keep working.
             layout_desc = group_states[0].layout_desc
-            num_physical_slots = chunk_tokens
+            num_physical_slots = layout_desc.shapes[0][-2]
         else:
             shape = (
                 torch.Size([num_layers, blocks_in_chunk * block_size, hidden_dim_size])
@@ -1450,6 +1441,7 @@ class EngineDrivenTransferContext(TransferContext):
             engine_kv_format=state.engine_kv_format,
             blocks_per_window=state.blocks_per_window,
             engine_type=self._engine_type,
+            tokens_per_block=self._chunk_tokens // state.blocks_in_chunk,
         )
 
     def _submit_retrieve_multigroup_inline(
