@@ -173,9 +173,10 @@ def _make_controller(
     return controller, ctx
 
 
-def test_lookup_and_lock_submits_skip_l2_and_returns_task_id():
-    """p2p_lookup_and_lock submits a "full" (gap-tolerant) skip_l2 prefetch
-    with all keys in one object-group row, and returns a fresh id."""
+def test_lookup_and_lock_submits_l1_only_and_returns_task_id():
+    """p2p_lookup_and_lock submits a "full" (gap-tolerant) prefetch that
+    allows only the local DRAM L1 and no L2 adapter, with all keys in one
+    object-group row, and returns a fresh id."""
     controller, ctx = _make_controller()
     handle = MagicMock(total_requested_keys=2)
     ctx.storage_manager.submit_prefetch_task.return_value = handle
@@ -193,7 +194,10 @@ def test_lookup_and_lock_submits_skip_l2_and_returns_task_id():
     assert [row.keys for row in spec.key_groups] == [keys]
     assert [row.object_group_id for row in spec.key_groups] == [0]
     assert spec.key_groups[0].layout_desc is layout
-    assert kwargs["skip_l2"] is True
+    assert spec.allowed_l1_memory_tags == frozenset(
+        {MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)}
+    )
+    assert spec.allowed_l2_memory_tags == frozenset()
     assert kwargs["l1_manager_id"] == 7
     assert spec.fetching_policy == "full"
     # A second call gets a distinct id.

@@ -400,11 +400,12 @@ def test_selected_l1_lookup_uses_exact_manager(
         ]
         _store(first, keys[0], 12)
         _store(second, keys[1], 24)
-        spec = single_row_spec(keys, _LAYOUT, fetching_policy="full")
+        spec = single_row_spec(
+            keys, _LAYOUT, fetching_policy="full", allowed_l2_memory_tags=frozenset()
+        )
         for manager in managers:
             handle = storage.submit_prefetch_task(
                 spec,
-                skip_l2=True,
                 l1_manager_id=manager.l1_manager_id,
             )
             result = storage.query_prefetch_status(handle)
@@ -413,14 +414,30 @@ def test_selected_l1_lookup_uses_exact_manager(
             assert len(hit_keys) == 1
             assert result.l1_owners == {hit_keys[0]: manager.l1_manager_id}
             storage.finish_read_prefetched(hit_keys, l1_owners=result.l1_owners)
-        handle = storage.submit_prefetch_task(spec, skip_l2=True)
+        handle = storage.submit_prefetch_task(spec)
         result = storage.query_prefetch_status(handle)
         assert result is not None and result.hit_cells[0].popcount() == 2
         storage.finish_read_prefetched(keys, l1_owners=result.l1_owners)
-        with pytest.raises(ValueError, match="requires skip_l2"):
-            storage.submit_prefetch_task(spec, l1_manager_id=first.l1_manager_id)
+        filtered_handle = storage.submit_prefetch_task(
+            single_row_spec(
+                keys,
+                _LAYOUT,
+                fetching_policy="full",
+                allowed_l1_memory_tags=frozenset({_GDS}),
+                allowed_l2_memory_tags=frozenset(),
+            ),
+            l1_manager_id=first.l1_manager_id,
+        )
+        filtered_result = storage.query_prefetch_status(filtered_handle)
+        assert filtered_result is not None
+        assert filtered_result.hit_cells[0].popcount() == 0
+        assert filtered_result.l1_owners == {}
+        with pytest.raises(ValueError, match="requires empty allowed_l2_memory_tags"):
+            storage.submit_prefetch_task(
+                single_row_spec(keys, _LAYOUT), l1_manager_id=first.l1_manager_id
+            )
         with pytest.raises(ValueError, match="Unknown L1 manager"):
-            storage.submit_prefetch_task(spec, skip_l2=True, l1_manager_id=-1)
+            storage.submit_prefetch_task(spec, l1_manager_id=-1)
         assert all(m.report_status()["read_locked_count"] == 0 for m in managers)
         monkeypatch.setattr(first, "memory_region_count", lambda: 2)
         assert storage.get_l1_manager_by_memory_tags(_DRAM) is first

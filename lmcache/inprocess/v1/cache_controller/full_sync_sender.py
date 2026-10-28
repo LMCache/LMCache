@@ -20,9 +20,9 @@ from lmcache.logging import init_logger
 if TYPE_CHECKING:
     # First Party
     from lmcache.inprocess.v1.cache_controller.worker import LMCacheWorker
-    from lmcache.v1.cache_engine import LMCacheEngine
+    from lmcache.inprocess.v1.cache_engine import LMCacheEngine
+    from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
     from lmcache.v1.config import LMCacheEngineConfig
-    from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
 

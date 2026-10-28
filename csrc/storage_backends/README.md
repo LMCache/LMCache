@@ -202,7 +202,7 @@ Inherit from `ConnectorClientBase` which provides asyncio event loop
 integration, future management, and both sync and async methods.
 
 ```python
-# lmcache/v1/storage_backend/native_clients/mybackend_client.py
+# lmcache/inprocess/v1/storage_backend/native_clients/mybackend_client.py
 from .connector_client_base import ConnectorClientBase
 from lmcache.lmcache_mybackend import LMCacheMyBackendClient
 
@@ -215,7 +215,7 @@ class MyBackendClient(ConnectorClientBase[LMCacheMyBackendClient]):
 This gives you `async get/set/exists`, `batch_get/batch_set/batch_exists`,
 and sync variants, all with automatic eventfd-driven completion handling.
 
-**Reference:** `lmcache/v1/storage_backend/native_clients/resp_client.py`
+**Reference:** `lmcache/inprocess/v1/storage_backend/native_clients/resp_client.py`
 
 ### Step 5: MP mode integration — L2 adapter config + factory
 

@@ -15,12 +15,12 @@ storage backend.
 
 ## Components
 
-`lmcache/v1/storage_backend/dax/core.py` defines `DaxCore[KeyT]`. The core owns
+`lmcache/v1/distributed/l2_adapters/dax/core.py` defines `DaxCore[KeyT]`. The core owns
 the mapped DAX arena, fixed-size slot allocation, in-memory index, LRU order,
 in-flight writes, external lock refcounts, active read borrow counts, close
 coordination, and direct `ctypes.memmove` copies.
 
-`lmcache/v1/storage_backend/plugins/dax_backend.py` is the non-MP wrapper. It
+`lmcache/inprocess/v1/storage_backend/plugins/dax_backend.py` is the non-MP wrapper. It
 keeps existing non-MP behavior such as the local CPU backend requirement, TP=1
 validation, optional async put, and the staging-slab batched restore path.
 

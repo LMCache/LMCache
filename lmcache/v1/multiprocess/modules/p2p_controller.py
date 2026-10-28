@@ -330,9 +330,15 @@ class P2PController(DiscoverableModule):
         if key_groups and manager is not None:
             # Only the registered DRAM region can be addressed by the peer.
             handle = self._ctx.storage_manager.submit_prefetch_task(
-                PrefetchTaskSpec(key_groups=key_groups, fetching_policy="full"),
+                PrefetchTaskSpec(
+                    key_groups=key_groups,
+                    fetching_policy="full",
+                    allowed_l1_memory_tags=frozenset(
+                        {MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)}
+                    ),
+                    allowed_l2_memory_tags=frozenset(),
+                ),
                 external_request_id=f"p2p-{task_id}",
-                skip_l2=True,
                 l1_manager_id=manager.l1_manager_id,
             )
         else:

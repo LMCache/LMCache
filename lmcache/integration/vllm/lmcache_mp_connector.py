@@ -266,6 +266,27 @@ def get_group_tokens_per_block(
     ] or [vllm_config.cache_config.block_size * dcp_size]
 
 
+def get_prefix_replay_tokens(kv_cache_config: "KVCacheConfig | None") -> int:
+    """Return vLLM's prefix-replay window, or 0 when no group declares one.
+
+    Sliding-window bounded replay (DeepSeek V4.1) makes the scheduler floor a
+    connector's external hit to the scheduler block boundary before it
+    allocates, so the connector must hand back block-aligned counts.
+    """
+    groups = (
+        getattr(kv_cache_config, "kv_cache_groups", ()) or ()
+        if kv_cache_config is not None
+        else ()
+    )
+    return max(
+        (
+            int(getattr(group.kv_cache_spec, "prefix_replay_tokens", 0) or 0)
+            for group in groups
+        ),
+        default=0,
+    )
+
+
 def get_vllm_scheduler_block_size(
     vllm_config: VllmConfig,
     kv_cache_config: "KVCacheConfig | None",
@@ -597,6 +618,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         group_tokens_per_block = get_group_tokens_per_block(
             vllm_config, kv_cache_config
         )
+        self._prefix_replay_tokens = get_prefix_replay_tokens(kv_cache_config)
         mamba_cache_mode = getattr(vllm_config.cache_config, "mamba_cache_mode", "none")
         self._reserve_last_token_for_lookup = mamba_cache_mode in ("align", "all")
         scheduler_block_size = get_vllm_scheduler_block_size(
@@ -1350,7 +1372,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.lookup_started_at = time.monotonic()
         submitted = self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
-            token_ids=tracker.get_token_ids(),
+            packed_token_ids=tracker.packed_token_ids(),
             cache_salt=tracker.cache_salt,
             # vLLM's prefix-cache hit, for the server's KV load policy.
             request_configs={
@@ -1408,7 +1430,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.num_lmcache_hit_tokens = 0
             if self.scheduler_adapter.maybe_submit_lookup_request(
                 request.request_id,
-                token_ids=tracker.get_token_ids(),
+                packed_token_ids=tracker.packed_token_ids(),
                 cache_salt=tracker.cache_salt,
                 request_configs={
                     **(tracker.request_configs or {}),
@@ -1443,7 +1465,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # causing num_new_tokens to be 0 and triggering the
         # `assert num_new_tokens > 0` in the scheduler.
         if ret == len(request.all_token_ids):
-            need_to_load = max(0, need_to_load - 1)
+            if self._prefix_replay_tokens > 0:
+                # SWA bounded replay floors the hit to a block boundary before
+                # allocating, so give back a whole chunk instead of one token.
+                chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
+                aligned = max(0, (ret - 1) // chunk * chunk)
+                if aligned < ret:
+                    tracker.pending_free_ranges.append((aligned, ret))
+                    tracker.num_lmcache_hit_tokens = aligned
+                need_to_load = max(0, aligned - num_computed_tokens)
+            else:
+                need_to_load = max(0, need_to_load - 1)
 
         logger.debug(
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
@@ -1466,7 +1498,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.lookup_started_at = time.monotonic()
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
-            token_ids=tracker.get_token_ids(),
+            packed_token_ids=tracker.packed_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
             reserve_last_token=self._reserve_last_token_for_lookup,
@@ -1551,7 +1583,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             if free_end > 0 or tracker.pending_free_ranges:
                 self.scheduler_adapter.free_lookup_locks(
-                    token_ids=tracker.get_token_ids(),
+                    packed_token_ids=tracker.packed_token_ids(),
                     start=0,
                     end=free_end,
                     request_id=request.request_id,

@@ -40,7 +40,7 @@ rather than double-counting.
 ## The contract
 
 A `DurableComponent`
-([`durable.py`](../../../../../lmcache/v1/mp_coordinator/persistence/durable.py))
+([`durable_component.py`](../../../../../lmcache/v1/mp_coordinator/persistence/durable_component.py))
 owns one section end to end:
 
 | Member | Meaning |
@@ -168,7 +168,16 @@ section by section is the escape hatch if that ever bites.
 
 **Every failure is survivable.** A missing, corrupt, or future-version
 artifact logs and leaves the coordinator cold rather than refusing to
-boot; one unreadable section does not cost the others; a failed write is
-logged and retried on the next tick. A checkpoint is an optimization, and
-a coordinator that dies because it could not write one is strictly worse
-than one that keeps serving.
+boot; one unreadable section does not cost the others; a failed checkpoint
+write is logged and retried on the next tick. A checkpoint is an
+optimization, and a coordinator that dies because it could not write one is
+strictly worse than one that keeps serving.
+
+**A failed metadata write is not hidden.** The metadata document is written
+by the request that changed a pin or a quota, so `MetadataPersister.save`
+raises `MetadataWriteError` instead of logging and moving on. The endpoint
+puts the component back as it was before the change (`restore` of a
+`capture` taken first) and answers 503: a `200` would promise a change that
+the next restart loses. A forced `/cache/delete` is the one change that
+cannot be undone, since the server already deleted the keys; it keeps the
+pins it would have dropped and says so in its 503.

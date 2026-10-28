@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     import torch
 
     # First Party
-    from lmcache.v1.cache_engine import LMCacheEngine
+    from lmcache.inprocess.v1.cache_engine import LMCacheEngine
     from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)

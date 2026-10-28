@@ -141,13 +141,13 @@ The ``ConnectorAdapter`` class is responsible for:
 
 .. code-block:: python
 
-    from lmcache.v1.storage_backend.connector import (
+    from lmcache.inprocess.v1.storage_backend.connector import (
         ConnectorAdapter,
         ConnectorContext,
     )
-    from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
+    from lmcache.inprocess.v1.storage_backend.connector.base_connector import RemoteConnector
 
-    from lmcache.v1.storage_backend.connector import extract_plugin_type
+    from lmcache.inprocess.v1.storage_backend.connector import extract_plugin_type
 
     PLUGIN_TYPE = "mystore"
 
@@ -193,7 +193,7 @@ The ``RemoteConnector`` class defines the interface for remote storage operation
     from lmcache.v1.config import LMCacheEngineConfig
     from lmcache.v1.metadata import LMCacheMetadata
     from lmcache.v1.memory_management import MemoryObj
-    from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
+    from lmcache.inprocess.v1.storage_backend.connector.base_connector import RemoteConnector
 
     class MyStoreConnector(RemoteConnector):
         """Custom connector for MyStore remote storage."""
@@ -255,12 +255,12 @@ The adapter module (``adapter.py``):
 
 .. code-block:: python
 
-    from lmcache.v1.storage_backend.connector import (
+    from lmcache.inprocess.v1.storage_backend.connector import (
         ConnectorAdapter,
         ConnectorContext,
         extract_plugin_type,
     )
-    from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
+    from lmcache.inprocess.v1.storage_backend.connector.base_connector import RemoteConnector
     from .connector import MyStoreConnector
 
     PLUGIN_TYPE = "mystore"

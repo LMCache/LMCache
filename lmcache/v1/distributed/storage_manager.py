@@ -601,7 +601,6 @@ class StorageManager:
         self,
         spec: PrefetchTaskSpec,
         external_request_id: str = "",
-        skip_l2: bool = False,
         *,
         l1_manager_id: int | None = None,
     ) -> PrefetchHandle:
@@ -610,25 +609,33 @@ class StorageManager:
         Args:
             spec: The request (see :class:`PrefetchTaskSpec`).
             external_request_id: Caller id for end-to-end log tracing.
-            skip_l2: If True, serve from L1 only. The result is available
-                as soon as this returns.
             l1_manager_id: Restrict an L1-only lookup to this manager. Requires
-                ``skip_l2=True``; omitted means search all L1 managers.
+                empty ``allowed_l2_memory_tags``; omitted searches all allowed L1s.
 
         Returns:
             PrefetchHandle to track the task.
+
+        Raises:
+            ValueError: The selected manager is unknown or the spec allows L2.
+
+        Note:
+            A spec that allows no L2 adapter (an empty
+            ``allowed_l2_memory_tags``) is served from L1 only, and its result
+            is available as soon as this returns.
         """
         prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-            spec, skip_l2=skip_l2, l1_manager_id=l1_manager_id
+            spec, l1_manager_id=l1_manager_id
         )
         logger.debug(
             "Prefetch request submitted: %d keys in %d groups "
-            "(external_request_id=%s, prefetch_request_id=%d, skip_l2=%s)",
+            "(external_request_id=%s, prefetch_request_id=%d, "
+            "allowed_l1_memory_tags=%s, allowed_l2_memory_tags=%s)",
             len(spec.key_groups) * spec.group_size,
             len(spec.key_groups),
             external_request_id,
             prefetch_request_id,
-            skip_l2,
+            spec.allowed_l1_memory_tags,
+            spec.allowed_l2_memory_tags,
         )
         return PrefetchHandle(
             prefetch_request_id=prefetch_request_id,

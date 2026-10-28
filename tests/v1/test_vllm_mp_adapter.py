@@ -36,6 +36,7 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.ipc_policy import (
     is_isolated_ipc,
@@ -43,6 +44,13 @@ from lmcache.v1.platform.ipc_policy import (
     set_ipc_policy,
     set_isolated_ipc,
     set_use_vmm_api,
+)
+
+# Test helpers
+from tests.v1.mp_scheduler_adapter_test_utils import (
+    make_request_client,
+    make_scheduler_adapter,
+    ready_future,
 )
 
 
@@ -177,7 +185,7 @@ def _complete_event_store(adapter: LMCacheMPWorkerAdapter) -> None:
     adapter.transfer_ctx.submit_store.return_value.query.return_value = True
     adapter.transfer_ctx.submit_store.return_value.result.return_value = True
     size = adapter.lmcache_tokens_per_chunk
-    op = replace(_op([[0]]), token_ids=list(range(size)), end=size)
+    op = replace(_op([[0]]), token_bytes=pack_token_ids(range(size)), end=size)
     adapter.submit_store_request("own-store", op, None)
     adapter.get_finished({"own-store"})
 
@@ -297,7 +305,9 @@ def _make_scheduler_adapter(
 
 def _op(block_ids: list[list[int]]) -> LoadStoreOp:
     """Build a minimal four-token ``LoadStoreOp`` over *block_ids*."""
-    return LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=block_ids, start=0, end=4)
+    return LoadStoreOp(
+        token_bytes=pack_token_ids([1, 2, 3, 4]), block_ids=block_ids, start=0, end=4
+    )
 
 
 def test_get_lmcache_chunk_size_uses_plain_query_without_alignment() -> None:
@@ -414,18 +424,8 @@ def fake_adapter(monkeypatch):
 def test_scheduler_reset_cache_clears_every_server_without_force(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reset sends non-forced CLEAR and preserves local lookup state."""
+    """Reset sends non-forced CLEAR to every server within one budget."""
     adapter, clients = _make_scheduler_adapter(["server-a", "server-b"])
-    lookup_state = {
-        "_pending_lookups": {"req-1"},
-        "_unacked_lookups": {"req-1": MagicMock()},
-        "_lookup_status": {"req-1": {}},
-        "_finished_lookup_results": {"req-1": 256},
-        "_per_server_hits": {"req-1": {"server-a": 1}},
-        "_lookup_params": {"req-1": ([1, 2, 3, 4], "", None)},
-    }
-    for name, value in lookup_state.items():
-        setattr(adapter, name, value)
     futures = {server: MagicMock(name=f"future[{server}]") for server in clients}
     for server, client in clients.items():
         client.clear.return_value = futures[server]
@@ -440,8 +440,21 @@ def test_scheduler_reset_cache_clears_every_server_without_force(
         futures[server].result.assert_called_once_with(
             timeout=expected_timeouts[server]
         )
-    for name, value in lookup_state.items():
-        assert getattr(adapter, name) is value
+
+
+def test_scheduler_reset_cache_keeps_lookups_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lookup submitted before a reset still resolves after it."""
+    client = make_request_client(chunk_size=256)
+    adapter = make_scheduler_adapter(monkeypatch, {"server-a": client}, 16)
+    assert adapter.maybe_submit_lookup_request("req-1", list(range(512)))
+
+    assert adapter.reset_cache() is True
+
+    client.query_prefetch_status.return_value = ready_future(2)
+    client.lookup.return_value.set_result(None)
+    assert adapter.check_lookup_result("req-1") == 512
 
 
 @pytest.mark.parametrize(
@@ -825,7 +838,9 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
     fake_future = MagicMock()
     transfer_ctx.submit_store.return_value = fake_future
     adapter.transfer_ctx = transfer_ctx
-    op = LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=[[0]], start=0, end=4)
+    op = LoadStoreOp(
+        token_bytes=pack_token_ids([1, 2, 3, 4]), block_ids=[[0]], start=0, end=4
+    )
 
     adapter.submit_store_request(
         "req-1",
@@ -859,7 +874,7 @@ def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypat
     transfer_ctx.submit_store.return_value = fake_future
     adapter.transfer_ctx = transfer_ctx
     op = LoadStoreOp(
-        token_ids=[1, 2, 3, 4],
+        token_bytes=pack_token_ids([1, 2, 3, 4]),
         block_ids=[[0, 1], [10, 11]],
         start=0,
         end=4,
@@ -895,7 +910,7 @@ def test_store_kv_events_are_reported_after_successful_store(
         chunk_size = adapter.lmcache_tokens_per_chunk
         token_ids = list(range(chunk_size * 2))
         op = LoadStoreOp(
-            token_ids=token_ids,
+            token_bytes=pack_token_ids(token_ids),
             block_ids=[[1]],
             start=chunk_size,
             end=chunk_size * 2,
@@ -906,8 +921,10 @@ def test_store_kv_events_are_reported_after_successful_store(
 
         adapter.get_finished({"req-1"})
         events = adapter.get_kv_events()
-        expected_hashes = TokenHasher(chunk_size=chunk_size).compute_chunk_hashes(
-            token_ids,
+        expected_hashes = TokenHasher(
+            chunk_size=chunk_size
+        ).compute_packed_chunk_hashes(
+            pack_token_ids(token_ids),
             end=chunk_size * 2,
         )
 
@@ -939,7 +956,7 @@ def test_store_kv_events_are_discarded_after_failed_store(
 
         chunk_size = adapter.lmcache_tokens_per_chunk
         op = LoadStoreOp(
-            token_ids=list(range(chunk_size)),
+            token_bytes=pack_token_ids(range(chunk_size)),
             block_ids=[[0]],
             start=0,
             end=chunk_size,
@@ -969,7 +986,7 @@ def test_lazy_store_kv_events_preserve_completion_and_failure_reporting(
         future.result.return_value = store_result
         chunk_size = adapter.lmcache_tokens_per_chunk
         op = LoadStoreOp(
-            token_ids=list(range(chunk_size)),
+            token_bytes=pack_token_ids(range(chunk_size)),
             block_ids=[[0]],
             start=0,
             end=chunk_size,
@@ -1015,7 +1032,7 @@ def test_kv_event_buffer_metrics(
         future.result.return_value = True
         chunk_size = adapter.lmcache_tokens_per_chunk
         op = LoadStoreOp(
-            token_ids=list(range(chunk_size * 2)),
+            token_bytes=pack_token_ids(range(chunk_size * 2)),
             block_ids=[[0, 1]],
             start=0,
             end=chunk_size * 2,
@@ -1123,7 +1140,7 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
     transfer_ctx.submit_retrieve.return_value = fake_future
     adapter.transfer_ctx = transfer_ctx
     op = LoadStoreOp(
-        token_ids=[1, 2, 3, 4],
+        token_bytes=pack_token_ids([1, 2, 3, 4]),
         block_ids=[[0]],
         start=0,
         end=4,
@@ -1170,7 +1187,7 @@ def test_batched_submit_rejects_mismatched_parallel_lists(
 
 def test_load_store_op_accepts_per_group_block_ids():
     op = LoadStoreOp(
-        token_ids=[1, 2, 3, 4],
+        token_bytes=pack_token_ids([1, 2, 3, 4]),
         block_ids=[[0, 1], [10, 11]],
         start=0,
         end=4,
@@ -1337,7 +1354,9 @@ def test_store_keeps_event_until_future_finishes(fake_adapter):
 
     event = FakeCudaEvent()
     event_ref = weakref.ref(event)
-    op = LoadStoreOp(token_ids=[1, 2], block_ids=[[7]], start=0, end=2)
+    op = LoadStoreOp(
+        token_bytes=pack_token_ids([1, 2]), block_ids=[[7]], start=0, end=2
+    )
 
     adapter.submit_store_request("req-1", op, event)
     del event
@@ -1367,7 +1386,9 @@ def test_retrieve_keeps_event_until_future_finishes(fake_adapter):
 
     event = FakeCudaEvent()
     event_ref = weakref.ref(event)
-    op = LoadStoreOp(token_ids=[1, 2], block_ids=[[7]], start=0, end=2)
+    op = LoadStoreOp(
+        token_bytes=pack_token_ids([1, 2]), block_ids=[[7]], start=0, end=2
+    )
 
     adapter.submit_retrieve_request("req-1", op, event)
     del event

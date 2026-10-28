@@ -17,7 +17,7 @@ jobs:
         include:
           - arch: amd64
             cibw_arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - arch: arm64
             cibw_arch: aarch64
             runner: ubuntu-24.04-arm
@@ -142,7 +142,7 @@ jobs:
   publish-nightly-cu129-arm64:
     name: Publish cu12.9 ARM64 nightly wheels
     needs: nightly-wheels
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -166,7 +166,7 @@ jobs:
   publish-nightly-cu130-arm64:
     name: Publish cu13.0 ARM64 nightly wheels
     needs: nightly-wheels
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -189,7 +189,7 @@ jobs:
 
   resolve-xpu-nightly:
     name: Resolve vLLM XPU nightly runtime
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       image: ${{ steps.runtime.outputs.image }}
       digest: ${{ steps.runtime.outputs.digest }}
@@ -208,7 +208,7 @@ jobs:
     name: Build XPU CI candidate
     if: github.ref == 'refs/heads/dev'
     needs: resolve-xpu-nightly
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       image: ${{ steps.image.outputs.image }}
       digest: ${{ steps.image.outputs.digest }}
@@ -247,7 +247,7 @@ jobs:
       !cancelled() &&
       needs.build-xpu-ci-candidate.result == 'success' &&
       needs.nightly-xpu-wheel.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 240
     permissions:
       contents: write
@@ -295,7 +295,7 @@ jobs:
     concurrency:
       group: github-nightly-vllm-pin
       cancel-in-progress: false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -317,7 +317,7 @@ jobs:
   publish-nightly-xpu:
     name: Publish XPU nightly wheel
     needs: [resolve-xpu-nightly, nightly-xpu-wheel, pin-nightly-xpu-base]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -372,7 +372,7 @@ jobs:
   publish-nightly-rocm:
     name: Publish ROCm nightly wheel
     needs: nightly-rocm-wheel
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -395,7 +395,7 @@ jobs:
           release_notes: |
             Nightly ROCm 7.2 wheels built from `dev` on {{date}},
             for AMD Instinct gfx942 (MI300X/MI325X) and gfx950 (MI350X/MI355X),
-            ABI-matched to the upstream `vllm/vllm-openai-rocm` image (torch 2.11, cp312).
+            ABI-matched to the upstream `vllm/vllm-openai-rocm` image (torch 2.13, cp312).
 
             Install into an upstream vLLM ROCm container:
             ```
@@ -415,7 +415,7 @@ jobs:
 
   publish-nightly-musa:
     name: Publish MUSA nightly wheel
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: nightly-musa-wheel
     permissions:
       contents: write
@@ -457,7 +457,7 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           # Build CUDA extensions on a native ARM runner rather than QEMU.
           - arch: arm64
             runner: ubuntu-24.04-arm
@@ -635,7 +635,7 @@ jobs:
   nightly-publish-manifests:
     name: Publish multi-arch image manifests
     needs: nightly-build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
@@ -736,7 +736,7 @@ jobs:
     concurrency:
       group: github-nightly-vllm-pin
       cancel-in-progress: false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
