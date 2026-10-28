@@ -155,8 +155,7 @@ When L1 is used purely as a write buffer (all data lives in L2), use
 ``--l2-store-policy skip_l1`` together with ``--eviction-policy noop``.
 This combination deletes keys from L1 as soon as they are stored to L2
 and disables the LRU eviction tracker entirely, reducing memory and CPU
-overhead. A key that a request is still reading when its L2 store finishes
-is deleted shortly after that read ends.
+overhead.
 
 .. code-block:: bash
 
@@ -323,11 +322,15 @@ because every ``L2AdapterEvictionState`` owns its own policy instance.
    * - ``fs``
      - No eviction support (``delete`` and ``get_usage`` are no-ops).
    * - ``hf3fs``
-     - Full support. ``delete`` removes data files from 3FS. The deleted
-       bytes are freed from accounting. ``get_usage`` reports 
+     - Full support. ``delete`` removes KVCache files from 3FS. The deleted
+       bytes are freed from accounting. ``get_usage`` reports
        ``usage_fraction == -1.0`` when ``max_capacity_gb`` is ``0`` (disabled).
-       set a non-zero ``max_capacity_gb`` to enable the watermark-triggered 
-       eviction controller.
+       set a non-zero ``max_capacity_gb`` to enable the watermark-triggered
+       eviction controller. When capacity accounting is enabled, the adapter
+       pre-seeds usage with file size of every KVCache file already present
+       in its ``base_paths`` at startup. Files that pre-date the instance
+       (restart ) are charged against capacity and can be evicted — see
+       :ref:`hf3fs<l2-hf3fs>`.
    * - native connectors
      - Depends on the connector. Connectors that declare capacity via
        ``max_capacity_gb`` (``fs_native``, ``nixl_native``, ``hf3fs``)

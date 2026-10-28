@@ -719,6 +719,123 @@ class TestHf3fsCapacityConfig:
 
 
 # =============================================================================
+# Startup Hydration Unit Tests (no C++ extension / cluster needed)
+# =============================================================================
+
+
+class _MockHf3fsClient:
+    """Minimal fake exposing the client contract used for hydration.
+
+    The adapter only touches ``event_fd`` / ``close`` at runtime (the
+    scan data comes back from ``get_existing_keys_with_sizes``), so the
+    demux thread simply polls an inert pipe, as in the real adapter when
+    no operations are submitted.
+    """
+
+    def __init__(self, existing: list[tuple[ObjectKey, int]] | None = None) -> None:
+        self._existing = list(existing or [])
+        self._r, self._w = os.pipe()
+
+    def event_fd(self) -> int:
+        return self._r
+
+    def get_existing_keys_with_sizes(self) -> list[tuple[ObjectKey, int]]:
+        return list(self._existing)
+
+    def close(self) -> None:
+        for fd in (self._r, self._w):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+class _RecordingListener:
+    """Captures ``on_l2_keys_stored`` notifications for policy-seeding checks."""
+
+    def __init__(self) -> None:
+        self.stored: list[list[ObjectKey]] = []
+        self.sizes: list[list[int]] = []
+
+    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+        self.stored.append(list(keys))
+        self.sizes.append(list(sizes))
+
+
+class TestHf3fsHydration:
+    """Startup usage hydration from pre-existing 3FS files.
+
+    These exercise ``Hf3fsNativeL2Adapter`` against a fake client so the
+    recovery path (seed usage from the native startup scan, then seed
+    each registered eviction-policy listener) is unit-tested without a
+    3FS cluster.
+    """
+
+    _CAPACITY_BYTES = 4 * 1024 * 1024  # 4 MiB, power of two for exact GiB math
+
+    def _make_adapter(self, existing):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.hf3fs_l2_adapter import (
+            Hf3fsNativeL2Adapter,
+        )
+
+        client = _MockHf3fsClient(existing)
+        adapter = Hf3fsNativeL2Adapter(
+            client,
+            type_name="Hf3fsL2Adapter",
+            max_capacity_gb=self._CAPACITY_BYTES / 1024**3,
+        )
+        return client, adapter
+
+    def test_scan_seeds_usage_and_listeners_once(self) -> None:
+        """The startup scan seeds usage and each listener exactly once.
+
+        Covers, in one adapter lifetime: usage reflecting pre-existing
+        bytes, the scanned ``ObjectKey``s matching the ones a store would
+        produce (no lossy re-encoding), one listener seed per registered
+        listener, and no double-counting under repeated registration.
+        """
+        keys = [create_object_key(9000 + i) for i in range(4)]
+        sizes = [4096 + i * 1024 for i in range(4)]  # 4096, 5120, 6144, 7168
+        existing = [(k, s) for k, s in zip(keys, sizes, strict=False)]
+
+        _client, adapter = self._make_adapter(existing)
+        try:
+            usage = adapter.get_usage()
+            expected = sum(sizes)
+            assert usage.total_capacity_bytes == self._CAPACITY_BYTES
+            assert usage.total_bytes_used == expected
+            assert abs(usage.usage_fraction - expected / self._CAPACITY_BYTES) < 1e-9
+
+            listener_a = _RecordingListener()
+            listener_b = _RecordingListener()
+            adapter.register_listener(listener_a)
+            adapter.register_listener(listener_b)
+
+            # Seed keys are exactly the stores' keys, one batch per listener.
+            assert listener_a.stored == [keys]
+            assert listener_b.stored == [keys]
+            assert listener_a.sizes == [sizes]
+            assert listener_b.sizes == [sizes]
+
+            # Registering more listeners never re-credits usage.
+            assert adapter.get_usage().total_bytes_used == expected
+        finally:
+            adapter.close()
+
+    def test_empty_scan_seeds_nothing(self) -> None:
+        """No existing files (e.g. collect_file_sizes disabled), no seeds."""
+        _client, adapter = self._make_adapter([])
+        try:
+            assert adapter.get_usage().total_bytes_used == 0
+            listener = _RecordingListener()
+            adapter.register_listener(listener)
+            assert listener.stored == []
+        finally:
+            adapter.close()
+
+
+# =============================================================================
 # Factory Tests
 # =============================================================================
 
@@ -1186,27 +1303,81 @@ class TestHf3fsEviction:
     ``L2EvictionController`` triggering LRU eviction above the watermark.
     """
 
-    def _make_capacity_adapter(self, hf3fs_native_client, capacity_bytes: int):
-        """Wrap the fixture client with a capacity-declaring adapter.
+    @pytest.fixture
+    def make_capacity_adapter(self):
+        """Factory fixture: wrap a client in a capacity-declaring adapter.
 
-        capacity_bytes must be a power of two so the GiB round-trip
-        (float division then int multiplication in the base class) is
-        exact.
+        Always wraps the client in the ``Hf3fsNativeL2Adapter`` subclass
+        (a strict superset of the base ``NativeConnectorL2Adapter``). When
+        the client was created with ``collect_file_sizes=True`` the startup
+        scan hydrates usage from pre-existing files; otherwise the scan is
+        empty and the hydration path is a no-op. ``capacity_bytes`` must be
+        a power of two so the GiB round-trip (float division then int
+        multiplication) is exact.
+
+        Every adapter built here is closed on teardown (``close`` also
+        closes its underlying client, whose ``close`` is idempotent).
         """
+        adapters: list[Any] = []
         # First Party
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
-            NativeConnectorL2Adapter,
+        from lmcache.v1.distributed.l2_adapters.hf3fs_l2_adapter import (
+            Hf3fsNativeL2Adapter,
         )
 
-        client = hf3fs_native_client[0]
-        return NativeConnectorL2Adapter(
-            client,
-            type_name="Hf3fsL2Adapter",
-            max_capacity_gb=capacity_bytes / _GIB,
-        )
+        def _build(client, capacity_bytes: int):
+            adapter = Hf3fsNativeL2Adapter(
+                client,
+                type_name="Hf3fsL2Adapter",
+                max_capacity_gb=capacity_bytes / _GIB,
+            )
+            adapters.append(adapter)
+            return adapter
 
-    def _make_eviction_state(self, adapter):
-        """Build a controller + per-adapter state with a low watermark.
+        yield _build
+        for adapter in adapters:
+            adapter.close()
+
+    @pytest.fixture
+    def make_collecting_client(self, hf3fs_test_mount_point, hf3fs_test_base_path):
+        """Factory fixture: build a fresh client whose scan records file sizes.
+
+        Returns ``_build(mount_point, base_path)`` rather than the client
+        directly so a test can seed ``.data`` files on disk *before* the
+        client is constructed — its startup scan must observe them. Uses
+        ``enable_key_buffer=False`` to prove the scan runs for eviction
+        accounting even when key buffering is disabled.
+
+        Built clients and their ``test_dir`` are closed/removed on teardown.
+        """
+        clients: list[Any] = []
+        # First Party
+        from lmcache.lmcache_hf3fs import LMCacheHf3fsClient
+
+        def _build(mount_point, base_path):
+            client = LMCacheHf3fsClient(
+                mount_point=str(mount_point),
+                base_paths=str(base_path),
+                num_workers=2,
+                ior_entries=128,
+                io_depth=0,
+                numa_id=-1,
+                iov_size=209715200,
+                time_out=200,
+                enable_key_buffer=False,
+                collect_file_sizes=True,
+            )
+            clients.append(client)
+            return client
+
+        yield _build
+        for client in clients:
+            client.close()
+        if _has_3fs_cluster():
+            shutil.rmtree(hf3fs_test_base_path, ignore_errors=True)
+
+    @pytest.fixture
+    def make_eviction_state(self):
+        """Factory fixture: build a controller + per-adapter state.
 
         The controller is never started: tests drive one synchronous
         eviction pass via ``_check_and_evict`` (the production loop calls
@@ -1219,19 +1390,22 @@ class TestHf3fsEviction:
             L2EvictionController,
         )
 
-        state = L2AdapterEvictionState(
-            adapter_id=0,
-            adapter=adapter,
-            eviction_config=EvictionConfig(
-                eviction_policy="LRU",
-                # 8 objs x 4 KiB = 32 KiB; against 1 MiB capacity that is
-                # 0.03125, which must exceed the watermark to trigger.
-                trigger_watermark=0.01,
-                eviction_ratio=0.5,
-            ),
-        )
-        controller = L2EvictionController([state])
-        return state, controller
+        def _build(adapter):
+            state = L2AdapterEvictionState(
+                adapter_id=0,
+                adapter=adapter,
+                eviction_config=EvictionConfig(
+                    eviction_policy="LRU",
+                    # 8 objs x 4 KiB = 32 KiB; against 1 MiB capacity that is
+                    # 0.03125, which must exceed the watermark to trigger.
+                    trigger_watermark=0.01,
+                    eviction_ratio=0.5,
+                ),
+            )
+            controller = L2EvictionController([state])
+            return state, controller
+
+        return _build
 
     def _store_one_by_one(self, adapter, keys):
         """Store each key in its own batch so LRU order == store order."""
@@ -1239,47 +1413,83 @@ class TestHf3fsEviction:
             adapter.submit_store_task([key], [create_memory_obj(1024)])
             _wait_for_store(adapter)
 
-    def _assert_exists(self, adapter, keys, expected: bool):
-        """Verify every key's existence via the adapter's lookup API.
+    def _assert_exists_map(self, adapter, keys, expected: list[bool]):
+        """Assert each key's existence against the expected lookup bitmap.
 
-        Lookup does not fire the LRU touch notification (only load does),
-        so existence checks cannot disturb the policy ordering under
-        test. The raw client must not be used here while the adapter is
-        alive: its demux thread drains the client's completions and
-        steals raw-client results.
+        Runs a single lookup-and-lock over ``keys`` and verifies bit ``i``
+        equals ``expected[i]``, then unlocks only the keys that were found
+        (lookup_and_lock locks its hits).
         """
         lookup_task_id = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         _wait_for_lookup(adapter)
         bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
         assert bitmap is not None
+        assert len(expected) == len(keys)
+        present = [key for i, key in enumerate(keys) if bitmap.test(i)]
+        if present:
+            adapter.submit_unlock(present)
         for i in range(len(keys)):
-            assert bitmap.test(i) == expected
-        if expected:
-            # Only found keys got locked by lookup_and_lock.
-            adapter.submit_unlock(keys)
+            assert bitmap.test(i) == expected[i]
 
-    def test_usage_reporting(self, hf3fs_native_client):
-        """get_usage() reflects stored bytes against declared capacity."""
+    def _assert_exists(self, adapter, keys, expected: bool):
+        """Assert every key exists (or is absent) on the backend.
+
+        Lookup does not fire the LRU touch notification (only load does),
+        so existence checks cannot disturb the policy ordering under test.
+        """
+        self._assert_exists_map(adapter, keys, [expected] * len(keys))
+
+    def _wait_for_touch(self, state, protected_key, timeout: float = 10.0):
+        """Wait until a load-access notification has reached the eviction policy.
+
+        Polls the policy's non-mutating victim pre-selection: after a load
+        touches ``protected_key`` it must no longer be the global LRU victim.
+        Deterministic — no arbitrary sleep.
+        """
+        start = os.times().elapsed if hasattr(os, "times") else 0
+        while True:
+            elapsed = os.times().elapsed if hasattr(os, "times") else 0
+            if elapsed - start > timeout:
+                raise TimeoutError(
+                    f"Timed out waiting for access notification on {protected_key}"
+                )
+            victims = state.eviction_policy.get_eviction_candidates(1)
+            if victims and victims[0] != protected_key:
+                return
+            time.sleep(0.1)
+
+    def _count_exists(self, adapter, keys) -> int:
+        """Return how many of ``keys`` exist on the backend.
+
+        Used when the exact surviving subset is scan-order (LRU) dependent,
+        so only the count is a stable assertion. Unlocks every key that was
+        found and locked by the lookup.
+        """
+        lookup_task_id = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+        _wait_for_lookup(adapter)
+        bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
+        assert bitmap is not None
+        present = [key for i, key in enumerate(keys) if bitmap.test(i)]
+        if present:
+            adapter.submit_unlock(present)
+        return len(present)
+
+    def test_store_usage_and_delete_reach_zero(
+        self, hf3fs_native_client, make_capacity_adapter
+    ):
+        """Storing drives usage up against capacity; delete returns it to zero."""
         capacity_bytes = 1024 * 1024  # 1 MiB
-        adapter = self._make_capacity_adapter(hf3fs_native_client, capacity_bytes)
+        adapter = make_capacity_adapter(hf3fs_native_client[0], capacity_bytes)
         assert adapter.supports_global_eviction
 
         keys = [create_object_key(5000 + i) for i in range(4)]
         self._store_one_by_one(adapter, keys)
 
         usage = adapter.get_usage()
-        assert usage.total_capacity_bytes == capacity_bytes
         expected_used = 4 * _OBJ_BYTES
+        assert usage.total_capacity_bytes == capacity_bytes
         assert usage.total_bytes_used == expected_used
         assert abs(usage.usage_fraction - expected_used / capacity_bytes) < 1e-6
-
-    def test_delete_updates_usage_and_backend(self, hf3fs_native_client):
-        """delete() removes files from 3FS and zeroes usage accounting."""
-        adapter = self._make_capacity_adapter(hf3fs_native_client, 1024 * 1024)
-
-        keys = [create_object_key(5100 + i) for i in range(2)]
-        self._store_one_by_one(adapter, keys)
-        assert adapter.get_usage().total_bytes_used == 2 * _OBJ_BYTES
         self._assert_exists(adapter, keys, True)
 
         adapter.delete(keys)
@@ -1289,10 +1499,12 @@ class TestHf3fsEviction:
         assert usage.usage_fraction == 0.0
         self._assert_exists(adapter, keys, False)
 
-    def test_watermark_eviction_via_controller(self, hf3fs_native_client):
+    def test_watermark_eviction_via_controller(
+        self, hf3fs_native_client, make_capacity_adapter, make_eviction_state
+    ):
         """Above the watermark, the controller evicts the oldest half."""
-        adapter = self._make_capacity_adapter(hf3fs_native_client, 1024 * 1024)
-        state, controller = self._make_eviction_state(adapter)
+        adapter = make_capacity_adapter(hf3fs_native_client[0], 1024 * 1024)
+        state, controller = make_eviction_state(adapter)
 
         keys = [create_object_key(5200 + i) for i in range(8)]
         self._store_one_by_one(adapter, keys)
@@ -1302,14 +1514,15 @@ class TestHf3fsEviction:
 
         # LRU order == store order: the oldest half is evicted, the
         # newest half survives both on the backend and in accounting.
-        self._assert_exists(adapter, keys[:4], False)
-        self._assert_exists(adapter, keys[4:], True)
+        self._assert_exists_map(adapter, keys, [False] * 4 + [True] * 4)
         assert adapter.get_usage().total_bytes_used == 4 * _OBJ_BYTES
 
-    def test_load_touch_protects_key_from_eviction(self, hf3fs_native_client):
+    def test_load_touch_protects_key_from_eviction(
+        self, hf3fs_native_client, make_capacity_adapter, make_eviction_state
+    ):
         """A loaded (touched) key moves to MRU and survives eviction."""
-        adapter = self._make_capacity_adapter(hf3fs_native_client, 1024 * 1024)
-        state, controller = self._make_eviction_state(adapter)
+        adapter = make_capacity_adapter(hf3fs_native_client[0], 1024 * 1024)
+        state, controller = make_eviction_state(adapter)
 
         keys = [create_object_key(5300 + i) for i in range(8)]
         self._store_one_by_one(adapter, keys)
@@ -1321,13 +1534,78 @@ class TestHf3fsEviction:
         load_task_id = adapter.submit_load_task([keys[0]], [load_obj])
         _wait_for_load(adapter)
         assert adapter.query_load_result(load_task_id) is not None
-        # The demux thread populates _completed_loads before firing the
-        # accessed notification; give it a moment to catch up.
-        time.sleep(0.5)
+        # Wait until the access notification has actually reached the
+        # policy (the demux fires it just after recording the load), so
+        # eviction runs against the updated LRU order.
+        self._wait_for_touch(state, keys[0])
 
         controller._check_and_evict(state)
 
         # The touched key survives; the next-oldest four are evicted.
-        self._assert_exists(adapter, [keys[0]], True)
-        self._assert_exists(adapter, keys[1:5], False)
-        self._assert_exists(adapter, keys[5:], True)
+        self._assert_exists_map(adapter, keys, [True] + [False] * 4 + [True] * 3)
+
+    # ------------------------------------------------------------------
+    # Startup hydration of pre-existing files
+    # ------------------------------------------------------------------
+
+    def _seed_data_files(self, directory: Path, keys: list[ObjectKey], size: int):
+        """Write ``.data`` files as if another instance had stored them."""
+        for key in keys:
+            (directory / _object_key_to_filename(key)).write_bytes(b"\x00" * size)
+
+    def test_hydrated_usage_and_delete_debits_real_size(
+        self,
+        hf3fs_test_mount_point,
+        hf3fs_test_base_path,
+        make_collecting_client,
+        make_capacity_adapter,
+    ):
+        """Pre-existing files seed usage; delete() debits the real on-disk size."""
+        test_dir = hf3fs_test_base_path
+        small_key = create_object_key(6000)
+        big_key = create_object_key(6001)
+        self._seed_data_files(test_dir, [small_key], 4096)
+        self._seed_data_files(test_dir, [big_key], 8192)
+
+        client = make_collecting_client(hf3fs_test_mount_point, test_dir)
+        adapter = make_capacity_adapter(client, 4 * 1024 * 1024)
+
+        assert adapter.supports_global_eviction
+        usage = adapter.get_usage()
+        assert usage.total_capacity_bytes == 4 * 1024 * 1024
+        assert usage.total_bytes_used == 4096 + 8192
+
+        adapter.delete([big_key])
+
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used == 4096
+        self._assert_exists(adapter, [big_key], False)
+        self._assert_exists(adapter, [small_key], True)
+
+    def test_watermark_eviction_of_preexisting_keys(
+        self,
+        hf3fs_test_mount_point,
+        hf3fs_test_base_path,
+        make_collecting_client,
+        make_capacity_adapter,
+        make_eviction_state,
+    ):
+        """Pre-existing files participate in watermark eviction."""
+        test_dir = hf3fs_test_base_path
+        keys = [create_object_key(6100 + i) for i in range(8)]
+        self._seed_data_files(test_dir, keys, _OBJ_BYTES)
+
+        client = make_collecting_client(hf3fs_test_mount_point, test_dir)
+        adapter = make_capacity_adapter(client, 1024 * 1024)
+
+        # 8 x 4 KiB = 32 KiB against 1 MiB exceeds the 0.01 watermark.
+        state, controller = make_eviction_state(adapter)
+        assert adapter.get_usage().usage_fraction > 0.01
+
+        controller._check_and_evict(state)
+
+        # Half of the pre-existing keys are evicted from both accounting
+        # and the backend. Which half is evicted is scan-order (LRU)
+        # dependent, so only the surviving count is asserted.
+        assert adapter.get_usage().total_bytes_used == 4 * _OBJ_BYTES
+        assert self._count_exists(adapter, keys) == 4

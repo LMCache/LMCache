@@ -1,3 +1,5 @@
+.. _l2-hf3fs:
+
 Hf3fs
 ======================
 
@@ -76,11 +78,20 @@ The **BUILD_HF3FS** environment variable controls compilation:
   keys — you can configure only the lanes that need dedicated pools.
 - ``max_capacity_gb`` (float, default ``0``): Declared L2 capacity in GiB
   across all ``base_paths``, used for usage accounting.  ``0`` disables
-  capacity accounting.  A value ``> 0`` does **not** bound 3FS usage on
-  its own — watermark eviction runs only when the adapter spec also
-  carries an ``eviction`` block; see
-  :ref:`L2 Eviction <l2-eviction-adapter-support>` in the L2 storage
-  overview for the supported policies and configuration.
+  capacity accounting. 
+   - A value ``> 0`` does **not** bound 3FS usage on its own — watermark eviction
+     runs only when the adapter spec also carries an ``eviction`` block; see
+     :ref:`L2 Eviction <l2-eviction-adapter-support>` in the L2 storage overview
+     for the supported policies and configuration.
+
+   - Restarting LMCache instance will **not** silently under-count usage. HF3FS 
+     adapter performs a startup scan of every ``base_paths`` directory and pre-seeds 
+     usage accounting with the real on-disk byte size of every existing KVCache
+     files when watermark eviction is enabled.
+
+   - Multiple instances sharing the same ``base_paths`` are **prohibited** when 
+     watermark eviction is enabled, as this can lead to confusion in 
+     L2 usage calculations and incorrect eviction actions.
 
 **HF3FS Fields**
 
@@ -95,9 +106,11 @@ The **BUILD_HF3FS** environment variable controls compilation:
 - ``iov_size`` (int, default ``209715200`` (200 MB), range
   ``[104857600, 2147483648]``): Per-thread I/O buffer in bytes.
 - ``enable_key_buffer`` (bool, default ``True``): Enable the in-memory
-  key buffer for accelerated exists lookups.  When enabled, exist lookups
-  respond from a hash set instead of issuing remote 3FS metadata calls.
-  This dramatically reduces lookup latency.
+  key buffer for accelerated exists lookups.  When enabled: 
+   - It dramatically reduces lookup latencys, due to exist lookups respond from  
+     DRAM instead of issuingremote 3FS metadata calls. 
+   - It performs a startup scan of every ``base_paths`` directory and stores 
+     the keys of existing KVCache files into the key buffer.
 
 **Configuration Example**
 
