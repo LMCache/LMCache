@@ -78,6 +78,14 @@ pre-existing name**: a taken name raises `FileExistsError` up through
 Reclaiming a pre-existing segment is a naming-policy decision that belongs to
 `create_memory_allocator`, not to the allocator.
 
+The native CUDA implementation (`csrc/cuda/mem_alloc.cpp`, bound onto
+`CudaDeviceOps` by `bind_native`) follows the same contract: exclusive
+`shm_open`, `EEXIST` translated by the pybind layer into
+`cuda_ops.ShmExistsError` (a `FileExistsError` subclass, so
+`is_shm_name_collision` and the retry loop treat it identically), and the
+same `flock` liveness guard held for the segment's lifetime and released in
+`free_shm_pinned_ptr`.
+
 ## Crash / orphan segments
 
 Each new `L1MemoryManagerConfig()` with the default factory gets a **fresh**
