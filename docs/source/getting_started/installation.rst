@@ -3,7 +3,7 @@
 Installation
 ============
 
-**Prerequisites:** Linux · Python 3.9–3.13 · NVIDIA GPU (compute 7.0+) · CUDA 12.1+ · `uv <https://astral.sh/uv>`_
+**Prerequisites:** Linux · Python 3.10–3.14 · NVIDIA GPU (compute 7.0+) · CUDA 12.1+ · `uv <https://astral.sh/uv>`_
 
 Install LMCache
 ---------------
