@@ -250,12 +250,10 @@ class QuotaEntry:
 class L1ManagerInterface(Protocol):
     """The L1 surface ``StorageManager`` and the storage controllers call.
 
-    Every L1 medium (pinned DRAM, Device-DAX, GDS slab) implements it with a
-    class in ``lmcache.v1.distributed.l1_manager``. Medium-specific
-    operations (Device-DAX hot-plug, device ownership) live on those
-    classes, not here. An implementation that cannot honour a call
-    answers with the documented ``L1Error`` codes instead of raising, so the
-    callers keep one code path.
+    ``L1Manager`` implements it with the allocator, index, locks and
+    eviction in this process. An implementation that cannot honour a call
+    answers with the documented ``L1Error`` codes instead of raising, so
+    the callers keep one code path.
     """
 
     @property

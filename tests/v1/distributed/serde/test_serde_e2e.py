@@ -38,7 +38,7 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.serde import SerdeConfig
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.platform import current_device_spec
 
 # Test helpers
@@ -163,7 +163,7 @@ def write_and_wait_for_l2(
         if tensor is not None:
             tensor.fill_(float(i + 1))
 
-    sm.finish_write(list(ret))
+    sm.finish_write(list(ret), l1_owners_of(ret))
 
     # Wait for StoreController to flush to L2. Polling the controller's queue
     # counters alone is racy: the background loop pops the pending keys

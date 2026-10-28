@@ -343,7 +343,7 @@ class StorageManager:
     def finish_write(
         self,
         keys: list[ObjectKey],
-        l1_owners: dict[ObjectKey, int] | None = None,
+        l1_owners: dict[ObjectKey, int],
     ) -> None:
         """
         Finish writing the objects into the storage manager.
@@ -355,26 +355,17 @@ class StorageManager:
         Args:
             keys (list[ObjectKey]): List of object keys that have been written.
             l1_owners: The L1 manager each key was reserved in, built from the
-                reserved objects with :func:`l1_owners_of`. ``None`` offers
-                the keys to every L1 and each admits the keys it stages.
+                reserved objects with :func:`l1_owners_of`.
 
         Raises:
             ValueError: ``l1_owners`` omits a key or names an unregistered L1
                 manager.
         """
         finish_result: dict[ObjectKey, L1Error] = {}
-        if l1_owners is None:
-            for manager in self._l1_managers:
-                for key, err in manager.finish_write(keys, tag=_L1_WRITE_TAG).items():
-                    if err == L1Error.SUCCESS or key not in finish_result:
-                        finish_result[key] = err
-        else:
-            for owner, group in self._group_by_owner(keys, l1_owners).items():
-                finish_result.update(
-                    self._l1_managers_by_id[owner].finish_write(
-                        group, tag=_L1_WRITE_TAG
-                    )
-                )
+        for owner, group in self._group_by_owner(keys, l1_owners).items():
+            finish_result.update(
+                self._l1_managers_by_id[owner].finish_write(group, tag=_L1_WRITE_TAG)
+            )
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
         self._event_bus.publish(

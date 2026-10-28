@@ -36,7 +36,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     DefaultStorePolicy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
 if not torch_dev.is_available():
@@ -293,7 +293,7 @@ class TestStorageManagerRuntimeAdapters:
             layout = make_layout()
             keys = [make_object_key(i) for i in range(4)]
             ret = sm.reserve_write(keys, layout)
-            sm.finish_write(list(ret))
+            sm.finish_write(list(ret), l1_owners_of(ret))
 
             assert wait_for_condition(
                 lambda: all(adapter.debug_has_key(k) for k in keys),  # type: ignore
@@ -357,7 +357,7 @@ class TestStorageManagerRuntimeAdapters:
             layout = make_layout()
             keys = [make_object_key(i) for i in range(3)]
             ret = sm.reserve_write(keys, layout)
-            sm.finish_write(list(ret))
+            sm.finish_write(list(ret), l1_owners_of(ret))
 
             assert wait_for_condition(
                 lambda: all(adapter.debug_has_key(k) for k in keys),  # type: ignore

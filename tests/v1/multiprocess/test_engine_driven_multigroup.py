@@ -515,9 +515,7 @@ class _FakeStorageManager:
             reserved[obj_key] = obj
         return reserved
 
-    def finish_write(self, keys, l1_owners=None):
-        if l1_owners is None:
-            raise ValueError("multiple L1 managers: complete writes by owner")
+    def finish_write(self, keys, l1_owners):
         self.finished_owners.update(l1_owners[k] for k in keys)
         self.finished_writes.extend(keys)
 
@@ -1303,7 +1301,7 @@ class _FakeShmStorageManager(_FakeStorageManager):
         self.reserved.extend(obj_keys)
         return reserved
 
-    def finish_write(self, keys, l1_owners=None):
+    def finish_write(self, keys, l1_owners):
         self.finished_writes.extend(keys)
 
     def unsafe_read(self, keys, l1_owners=None):

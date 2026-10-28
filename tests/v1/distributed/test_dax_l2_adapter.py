@@ -46,7 +46,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigureError,
 )
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -1004,7 +1004,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
         assert key in reserved
         assert reserved[key].tensor is not None
         reserved[key].tensor.fill_(11)
-        sm.finish_write(reserved)
+        sm.finish_write(list(reserved), l1_owners_of(reserved))
 
         assert wait_for_condition(
             lambda: (
@@ -1097,7 +1097,7 @@ def test_storage_manager_dax_adapter_uses_global_l2_eviction(tmp_path):
             assert key in reserved
             assert reserved[key].tensor is not None
             reserved[key].tensor.fill_(fill_value)
-            sm.finish_write(reserved)
+            sm.finish_write(list(reserved), l1_owners_of(reserved))
             assert wait_for_condition(
                 lambda: (
                     adapter.get_usage().usage_fraction == pytest.approx(usage_fraction)

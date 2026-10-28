@@ -57,7 +57,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import L2ReconfigureErro
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaState,
     DevDaxMemoryAllocator,
@@ -841,7 +841,7 @@ def test_draining_arena_still_counts_as_a_region(
         # A fills the primary arena.
         reserved_a = storage_manager.reserve_write([key_a], _layout())
         assert set(reserved_a) == {key_a}
-        storage_manager.finish_write(list(reserved_a))
+        storage_manager.finish_write(list(reserved_a), l1_owners_of(reserved_a))
         del reserved_a
         storage_manager.add_l1_devdax_device(extra, 4096)
         # B lands on the extra arena and stays write-reserved, so it can be
@@ -857,7 +857,7 @@ def test_draining_arena_still_counts_as_a_region(
         storage_manager.l1_managers()[0].get_l1_memory_desc()
         assert any("spans 2 memory regions" in m for m in devdax_warnings)
 
-        storage_manager.finish_write(list(pending))
+        storage_manager.finish_write(list(pending), l1_owners_of(pending))
         del pending
         storage_manager.delete_l1_keys([key_b])
         gc.collect()

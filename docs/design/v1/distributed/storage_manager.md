@@ -135,15 +135,15 @@ reserve_write(keys, layout) -> {key: MemoryObj}     objects carry their owner id
                                   -> each L1's finish_write(keys, tag)
 ```
 
-`finish_write(keys, l1_owners=None)` mirrors `finish_read_prefetched`. The
-caller builds `l1_owners` from the objects `reserve_write` returned with the
-module-level `l1_owners_of(objects)` (it reads `MemoryObj.get_l1_manager()`
-and raises `ValueError` for an unowned object), so completion never re-runs
-the policy and the storage manager keeps no per-key state. A key whose owner
-is missing or unregistered raises `ValueError`. With `l1_owners=None` the
-keys are offered to every L1 in placement order and a key succeeds if any L1
-admitted it (an L1 that stages nothing for the key answers `KEY_NOT_EXIST`
-silently). The stream callbacks in `lmcache_driven_transfer` and `qstore`
+`finish_write(keys, l1_owners)` takes the owners the way
+`finish_read_prefetched` does, but requires them: every caller holds the
+objects `reserve_write` returned, so there is no owner-less completion. The
+caller builds `l1_owners` from those objects with the module-level
+`l1_owners_of(objects)` (it reads `MemoryObj.get_l1_manager()` and raises
+`ValueError` for an unowned object), so completion never re-runs the policy
+and the storage manager keeps no per-key state. A key whose owner is missing
+or unregistered raises `ValueError`. The stream callbacks in
+`lmcache_driven_transfer` and `qstore`
 submit kind `"finish_write"` with the owners dict; the shared-memory store
 path keeps the same dict in its pending-write table. Existing staging and
 stream ordering retain allocations. The owner tag is neither a lifetime pin
@@ -161,13 +161,14 @@ new callers pass `l1_owners` to `finish_read_prefetched` themselves.
 
 When tracing is enabled, `finish_write` and `finish_read_prefetched` redact
 `l1_owners` and record key-only calls, so process-local owner ids never reach
-the trace. The replay dispatcher calls `finish_write(keys)` and reads without
-owners, which fan out, so a trace replays against a fresh manager and against
-a multi-L1 target alike.
+the trace. The replay dispatcher keeps the owners of its own `reserve_write`
+replays in `ReplayContext.write_owners` and hands them to the matching
+`finish_write`; reads replay without owners, which fan out. A trace therefore
+replays against a fresh manager and against a multi-L1 target alike.
 
 `test_multi_l1.py`, `test_write_policy.py`, `test_l1_owner.py`, and
 `test_l1_owner_completion.py` cover placement, invalid policy answers,
-owner-grouped and fan-out completion, independent same-key copies, recycled
+owner-grouped completion, independent same-key copies, recycled
 ownership, and serialized completion.
 
 ## Configured peer L1 serving
