@@ -38,6 +38,12 @@ from lmcache.v1.multiprocess.transport.zmq_impl.server import (
     build_zmq_request_server,
     get_zmq_handler_specs,
 )
+from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
+    HANDLER_ERROR_OPERATION,
+    LEGACY_OPERATION_IDS,
+    decode_handler_error,
+    encode_handler_error,
+)
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -1083,3 +1089,15 @@ def test_client_socket_bounds_connect_attempts():
     assert client.socket.getsockopt(zmq.CONNECT_TIMEOUT) == CONNECT_TIMEOUT_MS
     assert client.socket.getsockopt(zmq.RECONNECT_IVL_MAX) == RECONNECT_IVL_MAX_MS
     client.close()
+
+
+def test_handler_error_round_trips_through_the_wire_frames():
+    """The error frames carry the exception type and message."""
+    frames = encode_handler_error(RuntimeError("blew up"))
+    assert len(frames) == 2
+    assert decode_handler_error(frames[1]) == "RuntimeError: blew up"
+
+
+def test_handler_error_operation_is_not_a_real_operation():
+    """The sentinel must not collide with a routable operation name or ID."""
+    assert HANDLER_ERROR_OPERATION not in LEGACY_OPERATION_IDS
