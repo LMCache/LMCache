@@ -1,0 +1,294 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:2
+msgid "Valkey"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/resp`."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:10
+msgid "Overview"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:12
+msgid ""
+"Valkey is an open source (BSD) high-performance key/value datastore and "
+"is a supported option for remote KV Cache offloading in LMCache. Some "
+"other remote backends are :doc:`Mooncake <./mooncake>`, :doc:`Redis "
+"<./redis>`, and :doc:`InfiniStore <./infinistore>`."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:16
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:18
+msgid "To use this connector, you need valkey-glide 2.0 or higher."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:26
+msgid "Configuration Reference"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:28
+msgid "The following ``extra_config`` keys are supported:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:34
+msgid "Key"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:35
+msgid "Default"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:36
+msgid "Description"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:37
+msgid "``valkey_num_workers``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:38
+msgid "``8``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:39
+msgid "Number of worker threads, each with its own GLIDE client connection."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:40
+msgid "``valkey_mode``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:41
+msgid "``\"standalone\"``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:42
+msgid ""
+"``\"standalone\"`` or ``\"cluster\"``. Cluster mode auto-discovers "
+"topology from a seed node."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:43
+msgid "``tls_enable``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:44
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:56
+msgid "``false``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:45
+msgid "Enable TLS. Required for ElastiCache Serverless."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:46
+msgid "``valkey_username``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:47
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:50
+msgid "``\"\"``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:48
+msgid "Authentication username."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:49
+msgid "``valkey_password``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:51
+msgid "Authentication password."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:52
+msgid "``valkey_database``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:53
+msgid "None"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:54
+msgid "Database ID (standalone mode only, ignored in cluster mode)."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:55
+msgid "``valkey_enable_ttl``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:57
+msgid ""
+"Feature flag. When ``true``, every key is written with an expiry (see "
+"``valkey_ttl_sec``) so Valkey/Redis ``volatile-*`` eviction policies can "
+"reclaim L2 cache keys once the node reaches ``maxmemory``. When ``false``"
+" (default), keys are persisted without a TTL."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:58
+msgid "``valkey_ttl_sec``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:59
+msgid "``86400``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:60
+msgid ""
+"Key TTL in seconds, applied only when ``valkey_enable_ttl`` is ``true``. "
+"Must be a positive integer. If the flag is enabled but this key is "
+"omitted, it defaults to ``86400`` (24 hours)."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:61
+msgid "``request_timeout``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:62
+msgid "``5.0``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:63
+msgid ""
+"GLIDE request timeout in seconds. Also used as the Python-side Future "
+"timeout."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:64
+msgid "``connection_timeout``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:65
+msgid "``10.0``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:66
+msgid "GLIDE connection timeout in seconds for initial client connections."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:69
+msgid "Example Configurations"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:72
+msgid "Standalone-mode"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:75
+msgid "Basic Valkey Configuration (Standalone-mode)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:87
+msgid "Standalone-mode Valkey Configuration with database"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:100
+msgid "Standalone-mode Valkey Configuration with key TTL (volatile eviction)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:102
+msgid ""
+"Enable a per-key TTL so a node configured with a ``volatile-lru`` / "
+"``volatile-lfu`` eviction policy can reclaim L2 cache keys once it "
+"reaches ``maxmemory``. Without a TTL such policies never evict the KV "
+"cache keys, which can choke the remote cache."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:119
+msgid "Cluster-mode"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:122
+msgid "Cluster-mode Valkey Configuration (Endpoint)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:124
+msgid "For example, the configuration endpoint in ElastiCache is as follows:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:126
+msgid "<cache-name>.<identifier>.clustercfg.<region>.cache.amazonaws.com"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:128
+msgid "You need to add this DNS name in the <your host>."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:143
+msgid "Cluster-mode Valkey Configuration (Nodes)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:145
+msgid ""
+"Nodes are deployed directly and configured in cluster mode without "
+"connecting them via DNS names (CNAME)."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:147
+msgid "In this scenario, you simply input multiple IP hosts and ports."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:149
+msgid "Example: 172.0.0.1:7001, 172.0.0.2:7002 ... 172.0.0.6:7006"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:162
+msgid ""
+"Cluster-mode Valkey Configuration with numbered databases (Valkey 9.0+ "
+"and Valkey-GLIDE 2.1+)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:164
+msgid ""
+"Valkey connector supports numbered databases in both the Endpoint using "
+"DNS and the Nodes method using IP and port pairs."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:178
+msgid "TLS / ElastiCache Serverless"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:180
+msgid "ElastiCache Serverless requires TLS. Set ``tls_enable: true``:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:193
+msgid "Performance Tuning"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/valkey.rst:195
+msgid ""
+"For large models (e.g., 70B with TP=8), increase the worker count for "
+"higher throughput:"
+msgstr ""
+

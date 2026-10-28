@@ -1,0 +1,274 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:2
+msgid "Remote Storage Plugins"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:9
+msgid ""
+"LMCache supports built-in remote storage connectors for Redis, "
+"InfiniStore, MooncakeStore, S3, Hugging Face Buckets, and more. The "
+"remote storage plugin system provides the ability to add custom storage "
+"connectors through dynamic loading. This enables extending remote storage"
+" capabilities without modifying core code."
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:15
+msgid ""
+"The ``remote_url`` configuration is **deprecated** and will be removed in"
+" a future release. Please use ``remote_storage_plugins`` instead."
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:19
+msgid "Connector Definition Requirements"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:20
+msgid "A custom remote storage connector requires two classes:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:22
+msgid ""
+"**ConnectorAdapter**: Handles URL scheme matching and connector "
+"instantiation"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:24
+msgid "Inherit from ``ConnectorAdapter``"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:25
+msgid "Set the URL scheme in the constructor (e.g., ``mystore://``)"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:26
+msgid "Implement the ``create_connector`` method"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:28
+msgid "**RemoteConnector**: Implements the actual storage operations"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:30
+msgid "Inherit from ``RemoteConnector``"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:31
+msgid ""
+"Implement all abstract methods: ``exists``, ``exists_sync``, ``get``, "
+"``put``, ``list``, ``close``"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:35
+msgid ""
+"The ``ConnectorAdapter`` constructor receives no arguments from LMCache. "
+"The scheme should be set by calling the parent constructor with the "
+"scheme string."
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:37
+msgid ""
+"The ``create_connector`` method receives a ``ConnectorContext`` object "
+"containing the URL, event loop, local CPU backend, config, metadata, and "
+"``plugin_name``."
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:40
+msgid "Plugin Naming Convention"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:41
+#, python-brace-format
+msgid "Plugin names follow the format ``{type}`` or ``{type}.{instance}``:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:43
+#, python-brace-format
+msgid ""
+"``{type}`` — a single instance of that connector type (e.g. ``fs``, "
+"``mooncakestore``)"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:44
+#, python-brace-format
+msgid ""
+"``{type}.{instance}`` — a named instance, allowing **multiple instances "
+"of the same type** (e.g. ``fs.primary``, ``fs.backup``)"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:46
+msgid ""
+"The framework extracts the *type* portion (everything before the first "
+"``.``) to locate the matching ``ConnectorAdapter``. The full plugin name "
+"is used as the configuration key prefix."
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:49
+msgid "Using Built-in Connectors via Plugins"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:50
+msgid ""
+"Built-in connectors (``fs``, ``mooncakestore``, ``hfbucket``, etc.) can "
+"be used directly via ``remote_storage_plugins`` without specifying "
+"``module_path`` or ``class_name``. Their configuration is placed under "
+"``extra_config``:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:63
+msgid "Multiple instances of the same connector type:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:72
+msgid "Mixing different connector types:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:81
+msgid "Built-in Hugging Face Buckets example:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:91
+msgid "How to Integrate Custom Remote Storage with LMCache"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:92
+msgid "Install your connector package in the LMCache environment"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:93
+msgid ""
+"Add ``remote_storage_plugins`` and its related ``module_path`` and "
+"``class_name`` to the ``extra_config`` section of LMCache configuration "
+"as follows:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:105
+msgid "An example configuration for a custom remote storage connector:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:117
+msgid "Multiple instances of a custom connector:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:130
+msgid "``remote_url`` is **deprecated**; use ``remote_storage_plugins`` instead"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:131
+msgid ""
+"``remote_storage_plugin.<plugin_name>`` uses the full plugin name "
+"(including instance suffix) as the key prefix"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:132
+msgid "Multiple remote storage plugins can be loaded simultaneously"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:133
+msgid "Built-in connectors do not require ``module_path`` / ``class_name``"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:136
+msgid "ConnectorAdapter Implementation"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:137
+msgid "The ``ConnectorAdapter`` class is responsible for:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:139
+msgid "Defining the URL scheme it handles"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:140
+msgid "Creating the appropriate ``RemoteConnector`` instance"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:186
+msgid "RemoteConnector Implementation"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:187
+msgid ""
+"The ``RemoteConnector`` class defines the interface for remote storage "
+"operations. Your implementation must provide the following abstract "
+"methods:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:234
+msgid "Optional Methods"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:235
+msgid ""
+"The ``RemoteConnector`` base class also provides optional methods that "
+"can be overridden for enhanced functionality:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:237
+msgid "``support_ping()`` / ``ping()``: Health check support"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:238
+msgid "``support_batched_get()`` / ``batched_get()``: Batch retrieval operations"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:239
+msgid "``support_batched_put()`` / ``batched_put()``: Batch storage operations"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:240
+msgid ""
+"``support_batched_contains()`` / ``batched_contains()``: Batch existence "
+"checks"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:241
+msgid "``remove_sync()``: Synchronous key removal"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:244
+msgid "Implementation Example"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:245
+msgid ""
+"A complete remote storage connector implementation would include both the"
+" adapter and connector classes in a single module or package. Here's a "
+"minimal working example structure:"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:254
+msgid "The adapter module (``adapter.py``):"
+msgstr ""
+
+#: ../../source/legacy/developer_guide/extending_lmcache/remote_storage_plugins.rst:287
+msgid "Configuration would then reference the adapter:"
+msgstr ""
+

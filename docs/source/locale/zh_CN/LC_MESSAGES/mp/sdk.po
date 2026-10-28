@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"POT-Creation-Date: 2026-10-19 09:28+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -29,10 +29,10 @@ msgid ""
 " server, transform it on the CPU, and store it back. This can be used for"
 " KV cache transformations, such as token dropping. In the example: we "
 "prefill a batch of long prompts, drop half of each request's KV chunks, "
-"and show the decode-throughput gain. The full runnable notebook lives at "
-"`examples/token_dropping/token_dropping.ipynb "
+"and show the decode-throughput gain. The SDK API is meant for offline "
+"setup. The full runnable notebook lives at `examples/token_dropping "
 "<https://github.com/LMCache/LMCache/tree/dev/examples/token_dropping>`_."
-msgstr "LMCache **SDK** 允许您从 LMCache 服务器检索请求的 KV 缓存，在 CPU 上进行转换，然后再存储回去。这可以用于 KV 缓存转换，例如丢弃令牌。在这个例子中：我们预填充一批长提示，丢弃每个请求的一半 KV 块，并展示解码吞吐量的提升。完整的可运行笔记本位于 `examples/token_dropping/token_dropping.ipynb <https://github.com/LMCache/LMCache/tree/dev/examples/token_dropping>`_。"
+msgstr "LMCache **SDK** 允许您从 LMCache 服务器检索请求的 KV 缓存，在 CPU 上进行转换，然后再存储回去。这可以用于 KV 缓存转换，例如丢弃令牌。在示例中：我们预填充一批长提示，丢弃每个请求的一半 KV 块，并展示解码吞吐量的提升。SDK API 旨在用于离线设置。完整的可运行笔记本位于 `examples/token_dropping <https://github.com/LMCache/LMCache/tree/dev/examples/token_dropping>`_。"
 
 #: ../../source/mp/sdk.rst:18
 msgid "Why KV Cache SDK"
@@ -42,65 +42,101 @@ msgstr "为什么选择 KV Cache SDK"
 msgid ""
 "**Improving Decode Throughput** when shrinking KV cache using token "
 "dropping. Token dropping reduces the KV cache size, allowing more "
-"requests to fit in a batch, improving decode throughput."
-msgstr "**通过丢弃令牌** 来提高解码吞吐量。当使用丢弃令牌缩小 KV Cache 时，KV Cache 的大小减少，使得更多请求可以适应一个批次，从而提高解码吞吐量。"
+"requests to fit in a batch, improving decode throughput. Doing so will "
+"affect the accuracy minimally, as we demonstrated with the SnapKV example"
+" in the `examples/token_dropping/snapkv_token_dropping.ipynb "
+"<https://github.com/LMCache/LMCache/tree/dev/examples/token_dropping/snapkv_token_dropping.ipynb>`_."
+msgstr "**通过丢弃令牌来提高解码吞吐量**。丢弃令牌可以缩小 KV 缓存的大小，使更多请求能够适应一个批次，从而提高解码吞吐量。这样做对准确性的影响很小，正如我们在 `examples/token_dropping/snapkv_token_dropping.ipynb <https://github.com/LMCache/LMCache/tree/dev/examples/token_dropping/snapkv_token_dropping.ipynb>`_ 中用 SnapKV 示例所演示的那样。"
 
-#: ../../source/mp/sdk.rst:24
+#: ../../source/mp/sdk.rst:27
 msgid ""
-"The SDK gives you the hooks to retrieve a request's KV, supply your own "
-"function to edit the KV, and store the edited KV back. The SDK also "
-"provides a batched-stream API to prefill, modify, and store the cache "
-"back before decoding continues."
-msgstr "SDK 提供了钩子来检索请求的 KV，允许您提供自己的函数来编辑 KV，并将编辑后的 KV 存储回去。SDK 还提供了一个批量流 API，以便在继续解码之前进行预填充、修改和存储缓存。"
+"The SDK gives you the hooks to retrieve a request's KV and other "
+"intermediate tensors (currently only query tensors), supply your function"
+" to edit the KV, and store the edited KV back. The SDK also provides a "
+"batched-stream API to prefill, modify, and store the cache back before "
+"decoding continues."
+msgstr "SDK 提供了钩子来检索请求的 KV 及其他中间张量（目前仅支持查询张量），您可以提供自己的函数来编辑 KV，并将编辑后的 KV 存储回去。SDK 还提供了一个批量流 API，以便在继续解码之前进行预填充、修改并将缓存存储回去。"
 
-#: ../../source/mp/sdk.rst:31
+#: ../../source/mp/sdk.rst:32
+msgid ""
+"Since many token dropping algorithms rely on the intermediate tensors, we"
+" also provided a flag to transfer the intermediate tensors from vLLM to "
+"LMCache. Currently, the SDK only supports transferring query intermediate"
+" tensors."
+msgstr "由于许多丢弃令牌的算法依赖于中间张量，我们还提供了一个标志，以便将中间张量从 vLLM 转移到 LMCache。目前，SDK 仅支持转移查询中间张量。"
+
+#: ../../source/mp/sdk.rst:38
 msgid "How it works"
 msgstr "它是如何工作的"
 
-#: ../../source/mp/sdk.rst:33
+#: ../../source/mp/sdk.rst:40
 msgid "A request flows through three phases on the batched-stream API:"
 msgstr "请求在批处理流 API 上经历三个阶段："
 
-#: ../../source/mp/sdk.rst:35
+#: ../../source/mp/sdk.rst:42
 msgid ""
 "**prefill** — run each prompt through vLLM once (``max_tokens=1``); vLLM "
 "computes the KV cache and stores it in LMCache."
-msgstr "**预取** — 将每个提示通过 vLLM 运行一次（``max_tokens=1``）；vLLM 计算 KV Cache 并将其存储在 LMCache 中。"
+msgstr ""
+"**预取** — 将每个提示通过 vLLM 运行一次（``max_tokens=1``）；vLLM 计算 KV Cache 并将其存储在 "
+"LMCache 中。"
 
-#: ../../source/mp/sdk.rst:37
+#: ../../source/mp/sdk.rst:44
 msgid ""
 "**modify** — the SDK retrieves the cached KV to CPU, hands it to your "
 "edit function, and stores the result back."
 msgstr "**修改** — SDK 将缓存的 KV 取回到 CPU，交给你的编辑函数，并将结果存储回去。"
 
-#: ../../source/mp/sdk.rst:39
+#: ../../source/mp/sdk.rst:46
 msgid "**decode** — continue generation against the smaller, edited cache."
 msgstr "**解码** — 在更小的、编辑过的缓存上继续生成。"
 
-#: ../../source/mp/sdk.rst:41
+#: ../../source/mp/sdk.rst:48
 msgid ""
 "The SDK runs on **CPU** and hands you KV tensors in ``HND`` order with "
 "shape ``[2, L, T, D]`` (K/V, layers, chunk-aligned tokens, ``num_kv_heads"
 " * head_dim``)."
-msgstr "SDK 在 **CPU** 上运行，并以 ``HND`` 顺序提供形状为 ``[2, L, T, D]`` 的 KV 张量（K/V、层、块对齐的标记、``num_kv_heads * head_dim``）。"
+msgstr ""
+"SDK 在 **CPU** 上运行，并以 ``HND`` 顺序提供形状为 ``[2, L, T, D]`` 的 KV "
+"张量（K/V、层、块对齐的标记、``num_kv_heads * head_dim``）。"
 
-#: ../../source/mp/sdk.rst:46
+#: ../../source/mp/sdk.rst:53
 msgid "Configuration"
 msgstr "配置"
 
-#: ../../source/mp/sdk.rst:48
+#: ../../source/mp/sdk.rst:55
 msgid ""
-"To start the LMCache server with shared-memory transfer enabled, pass "
-"``--shm-name`` and disable lazy L1 allocation with ``--no-l1-use-lazy``. "
-"If shared memory is unavailable and these flags are not specified, the "
-"SDK falls back to pickle."
-msgstr "要启动启用共享内存传输的 LMCache 服务器，请传递 ``--shm-name`` 并使用 ``--no-l1-use-lazy`` 禁用懒惰的 L1 分配。如果共享内存不可用且未指定这些标志，SDK 将回退到 pickle。"
+"The SDK runs on CPU and talks to the server over the engine-driven "
+"transfer path, which the server does not load by default -- start the "
+"server with ``--supported-transfer-mode auto`` so both the vLLM (lmcache-"
+"driven) and SDK (engine-driven) paths are available. The SDK request "
+"client supports either ZMQ or gRPC. Its ``url`` scheme and the vLLM "
+"connector endpoint must match the server's ``--transport`` setting. To "
+"enable shared-memory transfer, pass ``--shm-name`` and disable lazy L1 "
+"allocation with ``--no-l1-use-lazy``. If shared memory is unavailable and"
+" these flags are not specified, the SDK falls back to the typed inline "
+"tensor codec. To transfer query tensors, load the opt-in ``qstore`` "
+"server module with ``--server-module``. It requires the LMCache-driven "
+"transfer path (``--supported-transfer-mode lmcache_driven`` or ``auto``) "
+"and advertises the ``transfer_query`` experimental feature, which the "
+"connector checks before it starts capturing query tensors."
+msgstr "SDK 在 CPU 上运行，并通过引擎驱动的传输路径与服务器通信，该路径默认情况下不加载服务器 -- 使用 ``--supported-transfer-mode auto`` 启动服务器，以便 vLLM（基于 lmcache 的）和 SDK（基于引擎的）路径都可用。SDK 请求客户端支持 ZMQ 或 gRPC。其 ``url`` 方案和 vLLM 连接器端点必须与服务器的 ``--transport`` 设置匹配。要启用共享内存传输，请传递 ``--shm-name`` 并使用 ``--no-l1-use-lazy`` 禁用懒惰的 L1 分配。如果共享内存不可用且未指定这些标志，SDK 将回退到类型内联张量编解码器。要传输查询张量，请使用 ``--server-module`` 加载可选的 ``qstore`` 服务器模块。它需要基于 LMCache 的传输路径（``--supported-transfer-mode lmcache_driven`` 或 ``auto``），并宣传 ``transfer_query`` 实验性功能，连接器在开始捕获查询张量之前会检查该功能。"
 
-#: ../../source/mp/sdk.rst:64
+#: ../../source/mp/sdk.rst:84
 msgid "Then start vLLM with the LMCache MP connector."
 msgstr "然后使用 LMCache MP 连接器启动 vLLM。"
 
-#: ../../source/mp/sdk.rst:80
+#: ../../source/mp/sdk.rst:100
+msgid ""
+"To also send intermediate tensors, add "
+"``\"lmcache.mp.transfer_intermediate_tensors\": true`` to "
+"``kv_connector_extra_config``. By default, the QRingBuffer, a temporary "
+"staging buffer for containing query tensor, has the capacity to hold the "
+"query tensor of 2 forward passes. However, it can also be configured via "
+"``\"lmcache.mp.q.ring_depth\":2``. Example:"
+msgstr "要同时发送中间张量，请将 ``\"lmcache.mp.transfer_intermediate_tensors\": true`` 添加到 ``kv_connector_extra_config`` 中。默认情况下，QRingBuffer 是一个临时的暂存缓冲区，用于存放查询张量，能够容纳 2 次前向传递的查询张量。然而，它也可以通过 ``\"lmcache.mp.q.ring_depth\":2`` 进行配置。示例："
+
+#: ../../source/mp/sdk.rst:127
 msgid ""
 "The SDK keys the KV cache by token ids: ``create_request`` takes the "
 "prompt as token ids, and every ``post_completion`` must report a "
@@ -108,114 +144,488 @@ msgid ""
 "straight from vLLM by passing ``--return-tokens-as-token-ids``. "
 "Otherwise, if vLLM returns only text, the ``post_completion`` must "
 "tokenize each generated token back into a token id."
-msgstr "SDK通过令牌 ID 对 KV Cache 进行键控：``create_request`` 将提示作为令牌 ID，且每个 ``post_completion`` 必须报告每个生成令牌的 ``token_id``。该示例通过传递 ``--return-tokens-as-token-ids`` 直接从 vLLM 获取这些 ID。否则，如果 vLLM 仅返回文本，则 ``post_completion`` 必须将每个生成的令牌重新标记为令牌 ID。"
+msgstr ""
+"SDK通过令牌 ID 对 KV Cache 进行键控：``create_request`` 将提示作为令牌 ID，且每个 "
+"``post_completion`` 必须报告每个生成令牌的 ``token_id``。该示例通过传递 ``--return-tokens-"
+"as-token-ids`` 直接从 vLLM 获取这些 ID。否则，如果 vLLM 仅返回文本，则 ``post_completion`` "
+"必须将每个生成的令牌重新标记为令牌 ID。"
 
-#: ../../source/mp/sdk.rst:101
+#: ../../source/mp/sdk.rst:133
+msgid ""
+"Here's an example of creating a context and connecting to the LMCache "
+"server. Each type of tensor (KV, query intermediate) has its own context."
+msgstr "这是创建上下文并连接到 LMCache 服务器的示例。每种类型的张量（KV、查询中间）都有其自己的上下文。"
+
+#: ../../source/mp/sdk.rst:158
 msgid "Writing a custom edit function"
 msgstr "编写自定义编辑函数"
 
-#: ../../source/mp/sdk.rst:103
+#: ../../source/mp/sdk.rst:160
 msgid ""
-"An edit function takes the retrieved KV tensor and its token ids and "
-"returns the edited ``(kv, tokens)``. ``batch.modify(fn)`` applies it to "
-"every stream."
-msgstr "编辑函数接受检索到的 KV 张量及其令牌 ID，并返回编辑后的 ``(kv, tokens)``。 ``batch.modify(fn)`` 将其应用于每个流。"
+"An edit function takes the Mapping[kind, retrieved tensor] and its token "
+"ids and returns the edited ``(kv, tokens)``. ``batch.modify(fn)`` applies"
+" it for every requests. The function should be implemented as if it's "
+"only for single request, and the SDK will call it in parallel for every "
+"requests in the batch."
+msgstr "编辑函数接受 Mapping[kind, retrieved tensor] 及其令牌 ID，并返回编辑后的 ``(kv, tokens)``。``batch.modify(fn)`` 会对每个请求应用该函数。该函数应当实现为仅针对单个请求，SDK 会并行调用它以处理批次中的每个请求。"
 
-#: ../../source/mp/sdk.rst:106
+#: ../../source/mp/sdk.rst:165
 msgid ""
 "``modify`` operates only on the **chunk-aligned** prefix. A trailing "
 "partial chunk is tracked by the SDK and re-sent on the next ``decode``, "
 "so ``tokens`` arrives already truncated to the cached length."
-msgstr "``modify`` 仅在 **块对齐** 前缀上操作。尾部的部分块由 SDK 跟踪，并在下一个 ``解码`` 时重新发送，因此 ``tokens`` 已经被截断到缓存的长度。"
+msgstr ""
+"``modify`` 仅在 **块对齐** 前缀上操作。尾部的部分块由 SDK 跟踪，并在下一个 ``解码`` 时重新发送，因此 "
+"``tokens`` 已经被截断到缓存的长度。"
 
-#: ../../source/mp/sdk.rst:112
+#: ../../source/mp/sdk.rst:171
 msgid "API reference"
 msgstr "API 参考"
 
-#: ../../source/mp/sdk.rst:118
+#: ../../source/mp/sdk.rst:173
+msgid ""
+"The SDK lives under ``lmcache.sdk``. The examples above alias ``import "
+"lmcache.sdk as lmc_sdk`` (and ``lmcache.sdk.request`` / ``.batch`` as "
+"``lmc_request`` / ``lmc_batch``)."
+msgstr "SDK 位于 ``lmcache.sdk`` 下。上面的示例将 ``import lmcache.sdk as lmc_sdk``（以及 ``lmcache.sdk.request`` / ``.batch`` 作为 ``lmc_request`` / ``lmc_batch``）进行了别名处理。"
+
+#: ../../source/mp/sdk.rst:178
+msgid "Modules"
+msgstr "模块"
+
+#: ../../source/mp/sdk.rst:184
+msgid "Module"
+msgstr "模块"
+
+#: ../../source/mp/sdk.rst:185 ../../source/mp/sdk.rst:211
+msgid "Purpose"
+msgstr "目的"
+
+#: ../../source/mp/sdk.rst:186
+msgid "``lmcache.sdk``"
+msgstr "``lmcache.sdk``"
+
+#: ../../source/mp/sdk.rst:187
+msgid ""
+"Package entry point; ``connect(kind, ...)`` dispatcher and re-exports of "
+"the submodules below."
+msgstr "包入口点；``connect(kind, ...)`` 调度器和下面子模块的重新导出。"
+
+#: ../../source/mp/sdk.rst:189
+msgid "``lmcache.sdk.kvcache``"
+msgstr "``lmcache.sdk.kvcache``"
+
+#: ../../source/mp/sdk.rst:190
+msgid "``connect()`` for the **KV** cache."
+msgstr "``connect()`` 用于 **KV** 缓存。"
+
+#: ../../source/mp/sdk.rst:191
+msgid "``lmcache.sdk.qcache``"
+msgstr "``lmcache.sdk.qcache``"
+
+#: ../../source/mp/sdk.rst:192
+msgid ""
+"``connect()`` for the **query (Q)** cache (model name is "
+"``<model>##query``)."
+msgstr "``connect()`` 用于 **查询 (Q)** 缓存（模型名称为 ``<model>##query``）。"
+
+#: ../../source/mp/sdk.rst:193
+msgid "``lmcache.sdk.context``"
+msgstr "``lmcache.sdk.context``"
+
+#: ../../source/mp/sdk.rst:194
+msgid ""
+"The server-connection context plus the shared cache-kind enum and error "
+"type."
+msgstr "服务器连接上下文加上共享缓存类型枚举和错误类型。"
+
+#: ../../source/mp/sdk.rst:195
+msgid "``lmcache.sdk.request``"
+msgstr "``lmcache.sdk.request``"
+
+#: ../../source/mp/sdk.rst:196
+msgid "Per-request streaming: ``create_request()`` and ``LMCacheRequestStream``."
+msgstr "每个请求的流式处理：``create_request()`` 和 ``LMCacheRequestStream``。"
+
+#: ../../source/mp/sdk.rst:197
+msgid "``lmcache.sdk.batch``"
+msgstr "``lmcache.sdk.batch``"
+
+#: ../../source/mp/sdk.rst:198
+msgid "Orchestrates many request streams together via ``LMCacheBatchedStream``."
+msgstr "通过 ``LMCacheBatchedStream`` 协调多个请求流。"
+
+#: ../../source/mp/sdk.rst:199
+msgid "``lmcache.sdk.wrapper.contiguous``"
+msgstr "``lmcache.sdk.wrapper.contiguous``"
+
+#: ../../source/mp/sdk.rst:200
+msgid ""
+"``ContiguousTransferWrapper`` — the transfer helper the context holds "
+"(used internally; exposed via ``ctx.transfer_ctx``)."
+msgstr "``ContiguousTransferWrapper`` — 上下文持有的传输助手（内部使用；通过 ``ctx.transfer_ctx`` 暴露）。"
+
+#: ../../source/mp/sdk.rst:204
+msgid "Classes"
+msgstr "类"
+
+#: ../../source/mp/sdk.rst:210
+msgid "Class"
+msgstr "类"
+
+#: ../../source/mp/sdk.rst:212
+msgid "``cache_kind.LMCacheSDKCacheKind``"
+msgstr "``cache_kind.LMCacheSDKCacheKind``"
+
+#: ../../source/mp/sdk.rst:213
+msgid "Enum selecting the cache: ``KV`` or ``QUERY``."
+msgstr "选择缓存的枚举：``KV`` 或 ``QUERY``。"
+
+#: ../../source/mp/sdk.rst:214
+msgid "``context.LMCacheSDKContext``"
+msgstr "``context.LMCacheSDKContext``"
+
+#: ../../source/mp/sdk.rst:215
+msgid ""
+"A connection to one LMCache server for one model + kind; returned by "
+"``connect`` and passed to every other call."
+msgstr "一个连接到一个 LMCache 服务器，用于一个模型 + 类型；由 ``connect`` 返回，并传递给其他所有调用。"
+
+#: ../../source/mp/sdk.rst:217
+msgid "``request.LMCacheRequestStream``"
+msgstr "``request.LMCacheRequestStream``"
+
+#: ../../source/mp/sdk.rst:218
+msgid "One request's lifecycle (prefill / decode / retrieve / modify)."
+msgstr "一个请求的生命周期（Prefill / 解码 / 检索 / 修改）。"
+
+#: ../../source/mp/sdk.rst:219
+msgid "``batch.LMCacheBatchedStream``"
+msgstr "``batch.LMCacheBatchedStream``"
+
+#: ../../source/mp/sdk.rst:220
+msgid ""
+"Runs a set of ``LMCacheRequestStream`` objects together and reports "
+"metrics."
+msgstr "同时运行一组 ``LMCacheRequestStream`` 对象并报告指标。"
+
+#: ../../source/mp/sdk.rst:222
+msgid "``request.StreamPerfMetrics``"
+msgstr "``request.StreamPerfMetrics``"
+
+#: ../../source/mp/sdk.rst:223
+msgid ""
+"Throughput / latency report for a single ``generate()`` call; the batch "
+"keeps the latest one per request stream in ``batch.perf_metrics``."
+msgstr "单个 ``generate()`` 调用的吞吐量/延迟报告；批次在 ``batch.perf_metrics`` 中保留每个请求流的最新报告。"
+
+#: ../../source/mp/sdk.rst:225
+msgid "``request.TokenEvent``"
+msgstr "``request.TokenEvent``"
+
+#: ../../source/mp/sdk.rst:226
+msgid "One generated-token event passed back through the request."
+msgstr "通过请求返回的一个生成的令牌事件。"
+
+#: ../../source/mp/sdk.rst:227
+msgid "``request.PostCompletion``"
+msgstr "``request.PostCompletion``"
+
+#: ../../source/mp/sdk.rst:228
+msgid "Protocol you implement: a callable that submits a request to your engine."
+msgstr "您实现的协议：一个可调用的函数，用于向您的引擎提交请求。"
+
+#: ../../source/mp/sdk.rst:229
+msgid "``context.ModifyFnType``"
+msgstr "``context.ModifyFnType``"
+
+#: ../../source/mp/sdk.rst:230
+msgid ""
+"Type alias for the edit function you pass to ``modify`` / ``modify_kv``: "
+"``Callable[[Mapping[LMCacheSDKCacheKind, torch.Tensor], Sequence[int]], "
+"tuple[torch.Tensor, Sequence[int]]]``."
+msgstr "用于传递给 ``modify`` / ``modify_kv`` 的编辑函数的类型别名： ``Callable[[Mapping[LMCacheSDKCacheKind, torch.Tensor], Sequence[int]], tuple[torch.Tensor, Sequence[int]]]``。"
+
+#: ../../source/mp/sdk.rst:233
+msgid "``lmcache.cli.metrics.Metrics``"
+msgstr "``lmcache.cli.metrics.Metrics``"
+
+#: ../../source/mp/sdk.rst:234
+msgid ""
+"Aggregated report returned by ``batch.prefill`` / ``modify`` / ``decode``"
+" (not an ``lmcache.sdk`` type). Emit it or convert it to a dict."
+msgstr "由 ``batch.prefill`` / ``modify`` / ``decode`` 返回的聚合报告（不是 ``lmcache.sdk`` 类型）。将其发出或转换为字典。"
+
+#: ../../source/mp/sdk.rst:236
+msgid ""
+"``context.LMCacheSDKError`` / ``request.LMCacheRequestStreamError`` / "
+"``batch.LMCacheBatchedStreamError``"
+msgstr "``context.LMCacheSDKError`` / ``request.LMCacheRequestStreamError`` / ``batch.LMCacheBatchedStreamError``"
+
+#: ../../source/mp/sdk.rst:238
+msgid "Error types raised by the SDK, streams, and batches respectively."
+msgstr "SDK、流和批次分别引发的错误类型。"
+
+#: ../../source/mp/sdk.rst:241
+msgid "Functions and methods"
+msgstr "函数和方法"
+
+#: ../../source/mp/sdk.rst:247
 msgid "Function / method"
 msgstr "函数 / 方法"
 
-#: ../../source/mp/sdk.rst:119
+#: ../../source/mp/sdk.rst:248 ../../source/mp/sdk.rst:305
 msgid "Description"
 msgstr "描述"
 
-#: ../../source/mp/sdk.rst:120
-msgid "``lmc_sdk.connect(url, http_url, model_name, timeout=60.0)``"
-msgstr "``lmc_sdk.connect(url, http_url, model_name, timeout=60.0)``"
+#: ../../source/mp/sdk.rst:249
+msgid "``ctx = lmc_sdk.connect(kind, url, http_url, model_name, timeout=60.0)``"
+msgstr "``ctx = lmc_sdk.connect(kind, url, http_url, model_name, timeout=60.0)``"
 
-#: ../../source/mp/sdk.rst:121
+#: ../../source/mp/sdk.rst:250
 msgid ""
-"Create an SDK context and register the transfer context, pass it to every"
-" other call."
-msgstr "创建一个 SDK 上下文并注册传输上下文，将其传递给每个其他调用。"
+"Connect and register caches for ``kind`` (dispatches to ``kvcache`` / "
+"``qcache``). Returns an ``LMCacheSDKContext``."
+msgstr "连接并注册 ``kind`` 的缓存（分发到 ``kvcache`` / ``qcache``）。返回一个 ``LMCacheSDKContext``。"
 
-#: ../../source/mp/sdk.rst:123
-msgid "``lmc_sdk.close(ctx)``"
-msgstr "``lmc_sdk.close(ctx)``"
-
-#: ../../source/mp/sdk.rst:124
-msgid "Close the context and release resources. Called when done with the SDK."
-msgstr "关闭上下文并释放资源。在完成 SDK 的使用时调用。"
-
-#: ../../source/mp/sdk.rst:125
+#: ../../source/mp/sdk.rst:252
 msgid ""
-"``lmc_stream.create_request(ctx, post_completion, prompt_token_ids, "
-"cache_salt=\"\")``"
-msgstr "``lmc_stream.create_request(ctx, post_completion, prompt_token_ids, cache_salt=\"\")``"
+"``kv_ctx = lmc_sdk.kvcache.connect(url, http_url, model_name, "
+"timeout=60.0)``"
+msgstr "``kv_ctx = lmc_sdk.kvcache.connect(url, http_url, model_name, timeout=60.0)``"
 
-#: ../../source/mp/sdk.rst:127
-msgid "Create one request stream to add to a batch."
-msgstr "创建一个请求流以添加到批处理中。"
+#: ../../source/mp/sdk.rst:253
+msgid ""
+"Connect for the KV cache directly. Alternatively, use "
+"``connect(kind=LMCacheSDKCacheKind.KV, ...)``."
+msgstr "直接连接 KV Cache。或者，使用 ``connect(kind=LMCacheSDKCacheKind.KV, ...)``。"
 
-#: ../../source/mp/sdk.rst:128
-msgid "``lmc_batch.LMCacheBatchedStream()``"
-msgstr "``lmc_batch.LMCacheBatchedStream()``"
+#: ../../source/mp/sdk.rst:255
+msgid ""
+"``q_ctx = lmc_sdk.qcache.connect(url, http_url, model_name, "
+"timeout=60.0)``"
+msgstr "``q_ctx = lmc_sdk.qcache.connect(url, http_url, model_name, timeout=60.0)``"
 
-#: ../../source/mp/sdk.rst:129
+#: ../../source/mp/sdk.rst:256
+msgid ""
+"Connect for the query cache directly (model name is ``<model>##query``). "
+"Alternatively, use ``connect(kind=LMCacheSDKCacheKind.QUERY, ...)``."
+msgstr "直接连接查询缓存（模型名称为 ``<model>##query``）。或者，使用 ``connect(kind=LMCacheSDKCacheKind.QUERY, ...)``。"
+
+#: ../../source/mp/sdk.rst:258
+msgid "``ctx.register_caches()``"
+msgstr "``ctx.register_caches()``"
+
+#: ../../source/mp/sdk.rst:259
+msgid ""
+"Fetch the server-registered layout for this model + kind (called by "
+"``connect``)."
+msgstr "获取此模型 + 类型的服务器注册布局（由 ``connect`` 调用）。"
+
+#: ../../source/mp/sdk.rst:261
+msgid "``ctx.retrieve(tokens, cache_salt=\"\")``"
+msgstr "``ctx.retrieve(tokens, cache_salt=\"\")``"
+
+#: ../../source/mp/sdk.rst:262
+msgid "Pull the cached tensor for a token sequence (``None`` on miss)."
+msgstr "拉取令牌序列的缓存张量（未命中时为 ``None``）。"
+
+#: ../../source/mp/sdk.rst:263
+msgid "``ctx.store(kv, tokens, cache_salt=\"\")``"
+msgstr "``ctx.store(kv, tokens, cache_salt=\"\")``"
+
+#: ../../source/mp/sdk.rst:264
+msgid ""
+"Push a tensor of shape ``[2, L, T, D]`` back to the server for ``tokens``"
+" (``len(tokens)`` must equal ``kv.shape[2]``). Returns ``False`` if the "
+"server already had it cached."
+msgstr "将形状为 ``[2, L, T, D]`` 的张量推送回服务器以获取 ``tokens``（``len(tokens)`` 必须等于 ``kv.shape[2]``）。如果服务器已经缓存了它，则返回 ``False``。"
+
+#: ../../source/mp/sdk.rst:267
+msgid "``ctx.close()``"
+msgstr "``ctx.close()``"
+
+#: ../../source/mp/sdk.rst:268
+msgid "Release the context's resources when done."
+msgstr "完成后释放上下文的资源。"
+
+#: ../../source/mp/sdk.rst:269
+msgid ""
+"``request = lmc_request.create_request(contexts, post_completion, "
+"prompt_token_ids, cache_salt=\"\")``"
+msgstr "``request = lmc_request.create_request(contexts, post_completion, prompt_token_ids, cache_salt=\\\"\\\")``"
+
+#: ../../source/mp/sdk.rst:271
+msgid "Create one request stream bound to one or more contexts (e.g. KV and Q)."
+msgstr "创建一个请求流，绑定到一个或多个上下文（例如 KV 和 Q）。"
+
+#: ../../source/mp/sdk.rst:272
+msgid "``batch = lmc_batch.LMCacheBatchedStream()``"
+msgstr "``batch = lmc_batch.LMCacheBatchedStream()``"
+
+#: ../../source/mp/sdk.rst:273
 msgid "Create an empty batch."
 msgstr "创建一个空批次。"
 
-#: ../../source/mp/sdk.rst:130
-msgid "``batch.add(stream)``"
-msgstr "``batch.add(stream)``"
+#: ../../source/mp/sdk.rst:274
+msgid "``batch.add(request)``"
+msgstr "``batch.add(request)``"
 
-#: ../../source/mp/sdk.rst:131
-msgid "Register a stream to the batch."
-msgstr "将流注册到批处理中。"
+#: ../../source/mp/sdk.rst:275
+msgid "Register a request stream to the batch."
+msgstr "将请求流注册到批处理中。"
 
-#: ../../source/mp/sdk.rst:132
+#: ../../source/mp/sdk.rst:276
+msgid "``batch.get_request_stream(stream_id)``"
+msgstr "``batch.get_request_stream(stream_id)``"
+
+#: ../../source/mp/sdk.rst:277
+msgid ""
+"Fetch a registered request stream by its ``request_stream_id``. Raises "
+"``LMCacheBatchedStreamError`` if the id is unknown."
+msgstr "通过其 ``request_stream_id`` 获取已注册的请求流。如果该 ID 不存在，则引发 ``LMCacheBatchedStreamError``。"
+
+#: ../../source/mp/sdk.rst:279
 msgid "``batch.prefill(sampling_params)``"
 msgstr "``batch.prefill(sampling_params)``"
 
-#: ../../source/mp/sdk.rst:133
+#: ../../source/mp/sdk.rst:280
 msgid ""
-"Prefill every stream once (``max_tokens`` forced to 1). Returns a "
-"``Metrics`` report."
-msgstr "一次 Prefill 每个流（``max_tokens`` 强制为 1）。返回一个 ``Metrics`` 报告。"
+"Prefill every request stream once (``max_tokens`` forced to 1). Returns "
+"``Metrics``."
+msgstr "每个请求流预填充一次（``max_tokens`` 强制为 1）。返回 ``Metrics``。"
 
-#: ../../source/mp/sdk.rst:135
+#: ../../source/mp/sdk.rst:282
 msgid "``batch.modify(fn)``"
 msgstr "``batch.modify(fn)``"
 
-#: ../../source/mp/sdk.rst:136
+#: ../../source/mp/sdk.rst:283
 msgid ""
-"Apply the edit function ``fn`` to every stream's cached KV. Returns a "
-"``Metrics`` report."
-msgstr "将编辑函数 ``fn`` 应用到每个流的缓存 KV。返回一个 ``Metrics`` 报告。"
+"Apply the edit function ``fn`` to every request stream's cached KV. "
+"Returns ``Metrics``."
+msgstr "将编辑函数 ``fn`` 应用到每个请求流的缓存 KV。返回 ``Metrics``。"
 
-#: ../../source/mp/sdk.rst:138
+#: ../../source/mp/sdk.rst:285
 msgid "``batch.decode(sampling_params)``"
 msgstr "``batch.decode(sampling_params)``"
 
-#: ../../source/mp/sdk.rst:139
-msgid "Decode every stream. Returns a ``Metrics`` report."
-msgstr "解码每个流。返回一个 ``Metrics`` 报告。"
+#: ../../source/mp/sdk.rst:286
+msgid "Decode every request stream. Returns ``Metrics``."
+msgstr "解码每个请求流。返回 ``Metrics``。"
 
-#: ../../source/mp/sdk.rst:141
+#: ../../source/mp/sdk.rst:287
+msgid "``metrics.emit()``"
+msgstr "``metrics.emit()``"
+
+#: ../../source/mp/sdk.rst:288
 msgid ""
-"```Metrics`` returns ``input_tokens``, ``input_tput`` for prefill, "
-"``duration`` for modify, and ``output_tokens``, ``output_tput`` for "
+"Print the ``Metrics`` report through its registered handlers (a terminal "
+"table by default)."
+msgstr "通过其注册的处理程序（默认是终端表）打印 ``Metrics`` 报告。"
+
+#: ../../source/mp/sdk.rst:290
+msgid "``metrics.to_dict()``"
+msgstr "``metrics.to_dict()``"
+
+#: ../../source/mp/sdk.rst:291
+msgid ""
+"Return the ``Metrics`` report as a JSON-serialisable dict, keyed by "
+"``\"title\"`` and ``\"metrics\"``."
+msgstr "返回 ``Metrics`` 报告，作为一个可序列化为 JSON 的字典，键为 ``\"title\"`` 和 ``\"metrics\"``。"
+
+#: ../../source/mp/sdk.rst:294
+msgid ""
+"``Metrics`` reports ``input_tokens`` / ``input_tput`` for prefill, "
+"``duration`` for modify, and ``output_tokens`` / ``output_tput`` for "
 "decode."
-msgstr "```Metrics``` 返回 ``input_tokens``、``input_tput`` 用于 Prefill，``duration`` 用于修改，以及 ``output_tokens``、``output_tput`` 用于解码。"
+msgstr "``Metrics`` 报告 ``input_tokens`` / ``input_tput`` 用于 Prefill，``duration`` 用于修改，以及 ``output_tokens`` / ``output_tput`` 用于解码。"
+
+#: ../../source/mp/sdk.rst:298
+msgid "Attributes"
+msgstr "属性"
+
+#: ../../source/mp/sdk.rst:304
+msgid "Attribute"
+msgstr "属性"
+
+#: ../../source/mp/sdk.rst:306
+msgid "``batch.request_streams``"
+msgstr "``batch.request_streams``"
+
+#: ../../source/mp/sdk.rst:307
+msgid ""
+"``dict`` of every registered ``LMCacheRequestStream``, keyed by "
+"``request_stream_id``. Iterate it to read each request's ``output_text`` "
+"/ ``output_tokens`` after decode."
+msgstr "每个注册的 ``LMCacheRequestStream`` 的 ``dict``，以 ``request_stream_id`` 为键。遍历它以在解码后读取每个请求的 ``output_text`` / ``output_tokens``。"
+
+#: ../../source/mp/sdk.rst:310
+msgid "``batch.perf_metrics``"
+msgstr "``batch.perf_metrics``"
+
+#: ../../source/mp/sdk.rst:311
+msgid ""
+"``dict`` of the latest ``StreamPerfMetrics`` per ``request_stream_id``. "
+"Cleared and repopulated by each ``prefill`` / ``decode``."
+msgstr "每个 ``request_stream_id`` 的最新 ``StreamPerfMetrics`` 的 ``dict``。每次 ``prefill`` / ``decode`` 时清除并重新填充。"
+
+#~ msgid ""
+#~ "To start the LMCache server with "
+#~ "shared-memory transfer enabled, pass "
+#~ "``--shm-name`` and disable lazy L1 "
+#~ "allocation with ``--no-l1-use-lazy``. If "
+#~ "shared memory is unavailable and these"
+#~ " flags are not specified, the SDK "
+#~ "falls back to pickle."
+#~ msgstr ""
+#~ "要启动启用共享内存传输的 LMCache 服务器，请传递 ``--shm-name``"
+#~ " 并使用 ``--no-l1-use-lazy`` 禁用懒惰的 L1 "
+#~ "分配。如果共享内存不可用且未指定这些标志，SDK 将回退到 pickle。"
+
+#~ msgid ""
+#~ "Create an SDK context and register "
+#~ "the transfer context, pass it to "
+#~ "every other call."
+#~ msgstr "创建一个 SDK 上下文并注册传输上下文，将其传递给每个其他调用。"
+
+#~ msgid ""
+#~ "The SDK runs on CPU and talks "
+#~ "to the server over the engine-"
+#~ "driven transfer path, which the server"
+#~ " does not load by default -- "
+#~ "start the server with ``--supported-"
+#~ "transfer-mode auto`` so both the vLLM"
+#~ " (lmcache-driven) and SDK (engine-"
+#~ "driven) paths are available. To enable"
+#~ " shared-memory transfer, pass ``--shm-"
+#~ "name`` and disable lazy L1 allocation"
+#~ " with ``--no-l1-use-lazy``. If shared "
+#~ "memory is unavailable and these flags"
+#~ " are not specified, the SDK falls "
+#~ "back to pickle. To transfer query "
+#~ "tensors, add ``--enable transfer_query`` flag."
+#~ msgstr ""
+
+#~ msgid ""
+#~ "The SDK runs on CPU and talks "
+#~ "to the server over the engine-"
+#~ "driven transfer path, which the server"
+#~ " does not load by default -- "
+#~ "start the server with ``--supported-"
+#~ "transfer-mode auto`` so both the vLLM"
+#~ " (lmcache-driven) and SDK (engine-"
+#~ "driven) paths are available. The SDK "
+#~ "request client supports either ZMQ or"
+#~ " gRPC. Its ``url`` scheme and the "
+#~ "vLLM connector endpoint must match the"
+#~ " server's ``--transport`` setting. To "
+#~ "enable shared-memory transfer, pass "
+#~ "``--shm-name`` and disable lazy L1 "
+#~ "allocation with ``--no-l1-use-lazy``. If "
+#~ "shared memory is unavailable and these"
+#~ " flags are not specified, the SDK "
+#~ "falls back to pickle. To transfer "
+#~ "query tensors, add ``--enable transfer_query``"
+#~ " flag."
+#~ msgstr ""
 

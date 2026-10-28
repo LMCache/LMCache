@@ -1,0 +1,147 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:4
+msgid "Internal API Server Metrics"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:11
+msgid ""
+"Another approach to retrieve LMCache metrics is to use the internal API "
+"server."
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:14
+msgid "Overview"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:16
+msgid ""
+"The internal API server exposes Prometheus-compatible metrics endpoints "
+"in your LMCache deployment."
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:19
+msgid "Quick Start Guide"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:22
+msgid "Step 1: Enable Internal API Server"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:24
+msgid "Configure your vLLM instance to enable the internal API server:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:33
+msgid "Step 2: Access Metrics Endpoint"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:35
+msgid "Retrieve metrics from the worker's endpoint:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:42
+msgid "Port Configuration"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:44
+msgid ""
+"The following environment variables are used implicitly with their "
+"default values:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:46
+msgid "Default Port Configuration"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:50
+msgid "Environment Variable"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:51
+msgid "Default Value"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:52
+msgid "Description"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:53
+msgid "``LMCACHE_INTERNAL_API_SERVER_HOST``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:54
+msgid "``127.0.0.1``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:55
+msgid ""
+"Host address for the internal API server to bind to. The API has no "
+"authentication, so only bind a non-loopback address on a trusted network."
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:58
+msgid "``LMCACHE_INTERNAL_API_SERVER_PORT_START``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:59
+msgid "``6999``"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:60
+msgid "Starting port number, e.g.:"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:62
+msgid "Scheduler: port_start + 0 (6999)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:63
+msgid "Worker 0: port_start + 1 (7000)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:64
+msgid "Worker 1: port_start + 2 (7001)"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:67
+msgid "Therefore, the metrics endpoint curl command above uses port 7000."
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:70
+msgid "Advanced Usage"
+msgstr ""
+
+#: ../../source/legacy/production/observability/internal_api_server.rst:72
+msgid ""
+"For comprehensive testing and configuration options, refer to "
+":doc:`/internal_api_server/internal_api_server` for detailed examples and"
+" best practices."
+msgstr ""
+

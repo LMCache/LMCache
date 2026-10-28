@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -29,7 +29,9 @@ msgid ""
 "``/dev/daxY.Y``, and stores KV cache objects in fixed-size slots. This "
 "adapter is intended for byte-addressable memory devices such as "
 "persistent memory or CXL memory."
-msgstr "一个 L2 适配器，映射设备 DAX 路径，例如 ``/dev/daxX.X`` 和 ``/dev/daxY.Y``，并在固定大小的槽中存储 KV Cache 对象。该适配器旨在用于字节可寻址内存设备，例如持久内存或 CXL 内存。"
+msgstr ""
+"一个 L2 适配器，映射设备 DAX 路径，例如 ``/dev/daxX.X`` 和 ``/dev/daxY.Y``，并在固定大小的槽中存储 KV"
+" Cache 对象。该适配器旨在用于字节可寻址内存设备，例如持久内存或 CXL 内存。"
 
 #: ../../source/mp/l2_storage/dax.rst:9
 msgid ""
@@ -37,7 +39,9 @@ msgid ""
 "index in server memory and rebuilds an empty index on restart.  Old bytes"
 " may remain on the DAX device, but they are unreachable after the LMCache"
 " server restarts."
-msgstr "在此版本中，MP ``dax`` 适配器是易失性的。它将键索引保存在服务器内存中，并在重启时重建一个空索引。旧字节可能仍保留在 DAX 设备上，但在 LMCache 服务器重启后无法访问。"
+msgstr ""
+"在此版本中，MP ``dax`` 适配器是易失性的。它将键索引保存在服务器内存中，并在重启时重建一个空索引。旧字节可能仍保留在 DAX "
+"设备上，但在 LMCache 服务器重启后无法访问。"
 
 #: ../../source/mp/l2_storage/dax.rst:13
 msgid "**Required fields for the legacy single-device form:**"
@@ -53,64 +57,81 @@ msgstr "``max_dax_size_gb``: 从 ``device_path`` 映射的 GiB 数量。"
 
 #: ../../source/mp/l2_storage/dax.rst:17
 msgid ""
+"``offset_gb`` (optional, default ``0``): GiB offset where the mapping "
+"starts, so several servers, or L1 and L2 in one server, can share one CXL"
+" device on disjoint ranges. The range must fit within the device and be a"
+" multiple of the device alignment."
+msgstr ""
+
+#: ../../source/mp/l2_storage/dax.rst:21
+msgid ""
 "``slot_bytes``: Fixed slot size in bytes. This must be large enough for "
 "one full LMCache chunk because MP memory descriptors do not expose the "
 "non-MP full-chunk size."
-msgstr "``slot_bytes``: 固定槽大小（以字节为单位）。该值必须足够大，能够容纳一个完整的 LMCache 块，因为 MP 内存描述符不公开非 MP 模式下完整块的大小。"
+msgstr ""
+"``slot_bytes``: 固定槽大小（以字节为单位）。该值必须足够大，能够容纳一个完整的 LMCache 块，因为 MP 内存描述符不公开非"
+" MP 模式下完整块的大小。"
 
-#: ../../source/mp/l2_storage/dax.rst:21
+#: ../../source/mp/l2_storage/dax.rst:25
 msgid "**Required fields for the multi-device form:**"
 msgstr "**多设备形式的必填字段：**"
 
-#: ../../source/mp/l2_storage/dax.rst:23
+#: ../../source/mp/l2_storage/dax.rst:27
+#, fuzzy
 msgid ""
-"``devices``: List of objects with ``device_path`` and "
-"``max_dax_size_gb``. The list may be empty only when ``hotplug_enabled`` "
-"is ``true``."
-msgstr "``devices``：包含 ``device_path`` 和 ``max_dax_size_gb`` 的对象列表。只有在 ``hotplug_enabled`` 为 ``true`` 时，列表可以为空。"
+"``devices``: List of objects with ``device_path``, ``max_dax_size_gb``, "
+"and optional ``offset_gb``. The same device may appear more than once "
+"with disjoint ranges. The list may be empty only when ``hotplug_enabled``"
+" is ``true``."
+msgstr ""
+"``devices``：包含 ``device_path`` 和 ``max_dax_size_gb`` 的对象列表。只有在 "
+"``hotplug_enabled`` 为 ``true`` 时，列表可以为空。"
 
-#: ../../source/mp/l2_storage/dax.rst:25
+#: ../../source/mp/l2_storage/dax.rst:31
 msgid ""
 "``slot_bytes``: Fixed slot size in bytes shared by every DAX device in "
 "the adapter facade."
 msgstr "``slot_bytes``: 适配器门面中所有 DAX 设备共用的固定槽大小（以字节为单位）。"
 
-#: ../../source/mp/l2_storage/dax.rst:28
+#: ../../source/mp/l2_storage/dax.rst:34
 msgid "**Optional fields:**"
 msgstr "**可选字段：**"
 
-#: ../../source/mp/l2_storage/dax.rst:30
+#: ../../source/mp/l2_storage/dax.rst:36
 msgid ""
 "``hotplug_enabled`` (bool, default ``false``): Enables runtime "
-"``/reconfigure/dax/status``, ``/reconfigure/dax/add``, "
-"``/reconfigure/dax/remove``, and ``/reconfigure/dax/resize``."
-msgstr "``hotplug_enabled`` (bool, 默认 ``false``): 启用运行时 ``/reconfigure/dax/status``、``/reconfigure/dax/add``、``/reconfigure/dax/remove`` 和 ``/reconfigure/dax/resize``。"
+"``/reconfigure/dax/l2/status``, ``/reconfigure/dax/l2/add``, "
+"``/reconfigure/dax/l2/remove``, and ``/reconfigure/dax/l2/resize``."
+msgstr ""
+"``hotplug_enabled`` (bool, default ``false``): 启用运行时 "
+"``/reconfigure/dax/l2/status``、``/reconfigure/dax/l2/add``、``/reconfigure/dax/l2/remove``"
+" 和 ``/reconfigure/dax/l2/resize``。"
 
-#: ../../source/mp/l2_storage/dax.rst:33
+#: ../../source/mp/l2_storage/dax.rst:39
 msgid "``num_store_workers`` (int, default ``1``): Store worker threads."
 msgstr "``num_store_workers`` (int, default ``1``): 存储工作线程数量。"
 
-#: ../../source/mp/l2_storage/dax.rst:34
+#: ../../source/mp/l2_storage/dax.rst:40
 msgid "``num_lookup_workers`` (int, default ``1``): Lookup worker threads."
 msgstr "``num_lookup_workers`` (int, default ``1``): 查找工作线程数量。"
 
-#: ../../source/mp/l2_storage/dax.rst:35
+#: ../../source/mp/l2_storage/dax.rst:41
 msgid ""
 "``num_load_workers`` (int, default ``min(4, os.cpu_count())``): Load "
 "worker threads."
 msgstr "``num_load_workers`` (int, default ``min(4, os.cpu_count())``): 加载工作线程数量。"
 
-#: ../../source/mp/l2_storage/dax.rst:37
+#: ../../source/mp/l2_storage/dax.rst:43
 msgid ""
 "``persist_enabled`` (bool): Accepted by common L2 config parsing but has "
 "no effect for ``dax`` because restart recovery is not implemented."
 msgstr "``persist_enabled`` (bool): 通用 L2 配置解析会接受该字段，但对 ``dax`` 无效，因为重启恢复功能尚未实现。"
 
-#: ../../source/mp/l2_storage/dax.rst:40
+#: ../../source/mp/l2_storage/dax.rst:46
 msgid "**Configuration examples:**"
 msgstr "**配置示例：**"
 
-#: ../../source/mp/l2_storage/dax.rst:76
+#: ../../source/mp/l2_storage/dax.rst:82
 msgid ""
 "Runtime management uses JSON bodies because DAX paths contain slashes. "
 "See the :doc:`Device-DAX backend guide </kv_cache/storage_backends/dax>` "
@@ -118,44 +139,56 @@ msgid ""
 "adapter reconfiguration API; the HTTP path selects the backend and "
 "operation, the DAX adapter interprets the operation payload, and the same"
 " interface can be reused by future adapters such as P2P."
-msgstr "运行时管理使用 JSON 请求体，因为 DAX 路径包含斜杠。完整示例请参阅 :doc:`Device-DAX 后端指南 </kv_cache/storage_backends/dax>`。这些路由使用 StorageManager 的通用 L2 适配器重新配置 API：HTTP 路径用于选择后端和操作，DAX 适配器负责解析操作负载，未来的适配器（如 P2P）也可复用同一接口。"
+msgstr ""
+"运行时管理使用 JSON 请求体，因为 DAX 路径包含斜杠。完整示例请参阅 :doc:`Device-DAX 后端指南 "
+"</kv_cache/storage_backends/dax>`。这些路由使用 StorageManager 的通用 L2 适配器重新配置 "
+"API：HTTP 路径用于选择后端和操作，DAX 适配器负责解析操作负载，未来的适配器（如 P2P）也可复用同一接口。"
 
-#: ../../source/mp/l2_storage/dax.rst:90
+#: ../../source/mp/l2_storage/dax.rst:96
+msgid ""
+"Pass the same ``device_path`` and ``offset`` to ``remove`` and "
+"``resize``. A range overlapping one this server already maps, in L1 or "
+"L2, returns ``409``."
+msgstr ""
+
+#: ../../source/mp/l2_storage/dax.rst:99
 msgid "**Current limits:**"
 msgstr "**当前限制：**"
 
-#: ../../source/mp/l2_storage/dax.rst:92
+#: ../../source/mp/l2_storage/dax.rst:101
 msgid ""
 "Runtime hotplug changes only LMCache mappings and metadata. It does not "
 "create, destroy, or reconfigure kernel CXL or DAX devices."
 msgstr "运行时热插拔仅更改 LMCache 映射和元数据。它不会创建、销毁或重新配置内核 CXL 或 DAX 设备。"
 
-#: ../../source/mp/l2_storage/dax.rst:94
+#: ../../source/mp/l2_storage/dax.rst:103
 msgid "Per-TP partitions and on-device restart metadata are not implemented."
 msgstr "每个 TP 的分区和设备重启元数据尚未实现。"
 
-#: ../../source/mp/l2_storage/dax.rst:95
+#: ../../source/mp/l2_storage/dax.rst:104
 msgid ""
 "Only single-buffer objects are supported. Multi-tensor objects are "
 "rejected."
 msgstr "仅支持单缓冲区对象。多张量对象被拒绝。"
 
-#: ../../source/mp/l2_storage/dax.rst:96
+#: ../../source/mp/l2_storage/dax.rst:105
 msgid ""
 "Capacity is slot-based, not payload-byte-based. L2 eviction and usage "
 "metrics count occupied slots."
 msgstr "容量以槽为单位计算，而非以负载字节计算。L2 逐出和使用量指标均基于已占用的槽数。"
 
-#: ../../source/mp/l2_storage/dax.rst:98
+#: ../../source/mp/l2_storage/dax.rst:107
 msgid ""
 "Lookups acquire DAX-side external locks. ``submit_unlock`` releases those"
 " locks after load/retrieve completes, making entries evictable again."
 msgstr "查找操作会持有 DAX 侧的外部锁。``submit_unlock`` 在加载／检索完成后释放这些锁，使对应条目重新可被逐出。"
 
-#: ../../source/mp/l2_storage/dax.rst:100
+#: ../../source/mp/l2_storage/dax.rst:109
 msgid ""
 "Remove ``mode=\"evict\"`` is destructive for the DAX tier. Remove "
 "``mode=\"migrate\"`` requires enough capacity on another active DAX "
 "device."
-msgstr "以 ``mode=\"evict\"`` 执行移除操作会破坏 DAX 层中的数据。以 ``mode=\"migrate\"`` 执行移除操作则要求另一个活跃 DAX 设备具有足够的剩余容量。"
+msgstr ""
+"以 ``mode=\"evict\"`` 执行移除操作会破坏 DAX 层中的数据。以 ``mode=\"migrate\"`` "
+"执行移除操作则要求另一个活跃 DAX 设备具有足够的剩余容量。"
 

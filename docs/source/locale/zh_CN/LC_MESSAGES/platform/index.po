@@ -1,0 +1,152 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/platform/index.rst:2
+msgid "Platform"
+msgstr ""
+
+#: ../../source/platform/index.rst:4
+msgid ""
+"LMCache is device-neutral and supports mainstream accelerator hardware. "
+"The platform layer detects the active device backend and provides the "
+"device-specific operations used by LMCache without tying the rest of "
+"LMCache to a single hardware vendor."
+msgstr ""
+
+#: ../../source/platform/index.rst:9
+msgid "Device backends are provided in two ways:"
+msgstr ""
+
+#: ../../source/platform/index.rst:11
+msgid ""
+"**Built-in backends** are maintained in the LMCache repository and "
+"released with LMCache."
+msgstr ""
+
+#: ../../source/platform/index.rst:13
+msgid ""
+"**Device plugins** are vendor-maintained Python packages installed "
+"alongside LMCache. They register a backend through the "
+"``lmcache.device_plugins`` entry-point group and can follow an "
+"independent release cycle."
+msgstr ""
+
+#: ../../source/platform/index.rst:18
+msgid "Built-in devices"
+msgstr ""
+
+#: ../../source/platform/index.rst:20
+msgid "LMCache currently includes the following built-in device backends:"
+msgstr ""
+
+#: ../../source/platform/index.rst:22
+msgid ":doc:`CPU <devices/cpu/index>`"
+msgstr ""
+
+#: ../../source/platform/index.rst:23
+msgid ":doc:`CUDA <devices/cuda/index>`"
+msgstr ""
+
+#: ../../source/platform/index.rst:24
+msgid ":doc:`HPU <devices/hpu/index>`"
+msgstr ""
+
+#: ../../source/platform/index.rst:25
+msgid ":doc:`MLU <devices/mlu/index>`"
+msgstr ""
+
+#: ../../source/platform/index.rst:26
+msgid ":doc:`MUSA <devices/musa/index>`"
+msgstr ""
+
+#: ../../source/platform/index.rst:27
+msgid ":doc:`Neuron <devices/neuron/index>`"
+msgstr ""
+
+#: ../../source/platform/index.rst:28
+msgid ":doc:`NPU <devices/npu/index>`"
+msgstr ""
+
+#: ../../source/platform/index.rst:29
+msgid ":doc:`RBLN <devices/rbln/index>`"
+msgstr ""
+
+#: ../../source/platform/index.rst:30
+msgid ":doc:`ROCm <devices/rocm/index>`"
+msgstr ""
+
+#: ../../source/platform/index.rst:31
+msgid ":doc:`SUPA <devices/supa/index>`"
+msgstr ""
+
+#: ../../source/platform/index.rst:32
+msgid ":doc:`XPU <devices/xpu/index>`"
+msgstr ""
+
+#: ../../source/platform/index.rst:35
+msgid "Using a device plugin"
+msgstr ""
+
+#: ../../source/platform/index.rst:37
+msgid ""
+"Install the vendor's device-plugin wheel in the same Python environment "
+"as LMCache and the serving engine:"
+msgstr ""
+
+#: ../../source/platform/index.rst:44
+msgid ""
+"Replace ``lmcache-foo-device`` with the package name published by the "
+"device vendor."
+msgstr ""
+
+#: ../../source/platform/index.rst:47
+msgid ""
+"Restart the LMCache and serving-engine processes after installation. "
+"LMCache discovers installed ``lmcache.device_plugins`` entry points "
+"automatically and selects the available backend. No LMCache source change"
+" or manual registration is required."
+msgstr ""
+
+#: ../../source/platform/index.rst:52
+msgid "To verify which device plugins are installed:"
+msgstr ""
+
+#: ../../source/platform/index.rst:63
+msgid ""
+"If more than one available backend uses the same device type, select the "
+"intended plugin by its backend name before starting LMCache and the "
+"serving engine:"
+msgstr ""
+
+#: ../../source/platform/index.rst:71
+msgid "Replace ``foo`` with the plugin's registered backend name."
+msgstr ""
+
+#: ../../source/platform/index.rst:73
+msgid ""
+"Only install plugins from trusted sources because entry-point packages "
+"execute Python code when the platform registry initializes. Device "
+"vendors and backend developers can follow :doc:`Adding a New Device "
+"Backend "
+"<../developer_guide/extending_lmcache/adding_a_new_device_backend>` to "
+"implement and package a plugin."
+msgstr ""
+

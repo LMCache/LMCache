@@ -1,0 +1,165 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:2
+msgid "SageMaker Hyperpod"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/index`."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:10
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:12
+msgid ""
+"Create an Amazon SageMaker HyperPod cluster with tiered storage enabled "
+"by following the instructions at:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:14
+msgid ""
+"https://docs.aws.amazon.com/sagemaker/latest/dg/managed-tier-"
+"checkpointing-setup.html"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:16
+msgid ""
+"This enables the ai-toolkit daemon that provides shared memory access for"
+" LMCache."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:19
+msgid "Example Configuration"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:29
+msgid "Configuration Parameters"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:32
+msgid "SageMaker Hyperpod-Specific (in extra_config)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:34
+msgid ""
+"**sagemaker_hyperpod_bucket**: Bucket name for KV storage namespace "
+"(default: \"lmcache\")"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:35
+msgid ""
+"**sagemaker_hyperpod_shared_memory_name**: Name of shared memory segment "
+"(default: \"shared_memory\"). Set to None to disable shared memory."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:36
+msgid ""
+"**sagemaker_hyperpod_max_concurrent_requests**: Maximum concurrent HTTP "
+"requests allowed in-flight at any moment (application-level throttling, "
+"default: 100, minimum: 1). This limit is per LMCache engine instance. "
+"With multiple workers (e.g., high TP), each worker creates its own engine"
+" with separate limits."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:37
+msgid ""
+"**sagemaker_hyperpod_max_connections**: Maximum total TCP connections in "
+"the connection pool per LMCache engine across all daemons (default: 256, "
+"minimum: 1). For typical single-daemon setups, this effectively limits "
+"connections from one engine to one daemon. With N workers per node, total"
+" connections to the daemon = N × this value."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:38
+msgid ""
+"**sagemaker_hyperpod_max_connections_per_host**: Maximum TCP connections "
+"per LMCache engine to a single daemon address (IP:port) (default: 128, "
+"minimum: 1). \"Host\" refers to the daemon's network address, not the "
+"client machine. For today's typical single-daemon setup, this has similar"
+" effect as max_connections. This parameter enables future multi-daemon "
+"configurations where one engine connects to multiple daemons for load "
+"balancing. With N workers per node connecting to the same daemon, total "
+"connections = N × this value. Reduce proportionally for high TP setups "
+"(e.g., set to 16 for 8 workers to achieve ~128 total connections)."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:39
+msgid ""
+"**sagemaker_hyperpod_timeout_ms**: Timeout for lease acquisition requests"
+" in milliseconds (default: 5000, minimum: 100)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:40
+msgid ""
+"**sagemaker_hyperpod_lease_ttl_s**: Server-side lease timeout in seconds "
+"(default: 30.0)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:41
+msgid ""
+"**sagemaker_hyperpod_put_stream_chunk_bytes**: Chunk size for streaming "
+"PUT requests in bytes (default: 65536, minimum: 1024)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:42
+msgid ""
+"**sagemaker_hyperpod_use_https**: Enable HTTPS instead of HTTP (default: "
+"False). **Note**: Ignored if ``remote_url`` already contains ``http://`` "
+"or ``https://`` protocol."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:43
+msgid ""
+"**save_chunk_meta**: Whether to save chunk metadata with data (set False "
+"for performance)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:46
+msgid "Kubernetes Deployment Requirements"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:49
+msgid "Environment Variable for Node IP"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:51
+msgid ""
+"Add the ``NODE_IP`` environment variable to resolve the local node's IP "
+"address:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:62
+msgid "/dev/shm Volume Configuration"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/sagemaker_hyperpod.rst:64
+msgid ""
+"SageMaker Hyperpod requires /dev/shm for high-performance shared memory "
+"operations:"
+msgstr ""
+

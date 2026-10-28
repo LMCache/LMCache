@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -30,9 +30,12 @@ msgid ""
 msgstr "MP（多进程）缓存管理接口层（如 ``move``\\ 、\\ ``pin`` 和 ``compress`` 等操作）即将 **推出**\\ 。"
 
 #: ../../source/mp/kv_cache_management.rst:11
+#, fuzzy
 msgid ""
 "Until it lands, the in-process management commands are documented in the "
 ":doc:`Legacy section <../legacy/index>`: "
-":doc:`../kv_cache_management/index`."
-msgstr "在此功能发布之前，进程内管理命令已记录于 :doc:`旧版章节 <../legacy/index>`： :doc:`../kv_cache_management/index`。"
+":doc:`/legacy/kv_cache_management/index`."
+msgstr ""
+"在此功能发布之前，进程内管理命令已记录于 :doc:`旧版章节 <../legacy/index>`： "
+":doc:`../kv_cache_management/index`。"
 

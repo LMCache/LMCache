@@ -1,0 +1,408 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-28 09:40+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:2
+msgid "Native NIXL"
+msgstr "原生 NIXL"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:4
+msgid ""
+"``nixl_native`` is LMCache's optional C++ NIXL L2 adapter. It registers "
+"the complete L1 DRAM arena once per worker and submits each LMCache tile "
+"as one NIXL descriptor-list transfer."
+msgstr "``nixl_native`` 是 LMCache 的可选 C++ NIXL L2 适配器。它为每个工作线程注册一次完整的 L1 DRAM 区域，并将每个 LMCache 块作为一个 NIXL 描述符列表传输。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:8
+msgid "The backend is the single storage selector:"
+msgstr "后端是唯一的存储选择器："
+
+#: ../../source/mp/l2_storage/nixl_native.rst:17
+msgid ""
+"``POSIX`` advertising ``FILE_SEG`` and ``OBJ`` advertising ``OBJ_SEG`` "
+"are the reference configurations below. Another plugin can be substituted"
+" only when it supports ``DRAM_SEG`` and exactly one of those storage "
+"segments. The connector checks those capabilities when it starts and "
+"rejects ambiguous plugins."
+msgstr "``POSIX`` 广告的 ``FILE_SEG`` 和 ``OBJ`` 广告的 ``OBJ_SEG`` 是下面的参考配置。只有在支持 ``DRAM_SEG`` 和其中一个存储段时，才能替换为其他插件。连接器在启动时检查这些能力，并拒绝模糊的插件。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:23
+msgid "Build and runtime requirements"
+msgstr "构建和运行时要求"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:25
+msgid ""
+"The minimum supported NIXL version is 1.3.0. A source installation must "
+"install the public C++ headers as well as ``libnixl``. Build LMCache "
+"with:"
+msgstr "支持的最低 NIXL 版本是 1.3.0。源代码安装必须安装公共 C++ 头文件以及 ``libnixl``。使用以下命令构建 LMCache："
+
+#: ../../source/mp/l2_storage/nixl_native.rst:35
+msgid ""
+"``NIXL_PREFIX=/opt/nixl`` can replace the two directory variables when "
+"the installation uses conventional ``include`` and ``lib`` directories. "
+"The build produces ``lmcache.lmcache_nixl`` as an isolated C++20 "
+"extension. A normal build without NIXL headers and libraries does not "
+"build or import this extension."
+msgstr "``NIXL_PREFIX=/opt/nixl`` 可以在安装使用常规 ``include`` 和 ``lib`` 目录时替换这两个目录变量。构建会生成 ``lmcache.lmcache_nixl`` 作为一个独立的 C++20 扩展。没有 NIXL 头文件和库的正常构建不会构建或导入此扩展。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:40
+msgid ""
+"At runtime, the dynamic NIXL plugins must be discoverable. NIXL normally "
+"looks in the ``plugins`` directory next to ``libnixl``. Set "
+"``NIXL_PLUGIN_DIR`` when the plugins are installed elsewhere, and ensure "
+"the dynamic linker can find ``libnixl`` (for example with the system "
+"linker cache or ``LD_LIBRARY_PATH``)."
+msgstr "在运行时，动态 NIXL 插件必须可被发现。NIXL 通常在与 ``libnixl`` 相邻的 ``plugins`` 目录中查找。当插件安装在其他位置时，请设置 ``NIXL_PLUGIN_DIR``，并确保动态链接器能够找到 ``libnixl``（例如通过系统链接器缓存或 ``LD_LIBRARY_PATH``）。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:46
+msgid "Configuration reference"
+msgstr "配置参考"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:52
+msgid "Field"
+msgstr "字段"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:53
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:54
+msgid "Meaning"
+msgstr "含义"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:55
+msgid "``type``"
+msgstr "``type``"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:56
+#: ../../source/mp/l2_storage/nixl_native.rst:59
+msgid "required"
+msgstr "必需"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:57
+msgid "Must be ``\"nixl_native\"``."
+msgstr "必须是 ``\"nixl_native\"``。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:58
+msgid "``backend``"
+msgstr "``backend``"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:60
+msgid ""
+"Uppercase NIXL plugin identifier, such as ``POSIX`` or ``OBJ``. Its "
+"advertised ``FILE_SEG`` or ``OBJ_SEG`` capability selects the strategy."
+msgstr "大写的 NIXL 插件标识符，例如 ``POSIX`` 或 ``OBJ``。其宣传的 ``FILE_SEG`` 或 ``OBJ_SEG`` 功能选择策略。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:62
+msgid "``backend_params``"
+msgstr "``backend_params``"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:63
+#, python-brace-format
+msgid "``{}``"
+msgstr "``{}``"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:64
+msgid ""
+"String-to-string map passed to NIXL. A ``FILE_SEG`` backend also requires"
+" ``file_path`` and accepts ``use_direct_io`` and ``shard_dirs``."
+msgstr "传递给 NIXL 的字符串到字符串映射。``FILE_SEG`` 后端还需要 ``file_path``，并接受 ``use_direct_io`` 和 ``shard_dirs``。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:66
+msgid "``num_workers``"
+msgstr "``num_workers``"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:67
+msgid "``4``"
+msgstr "``4``"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:68
+msgid ""
+"Positive worker count. Each worker owns one NIXL agent, backend handle, "
+"and registration of the full L1 arena."
+msgstr "正向工作线程数量。每个工作线程拥有一个 NIXL 代理、后端句柄和完整的 L1 领域注册。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:70
+msgid "``max_capacity_gb``"
+msgstr "``max_capacity_gb``"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:71
+msgid "``0``"
+msgstr "``0``"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:72
+msgid ""
+"Non-negative capacity for LMCache byte accounting. Zero disables the "
+"aggregate capacity signal."
+msgstr "LMCache 字节计数的非负容量。零值禁用聚合容量信号。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:75
+msgid ""
+"The adapter rejects missing L1 memory, invalid backend names, backends "
+"that advertise neither or both storage segments, non-string backend "
+"parameters, and non-positive worker counts during startup. An inferred "
+"object strategy rejects eviction configuration because NIXL 1.3 does not "
+"expose object deletion."
+msgstr "适配器在启动时拒绝缺失的 L1 内存、无效的后端名称、既不宣传也不同时宣传存储段的后端、非字符串的后端参数以及非正的工作线程数量。推断的对象策略拒绝逐出配置，因为 NIXL 1.3 不支持对象删除。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:81
+msgid "POSIX FILE example"
+msgstr "POSIX 文件示例"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:83
+msgid "Create a writable directory and start the MP server:"
+msgstr "创建一个可写目录并启动 MP 服务器："
+
+#: ../../source/mp/l2_storage/nixl_native.rst:103
+msgid ""
+"POSIX transfers use path-mode registration. For example, a buffered store"
+" and load can register these metadata strings (the path after the first "
+"colon is an absolute cache path):"
+msgstr "POSIX 传输使用路径模式注册。例如，缓冲存储和加载可以注册这些元数据字符串（第一个冒号后的路径是绝对缓存路径）："
+
+#: ../../source/mp/l2_storage/nixl_native.rst:112
+msgid ""
+"Each file in a batch receives a distinct synthetic device ID. NIXL opens "
+"a registered path, owns its file descriptor through the transfer, and "
+"closes it during deregistration. For stores, ``sync`` asks NIXL to "
+"preserve the durable completion boundary. After deregistration closes the"
+" files, LMCache publishes the completed temporary paths with an atomic "
+"no-replace operation in the same filesystem; LMCache does not reopen "
+"transfer files or call ``fsync`` on NIXL-owned descriptors."
+msgstr "每个批次中的文件都会接收一个独特的合成设备 ID。NIXL 打开一个注册的路径，通过传输拥有其文件描述符，并在注销期间关闭它。对于存储，``sync`` 请求 NIXL 保留持久完成边界。在注销关闭文件后，LMCache 通过在同一文件系统中执行原子无替换操作来发布已完成的临时路径；LMCache 不会重新打开传输文件或在 NIXL 拥有的描述符上调用 ``fsync``。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:120
+msgid ""
+"The store path does not perform an existence query; the caller is "
+"expected to query first. If another worker thread wins the publication "
+"race, an existing file of the expected size is accepted, while a "
+"different size is an error. A failed batch removes its unpublished "
+"temporary files and rolls back files published by that batch. Concurrent "
+"workers are supported within one LMCache process, but a ``file_path`` "
+"namespace must not be written by multiple LMCache processes."
+msgstr "存储路径不执行存在性查询；调用者需要先进行查询。如果另一个工作线程赢得了发布竞争，则接受预期大小的现有文件，而不同大小则会导致错误。失败的批次会删除其未发布的临时文件，并回滚该批次发布的文件。支持在一个 LMCache 进程内的并发工作线程，但 ``file_path`` 命名空间不得被多个 LMCache 进程写入。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:128
+msgid ""
+"The submission path also performs no duplicate-key scan. Duplicate "
+"serialized keys in one batch violate the caller contract and must be "
+"removed upstream."
+msgstr "提交路径也不执行重复键扫描。一个批次中的重复序列化键违反了调用者合同，必须在上游移除。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:131
+msgid ""
+"Files persist when the connector closes. Lookup calls NIXL ``queryMem`` "
+"with the complete deterministic path, not a mode-prefixed string. Load "
+"performs no filesystem open, existence check, or size preflight in "
+"LMCache. The caller must query first and provide the correct destination "
+"length; NIXL registers every ``ro:<absolute-path>`` descriptor and "
+"executes the tile as one batch. A registration or transfer error fails "
+"that load batch. Delete removes the deterministic file."
+msgstr "文件在连接器关闭时保持持久。查找调用 NIXL ``queryMem``，使用完整的确定性路径，而不是带模式前缀的字符串。加载在 LMCache 中不执行文件系统打开、存在性检查或大小预检。调用者必须先查询并提供正确的目标长度；NIXL 注册每个 ``ro:<absolute-path>`` 描述符，并将瓦片作为一个批次执行。注册或传输错误会导致该加载批次失败。删除操作会移除确定性文件。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:139
+msgid ""
+"Set ``use_direct_io`` to ``\"true\"`` to request direct I/O for eligible "
+"FILE buffers. The connector reads the target filesystem's direct-I/O "
+"alignment from ``statvfs(file_path).f_bsize`` and decides eligibility per"
+" buffer: a buffer uses direct I/O only when both its address and its byte"
+" length are exact multiples of that alignment. An address- or length-"
+"misaligned buffer automatically falls back to buffered I/O for that "
+"descriptor instead of failing, so one batched request can mix both "
+"descriptor forms:"
+msgstr "将 ``use_direct_io`` 设置为 ``\"true\"`` 以请求适用于合格 FILE 缓冲区的直接 I/O。连接器从 ``statvfs(file_path).f_bsize`` 读取目标文件系统的直接 I/O 对齐，并根据每个缓冲区决定资格：只有当缓冲区的地址和字节长度都是该对齐的精确倍数时，缓冲区才会使用直接 I/O。地址或长度未对齐的缓冲区会自动回退到该描述符的缓冲 I/O，而不是失败，因此一个批处理请求可以混合这两种描述符形式："
+
+#: ../../source/mp/l2_storage/nixl_native.rst:154
+msgid ""
+"The fallback exists because unaligned buffers previously failed; "
+"selecting the I/O mode per descriptor keeps the direct-I/O benefit for "
+"every eligible buffer instead of rejecting the whole batch. This "
+"filesystem alignment is independent of the L1 allocator alignment (``--l1"
+"-align-bytes``): L1 layout is enforced by the allocator and adapter and "
+"is never validated by the connector as a FILE I/O constraint. As an "
+"adapter-level optimization (not a connector requirement), direct-I/O "
+"transfers still cover each object's full alignment-padded L1 slot — "
+"logical bytes plus padding up to ``--l1-align-bytes`` — so padded buffers"
+" stay eligible for direct I/O. On-disk files are therefore alignment-"
+"sized multiples, and loading them requires the same ``--l1-align-bytes`` "
+"and direct-I/O setting as the store. Buffered transfers (direct I/O off) "
+"and OBJECT storage are never padded. The fallback covers only this "
+"deterministic alignment preflight: NIXL registration, ``open()``, and "
+"transfer failures still fail the batch, and the separate ``fs`` connector"
+" keeps its own behavior. ``shard_dirs: \"true\"`` stores files under two "
+"hash-prefix directories; choose that layout before populating a cache."
+msgstr "回退机制的存在是因为未对齐的缓冲区之前失败；按描述符选择 I/O 模式可以保持每个合格缓冲区的直接 I/O 优势，而不是拒绝整个批处理。此文件系统对齐与 L1 分配器对齐（``--l1-align-bytes``）无关：L1 布局由分配器和适配器强制执行，连接器从不将其视为 FILE I/O 约束进行验证。作为适配器级优化（不是连接器要求），直接 I/O 传输仍然覆盖每个对象的完整对齐填充 L1 槽——逻辑字节加上填充，直到 ``--l1-align-bytes``——因此填充缓冲区仍然符合直接 I/O 的条件。因此，磁盘上的文件是对齐大小的倍数，加载它们需要与存储相同的 ``--l1-align-bytes`` 和直接 I/O 设置。缓冲传输（关闭直接 I/O）和对象存储从不填充。回退仅涵盖此确定性对齐的预检：NIXL 注册、``open()`` 和传输失败仍会导致批处理失败，单独的 ``fs`` 连接器保持其自身行为。``shard_dirs: \\\"true\\\"`` 将文件存储在两个哈希前缀目录下；在填充缓存之前选择该布局。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:173
+msgid "OBJ OBJECT example"
+msgstr "OBJ OBJECT 示例"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:175
+msgid ""
+"Inject credentials through the AWS environment or another credential "
+"provider supported by the AWS SDK. Do not put credentials in "
+"``backend_params`` because configuration can be displayed by operational "
+"tooling."
+msgstr "通过 AWS 环境或 AWS SDK 支持的其他凭证提供者注入凭证。请勿将凭证放入 ``backend_params`` 中，因为配置可能会被操作工具显示。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:200
+msgid ""
+"The tested NIXL 1.3 OBJ parameters are ``bucket``, ``endpoint_override``,"
+" ``scheme``, ``region``, ``use_virtual_addressing``, ``req_checksum``, "
+"and ``resp_checksum``. Consult the selected plugin's documentation before"
+" adding other parameters."
+msgstr "测试过的 NIXL 1.3 OBJ 参数包括 ``bucket``、``endpoint_override``、``scheme``、``region``、``use_virtual_addressing``、``req_checksum`` 和 ``resp_checksum``。在添加其他参数之前，请查阅所选插件的文档。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:205
+msgid ""
+"OBJECT stores are unconditional whole-object writes. Store completion "
+"means the NIXL request reached its terminal success state; the connector "
+"does not perform an existence preflight. Query uses the plugin's object "
+"query API. NIXL 1.3 returns existence but not object length, so the "
+"connector cannot reject an oversized object before issuing a ranged read."
+" Partial writes are impossible through this adapter because every "
+"descriptor starts at object offset zero and covers the complete LMCache "
+"object."
+msgstr "OBJECT 存储是无条件的整体对象写入。存储完成意味着 NIXL 请求达到了其最终成功状态；连接器不执行存在性预检。查询使用插件的对象查询 API。NIXL 1.3 返回存在性但不返回对象长度，因此连接器无法在发出范围读取之前拒绝超大对象。通过此适配器进行部分写入是不可能的，因为每个描述符从对象偏移量零开始，并覆盖完整的 LMCache 对象。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:215
+msgid ""
+"NIXL 1.3 has no supported object-deletion API. ``nixl_native`` therefore "
+"reports ``supports_delete: false`` and rejects eviction configuration for"
+" ``OBJECT``. Objects remain until external bucket lifecycle or "
+"administrative tooling removes them."
+msgstr "NIXL 1.3 不支持对象删除 API。因此 ``nixl_native`` 报告 ``supports_delete: false`` 并拒绝对 ``OBJECT`` 的逐出配置。对象将保留，直到外部桶生命周期或管理工具将其移除。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:221
+msgid "Persistent identities"
+msgstr "持久身份"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:223
+msgid ""
+"Names follow ``nixl_store_dynamic``. A model slash becomes ``--`` and all"
+" ``ObjectKey`` identity fields are retained:"
+msgstr "名称遵循 ``nixl_store_dynamic``。模型斜杠变为 ``--``，所有 ``ObjectKey`` 身份字段均保留："
+
+#: ../../source/mp/l2_storage/nixl_native.rst:230
+msgid ""
+"For example, model ``org/model``, rank 42, object group 7, hash "
+"``00112233``, and salt ``tenant`` becomes:"
+msgstr "例如，模型 ``org/model``、排名 42、对象组 7、哈希 ``00112233`` 和盐 ``tenant`` 变为："
+
+#: ../../source/mp/l2_storage/nixl_native.rst:237
+msgid ""
+"This is the same persistent filename format used by ``fs_native``. With "
+"``shard_dirs: \"true\"``, the example lives below ``00/11/``. For object "
+"storage those separators form an object-key prefix; for file storage they"
+" are directories beneath ``file_path``."
+msgstr "这与 ``fs_native`` 使用的持久文件名格式相同。使用 ``shard_dirs: \\\"true\\\"`` 时，示例位于 ``00/11/`` 目录下。对于对象存储，这些分隔符形成对象键前缀；对于文件存储，它们是 ``file_path`` 目录下的子目录。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:243
+msgid "Benchmarking"
+msgstr "基准测试"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:245
+msgid ""
+"Use the public L2 benchmark so all adapters receive equivalent arena-"
+"backed buffers. The following command verifies a POSIX round trip:"
+msgstr "使用公共 L2 基准测试，以便所有适配器接收等效的基于区域的缓冲区。以下命令验证 POSIX 往返："
+
+#: ../../source/mp/l2_storage/nixl_native.rst:256
+msgid ""
+"Run the same command with ``fs_native`` on the same filesystem, payload "
+"size, worker count, and cache state. The existing Python ``nixl_store`` "
+"and ``nixl_store_dynamic`` adapters should also be compared after "
+"confirming that their prepared-descriptor index contract is compatible "
+"with the benchmark's arena offsets. On the current development tree with "
+"NIXL 1.3.1, both Python adapters reject this harness with ``makeXferReq "
+"local index out of range``; do not report their failed runs as "
+"performance results."
+msgstr "在相同的文件系统、负载大小、工作线程数量和缓存状态下，使用 ``fs_native`` 运行相同的命令。在确认其准备好的描述符索引契约与基准的区域偏移兼容后，还应比较现有的 Python ``nixl_store`` 和 ``nixl_store_dynamic`` 适配器。在当前的开发树上，使用 NIXL 1.3.1，两个 Python 适配器都因 ``makeXferReq local index out of range`` 拒绝此测试；请勿将它们的失败运行报告为性能结果。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:264
+msgid ""
+"Record the NIXL version, filesystem/device, direct-I/O setting, CPU "
+"allocation, and whether the page cache was warm. OBJ results must also "
+"record the object-store implementation, network topology, request size, "
+"and non-secret endpoint settings."
+msgstr "记录 NIXL 版本、文件系统/设备、直接 I/O 设置、CPU 分配，以及页面缓存是否处于热状态。OBJ 结果还必须记录对象存储实现、网络拓扑、请求大小和非机密端点设置。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:270
+msgid "Troubleshooting"
+msgstr "故障排除"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:272
+msgid "``lmcache_nixl`` cannot be imported"
+msgstr "``lmcache_nixl`` 无法导入"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:273
+msgid ""
+"Rebuild with ``BUILD_WITH_NIXL=1`` and verify that ``NIXL_INCLUDE_DIR`` "
+"contains ``nixl.h`` and ``NIXL_LIBRARY_DIR`` contains ``libnixl.so``."
+msgstr "使用 ``BUILD_WITH_NIXL=1`` 重新构建，并验证 ``NIXL_INCLUDE_DIR`` 是否包含 ``nixl.h``，以及 ``NIXL_LIBRARY_DIR`` 是否包含 ``libnixl.so``。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:276
+msgid "Plugin discovery or backend creation fails"
+msgstr "插件发现或后端创建失败"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:277
+msgid ""
+"Verify NIXL 1.3 or newer, set ``NIXL_PLUGIN_DIR`` to the installed plugin"
+" directory, and confirm that the requested plugin supports ``DRAM_SEG`` "
+"and exactly one of ``FILE_SEG`` or ``OBJ_SEG``."
+msgstr "验证 NIXL 1.3 或更高版本，将 ``NIXL_PLUGIN_DIR`` 设置为已安装插件目录，并确认请求的插件支持 ``DRAM_SEG`` 并且仅支持 ``FILE_SEG`` 或 ``OBJ_SEG`` 之一。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:281
+msgid "Buffer is outside the registered L1 arena"
+msgstr "缓冲区位于注册的 L1 区域之外"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:282
+msgid ""
+"The factory must receive the same L1 arena that owns every submitted "
+"``MemoryObj``. The connector deliberately does not register arbitrary "
+"process memory."
+msgstr "工厂必须接收拥有每个提交的 ``MemoryObj`` 的相同 L1 区域。连接器故意不注册任意进程内存。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:286
+msgid "Direct I/O is not used for some buffers"
+msgstr "某些缓冲区不使用直接 I/O。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:287
+msgid ""
+"Eligibility is per buffer: the buffer address and byte length must both "
+"be exact multiples of the filesystem's direct-I/O alignment, read from "
+"``statvfs(file_path).f_bsize``. Misaligned buffers fall back to buffered "
+"I/O for that descriptor instead of failing, so this is a performance "
+"observation, not an error. Keep ``--l1-align-bytes`` at or above the "
+"filesystem block size so the adapter's padded L1 slots stay eligible."
+msgstr "每个缓冲区的资格是独立的：缓冲区地址和字节长度必须都是文件系统直接 I/O 对齐的精确倍数，该值可以通过 ``statvfs(file_path).f_bsize`` 获取。未对齐的缓冲区会回退到该描述符的缓冲 I/O，而不是失败，因此这是一个性能观察，而不是错误。保持 ``--l1-align-bytes`` 在文件系统块大小或以上，以确保适配器的填充 L1 插槽保持合格。"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:294
+msgid "OBJ authentication or lookup fails"
+msgstr "OBJ 认证或查找失败"
+
+#: ../../source/mp/l2_storage/nixl_native.rst:295
+msgid ""
+"Check the credential provider, bucket, endpoint, scheme, region, and path"
+" versus virtual addressing choice. Status output includes backend and "
+"storage type but never includes ``backend_params`` or credential values."
+msgstr "检查凭证提供者、存储桶、端点、方案、区域和路径与虚拟地址选择的匹配情况。状态输出包括后端和存储类型，但从不包括 ``backend_params`` 或凭证值。"
+

@@ -1,0 +1,338 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:3
+msgid "Nixl"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:7
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/nixl`."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:13
+msgid "Overview"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:15
+msgid ""
+"NIXL (NVIDIA Inference Xfer Library) is a high-performance library "
+"designed for accelerating point to point communications in AI inference "
+"frameworks. It provides an abstraction over various types of memory (CPU "
+"and GPU) and storage through a modular plug-in architecture, enabling "
+"efficient data transfer and coordination between different components of "
+"the inference pipeline."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:17
+msgid ""
+"LMCache supports using NIXL as a storage backend, allowing using NIXL to "
+"save either GPU or CPU memory into storage."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:20
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:22
+msgid "**LMCache**: Install with ``pip install lmcache``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:23
+msgid ""
+"**NIXL**: Install from `NIXL GitHub repository <https://github.com/ai-"
+"dynamo/nixl>`_"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:24
+msgid ""
+"**Model Access**: Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B "
+"Instruct"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:27
+msgid "Ways to configure LMCache NIXL Offloading"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:29
+msgid "**Configuration File**:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:31
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=lmcache-config.yaml``"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:33
+msgid "Example ``lmcache-config.yaml`` for POSIX backend:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:47
+msgid "Key settings:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:49
+msgid ""
+"``nixl_buffer_size``: buffer size for NIXL transfers. **GPU mode only** "
+"(``nixl_buffer_device: cuda``). Setting this with ``nixl_buffer_device: "
+"cpu`` is a configuration error and will be rejected — in CPU mode NIXL "
+"shares ``LocalCPUBackend``'s pinned pool, which is sized by "
+"``max_local_cpu_size``."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:51
+msgid ""
+"``max_local_cpu_size``: size of ``LocalCPUBackend``'s pinned pool in GiB."
+" In CPU mode, this pool is shared with NIXL and must accommodate both the"
+" hot cache and concurrent NIXL I/O in flight. Must be > 0 when "
+"``nixl_buffer_device: cpu``. Default: ``5.0``."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:53
+msgid ""
+"``nixl_pool_size``: number of descriptors opened at init time for nixl "
+"backend. Set to 0 for dynamic mode."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:55
+msgid ""
+"``nixl_path``: directory (or list of directories) under which the storage"
+" files will be saved (e.g. /mnt/nixl/). Needed for NIXL backends that "
+"store to file. When using a list of paths with ``path_sharding``, paths "
+"will be selected based on the sharding strategy."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:57
+msgid ""
+"``nixl_buffer_device``: dictates where the memory managed by NIXL should "
+"be on. \"cpu\" or \"cuda\" is supported for \"GDS\", \"GDS_MT\", and "
+"\"OBJ\" backends - for \"POSIX\", \"HF3FS\", \"AZURE_BLOB\" & "
+"\"DOCA_MEMOS\", must be \"cpu\". In CPU mode, NIXL shares "
+"``LocalCPUBackend``'s pinned buffer; ``LocalCPUBackend`` is always "
+"created when ``nixl_buffer_device: cpu``, regardless of the ``local_cpu``"
+" setting. ``local_cpu: false`` still suppresses hot-cache promotions — "
+"the backend acts as a staging buffer only, mirroring how ``local_disk`` "
+"already uses ``LocalCPUBackend``."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:59
+msgid "``nixl_backend``: configuration of which nixl backend to use for storage."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:61
+msgid ""
+"``nixl_path_sharding``: strategy for selecting path when multiple paths "
+"are provided. Currently only \"by_gpu\" is supported, which selects paths"
+" based on GPU device ID."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:62
+msgid ""
+"``local_cpu_use_hugepages``: whether to use Linux hugepages (2 MiB) for "
+"``LocalCPUBackend``'s pinned pool (which NIXL shares in CPU mode). "
+"Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Default: "
+"``false``. **Deprecated alias:** ``extra_config.nixl_use_hugepages`` — "
+"accepted with a warning and copied into this field; will be removed in a "
+"future release."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:66
+msgid ""
+"In CPU mode, the shared paged allocator consumes one full page per "
+"object. With ``save_unfull_chunk: true`` (only valid in static mode — "
+"dynamic mode rejects it; see \"Dynamic Mode\" → \"Restrictions\" below), "
+"partial chunks still occupy a full page each, so effective capacity "
+"degrades proportionally to the fraction of unfull last chunks across "
+"active sequences."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:70
+msgid ""
+"``enable_p2p: true`` is rejected together with ``nixl_buffer_device: "
+"cpu``. The combination is structurally supported — both backends share "
+"``LocalCPUBackend``'s pinned pool, each runs its own NIXL agent over it, "
+"and allocations route through ``LocalCPUBackend.allocate()`` — but it has"
+" not been exercised end-to-end and has no CI coverage. Use ``enable_p2p: "
+"true`` with ``nixl_buffer_device: cuda`` instead, or disable "
+"``enable_p2p`` when running the NIXL CPU shared pool."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:72
+msgid ""
+"``nixl_presence_cache``: whether to keep an in-DRAM presence cache of "
+"keys known to exist, so repeated existence checks for the same key are "
+"answered locally instead of via a NIXL ``query_memory`` call. Applies to "
+"the dynamic backend (``nixl_pool_size: 0``). Default: ``false``."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:74
+msgid ""
+"``nixl_presence_cache_only``: when ``true``, the dynamic NIXL backend "
+"treats the local presence cache (and in-progress put set) as "
+"authoritative for existence checks. If a key is not known locally, lookup"
+" reports a miss **without** issuing a NIXL ``query_memory`` check. This "
+"requires ``nixl_presence_cache: true`` and can intentionally produce "
+"**false negatives** for objects that exist in the underlying storage but "
+"are absent from local presence metadata — giving \"DRAM-only metadata\" "
+"semantics where a process restart always yields a logically empty cache. "
+"Default: ``false``."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:78
+msgid ""
+"This is a **lookup/existence-check** mode, not a \"never touch the "
+"underlying storage\" policy. It gates ``contains`` / ``batched_contains``"
+" (and the async variant); direct retrieval still reads from the "
+"underlying storage. In normal operation a retrieval is only issued for a "
+"key that lookup already reported as present, so locally-unknown keys are "
+"not fetched. The option is only consulted by the dynamic backend "
+"(``nixl_pool_size: 0``); it is accepted but unused for static "
+"configurations."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:82
+msgid ""
+"Supported backends are: [\"GDS\", \"GDS_MT\", \"POSIX\", \"HF3FS\", "
+"\"OBJ\", \"AZURE_BLOB\", \"DOCA_MEMOS\"]."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:84
+msgid ""
+"Backend specific params should be provided via "
+"``extra_config.nixl_backend_params``. Please refer to NIXL documentation "
+"for specifics."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:86
+msgid "Example ``lmcache-config.yaml`` for POSIX backend with multipath support:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:104
+msgid "Example ``lmcache-config.yaml`` for OBJ backend using S3 API:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:122
+msgid "Example ``lmcache-config.yaml`` for POSIX backend using liburing:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:126
+msgid ""
+"using POSIX backend with liburing requires NIXL to be built with liburing"
+" support."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:142
+msgid ""
+"Example ``lmcache-config.yaml`` for AZURE_BLOB backend to offload using "
+"Azure Blob Storage API:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:159
+msgid "Per-Worker Endpoint Distribution"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:161
+msgid ""
+"When using the OBJ backend with multiple tensor-parallel (TP) workers, "
+"you can distribute workers across multiple object-storage endpoints by "
+"providing a list of endpoints via ``nixl_endpoint_list``. Each worker "
+"selects an endpoint in round-robin order based on its ``local_worker_id``"
+" (the worker ID within its host)."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:185
+msgid ""
+"When ``nixl_endpoint_list`` is set, any ``endpoint_override`` value in "
+"``nixl_backend_params`` is ignored (a warning is logged)."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:188
+msgid ""
+"``nixl_endpoint_list`` is only honored for the OBJ backend; it is ignored"
+" for all other backends (including DOCA_MEMOS, AZURE_BLOB, and the file "
+"backends)."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:193
+msgid "Dynamic Mode"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:195
+msgid ""
+"Nixl Storage Backend also supports a dynamic mode, which creates nixl "
+"storage descriptors on demand instead of at init time."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:197
+msgid ""
+"In order to use dynamic mode, extra_config.nixl_pool_size should be set "
+"to 0."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:200
+msgid "Restrictions"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:202
+msgid ""
+"Dynamic mode is supported for object backends (\"OBJ\", \"AZURE_BLOB\", "
+"\"DOCA_MEMOS\") and file backends (\"POSIX\", \"GDS\", \"GDS_MT\", "
+"\"HF3FS\")."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:203
+msgid "save_unfull_chunk must be set to False."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:205
+msgid "Example ``lmcache-config.yaml`` for OBJ backend with dynamic mode:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:230
+msgid "Example ``lmcache-config.yaml`` for AZURE_BLOB backend with dynamic mode:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:251
+msgid "DOCA_MEMOS Backend (NVIDIA CMX)"
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:253
+msgid ""
+"``DOCA_MEMOS`` stores KV cache on NVIDIA CMX (Context Memory Storage), a "
+"BlueField-4 context-memory tier accessed through NIXL. It is an object-"
+"style backend (like ``OBJ``), supported in both static "
+"(``nixl_pool_size`` > 0) and dynamic (``nixl_pool_size`` = 0) mode. "
+"``nixl_buffer_device`` must be ``cpu``. ``nixl_endpoint_list`` is not "
+"supported for DOCA_MEMOS."
+msgstr ""
+
+#: ../../source/legacy/kv_cache/storage_backends/nixl.rst:259
+msgid ""
+"Object names are 128-bit lowercase-hex strings: the NIXL DOCA_MEMOS "
+"plugin passes object names as strings and hex-decodes them on the device "
+"side, so each name is exactly 32 hex characters. In dynamic mode this "
+"name is a truncated SHA-256 of the cache key, so names are opaque (they "
+"carry no model/chunk debug information) and uniqueness is probabilistic "
+"at 128 bits."
+msgstr ""
+

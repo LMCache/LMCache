@@ -1,0 +1,136 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/production/performance_tuning.rst:4
+msgid "Performance Tuning"
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:11
+msgid ""
+"This guide covers key LMCache configuration options that can help you "
+"optimize performance in production deployments."
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:15
+msgid "Minimum Retrieve Tokens"
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:17
+msgid ""
+"When LMCache finds a partial KV cache hit, it loads the cached tokens "
+"into GPU memory to avoid recomputation. However, if only a small number "
+"of tokens are hit, the overhead of loading them from the cache may "
+"outweigh the benefit of skipping recomputation."
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:22
+msgid ""
+"The ``min_retrieve_tokens`` setting lets you set a threshold: if the "
+"number of tokens that need to be loaded is below this value, LMCache will"
+" skip the retrieve and let the inference engine recompute them instead."
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:29
+msgid ""
+"Even when retrieve is skipped, LMCache still records the hit tokens "
+"internally so that it does **not** re-store chunks that already exist in "
+"the cache."
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:34
+msgid "When to Use"
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:36
+msgid "Consider setting ``min_retrieve_tokens`` when:"
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:38
+msgid ""
+"For the backend you are using, the transfer latency is noticeable for "
+"small payloads."
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:40
+msgid ""
+"Your workload has many requests with **low cache hit ratios**, where "
+"recomputation is faster than cache loading."
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:42
+msgid "You want to reduce unnecessary I/O for marginal cache hits."
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:44
+msgid "You can increase or decrease based on your latency observations."
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:47
+msgid "Configuration"
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:49
+msgid "**YAML configuration file:**"
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:57
+msgid "**Environment variable:**"
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:64
+msgid "Working Example"
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:66
+msgid "Create an LMCache configuration file ``lmcache_config.yaml``:"
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:75
+msgid "Start vLLM with LMCache:"
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:85
+msgid "Send a request to populate the cache:"
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:98
+msgid "Send a similar request that partially reuses the cached prefix:"
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:111
+msgid ""
+"Check the server logs. If the number of loadable hit tokens is below "
+"1024, you will see a log message like:"
+msgstr ""
+
+#: ../../source/legacy/production/performance_tuning.rst:119
+msgid ""
+"This confirms that the small cache hit was skipped in favor of "
+"recomputation, avoiding unnecessary transfer overhead."
+msgstr ""
+

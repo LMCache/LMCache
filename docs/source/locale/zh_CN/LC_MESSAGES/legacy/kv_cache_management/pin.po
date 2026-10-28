@@ -1,0 +1,83 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/kv_cache_management/pin.rst:4
+msgid "Pin the KV cache"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/pin.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/pin.rst:11
+msgid "The ``pin`` interface is defined as the following:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/pin.rst:17
+msgid ""
+"The function pins (persists) the KV cache chunks specified by ``tokens`` "
+"in the given ``location`` of the ``instance_id``. The controller returns "
+"an ``event_id`` and the number of tokens scheduled for pinning."
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/pin.rst:22
+msgid "Example usage:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/pin.rst:24
+msgid ""
+"First, create a yaml file ``example.yaml`` to configure the lmcache "
+"instance:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/pin.rst:43
+msgid "Start the vllm/lmcache instance at port 8000:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/pin.rst:50
+msgid "Start the lmcache controller at port 9000 and the monitor at port 9001:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/pin.rst:56
+msgid "Send a request to vllm:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/pin.rst:68
+msgid "Tokenize the prompt to obtain token ids:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/pin.rst:79
+msgid "Pin the KV cache in the system:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/pin.rst:91
+msgid "The controller responds with a message similar to:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/pin.rst:97
+msgid ""
+"``num_tokens`` indicates how many tokens' KV cache are pinned. The "
+"returned ``event_id`` can be used to query the status of the operation."
+msgstr ""
+

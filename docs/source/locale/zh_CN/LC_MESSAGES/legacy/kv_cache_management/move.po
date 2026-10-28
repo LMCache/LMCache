@@ -1,0 +1,92 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-26 09:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/kv_cache_management/move.rst:4
+msgid "Move the KV cache"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/move.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/move.rst:11
+msgid "The ``move`` interface is defined as the following:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/move.rst:18
+msgid ""
+"The function moves the KV cache chunks identified by ``tokens`` from "
+"``old_position`` to ``new_position``. Each position is a tuple of "
+"``(instance_id, location)``. Setting ``copy`` to ``True`` copies the KV "
+"cache instead of moving it."
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/move.rst:23
+msgid ""
+"Note that NIXL is required to  be installed for P2P transfer. We'll "
+"support other transports later such as Python socket and Mooncake."
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/move.rst:27
+msgid "Example usage:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/move.rst:29
+msgid ""
+"First, prepare two yaml files ``instance1.yaml`` and ``instance2.yaml`` "
+"to configure two lmcache instances:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/move.rst:75
+msgid "Start two vllm engines:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/move.rst:87
+msgid "Start the lmcache controller at port 9000 and the monitor at port 9001:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/move.rst:93
+msgid "Send a request to vllm engine 1:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/move.rst:105
+msgid "Tokenize the prompt to obtain token ids:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/move.rst:116
+msgid ""
+"Move the KV cache from engine 1's CPU to engine 2's CPU using the token "
+"ids:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/move.rst:128
+msgid "The controller responds with a message similar to:"
+msgstr ""
+
+#: ../../source/legacy/kv_cache_management/move.rst:134
+msgid ""
+"``num_tokens`` indicates how many tokens' KV cache are being moved. The "
+"returned ``event_id`` can be used to query the status of the operation."
+msgstr ""
+
