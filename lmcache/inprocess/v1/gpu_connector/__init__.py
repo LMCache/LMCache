@@ -4,13 +4,13 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 from lmcache.inprocess.v1.gpu_connector.mock_gpu_connector import MockGPUConnector
 from lmcache.inprocess.v1.gpu_connector.utils import need_gpu_interm_buffer
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.utils import EngineType
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.metadata import LMCacheMetadata
 
 # Boolean config flags whose underlying implementations exist only on a
 # subset of accelerators. Each entry is ``(attr_name, human_label,

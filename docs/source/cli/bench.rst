@@ -1065,6 +1065,11 @@ Both transfer modes verify local buffers. ``--url`` remains accepted for
 compatibility but is unused.
 
 
+STORE/RETRIEVE runs enabled workers concurrently; latency covers dispatch through
+completion of all workers. ``--transfer-timeout`` bounds each call's wait. After a
+timeout or transfer exception, close the client before reuse. Shutdown waits for
+running transfers and may block if a native call hangs.
+
 Quick start
 ~~~~~~~~~~~
 
@@ -1124,6 +1129,9 @@ Options
    * - ``--block-allocation {sequential,random}``
      - ``sequential``
      - Allocate the lowest free block IDs or sample from all free IDs.
+   * - ``--transfer-timeout SECS``
+     - ``10``
+     - Positive, finite wait budget for each STORE or RETRIEVE call.
    * - ``--num-blocks N``
      - ``1024``
      - Fallback block capacity per KV group; overridden by the shape spec.

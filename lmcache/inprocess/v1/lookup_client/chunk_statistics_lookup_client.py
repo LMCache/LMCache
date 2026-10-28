@@ -18,9 +18,9 @@ if TYPE_CHECKING:
     import torch
 
     # First Party
+    from lmcache.inprocess.v1.config import LMCacheEngineConfig
     from lmcache.inprocess.v1.lookup_client.record_strategies import RecordStrategy
-    from lmcache.v1.config import LMCacheEngineConfig
-    from lmcache.v1.metadata import LMCacheMetadata
+    from lmcache.inprocess.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 

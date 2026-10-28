@@ -21,6 +21,8 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.inprocess.v1.storage_backend.plugins.rust_raw_block_backend import (
     _DEFAULT_META_MAGIC,
@@ -28,7 +30,6 @@ from lmcache.inprocess.v1.storage_backend.plugins.rust_raw_block_backend import 
     RustRawBlockBackend,
 )
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.distributed.l2_adapters.raw_block import (
     RawBlockCore,
     RawBlockCoreConfig,
@@ -41,7 +42,6 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
-from lmcache.v1.metadata import LMCacheMetadata
 from tests.v1.distributed.raw_block.test_utils import is_skip_safe_io_error
 
 

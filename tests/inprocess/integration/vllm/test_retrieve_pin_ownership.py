@@ -24,18 +24,17 @@ import torch
 
 # First Party
 from lmcache.inprocess.v1.cache_engine import LMCacheEngine
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.event_manager import EventStatus, EventType
 from lmcache.inprocess.v1.gpu_connector import GPUConnectorInterface
-from lmcache.inprocess.v1.pin_monitor import PinMonitor
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.inprocess.v1.storage_backend.storage_manager import StorageManager
 from lmcache.inprocess.v1.token_database import ChunkedTokenDatabase
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
-from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.memory_management import MemoryObj
 from tests.v1.utils import create_test_memory_obj
 import lmcache.inprocess.v1.cache_engine as cache_engine_module
 
@@ -121,25 +120,8 @@ class _CacheCase:
 
 
 @pytest.fixture
-def pin_monitor() -> Generator[None, None, None]:
-    """Create the real pin monitor and always destroy its singleton at teardown.
-
-    Yields:
-        None while pin/unpin calls can register real test objects.
-    """
-    config = LMCacheEngineConfig.from_defaults(
-        chunk_size=CHUNK_SIZE, lmcache_instance_id="test_retrieve_pin_ownership"
-    )
-    PinMonitor.GetOrCreate(config)
-    try:
-        yield
-    finally:
-        PinMonitor.DestroyInstance()
-
-
-@pytest.fixture
 def cache_case(
-    monkeypatch: pytest.MonkeyPatch, pin_monitor: None
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Generator[_CacheCase, None, None]:
     """Build three tiny CPU chunks with one cache reference apiece.
 
@@ -149,8 +131,6 @@ def cache_case(
 
     Args:
         monkeypatch: Restores the isolated dependency replacements after the test.
-        pin_monitor: Keeps the real monitor alive through object cleanup.
-
     Yields:
         The engine, backend, copy recorder, tokens, keys and corresponding objects.
     """
@@ -158,7 +138,6 @@ def cache_case(
     stats.on_retrieve_request.return_value.time_to_retrieve.return_value = 0.0
     monkeypatch.setattr(LMCStatsMonitor, "GetOrCreate", MagicMock(return_value=stats))
     monkeypatch.setattr(PrometheusLogger, "GetOrCreate", MagicMock())
-    monkeypatch.setattr(TensorMemoryObj, "monitor", stats)
     monkeypatch.setattr(cache_engine_module, "InitializeUsageContext", MagicMock())
     monkeypatch.setattr(
         cache_engine_module.multiprocessing, "set_start_method", MagicMock()

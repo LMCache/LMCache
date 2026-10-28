@@ -7,17 +7,17 @@ import torch
 
 # First Party
 from lmcache import device_ops, torch_dev, torch_device_type
-from lmcache.logging import init_logger
-from lmcache.storage_backend.serde.cachegen_basics import (
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
+from lmcache.inprocess.v1.storage_backend.legacy_serde.cachegen_basics import (
     CacheGenConfig,
     CacheGenGPUBytestream,
     CacheGenGPUEncoderOutput,
 )
-from lmcache.storage_backend.serde.serde import Serializer
+from lmcache.inprocess.v1.storage_backend.legacy_serde.serde import Serializer
+from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.metadata import LMCacheMetadata
-import lmcache.storage_backend.serde.cachegen_basics as CGBasics
+import lmcache.inprocess.v1.storage_backend.legacy_serde.cachegen_basics as CGBasics
 
 logger = init_logger(__name__)
 

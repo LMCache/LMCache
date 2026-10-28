@@ -261,12 +261,6 @@ Memory Management Metrics
    * - ``lmcache:pinned_memory_objs_count``
      - Gauge
      - The number of currently pinned memory objects.
-   * - ``lmcache:forced_unpin_count``
-     - Counter
-     - Total number of forced unpins due to timeout.
-   * - ``lmcache:pin_monitor_pinned_objects_count``
-     - Gauge
-     - The number of pinned objects tracked by the PinMonitor.
 
 P2P Transfer Metrics
 ~~~~~~~~~~~~~~~~~~~~
