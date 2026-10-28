@@ -341,7 +341,6 @@ eventually succeed.
 plan_load(key_groups, l1_locked_keys, l2_locked_keys,
           l1_manager_descs, l2_adapter_descs, fetching_policy) -> PrefetchPlan
 plan_l1_retention(keys, l1_manager_desc, l2_adapter_desc) -> list[bool]
-needs_l2_lookup(key_groups, l1_locked_keys, fetching_policy) -> bool
 ```
 
 `plan_load` sees the L1 hits and every adapter's found bitmap at once and
@@ -545,10 +544,6 @@ The policy is now available via `--l2-store-policy tiered`.
 
 Same pattern: subclass `PrefetchPolicy`, implement `plan_load()` and
 `plan_l1_retention()`, and call `register_prefetch_policy("name", cls)`.
-Override `needs_l2_lookup()` only if your `plan_load()` can tell from the L1
-hits alone that L2 cannot change the plan. If you subclass
-`DefaultPrefetchPolicy` and change `plan_load()`, override `needs_l2_lookup()`
-too: the inherited one assumes the L1-first plan.
 
 ### How Discovery Works
 

@@ -62,7 +62,6 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     Bitmap2D,
     L1ManagerDescriptor,
     L2AdapterDescriptor,
-    MapState,
 )
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 from lmcache.v1.storage_backend.raw_block import RawBlockCore, encode_object_key
@@ -1299,57 +1298,56 @@ class LookupCountingAdapter(MockL2Adapter):
         return super().submit_lookup_and_lock_task(keys, group_layout_descs)
 
 
-class BaseLookupDecisionPolicy(DefaultPrefetchPolicy):
-    """Default planning with the base class's ``needs_l2_lookup``."""
-
-    def needs_l2_lookup(
-        self,
-        key_groups: list[GroupedObjectKeys],
-        l1_locked_keys: MapState,
-        fetching_policy: FetchingPolicy,
-    ) -> bool:
-        return PrefetchPolicy.needs_l2_lookup(
-            self, key_groups, l1_locked_keys, fetching_policy
-        )
-
-
 class TestL1ServesWholeRequest:
     @pytest.mark.parametrize(
-        "num_in_l1, policy_cls, lookups, hits",
+        "fetching_policy, window, row1_in_l1, lookups, hits",
         [
-            (4, DefaultPrefetchPolicy, 0, (4, 0)),
-            (3, DefaultPrefetchPolicy, 1, (3, 1)),
-            (4, BaseLookupDecisionPolicy, 1, (4, 0)),
+            ("prefix", FULL, [0, 1, 2, 3], 0, (8, 0)),
+            ("prefix", FULL, [0, 1, 2], 1, (7, 1)),
+            ("prefix", 1, [3], 0, (5, 0)),
+            ("full", FULL, [0, 1, 2, 3], 0, (8, 0)),
+            ("full", FULL, [0, 2, 3], 1, (7, 1)),
         ],
-        ids=["l1_serves_all", "missing_last_chunk", "base_decision"],
+        ids=[
+            "l1_serves_all",
+            "missing_last_chunk",
+            "window_in_l1",
+            "full_l1_serves_all",
+            "full_missing_a_chunk",
+        ],
     )
-    def test_l2_looked_up_only_when_it_can_help(
+    def test_l2_looked_up_only_when_l1_misses_a_chunk(
         self,
         l1_manager,
-        num_in_l1: int,
-        policy_cls: type[PrefetchPolicy],
+        fetching_policy: FetchingPolicy,
+        window: int,
+        row1_in_l1: list[int],
         lookups: int,
         hits: tuple[int, int],
     ):
-        """L2 holds every chunk; it is looked up only when it can add to the
-        plan, or when the policy keeps the base ``needs_l2_lookup``."""
+        """L2 holds every cell, L1 all of row 0 and part of row 1: L2 is
+        looked up only when L1 does not serve every chunk."""
         adapter = LookupCountingAdapter()
         layout = make_layout()
-        keys = [make_object_key(i) for i in range(4)]
-        store_keys_in_l2(adapter, keys, layout)
-        write_keys_to_l1(l1_manager, keys[:num_in_l1], layout)
-        ctrl = make_controller(l1_manager, [adapter], policy=policy_cls())
+        row0 = [make_object_key(i, gid=0) for i in range(4)]
+        row1 = [make_object_key(i, gid=1) for i in range(4)]
+        store_keys_in_l2(adapter, row0 + row1, layout)
+        write_keys_to_l1(l1_manager, row0 + [row1[i] for i in row1_in_l1], layout)
+        ctrl = make_controller(l1_manager, [adapter])
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+        req_id = ctrl.submit_prefetch_request(
+            make_spec(
+                [make_group(row0, gid=0), make_group(row1, gid=1, window=window)],
+                fetching_policy=fetching_policy,
+            )
+        )
         result = wait_for_result(ctrl, req_id)
 
-        assert row_bits(result) == [0, 1, 2, 3]
-        assert hit_counts(result) == hits
         assert adapter.lookup_count == lookups
+        assert row_bits(result, 0) == [0, 1, 2, 3]
+        assert hit_counts(result) == hits
         assert_l2_unlocked(adapter)
-        assert_read_locked(l1_manager, keys)
-        l1_manager.finish_read(keys)
         ctrl.stop()
         adapter.close()
 

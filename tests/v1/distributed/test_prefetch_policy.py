@@ -11,7 +11,6 @@ empty plan, and the policy never mutates its inputs).
 """
 
 # Standard
-import itertools
 import uuid
 
 # Third Party
@@ -483,48 +482,6 @@ class TestDefaultContract:
         plan = _plan(DefaultPrefetchPolicy(), groups, MapState(), l2)
 
         assert _is_empty(plan)
-
-
-# =============================================================================
-# Whether L2 needs a lookup
-# =============================================================================
-
-
-class TestNeedsL2Lookup:
-    @pytest.mark.parametrize(
-        "fetching_policy, windows",
-        [
-            ("prefix", (FULL, FULL)),
-            ("prefix", (FULL, 1)),
-            ("prefix", (2, 1)),
-            ("full", (FULL, FULL)),
-        ],
-    )
-    def test_no_lookup_means_l2_cannot_change_the_plan(
-        self, fetching_policy: FetchingPolicy, windows: tuple[int, int]
-    ) -> None:
-        """For every L1 grid that needs no lookup, planning with L2 holding
-        every cell gives the L1-only plan."""
-        policy = DefaultPrefetchPolicy()
-        groups = [_group(3, gid=gid, window=w) for gid, w in enumerate(windows)]
-        l2 = _state({0: [_row(3, 0, 1, 2), _row(3, 0, 1, 2)]})
-        subsets = [tuple(c for c in range(3) if m >> c & 1) for m in range(8)]
-        skipped = 0
-        for row0, row1 in itertools.product(subsets, repeat=2):
-            l1 = _state({0: [_row(3, *row0), _row(3, *row1)]})
-            if policy.needs_l2_lookup(groups, l1, fetching_policy):
-                continue
-            skipped += 1
-            l1_only = _plan(
-                policy, groups, l1, MapState(), fetching_policy, l2_indices=()
-            )
-            with_l2 = _plan(policy, groups, l1, l2, fetching_policy)
-
-            assert with_l2.l2_planned_keys.merge().popcount() == 0
-            assert _snapshot(with_l2.l1_planned_keys, [0]) == _snapshot(
-                l1_only.l1_planned_keys, [0]
-            )
-        assert skipped > 0
 
 
 # =============================================================================
