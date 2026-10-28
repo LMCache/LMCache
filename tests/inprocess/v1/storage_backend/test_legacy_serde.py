@@ -12,9 +12,12 @@ from lmcache.inprocess.v1.storage_backend.legacy_serde.cachegen_basics import (
 )
 from lmcache.inprocess.v1.storage_backend.legacy_serde.cachegen_decoder import (
     CacheGenDeserializer,
+    do_dequantize,
 )
 from lmcache.inprocess.v1.storage_backend.legacy_serde.cachegen_encoder import (
     CacheGenSerializer,
+    _split_kv,
+    torch_quant_vectorized,
 )
 
 if not torch_dev.is_available():
@@ -126,3 +129,52 @@ def test_cachegen_unmatched_size():
     decoded_kv = deserializer.from_bytes(output)
     assert decoded_kv.shape == kv.shape
     assert decoded_kv.mean() != 0
+
+
+@pytest.mark.parametrize("key_max_bins, value_max_bins", [(32, 12), (12, 32), (16, 16)])
+def test_cachegen_different_key_value_max_bins(key_max_bins, value_max_bins):
+    """Keys and values may use different maximum bin counts.
+
+    The encoder stores the key and value CDFs in one tensor; it used to build
+    each at its own maximum and then fail in torch.cat when the two differed.
+    The round trip must also stay lossless: arithmetic coding adds no error, so
+    the decoder returns exactly the quantize -> dequantize reconstruction.
+    """
+    chunk_size = 256
+    config = LMCacheEngineConfig.from_defaults(chunk_size=chunk_size)
+    metadata = LMCacheMetadata(
+        model_name="mistralai/Mistral-7B-Instruct-v0.2",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=None,
+    )
+    serializer = CacheGenSerializer(config, metadata)
+    deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
+    nlayers = serializer.key_bins.shape[0]
+    for coder in (serializer, deserializer):
+        coder.key_bins = torch.full(
+            (nlayers,), float(key_max_bins), device=torch_device_type
+        )
+        coder.value_bins = torch.full(
+            (nlayers,), float(value_max_bins), device=torch_device_type
+        )
+
+    kv = to_blob(generate_kv_cache(chunk_size, torch_device_type))
+    decoded_kv = deserializer.from_bytes(serializer.to_bytes(kv))
+
+    expected = []
+    bins_kv = (serializer.key_bins, serializer.value_bins)
+    for x, bins in zip(_split_kv(kv), bins_kv, strict=True):
+        xq, max1 = torch_quant_vectorized(bins, x)
+        expected.append(do_dequantize(xq.float(), bins, max1))
+    expected_kv = (
+        torch.stack(expected)
+        .reshape(kv.shape[1], kv.shape[0], *kv.shape[2:])
+        .permute((1, 0, 2, 3, 4))
+        .to(decoded_kv.dtype)
+    )
+    assert decoded_kv.shape == kv.shape
+    assert torch.equal(decoded_kv, expected_kv)

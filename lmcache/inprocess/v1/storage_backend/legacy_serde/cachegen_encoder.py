@@ -296,8 +296,12 @@ def encode_function(
         nlayers, chunk_size, nchannels
     )
 
-    new_cdf_key = device_ops.calculate_cdf(new_key, int(key_bins.max()))
-    new_cdf_value = device_ops.calculate_cdf(new_value, int(value_bins.max()))
+    # Keys and values share one CDF tensor ([2 * nlayers, nchannels, bins + 1]),
+    # so both CDFs must have the same width; building each at its own max bins
+    # makes torch.cat fail whenever key_bins.max() != value_bins.max().
+    max_bins = int(torch.maximum(key_bins.max(), value_bins.max()))
+    new_cdf_key = device_ops.calculate_cdf(new_key, max_bins)
+    new_cdf_value = device_ops.calculate_cdf(new_value, max_bins)
     cdf_int = torch.cat([new_cdf_key, new_cdf_value])
 
     output_buffer = torch.zeros(
