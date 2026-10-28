@@ -14,6 +14,10 @@ from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
+from lmcache.v1.gpu_connector.kv_format.declared import (
+    resolve_declared_tensor,
+    tensor_axes,
+)
 from lmcache.v1.gpu_connector.kv_format.detectors import get_detector
 from lmcache.v1.gpu_connector.kv_format.specs import describe_shape
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
@@ -59,6 +63,32 @@ def detect_format(
         ValueError: If no detector exists for *serving_engine*, or the structure
             matches no known format.
     """
+    if layout_hints is not None and "tensor_layouts" in layout_hints:
+        if serving_engine != EngineType.VLLM or not isinstance(kv_caches, list):
+            raise ValueError("Declared tensor layouts require per-layer vLLM caches")
+        axes_per_layer = tensor_axes(layout_hints, len(kv_caches))
+        normalized: list[DiscoverableKVCache] = []
+        formats = []
+        legacy_hints = layout_hints.copy()
+        del legacy_hints["tensor_layouts"]
+        for cache, axes in zip(kv_caches, axes_per_layer, strict=True):
+            if axes is None:
+                fmt, views = detect_format([cache], serving_engine, legacy_hints)
+                normalized.append(views[0])
+            else:
+                if not isinstance(cache, torch.Tensor):
+                    raise ValueError(
+                        "Declared layout requires a single tensor per layer"
+                    )
+                fmt, view = resolve_declared_tensor(cache, axes)
+                normalized.append(view)
+            formats.append(fmt)
+        if not formats or len(set(formats)) != 1:
+            raise ValueError(
+                "Declared layers have different formats; use "
+                "normalize_and_discover_per_layer_formats"
+            )
+        return formats[0], normalized
     kv_caches = attempt_permute_to_contiguous_view(kv_caches)
     detector = get_detector(serving_engine)
     if detector is None:

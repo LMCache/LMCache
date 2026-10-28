@@ -48,6 +48,7 @@ from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import validate_and_set_config_value
+from lmcache.v1.gpu_connector.kv_format.types import TensorLayoutHints
 
 if TYPE_CHECKING:
     # Third Party
@@ -746,11 +747,31 @@ class LMCacheConnectorV1Impl:
     # Worker side APIs
     ####################
     @_lmcache_nvtx_annotate
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        tensor_layouts: TensorLayoutHints | None = None,
+    ) -> None:
+        """Register layer tensors and optional producer axes before post-init.
+
+        Args:
+            kv_caches: Nonempty cache mapping in engine registration order.
+            tensor_layouts: Optional declarations describing these exact views.
+
+        Raises:
+            ValueError: Duplicate/empty registration or missing worker engine.
+            NotImplementedError: GPU connector cannot consume declarations.
+        """
         logger.info("Registering KV caches")
         # TODO(chunxiaozheng): `_init_kv_caches_from_forward_context` is
         #  not called, we should consider removing it.
-        assert len(self.kv_caches) == 0 and len(kv_caches) > 0
+        if self.kv_caches or not kv_caches:
+            raise ValueError("KV caches must be registered once with nonempty tensors")
+        if tensor_layouts is not None:
+            engine = self.lmcache_engine
+            if engine is None or engine.gpu_connector is None:
+                raise ValueError("Producer layouts require a worker GPU connector")
+            engine.gpu_connector.set_tensor_layouts(tensor_layouts)
         self.kv_caches = kv_caches
         self._manager.post_init()
 

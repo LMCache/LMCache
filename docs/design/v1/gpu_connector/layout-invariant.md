@@ -271,9 +271,10 @@ consumer code must never do any of the following — it queries via the
   The adapter (`vllm_v1_adapter.py`) does not participate in format
   discovery — it only stores `self.kv_caches` at register time.
 
-Only `normalize_kv_and_discover_format` consumes `layout_hints`.
-`attempt_permute_to_contiguous_view` (called internally) infers the
-permutation from strides and needs no hints.
+Legacy detection uses `attempt_permute_to_contiguous_view` to infer physical
+order from strides. With producer declarations, normalization preserves semantic
+singleton axes and transforms roles alongside the tensor instead. See
+[producer-declared axes](kv_format/declared.md) for the registration/IPC contract.
 
 ## Implementation note: mypy and the recursive union
 

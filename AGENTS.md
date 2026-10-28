@@ -154,6 +154,11 @@ All Python files require an `# SPDX-License-Identifier: Apache-2.0` header as th
 `isort` enforces the section-heading convention (`# Standard` / `# Third Party` /
 `# First Party` / `# Local`); see `docs/coding_standards.md` Section 7.2.
 
+The `ban-direct-torch-device` hook uses `python3` from `PATH`. On macOS,
+`/usr/bin/python3` may be Python 3.9 and fail while evaluating its Python 3.10+
+type aliases. Run pre-commit with the project's Python 3.12+ environment first
+in `PATH`; this hook does not use pre-commit's managed Python environment.
+
 ### SLF (Private Member Access)
 
 SLF lint rules are currently enforced by CI only in `lmcache/v1/multiprocess/` and `lmcache/v1/distributed/`. However, **all new code should follow SLF discipline regardless of location** — never access private members (prefixed with `_`) of other classes. Treat this as a project-wide coding standard for any new or modified code.

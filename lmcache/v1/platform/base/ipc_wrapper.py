@@ -12,7 +12,7 @@ concrete implementation from a local allowlist.
 from __future__ import annotations
 
 # Standard
-from typing import Any, Tuple, cast
+from typing import Any, ClassVar, Tuple, cast
 import importlib
 import threading
 
@@ -59,6 +59,13 @@ class DeviceIPCWrapper:
     # ``Any`` because each backend stores a different opaque payload
     # (``tuple`` for CUDA shared-storage IPC, ``None`` for the SHM /
     # raw-CUDA paths that override ``to_tensor``).
+    supports_view_metadata: ClassVar[bool] = False
+    """Whether shape/stride fields independently control the imported view.
+
+    Tensor-handle wrappers must opt in only when receiver reconstruction uses
+    these fields. storage_offset always follows the concrete handle's origin.
+    """
+
     handle: Any
     dtype: torch.dtype
     shape: Tuple[int, ...]

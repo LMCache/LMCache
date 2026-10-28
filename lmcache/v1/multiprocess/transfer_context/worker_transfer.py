@@ -17,6 +17,10 @@ import torch
 from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.gpu_connector.kv_format.declared import (
+    select_layout_hints,
+    tensor_axes,
+)
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_device,
@@ -196,6 +200,7 @@ class _GroupState:
         window_chunks: Trailing chunks this group needs for a cache hit
             (``-1`` = full attention). A retrieve returns only these chunks
             for the group, mirroring the server's prefetch window.
+        layout_hints: Declarations selected in this group's layer order.
     """
 
     layer_names: list[str]
@@ -204,6 +209,7 @@ class _GroupState:
     blocks_per_window: int
     layout_desc: MemoryLayoutDesc
     window_chunks: int = -1
+    layout_hints: LayoutHints | None = None
 
 
 # Allocates ``count`` CPU gather targets of one shape and dtype.
@@ -593,10 +599,16 @@ class LMCacheDrivenTransferContext(TransferContext):
         event_backend = get_event_ipc_backend(device)
         event_backend.check_event_support(device)
 
+        axes = tensor_axes(layout_hints or {}, len(kv_caches))
+        declared_layers = [
+            name
+            for name, roles in zip(kv_caches, axes, strict=True)
+            if roles is not None
+        ]
         future = self._submit_registration(
             lambda: self._req_client.register_kv_cache(
                 self._instance_id,
-                wrap_kv_caches(kv_caches),
+                wrap_kv_caches(kv_caches, preserve_views=declared_layers),
                 model_name,
                 world_size,
                 engine_type,
@@ -884,6 +896,17 @@ class EngineDrivenTransferContext(TransferContext):
         # TODO: per-group compression (tokens_per_block > the detected slot
         # count, e.g. DeepSeek V4 indexer pages) is validated by the manager
         # but not yet threaded through gather/scatter buffer sizing.
+        layout_caches = kv_caches
+        initial_hints = layout_hints
+        if (
+            len(engine_group_infos) > 1
+            and layout_hints
+            and "tensor_layouts" in layout_hints
+        ):
+            indices = engine_group_infos[0].layer_indices
+            names = list(kv_caches)
+            layout_caches = {names[i]: kv_caches[names[i]] for i in indices}
+            initial_hints = select_layout_hints(layout_hints, indices)
         (
             block_size,
             num_layers,
@@ -892,8 +915,8 @@ class EngineDrivenTransferContext(TransferContext):
             engine_kv_format,
             kv_size,
         ) = compute_kv_layout(
-            kv_caches,
-            layout_hints=layout_hints,
+            layout_caches,
+            layout_hints=initial_hints,
             engine_type=engine_type,
         )
         self._layout_hints = layout_hints
@@ -1009,6 +1032,9 @@ class EngineDrivenTransferContext(TransferContext):
                             shapes=[group_shape], dtypes=[kernel_group.dtype]
                         ),
                         window_chunks=window_chunks,
+                        layout_hints=select_layout_hints(
+                            layout_hints, kernel_group.layer_indices
+                        ),
                     )
                 )
             # Group 0's layout doubles as the legacy top-level layout so
@@ -1340,7 +1366,7 @@ class EngineDrivenTransferContext(TransferContext):
                     {name: kv_caches[name] for name in state.layer_names},
                     block_ids[plan.gid],
                     state.blocks_in_chunk,
-                    layout_hints=self._layout_hints,
+                    layout_hints=state.layout_hints,
                     engine_kv_format=state.engine_kv_format,
                     out=plan.out,
                     chunk_indices=plan.chunk_indices,
@@ -1446,7 +1472,7 @@ class EngineDrivenTransferContext(TransferContext):
             skip_first_n_tokens=max(
                 0, skip_first_n_tokens - first_chunk * self._chunk_tokens
             ),
-            layout_hints=self._layout_hints,
+            layout_hints=state.layout_hints,
             engine_kv_format=state.engine_kv_format,
             blocks_per_window=state.blocks_per_window,
             engine_type=self._engine_type,

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Optional
 
 # Third Party
@@ -18,6 +19,7 @@ import torch
 from lmcache.inprocess.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorV1Impl,
 )
+from lmcache.integration.vllm.kv_cache_layout import TensorLayout, encode_tensor_layouts
 
 if TYPE_CHECKING:
     # Third Party
@@ -58,6 +60,24 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
             dictionary of layer names, kv cache
         """
         self._lmcache_engine.register_kv_caches(kv_caches)
+
+    def register_kv_caches_with_layouts(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        layouts: Mapping[str, TensorLayout],
+    ) -> None:
+        """Register original tensor views and their producer-declared axes.
+
+        Args:
+            kv_caches: Layer tensors before LMCache normalization.
+            layouts: Producer descriptors; missing entries use legacy detection.
+
+        Raises:
+            ValueError: Invalid descriptors or registration state.
+            NotImplementedError: GPU connector cannot consume declarations.
+        """
+        hints = encode_tensor_layouts(kv_caches, layouts) if layouts else None
+        self._lmcache_engine.register_kv_caches(kv_caches, tensor_layouts=hints)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """

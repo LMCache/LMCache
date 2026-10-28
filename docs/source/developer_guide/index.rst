@@ -9,6 +9,7 @@ commands, and HTTP endpoints.
 
    contributing
    integration
+   kv_tensor_layouts
    extending_lmcache/storage_plugins
    usage/index
    extending_lmcache/native_connectors
