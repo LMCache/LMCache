@@ -59,6 +59,7 @@ async def request_prefetch(body: PrefetchRequest, request: Request) -> PrefetchR
     prefetch = ctx.controllers.get(PrefetchManager)
     target = ctx.views.get(InstanceRegistry).get(body.instance_id)
     if target is None:
+        prefetch.record_unknown_server()
         raise HTTPException(
             status_code=404,
             detail=f"no MP server registered with instance_id={body.instance_id!r}",
