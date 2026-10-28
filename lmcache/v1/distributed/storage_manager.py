@@ -306,9 +306,10 @@ class StorageManager:
     ) -> tuple[L1Error, L1ObjectSnapshot | None]:
         """Copy one node-local L1 object into an independent CPU snapshot.
 
-        The method owns the complete inspection lifecycle: it atomically
-        acquires read protection, copies metadata and logical bytes, and releases
-        protection before returning. Inspection does not touch LRU state or emit
+        The method checks L1 managers in configuration order, skipping missing,
+        unreadable, or GDS-backed copies. For the first CPU-readable object, it
+        acquires an inspection pin, copies metadata and logical bytes, and releases
+        the pin before returning. Inspection does not touch LRU state or emit
         normal L1-read observability events.
 
         Args:
@@ -319,48 +320,61 @@ class StorageManager:
         Returns:
             ``(SUCCESS, snapshot)`` on success. Missing, temporarily unreadable,
             oversized, and unsupported-backend results return their corresponding
-            :class:`L1Error` with ``None``. Lost residency or unsuccessful release
-            (including read TTL expiry) returns ``KEY_NOT_READABLE`` with ``None``.
+            :class:`L1Error` with ``None``. When no CPU-readable copy exists,
+            unsupported GDS takes precedence over unreadable and missing copies.
 
         Raises:
-            Exception: Metadata access or byte copying failed. Read release is
+            Exception: Metadata access or byte copying failed. Pin release is
                 still attempted; no snapshot is returned.
 
         Note:
-            DRAM and Device-DAX objects are CPU-addressable. GDS objects are
-            rejected because their bytes require a GPU staging/DMA path.
+            DRAM and Device-DAX objects are CPU-addressable. GDS objects require
+            a GPU staging/DMA path and are skipped during multi-L1 lookup.
         """
-        try:
-            with self._l1_manager.reserve_read_for_inspection(key) as (error, obj):
-                if error != L1Error.SUCCESS or obj is None:
-                    return error, None
+        found_unreadable = False
+        found_unsupported = False
+        for manager in self._l1_managers_by_id.values():
+            try:
+                with manager.reserve_read_for_inspection(key) as (error, obj):
+                    if error == L1Error.KEY_NOT_EXIST:
+                        continue
+                    if error == L1Error.KEY_NOT_READABLE:
+                        found_unreadable = True
+                        continue
+                    if error != L1Error.SUCCESS or obj is None:
+                        return error, None
 
-                backend = self._l1_manager.get_backend_type(obj)
-                if backend == L1BackendType.GDS:
-                    return L1Error.UNSUPPORTED_BACKEND, None
-                if max_size_bytes is not None and obj.get_size() > max_size_bytes:
-                    return L1Error.OBJECT_TOO_LARGE, None
+                    backend = manager.get_backend_type(obj)
+                    if backend == L1BackendType.GDS:
+                        found_unsupported = True
+                        continue
+                    if max_size_bytes is not None and obj.get_size() > max_size_bytes:
+                        return L1Error.OBJECT_TOO_LARGE, None
 
-                shapes = tuple(
-                    tuple(int(dim) for dim in shape) for shape in obj.get_shapes()
-                )
-                dtypes = tuple(str(dtype) for dtype in obj.get_dtypes())
-                memory_format = obj.get_memory_format().name.lower()
-                view = memoryview(obj.byte_array).cast("B")
-                data = view.tobytes()
-                snapshot = L1ObjectSnapshot(
-                    data=data,
-                    size_bytes=len(data),
-                    backend=backend,
-                    memory_format=memory_format,
-                    shapes=shapes,
-                    dtypes=dtypes,
-                )
-            # Context exit validates residency before releasing the read, and
-            # rejects expired protection. Only then can bytes be returned.
-            return L1Error.SUCCESS, snapshot
-        except InspectionReadError:
+                    shapes = tuple(
+                        tuple(int(dim) for dim in shape) for shape in obj.get_shapes()
+                    )
+                    dtypes = tuple(str(dtype) for dtype in obj.get_dtypes())
+                    memory_format = obj.get_memory_format().name.lower()
+                    view = memoryview(obj.byte_array).cast("B")
+                    data = view.tobytes()
+                    snapshot = L1ObjectSnapshot(
+                        data=data,
+                        size_bytes=len(data),
+                        backend=backend,
+                        memory_format=memory_format,
+                        shapes=shapes,
+                        dtypes=dtypes,
+                    )
+                # Context exit validates residency before releasing the pin.
+                return L1Error.SUCCESS, snapshot
+            except InspectionReadError:
+                found_unreadable = True
+        if found_unsupported:
+            return L1Error.UNSUPPORTED_BACKEND, None
+        if found_unreadable:
             return L1Error.KEY_NOT_READABLE, None
+        return L1Error.KEY_NOT_EXIST, None
 
     @enable_tracing()
     def reserve_write(

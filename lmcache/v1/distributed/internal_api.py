@@ -5,6 +5,7 @@ Class for distributed storage manager internal API data structures
 
 # Standard
 from abc import ABC, abstractmethod
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import enum
@@ -271,6 +272,16 @@ class L1ManagerInterface(Protocol):
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for this L1's lifecycle notifications."""
+        ...
+
+    def reserve_read_for_inspection(
+        self, key: ObjectKey
+    ) -> AbstractContextManager[L1OperationResult]:
+        """Protect a key from ordinary deletion while inspecting its bytes."""
+        ...
+
+    def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
+        """Return the backing medium of an object owned by this L1."""
         ...
 
     def reserve_read(
