@@ -22,6 +22,20 @@ Later phases are listed under [Next phases](#next-phases).
 
 ## Part 1: HeteroKVView
 
+```
+LookupModule                         other callers: store, warm prefetch,
+     |                               blend, P2P controller (peer lookups)
+HeteroKVView --> HeteroTPPlanner                |
+     |           (tp_reshard.py)                |
+StorageManager <--------------------------------+
+     |
+L1 / L2 adapters (P2P included)
+```
+
+Only `LookupModule`'s prefetches pass through the view; every other caller
+uses the storage manager directly. The view holds the TP planner and asks it
+for a plan per prefetch.
+
 ### Why a layer above the storage manager
 
 Objects stored in another engine's form can sit in any tier, L1 included.
