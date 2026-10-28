@@ -197,8 +197,14 @@ _path_filter_should_skip_for_pipeline() {
             return 1
             ;;
         musa)
-            # Placeholder only: no dedicated MUSA pipeline dir is introduced here.
-            # Keep the platform kind explicit for future CI extension.
+            case "$changed_file" in
+                .buildkite/k3_tests/musa/*|tests/*|lmcache/*)
+                    return 1
+                    ;;
+                examples/*)
+                    return 0
+                    ;;
+            esac
             return 1
             ;;
         rbln)
@@ -231,7 +237,8 @@ _path_filter_pipeline_kind() {
         *k3_tests/multiprocess/pipeline.yml) echo multiprocess ;;
         *k3_tests/blend/pipeline.yml) echo blend ;;
         *k3_tests/xpu/*/pipeline.yml) echo xpu ;;
-        *k3_tests/musa/pipeline.yml) echo musa ;;
+        *k3_tests/musa/unittests/pipeline.yml|\
+        *k3_tests/musa/multiprocess/pipeline.yml) echo musa ;;
         *k3_tests/rbln/pipeline.yml) echo rbln ;;
         *k3_tests/amd/pipeline.yml) echo amd ;;
         *k3_tests/comprehensive/pipeline.yml) echo comprehensive ;;

@@ -51,11 +51,20 @@ else
 fi
 
 export DEFAULT_MODEL="${DEFAULT_MODEL:-${ENGINE_DEFAULT_MODEL:-Qwen/Qwen3-14B}}"
-engine_setup_environment "$REPO_ROOT"
+if [[ "${MUSA_CI_PREPROVISIONED:-0}" == "1" ]]; then
+    echo "Using the pre-provisioned MUSA environment"
+else
+    engine_setup_environment "$REPO_ROOT"
+fi
 export INFERENCE_ENGINE
 
-# Install test extras (lm-eval for eval workload, openai/pandas/matplotlib for benchmarks)
-uv pip install 'lm-eval[api]' openai pandas matplotlib
+# Install test extras (lm-eval for eval workload, openai/pandas/matplotlib for
+# benchmarks). Vendor images may provide pip but not uv.
+if command -v uv >/dev/null 2>&1; then
+    uv pip install 'lm-eval[api]' openai pandas matplotlib
+else
+    python3 -m pip install 'lm-eval[api]' openai pandas matplotlib
+fi
 if [[ "$TORCH_DEVICE_TYPE" == "xpu" ]]; then
     python -c "from importlib.metadata import version; print('vLLM version:', version('vllm'))"
 fi
