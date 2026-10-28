@@ -556,3 +556,57 @@ class TestDeleteAndStatus:
         assert status["transport"] == "blob-tcp"
         assert "rdma_provider" not in status
         assert "l1_arena_bytes" not in status
+
+
+# ===========================================================================
+# Fail-open over blob-tcp
+# ===========================================================================
+
+
+class TestFailOpen:
+    def test_the_breaker_trips_on_blob_failures_and_then_skips_the_module(self):
+        a = ValkeyL2Adapter(
+            _make_config(breaker_failure_threshold=2, breaker_cooldown_s=60.0)
+        )
+        try:
+            keys = [_key(1), _key(2)]
+            for k in keys:
+                _SERVER.faults[_wire(a, k)] = RequestError("ERR shard unreachable")
+
+            assert not _store(a, keys, [_obj(), _obj()]).is_successful()
+            assert a.report_status()["circuit_breaker"]["open"]
+
+            sent = len(_SERVER.calls)
+            assert not _store(a, [_key(3)], [_obj()]).is_successful()
+            loaded = _load(a, [_key(3)], [_obj()])
+            found = _lookup(a, [_key(3)])
+
+            assert not loaded.test(0) and not found.test(0)
+            # Answered at submit: nothing reached the module while open.
+            assert len(_SERVER.calls) == sent
+            assert not a.report_status()["is_healthy"]
+        finally:
+            a.close()
+
+    def test_lazy_connect_serves_misses_until_the_module_answers(self):
+        _SERVER.state = "absent"
+        a = ValkeyL2Adapter(
+            _make_config(lazy_connect=True, connect_retry_interval_s=0.05)
+        )
+        try:
+            assert not a.report_status()["connected"]
+            assert not _load(a, [_key(1)], [_obj()]).test(0)
+
+            _SERVER.state = "loaded"
+            deadline = time.monotonic() + 5.0
+            while not a.report_status()["connected"]:
+                assert time.monotonic() < deadline, "never connected"
+                time.sleep(0.02)
+
+            obj = _obj(fill=3.0)
+            assert _store(a, [_key(1)], [obj]).is_successful()
+            out = _obj(fill=0.0)
+            assert _load(a, [_key(1)], [out]).test(0)
+            assert _bytes_of(out) == _bytes_of(obj)
+        finally:
+            a.close()

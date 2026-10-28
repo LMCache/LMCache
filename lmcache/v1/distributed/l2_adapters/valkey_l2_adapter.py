@@ -27,13 +27,14 @@ Concurrency model:
 from __future__ import annotations
 
 # Standard
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 import functools
 import threading
+import time
 
 if TYPE_CHECKING:
     # First Party
@@ -82,6 +83,14 @@ logger = init_logger(__name__)
 DEFAULT_REQUEST_TIMEOUT_SECS: float = 5.0
 #: Default initial-connection timeout (seconds).
 DEFAULT_CONNECTION_TIMEOUT_SECS: float = 10.0
+#: Default circuit-breaker failure window (seconds).
+DEFAULT_BREAKER_WINDOW_SECS: float = 10.0
+#: Default first circuit-breaker cool-down (seconds).
+DEFAULT_BREAKER_COOLDOWN_SECS: float = 5.0
+#: Default cap on the (doubling) circuit-breaker cool-down (seconds).
+DEFAULT_BREAKER_MAX_COOLDOWN_SECS: float = 60.0
+#: Default interval between background connection attempts (seconds).
+DEFAULT_CONNECT_RETRY_INTERVAL_SECS: float = 10.0
 
 #: Which server commands store each chunk.
 TRANSPORTS: tuple[str, ...] = ("tcp", "rdma", "blob-tcp")
@@ -201,6 +210,24 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
       * ``rdma_interface``: Fabric domain, or list of domains, to open on
         a multi-card host; workers are spread across them round-robin.
         RDMA only.
+
+    Fail-open fields (all off by default, so behaviour is unchanged
+    unless set; ``tcp`` and ``blob-tcp`` transports only). They make a
+    Valkey outage cost cache hits only:
+      * ``batch_timeout``: Deadline in seconds for a whole lookup / load /
+        store batch. Keys whose request has not started by then are not
+        sent and count as a miss (or a failed store). ``0`` disables.
+      * ``breaker_failure_threshold``: Open the circuit breaker after this
+        many failed requests within ``breaker_window_s``. While open,
+        lookups and loads report all-miss, stores fail immediately and
+        queued requests are dropped without touching Valkey. After the
+        cool-down the adapter lets traffic through again; a backend that
+        is still broken re-trips with the cool-down doubled up to
+        ``breaker_max_cooldown_s``. ``0`` disables.
+      * ``lazy_connect``: When ``True``, an unreachable Valkey at startup
+        does not fail adapter creation; the adapter serves misses and
+        retries the connection in the background every
+        ``connect_retry_interval_s`` seconds.
     """
 
     def __init__(
@@ -220,6 +247,13 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         transport: str = "tcp",
         rdma_provider: str = DEFAULT_RDMA_PROVIDER,
         rdma_interface: Optional[Union[str, Sequence[str]]] = None,
+        batch_timeout: float = 0.0,
+        breaker_failure_threshold: int = 0,
+        breaker_window_s: float = DEFAULT_BREAKER_WINDOW_SECS,
+        breaker_cooldown_s: float = DEFAULT_BREAKER_COOLDOWN_SECS,
+        breaker_max_cooldown_s: float = DEFAULT_BREAKER_MAX_COOLDOWN_SECS,
+        lazy_connect: bool = False,
+        connect_retry_interval_s: float = DEFAULT_CONNECT_RETRY_INTERVAL_SECS,
     ) -> None:
         """Initialize a ValkeyL2AdapterConfig with validated fields.
 
@@ -248,12 +282,21 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             rdma_provider: ``"efa-direct"`` or ``"tcp"``; RDMA only.
             rdma_interface: Optional fabric domain or domains; each must be
                 a non-empty string. RDMA only.
+            batch_timeout: Per-batch deadline in seconds; ``0`` disables.
+            breaker_failure_threshold: Failures within
+                ``breaker_window_s`` that open the breaker; ``0`` disables.
+            breaker_window_s: Failure-counting window in seconds.
+            breaker_cooldown_s: First cool-down in seconds.
+            breaker_max_cooldown_s: Cap on the doubling cool-down.
+            lazy_connect: Tolerate an unreachable Valkey at startup.
+            connect_retry_interval_s: Background reconnect interval.
 
         Raises:
             ValueError: If any validation fails (empty
                 ``startup_nodes``, non-positive ``num_workers``,
                 negative capacity, non-positive ``ttl_seconds``, ``@`` in
-                ``key_prefix``, an unknown transport or provider, etc.).
+                ``key_prefix``, an unknown transport or provider, a
+                fail-open field with ``transport="rdma"``, etc.).
         """
         super().__init__()
         if not startup_nodes:
@@ -297,6 +340,22 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             raise ValueError("request_timeout must be > 0")
         if connection_timeout <= 0:
             raise ValueError("connection_timeout must be > 0")
+        if batch_timeout < 0:
+            raise ValueError("batch_timeout must be >= 0")
+        if isinstance(breaker_failure_threshold, bool) or not isinstance(
+            breaker_failure_threshold, int
+        ):
+            raise ValueError("breaker_failure_threshold must be an integer")
+        if breaker_failure_threshold < 0:
+            raise ValueError("breaker_failure_threshold must be >= 0")
+        if breaker_window_s <= 0:
+            raise ValueError("breaker_window_s must be > 0")
+        if breaker_cooldown_s <= 0:
+            raise ValueError("breaker_cooldown_s must be > 0")
+        if breaker_max_cooldown_s < breaker_cooldown_s:
+            raise ValueError("breaker_max_cooldown_s must be >= breaker_cooldown_s")
+        if connect_retry_interval_s <= 0:
+            raise ValueError("connect_retry_interval_s must be > 0")
         if ttl_seconds is not None:
             # bool is an int subclass, so reject it (True would be 1 second).
             if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
@@ -320,6 +379,15 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
                 f"rdma_provider must be one of {RDMA_PROVIDERS}, got {rdma_provider!r}"
             )
         rdma_interfaces = normalize_rdma_interfaces(rdma_interface)
+        if transport == "rdma" and (
+            batch_timeout > 0 or breaker_failure_threshold > 0 or lazy_connect
+        ):
+            # Not validated with RDMA: a skipped or dropped request there
+            # interacts with the per-thread arena registration.
+            raise ValueError(
+                "batch_timeout, breaker_failure_threshold and lazy_connect "
+                "are not supported with transport='rdma'"
+            )
 
         self.startup_nodes: list[tuple[str, int]] = startup_nodes
         self.cluster_mode: bool = cluster_mode
@@ -336,6 +404,13 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         self.transport: str = transport
         self.rdma_provider: str = rdma_provider
         self.rdma_interfaces: tuple[str, ...] = rdma_interfaces
+        self.batch_timeout: float = batch_timeout
+        self.breaker_failure_threshold: int = breaker_failure_threshold
+        self.breaker_window_s: float = breaker_window_s
+        self.breaker_cooldown_s: float = breaker_cooldown_s
+        self.breaker_max_cooldown_s: float = breaker_max_cooldown_s
+        self.lazy_connect: bool = lazy_connect
+        self.connect_retry_interval_s: float = connect_retry_interval_s
 
     @property
     def uses_rdma(self) -> bool:
@@ -411,6 +486,10 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         if interface_raw is not None and not isinstance(interface_raw, (str, list)):
             raise ValueError("rdma_interface must be a string, a list, or omitted")
 
+        threshold_raw = d.get("breaker_failure_threshold", 0)
+        if isinstance(threshold_raw, bool) or not isinstance(threshold_raw, int):
+            raise ValueError("breaker_failure_threshold must be an integer")
+
         return {
             "startup_nodes": startup_nodes,
             "cluster_mode": cluster_mode,
@@ -427,6 +506,21 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             "transport": transport_raw,
             "rdma_provider": provider_raw,
             "rdma_interface": interface_raw,
+            "batch_timeout": float(d.get("batch_timeout", 0.0)),
+            "breaker_failure_threshold": threshold_raw,
+            "breaker_window_s": float(
+                d.get("breaker_window_s", DEFAULT_BREAKER_WINDOW_SECS)
+            ),
+            "breaker_cooldown_s": float(
+                d.get("breaker_cooldown_s", DEFAULT_BREAKER_COOLDOWN_SECS)
+            ),
+            "breaker_max_cooldown_s": float(
+                d.get("breaker_max_cooldown_s", DEFAULT_BREAKER_MAX_COOLDOWN_SECS)
+            ),
+            "lazy_connect": bool(d.get("lazy_connect", False)),
+            "connect_retry_interval_s": float(
+                d.get("connect_retry_interval_s", DEFAULT_CONNECT_RETRY_INTERVAL_SECS)
+            ),
         }
 
     @classmethod
@@ -478,8 +572,149 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             "- rdma_interface (str or list of str, optional): fabric domain or "
             "domains to open on a host with more than one card; workers are "
             "spread across a list round-robin. Omit to let the provider "
-            "choose. RDMA only."
+            "choose. RDMA only.\n"
+            "- batch_timeout (float, default 0 = off): deadline (seconds) "
+            "for a whole lookup/load/store batch; keys not started by then "
+            "count as misses. Not with transport='rdma'.\n"
+            "- breaker_failure_threshold (int, default 0 = off): open the "
+            "circuit breaker after this many failed requests within "
+            "breaker_window_s; while open, lookups/loads miss and stores "
+            "are dropped without contacting Valkey. Not with "
+            "transport='rdma'.\n"
+            "- breaker_window_s (float, default 10): failure window.\n"
+            "- breaker_cooldown_s (float, default 5): first cool-down; "
+            "doubles on each re-trip.\n"
+            "- breaker_max_cooldown_s (float, default 60): cool-down cap.\n"
+            "- lazy_connect (bool, default false): do not fail startup when "
+            "Valkey is unreachable; serve misses and reconnect in the "
+            "background. Not with transport='rdma'.\n"
+            "- connect_retry_interval_s (float, default 10): background "
+            "reconnect interval."
         )
+
+
+# ---------------------------------------------------------------------------
+# Fail-open helpers
+# ---------------------------------------------------------------------------
+
+
+class _L2Skipped(Exception):
+    """Raised on a worker thread instead of issuing a Valkey request.
+
+    The request was skipped on purpose (breaker open, batch deadline
+    passed, or no connection yet); it is a miss, not a backend failure,
+    so it is neither logged as a warning nor counted by the breaker.
+    """
+
+
+class _CircuitBreaker:
+    """Time-windowed failure counter with a doubling cool-down.
+
+    Trips after ``threshold`` failures within ``window_s``. While open,
+    :meth:`allow` is ``False`` until the cool-down passes; then traffic is
+    let through again. Outcomes reported while open are ignored, since
+    they belong to requests issued before the trip. A re-trip within
+    ``max_cooldown_s`` of the previous re-open doubles the cool-down
+    (capped at ``max_cooldown_s``); otherwise it starts from
+    ``cooldown_s``. Successes never close an open breaker early: during a
+    partial outage the healthy shards keep answering while every batch
+    still waits on the broken one.
+
+    ``threshold == 0`` disables the breaker (:meth:`allow` is always
+    ``True``).
+    """
+
+    def __init__(
+        self,
+        threshold: int,
+        window_s: float,
+        cooldown_s: float,
+        max_cooldown_s: float,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._threshold = threshold
+        self._window_s = window_s
+        self._base_cooldown_s = cooldown_s
+        self._max_cooldown_s = max_cooldown_s
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._failures: deque[float] = deque()
+        self._open_until: Optional[float] = None
+        self._reopened_at: Optional[float] = None
+        self._cooldown_s = cooldown_s
+        self.trips: int = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self._threshold > 0
+
+    def allow(self) -> bool:
+        """Whether a request may be sent to Valkey now."""
+        if self._threshold <= 0:
+            return True
+        with self._lock:
+            if self._open_until is None:
+                return True
+            now = self._clock()
+            if now < self._open_until:
+                return False
+            # Cool-down over: re-open the gate and count afresh.
+            self._open_until = None
+            self._reopened_at = now
+            self._failures.clear()
+            logger.info("Valkey L2 circuit breaker closed; resuming L2 traffic")
+            return True
+
+    def is_open(self) -> bool:
+        """Whether the breaker currently blocks traffic."""
+        return not self.allow()
+
+    def record_failure(self) -> None:
+        """Count one failed request; trip when the window is full."""
+        if self._threshold <= 0:
+            return
+        with self._lock:
+            if self._open_until is not None:
+                return
+            now = self._clock()
+            self._failures.append(now)
+            while self._failures and now - self._failures[0] > self._window_s:
+                self._failures.popleft()
+            if len(self._failures) < self._threshold:
+                return
+            if (
+                self._reopened_at is not None
+                and now - self._reopened_at <= self._max_cooldown_s
+            ):
+                self._cooldown_s = min(self._cooldown_s * 2, self._max_cooldown_s)
+            else:
+                self._cooldown_s = self._base_cooldown_s
+            self._open_until = now + self._cooldown_s
+            self._failures.clear()
+            self.trips += 1
+            cooldown = self._cooldown_s
+        logger.warning(
+            "Valkey L2 circuit breaker OPEN after %d failures in %.1fs; "
+            "treating L2 as a miss and skipping stores for %.1fs",
+            self._threshold,
+            self._window_s,
+            cooldown,
+        )
+
+    def status(self) -> dict[str, Any]:
+        """Snapshot for ``report_status``."""
+        with self._lock:
+            now = self._clock()
+            remaining = (
+                max(0.0, self._open_until - now) if self._open_until is not None else 0
+            )
+            return {
+                "enabled": self._threshold > 0,
+                "open": self._open_until is not None and remaining > 0,
+                "open_remaining_s": remaining,
+                "cooldown_s": self._cooldown_s,
+                "trips": self.trips,
+            }
 
 
 # ---------------------------------------------------------------------------
@@ -600,14 +835,53 @@ class ValkeyL2Adapter(L2AdapterInterface):
         self._next_task_id: L2TaskId = 0
         self._lock: threading.Lock = threading.Lock()
 
-        # Shared glide client pool — owns clients, thread pool, copy-reduced
-        # primitives, capability probing, and reliable shutdown.
-        self._pool: ValkeyWorkerPool = self._create_pool(config)
-
         self._closed: bool = False
+
+        # Fail-open machinery (inert unless configured).
+        self._breaker = _CircuitBreaker(
+            threshold=config.breaker_failure_threshold,
+            window_s=config.breaker_window_s,
+            cooldown_s=config.breaker_cooldown_s,
+            max_cooldown_s=config.breaker_max_cooldown_s,
+        )
+        self._use_gate: bool = (
+            self._breaker.enabled or config.batch_timeout > 0 or config.lazy_connect
+        )
+        self._stop_event = threading.Event()
+        self._connect_thread: Optional[threading.Thread] = None
+
+        # Shared glide client pool — owns clients, thread pool, copy-reduced
+        # primitives, capability probing, and reliable shutdown. ``None``
+        # only while a ``lazy_connect`` adapter is still connecting.
+        self._pool: Optional[ValkeyWorkerPool] = None
+        try:
+            self._pool = self._create_pool(config)
+        except Exception as e:
+            if not config.lazy_connect:
+                raise
+            logger.warning(
+                "%s: cannot connect to %s (%s: %s); L2 disabled (all misses) "
+                "and retrying every %.1fs in the background",
+                type(self).__name__,
+                list(config.startup_nodes),
+                type(e).__name__,
+                e,
+                config.connect_retry_interval_s,
+            )
+            self._connect_thread = threading.Thread(
+                target=self._connect_loop, name="valkey-l2-connect", daemon=True
+            )
+            self._connect_thread.start()
+            return
+        self._log_ready()
+
+    def _log_ready(self) -> None:
+        config = self._config
+        assert self._pool is not None
         logger.info(
             "%s ready: transport=%s workers=%d cluster_mode=%s nodes=%s "
-            "tls=%s buffer_get=%s key_prefix=%r",
+            "tls=%s buffer_get=%s key_prefix=%r batch_timeout=%s "
+            "breaker_failure_threshold=%d",
             type(self).__name__,
             config.transport,
             config.num_workers,
@@ -616,7 +890,32 @@ class ValkeyL2Adapter(L2AdapterInterface):
             config.tls_enable,
             self._pool.has_buffer_get,
             config.key_prefix,
+            config.batch_timeout,
+            config.breaker_failure_threshold,
         )
+
+    def _connect_loop(self) -> None:
+        """Background reconnect for ``lazy_connect`` (runs until success)."""
+        while not self._stop_event.wait(self._config.connect_retry_interval_s):
+            try:
+                pool = self._create_pool(self._config)
+            except Exception as e:
+                logger.warning(
+                    "%s: still cannot connect (%s: %s); retrying",
+                    type(self).__name__,
+                    type(e).__name__,
+                    e,
+                )
+                continue
+            with self._lock:
+                closed = self._closed
+                if not closed:
+                    self._pool = pool
+            if closed:  # closed while connecting
+                pool.close()
+                return
+            self._log_ready()
+            return
 
     def _create_pool(self, config: ValkeyL2AdapterConfig) -> ValkeyWorkerPool:
         """Build the worker pool for the configured transport."""
@@ -648,6 +947,48 @@ class ValkeyL2Adapter(L2AdapterInterface):
             "database_id": config.database_id,
             "ttl_seconds": config.ttl_seconds,
         }
+
+    # ---------------------------------------------------------------
+    # Fail-open helpers
+    # ---------------------------------------------------------------
+
+    def _available(self) -> bool:
+        """Whether new work may be sent to Valkey (connected, breaker
+        closed). Callers complete the task as a miss/failure otherwise."""
+        return self._pool is not None and self._breaker.allow()
+
+    def _make_gate(self) -> Optional[Callable[[], None]]:
+        """Build the per-batch worker-side gate (``None`` when the
+        fail-open features are all off, keeping the legacy path)."""
+        if not self._use_gate:
+            return None
+        timeout = self._config.batch_timeout
+        deadline = time.monotonic() + timeout if timeout > 0 else None
+        breaker = self._breaker
+
+        def gate() -> None:
+            if self._closed:
+                raise _L2Skipped("adapter closed")
+            if deadline is not None and time.monotonic() > deadline:
+                raise _L2Skipped("batch deadline passed")
+            if not breaker.allow():
+                raise _L2Skipped("circuit breaker open")
+
+        return gate
+
+    def _record_exception(
+        self, op: str, batch_id: int, idx: int, exc: BaseException
+    ) -> None:
+        """Log a per-key failure and feed the breaker; skips are quiet."""
+        if isinstance(exc, _L2Skipped):
+            logger.debug(
+                "Valkey %s skipped (batch=%d, idx=%d): %s", op, batch_id, idx, exc
+            )
+            return
+        logger.warning(
+            "Valkey %s failed (batch=%d, idx=%d): %s", op, batch_id, idx, exc
+        )
+        self._breaker.record_failure()
 
     # ---------------------------------------------------------------
     # Event Fd Interface
@@ -709,6 +1050,15 @@ class ValkeyL2Adapter(L2AdapterInterface):
             self._store_efd.notify()
             return task_id
 
+        pool = self._pool
+        if pool is None or not self._breaker.allow():
+            # Fail open: drop the store rather than queue it on a dead L2.
+            with self._lock:
+                self._completed_stores[task_id] = L2StoreResult(False, 0)
+            self._store_efd.notify()
+            return task_id
+        gate = self._make_gate()
+
         wire_keys = [self._wire_key(k) for k in keys]
         sizes = [obj.get_size() for obj in objects]
 
@@ -723,7 +1073,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
         launched = 0
         try:
             for i in range(len(keys)):
-                fut = self._pool.submit_set(wire_keys[i], objects[i].byte_array)
+                fut = pool.submit_set(wire_keys[i], objects[i].byte_array, gate)
                 # partial binds this key's batch+index; the future is passed
                 # last by add_done_callback.
                 fut.add_done_callback(functools.partial(self._on_store_done, batch, i))
@@ -761,13 +1111,8 @@ class ValkeyL2Adapter(L2AdapterInterface):
         else:
             exc = fut.exception()
             ok = exc is None
-            if not ok:
-                logger.warning(
-                    "Valkey SET failed (batch task_id=%d, key idx=%d): %s",
-                    batch.task_id,
-                    idx,
-                    exc,
-                )
+            if exc is not None:
+                self._record_exception("SET", batch.task_id, idx, exc)
         with batch.lock:
             batch.per_key_ok[idx] = ok
             batch.remaining -= 1
@@ -864,6 +1209,15 @@ class ValkeyL2Adapter(L2AdapterInterface):
             self._lookup_efd.notify()
             return task_id
 
+        pool = self._pool
+        if pool is None or not self._breaker.allow():
+            # Fail open: L2 unavailable is an all-miss, answered right away.
+            with self._lock:
+                self._completed_lookups[task_id] = Bitmap(len(keys))
+            self._lookup_efd.notify()
+            return task_id
+        gate = self._make_gate()
+
         wire_keys = [self._wire_key(k) for k in keys]
         batch = _SubmitTaskBatchState(
             task_id=task_id,
@@ -874,7 +1228,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
         launched = 0
         try:
             for i in range(len(keys)):
-                fut = self._pool.submit_exists(wire_keys[i])
+                fut = pool.submit_exists(wire_keys[i], gate)
                 fut.add_done_callback(functools.partial(self._on_lookup_done, batch, i))
                 launched = i + 1
         except Exception as e:
@@ -913,12 +1267,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
                         e,
                     )
             else:
-                logger.warning(
-                    "Valkey EXISTS failed (batch=%d, idx=%d): %s",
-                    batch.task_id,
-                    idx,
-                    exc,
-                )
+                self._record_exception("EXISTS", batch.task_id, idx, exc)
         with batch.lock:
             batch.per_key_ok[idx] = exists
             batch.remaining -= 1
@@ -1012,6 +1361,14 @@ class ValkeyL2Adapter(L2AdapterInterface):
             self._load_efd.notify()
             return task_id
 
+        pool = self._pool
+        if pool is None or not self._breaker.allow():
+            with self._lock:
+                self._completed_loads[task_id] = Bitmap(len(keys))
+            self._load_efd.notify()
+            return task_id
+        gate = self._make_gate()
+
         wire_keys = [self._wire_key(k) for k in keys]
         # ``sizes[i]`` is the expected chunk length; the load callback
         # treats any GET whose byte count differs as a cache miss (stale
@@ -1027,7 +1384,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
         launched = 0
         try:
             for i in range(len(keys)):
-                fut = self._pool.submit_get_into(wire_keys[i], objects[i].byte_array)
+                fut = pool.submit_get_into(wire_keys[i], objects[i].byte_array, gate)
                 fut.add_done_callback(functools.partial(self._on_load_done, batch, i))
                 launched = i + 1
         except Exception as e:
@@ -1082,12 +1439,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
                         e,
                     )
             else:
-                logger.warning(
-                    "Valkey GET failed (batch=%d, idx=%d): %s",
-                    batch.task_id,
-                    idx,
-                    exc,
-                )
+                self._record_exception("GET", batch.task_id, idx, exc)
         with batch.lock:
             batch.per_key_ok[idx] = loaded
             batch.remaining -= 1
@@ -1145,6 +1497,10 @@ class ValkeyL2Adapter(L2AdapterInterface):
             logger.warning("delete on a closed ValkeyL2Adapter; ignoring")
             return
 
+        pool = self._pool
+        if pool is None or not self._breaker.allow():
+            return
+
         # Skip keys currently pinned by a read; same convention as the
         # other L2 adapters (e.g. S3).
         with self._lock:
@@ -1153,7 +1509,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
             return
 
         wire_keys = [self._wire_key(k) for k in deletable]
-        futures = [self._pool.submit_delete(wk) for wk in wire_keys]
+        futures = [pool.submit_delete(wk) for wk in wire_keys]
 
         deleted_keys: list[ObjectKey] = []
         deleted_sizes: list[int] = []
@@ -1180,8 +1536,11 @@ class ValkeyL2Adapter(L2AdapterInterface):
     def report_status(self) -> dict[str, Any]:
         """Return a JSON-serializable health/status snapshot."""
         usage = self.get_usage()
+        pool = self._pool
         status: dict[str, Any] = {
-            "is_healthy": not self._closed,
+            "is_healthy": not self._closed and self._available(),
+            "connected": pool is not None,
+            "circuit_breaker": self._breaker.status(),
             "type": "valkey",
             "cluster_mode": self._config.cluster_mode,
             "num_workers": self._config.num_workers,
@@ -1190,7 +1549,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
             ],
             "key_prefix": self._config.key_prefix,
             "tls_enable": self._config.tls_enable,
-            "has_buffer_get": self._pool.has_buffer_get,
+            "has_buffer_get": pool.has_buffer_get if pool is not None else None,
             "current_size_bytes": usage.total_bytes_used,
             "max_capacity_bytes": usage.total_capacity_bytes,
             "usage_fraction": usage.usage_fraction,
@@ -1204,8 +1563,8 @@ class ValkeyL2Adapter(L2AdapterInterface):
         # (``current_size_bytes`` above is LMCache's aggregate logical
         # count and cannot reveal a hot shard). Best-effort: an empty
         # dict means the INFO query failed or returned nothing.
-        if self._config.cluster_mode:
-            status["node_memory"] = self._pool.node_memory_usage()
+        if self._config.cluster_mode and pool is not None:
+            status["node_memory"] = pool.node_memory_usage()
         return status
 
     def get_memory_tags(self) -> MemoryTags:
@@ -1221,8 +1580,14 @@ class ValkeyL2Adapter(L2AdapterInterface):
         """
         if self._closed:
             return
-        self._closed = True
-        self._pool.close()
+        with self._lock:
+            self._closed = True
+            pool = self._pool
+        self._stop_event.set()
+        if self._connect_thread is not None:
+            self._connect_thread.join(timeout=self._config.connection_timeout + 1.0)
+        if pool is not None:
+            pool.close()
         self._store_efd.close()
         self._lookup_efd.close()
         self._load_efd.close()

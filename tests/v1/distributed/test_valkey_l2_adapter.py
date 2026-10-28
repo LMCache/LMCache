@@ -197,6 +197,7 @@ from lmcache.v1.distributed.internal_api import L2AdapterListener  # noqa: E402
 from lmcache.v1.distributed.l2_adapters.valkey_l2_adapter import (  # noqa: E402
     ValkeyL2Adapter,
     ValkeyL2AdapterConfig,
+    _CircuitBreaker,
     _parse_startup_nodes,
 )
 from lmcache.v1.memory_management import (  # noqa: E402
@@ -712,3 +713,322 @@ class TestKeyNamespacing:
             adapter, adapter.submit_lookup_and_lock_task([k_b], {0: _EMPTY_LAYOUT})
         )
         assert not bm.test(0)
+
+
+# ===========================================================================
+# Fail-open: circuit breaker, batch deadline, lazy connect
+# ===========================================================================
+
+
+class ClosingError(Exception):
+    """Stand-in for ``glide_sync.ClosingError`` (matched by class name)."""
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestFailOpenConfig:
+    def test_defaults_are_off(self):
+        cfg = ValkeyL2AdapterConfig.from_dict(
+            {"type": "valkey", "startup_nodes": "h:1"}
+        )
+        assert cfg.batch_timeout == 0
+        assert cfg.breaker_failure_threshold == 0
+        assert cfg.lazy_connect is False
+
+    def test_from_dict(self):
+        cfg = ValkeyL2AdapterConfig.from_dict(
+            {
+                "type": "valkey",
+                "startup_nodes": "h:1",
+                "batch_timeout": 2,
+                "breaker_failure_threshold": 16,
+                "breaker_window_s": 5,
+                "breaker_cooldown_s": 3,
+                "breaker_max_cooldown_s": 30,
+                "lazy_connect": True,
+                "connect_retry_interval_s": 1.5,
+            }
+        )
+        assert cfg.batch_timeout == 2.0
+        assert cfg.breaker_failure_threshold == 16
+        assert cfg.breaker_window_s == 5.0
+        assert cfg.breaker_cooldown_s == 3.0
+        assert cfg.breaker_max_cooldown_s == 30.0
+        assert cfg.lazy_connect is True
+        assert cfg.connect_retry_interval_s == 1.5
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("batch_timeout", -1.0),
+            ("breaker_failure_threshold", -1),
+            ("breaker_window_s", 0.0),
+            ("breaker_cooldown_s", 0.0),
+            ("breaker_max_cooldown_s", 0.1),
+            ("connect_retry_interval_s", 0.0),
+        ],
+    )
+    def test_invalid_rejected(self, field, value):
+        with pytest.raises(ValueError, match=field):
+            ValkeyL2AdapterConfig(startup_nodes=[("h", 1)], **{field: value})
+
+
+class TestCircuitBreaker:
+    def _breaker(self, clock, threshold=3):
+        return _CircuitBreaker(
+            threshold=threshold,
+            window_s=10.0,
+            cooldown_s=5.0,
+            max_cooldown_s=20.0,
+            clock=clock,
+        )
+
+    def test_disabled_never_blocks(self):
+        b = _CircuitBreaker(0, 10.0, 5.0, 20.0)
+        for _ in range(100):
+            b.record_failure()
+        assert b.allow()
+
+    def test_trips_at_threshold_within_window(self):
+        clock = _FakeClock()
+        b = self._breaker(clock)
+        b.record_failure()
+        b.record_failure()
+        assert b.allow()
+        b.record_failure()
+        assert not b.allow()
+        assert b.trips == 1
+
+    def test_spread_out_failures_do_not_trip(self):
+        clock = _FakeClock()
+        b = self._breaker(clock)
+        for _ in range(10):
+            b.record_failure()
+            clock.now += 6.0  # only ~2 failures ever share a 10 s window
+        assert b.allow()
+
+    def test_reopens_after_cooldown_and_doubles_on_quick_retrip(self):
+        clock = _FakeClock()
+        b = self._breaker(clock)
+        for _ in range(3):
+            b.record_failure()
+        clock.now += 4.9
+        assert not b.allow()
+        # Failures reported while open (stale, in-flight) are ignored.
+        for _ in range(10):
+            b.record_failure()
+        clock.now += 0.2
+        assert b.allow()
+        for _ in range(3):
+            b.record_failure()
+        assert b.status()["cooldown_s"] == 10.0
+        clock.now += 9.9
+        assert not b.allow()
+        clock.now += 0.2
+        assert b.allow()
+        # A trip long after the last re-open starts from the base again.
+        clock.now += 100.0
+        for _ in range(3):
+            b.record_failure()
+        assert b.status()["cooldown_s"] == 5.0
+        assert b.trips == 3
+
+
+def _count_exists_calls(monkeypatch) -> list[int]:
+    calls = [0]
+    orig = _FakeGlideClient.exists
+
+    def exists(self, keys):
+        calls[0] += 1
+        return orig(self, keys)
+
+    monkeypatch.setattr(_FakeGlideClient, "exists", exists)
+    return calls
+
+
+class TestBreakerAdapter:
+    def test_failing_l2_fails_open_fast(self, monkeypatch):
+        """A timing-out Valkey costs a few request timeouts, not one per key."""
+        calls = _count_exists_calls(monkeypatch)
+
+        def slow_timeout(_k: bytes):
+            time.sleep(0.2)
+            return TimeoutError("timed out")
+
+        _SERVER.faults["exists"] = slow_timeout
+        a = ValkeyL2Adapter(
+            _make_config(breaker_failure_threshold=4, breaker_cooldown_s=30.0)
+        )
+        try:
+            keys = [create_object_key(i) for i in range(60)]
+            t0 = time.monotonic()
+            bm = _wait_for_lookup(
+                a, a.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+            )
+            elapsed = time.monotonic() - t0
+            # Legacy behaviour: 60 keys / 2 workers * 0.2 s = 6 s.
+            assert elapsed < 2.0
+            assert not any(bm.test(i) for i in range(60))
+            assert calls[0] < 10
+            assert a.report_status()["circuit_breaker"]["open"]
+            assert not a.report_status()["is_healthy"]
+
+            # While open: lookups miss and stores fail without any request.
+            before = calls[0]
+            bm = _wait_for_lookup(
+                a, a.submit_lookup_and_lock_task(keys[:3], {0: _EMPTY_LAYOUT})
+            )
+            assert not any(bm.test(i) for i in range(3))
+            res = _wait_for_store(
+                a, a.submit_store_task([keys[0]], [create_memory_obj(size=8)])
+            )
+            assert not res.is_successful()
+            dst = create_memory_obj(size=8)
+            assert not _wait_for_load(a, a.submit_load_task([keys[0]], [dst])).test(0)
+            assert calls[0] == before
+        finally:
+            a.close()
+
+    def test_recovers_after_cooldown(self):
+        _SERVER.faults["exists"] = RuntimeError("CLUSTERDOWN")
+        a = ValkeyL2Adapter(
+            _make_config(breaker_failure_threshold=2, breaker_cooldown_s=0.3)
+        )
+        try:
+            k = create_object_key(1)
+            _wait_for_lookup(a, a.submit_lookup_and_lock_task([k], {0: _EMPTY_LAYOUT}))
+            _wait_for_lookup(a, a.submit_lookup_and_lock_task([k], {0: _EMPTY_LAYOUT}))
+            assert a.report_status()["circuit_breaker"]["open"]
+            _SERVER.faults.clear()
+            time.sleep(0.4)
+            _wait_for_store(a, a.submit_store_task([k], [create_memory_obj(size=8)]))
+            bm = _wait_for_lookup(
+                a, a.submit_lookup_and_lock_task([k], {0: _EMPTY_LAYOUT})
+            )
+            assert bm.test(0)
+            assert a.report_status()["is_healthy"]
+        finally:
+            a.close()
+
+
+class TestBatchTimeout:
+    def test_slow_l2_is_bounded_and_not_a_failure(self):
+        keys = [create_object_key(i) for i in range(40)]
+
+        def slow(_k: bytes):
+            time.sleep(0.1)
+            return None
+
+        a = ValkeyL2Adapter(
+            _make_config(batch_timeout=0.3, breaker_failure_threshold=2)
+        )
+        try:
+            _wait_for_store(
+                a,
+                a.submit_store_task(keys[:2], [create_memory_obj(size=8)] * 2),
+            )
+            _SERVER.faults["exists"] = slow
+            t0 = time.monotonic()
+            bm = _wait_for_lookup(
+                a, a.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+            )
+            # Legacy: 40 keys / 2 workers * 0.1 s = 2 s.
+            assert time.monotonic() - t0 < 1.0
+            # The first keys were looked up before the deadline.
+            assert bm.test(0) and bm.test(1)
+            assert not any(bm.test(i) for i in range(20, 40))
+            # Deadline skips are misses, not backend failures.
+            assert a.report_status()["circuit_breaker"]["trips"] == 0
+        finally:
+            a.close()
+
+
+class TestLazyConnect:
+    def _unreachable(self, monkeypatch, state):
+        orig = _FakeGlideClient.create.__func__
+
+        def create(cls, config):
+            if state["down"]:
+                raise ClosingError("No topology views found")
+            return orig(cls, config)
+
+        monkeypatch.setattr(_FakeGlideClient, "create", classmethod(create))
+
+    def test_eager_connect_still_fails_fast(self, monkeypatch):
+        self._unreachable(monkeypatch, {"down": True})
+        with pytest.raises(ClosingError):
+            ValkeyL2Adapter(_make_config())
+
+    def test_lazy_connect_serves_misses_then_connects(self, monkeypatch):
+        state = {"down": True}
+        self._unreachable(monkeypatch, state)
+        a = ValkeyL2Adapter(
+            _make_config(lazy_connect=True, connect_retry_interval_s=0.1)
+        )
+        try:
+            k = create_object_key(1)
+            assert not a.report_status()["connected"]
+            bm = _wait_for_lookup(
+                a, a.submit_lookup_and_lock_task([k], {0: _EMPTY_LAYOUT})
+            )
+            assert not bm.test(0)
+            res = _wait_for_store(a, a.submit_store_task([k], [create_memory_obj(8)]))
+            assert not res.is_successful()
+            a.delete([k])  # no-op, must not raise
+
+            state["down"] = False
+            deadline = time.monotonic() + 5.0
+            while not a.report_status()["connected"]:
+                assert time.monotonic() < deadline, "never reconnected"
+                time.sleep(0.05)
+            res = _wait_for_store(a, a.submit_store_task([k], [create_memory_obj(8)]))
+            assert res.is_successful()
+            bm = _wait_for_lookup(
+                a, a.submit_lookup_and_lock_task([k], {0: _EMPTY_LAYOUT})
+            )
+            assert bm.test(0)
+        finally:
+            a.close()
+
+    def test_close_while_connecting(self, monkeypatch):
+        self._unreachable(monkeypatch, {"down": True})
+        a = ValkeyL2Adapter(
+            _make_config(lazy_connect=True, connect_retry_interval_s=0.05)
+        )
+        time.sleep(0.15)
+        a.close()
+        assert a._connect_thread is not None  # noqa: SLF001
+        assert not a._connect_thread.is_alive()  # noqa: SLF001
+
+
+class TestClosingErrorReconnect:
+    def test_closed_client_is_rebuilt(self, monkeypatch):
+        creates = [0]
+        orig = _FakeGlideClient.create.__func__
+
+        def create(cls, config):
+            creates[0] += 1
+            return orig(cls, config)
+
+        monkeypatch.setattr(_FakeGlideClient, "create", classmethod(create))
+        a = ValkeyL2Adapter(_make_config(num_workers=1))
+        try:
+            assert creates[0] == 1
+            k = create_object_key(1)
+            _SERVER.faults["exists"] = ClosingError("client closed")
+            _wait_for_lookup(a, a.submit_lookup_and_lock_task([k], {0: _EMPTY_LAYOUT}))
+            _SERVER.faults.clear()
+            _wait_for_store(a, a.submit_store_task([k], [create_memory_obj(8)]))
+            assert creates[0] == 2
+            bm = _wait_for_lookup(
+                a, a.submit_lookup_and_lock_task([k], {0: _EMPTY_LAYOUT})
+            )
+            assert bm.test(0)
+        finally:
+            a.close()

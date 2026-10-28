@@ -235,6 +235,16 @@ class ValkeyRdmaWorkerPool(ValkeyWorkerPool):
         super()._close_local_client(barrier)
         self._drop_region()
 
+    def _drop_local_client(self) -> None:
+        """Forget a dead client and the region registered on it.
+
+        The next call on this thread builds a new client, which must
+        register the arena again rather than reuse the closed client's
+        region.
+        """
+        super()._drop_local_client()
+        self._drop_region()
+
     # ------------------------------------------------------------------
     # Worker-side primitives (run on a worker thread)
     # ------------------------------------------------------------------

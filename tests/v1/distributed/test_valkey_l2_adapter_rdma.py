@@ -490,6 +490,18 @@ def adapter(arena: _Arena):
 
 
 class TestConfig:
+    @pytest.mark.parametrize(
+        "field",
+        [
+            {"batch_timeout": 1.0},
+            {"breaker_failure_threshold": 4},
+            {"lazy_connect": True},
+        ],
+    )
+    def test_fail_open_fields_are_refused_with_rdma(self, field: dict):
+        with pytest.raises(ValueError, match="not supported with transport='rdma'"):
+            _make_config(**field)
+
     def test_defaults_to_tcp_transport(self):
         cfg = ValkeyL2AdapterConfig(startup_nodes=[("h", 1)])
         assert cfg.transport == "tcp"
@@ -931,6 +943,26 @@ class TestRevokedRegion:
         finally:
             adapter.close()
 
+    def test_a_closed_client_is_replaced_together_with_its_region(self, arena: _Arena):
+        class ClosingError(Exception):
+            pass
+
+        adapter = ValkeyL2Adapter(_make_config(num_workers=1), arena.desc)
+        try:
+            _SERVER.faults["set"] = ClosingError("client is closed")
+            assert not _store(adapter, [_key(1)], [arena.alloc()]).is_successful()
+            _SERVER.faults.clear()
+
+            assert _store(adapter, [_key(2)], [arena.alloc()]).is_successful()
+
+            # The dead client's region was deregistered with it, and the new
+            # client registered the arena again instead of reusing it.
+            assert len(_SERVER.registrations) == 2
+            assert _SERVER.registrations[0].closed
+            assert not _SERVER.registrations[1].closed
+        finally:
+            adapter.close()
+
     def test_a_server_reply_does_not_cost_a_registration(self, arena: _Arena):
         adapter = ValkeyL2Adapter(_make_config(num_workers=1), arena.desc)
         try:
@@ -986,6 +1018,7 @@ class TestWindowDerivation:
         view = memoryview(raw).cast("B")
         view[:] = bytes(range(64))
         pool = adapter._pool  # noqa: SLF001
+        assert pool is not None
         pool.submit_set("direct", view).result(timeout=5)
         assert _transfers("set")[-1] == (b"direct", 4096, 64)
         assert _SERVER.store[b"direct"] == bytes(range(64))
