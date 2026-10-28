@@ -26,6 +26,7 @@ from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
+from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 
@@ -69,6 +70,8 @@ def test_prefetch_unknown_instance_returns_404():
     with _client() as client:
         resp = client.post("/cache/prefetches", json=_prefetch_body("does-not-exist"))
         assert resp.status_code == 404
+        prefetch = client.app.state.ctx.controllers.get(PrefetchManager)
+        assert prefetch.stats().requests_submitted["unknown_server"] == 1
 
 
 def test_prefetch_submit_then_status_proxy():
@@ -464,6 +467,38 @@ def test_delete_force_removes_and_drops_l2_pin():
         assert resp.json()["skipped"] == 0
         # ...and the coordinator dropped the L2 pin.
         assert eviction.filter_unpinned([keys[0]]) == [keys[0]]
+
+
+def test_delete_force_keeps_the_pin_when_its_removal_cannot_be_saved(tmp_path):
+    """The server's delete cannot be undone, so a forced delete whose pin
+    removal fails to save keeps the pin, and says both things in its 503."""
+    deletes: list = []
+    (tmp_path / "blocker").write_text("")  # metadata cannot be written under it
+    config = MPCoordinatorConfig(
+        health_check_interval=0.0,
+        eviction_check_interval=0.0,
+        chunk_size=4,
+        metadata_path=str(tmp_path / "blocker" / "metadata.json"),
+    )
+    with TestClient(create_app(config)) as client:
+        client.post(
+            "/instances",
+            json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
+        )
+        ctx = client.app.state.ctx
+        eviction = ctx.controllers.get(FleetEvictionController)
+        client.app.state.outbound_client = _mock_delete_server(deletes)
+        keys = _resolve_delete(ctx)
+        eviction.pin([keys[0]])
+
+        resp = client.post("/cache/delete", json=_delete_body("mp-1", force=True))
+
+        assert resp.status_code == 503
+        assert "deleted on 'mp-1'" in resp.json()["detail"]
+        # The delete itself went out...
+        assert len(deletes) == 1
+        # ...but the pin stays, matching the document on disk.
+        assert eviction.filter_unpinned([keys[0]]) == []
 
 
 def test_delete_l1_tier_ignores_l2_pins():

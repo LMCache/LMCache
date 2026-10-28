@@ -100,6 +100,19 @@ PY
         VLLM_BATCH_ARGS=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
     fi
 
+    VLLM_MODEL_ARGS=()
+    if [[ "${VLLM_TRUST_REMOTE_CODE:-0}" == "1" ]]; then
+        VLLM_MODEL_ARGS+=(--trust-remote-code)
+    fi
+    if [[ -n "${VLLM_MAX_LOGPROBS:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--max-logprobs "$VLLM_MAX_LOGPROBS")
+    fi
+
+    VLLM_BLOCK_ARGS=()
+    if [[ -n "${VLLM_BLOCK_SIZE:-}" ]]; then
+        VLLM_BLOCK_ARGS=(--block-size "$VLLM_BLOCK_SIZE")
+    fi
+
     # Pin the KV block pool (in blocks) on both servers. The preemption test
     # needs the pool size to be independent of the GPU model: a workload whose
     # KV demand exceeds NUM_GPU_BLOCKS_OVERRIDE * block_size preempts by
@@ -129,6 +142,7 @@ engine_kv_transfer_config() {
     LMCACHE_PORT="${LMCACHE_PORT}" \
     LMCACHE_REQUEST_SCHEME="${LMCACHE_REQUEST_SCHEME}" \
     LMCACHE_MP_MQ_TIMEOUT="${LMCACHE_MP_MQ_TIMEOUT:-10}" \
+    VLLM_KV_LOAD_FAILURE_POLICY="${VLLM_KV_LOAD_FAILURE_POLICY:-recompute}" \
     LMCACHE_MP_LAZY_OFFLOAD="${LMCACHE_MP_LAZY_OFFLOAD:-false}" \
     LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD="${LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD:-2}" \
     LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT="${LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT:-1}" \
@@ -160,7 +174,7 @@ print(
         {
             "kv_connector": "LMCacheMPConnector",
             "kv_role": "kv_both",
-            "kv_load_failure_policy": "recompute",
+            "kv_load_failure_policy": os.environ["VLLM_KV_LOAD_FAILURE_POLICY"],
             "kv_connector_extra_config": extra_config,
         }
     )
@@ -199,6 +213,7 @@ engine_launch() {
         "VLLM_BATCH_INVARIANT=${batch_invariant}" \
         PYTHONHASHSEED=0 \
         vllm serve "$MODEL" \
+            "${VLLM_MODEL_ARGS[@]}" \
             "${mode_args[@]}" \
             "${VLLM_ATTENTION_ARGS[@]}" \
             --port "$port" \
@@ -207,6 +222,7 @@ engine_launch() {
             "${VLLM_EAGER_ARGS[@]}" \
             "${VLLM_GPU_MEMORY_ARGS[@]}" \
             "${VLLM_POOL_ARGS[@]}" \
+            "${VLLM_BLOCK_ARGS[@]}" \
             "${VLLM_PREFIX_ARGS[@]}" \
             > "$log_file" 2>&1 &
     ENGINE_PID=$!

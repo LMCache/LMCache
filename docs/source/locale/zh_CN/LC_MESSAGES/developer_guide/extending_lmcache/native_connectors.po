@@ -210,8 +210,8 @@ msgstr "这为您提供了 ``batch_get``\\ 、\\ ``batch_set``\\ 、\\ ``batch_e
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:229
 msgid ""
 "**Reference:** "
-"``lmcache/v1/storage_backend/native_clients/resp_client.py``"
-msgstr "**参考:** ``lmcache/v1/storage_backend/native_clients/resp_client.py``"
+"``lmcache/inprocess/v1/storage_backend/native_clients/resp_client.py``"
+msgstr "**参考:** ``lmcache/inprocess/v1/storage_backend/native_clients/resp_client.py``"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:233
 msgid "Step 5: L2 Adapter (MP Mode)"

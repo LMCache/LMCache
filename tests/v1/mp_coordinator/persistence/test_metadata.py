@@ -2,8 +2,10 @@
 """Tests for the metadata document: operator intent, written on change."""
 
 # Standard
+from collections.abc import Mapping
 from pathlib import Path
 import json
+import os
 
 # Third Party
 import pytest
@@ -14,7 +16,11 @@ from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
-from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
+from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
+from lmcache.v1.mp_coordinator.persistence.metadata import (
+    MetadataPersister,
+    MetadataWriteError,
+)
 from lmcache.v1.mp_coordinator.persistence.store import LocalArtifactStore
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
@@ -105,6 +111,86 @@ class TestSurvivableFailures:
         persister.load()
 
         assert controller.filter_unpinned([_key(1)]) == [_key(1)], reason
+
+
+class _Unserializable:
+    """A metadata component whose capture JSON cannot encode: a bug."""
+
+    persistence_type = PersistenceType.METADATA
+    name = "broken"
+
+    def capture(self) -> Mapping[str, object]:
+        return {"value": object()}
+
+    def restore(self, state: Mapping[str, object]) -> None:
+        pass
+
+
+class TestWriteFailures:
+    def test_a_failed_write_raises_instead_of_logging(self, tmp_path: Path):
+        """A pin or quota a restart would lose must not be reported as
+        saved, so the caller has to hear about it."""
+        controller = _controller()
+        controller.pin([_key(1)])
+        # A file where the directory should be: the write cannot even start.
+        (tmp_path / "blocker").write_text("")
+        persister = MetadataPersister(
+            LocalArtifactStore(tmp_path / "blocker" / "metadata.json")
+        )
+        persister.register(controller)
+
+        with pytest.raises(MetadataWriteError, match="blocker"):
+            persister.save()
+
+    def test_a_failed_write_leaves_the_previous_document(self, tmp_path: Path):
+        """The write is atomic: a reader still finds the last good copy."""
+        if os.geteuid() == 0:
+            pytest.skip("root can write to a read-only directory")
+        path = tmp_path / "metadata.json"
+        quota = QuotaManager()
+        quota.set_quota("t", 1024)
+        persister = MetadataPersister(LocalArtifactStore(path))
+        persister.register(quota)
+        persister.save()
+        tmp_path.chmod(0o500)
+        try:
+            quota.set_quota("t", 2048)
+            with pytest.raises(MetadataWriteError):
+                persister.save()
+        finally:
+            tmp_path.chmod(0o700)
+
+        restored = QuotaManager()
+        reader = MetadataPersister(LocalArtifactStore(path))
+        reader.register(restored)
+        reader.load()
+        assert restored.get_limit_bytes("t") == 1024
+
+    def test_a_capture_json_cannot_encode_is_a_bug_not_a_write_error(
+        self, tmp_path: Path
+    ):
+        """Retrying cannot fix a bad capture, so it must not read as a
+        storage problem the caller can wait out."""
+        persister = MetadataPersister(LocalArtifactStore(tmp_path / "metadata.json"))
+        persister.register(_Unserializable())
+
+        with pytest.raises(TypeError):
+            persister.save()
+
+
+class TestStats:
+    def test_saves_are_counted_by_result(self, tmp_path: Path):
+        unwritable = tmp_path / "dir-in-the-way"
+        unwritable.mkdir()
+        good = MetadataPersister(LocalArtifactStore(tmp_path / "metadata.json"))
+        bad = MetadataPersister(LocalArtifactStore(unwritable))
+
+        good.save()
+        with pytest.raises(MetadataWriteError):
+            bad.save()
+
+        assert good.stats().writes == {"ok": 1, "error": 0}
+        assert bad.stats().writes == {"ok": 0, "error": 1}
 
 
 class TestRegistration:

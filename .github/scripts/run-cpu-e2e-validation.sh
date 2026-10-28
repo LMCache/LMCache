@@ -80,12 +80,18 @@ VLLM_HF_OFFLINE="${VLLM_HF_OFFLINE:-1}"
 LMCACHE_SHM_NAME="${LMCACHE_SHM_NAME-__default__}"
 LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-engine_driven}"
 
+# grpc-native is the gRPC transport served by --grpc-server-mode native.
+LMCACHE_TRANSPORT_ARGS=(--transport "${LMCACHE_REQUEST_TRANSPORT}")
 case "${LMCACHE_REQUEST_TRANSPORT}" in
   zmq) LMCACHE_REQUEST_SCHEME="tcp" ;;
   grpc) LMCACHE_REQUEST_SCHEME="grpc" ;;
+  grpc-native)
+    LMCACHE_REQUEST_SCHEME="grpc"
+    LMCACHE_TRANSPORT_ARGS=(--transport grpc --grpc-server-mode native)
+    ;;
   *)
     echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'" >&2
-    echo "Valid values: zmq, grpc" >&2
+    echo "Valid values: zmq, grpc, grpc-native" >&2
     exit 1
     ;;
 esac
@@ -532,7 +538,7 @@ echo "[Phase 2 / Step 3] Starting LMCache server"
 echo "LMCache log: ${LMCACHE_LOG}"
 # Build lmcache server args
 LMCACHE_ARGS=(
-  --transport "${LMCACHE_REQUEST_TRANSPORT}"
+  "${LMCACHE_TRANSPORT_ARGS[@]}"
   --port "${LMCACHE_REQUEST_PORT}"
   --http-port "${LMCACHE_HTTP_PORT}"
   --l1-size-gb "${LMCACHE_L1_SIZE_GB}"
