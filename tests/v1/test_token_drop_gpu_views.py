@@ -6,8 +6,9 @@ import torch
 
 # First Party
 from lmcache.integration.vllm.experimental.token_drop_kv import PagedKVSequenceView
+from lmcache.v1.platform import torch_device_type
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+pytestmark = pytest.mark.skipif(torch_device_type != "cuda", reason="CUDA required")
 
 KV_CASES = [
     pytest.param("cuda", torch.float16, id="cuda-fp16"),
