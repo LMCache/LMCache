@@ -420,10 +420,13 @@ def _make_reload_module(monkeypatch, evicted, in_l2, l2_answers=True):
     return module, objs, transfers, specs, callback
 
 
-def _retrieve(module):
-    return module.retrieve(
-        SimpleNamespace(request_id="req", cache_salt="salt"), 1, [[1, 2, 3]], b"x"
+def _retrieve(module, num_kv_readers=1):
+    key = SimpleNamespace(
+        request_id="req",
+        cache_salt="salt",
+        require_num_kv_readers=lambda: num_kv_readers,
     )
+    return module.retrieve(key, 1, [[1, 2, 3]], b"x")
 
 
 def _released(module, callback):
@@ -450,6 +453,19 @@ def test_retrieve_reloads_keys_evicted_from_l1_from_l2(monkeypatch):
         [(0, ["g0c0", "g0c2"]), (_RELOAD_OWNER, ["g0c1"])]
     ]
     module.context.storage_manager.finish_read_prefetched.assert_not_called()
+
+
+def test_reload_locks_once_per_kv_reader(monkeypatch):
+    # MLA with TP=2: both ranks read the same keys, so the reload must hold
+    # a lock for the rank that has not retrieved yet.
+    module, _objs, _transfers, specs, _callback = _make_reload_module(
+        monkeypatch, evicted=["g0c1"], in_l2=["g0c1"]
+    )
+
+    _, ok = _retrieve(module, num_kv_readers=2)
+
+    assert ok is True
+    assert [s.num_kv_readers for s in specs] == [2]
 
 
 def test_retrieve_fails_and_releases_partial_reload_when_l2_misses(monkeypatch):

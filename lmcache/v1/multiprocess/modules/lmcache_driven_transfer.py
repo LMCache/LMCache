@@ -1205,10 +1205,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
         A lookup's read lock expires after the L1 read TTL, so a request that
         waits longer in the engine's queue can find its keys evicted at
-        retrieve time; write-through still holds them in L2.
+        retrieve time; write-through still holds them in L2. Each key is
+        read-locked once per KV reader of the request, like the lookup, so
+        every reader's retrieve can release one lock.
 
         Args:
-            key: The retrieve's IPC key, for log correlation.
+            key: The retrieve's IPC key: its reader count and request id.
             missing: Keys of one object group absent from L1, in chunk order.
             obj_group_id: The object group of ``missing``.
             layout_desc: The memory layout of that object group's objects.
@@ -1231,6 +1233,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     )
                 ],
                 fetching_policy="full",
+                num_kv_readers=key.require_num_kv_readers(),
             ),
             external_request_id=key.request_id,
         )
