@@ -305,9 +305,10 @@ def _infer_l1_devdax_overflow_from_dax_adapter(
 
 # The generated name passed to shm_open() is "/lmcache_l1_pool_<token>".
 # We cap the token at 16 hex digits (64-bit UUID slice); the platform limit
-# further restricts it on macOS (PSHMNAMLEN = 31) where the prefix consumes
-# 17 of those 31 characters, leaving at most 14.  Linux resolves through
-# /dev/shm with NAME_MAX = 255, so 16 is always safe there.
+# further restricts it on macOS (PSHMNAMLEN = 31, effective max 30 due to
+# the kernel's >= check) where the prefix consumes 17 of those 30
+# characters, leaving 13.  Linux resolves through /dev/shm with
+# NAME_MAX = 255, so 16 is always safe there.
 _L1_POOL_SHM_NAME_WITH_SLASH = "/lmcache_l1_pool_"
 
 L1_POOL_SHM_NAME_TOKEN_HEX_LEN: int = min(
