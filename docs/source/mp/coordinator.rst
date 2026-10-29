@@ -317,9 +317,10 @@ With the Kafka transport, start the coordinator with
 instead of serving ``POST /events``; without that, the broker retains the
 records but nothing reads them. Both sides need the optional
 ``lmcache[kafka]`` extra (``pip install 'lmcache[kafka]'``), imported only
-when Kafka is selected. A restarted coordinator resumes from its consumer
-group's committed offsets; coordinator-driven replay of a detected gap is a
-follow-up.
+when Kafka is selected. The ``lmcache/vllm-openai`` and
+``lmcache/standalone`` images include it. A restarted coordinator resumes
+from its consumer group's committed offsets; coordinator-driven replay of a
+detected gap is a follow-up.
 
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a

@@ -1061,8 +1061,10 @@ The full RPC path exercised is::
      → QUERY_PREFETCH_STATUS → RETRIEVE → STORE
      → END_SESSION
 
-Both transfer modes verify local buffers. ``--url`` remains accepted for
-compatibility but is unused.
+Both transfer modes verify local buffers. In ``lmcache_driven`` mode, ``--url``
+also enables server checksum comparisons before STORE and after RETRIEVE,
+reported separately. HTTP failures or mismatches fail this check. An empty
+``--url`` disables HTTP checks; ``engine_driven`` mode skips them.
 
 
 STORE/RETRIEVE runs enabled workers concurrently; latency covers dispatch through
@@ -1109,7 +1111,9 @@ Options
      - ZMQ endpoint of the MP cache server.
    * - ``--url URL``
      - ``http://localhost:8080``
-     - Accepted for compatibility; unused by local checksum verification.
+     - HTTP endpoint for checksum verification in ``lmcache_driven`` mode.
+       Pass an empty string to disable HTTP checks; ``engine_driven`` mode
+       skips them. Local round-trip verification still runs in both modes.
    * - ``--mode {gpu,cpu}``
      - ``gpu``
      - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC

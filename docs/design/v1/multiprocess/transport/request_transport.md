@@ -127,8 +127,14 @@ Rust code for it. The `lmcache/vllm-openai` and `lmcache/standalone` images
 include it.
 
 The gRPC runtime metrics (`grpc_metrics_enabled`, from
-`grpcio-observability`) measure grpcio's own servers, so in `native` mode
-they only cover out-of-tree services. LMCache's own request metrics are
+`grpcio-observability`) measure grpcio's own servers, so they only see the
+out-of-tree services in `native` mode. For everything else the native front
+keeps its own totals (pygrpc-native 0.3.0 or later), and
+`grpc_impl/native_metrics.py` exports them as `grpc.server.call.started` and
+`grpc.server.call.duration` with the plugin's names and labels, through
+`register_metrics_source` in `mp_observability/otel_init.py`. The two
+sources share one metric family. The duration buckets are gRFC A66's, and
+the message size metrics aren't reported. LMCache's own request metrics are
 unaffected.
 
 Both servers subclass `GrpcMultiprocessServerBase` in `grpc_impl/server_base.py`,
