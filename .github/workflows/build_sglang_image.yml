@@ -66,7 +66,8 @@ jobs:
                 TORCH=$(python3 -c 'import re, tomllib; reqs = tomllib.load(open("pyproject.toml", "rb"))["build-system"]["requires"]; print(next(re.sub(r"^torch\s*==\s*", "", r) for r in reqs if re.match(r"^torch\s*==", r)))')
                 HUB=https://hub.docker.com/v2/repositories/lmsysorg/sglang/tags
                 LATEST=$(curl -fsSL "${HUB}/latest" | jq -r .digest)
-                VERSION= FOUND_LATEST=
+                VERSION=""
+                FOUND_LATEST=""
                 for TAG in $(git ls-remote --tags --refs https://github.com/sgl-project/sglang.git \
                     | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$' | sort -rV); do
                   # A 404 means the release's image is not pushed yet.
