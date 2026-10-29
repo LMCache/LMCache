@@ -70,6 +70,17 @@ def _unused_tcp_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def free_tcp_url() -> str:
+    """Return a ``tcp://`` URL on a currently free loopback port.
+
+    A hardcoded port makes two concurrent runs collide: the second server's
+    bind fails and its clients then fail on a timeout that names neither the
+    port nor the cause. The probe socket only listens, so closing it leaves no
+    connection in ``TIME_WAIT`` to block the server's bind.
+    """
+    return f"tcp://127.0.0.1:{_unused_tcp_port()}"
+
+
 def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
     """ZMQ discovers the same transport-neutral P2P annotations as gRPC."""
 
@@ -240,7 +251,7 @@ class MessageQueueTestHelper:
         3. Call run_test() to execute the test with client requests
 
     Example:
-        helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5556")
+        helper = MessageQueueTestHelper()
         helper.register_handler("noop", noop_handler)
         helper.run_test(
             operation="noop",
@@ -251,8 +262,8 @@ class MessageQueueTestHelper:
         )
     """
 
-    def __init__(self, server_url: str = "tcp://127.0.0.1:5556"):
-        self.server_url = server_url
+    def __init__(self, server_url: "str | None" = None):
+        self.server_url = server_url or free_tcp_url()
         self.handlers: dict[str, Callable] = {}
         self.ctx = mp.get_context("spawn")
 
@@ -348,17 +359,19 @@ class MessageQueueTestHelper:
             server_process.terminate()
             server_process.join()
 
-        # Report any failures
+        # Report any failures. The server is reported first: when it fails to
+        # start, every client fails as a consequence, and naming only the
+        # client hides the cause.
+        if server_process.exitcode != 0:
+            pytest.fail(
+                f"Server process failed with exit code {server_process.exitcode}"
+            )
+
         if failed_clients:
             failure_details = ", ".join(
                 [f"Client {cid}: {reason}" for cid, reason in failed_clients]
             )
             pytest.fail(f"Some clients failed: {failure_details}")
-
-        if server_process.exitcode != 0:
-            pytest.fail(
-                f"Server process failed with exit code {server_process.exitcode}"
-            )
 
 
 # ==============================================================================
@@ -372,7 +385,7 @@ def test_mq_noop_request():
     NOOP takes no payloads and returns a string response.
     """
     # Create test helper and register handler
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5556")
+    helper = MessageQueueTestHelper()
     helper.register_handler("noop", test_mq_handler_helpers.noop_handler)
 
     # Run test with single request
@@ -389,7 +402,7 @@ def test_mq_noop_multiple_requests():
     Test MessageQueue with multiple NOOP requests.
     Verifies that server can handle multiple sequential requests.
     """
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5557")
+    helper = MessageQueueTestHelper()
     helper.register_handler("noop", test_mq_handler_helpers.noop_handler)
 
     # Run test with multiple requests
@@ -406,7 +419,7 @@ def test_mq_noop_multiple_clients():
     Test MessageQueue with multiple concurrent clients.
     Verifies that server can handle requests from multiple clients simultaneously.
     """
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5558")
+    helper = MessageQueueTestHelper()
     helper.register_handler("noop", test_mq_handler_helpers.noop_handler)
 
     # Run test with multiple clients, each sending multiple requests
@@ -442,7 +455,7 @@ def test_mq_register_kv_cache():
     gpu_id = 0
 
     # Create test helper and register handler
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5559")
+    helper = MessageQueueTestHelper()
     helper.register_handler(
         "register_kv_cache", test_mq_handler_helpers.register_kv_cache_handler
     )
@@ -472,7 +485,7 @@ def test_mq_unregister_kv_cache():
     gpu_id = 0
 
     # Create test helper and register handler
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5560")
+    helper = MessageQueueTestHelper()
     helper.register_handler(
         "unregister_kv_cache",
         test_mq_handler_helpers.unregister_kv_cache_handler,
@@ -495,7 +508,7 @@ def test_mq_unregister_kv_cache_multiple_clients():
     gpu_id = 0
 
     # Create test helper and register handler
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5561")
+    helper = MessageQueueTestHelper()
     helper.register_handler(
         "unregister_kv_cache",
         test_mq_handler_helpers.unregister_kv_cache_handler,
@@ -524,7 +537,7 @@ def test_mq_store():
     test_handle = b"\x00" * 64
 
     # Create test helper and register handler
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5562")
+    helper = MessageQueueTestHelper()
     helper.register_handler("store", test_mq_handler_helpers.store_handler)
 
     # Run test with STORE request
@@ -549,7 +562,7 @@ def test_mq_retrieve():
     test_handle = b"\x00" * 64
 
     # Create test helper and register handler
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5563")
+    helper = MessageQueueTestHelper()
     helper.register_handler("retrieve", test_mq_handler_helpers.retrieve_handler)
 
     # Run test with RETRIEVE request
@@ -574,7 +587,7 @@ def test_mq_lookup():
     expected_response = None
 
     # Create test helper and register handler
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5564")
+    helper = MessageQueueTestHelper()
     helper.register_handler("lookup", test_mq_handler_helpers.lookup_handler)
 
     # Run test with LOOKUP request
@@ -598,7 +611,7 @@ def test_mq_lookup_with_different_key():
     expected_response = None
 
     # Create test helper and register handler
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5565")
+    helper = MessageQueueTestHelper()
     helper.register_handler("lookup", test_mq_handler_helpers.lookup_handler)
 
     # Run test with LOOKUP request
@@ -629,7 +642,7 @@ def test_mq_report_block_allocation():
         ),
     ]
 
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5566")
+    helper = MessageQueueTestHelper()
     helper.register_handler(
         "report_block_allocation",
         test_mq_handler_helpers.report_block_allocations_handler,
@@ -649,7 +662,7 @@ def test_mq_report_block_allocation_empty():
     """
     records: list[BlockAllocationRecord] = []
 
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5567")
+    helper = MessageQueueTestHelper()
     helper.register_handler(
         "report_block_allocation",
         test_mq_handler_helpers.report_block_allocations_handler,
@@ -681,8 +694,8 @@ def test_shared_loop_lifecycle():
     # No loop before any clients exist
     assert ClientPollingLoop._instance is None
 
-    client_a = MessageQueueClient("tcp://127.0.0.1:16000", context)
-    client_b = MessageQueueClient("tcp://127.0.0.1:16001", context)
+    client_a = MessageQueueClient(free_tcp_url(), context)
+    client_b = MessageQueueClient(free_tcp_url(), context)
 
     # Both share the same singleton
     loop = ClientPollingLoop._instance
@@ -712,7 +725,7 @@ def test_shared_loop_dispatch():
     # First Party
     from lmcache.v1.multiprocess.transport.zmq_impl.mq import ClientPollingLoop
 
-    server_url = "tcp://127.0.0.1:16020"
+    server_url = free_tcp_url()
     context = zmq.Context.instance()
 
     # Start server in-process
@@ -750,7 +763,7 @@ def test_shared_loop_dispatch():
 
 def test_invalid_outbound_request_does_not_block_later_requests() -> None:
     """An invalid request fails locally without blocking the outbound queue."""
-    server_url = "tcp://127.0.0.1:16025"
+    server_url = free_tcp_url()
     context = zmq.Context.instance()
     server = MessageQueueServer(server_url, context)
     add_handler_helper(server, "noop", test_mq_handler_helpers.noop_handler)
@@ -776,7 +789,7 @@ def test_invalid_outbound_request_does_not_block_later_requests() -> None:
 
 
 def test_server_answers_a_burst_larger_than_one_poll() -> None:
-    server_url = "tcp://127.0.0.1:16031"
+    server_url = free_tcp_url()
     context = zmq.Context.instance()
     server = MessageQueueServer(server_url, context)
     add_handler_helper(server, "noop", test_mq_handler_helpers.noop_handler)
@@ -810,7 +823,7 @@ def test_client_survives_undecodable_response() -> None:
     stranded. The observable contract is that only the offending request is
     lost: a later, well-formed request must still complete normally.
     """
-    server_url = "tcp://127.0.0.1:16030"
+    server_url = free_tcp_url()
     context = zmq.Context.instance()
 
     unknown_value = 999
@@ -867,14 +880,14 @@ def test_shared_loop_recreate():
 
     context = zmq.Context.instance()
 
-    client = MessageQueueClient("tcp://127.0.0.1:16010", context)
+    client = MessageQueueClient(free_tcp_url(), context)
     first_loop = ClientPollingLoop._instance
     assert first_loop is not None
     client.close()
     assert ClientPollingLoop._instance is None
 
     # New client creates a brand-new loop
-    client2 = MessageQueueClient("tcp://127.0.0.1:16011", context)
+    client2 = MessageQueueClient(free_tcp_url(), context)
     second_loop = ClientPollingLoop._instance
     assert second_loop is not None
     assert second_loop is not first_loop
@@ -892,7 +905,7 @@ def test_add_normal_thread_pool():
     Test that add_normal_thread_pool assigns handler executors.
     """
     context = zmq.Context.instance()
-    server = MessageQueueServer("tcp://127.0.0.1:15700", context)
+    server = MessageQueueServer(free_tcp_url(), context)
 
     add_handler_helper(
         server,
@@ -922,7 +935,7 @@ def test_add_affinity_thread_pool():
     from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 
     context = zmq.Context.instance()
-    server = MessageQueueServer("tcp://127.0.0.1:15700", context)
+    server = MessageQueueServer(free_tcp_url(), context)
 
     add_handler_helper(
         server,
@@ -957,7 +970,7 @@ def test_normal_pool_error_on_serialized_handler():
     Test that add_normal_thread_pool raises TypeError for SERIALIZED handlers.
     """
     context = zmq.Context.instance()
-    server = MessageQueueServer("tcp://127.0.0.1:15701", context)
+    server = MessageQueueServer(free_tcp_url(), context)
 
     add_handler_helper(server, "noop", test_mq_handler_helpers.noop_handler)
 
@@ -972,7 +985,7 @@ def test_affinity_pool_error_on_serialized_handler():
     Test that add_affinity_thread_pool raises TypeError for SERIALIZED handlers.
     """
     context = zmq.Context.instance()
-    server = MessageQueueServer("tcp://127.0.0.1:15701", context)
+    server = MessageQueueServer(free_tcp_url(), context)
 
     add_handler_helper(server, "noop", test_mq_handler_helpers.noop_handler)
 
@@ -987,7 +1000,7 @@ def test_pool_error_on_unregistered():
     Test that pool methods raise ValueError for unregistered request types.
     """
     context = zmq.Context.instance()
-    server = MessageQueueServer("tcp://127.0.0.1:15702", context)
+    server = MessageQueueServer(free_tcp_url(), context)
 
     with pytest.raises(ValueError, match="No handler registered"):
         server.add_normal_thread_pool(["store"], max_workers=1)
@@ -1006,7 +1019,7 @@ def test_multiple_pools():
     from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 
     context = zmq.Context.instance()
-    server = MessageQueueServer("tcp://127.0.0.1:15703", context)
+    server = MessageQueueServer(free_tcp_url(), context)
 
     add_handler_helper(
         server,
@@ -1054,7 +1067,7 @@ def test_start_fails_without_pool_assignment():
     has no executor assigned.
     """
     context = zmq.Context.instance()
-    server = MessageQueueServer("tcp://127.0.0.1:15704", context)
+    server = MessageQueueServer(free_tcp_url(), context)
 
     add_handler_helper(
         server,
@@ -1079,7 +1092,7 @@ def test_client_socket_bounds_connect_attempts():
     """
     context = zmq.Context.instance()
 
-    client = MessageQueueClient("tcp://127.0.0.1:15705", context)
+    client = MessageQueueClient(free_tcp_url(), context)
     assert client.socket.getsockopt(zmq.CONNECT_TIMEOUT) == CONNECT_TIMEOUT_MS
     assert client.socket.getsockopt(zmq.RECONNECT_IVL_MAX) == RECONNECT_IVL_MAX_MS
     client.close()
