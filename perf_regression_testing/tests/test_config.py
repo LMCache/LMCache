@@ -132,6 +132,13 @@ def test_aiperf_keeps_every_session_of_the_uncapped_trace() -> None:
     assert v41.aiperf_args["max-context-length"] >= 996_579
 
 
+def test_lmcache_read_locks_outlast_the_queue_wait() -> None:
+    # Build 55 waited up to 313 s from lookup to retrieve; locks that expire
+    # first fail the retrieve and kill vLLM.
+    v41 = resolve(load(), "agentic", "vllm_lmcache")
+    assert int(v41.services[0].args.get("l1-read-ttl-seconds", 300)) > 313
+
+
 def test_check_host_needs_rdma_devices_only_for_mooncake(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

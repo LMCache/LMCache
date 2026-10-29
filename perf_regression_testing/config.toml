@@ -219,6 +219,10 @@ eviction-ratio = 0.05
 # One GPU and one CPU worker by default: all TP ranks' stores and loads queue
 # on a single thread. One worker per TP8 rank, so none shares a slot.
 max-workers = 8
+# A lookup read-locks its hits until the retrieve, which waits in vLLM's queue
+# behind long 1M-token prefills. With the default 300 s the locks expired, the
+# retrieve failed, and vLLM exited (build 55, waits up to 313 s).
+l1-read-ttl-seconds = 3600
 
 [deployments.vllm_lmcache_swa_l2]
 # The L2 write path on the hybrid sliding-window model, the setup
