@@ -153,6 +153,14 @@ class L1ObjectState:
     free this buffer while the count is nonzero.
     """
 
+    staging_charge: int = 0
+    """ Bytes added to the staging counter while the object is staged.
+
+    Recorded at ``_put_staging`` and subtracted unchanged at
+    ``_pop_staging``, so a buffer whose logical size is narrowed in
+    between (``MemoryObj.set_used_size`` after serialization) does not
+    leave phantom staging bytes behind. """
+
 
 def l1_mgr_synchronized(func):
     """
@@ -1518,7 +1526,8 @@ class L1Manager(L1ManagerInterface):
     def _put_staging(self, key: ObjectKey, tag: str, entry: L1ObjectState) -> None:
         """Store ``entry`` as ``tag``'s staging object for ``key``."""
         self._staging.setdefault(key, {})[tag] = entry
-        self._staging_bytes += entry.memory_obj.get_size()
+        entry.staging_charge = entry.memory_obj.get_size()
+        self._staging_bytes += entry.staging_charge
 
     def _pop_staging(self, key: ObjectKey, tag: str) -> L1ObjectState:
         """Remove and return ``tag``'s staging object for ``key``.
@@ -1529,7 +1538,8 @@ class L1Manager(L1ManagerInterface):
         entry = per_tag.pop(tag)
         if not per_tag:
             del self._staging[key]
-        self._staging_bytes -= entry.memory_obj.get_size()
+        self._staging_bytes -= entry.staging_charge
+        entry.staging_charge = 0
         return entry
 
     def _take_staging(

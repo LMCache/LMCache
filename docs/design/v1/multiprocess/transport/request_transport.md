@@ -37,6 +37,16 @@ defaults to the handler name; `operation=` is for legacy method names.
 Discovery validates handler annotations against the shared contract before
 either server starts.
 
+A request whose server goes away before answering fails with a `TimeoutError`
+on both transports. ZMQ can't tell a lost server from a slow one, so the
+future times out. The gRPC client sees the connection close and raises
+`MPServerUnavailableError` from `transport/errors.py`, which is both a
+`TimeoutError` and a `ConnectionError`, so callers written for ZMQ handle it
+and event streams still end with a `ConnectionError`. When a gRPC server
+answers with any other error status, the client raises `MPRequestError` with
+the status code and message instead of grpcio's own error. A ZMQ server
+doesn't reply to a request whose handler fails, so that request times out.
+
 ## Transport implementations
 
 `RequestClientFactory` selects an implementation by endpoint scheme:
@@ -91,7 +101,7 @@ call also runs grpcio's own Python layer (call state, metadata, status, a
 thread hand-off) under that GIL, which for small requests such as lookups
 costs about as much as the handler. The `native` server does the HTTP/2 and
 gRPC framing in Rust through
-[pygrpc-native](https://github.com/theminjunchoi/pygrpc-native), without the
+[pygrpc-native](https://github.com/pygrpc/pygrpc-native), without the
 GIL, and hands Python only the method id and the request bytes:
 
 ```
@@ -124,10 +134,7 @@ is only created when a module has a registrar. In their handlers
 `native` needs the `pygrpc-native` package (`pip install "lmcache[grpc-native]"`),
 a general-purpose gRPC server kept outside LMCache so that LMCache carries no
 Rust code for it. The `lmcache/vllm-openai` and `lmcache/standalone` images
-include it. grpc-core sends a Unix socket's path
-as `:authority`, which the Rust HTTP/2 stack rejects, so a `grpc+unix://`
-native server only serves clients that set `grpc.default_authority`;
-`GrpcMultiprocessClient` does not, so use TCP with it.
+include it.
 
 The gRPC runtime metrics (`grpc_metrics_enabled`, from
 `grpcio-observability`) measure grpcio's own servers, so they only see the

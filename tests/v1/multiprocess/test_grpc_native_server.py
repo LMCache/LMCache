@@ -34,6 +34,10 @@ from lmcache.v1.multiprocess.protocols.server_module import (
     ServerModuleCallResponse,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.client import GrpcMultiprocessClient
 from lmcache.v1.multiprocess.transport.grpc_impl.native_server import (
     GrpcNativeMultiprocessServer,
@@ -79,6 +83,8 @@ def _client(server: GrpcMultiprocessServerBase) -> GrpcMultiprocessClient:
 
 
 def _status(error: BaseException) -> tuple[grpc.StatusCode, str]:
+    if isinstance(error, (MPRequestError, MPServerUnavailableError)):
+        return grpc.StatusCode[error.code], error.details
     call = cast(grpc.Call, error)
     return call.code(), call.details()
 
@@ -127,7 +133,7 @@ def _first_stream_error(
     client = _client(server)
     try:
         stream = client.subscribe_kv_events(1, "model", 0, 8)
-        with pytest.raises(grpc.RpcError) as info:
+        with pytest.raises(MPRequestError) as info:
             next(stream)
         return _status(info.value)
     finally:
@@ -154,7 +160,7 @@ def test_handler_error_is_unknown_with_grpcio_message() -> None:
     try:
         # More failures than workers.
         for _ in range(3):
-            with pytest.raises(grpc.RpcError) as info:
+            with pytest.raises(MPRequestError) as info:
                 client.ping(1).result(5)
             assert _status(info.value) == (
                 grpc.StatusCode.UNKNOWN,
@@ -170,7 +176,7 @@ def test_missing_handler_is_unimplemented() -> None:
     server = _serve([])
     client = _client(server)
     try:
-        with pytest.raises(grpc.RpcError) as info:
+        with pytest.raises(MPRequestError) as info:
             client.ping(1).result(5)
         assert _status(info.value) == (
             grpc.StatusCode.UNIMPLEMENTED,
@@ -223,7 +229,7 @@ def test_handler_returning_the_wrong_kind_is_unknown() -> None:
     server = _serve([Module()])
     client = _client(server)
     try:
-        with pytest.raises(grpc.RpcError) as info:
+        with pytest.raises(MPRequestError) as info:
             client.ping(1).result(5)
         assert _status(info.value)[0] is grpc.StatusCode.UNKNOWN
         assert closed.is_set()
@@ -410,7 +416,7 @@ def test_close_fails_calls_in_flight_and_is_idempotent(
         assert entered.wait(5)
         server.close()
         server.close()
-        with pytest.raises(grpc.RpcError) as info:
+        with pytest.raises(MPServerUnavailableError) as info:
             future.result(5)
         assert _status(info.value)[0] is grpc.StatusCode.UNAVAILABLE
     finally:
@@ -493,9 +499,6 @@ def test_unix_socket_forms_and_restart_after_a_stale_file() -> None:
     # pytest's tmp_path can exceed the 104-byte socket path limit on macOS.
     directory = Path(tempfile.mkdtemp(prefix="lmc", dir="/tmp"))
     path = directory / "s.sock"
-    request = extension_service_pb2.ServerModuleCallRequest(
-        method="echo", payload=b"ab"
-    )
     try:
         stale = socket.socket(socket.AF_UNIX)
         stale.bind(str(path))
@@ -505,20 +508,13 @@ def test_unix_socket_forms_and_restart_after_a_stale_file() -> None:
             server.add_modules([_EchoModule()])
             server.start()
             assert server.bound_port == 1
-            # grpc-core sends the socket path as :authority, which the front
-            # rejects as invalid HTTP/2, so name the authority explicitly.
-            channel = grpc.insecure_channel(
-                f"unix:{path}", options=[("grpc.default_authority", "localhost")]
+            client = GrpcMultiprocessClient(  # type: ignore[abstract]
+                f"grpc+unix://{path}"
             )
             try:
-                call = channel.unary_unary(
-                    _SERVER_MODULE_CALL,
-                    request_serializer=extension_service_pb2.ServerModuleCallRequest.SerializeToString,
-                    response_deserializer=extension_service_pb2.ServerModuleCallResponse.FromString,
-                )
-                assert call(request, timeout=5).payload == b"ba"
+                assert _echo(client, b"ab") == b"ba"
             finally:
-                channel.close()
+                client.close()
                 server.close()
             assert not path.exists()
     finally:
@@ -771,7 +767,7 @@ def test_non_blocking_handlers_are_unimplemented() -> None:
     server = _serve([Module()])
     client = _client(server)
     try:
-        with pytest.raises(grpc.RpcError) as info:
+        with pytest.raises(MPRequestError) as info:
             client.ping(1).result(5)
         assert _status(info.value) == (
             grpc.StatusCode.UNIMPLEMENTED,
@@ -788,7 +784,7 @@ def test_calls_before_add_modules_are_unimplemented() -> None:
     server.start()
     client = _client(server)
     try:
-        with pytest.raises(grpc.RpcError) as info:
+        with pytest.raises(MPRequestError) as info:
             client.ping(1).result(5)
         assert _status(info.value) == (
             grpc.StatusCode.UNIMPLEMENTED,
