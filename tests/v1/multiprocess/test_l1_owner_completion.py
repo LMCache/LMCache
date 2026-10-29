@@ -161,19 +161,19 @@ def test_store_owner_callback_round_trip(
         release_kind, release_encoded = queued[0]
         assert release_kind == "release_imported_event"
         assert msgspec.msgpack.decode(release_encoded, type=tuple[int, int]) == (1, 7)
+        assert len(queued) == 2
+        assert order == ["callback", "copy", "copy", "record", "callback"]
+        kind, encoded = queued[1]
+        assert kind == (
+            "finish_write_by_owner" if failure == "none" else "abort_write_by_owner"
+        )
+        payload = msgspec.msgpack.decode(encoded, type=L1WriteCompletion)
+        assert payload == [
+            (manager.l1_manager_id, keys if owner_count == 1 else [keys[index]])
+            for index, manager in enumerate(managers)
+        ]
         if failure != "none":
-            assert len(queued) == 1
-            assert order == ["callback", "copy", "copy", "record"]
             assert all(obj.is_valid() for obj in copied)
-        else:
-            assert order == ["callback", "copy", "copy", "record", "callback"]
-            kind, encoded = queued[1]
-            assert kind == "finish_write_by_owner"
-            payload = msgspec.msgpack.decode(encoded, type=L1WriteCompletion)
-            assert payload == [
-                (manager.l1_manager_id, keys if owner_count == 1 else [keys[index]])
-                for index, manager in enumerate(managers)
-            ]
         module.close()
         cache_context.release_imported_event.assert_called_once_with(7)
         for index, manager in enumerate(managers):
