@@ -5,7 +5,7 @@
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 import importlib
 import queue
 import subprocess
@@ -483,10 +483,15 @@ def test_client_channel_bounds_connect_timeout_and_reconnect_backoff(
     assert captured["grpc.max_reconnect_backoff_ms"] == MAX_RECONNECT_BACKOFF_MS
 
 
+@pytest.mark.parametrize("server_mode", ["sync", "aio"])
+@pytest.mark.parametrize("api_key", ["", "builder-secret"])
 def test_build_grpc_request_server_uses_configured_server_workers(
     monkeypatch: pytest.MonkeyPatch,
+    server_mode: Literal["sync", "aio"],
+    api_key: str,
 ) -> None:
     """The gRPC server builder should not rely on constructor defaults."""
+    monkeypatch.setenv("LMCACHE_API_KEY", api_key)
     modules: Any = [object()]
 
     class FakeGrpcServer:
@@ -496,12 +501,14 @@ def test_build_grpc_request_server_uses_configured_server_workers(
             max_cpu_workers: int,
             max_gpu_workers: int,
             grpc_server_workers: int,
+            authentication: Any,
         ) -> None:
             self.args = (
                 bind_url,
                 max_cpu_workers,
                 max_gpu_workers,
                 grpc_server_workers,
+                authentication,
             )
             self.modules: Any = None
 
@@ -510,7 +517,9 @@ def test_build_grpc_request_server_uses_configured_server_workers(
 
     monkeypatch.setattr(
         grpc_server_builder,
-        "GrpcMultiprocessServer",
+        "GrpcAioMultiprocessServer"
+        if server_mode == "aio"
+        else "GrpcMultiprocessServer",
         FakeGrpcServer,
     )
     config = MPServerConfig(
@@ -520,6 +529,7 @@ def test_build_grpc_request_server_uses_configured_server_workers(
         max_cpu_workers=2,
         max_gpu_workers=3,
         grpc_server_workers=7,
+        grpc_server_mode=server_mode,
     )
 
     server = cast(
@@ -527,7 +537,10 @@ def test_build_grpc_request_server_uses_configured_server_workers(
         build_grpc_request_server(modules, config),
     )
 
-    assert server.args == ("grpc://127.0.0.1:6000", 2, 3, 7)
+    assert server.args[:4] == ("grpc://127.0.0.1:6000", 2, 3, 7)
+    assert server.args[4].enabled is bool(api_key)
+    if api_key:
+        assert server.args[4].verify_token(api_key)
     assert server.modules is modules
 
 

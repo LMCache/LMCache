@@ -2,6 +2,7 @@
 """Tests for scheme-based multiprocess request client selection."""
 
 # Standard
+from pathlib import Path
 from unittest.mock import MagicMock
 import importlib
 
@@ -11,9 +12,28 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
-from lmcache.v1.multiprocess.transport import grpc_impl, zmq_impl
+from lmcache.v1.multiprocess.transport import (
+    factory,
+    grpc_impl,
+    server_factory,
+    zmq_impl,
+)
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
+
+KEY_ENV_VARS = (
+    "LMCACHE_API_KEY",
+    "LMCACHE_API_KEY_FILE",
+    "LMCACHE_HTTP_API_KEY",
+    "LMCACHE_HTTP_API_KEY_FILE",
+)
+
+
+@pytest.fixture(autouse=True)
+def clear_key_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Do not inherit credentials from the test runner's environment."""
+    for variable in KEY_ENV_VARS:
+        monkeypatch.delenv(variable, raising=False)
 
 
 @pytest.mark.parametrize(
@@ -42,6 +62,86 @@ def test_factory_selects_zmq_by_scheme(
 
 
 @pytest.mark.parametrize(
+    "server_url",
+    ["tcp://localhost:5555", "ipc:///tmp/lmcache.sock", "inproc://lmcache"],
+)
+@pytest.mark.parametrize("api_key", ["", "http-only-secret"])
+def test_factory_warns_and_ignores_explicit_zmq_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    server_url: str,
+    api_key: str,
+) -> None:
+    """Shared explicit credentials do not prevent creating a legacy ZMQ client."""
+    create = MagicMock()
+    context = object()
+    monkeypatch.setattr(zmq_impl, "create_request_client", create)
+    factory.logger.addHandler(caplog.handler)
+    try:
+        result = RequestClientFactory.create(
+            server_url, context=context, api_key=api_key
+        )
+    finally:
+        factory.logger.removeHandler(caplog.handler)
+
+    assert result is create.return_value
+    create.assert_called_once_with(server_url, context=context)
+    assert "Ignoring api_key for ZMQ" in caplog.text
+    assert "ZMQ requests remain unauthenticated" in caplog.text
+    assert "http-only-secret" not in caplog.text
+
+
+@pytest.mark.parametrize("variable", KEY_ENV_VARS)
+def test_zmq_client_ignores_http_key_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str,
+) -> None:
+    """Inherited HTTP keys, including unreadable paths, do not affect ZMQ."""
+    monkeypatch.setenv(variable, "http-only-key-or-nonexistent-file")
+    create = MagicMock()
+    monkeypatch.setattr(zmq_impl, "create_request_client", create)
+
+    result = RequestClientFactory.create("tcp://localhost:5555")
+
+    assert result is create.return_value
+    create.assert_called_once_with("tcp://localhost:5555", context=None)
+
+
+@pytest.mark.parametrize("source", ["cli", *KEY_ENV_VARS])
+def test_request_server_factory_preserves_zmq_with_http_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    source: str,
+) -> None:
+    """HTTP-only key configurations keep ZMQ available with an honest warning."""
+    key_file = tmp_path / "key"
+    key_file.write_text("http-only-secret\n")
+    config = MPServerConfig(transport="zmq")
+    if source == "cli":
+        config.api_key_files = [str(key_file)]
+    else:
+        monkeypatch.setenv(
+            source, str(key_file) if source.endswith("_FILE") else "http-only-secret"
+        )
+    zmq_server_module = importlib.import_module(
+        "lmcache.v1.multiprocess.transport.zmq_impl.server"
+    )
+    build = MagicMock()
+    monkeypatch.setattr(zmq_server_module, "build_zmq_request_server", build)
+    server_factory.logger.addHandler(caplog.handler)
+    try:
+        result = create_request_server([], config)
+    finally:
+        server_factory.logger.removeHandler(caplog.handler)
+
+    assert result is build.return_value
+    build.assert_called_once_with([], config)
+    assert "ZMQ requests remain unauthenticated" in caplog.text
+    assert "http-only-secret" not in caplog.text
+
+
+@pytest.mark.parametrize(
     ("server_url", "normalized_url"),
     [
         ("grpc://localhost:5555", "grpc://localhost:5555"),
@@ -61,7 +161,23 @@ def test_factory_selects_grpc_by_scheme(
     result = RequestClientFactory.create(server_url, context=context)
 
     assert result is client
-    create.assert_called_once_with(normalized_url, context=context)
+    create.assert_called_once_with(normalized_url, context=context, api_key=None)
+
+
+def test_factory_passes_explicit_grpc_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programmatic gRPC clients can provide a request credential."""
+    client = MagicMock(name="grpc_request_client")
+    create = MagicMock(return_value=client)
+    monkeypatch.setattr(grpc_impl, "create_request_client", create)
+
+    result = RequestClientFactory.create("grpc://localhost:5555", api_key="secret")
+
+    assert result is client
+    create.assert_called_once_with(
+        "grpc://localhost:5555", context=None, api_key="secret"
+    )
 
 
 @pytest.mark.parametrize("server_url", ["", "grpc://", "http://localhost:5555"])
@@ -104,3 +220,21 @@ def test_request_server_factory_selects_zmq_server(
 
     assert result is server
     build.assert_called_once_with(modules, config)
+
+
+@pytest.mark.parametrize("source", ["cli", *KEY_ENV_VARS])
+def test_native_grpc_rejects_configured_authentication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: str
+) -> None:
+    """Native mode must not silently bypass shared server authentication."""
+    key_file = tmp_path / "key"
+    key_file.write_text("native-secret\n")
+    config = MPServerConfig(transport="grpc", grpc_server_mode="native")
+    if source == "cli":
+        config.api_key_files = [str(key_file)]
+    else:
+        monkeypatch.setenv(
+            source, str(key_file) if source.endswith("_FILE") else "native-secret"
+        )
+    with pytest.raises(ValueError, match="use --grpc-server-mode sync or aio"):
+        create_request_server([], config)

@@ -5,7 +5,10 @@
 from typing import Any
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.transport.base import RequestClient
+
+logger = init_logger(__name__)
 
 _ZMQ_SCHEMES = frozenset({"inproc", "ipc", "tcp"})
 _GRPC_SCHEMES = frozenset({"grpc", "grpc+unix"})
@@ -33,6 +36,7 @@ class RequestClientFactory:
         server_url: str,
         *,
         context: Any | None = None,
+        api_key: str | None = None,
     ) -> RequestClient:
         """Create a request client selected by ``server_url`` scheme.
 
@@ -45,6 +49,10 @@ class RequestClientFactory:
                 scheme for the legacy ZMQ TCP default.
             context: Optional transport context. ZMQ accepts a ``zmq.Context``;
                 transports that do not need a context may ignore it.
+            api_key: Optional explicit gRPC credential. If omitted, gRPC uses
+                the shared key environment variables. ZMQ ignores those
+                variables; explicit credentials are ignored with a warning
+                until ZMQ authentication is supported.
 
         Returns:
             A method-oriented request client for the selected transport.
@@ -55,6 +63,11 @@ class RequestClientFactory:
         """
         scheme, normalized_url = _normalize_server_url(server_url)
         if scheme in _ZMQ_SCHEMES:
+            if api_key is not None:
+                logger.warning(
+                    "Ignoring api_key for ZMQ: request authentication is not "
+                    "supported yet; ZMQ requests remain unauthenticated."
+                )
             # First Party
             from lmcache.v1.multiprocess.transport import zmq_impl
 
@@ -69,6 +82,7 @@ class RequestClientFactory:
             return grpc_impl.create_request_client(
                 normalized_url,
                 context=context,
+                api_key=api_key,
             )
 
         supported = sorted(_ZMQ_SCHEMES | _GRPC_SCHEMES)

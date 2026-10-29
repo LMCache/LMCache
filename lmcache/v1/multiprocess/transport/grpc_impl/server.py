@@ -10,9 +10,13 @@ import grpc
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.security.api_key import APIKeyVerifier
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
+from lmcache.v1.multiprocess.transport.grpc_impl.auth import (
+    GrpcAuthenticationInterceptor,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import ServiceBinding
 from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
     GrpcMultiprocessServerBase,
@@ -151,16 +155,25 @@ class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
         max_cpu_workers: int,
         max_gpu_workers: int,
         grpc_server_workers: int,
+        authentication: APIKeyVerifier | None = None,
     ) -> None:
         super().__init__(
-            bind_url, max_cpu_workers, max_gpu_workers, grpc_server_workers
+            bind_url,
+            max_cpu_workers,
+            max_gpu_workers,
+            grpc_server_workers,
+            authentication,
         )
         self._normal_slots = threading.BoundedSemaphore(max_cpu_workers)
         self._affinity_submit_lock = threading.Lock()
         # HandlerType.SERIALIZED is a transport-neutral single-main-loop contract.
         self._serialized_handler_lock = threading.Lock()
         try:
-            self._server = grpc.server(self._executor, options=GRPC_SERVER_OPTIONS)
+            self._server = grpc.server(
+                self._executor,
+                options=GRPC_SERVER_OPTIONS,
+                interceptors=(GrpcAuthenticationInterceptor(self._authentication),),
+            )
             self._bind(self._server)
         except BaseException:
             self._release_threads(wait=True)
