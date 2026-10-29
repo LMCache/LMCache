@@ -45,6 +45,9 @@ from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
 
 logger = init_logger(__name__)
 
+# 3FS is a remote storage medium; used as the default adapter memory tags.
+_HF3FS_MEMORY_TAGS = MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
+
 
 class Hf3fsL2AdapterConfig(L2AdapterConfigBase):
     """
@@ -231,9 +234,7 @@ class Hf3fsNativeL2Adapter(NativeConnectorL2Adapter):
     def __init__(
         self,
         native_client: Any,
-        memory_tags: MemoryTags = MemoryTags(
-            MemorySegment.STORAGE, MemoryResidency.REMOTE
-        ),
+        memory_tags: MemoryTags = _HF3FS_MEMORY_TAGS,
         *,
         max_capacity_gb: float = 0,
         type_name: str = "Hf3fsL2Adapter",
@@ -379,7 +380,7 @@ def _create_hf3fs_l2_adapter(
     )
     return Hf3fsNativeL2Adapter(
         native_client,
-        MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE),
+        _HF3FS_MEMORY_TAGS,
         type_name="Hf3fsL2Adapter",
         max_capacity_gb=config.max_capacity_gb,
         extra_status={
