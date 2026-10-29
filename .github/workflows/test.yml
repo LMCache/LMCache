@@ -232,7 +232,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements/test.txt
           python -m pip install -r requirements/common.txt
-          python -m pip install pygrpc-native==0.4.0
+          python -m pip install pygrpc-native==0.5.2
           NO_GPU_EXT=1 python -m pip install -e . --no-build-isolation
 
       - name: Run native, shared transport and liveness tests
