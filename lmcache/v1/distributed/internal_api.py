@@ -59,12 +59,14 @@ class L1MemoryDesc:
             allocator, this is a snapshot of the currently pinned prefix and
             does not change as the allocator grows. ``None`` means that no
             stable size is exposed.
+        shm_name: Allocator-owned POSIX shared-memory basename, if available.
     """
 
     ptr: int
     size: int
     align_bytes: int
     stable_registration_size: int | None = None
+    shm_name: str | None = None
 
 
 @dataclass(frozen=True)

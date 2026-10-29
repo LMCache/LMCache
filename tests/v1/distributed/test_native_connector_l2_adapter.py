@@ -38,10 +38,46 @@ from lmcache.v1.memory_management import (
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd, create_event_notifier
+from lmcache.v1.platform.event_notifier import EventNotifier
 
 _MEMORY_TAGS = MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
+
+
+@pytest.mark.parametrize("failure_at", [2, 3, 4])
+def test_failed_bridge_construction_closes_created_notifiers(
+    monkeypatch: pytest.MonkeyPatch, failure_at: int
+) -> None:
+    """Partial notifier allocation and thread-start failures must not leak FDs."""
+    native = MockNativeConnector()
+    created: list[int] = []
+
+    def allocate() -> EventNotifier:
+        if len(created) + 1 == failure_at:
+            raise OSError("injected notifier allocation failure")
+        notifier = create_event_notifier()
+        created.append(notifier.fileno())
+        return notifier
+
+    def fail_thread_start(self: threading.Thread) -> None:
+        raise OSError("injected thread startup failure")
+
+    monkeypatch.setattr(
+        "lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter.create_event_notifier",
+        allocate,
+    )
+    if failure_at == 4:
+        monkeypatch.setattr(threading.Thread, "start", fail_thread_start)
+    try:
+        with pytest.raises(OSError, match="injected"):
+            NativeConnectorL2Adapter(native, _MEMORY_TAGS)
+        for fd in created:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+    finally:
+        native.close()
+
 
 # =============================================================================
 # Mock Native Connector (simulates the pybind C++ IStorageConnector interface)

@@ -59,7 +59,7 @@ If the Mooncake headers are not installed in the system include path
 **Mooncake fields:**
 
 All other keys in the JSON config (except ``type``, ``num_workers``,
-``per_op_workers``, and ``eviction``) are forwarded **as-is** to Mooncake's
+``per_op_workers``, ``process``, ``serde``, and ``eviction``) are forwarded **as-is** to Mooncake's
 ``setup_internal(ConfigDict)``.  Refer to the
 `Mooncake documentation <https://github.com/kvcache-ai/Mooncake>`_
 for available setup keys (e.g., ``local_hostname``,
@@ -109,3 +109,38 @@ etc.), see `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ .
 - If Mooncake RDMA initialization fails at adapter creation time, verify that
   LMCache L1 memory is enabled and that the descriptor has a non-zero pointer
   and size.
+
+Process isolation (opt-in)
+--------------------------
+
+Add ``"process": {}`` to the adapter JSON to enable the isolated native worker
+and admission guard. Omit the field to retain the in-process implementation.
+This mode requires Linux, ``--no-l1-use-lazy``, one named SHM arena, and the
+prefetch/store transfer-pin lifecycle. Generate a fresh ``--shm-name`` for every
+service start. Serde and anonymous or multiple L1 arenas are rejected.
+
+Process fields are ``operation_timeout`` (8 seconds), ``startup_timeout`` (15),
+``kill_timeout`` (10), ``restart_interval`` (2), and ``max_pending`` (16).
+The nested ``guard`` object accepts the admission/probe policy, for example:
+
+.. code-block:: json
+
+    {
+      "process": {
+        "operation_timeout": 8.0,
+        "guard": {
+          "lookup_timeout": 2.0,
+          "cooldown": 15.0,
+          "probe_timeout": 2.0,
+          "recovery_successes": 2
+        }
+      }
+    }
+
+When remote admission is open, misses and bypassed stores preserve L1 serving.
+The first affected request can still wait for a deadline and recomputation.
+Recovery requires verified data probes, native readiness and drained old I/O.
+Inspect ``resilience.remote_available`` separately from bridge ``is_healthy``.
+Do not force-clear/delete objects or close L1 while operations are active.
+If worker termination cannot be confirmed, the parent exits with code 78 rather
+than releasing buffers that might still be accessed.

@@ -135,12 +135,18 @@ class InvalidatingAdmissionL1Manager(L1Manager):
         self.invalidated_key = invalidated_key
 
     def finish_write_and_reserve_read(
-        self, keys: list[ObjectKey], read_locks: int = 1, tag: str = ""
+        self,
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        tag: str = "",
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Invalidate one staging object before attempting the real admission."""
         if self.invalidated_key in keys:
             self.delete([self.invalidated_key], force=True)
-        return super().finish_write_and_reserve_read(keys, read_locks, tag)
+        return super().finish_write_and_reserve_read(
+            keys, read_locks, tag, read_generations=read_generations
+        )
 
 
 def test_shutdown_keeps_load_buffers_until_adapter_completion(
@@ -335,7 +341,7 @@ def test_shutdown_settles_queued_requests_and_rejects_new_submissions(
     adapter = GatedLoadAdapter()
     keys = [make_object_key(i) for i in range(2)]
     store_keys_in_l2(adapter, keys, make_layout())
-    controller = make_controller(l1_manager, [adapter], max_in_flight=1)
+    controller = make_controller(l1_manager, [adapter], inflight_watermark=0.001)
     controller.start()
     active = controller.submit_prefetch_request(single_row_spec(keys))
     assert adapter.load_started.wait(5)

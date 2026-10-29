@@ -975,8 +975,9 @@ class L1Manager(L1ManagerInterface):
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_IS_LOCKED: The key is read-locked or transfer-pinned, or a staging object is
-                write-locked or I/O-pinned. Never returned when ``force`` is True.
+            KEY_IS_LOCKED: The key is read-locked or transfer-pinned, or a staging
+                object is write-locked or I/O-pinned. Never returned when
+                ``force`` is True.
         """
         need_to_free: list[MemoryObj] = []
         ret: dict[ObjectKey, L1Error] = {}

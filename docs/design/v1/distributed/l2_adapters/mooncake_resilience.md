@@ -2,9 +2,10 @@
 
 Related discussion: [#6165](https://github.com/LMCache/LMCache/issues/6165).
 This component composes with the [process transport](mooncake_process_client.md).
-Neither component is registered by the L2 factory; existing deployments are
-unchanged. The process transport's L1 ownership, controller shutdown and RDMA
-validation gates also apply here. Do not wrap the unmodified in-process SDK and
+The integrated factory opts into both components through a `process` dictionary;
+existing configurations are unchanged. The process transport's L1 ownership,
+controller shutdown and RDMA validation requirements also apply here. Do not
+wrap the unmodified in-process SDK and
 treat the guard as a DMA cancellation mechanism.
 
 ## Responsibility boundary
@@ -99,6 +100,9 @@ the result budget, rather than raising because the monitor is stopping.
 `report_status()` reports circuit state/reason, remote admission, pending/expired
 operations, slow data operations, failure/bypass counts, probe state and policy.
 “Remote available” describes admission at that instant, not a service SLA.
+The native bridge's `is_healthy` describes its completion thread; an open circuit
+can coexist with a healthy L1 serving path. Inspect `resilience.remote_available`
+and the `process` status separately.
 The first affected request may still wait for a lookup or transport deadline;
 recomputation and reduced cache hit rate can increase latency.
 

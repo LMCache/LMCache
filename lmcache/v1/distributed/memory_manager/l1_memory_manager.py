@@ -213,12 +213,14 @@ class L1MemoryManager:
         """
         if isinstance(self._allocator, MixedMemoryAllocator):
             buffer = self._allocator.buffer
+            shm_name = (self._allocator.shm_name or "").removeprefix("/") or None
             # POSIX SHM is file-backed and is not eligible for io_uring
             # fixed-buffer registration, so expose no stable prefix for it.
             stable_registration_size = (
                 None if self._allocator.shm_name else self._size_in_bytes
             )
         elif isinstance(self._allocator, LazyMemoryAllocator):
+            shm_name = None
             # TODO(ApostaC): need to test if the RDMA registration works
             # before the lazy expansion is finished
             buffer = self._allocator.get_underlying_buffer()
@@ -240,6 +242,7 @@ class L1MemoryManager:
             size=self._size_in_bytes,
             align_bytes=self._align_bytes,
             stable_registration_size=stable_registration_size,
+            shm_name=shm_name,
         )
 
     def close(self) -> None:

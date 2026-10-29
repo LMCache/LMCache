@@ -25,12 +25,12 @@ from lmcache.v1.distributed.storage_manager import (
     L1ReadTransferCompletion,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.multiprocess import native_completion
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
+from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
 from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
-from lmcache.v1.multiprocess import native_completion
-from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
 
 
 class _FakeEventBackend:

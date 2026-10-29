@@ -3,9 +3,10 @@
 Related design discussion: [#6165](https://github.com/LMCache/LMCache/issues/6165).
 
 `mooncake_process_client.py` implements the native completion protocol in a
-dedicated Linux child. It is **not registered by the L2 factory**. Existing
-Mooncake configurations continue to use the existing in-process implementation.
-This is a component for reviewing the failure boundary, not a deployment recipe.
+dedicated Linux child. The integrated factory enables it only when a
+`mooncake_store` adapter includes a `process` dictionary. Existing configurations
+continue to use the in-process implementation. See
+[process integration](mooncake_process_adapter.md) for prerequisites and configuration.
 
 ## Why a process
 
@@ -64,10 +65,11 @@ a new service generation while a worker could still access it. After a parent
 crash, allocate a fresh backing object and reclaim the old generation only after
 its worker/resources are known to be gone.
 
-**Current L1 TTL locks do not satisfy this ownership contract.** They can expire
-while the worker is alive. An operation deadline smaller than the configured TTL
-does not solve reservation age, scheduler pauses, or driver teardown delays.
-This is why factory activation is deliberately absent.
+**TTL locks alone do not satisfy this ownership contract.** The integrated
+prefetch and store controllers use non-expiring write/read buffer pins until
+terminal completion. An operation deadline smaller than the configured TTL is
+not a substitute for these pins. Concurrent `clear(force=True)`,
+`delete(force=True)` and direct L1 teardown remain unsupported.
 
 ## Admission and shutdown
 
@@ -88,12 +90,12 @@ This is why factory activation is deliberately absent.
 
 ## Activation gates
 
-Before connecting this component to `StorageManager`:
+The integrated deployment must satisfy all of these conditions:
 
 1. Establish non-expiring ownership for every active native I/O, including error
    paths, request aborts, eviction and shutdown. Do not rely on TTL comparison.
-2. Stop controller admission/loops while retaining their buffers; fence adapters;
-   then release controller resources. Account for multiple adapters and wrappers.
+2. Stop controller admission and drain terminal results while retaining buffers;
+   close adapters before L1 teardown. Account for multiple adapters and wrappers.
 3. Provide allocator-owned mapping metadata and fresh service generations.
    Reject layouts such as serialized temporary buffers outside the shared arena.
 4. Validate real native SDK initialization, RDMA success/failure/partial completion,
