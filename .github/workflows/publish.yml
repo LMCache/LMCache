@@ -138,7 +138,7 @@ jobs:
               run: |
                   set -Eeuo pipefail
                   IMAGE="vllm/vllm-openai-xpu"
-                  TAG="v0.32.0"
+                  TAG="latest"
                   DIGEST="$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{json .Manifest.Digest}}' | tr -d '\"')"
                   [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
                   echo "image=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"

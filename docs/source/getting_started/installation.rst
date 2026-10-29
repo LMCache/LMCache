@@ -101,8 +101,7 @@ runtime, see :doc:`compatibility` before installing.
                     .. tab-item:: Intel XPU
 
                         The Intel XPU wheel is ABI-matched to the upstream
-                        ``vllm/vllm-openai-xpu:v0.32.0`` image (torch 2.14.0+xpu
-                        and oneAPI/SYCL runtime 2026.1.1).
+                        ``vllm/vllm-openai-xpu:latest`` image.
                         It is published to a dedicated
                         `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
 
@@ -112,9 +111,9 @@ runtime, see :doc:`compatibility` before installing.
                         .. code-block:: bash
 
                             docker run -it --device /dev/dri --shm-size=4g \
-                                --entrypoint bash vllm/vllm-openai-xpu:v0.32.0
+                                --entrypoint bash vllm/vllm-openai-xpu:latest
 
-                            VERSION=0.5.7  # use an XPU release built for vLLM 0.32.0
+                            VERSION=0.5.7  # use an XPU release built for latest vLLM
                             pip install lmcache==${VERSION}+xpu --no-deps \
                                 --no-index \
                                 --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-xpu
@@ -360,12 +359,12 @@ runtime, see :doc:`compatibility` before installing.
                         .. code-block:: bash
 
                             docker run -it --device /dev/dri --shm-size=4g \
-                                --entrypoint bash vllm/vllm-openai-xpu:v0.32.0
+                                --entrypoint bash vllm/vllm-openai-xpu:latest
 
                             git clone https://github.com/LMCache/LMCache.git
                             cd LMCache
 
-                            python3 -m pip install -r requirements/build.txt
+                            uv pip install -r requirements/build.txt
                             if [ -f /opt/intel/oneapi/setvars.sh ]; then
                                 source /opt/intel/oneapi/setvars.sh
                             fi
@@ -375,7 +374,7 @@ runtime, see :doc:`compatibility` before installing.
                                 source /opt/intel/oneapi/setvars.sh
                             fi
 
-                            BUILD_WITH_SYCL=1 python3 -m pip install --no-build-isolation -e .
+                            BUILD_WITH_SYCL=1 uv pip install --no-build-isolation -e .
 
                     .. tab-item:: MetaX MACA
 
@@ -485,7 +484,7 @@ runtime, see :doc:`compatibility` before installing.
 
                 .. code-block:: bash
 
-                    docker pull vllm/vllm-openai-xpu:v0.32.0
+                    docker pull vllm/vllm-openai-xpu:latest
 
         The official CUDA vLLM and standalone images default to the non-root
         ``lmcache`` user (uid 1000). Mount the Hugging Face cache at

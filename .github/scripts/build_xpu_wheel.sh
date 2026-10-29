@@ -1,8 +1,7 @@
 #!/bin/bash
 # Build the LMCache Intel XPU/SYCL wheel.
 #
-# Runs inside a vLLM XPU runtime or Intel oneAPI build image. No GPU is required
-# to compile. Runtime images need root access to install the matching compiler.
+# Runs inside an Intel oneAPI build image. No GPU is required to compile.
 # Produces a manylinux-tagged wheel in /work/LMCache/dist that excludes torch
 # and oneAPI/SYCL runtime libs (bound at runtime by the host XPU image).
 #
