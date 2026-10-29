@@ -248,6 +248,8 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
             in protocol group order. Empty means legacy single-group; the
             top-level ``num_layers``/``hidden_dim_size``/``dtype_str`` then
             describe the sole group.
+        kv_worker_id: This worker's ``IPCCacheServerKey.worker_id``, used to
+            keep each pipeline stage's layout apart; ``None`` if not sent.
     """
 
     instance_id: int
@@ -260,6 +262,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     use_mla: bool
     num_physical_slots: int | None = None
     group_layouts: list[GroupLayout] = []
+    kv_worker_id: int | None = None
 
 
 @dataclass

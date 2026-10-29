@@ -55,6 +55,8 @@ class LayoutHints(TypedDict, total=False):
             rank distinguishes MLA ``[NB, BS, HS]`` from independent
             components ``[NB, BS, NH, HS]``.
         head_dim: Per-head dimension. Used by TRT-LLM (same).
+        kv_worker_id: This rank's ``IPCCacheServerKey.worker_id``. Used by
+            the MP server to prefetch with each pipeline stage's own layout.
     """
 
     kv_layout: KVLayoutName
@@ -62,3 +64,4 @@ class LayoutHints(TypedDict, total=False):
     tokens_per_block: int
     kv_list_layout: Literal["k_v", "unified"]
     head_dim: int
+    kv_worker_id: int
