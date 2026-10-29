@@ -509,7 +509,19 @@ def _pick_layout_probe_tensor(
     engine_kv_format: "lmcache_native.EngineKVFormat",
     layer_idx: int,
 ) -> torch.Tensor:
-    """Return the tensor whose physical layout represents a KV layer."""
+    """Return the tensor whose physical layout represents a KV layer.
+
+    Args:
+        kv_caches: Full KV cache structure (already normalised).
+        engine_kv_format: Format of ``kv_caches``.
+        layer_idx: 0-based layer index used as the layout probe.
+
+    Returns:
+        Tensor whose shape and strides describe the requested layer's layout.
+
+    Raises:
+        TypeError: A cross-layer format does not use a tensor backing store.
+    """
     # Layout probe only (shape/stride/storage_offset/dtype); not
     # the K/V slice fed to the transfer kernel.
     # - Cross-layer formats: ``kv_caches`` is the single backing
@@ -578,11 +590,12 @@ def resolve_block_stride(
             padding = int(rep.stride(0)) - tight_dim0
             if padding > 0:
                 raise ValueError(
-                    "resolve_block_stride_and_log_layout: group's probe "
-                    f"tensor has dim-0 padding ({padding} elements per "
+                    f"resolve_block_stride: layer {layer_idx} probe tensor "
+                    f"has dim-0 padding ({padding} elements per "
                     f"block) but engine_kv_format={engine_kv_format!r} is not "
-                    "a supported dim-0-padded format (only "
-                    "NL_X_NB_BS_HS is); downstream transfer kernels "
+                    "a supported dim-0-padded format; only block-axis formats "
+                    "in _BLOCK_AXIS_FORMATS support dim-0 padding. Downstream "
+                    "transfer kernels "
                     "cannot honour this padding and would read/write "
                     "wrong bytes. "
                     f"layer_idx={layer_idx}, shape={tuple(rep.shape)}, "
