@@ -12,13 +12,20 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
+from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
+    ObjectKey,
+    PrefetchHandle,
+    PrefetchResult,
+)
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.rpc import get_rpc_spec
+from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
+from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 # Test helpers
@@ -135,15 +142,17 @@ def _make_free_locks_ctx(
         num_chunks_in_sw=windows
     )
     session = ctx.session_manager.get_or_create.return_value
+    ctx.session_manager.get.return_value = session
+    session.get_read_generations.return_value = {}
+    session.get_abandoned_prefetch.return_value = None
     session.prefetch_hit_chunks = hit_chunks
     session.prefetch_locked_gids = tuple(locked_gids)
     session.lookup_ipc_key = _free_locks_key(1024, start=lookup_start, end=1024)
     return ctx
 
 
-def test_server_free_lookup_locks_calls_finish_read_prefetched():
-    """LookupModule.free_lookup_locks should resolve hash keys and call
-    finish_read_prefetched on the storage manager."""
+def test_server_free_lookup_locks_releases_only_claimed_reservations():
+    """FREE resolves exact keys, claims remaining shares, then settles them."""
     # First Party
     from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
@@ -161,8 +170,10 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
     ):
         module.free_lookup_locks(key, 1)
 
-    module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
-        sentinel_obj_keys, read_locks=1, l1_owners=None
+    session = module.context.session_manager.get.return_value
+    session.claim_free_reads.assert_called_once_with(key, sentinel_obj_keys)
+    module.context.storage_manager.finish_read_reservations.assert_called_once_with(
+        session.claim_free_reads.return_value
     )
 
 
@@ -180,10 +191,10 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
     )
 
 
-def _released_chunks(finish_read_mock: MagicMock) -> set[tuple[int, bytes]]:
-    """Collect (object_group_id, chunk_hash) pairs released by the module."""
-    (obj_keys,), kwargs = finish_read_mock.call_args
-    assert kwargs == {"read_locks": 1, "l1_owners": None}
+def _released_chunks(claim_mock: MagicMock) -> set[tuple[int, bytes]]:
+    """Collect the exact object keys whose remaining shares FREE claims."""
+    (_key, obj_keys), kwargs = claim_mock.call_args
+    assert not kwargs
     return {(k.object_group_id, k.chunk_hash) for k in obj_keys}
 
 
@@ -203,7 +214,7 @@ def test_server_free_lookup_locks_sliding_window_skips_unlocked_chunks():
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
 
-    released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
+    released = _released_chunks(ctx.session_manager.get.return_value.claim_free_reads)
     assert released == {(1, b"h0"), (1, b"h1"), (1, b"h2")}
 
 
@@ -222,7 +233,7 @@ def test_server_free_lookup_locks_sliding_window_releases_locked_suffix():
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=1024), 1)
 
-    released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
+    released = _released_chunks(ctx.session_manager.get.return_value.claim_free_reads)
     assert released == {
         (0, b"h3"),
         (1, b"h0"),
@@ -243,7 +254,7 @@ def test_server_free_lookup_locks_caps_release_at_hit_length():
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=1024), 1)
 
-    released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
+    released = _released_chunks(ctx.session_manager.get.return_value.claim_free_reads)
     assert released == {(0, b"h0"), (0, b"h1")}
 
 
@@ -264,7 +275,7 @@ def test_server_free_lookup_locks_floors_release_to_the_lookup_start():
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=1024), 1)
 
-    released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
+    released = _released_chunks(ctx.session_manager.get.return_value.claim_free_reads)
     assert released == {(0, b"h2"), (0, b"h3")}
     # The range was floored before hashing: [512, 1024), not [0, 1024).
     hash_call = ctx.token_hasher.compute_packed_chunk_hashes.call_args
@@ -284,6 +295,23 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
 
     hashes = [b"h2", b"h3"]  # the stale range [2, 4)
     ctx = _make_free_locks_ctx(hashes, windows=[1, -1], hit_chunks=8)
+    old = _free_locks_key(1024, start=512, end=1024)
+    session = Session(
+        old.request_id, TokenHasher(chunk_size=256, hash_algorithm="blake3")
+    )
+    kv_rank = ObjectKey.ComputeKVRank(1, 0, 1, 0)
+    original_generations = {
+        ObjectKey(chunk, "testmodel", kv_rank, group): 11
+        for group, chunk in ((0, b"h3"), (1, b"h2"), (1, b"h3"))
+    }
+    original_owners = {key: 0 for key in original_generations}
+    session.begin_lookup(old, (1, -1))
+    session.record_prefetch_result(
+        4, (0, 1), original_owners, read_generations=original_generations
+    )
+    session.begin_lookup(_free_locks_key(1024, start=0, end=1024), (1, -1))
+    session.record_prefetch_result(8, (0, 1))
+    ctx.session_manager.get.return_value = session
     module = LookupModule(ctx)
 
     # Primary range empty; only the stale range [512, 1024) is released.
@@ -291,7 +319,12 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
         _free_locks_key(1024, start=0, end=0), 1, extra_ranges=((512, 1024),)
     )
 
-    released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
+    (claims,), kwargs = ctx.storage_manager.finish_read_reservations.call_args
+    assert not kwargs
+    assert {claim.key: claim.generation for claim in claims} == original_generations
+    assert {claim.key: claim.owner for claim in claims} == original_owners
+    assert all(claim.count == 1 for claim in claims)
+    released = {(claim.key.object_group_id, claim.key.chunk_hash) for claim in claims}
     # Window 1 with hit=4 (the range end): only chunk 3; full attention:
     # chunks 2-3 (floored to the range start).
     assert released == {(0, b"h3"), (1, b"h2"), (1, b"h3")}
@@ -312,16 +345,18 @@ def test_server_free_lookup_locks_without_result_releases_nothing():
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
 
-    ctx.storage_manager.finish_read_prefetched.assert_not_called()
+    ctx.storage_manager.finish_read_reservations.assert_not_called()
 
 
 def test_server_free_lookup_locks_consumes_pending_result_first():
     """An unconsumed result supplies the exact hit length and retained owners."""
     ctx = _make_free_locks_ctx([b"h0", b"h1", b"h2"], windows=[-1], hit_chunks=-1)
     session = ctx.session_manager.get_or_create.return_value
-    session.record_prefetch_result.side_effect = lambda hit, gids, owners=None: (
-        setattr(session, "prefetch_hit_chunks", hit),
-        setattr(session, "prefetch_locked_gids", gids),
+    session.record_prefetch_result.side_effect = (
+        lambda hit, gids, owners=None, **kwargs: (
+            setattr(session, "prefetch_hit_chunks", hit),
+            setattr(session, "prefetch_locked_gids", gids),
+        )
     )
     owners = {"owner-map": 1}
     ctx.get_read_owners.return_value = owners
@@ -346,20 +381,25 @@ def test_server_free_lookup_locks_consumes_pending_result_first():
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
 
-    session.record_prefetch_result.assert_called_once_with(2, (0,), owners)
+    session.record_prefetch_result.assert_called_once_with(
+        2, (0,), owners, read_generations={}
+    )
     assert "req-sw" not in module._prefetch_jobs
     ctx.event_bus.publish.assert_called_once()
     assert (
         ctx.event_bus.publish.call_args.args[0].event_type
         == EventType.MP_LOOKUP_PREFETCH_END
     )
-    ctx.storage_manager.finish_read_prefetched.assert_called_once()
-    (obj_keys,), kwargs = ctx.storage_manager.finish_read_prefetched.call_args
+    session.claim_free_reads.assert_called_once()
+    (_key, obj_keys), kwargs = session.claim_free_reads.call_args
     assert {(k.object_group_id, k.chunk_hash) for k in obj_keys} == {
         (0, b"h0"),
         (0, b"h1"),
     }
-    assert kwargs == {"read_locks": 1, "l1_owners": owners}
+    assert not kwargs
+    ctx.storage_manager.finish_read_reservations.assert_called_once_with(
+        session.claim_free_reads.return_value
+    )
 
 
 def test_server_free_lookup_locks_while_prefetch_running_releases_nothing():
@@ -381,7 +421,7 @@ def test_server_free_lookup_locks_while_prefetch_running_releases_nothing():
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
 
-    ctx.storage_manager.finish_read_prefetched.assert_not_called()
+    ctx.storage_manager.finish_read_reservations.assert_not_called()
     assert "req-sw" in module._prefetch_jobs
     ctx.session_manager.get_or_create.return_value.record_prefetch_result.assert_not_called()
 
@@ -412,7 +452,7 @@ def test_server_free_lookup_locks_no_matching_chunks():
 
     module.free_lookup_locks(key, 1)
 
-    module.context.storage_manager.finish_read_prefetched.assert_not_called()
+    module.context.storage_manager.finish_read_reservations.assert_not_called()
 
 
 def test_server_handler_registered():
@@ -515,7 +555,7 @@ def test_server_free_lookup_locks_honors_the_session_lock_model():
     ):
         module.free_lookup_locks(key, 1)
 
-    released = ctx.storage_manager.finish_read_prefetched.call_args[0][0]
+    released = ctx.session_manager.get.return_value.claim_free_reads.call_args[0][1]
     # Group 0 (recurrent, window 1): only the boundary chunk. Group 1
     # (attention): the whole hit prefix. Group 2 (standalone aux): NOTHING.
     assert released == ["g0-h2", "g1-h0", "g1-h1", "g1-h2"]
@@ -535,4 +575,4 @@ def test_disjoint_frees_for_one_lookup_both_land():
     module.free_lookup_locks(_free_locks_key(1024, start=512, end=1024), 1)
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=512), 1)
 
-    assert ctx.storage_manager.finish_read_prefetched.call_count == 2
+    assert ctx.storage_manager.finish_read_reservations.call_count == 2

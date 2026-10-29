@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import Iterator
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -53,7 +54,15 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.utils import CacheStoreEvent  # noqa: E402
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
+# Test helpers
+from tests.v1.multiprocess import test_lookup_lock_generation as lookup_tests
+from tests.v1.multiprocess.test_lookup_lock_generation import (
+    LookupFixture,
+    seed_prompt,
+)
+
 pytestmark = pytest.mark.no_shared_allocator
+lookup = lookup_tests.lookup
 
 
 @pytest.mark.parametrize(
@@ -810,11 +819,13 @@ def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
         if replay:
             assert (need, async_load) == (8, True)
             assert tracker.num_lmcache_hit_tokens == 8
-            assert tracker.pending_free_ranges == [(8, 12)]
+            assert tracker.pending_replay_tail == (8, 12)
+            assert tracker.pending_free_ranges == []
         else:
             assert (need, async_load) == (11, True)
             assert tracker.num_lmcache_hit_tokens == 12
             assert tracker.pending_free_ranges == []
+            assert tracker.pending_replay_tail is None
         # vLLM allocates exactly the blocks it was told about (8 tokens = 2
         # blocks under replay); the retrieve must fit in them.
         n_blocks = 2 if replay else 3
@@ -832,6 +843,55 @@ def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
         assert len(meta.op.block_ids[0]) * 4 >= meta.op.end
         if replay:
             kwargs = mock_io.scheduler.free_lookup_locks.call_args.kwargs
-            assert kwargs["extra_ranges"] == ((8, 12),)
+            assert (kwargs["start"], kwargs["end"]) == (8, 12)
+            assert kwargs.get("extra_ranges", ()) == ()
+    finally:
+        scheduler.shutdown()
+
+
+def test_prefix_replay_tail_releases_real_lookup_locks(
+    mock_io: SimpleNamespace, lookup: LookupFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Connect the full-prompt replay decision to real host-lock cleanup."""
+    module, storage, _, _ = lookup
+    key, keys = seed_prompt(lookup)
+    module.lookup(key, 1)
+    assert module.wait_prefetch_status(key.request_id, timeout=5) == 3
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    monkeypatch.setattr(
+        "lmcache.integration.vllm.lmcache_mp_connector.get_prefix_replay_tokens",
+        lambda _: 128,
+    )
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    scheduler.bind_gpu_block_pool(mock_io.pool)
+
+    def release(**kwargs: Any) -> None:
+        module.free_lookup_locks(
+            replace(
+                key,
+                token_bytes=kwargs["packed_token_ids"],
+                start=kwargs["start"],
+                end=kwargs["end"],
+            ),
+            1,
+            kwargs.get("extra_ranges", ()),
+        )
+
+    try:
+        request = _request(key.request_id)
+        mock_io.scheduler.check_lookup_result.return_value = 12
+        mock_io.scheduler.free_lookup_locks.side_effect = release
+        need, asynchronous = scheduler.get_num_new_matched_tokens(request, 0)
+        assert (need, asynchronous) == (8, True)
+        assert need is not None
+        scheduler.update_state_after_alloc(
+            request,
+            MagicMock(get_block_ids=lambda: ([1, 2],)),
+            need,
+        )
+        assert storage.delete_l1_keys(keys[2:]) == (1, 0)
+        assert storage.delete_l1_keys(keys[:2]) == (0, 2)
     finally:
         scheduler.shutdown()

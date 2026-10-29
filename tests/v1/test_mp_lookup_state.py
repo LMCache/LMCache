@@ -448,6 +448,24 @@ def test_drain_returns_the_server_that_missed_its_deadline() -> None:
     assert run_bounded(state.drain) == "s0"
 
 
+@pytest.mark.parametrize("phase", ["lookup", "query"])
+def test_take_pending_rpcs_keeps_timed_out_handler_once(phase: str) -> None:
+    """Closing transfers a raw ACK even after its scheduler deadline elapsed."""
+    state, (client,) = make_state(timeout=0)
+    state.submit()
+    if phase == "query":
+        client.lookups[0].set_result(None)
+        pending = client.queries[0]
+    else:
+        pending = client.lookups[0]
+    assert state.on_scheduler_check() == ["s0"]
+    assert state.close_and_take_pending_rpcs() == {"s0": (pending,)}
+    assert state.close_and_take_pending_rpcs() == {}
+    pending.set_result(None)
+    assert state.close_and_take_pending_rpcs() == {}
+    assert len(client.queries) == (1 if phase == "query" else 0)
+
+
 def test_concurrent_replies_keep_one_query_in_flight_per_server() -> None:
     state, clients = make_state(4, timeout=30)
     rng = random.Random(0)
