@@ -3,7 +3,7 @@
 
 Holds completed KV retrieves for one engine step so that several
 prefill tails are admitted on the same step boundary and the per-step
-token budget is filled. See docs/design/v1/multiprocess/admission_coalescing.md.
+token budget is filled. See docs/design/integration/vllm/admission_coalescing.md.
 """
 
 # Standard
@@ -22,18 +22,12 @@ DEFAULT_BUDGET_TOKENS: int = 8192
 # deliberately generous: it must comfortably exceed the typical sibling
 # retrieve duration (d), otherwise a sibling submitted shortly after the
 # ready request can never arrive inside the window and every hold is
-# wasted latency. On our benchmark d converges to ~260 ms and the
-# measured hold durations stay well under 1 s, so 3 s gives the ETA
-# condition room to admit real siblings. An adaptive variant
-# (factor * d EWMA) was tested and rejected: it collapsed the window to
-# ~0.6 s on fast deployments and the coalescing never fired.
+# wasted latency. 
 _DEADLINE_S: float = 3.0
 # Fraction of the step budget that counts as a full step.
 _FILL_ALPHA: float = 0.75
 # Number of ready retrieves to coalesce.
 _K: int = 3
-# Enable the sibling-ETA release condition.
-_SIBLING_ETA: bool = True
 # Log a decision summary every N gate calls (0 = never). The summary
 # (hold rate, duration EWMA) is what the deadline and alpha were tuned
 # from; keep it cheap enough to leave on in production.
@@ -75,7 +69,16 @@ class AdmissionCoalescer:
         The tail is computed by the adapter from the op itself
         (packed token count minus the cached range) because new metadata
         fields do not survive SchedulerOutput serialization.
+
+        No-op when the gate is disabled: the off path keeps no
+        per-request state, so it cannot grow without bound.
+
+        Args:
+            request_id: The request identifier.
+            tail_tokens: Prefill tail in tokens.
         """
+        if not self._enabled:
+            return
         self._submit_ts[request_id] = time.monotonic()
         self._tail[request_id] = tail_tokens
 
@@ -91,7 +94,17 @@ class AdmissionCoalescer:
         Held ids keep their state and are re-evaluated on the next call,
         so a completed retrieve is reported exactly once. Reported
         requests update the duration EWMA and drop their state.
+
+        Args:
+            ready: Request ids whose retrieve completed this call.
+            pending: All in-flight retrieve ids (superset of *ready*).
+
+        Returns:
+            The subset of *ready* to report this engine step; an empty
+            set means hold everything for one more step.
         """
+        if not self._enabled:
+            return ready
         reported = self._hold(ready, pending)
         now = time.monotonic()
         if len(ready) > len(reported):
@@ -99,13 +112,13 @@ class AdmissionCoalescer:
         if _LOG_EVERY and self._enabled:
             self._log_calls += 1
             if self._log_calls % _LOG_EVERY == 0:
-                logger.info(
-                    "admit_coalesce: calls=%d holds=%d ewma_ms=%s "
-                    "deadline_ms=%d",
+                logger.debug(
+                    "admit_coalesce: calls=%d holds=%d ewma_ms=%s deadline_ms=%d",
                     self._log_calls,
                     self._log_holds,
                     f"{self._duration_ewma * 1000:.0f}"
-                    if self._duration_ewma is not None else "n/a",
+                    if self._duration_ewma is not None
+                    else "n/a",
                     int(_DEADLINE_S * 1000),
                 )
         for request_id in ready - reported:
@@ -158,15 +171,14 @@ class AdmissionCoalescer:
         # finish before the deadline: its remaining time is the typical
         # retrieve duration minus how long it has already waited.
         # Without duration observations, release instead of holding.
-        if _SIBLING_ETA:
-            if self._duration_ewma is None:
-                return ready
-            eta_min = min(
-                max(0.0, self._duration_ewma - (now - self._submit_ts.get(r, now)))
-                for r in inflight
-            )
-            if eta_min > deadline_left:
-                return ready
+        if self._duration_ewma is None:
+            return ready
+        eta_min = min(
+            max(0.0, self._duration_ewma - (now - self._submit_ts.get(r, now)))
+            for r in inflight
+        )
+        if eta_min > deadline_left:
+            return ready
 
         return set()
 

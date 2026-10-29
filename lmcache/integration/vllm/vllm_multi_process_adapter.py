@@ -149,7 +149,7 @@ class ExtraConfigDefault(enum.Enum):
     mp_transfer_mode = "auto"
     # Hold completed retrieves briefly so that several prefill tails
     # are admitted on the same step boundary and the per-step token
-    # budget is filled (see docs/design/v1/multiprocess/admission_coalescing.md). Default off.
+    # budget is filled. Default off.
     admit_coalesce = False
     # Whether IPC mechanisms must work across isolated containers (no
     # shared host IPC namespace or /dev/shm); see
@@ -1284,6 +1284,9 @@ class LMCacheMPWorkerAdapter:
                 for vLLM's KV event publisher.
             required_chunk_alignment: Optional model-derived chunk alignment
                 used to bind or validate the LMCache server chunk size.
+            admit_coalesce_budget: Step budget in tokens for the admission
+                coalescing gate; the connector passes vLLM's
+                ``scheduler_config.max_num_batched_tokens``.
 
         Raises:
             TypeError: If the connector argument shape is unsupported.
@@ -1336,7 +1339,7 @@ class LMCacheMPWorkerAdapter:
                 self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
             else:
                 self._mp_transfer_mode = None
-            # Hold-K admission coalescing: one switch; K fixed at 2.
+            # Hold-K admission coalescing: one switch; K fixed at 3.
             admit_coalesce = cfg[ExtraConfigDefault.admit_coalesce.name]
             set_ipc_policy(
                 isolated_ipc=cfg[ExtraConfigDefault.isolated_ipc.name],
@@ -1344,7 +1347,7 @@ class LMCacheMPWorkerAdapter:
             )
         else:
             self._mp_transfer_mode = None
-            admit_coalesce = ExtraConfigDefault.admit_coalesce.value
+            admit_coalesce = ExtraConfigDefault.admit_coalesce.default
         self._coalescer = AdmissionCoalescer(
             enabled=bool(admit_coalesce),
             budget_tokens=admit_coalesce_budget,
@@ -2107,7 +2110,9 @@ class LMCacheMPWorkerAdapter:
 
         # Admission coalescing: hold ready retrieves for one more step
         # when that can fill the step (see AdmissionCoalescer). Held ids
-        # stay in retrieve_futures and are re-evaluated next call.
+        # stay in retrieve_futures and are re-evaluated next call. Failed
+        # retrieves bypass the gate: holding them would delay the error
+        # path and skew the duration EWMA.
         finished_retrieves = self._coalescer.select_to_report(
             finished_retrieves, set(self.retrieve_futures)
         )
@@ -2164,6 +2169,9 @@ class LMCacheMPWorkerAdapter:
             - The second set contains the finished retrieve request ids,
                 including retrieves dropped at submit time while unhealthy
                 (reported exactly once; blocks already in error_block_ids).
+                When ``lmcache.mp.admit_coalesce`` is enabled, a completed
+                retrieve may be intentionally held back for one or more
+                engine steps (bounded by the hold deadline, default 3 s).
         """
         if not self.lazy_offload:
             raise ValueError(
@@ -2244,6 +2252,7 @@ class LMCacheMPWorkerAdapter:
                     r_result,
                 )
 
+        # Same gate as get_finished; failed retrieves bypass it.
         finished_retrieves = self._coalescer.select_to_report(
             finished_retrieves, set(self.retrieve_futures)
         )

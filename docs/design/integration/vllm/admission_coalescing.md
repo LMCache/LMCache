@@ -40,13 +40,26 @@ Per-request state: submission timestamp, prefill tail in tokens
 new metadata fields do not survive `SchedulerOutput` serialization),
 and the shared duration EWMA.
 
+## Tuning notes
+
+The current values were validated on one workload shape (homogeneous
+13824-token prefixes, 1536-token tails, `B = 8192`). With
+`alpha * B = 6144`, four tails are needed to fill a step, so `K = 3`
+never fills one by count alone: the measured gain comes from batching
+two or three tails into one step (fewer, fuller prefill steps), not
+from literally reaching `B`. `K`, `alpha` and `T` are module constants,
+not user knobs.
+
 ## Gate
 
 ```
 on each get_finished() call (once per engine step):
 
     ready    = retrieves whose future completed this call
+    failed   = ready retrieves whose result is an error
     inflight = submitted retrieves still pending        # retrieve_futures - ready
+
+    report failed immediately; they never take part in the hold decision
 
     report everything (no hold) if any of:
         K or more ready                                  # coalesce target reached
@@ -61,8 +74,10 @@ on each get_finished() call (once per engine step):
     otherwise: hold the ready retrieves for one step
                (they stay in retrieve_futures and are re-evaluated next call)
 
-after reporting: update the duration EWMA from each reported
-                 (non-held) request: submit -> report time
+after reporting: update the duration EWMA from each reported request
+                 (submit -> first-hold time for held requests, so the
+                 estimate tracks the retrieve pipeline, not our waiting;
+                 submit -> report time for non-held requests)
 ```
 
 ## Why each release condition
@@ -70,9 +85,11 @@ after reporting: update the duration EWMA from each reported
 - **K reached / no sibling in flight** — with nothing left to wait for,
   holding is pure latency.
 - **A tail alone fills a step** — a sibling cannot join an already-full
-  step, so delaying the request cannot reduce the step count. Smaller
-  tails are coalesced regardless of fill: merging two partial tails
-  into one step still saves a whole step's fixed cost.
+  step, so delaying the request cannot reduce the step count.
+- **The cohort cannot fill a step** — if the ready plus in-flight tails
+  together stay below `alpha * B`, coalescing cannot produce a full
+  step, so holding only adds latency; those tails are reported one per
+  step as before.
 - **Deadline** — bounds the added latency of any held request. It is
   measured from submission because that is the wall time the request
   has already invested.
@@ -85,6 +102,9 @@ after reporting: update the duration EWMA from each reported
 
 - A completed retrieve is reported exactly once: held ids stay in
   `retrieve_futures` and are re-reported only when released.
-- Nothing is dropped on failure paths: unhealthy drains report
+- Failed retrieves bypass the gate and are reported in the same
+  `get_finished()` call, so the error/recovery path keeps its latency.
+  Nothing is dropped on failure paths: unhealthy drains report
   everything immediately.
-- Disabled (default): the code path is unchanged.
+- Disabled (default): the gate returns immediately and no per-request
+  state is kept or updated.
