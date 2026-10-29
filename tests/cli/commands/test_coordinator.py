@@ -164,8 +164,9 @@ class TestCoordinatorCommandExecute:
 
         captured = {}
 
-        def fake_create_app(config: MPCoordinatorConfig):
+        def fake_create_app(config: MPCoordinatorConfig, http_authentication=None):
             captured["config"] = config
+            captured["http_authentication"] = http_authentication
             return MagicMock()
 
         with (
@@ -211,6 +212,14 @@ class TestCoordinatorCommandExecute:
         monkeypatch.setenv("LMCACHE_MP_COORDINATOR_PORT", "7777")
         monkeypatch.setenv("LMCACHE_MP_COORDINATOR_HOST", "10.0.0.1")
         monkeypatch.setenv("LMCACHE_MP_COORDINATOR_OTLP_ENDPOINT", "http://x:4317")
+        # No API-key source configured anywhere.
+        for env_var in (
+            "LMCACHE_API_KEY",
+            "LMCACHE_API_KEY_FILE",
+            "LMCACHE_HTTP_API_KEY",
+            "LMCACHE_HTTP_API_KEY_FILE",
+        ):
+            monkeypatch.delenv(env_var, raising=False)
 
         args = argparse.Namespace(
             host=None,
@@ -239,8 +248,9 @@ class TestCoordinatorCommandExecute:
 
         captured = {}
 
-        def fake_create_app(config: MPCoordinatorConfig):
+        def fake_create_app(config: MPCoordinatorConfig, http_authentication=None):
             captured["config"] = config
+            captured["http_authentication"] = http_authentication
             return MagicMock()
 
         with (
@@ -254,6 +264,74 @@ class TestCoordinatorCommandExecute:
             cmd.execute(args)
 
         assert captured["config"] == MPCoordinatorConfig()
+        # No key source configured -> authentication stays disabled.
+        assert captured["http_authentication"] is not None
+        assert captured["http_authentication"].enabled is False
+
+
+    def test_api_key_file_enables_authentication(self, cmd, tmp_path, monkeypatch):
+        """--api-key-file builds an enabled verifier handed to create_app."""
+        # First Party
+        from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+
+        key_file = tmp_path / "key"
+        key_file.write_text("fleet-secret\n")
+        # Isolate from ambient key env so only the CLI file drives the verifier.
+        for env_var in (
+            "LMCACHE_API_KEY",
+            "LMCACHE_API_KEY_FILE",
+            "LMCACHE_HTTP_API_KEY",
+            "LMCACHE_HTTP_API_KEY_FILE",
+        ):
+            monkeypatch.delenv(env_var, raising=False)
+
+        args = argparse.Namespace(
+            host=None,
+            port=None,
+            instance_timeout=None,
+            health_check_interval=None,
+            eviction_check_interval=None,
+            eviction_ratio=None,
+            trigger_watermark=None,
+            chunk_size=None,
+            hash_algorithm=None,
+            enable_blend_lookup=None,
+            blend_probe_stride=None,
+            checkpoint_path=None,
+            checkpoint_interval=None,
+            metadata_path=None,
+            extra_config=None,
+            timeout_keep_alive=None,
+            disable_metrics=None,
+            otlp_endpoint=None,
+            event_transport=None,
+            kafka_bootstrap_servers=None,
+            kafka_topic=None,
+            kafka_group_id=None,
+            api_key_file=[str(key_file)],
+        )
+
+        captured = {}
+
+        def fake_create_app(config: MPCoordinatorConfig, http_authentication=None):
+            captured["http_authentication"] = http_authentication
+            return MagicMock()
+
+        with (
+            patch("uvicorn.run"),
+            patch("lmcache.v1.mp_coordinator.observability.init_coordinator_metrics"),
+            patch(
+                "lmcache.v1.mp_coordinator.app.create_app",
+                side_effect=fake_create_app,
+            ),
+        ):
+            cmd.execute(args)
+
+        verifier = captured["http_authentication"]
+        assert verifier is not None
+        assert verifier.enabled is True
+        assert verifier.accepts_authorization_header("Bearer fleet-secret")
+        assert not verifier.accepts_authorization_header("Bearer wrong")
 
 
 class TestExtraConfig:

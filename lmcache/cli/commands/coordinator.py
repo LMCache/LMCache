@@ -332,8 +332,11 @@ class CoordinatorCommand(BaseCommand):
         config = MPCoordinatorConfig(**fields)
 
         init_coordinator_metrics(config)
+        # ``api_key_file`` is registered by add_api_key_args; getattr keeps
+        # hand-built Namespaces (e.g. unit tests) working when they omit it.
+        key_files = getattr(args, "api_key_file", None) or []
         http_authentication = CoordinatorAuthenticationConfig.from_sources(
-            args.api_key_file
+            key_files
         )
         app = create_app(config, http_authentication=http_authentication)
         uvicorn.run(
