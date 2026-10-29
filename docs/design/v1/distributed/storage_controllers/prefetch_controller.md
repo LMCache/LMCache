@@ -34,7 +34,8 @@ leaves nothing behind.
 - **One planning step, one fold.** The policy plans once on the union of the
   L1 locked map and every L2 locked map. The prefix fold runs once, at finish,
   over the final L1 locked map. L1 is never folded on its own and then handed
-  to L2 as a remainder.
+  to L2 as a remainder. The lookup step may fold L1 alone, but only to skip
+  L2 when L1 serves every chunk.
 - **Every planned cell is locked in the tier it is planned from, and no cell
   is planned twice.** This is the policy contract (`PrefetchPolicy.plan_load`).
   The controller releases every lock outside the plan and then sets the locked
@@ -126,7 +127,11 @@ afterwards.
 1. **Lock pass** (`_lock_l1_keys`). `reserve_read` every key of the request in
    every L1 manager; the hits become `l1_locked_keys`. Locks are taken
    regardless of `lock_mode`.
-2. **Lookup** (`_start_lookup_phase`). Submit one `lookup_and_lock` task per
+2. **Lookup** (`_start_lookup_phase`). If no adapter is live, or the L1
+   hits alone serve the request (under `"prefix"` they fold to a hit over
+   every chunk, under `"full"` L1 holds every cell), plan from L1 alone and
+   finish (steps 3 and 7 with an empty L2 map).
+   Otherwise, submit one `lookup_and_lock` task per
    non-draining adapter, over the full key list. As each result arrives
    (`_poll_lookup_results`) it becomes that adapter's row in `l2_locked_keys`.
 3. **Plan** (`_plan_load`). Call `policy.plan_load` on the two maps. Release
@@ -184,6 +189,8 @@ locked maps plus the L1 manager and L2 adapter descriptors and returns a
 `PrefetchPlan` (`l1_planned_keys`, `l2_planned_keys`); `plan_l1_retention`
 returns one flag per key loaded from a given L2 adapter into a given L1
 manager. Neither raises; invalid input yields an empty plan.
+A policy plans every L1 hit from L1; the controller relies on this to skip
+L2 for a request the L1 hits alone serve.
 
 - `"default"`: serve each needed cell from the lowest-indexed tier that holds
   it (L1 managers before L2 adapters); nothing loaded from L2 is retained.
@@ -202,7 +209,7 @@ selected with `--l2-prefetch-policy`.
 
 | Event | When |
 |---|---|
-| `L2_PREFETCH_LOOKUP_SUBMITTED` | Lookup tasks submitted (once per request). |
+| `L2_PREFETCH_LOOKUP_SUBMITTED` | Lookup tasks submitted (once per request that looks up L2). |
 | `L2_PREFETCH_LOAD_SUBMITTED` | Load tasks submitted (once per request). |
 | `L2_LOAD_TASK_SUBMITTED` / `L2_LOAD_TASK_COMPLETED` | Per adapter, per request. |
 | `L2_PREFETCH_LOAD_COMPLETED` | Per adapter, as its load is admitted. |
@@ -223,6 +230,9 @@ Gauges: `lmcache_mp.num_inflight_l2_loads`,
   planning. Exact for one L1; it under-admits with several.
 - **Full key list to L2.** Lookups are submitted with every key, not only the
   L1 misses, because the adapter interface carries a flat key list.
+- **L2 recency skips L1-only requests.** Adapters that refresh LRU recency on
+  lookup (S3, Valkey, Bigtable, HF bucket, SageMaker HyperPod) do not see a
+  request L1 alone serves, so a chunk hot in L1 can age out of L2 first.
 - **Write conflicts are misses.** A key that becomes resident between the
   lookup and the reserve step fails reservation (`l1_contended`) and is
   reported as a miss; the engine recomputes and re-stores it.
@@ -243,6 +253,9 @@ with a real `L1Manager` and `MockL2Adapter`:
   retrieve, `"retain"` keeps them.
 - `TestSlidingWindowRows` — a windowed row keeps and loads only its trailing
   chunks; `"full"` refuses windowed rows.
+- `TestL1ServesWholeRequest` — a request L1 fully serves (a windowed row
+  needs only its window) finishes with no L2 lookup; one where L1 misses a
+  chunk, under `"prefix"` or `"full"`, still looks up L2.
 - `TestRuntimeAdapters`, `TestShutdown` — draining adapters are not planned
   and detach once unreferenced; `stop()` releases what the maps record.
 
