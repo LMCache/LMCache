@@ -66,13 +66,14 @@ packages and implementation-level tests.
 
 ### gRPC server modes
 
-`--grpc-server-mode` picks one of two gRPC servers that serve the same
+`--grpc-server-mode` picks one of three gRPC servers that serve the same
 handlers:
 
 | Mode | Receives requests on | Handler runs on |
 |---|---|---|
 | `sync` (default) | `grpc_server_workers` threads | the receiving thread, or the client's affinity worker |
 | `aio` | one `grpc.aio` event loop thread | a pool picked by handler type |
+| `native` | Rust (tokio) threads, then one Python dispatcher thread | a pool picked by handler type |
 
 In `sync` mode each in-flight call holds a gRPC thread until its handler
 returns, and every call also passes through grpcio's Python polling thread. In `aio` mode one event loop receives every call and only the
@@ -85,6 +86,60 @@ server-streaming call is read on its own thread, so idle subscriptions never
 occupy a handler worker. In `aio` mode, the `grpc_server_workers` threads only
 run out-of-tree services that register plain functions instead of coroutines.
 
+`native` exists because the server is bound by one GIL. With grpcio, every
+call also runs grpcio's own Python layer (call state, metadata, status, a
+thread hand-off) under that GIL, which for small requests such as lookups
+costs about as much as the handler. The `native` server does the HTTP/2 and
+gRPC framing in Rust through
+[pygrpc-native](https://github.com/theminjunchoi/pygrpc-native), without the
+GIL, and hands Python only the method id and the request bytes:
+
+```
+client ──HTTP/2──▶ tokio threads: path → method id, client id metadata
+                     │ (call_id, method_id, bytes, client key)
+                     ▼
+                   dispatcher thread ── recv_batch(), GIL released while idle
+                     ▼
+                   handler pool: FromString → handler → SerializeToString
+                     └── respond(call_id, bytes) straight to the tokio side
+```
+
+Python still owns the protobuf codecs and the handlers, so the wire format,
+the clients and the handler contract are the same as on `sync` and `aio`.
+Status codes follow grpcio: a missing handler is `UNIMPLEMENTED`, a handler
+exception is `UNKNOWN` (`Exception calling application: ...`), an undecodable
+request is `INTERNAL`, and calls still running at shutdown get `UNAVAILABLE`.
+A cancelled server-streaming call closes the handler's `MessagingStream`.
+Like grpcio servers it accepts gzip requests, answers uncompressed, and ends
+a call with `DEADLINE_EXCEEDED` once its `grpc-timeout` passes.
+
+Out-of-tree services still register on a real `grpc.Server`
+(`register_grpc_services(server)`). In `native` mode that server listens on a
+private Unix socket, and the front forwards every method it does not know to
+it over one connection per client, so these services keep the whole grpcio
+API at the cost of one local hop; `grpc_server_workers` sizes it. The socket
+is only created when a module has a registrar. In their handlers
+`context.peer()` is that socket rather than the client.
+
+`native` needs the `pygrpc-native` package (`pip install "lmcache[grpc-native]"`),
+a general-purpose gRPC server kept outside LMCache so that LMCache carries no
+Rust code for it. The `lmcache/vllm-openai` and `lmcache/standalone` images
+include it. grpc-core sends a Unix socket's path
+as `:authority`, which the Rust HTTP/2 stack rejects, so a `grpc+unix://`
+native server only serves clients that set `grpc.default_authority`;
+`GrpcMultiprocessClient` does not, so use TCP with it.
+
+The gRPC runtime metrics (`grpc_metrics_enabled`, from
+`grpcio-observability`) measure grpcio's own servers, so they only see the
+out-of-tree services in `native` mode. For everything else the native front
+keeps its own totals (pygrpc-native 0.3.0 or later), and
+`grpc_impl/native_metrics.py` exports them as `grpc.server.call.started` and
+`grpc.server.call.duration` with the plugin's names and labels, through
+`register_metrics_source` in `mp_observability/otel_init.py`. The two
+sources share one metric family. The duration buckets are gRFC A66's, and
+the message size metrics aren't reported. LMCache's own request metrics are
+unaffected.
+
 Both servers subclass `GrpcMultiprocessServerBase` in `grpc_impl/server_base.py`,
 which owns the affinity pool, port binding, service registration and the close
 sequence. `GrpcMultiprocessServer` (sync) and `GrpcAioMultiprocessServer` only
@@ -93,6 +148,10 @@ normal handlers are bounded (a semaphore on the sync server, a thread pool on
 the aio event loop), and how the server starts and stops.
 `build_grpc_request_server` in `grpc_impl/server_builder.py` picks one of them
 from `grpc_server_mode` and returns it as a `GrpcMultiprocessServerBase`.
+`GrpcNativeMultiprocessServer` subclasses it too: it fills its method table
+from the same per-service handlers in `_make_servicer` and returns a
+placeholder servicer for its internal `grpc.Server`, which never sees those
+methods since the front serves them.
 
 ## Adding an RPC
 

@@ -253,28 +253,44 @@ def test_window_group_round_trip_restores_window_chunks_last_page(
 
 
 @pytest.mark.parametrize(
-    ("num_pages", "page_tokens", "num_blocks", "chunk_slots"),
+    ("num_pages", "page_tokens", "num_blocks", "chunk_slots", "compressed"),
     [
         # Two pages per engine block: a chunk holds every page of its blocks.
-        (NUM_BLOCKS * PAGES_PER_BLOCK, PAGE_TOKENS, NUM_BLOCKS, CHUNK_TOKENS),
+        (NUM_BLOCKS * PAGES_PER_BLOCK, PAGE_TOKENS, NUM_BLOCKS, CHUNK_TOKENS, False),
         # One full page per engine block.
-        (NUM_BLOCKS, BLOCK_TOKENS, NUM_BLOCKS, CHUNK_TOKENS),
+        (NUM_BLOCKS, BLOCK_TOKENS, NUM_BLOCKS, CHUNK_TOKENS, False),
         # One page per block with fewer slots than tokens (a DCP rank's slice).
-        (NUM_BLOCKS, PAGE_TOKENS, NUM_BLOCKS, BLOCKS_IN_CHUNK * PAGE_TOKENS),
+        (NUM_BLOCKS, PAGE_TOKENS, NUM_BLOCKS, BLOCKS_IN_CHUNK * PAGE_TOKENS, True),
         # An unreported block count keeps one page per block ID.
-        (NUM_BLOCKS * PAGES_PER_BLOCK, PAGE_TOKENS, 0, BLOCKS_IN_CHUNK * PAGE_TOKENS),
+        (
+            NUM_BLOCKS * PAGES_PER_BLOCK,
+            PAGE_TOKENS,
+            0,
+            BLOCKS_IN_CHUNK * PAGE_TOKENS,
+            True,
+        ),
     ],
 )
 def test_single_group_registers_pages_per_chunk(
-    num_pages: int, page_tokens: int, num_blocks: int, chunk_slots: int
+    num_pages: int,
+    page_tokens: int,
+    num_blocks: int,
+    chunk_slots: int,
+    compressed: bool,
 ) -> None:
     """A single group registers ``k`` pages per engine block only when its
-    tensor holds ``k`` times the engine's block count."""
+    tensor holds ``k`` times the engine's block count. A kernel-paged group
+    keeps the legacy single-group layout; one with fewer slots than tokens per
+    block ID is compressed and registers its chunk slots as a group layout."""
     _, payload = _register(
         _single_kv(num_pages, page_tokens), _single_group_info(num_blocks)
     )
 
-    assert payload.num_physical_slots == chunk_slots
+    if compressed:
+        assert [g.num_physical_slots for g in payload.group_layouts] == [chunk_slots]
+    else:
+        assert payload.group_layouts == []
+        assert payload.num_physical_slots == chunk_slots
 
 
 def test_single_group_round_trip_moves_every_page(monkeypatch) -> None:

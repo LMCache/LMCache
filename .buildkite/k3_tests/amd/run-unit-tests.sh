@@ -47,7 +47,7 @@ pytest --maxfail=1 --cov=lmcache \
     --ignore=tests/v1/test_device_id_race.py \
     --ignore=tests/v1/test_nixl_multipath.py \
     --ignore=tests/skipped \
-    --ignore=tests/v1/storage_backend/test_eic.py
+    --ignore=tests/inprocess/v1/storage_backend/test_eic.py
 
 cat << EOF | buildkite-agent annotate --style "info"
   Read the <a href="artifact://coverage-test/index.html">uploaded coverage report</a>

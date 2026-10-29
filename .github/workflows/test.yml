@@ -27,7 +27,7 @@ permissions:
 jobs:
   changes:
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pull-requests: read
     outputs:
@@ -52,11 +52,12 @@ jobs:
               - '!operator/**'
             raw_block:
               - 'rust/raw_block/**'
-              - 'lmcache/v1/storage_backend/raw_block/**'
+              - 'lmcache/v1/distributed/l2_adapters/raw_block/**'
               - 'lmcache/v1/distributed/l2_adapters/raw_block_l2_adapter.py'
               - 'lmcache/v1/multiprocess/**'
-              - 'tests/v1/storage_backend/test_raw_block*.py'
-              - 'tests/v1/storage_backend/raw_block_test_utils.py'
+              - 'tests/v1/distributed/raw_block/test_*.py'
+              - 'tests/v1/distributed/raw_block/test_utils.py'
+              - 'tests/inprocess/v1/storage_backend/test_raw_block_uring_cmd.py'
               - 'tests/v1/multiprocess/test_raw_block_l2_adapter.py'
               - '.github/workflows/test.yml'
 
@@ -72,8 +73,9 @@ jobs:
           - "3.11"
           - "3.12"
           - "3.13"
+          - "3.14"
         platform:
-          - "ubuntu-latest"
+          - "ubuntu-24.04"
 
     steps:
       - name: "Harden Runner"
@@ -123,7 +125,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.raw_block == 'true'
     name: Rust unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: "Harden Runner"
@@ -149,7 +151,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.raw_block == 'true'
     name: raw-block temp-file tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       LMCACHE_LOG_LEVEL: CRITICAL
 
@@ -194,6 +196,47 @@ jobs:
       - name: Run raw-block tests
         run: |
           pytest -q --basetemp=.pytest-tmp/raw-block \
-            tests/v1/storage_backend/test_raw_block_device.py \
-            tests/v1/storage_backend/test_raw_block_core.py \
+            tests/v1/distributed/raw_block/test_device.py \
+            tests/v1/distributed/raw_block/test_core.py \
             tests/v1/multiprocess/test_raw_block_l2_adapter.py
+
+  grpc-native-tests:
+    needs: changes
+    if: needs.changes.outputs.lmcache == 'true'
+    name: gRPC native server tests
+    runs-on: ubuntu-latest
+    env:
+      LMCACHE_LOG_LEVEL: CRITICAL
+
+    steps:
+      - name: "Harden Runner"
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            **/pyproject.toml
+            **/requirements/*.txt
+
+      # pygrpc-native is optional, so the main test job skips these tests.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements/test.txt
+          python -m pip install -r requirements/common.txt
+          python -m pip install pygrpc-native==0.3.0
+          NO_GPU_EXT=1 python -m pip install -e . --no-build-isolation
+
+      - name: Run native, shared transport and liveness tests
+        run: |
+          pytest -q tests/v1/multiprocess/test_grpc_native_server.py \
+            tests/v1/multiprocess/test_grpc_transport.py \
+            tests/v1/multiprocess/test_worker_liveness.py

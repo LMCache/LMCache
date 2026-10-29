@@ -41,6 +41,8 @@ from lmcache.inprocess.v1.cache_controller.message import (
     WorkerReqMsg,
     WorkerReqRetMsg,
 )
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.rpc_utils import (
     DEFAULT_SOCKET_RECV_TIMEOUT_MS,
     DEFAULT_SOCKET_SEND_TIMEOUT_MS,
@@ -50,8 +52,6 @@ from lmcache.inprocess.v1.rpc_utils import (
     get_zmq_socket_with_timeout,
 )
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import get_ip
 
 if TYPE_CHECKING:

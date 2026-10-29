@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 export INFERENCE_ENGINE="${INFERENCE_ENGINE:-sglang}"
 source "${SCRIPT_DIR}/../helpers.sh"
-source "${SCRIPT_DIR}/../verification/dsv4-flash-tp-verification.sh"
+source "${SCRIPT_DIR}/../verification/l1-round-trip-verification.sh"
 
 MODEL="${MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
 LMCACHE_PORT="${LMCACHE_PORT:-6555}"
@@ -71,7 +71,11 @@ echo "$LMCACHE_PID" >> "$PID_FILE"
 echo "LMCache MP server started (PID=$LMCACHE_PID)"
 sleep 10
 
-dsv4_build_prompt
+# The incomplete final sentence keeps greedy decoding away from a near-tie
+# that can make cross-prefill comparisons flaky when the restored KV is valid.
+l1_round_trip_build_prompt \
+    "$PROMPT_FILE" \
+    "The poll() system call waits for one of a set of file"
 
 engine_write_lmcache_config
 
@@ -101,4 +105,4 @@ if ! wait_for_server "$SGLANG_PORT" "$SGLANG_READY_TIMEOUT" "$SGLANG_LOG"; then
 fi
 echo ""
 
-dsv4_run_l1_round_trip
+l1_round_trip_run "DeepSeek-V4-Flash L1"

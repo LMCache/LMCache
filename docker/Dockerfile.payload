@@ -35,16 +35,17 @@ ARG SOURCE_IMAGE=lmcache/vllm-openai:latest-nightly
 # Pull the installed `lmcache` package (and its dist-info, for version metadata)
 # out of the source image into /payload. The location is resolved from the
 # running interpreter so it tracks whatever site-packages / venv the image uses.
+# Staged under /tmp: the source image's non-root user cannot write to /.
 FROM ${SOURCE_IMAGE} AS extract
 
 RUN set -eux; \
     SITE="$(python3 -c 'import os, lmcache; print(os.path.dirname(os.path.dirname(os.path.abspath(lmcache.__file__))))')"; \
     test -f "$SITE/lmcache/__init__.py"; \
-    mkdir -p /payload; \
+    mkdir -p /tmp/payload; \
     for d in "$SITE"/lmcache "$SITE"/lmcache-*.dist-info; do \
-        [ -e "$d" ] && cp -a "$d" /payload/; \
+        [ -e "$d" ] && cp -a "$d" /tmp/payload/; \
     done; \
-    test -f /payload/lmcache/__init__.py; \
+    test -f /tmp/payload/lmcache/__init__.py; \
     python3 -c 'import lmcache; print("payload lmcache:", getattr(lmcache, "__version__", "unknown"))'
 
 #################### PAYLOAD ####################
@@ -53,7 +54,7 @@ RUN set -eux; \
 # (defaulted here only so a standalone `docker run -e SHARED_DIR=...` works).
 FROM busybox:1.37
 
-COPY --from=extract /payload /payload
+COPY --from=extract /tmp/payload /payload
 
 ENV SHARED_DIR=/lmcache-payload
 

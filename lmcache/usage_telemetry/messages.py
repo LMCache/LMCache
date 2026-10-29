@@ -35,9 +35,9 @@ from lmcache import torch_device_type
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.inprocess.v1.config import LMCacheEngineConfig
+    from lmcache.inprocess.v1.metadata import LMCacheMetadata
     from lmcache.v1.distributed.config import StorageManagerConfig
-    from lmcache.v1.metadata import LMCacheMetadata
     from lmcache.v1.multiprocess.config import MPServerConfig
 
 

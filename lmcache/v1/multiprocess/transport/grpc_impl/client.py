@@ -8,13 +8,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 from urllib.parse import urlparse
+import functools
+import socket
 import threading
+import time
 import uuid
 
 # Third Party
 import grpc
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
@@ -40,6 +44,13 @@ _GRPC_OPTIONS = (
     ("grpc.max_reconnect_backoff_ms", MAX_RECONNECT_BACKOFF_MS),
 )
 _CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
+
+# A ZMQ socket greets every new connection with this 10-byte ZMTP signature.
+_ZMTP_SIGNATURE_LEN = 10
+_PEER_PROBE_TIMEOUT_S = 1.0
+_PEER_PROBE_INTERVAL_S = 5.0
+
+logger = init_logger(__name__)
 
 
 def parse_grpc_target(server_url: str) -> str:
@@ -72,6 +83,46 @@ def parse_grpc_target(server_url: str) -> str:
     raise ValueError(f"Unsupported gRPC URL scheme: {parsed.scheme!r}")
 
 
+def _peer_speaks_zmtp(host: str, port: int) -> bool:
+    """Return whether the server at ``host:port`` greets like a ZMQ socket.
+
+    Args:
+        host: Server host.
+        port: Server TCP port.
+
+    Returns:
+        True if the first bytes the server sends are a ZMTP signature. False if
+        it sends anything else, nothing in time, or refuses the connection
+        (for example while it is still starting).
+    """
+    greeting = b""
+    try:
+        with socket.create_connection((host, port), _PEER_PROBE_TIMEOUT_S) as sock:
+            sock.settimeout(_PEER_PROBE_TIMEOUT_S)
+            while len(greeting) < _ZMTP_SIGNATURE_LEN:
+                chunk = sock.recv(_ZMTP_SIGNATURE_LEN - len(greeting))
+                if not chunk:
+                    break
+                greeting += chunk
+    except OSError:
+        return False
+    return (
+        len(greeting) == _ZMTP_SIGNATURE_LEN
+        and greeting[0] == 0xFF
+        and greeting[-1] == 0x7F
+    )
+
+
+def _tcp_host_port(target: str) -> tuple[str, int] | None:
+    """Return ``(host, port)`` for a TCP gRPC target, or None for other targets."""
+    if target.startswith("unix:"):
+        return None
+    host, sep, port = target.rpartition(":")
+    if not sep or not port.isdigit():
+        return None
+    return host.strip("[]"), int(port)
+
+
 @dataclass(frozen=True)
 class _ClientRpc:
     stub_method: Any
@@ -85,9 +136,23 @@ class GrpcMultiprocessClient(RequestClient):
     """Expose generated unary and server-streaming RPCs as client methods."""
 
     def __init__(self, server_url: str) -> None:
-        self._channel = grpc.insecure_channel(
-            parse_grpc_target(server_url), options=_GRPC_OPTIONS
-        )
+        target = parse_grpc_target(server_url)
+        self._server_url = server_url
+        self._channel = grpc.insecure_channel(target, options=_GRPC_OPTIONS)
+        # Calls wait for the server to come up (wait_for_ready), so a ZMQ
+        # server on the port would otherwise look like one that never starts.
+        self._wrong_transport: str | None = None
+        self._pending: set[grpc.Future] = set()
+        self._pending_lock = threading.Lock()
+        self._next_probe_at = 0.0
+        self._connectivity_callback: Callable[[grpc.ChannelConnectivity], None] | None
+        self._connectivity_callback = None
+        peer = _tcp_host_port(target)
+        if peer is not None:
+            self._connectivity_callback = functools.partial(
+                self._on_connectivity, *peer
+            )
+            self._channel.subscribe(self._connectivity_callback, try_to_connect=False)
         stubs: dict[str, Any] = {}
         self._rpc_methods: dict[str, _ClientRpc] = {}
         codec_registry = get_method_codec_registry()
@@ -142,7 +207,39 @@ class GrpcMultiprocessClient(RequestClient):
 
     def close(self) -> None:
         """Close the underlying gRPC channel."""
+        if self._connectivity_callback is not None:
+            self._channel.unsubscribe(self._connectivity_callback)
         self._channel.close()
+
+    def _on_connectivity(
+        self, host: str, port: int, state: grpc.ChannelConnectivity
+    ) -> None:
+        if state is not grpc.ChannelConnectivity.TRANSIENT_FAILURE:
+            return
+        now = time.monotonic()
+        if self._wrong_transport is not None or now < self._next_probe_at:
+            return
+        self._next_probe_at = now + _PEER_PROBE_INTERVAL_S
+        # Runs on gRPC's polling thread, which must not block on the probe.
+        threading.Thread(
+            target=self._probe_peer,
+            args=(host, port),
+            daemon=True,
+            name="grpc-peer-probe",
+        ).start()
+
+    def _probe_peer(self, host: str, port: int) -> None:
+        if not _peer_speaks_zmtp(host, port):
+            return
+        self._wrong_transport = (
+            f"The server at {self._server_url} speaks ZMQ, not gRPC. Use "
+            f"tcp://{host}:{port}, or start the server with --transport grpc."
+        )
+        logger.error("%s", self._wrong_transport)
+        with self._pending_lock:
+            pending = list(self._pending)
+        for call in pending:
+            call.cancel()
 
     def _call(
         self,
@@ -155,11 +252,14 @@ class GrpcMultiprocessClient(RequestClient):
             call = rpc.stub_method(
                 request, metadata=self._metadata, wait_for_ready=True
             )
+            self._track(call)
 
             def read(closed: threading.Event) -> Any:
                 try:
                     return rpc.codec.response_decoder(next(call))
                 except grpc.RpcError as exc:
+                    if self._wrong_transport is not None:
+                        raise ConnectionError(self._wrong_transport) from exc
                     if exc.code() in (
                         grpc.StatusCode.UNAVAILABLE,
                         grpc.StatusCode.CANCELLED,
@@ -169,6 +269,9 @@ class GrpcMultiprocessClient(RequestClient):
 
             return MessagingStream(read, call.cancel)
         future: MessagingFuture[Any] = MessagingFuture()
+        if self._wrong_transport is not None:
+            future.set_exception(ConnectionError(self._wrong_transport))
+            return future
         call = rpc.stub_method.future(
             request,
             metadata=self._metadata,
@@ -176,6 +279,9 @@ class GrpcMultiprocessClient(RequestClient):
         )
 
         def on_done(grpc_future: grpc.Future[Any]) -> None:
+            if grpc_future.cancelled() and self._wrong_transport is not None:
+                future.set_exception(ConnectionError(self._wrong_transport))
+                return
             try:
                 result = rpc.codec.response_decoder(grpc_future.result())
             except BaseException as exc:
@@ -184,7 +290,22 @@ class GrpcMultiprocessClient(RequestClient):
                 future.set_result(result)
 
         call.add_done_callback(on_done)
+        self._track(call)
         return future
+
+    def _track(self, call: grpc.Future) -> None:
+        """Keep ``call`` cancellable until it ends, so a wrong-transport
+        verdict can fail it. Checked after adding, so a call cannot slip
+        between the verdict and its cancel sweep."""
+        with self._pending_lock:
+            self._pending.add(call)
+        call.add_done_callback(self._untrack)
+        if self._wrong_transport is not None:
+            call.cancel()
+
+    def _untrack(self, call: grpc.Future) -> None:
+        with self._pending_lock:
+            self._pending.discard(call)
 
 
 def _make_client_rpc_method(name: str) -> ClientRpcCallable:
