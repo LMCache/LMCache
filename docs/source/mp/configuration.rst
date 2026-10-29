@@ -115,11 +115,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - gRPC server implementation: ``sync``, ``aio`` or ``native``.
        ``aio`` receives requests on one event loop and hands only the
        handlers to worker threads. ``native`` does the HTTP/2 and gRPC
-       framing in Rust, outside the GIL; it needs
-       ``pip install pygrpc-native``, which the Docker images do not
-       include yet. All three serve the same clients over TCP.
-       In ``native`` mode the grpcio runtime metrics only cover
-       out-of-tree services. Used only with ``--transport grpc``.
+       framing in Rust, outside the GIL; it needs the ``pygrpc-native``
+       package (``pip install "lmcache[grpc-native]"``), which the
+       ``lmcache/vllm-openai`` and ``lmcache/standalone`` images include.
+       All three serve the same clients over TCP.
+       In ``native`` mode the native front reports the call count and
+       duration metrics itself (pygrpc-native 0.3.0 or later), under the
+       same names, but not the message size ones. Used only with
+       ``--transport grpc``.
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.
@@ -979,6 +982,8 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
      - Whether vLLM worker 0 should start a local ``lmcache server`` process
        before workers connect to it. Other local workers wait for the server to
        become reachable. Only ``localhost`` and ``127.0.0.1`` are supported.
+       The URL scheme picks the server transport: ``tcp://`` starts a ZMQ
+       server and ``grpc://`` starts a gRPC server.
        IPv6 endpoints, including ``::1``, raise ``ValueError`` before startup
        because the MP ZMQ transport does not enable IPv6 sockets.
        Auto-start supports exactly one server endpoint; configuring
@@ -987,16 +992,16 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.autostart.wait_timeout``
      - ``90.0``
      - Timeout (seconds) to wait for the auto-started server to respond to
-       ZMQ ``PING`` requests. Must be positive and finite.
+       ``PING`` requests. Must be positive and finite.
    * - ``lmcache.mp.autostart.server_args``
      - ``""``
      - Extra command-line arguments passed to the auto-started MP HTTP server
        process. Required server settings such as ``--l1-size-gb`` and
        ``--eviction-policy`` must be supplied here. For example, pass
        ``--l1-size-gb 20 --eviction-policy LRU``. Endpoint flags such as
-       ``--host``, ``--port``, and ``--http-host`` are rejected because the
-       auto-started ZMQ and HTTP listeners are bound to the local connector
-       endpoint. If multiple auto-started MP servers run on the same host, pass
+       ``--host``, ``--port``, ``--http-host``, and ``--transport`` are
+       rejected because the auto-started request and HTTP listeners are bound
+       to the local connector endpoint and its transport. If multiple auto-started MP servers run on the same host, pass
        distinct ``--http-port`` values here to avoid HTTP frontend port
        conflicts.
    * - ``lmcache.mp.mp_transfer_mode``

@@ -15,12 +15,12 @@ from lmcache.inprocess.v1.gpu_connector.musa_connectors import (
     VLLMPagedMemLayerwiseMUSAConnector,
     VLLMPagedMemMUSAConnectorV2,
 )
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.metadata import LMCacheMetadata
 from tests.v1.utils import (
     check_paged_kv_cache_equal,
     generate_kv_cache_paged_list_tensors,

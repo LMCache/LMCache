@@ -4,11 +4,10 @@
 # Standard
 from collections.abc import Mapping
 from dataclasses import asdict
-from typing import TypeVar
+from typing import TypeVar, cast
 
 # Third Party
 from google.protobuf.message import Message
-import msgspec
 
 # First Party
 from lmcache.v1.memory_orchestrator._proto_gen import memory_orchestrator_pb2 as pb2
@@ -29,6 +28,10 @@ from lmcache.v1.memory_orchestrator.api import (
     WriteStatus,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import p2p_service_pb2
+from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
+    compile_response_decoder_for_type,
+    compile_response_encoder_for_type,
+)
 
 _WireT = TypeVar("_WireT")
 _ApiT = TypeVar("_ApiT")
@@ -42,52 +45,27 @@ _READ_STATUS_FROM_PROTO = {wire: api for api, wire in _READ_STATUS_TO_PROTO.item
 _TOKEN_STATUS_FROM_PROTO = {wire: api for api, wire in _TOKEN_STATUS_TO_PROTO.items()}
 
 
-def _encode_extra_attributes(value: dict[str, object]) -> bytes:
-    """Encode request metadata using the P2P ObjectKey wire convention."""
-    if not value:
-        return b""
-    return msgspec.msgpack.encode(value)
-
-
-def _decode_extra_attributes(value: bytes) -> dict[str, object]:
-    """Decode request metadata, accepting messages from older senders."""
-    if not value:
-        return {}
-    decoded = msgspec.msgpack.decode(value)
-    if not isinstance(decoded, dict):
-        raise TypeError(f"expected a msgpack dict, got {type(decoded)!r}")
-    return decoded
-
-
 def _from_proto(cls: type[_ApiT], msg: Message) -> _ApiT:
     """Build the api dataclass ``cls`` from the same-named fields of ``msg``."""
     return cls(**{f.name: getattr(msg, f.name) for f in msg.DESCRIPTOR.fields})
 
 
-# Keys and handles are converted once per batch entry, so they spell out their
-# fields; the generic helper costs about twice as much per entry.
+_encode_key = compile_response_encoder_for_type(
+    p2p_service_pb2.ObjectKey, WireObjectKey
+)
+_decode_key = compile_response_decoder_for_type(
+    p2p_service_pb2.ObjectKey, WireObjectKey
+)
+
+
 def _key_to_proto(key: WireObjectKey) -> p2p_service_pb2.ObjectKey:
     """Convert an object key to its wire form."""
-    return p2p_service_pb2.ObjectKey(
-        chunk_hash=key.chunk_hash,
-        model_name=key.model_name,
-        kv_rank=key.kv_rank,
-        object_group_id=key.object_group_id,
-        cache_salt=key.cache_salt,
-        encoded_extra_attributes=_encode_extra_attributes(key.extra_attributes),
-    )
+    return cast(p2p_service_pb2.ObjectKey, _encode_key(key))
 
 
 def _key_from_proto(msg: p2p_service_pb2.ObjectKey) -> WireObjectKey:
     """Convert a wire object key."""
-    return WireObjectKey(
-        chunk_hash=msg.chunk_hash,
-        model_name=msg.model_name,
-        kv_rank=msg.kv_rank,
-        object_group_id=msg.object_group_id,
-        cache_salt=msg.cache_salt,
-        extra_attributes=_decode_extra_attributes(msg.encoded_extra_attributes),
-    )
+    return cast(WireObjectKey, _decode_key(msg))
 
 
 def _handle_to_proto(handle: ExtentHandle | None) -> pb2.Handle | None:

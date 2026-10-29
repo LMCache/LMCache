@@ -17,6 +17,7 @@ import time
 import grpc
 import pytest
 import torch
+import zmq
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
@@ -902,3 +903,60 @@ def test_grpc_normal_worker_limit_and_error_release(max_cpu_workers: int) -> Non
         release.set()
         client.close()
         server.close()
+
+
+@pytest.mark.parametrize("grpc_server_mode", ["sync", "aio"])
+def test_second_server_cannot_bind_a_served_port(grpc_server_mode: str) -> None:
+    """Like ZMQ, a second server fails instead of sharing the first one's port."""
+    first = build_grpc_request_server(
+        [],
+        MPServerConfig(
+            transport="grpc",
+            host="127.0.0.1",
+            port=0,
+            grpc_server_mode=cast(Any, grpc_server_mode),
+        ),
+    )
+    try:
+        workers_before = _affinity_workers()
+        with pytest.raises(RuntimeError):
+            build_grpc_request_server(
+                [],
+                MPServerConfig(
+                    transport="grpc",
+                    host="127.0.0.1",
+                    port=first.bound_port,
+                    grpc_server_mode=cast(Any, grpc_server_mode),
+                ),
+            )
+        assert _affinity_workers() == workers_before
+    finally:
+        first.close()
+
+
+def _affinity_workers() -> int:
+    return sum(t.name.startswith("grpc-affinity") for t in threading.enumerate())
+
+
+def test_client_reports_a_zmq_server_instead_of_waiting() -> None:
+    """Unary and streaming calls to a ZMQ server fail with a clear error
+    instead of waiting for a gRPC server that never comes, including calls
+    already in flight."""
+    router = zmq.Context.instance().socket(zmq.ROUTER)
+    port = router.bind_to_random_port("tcp://127.0.0.1")
+    client = GrpcMultiprocessClient(f"grpc://127.0.0.1:{port}")  # type: ignore[abstract]
+    try:
+        in_flight = client.noop()
+        stream = client.subscribe_kv_events(1, "model", 0, 16)
+        with pytest.raises(ConnectionError, match="speaks ZMQ"):
+            in_flight.result(timeout=10)
+        with pytest.raises(ConnectionError, match="speaks ZMQ"):
+            next(stream)
+        with pytest.raises(ConnectionError, match="speaks ZMQ") as first:
+            client.noop().result(timeout=1)
+        with pytest.raises(ConnectionError, match="speaks ZMQ") as second:
+            client.noop().result(timeout=1)
+        assert first.value is not second.value
+    finally:
+        client.close()
+        router.close(linger=0)

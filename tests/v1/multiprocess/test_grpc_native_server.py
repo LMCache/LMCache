@@ -493,9 +493,6 @@ def test_unix_socket_forms_and_restart_after_a_stale_file() -> None:
     # pytest's tmp_path can exceed the 104-byte socket path limit on macOS.
     directory = Path(tempfile.mkdtemp(prefix="lmc", dir="/tmp"))
     path = directory / "s.sock"
-    request = extension_service_pb2.ServerModuleCallRequest(
-        method="echo", payload=b"ab"
-    )
     try:
         stale = socket.socket(socket.AF_UNIX)
         stale.bind(str(path))
@@ -505,20 +502,13 @@ def test_unix_socket_forms_and_restart_after_a_stale_file() -> None:
             server.add_modules([_EchoModule()])
             server.start()
             assert server.bound_port == 1
-            # grpc-core sends the socket path as :authority, which the front
-            # rejects as invalid HTTP/2, so name the authority explicitly.
-            channel = grpc.insecure_channel(
-                f"unix:{path}", options=[("grpc.default_authority", "localhost")]
+            client = GrpcMultiprocessClient(  # type: ignore[abstract]
+                f"grpc+unix://{path}"
             )
             try:
-                call = channel.unary_unary(
-                    _SERVER_MODULE_CALL,
-                    request_serializer=extension_service_pb2.ServerModuleCallRequest.SerializeToString,
-                    response_deserializer=extension_service_pb2.ServerModuleCallResponse.FromString,
-                )
-                assert call(request, timeout=5).payload == b"ba"
+                assert _echo(client, b"ab") == b"ba"
             finally:
-                channel.close()
+                client.close()
                 server.close()
             assert not path.exists()
     finally:
@@ -805,3 +795,37 @@ def test_start_after_close_is_rejected() -> None:
     server.close()
     with pytest.raises(RuntimeError, match="closed"):
         server.start()
+
+
+def test_exports_grpc_server_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    # First Party
+    from lmcache.v1.mp_observability import otel_init
+
+    pygrpc_native = pytest.importorskip("pygrpc_native")
+    if not hasattr(pygrpc_native.NativeGrpcFront, "metrics"):
+        pytest.skip("needs pygrpc-native 0.3.0 or later")
+    monkeypatch.setattr(otel_init, "_GRPC_METRICS_ENABLED", True)
+    monkeypatch.setattr(otel_init, "_METRICS_SOURCES", [])
+    server = _serve([_EchoModule()])
+    client = _client(server)
+    try:
+        for _ in range(3):
+            assert _echo(client, b"ab") == b"ba"
+        (source,) = otel_init._METRICS_SOURCES
+        for _ in range(100):
+            metrics = {metric.name: metric for metric in source()}
+            if metrics and metrics["grpc.server.call.duration"].data.data_points:
+                break
+            time.sleep(0.01)
+    finally:
+        client.close()
+        server.close()
+
+    (started,) = metrics["grpc.server.call.started"].data.data_points
+    (duration,) = metrics["grpc.server.call.duration"].data.data_points
+    method = _SERVER_MODULE_CALL.lstrip("/")
+    assert started.attributes == {"grpc.method": method}
+    assert started.value == 3
+    assert duration.attributes == {"grpc.method": method, "grpc.status": "OK"}
+    assert duration.count == sum(duration.bucket_counts) == 3
+    assert otel_init._METRICS_SOURCES == []

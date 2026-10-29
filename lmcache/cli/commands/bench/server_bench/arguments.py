@@ -94,6 +94,13 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         help="Block allocation order (default: sequential).",
     )
 
+    parser.add_argument(
+        "--transfer-timeout",
+        type=float,
+        default=10.0,
+        help="Seconds to wait for each transfer (default: 10).",
+    )
+
     # -- KV cache shape --
     kv = parser.add_argument_group("KV cache shape")
     kv.add_argument(
@@ -165,7 +172,10 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--url",
         default="http://localhost:8080",
-        help=("Legacy HTTP URL; checksums are computed from local worker buffers"),
+        help=(
+            "HTTP URL for checksum verification in lmcache_driven mode; "
+            "empty disables it; engine_driven mode skips HTTP checks"
+        ),
     )
 
     prof = parser.add_argument_group(

@@ -46,8 +46,10 @@ def test_shared_object_key_and_layout_round_trip() -> None:
     restored_write = codec.write_request_from_proto(restored)
     assert restored_write == entry
     assert restored.key.encoded_extra_attributes
+    assert restored_write.key.identity == key.identity
     assert restored_write.key.extra_attributes == {"encryption_key": "key-1"}
     read = ReadRequest(entry.key, 2)
     restored_read = codec.read_request_from_proto(codec.read_request_to_proto(read))
     assert restored_read == read
+    assert restored_read.key.identity == key.identity
     assert restored_read.key.extra_attributes == {"encryption_key": "key-1"}

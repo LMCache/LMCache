@@ -110,8 +110,8 @@ class TransferStrategy(abc.ABC):
             instance_id: Worker instance identifier.
             context: Non-GPU transfer metadata for the instance.
             resolve_obj_keys: Callable that resolves object keys from ``key``.
-            group_keys: Group-major object keys for multi-group workers;
-                ``None`` for single-group.
+            group_keys: Group-major object keys for grouped-protocol workers,
+                including a single compressed group; ``None`` for legacy workers.
             skipped_chunks: Per group, chunk positions the worker will not
                 store (all-null engine blocks); empty means none.
 
@@ -137,8 +137,8 @@ class TransferStrategy(abc.ABC):
             cpu_data: Serialized payload from the worker.
             context: Non-GPU transfer metadata for the instance.
             resolve_obj_keys: Callable that resolves object keys from ``key``.
-            group_keys: Group-major object keys for multi-group workers;
-                ``None`` for single-group.
+            group_keys: Group-major object keys for grouped-protocol workers,
+                including a single compressed group; ``None`` for legacy workers.
 
         Returns:
             ``True`` when the strategy successfully commits the store request.
@@ -159,9 +159,9 @@ class TransferStrategy(abc.ABC):
             key: Cache key identifying the requested token range.
             instance_id: Worker instance identifier.
             resolve_obj_keys: Callable that resolves object keys from ``key``.
-            group_keys: Group-major object keys for multi-group workers,
+            group_keys: Group-major object keys for grouped-protocol workers,
                 already narrowed to each group's in-window suffix; ``None``
-                for single-group.
+                for legacy workers.
             group_first_chunk: Per group, the chunk position of
                 ``group_keys[g][0]`` within the request (non-zero when a
                 window drops leading chunks); empty means all zero.
@@ -194,8 +194,8 @@ class InlineTransferStrategy(TransferStrategy):
     fallback by the SHM strategy when the worker sends an inline serialized payload.
     ``prepare_store`` returns an empty context, while ``commit_store`` validates a
     typed tensor envelope and writes the resulting tensors into reserved objects.
-    Multi-group (hybrid-KV) payloads use a group-major envelope in which every
-    group is validated against its own registered layout.
+    Explicit group layouts, including a single compressed group, use a
+    group-major envelope validated against each group's registered layout.
     """
 
     def __init__(
@@ -223,8 +223,8 @@ class InlineTransferStrategy(TransferStrategy):
         """Return empty store context for inline mode.
 
         Inline transport does not pre-allocate SHM slots during prepare; the
-        whole (single- or multi-group) payload arrives with ``commit_store``.
-        ``skipped_chunks`` is not needed here: a multi-group payload names
+        whole (legacy or grouped) payload arrives with ``commit_store``.
+        ``skipped_chunks`` is not needed here: a grouped payload names
         the chunks it carries.
         """
         return PrepareStoreResponse(context={})
@@ -326,15 +326,15 @@ class InlineTransferStrategy(TransferStrategy):
     ) -> bool:
         """Deserialize and write validated inline chunks into reserved objects.
 
-        Single-group payloads are a flat tensor envelope; multi-group payloads
-        are a group-major envelope, and each group is validated and written
-        against its own layout from ``context.group_layouts``. Validation runs
-        before any storage access.
+        Legacy payloads are a flat tensor envelope; explicit group layouts use
+        a group-major envelope even for one group. Each group is validated and
+        written against its own layout from ``context.group_layouts``.
+        Validation runs before any storage access.
 
         Returns:
             ``True`` when every reserved object is written successfully.
         """
-        if group_keys is not None and len(group_keys) > 1:
+        if group_keys is not None:
             group_layouts = context.group_layouts
             if group_layouts is None or len(group_layouts) != len(group_keys):
                 logger.error(
@@ -385,12 +385,12 @@ class InlineTransferStrategy(TransferStrategy):
     ) -> PrepareRetrieveResponse:
         """Read prefetched objects and return a typed inline tensor payload.
 
-        Single-group responses carry a flat tensor envelope. Multi-group
-        responses carry a group-major envelope with each group's absolute
-        chunk positions, and are all-or-nothing: a retrieve is a miss unless
-        EVERY group has every chunk of its in-window suffix.
+        Legacy responses carry a flat tensor envelope. Grouped-protocol
+        responses, including one group, carry a group-major envelope with each
+        group's absolute chunk positions, and are all-or-nothing: a retrieve
+        is a miss unless EVERY group has every chunk of its in-window suffix.
         """
-        multi_group = group_keys is not None and len(group_keys) > 1
+        grouped = group_keys is not None
         if group_keys is None:
             group_keys = [resolve_obj_keys(key)]
         owners = (
@@ -426,7 +426,7 @@ class InlineTransferStrategy(TransferStrategy):
                         prefetched_keys, l1_owners=owners
                     )
 
-        if multi_group:
+        if grouped:
             firsts = list(group_first_chunk) or [0] * len(group_keys)
             data = encode_grouped_tensors(
                 [
@@ -497,23 +497,23 @@ class ShmTransferStrategy(TransferStrategy):
         """Reserve SHM-backed objects and return slot descriptors.
 
         Args:
-            group_keys: Group-major object keys for multi-group workers
+            group_keys: Group-major object keys for grouped-protocol workers
                 (``group_keys[g][c]`` is chunk ``c``'s key in group ``g``).
-                ``None`` means single-group via ``resolve_obj_keys``.
+                ``None`` means legacy protocol via ``resolve_obj_keys``.
             skipped_chunks: Per group, chunk positions the worker will not
                 store; they are never reserved and get no slot.
 
         Returns:
-            Context with ``slots`` and ``chunk_indices``. Multi-group
-            responses additionally carry ``group_ids`` parallel to ``slots``.
+            Context with ``slots`` and ``chunk_indices``. Grouped-protocol
+            responses also carry ``group_ids``, even for one group.
         """
+        grouped = group_keys is not None
         if group_keys is None:
             group_layouts = [context.layout_desc]
             group_keys = [resolve_obj_keys(key)]
         else:
             assert context.group_layouts is not None
             group_layouts = context.group_layouts
-        multi_group = len(group_keys) > 1
 
         slots: list[dict[str, Any]] = []
         chunk_indices: list[int] = []
@@ -558,14 +558,14 @@ class ShmTransferStrategy(TransferStrategy):
 
         if not reserved_keys:
             empty: dict[str, Any] = {"slots": [], "chunk_indices": []}
-            if multi_group:
+            if grouped:
                 empty["group_ids"] = []
             return PrepareStoreResponse(context=empty)
         transfer_key = self._transfer_key_factory(key, instance_id)
         with self._pending_lock:
             self._pending_writes[transfer_key] = reserved_keys
         ctx: dict[str, Any] = {"slots": slots, "chunk_indices": chunk_indices}
-        if multi_group:
+        if grouped:
             ctx["group_ids"] = group_ids
         return PrepareStoreResponse(context=ctx)
 
@@ -612,17 +612,18 @@ class ShmTransferStrategy(TransferStrategy):
         """Read SHM objects and return slot descriptors for worker access.
 
         Args:
-            group_keys: Group-major object keys for multi-group workers,
+            group_keys: Group-major object keys for grouped-protocol workers,
                 narrowed to each group's in-window suffix. A retrieve is a
                 miss unless EVERY group has every one of them. ``None`` means
-                single-group.
+                legacy protocol.
             group_first_chunk: Per group, the chunk position of its first
-                key; multi-group responses report absolute ``chunk_indices``
-                parallel to ``slots``.
+                key; grouped-protocol responses report ``group_ids`` and
+                absolute ``chunk_indices`` parallel to ``slots``, even for
+                one group.
         """
+        grouped = group_keys is not None
         if group_keys is None:
             group_keys = [resolve_obj_keys(key)]
-        multi_group = len(group_keys) > 1
 
         all_prefetched: list[ObjectKey] = []
         slots: list[dict[str, Any]] = []
@@ -662,7 +663,7 @@ class ShmTransferStrategy(TransferStrategy):
         with self._pending_lock:
             self._pending_reads[transfer_key] = all_prefetched
         ctx: dict[str, Any] = {"slots": slots}
-        if multi_group:
+        if grouped:
             ctx["group_ids"] = group_ids
             ctx["chunk_indices"] = chunk_indices
         return PrepareRetrieveResponse(success=True, data=b"", context=ctx)
