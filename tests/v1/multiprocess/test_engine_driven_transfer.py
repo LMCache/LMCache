@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, PropertyMock, patch
 import os
 import sys
+import threading
 import time
 
 # Third Party
@@ -2588,6 +2589,66 @@ def test_engine_driven_context_shm_tensor_view_from_buffer() -> None:
             assert torch.equal(view, src)
         finally:
             context.close()
+    finally:
+        shm_munmap(addr, 4096)
+        shm_unlink(shm_name)
+
+
+def test_engine_driven_context_shm_close_defers_release_past_drain_timeout() -> None:
+    """A transfer still in flight after the drain timeout keeps the pool mapped:
+    close() returns, and the pool is released only after the transfer ends."""
+    shm_name = f"lmcache_test_defer_{os.getpid()}"
+    addr = _create_shm_segment(shm_name, 4096)
+    try:
+        context = EngineDrivenContextShm(
+            metadata=EngineDrivenContextMetadata(
+                layout_desc=MemoryLayoutDesc(
+                    shapes=[torch.Size([2, 4])],
+                    dtypes=[torch.float32],
+                ),
+                block_size=1,
+                use_mla=False,
+            ),
+            req_client=MagicMock(),
+            mq_timeout=1.0,
+            shm_name=shm_name,
+            pool_size=4096,
+        )
+        context.drain_timeout_s = 0.1
+        released = threading.Event()
+        release_shm = context._release_shm
+
+        def _record_release() -> None:
+            release_shm()
+            released.set()
+
+        context._release_shm = _record_release  # type: ignore[method-assign]
+        entered = threading.Event()
+        finish = threading.Event()
+
+        def _transfer() -> None:
+            with context.transfer_guard():
+                entered.set()
+                finish.wait(timeout=10.0)
+
+        worker = threading.Thread(target=_transfer)
+        worker.start()
+        assert entered.wait(timeout=5.0)
+
+        start = time.monotonic()
+        context.close()
+        assert time.monotonic() - start < 2.0
+        # Past the timeout, but the transfer still owns views into the pool.
+        assert not released.is_set()
+        assert context._shm is not None
+        # A second close while the release is pending is a no-op.
+        context.close()
+        assert context._shm is not None
+
+        finish.set()
+        worker.join(timeout=5.0)
+        assert released.wait(timeout=5.0)
+        assert context._shm is None
     finally:
         shm_munmap(addr, 4096)
         shm_unlink(shm_name)

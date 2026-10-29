@@ -155,9 +155,9 @@ class EngineDrivenContext(ABC):
 
         Returns:
             ``True`` when the context drained within ``timeout``; ``False``
-            when transfers were still in flight after it. The caller
-            proceeds with resource release either way — a bounded wait must
-            not hang shutdown — so the overrun is logged as a warning.
+            when transfers were still in flight after it. On ``False`` the
+            caller must not release anything a straggler can still touch;
+            it can defer the release behind :meth:`_wait_for_transfers`.
         """
         deadline = time.monotonic() + timeout
         with self._guard_cond:
@@ -166,14 +166,24 @@ class EngineDrivenContext(ABC):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     logger.warning(
-                        "Context close proceeding with %d transfer(s) still "
-                        "in flight after %.0fs drain timeout",
+                        "Context close timed out with %d transfer(s) still "
+                        "in flight after %.0fs",
                         self._inflight_transfers,
                         timeout,
                     )
                     return False
                 self._guard_cond.wait(timeout=remaining)
         return True
+
+    def _wait_for_transfers(self) -> None:
+        """Block, with no deadline, until no transfer is in flight.
+
+        For a release deferred after :meth:`_drain_transfers` timed out; the
+        context is already closing, so no new transfer can start meanwhile.
+        """
+        with self._guard_cond:
+            while self._inflight_transfers > 0:
+                self._guard_cond.wait()
 
     @property
     def layout_desc(self) -> MemoryLayoutDesc:
