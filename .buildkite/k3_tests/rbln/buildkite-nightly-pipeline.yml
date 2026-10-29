@@ -1,13 +1,22 @@
 # Paste this into the rbln-mp-nightly Buildkite pipeline's "Steps" editor.
 # It runs the same RBLN hardware smoke as rbln-mp-test, but on the newest
-# rbln-serve image that passed rbln-serve's nightly CI.
-
-env:
-  RBLN_SERVE_NIGHTLY_VERIFIED: "1"
+# rbln-serve image that passed rbln-serve's nightly CI, so vLLM-RBLN changes
+# that break LMCache show up before the pin in pipeline.yml is bumped.
+#
+# Web UI setup:
+# - GitHub: no build triggers and no commit statuses. A separate pipeline
+#   keeps nightly results off PR statuses and out of rbln-mp-test's
+#   cancel-running-branch-builds.
+# - Schedule: cron "0 18 * * *" (UTC, 03:00 KST) on branch dev.
+# - Notifications: notify on failed builds of this pipeline.
+#
+# Cluster prerequisite: the verified images live on harbor.mgmt.rbln.in,
+# which rejects anonymous pulls, so the rbln-queue job pods need an image
+# pull secret for it (e.g. on their service account's imagePullSecrets).
 
 agents:
   queue: "rbln-queue"
 
 steps:
   - label: ":pipeline: Upload pipeline"
-    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/rbln/pipeline.yml
+    command: bash .buildkite/k3_tests/rbln/upload-nightly.sh
