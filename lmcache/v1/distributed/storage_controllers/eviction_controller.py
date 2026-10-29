@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+L2_EVICTION_ERROR_LOG_INTERVAL_SECONDS = 60.0
+
 
 class EvictionController(StorageControllerInterface):
     """
@@ -238,6 +240,7 @@ class L2EvictionController(StorageControllerInterface):
     ):
         self._adapter_states = l2_adapter_states
         self._quota_manager = quota_manager
+        self._last_error_log: dict[int, float] = {}
         # Guards _adapter_states against concurrent runtime add/remove.
         self._states_lock = threading.Lock()
         self._stop_flag = threading.Event()
@@ -270,6 +273,7 @@ class L2EvictionController(StorageControllerInterface):
             self._adapter_states = [
                 s for s in self._adapter_states if s.adapter_id != adapter_id
             ]
+            self._last_error_log.pop(adapter_id, None)
 
     def report_status(self) -> dict:
         # NOTE: ``usage.bytes_by_cache_salt`` is intentionally NOT
@@ -303,12 +307,29 @@ class L2EvictionController(StorageControllerInterface):
     def _eviction_loop(self):
         while not self._stop_flag.is_set():
             time.sleep(1)
-            # Hold the lock across the whole pass so remove_adapter_state
-            # cannot detach (and the caller close) an adapter while we are
-            # calling into it.
-            with self._states_lock:
-                for state in self._adapter_states:
+            self._run_eviction_pass()
+
+    def _run_eviction_pass(self) -> None:
+        # Hold the lock across the whole pass so remove_adapter_state
+        # cannot detach (and the caller close) an adapter while we are
+        # calling into it.
+        with self._states_lock:
+            for state in self._adapter_states:
+                try:
                     self._check_and_evict(state)
+                except Exception:
+                    now = time.monotonic()
+                    previous = self._last_error_log.get(state.adapter_id)
+                    if (
+                        previous is None
+                        or now - previous >= L2_EVICTION_ERROR_LOG_INTERVAL_SECONDS
+                    ):
+                        self._last_error_log[state.adapter_id] = now
+                        logger.exception(
+                            "L2 eviction failed for adapter_id=%d; retrying on "
+                            "the next pass (errors logged at most once per minute).",
+                            state.adapter_id,
+                        )
 
     def _check_and_evict(self, state: L2AdapterEvictionState):
         if state.eviction_policy.support_isolation and self._quota_manager is not None:
@@ -342,6 +363,7 @@ class L2EvictionController(StorageControllerInterface):
         )
         actions = state.eviction_policy.get_eviction_actions(eviction_ratio)
         for action in actions:
+            state.eviction_policy.on_eviction_attempted(action.keys)
             self._execute_eviction_action(state.adapter, action)
 
     def _check_and_evict_by_cache_salt(self, state: L2AdapterEvictionState):
@@ -398,6 +420,7 @@ class L2EvictionController(StorageControllerInterface):
                 pending.setdefault(action.destination, []).extend(action.keys)
 
         for destination, keys in pending.items():
+            state.eviction_policy.on_eviction_attempted(keys)
             self._execute_eviction_action(
                 state.adapter,
                 EvictionAction(keys=keys, destination=destination),

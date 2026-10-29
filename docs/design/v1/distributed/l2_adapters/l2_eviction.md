@@ -14,6 +14,19 @@ A single `L2EvictionController` manages all adapters that have eviction enabled.
 Its background thread loops over every adapter each cycle, checking usage and
 triggering eviction independently per adapter.
 
+L2 store events provide per-key byte weights to LRU policies. A bucket with
+complete, heterogeneous sizes selects an LRU prefix reaching the configured
+fraction of its tracked bytes. Uniform or incomplete sizes retain count-based
+rounding. This target includes tracked keys excluded by an eligibility filter;
+it is not a fraction of eligible bytes. Fleet callers without size events
+remain in count mode.
+
+Before attempting deletion, the controller calls `on_eviction_attempted` to
+rotate selected keys behind other candidates, including when deletion fails.
+This is neither an access event nor evidence of deletion. Batches may combine
+several salt buckets. An adapter exception does not stop the remaining adapters
+or later passes; its traceback is logged at most once per minute per adapter.
+
 ## Architecture
 
 ```
