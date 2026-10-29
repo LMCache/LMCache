@@ -220,6 +220,13 @@ class KernelGroupInfo:
     rather than per-token attention KV. The window reflects restore
     semantics, so ``full_sw_kv`` forcing must not widen it."""
 
+    expected_bytes_per_token: "int | None" = None
+    """Engine-spec-derived KV payload bytes per logical token for this
+    group's layers (leaf ``page_size_bytes / block_size`` summed over
+    members), carried from ``EngineGroupInfo``. ``None`` means no
+    engine-derived expectation exists and the store-time byte-coverage
+    check must no-op for this group."""
+
     def __repr__(self) -> str:
         if not self.layer_indices:
             indices_repr = "[]"
@@ -464,6 +471,9 @@ class KVLayerGroupsManager:
                     recurrent_state=(
                         info.recurrent_state if info is not None else False
                     ),
+                    expected_bytes_per_token=(
+                        info.expected_bytes_per_token if info is not None else None
+                    ),
                 )
             )
 
@@ -521,6 +531,42 @@ class KVLayerGroupsManager:
     def num_object_groups(self) -> int:
         """Number of :class:`ObjectGroupInfo` entries."""
         return len(self._object_groups)
+
+    def expected_object_group_bytes_per_chunk(
+        self, object_group_idx: int, chunk_size: int
+    ) -> "int | None":
+        """Engine-spec-derived bytes one stored chunk of an object group covers.
+
+        Sums the member kernel groups' ``expected_bytes_per_token`` rates
+        (engine KV cache spec only, never the detected registration
+        geometry) and scales by ``chunk_size`` tokens; this is the expected
+        byte size of each host object reserved for that object group.
+
+        Args:
+            object_group_idx: Index of the object group.
+            chunk_size: Logical tokens per stored chunk.
+
+        Returns:
+            ``None`` when any member group has no engine-derived rate, or a
+            member's registered tensors are dim-0-padded pools (page stride
+            does not tile ``kv_size * bs * nh * hs`` elements, so a
+            spec-vs-numel comparison is unreliable): the store-time
+            byte-coverage check must no-op for this object group.
+        """
+        if not 0 <= object_group_idx < len(self._object_groups):
+            return None
+        total = 0
+        for kg_idx in self._object_groups[object_group_idx].kernel_group_indices:
+            group = self._kernel_groups[kg_idx]
+            bpt = group.expected_bytes_per_token
+            if bpt is None:
+                return None
+            sd = group.shape_desc
+            contiguous_page_elems = sd.kv_size * sd.bs * sd.nh * sd.hs
+            if sd.block_stride_elems and sd.block_stride_elems != contiguous_page_elems:
+                return None
+            total += bpt
+        return total * chunk_size if total > 0 else None
 
     @property
     @lmcache_deprecate("`num_groups` is an outdated alias for `num_kernel_groups`")
