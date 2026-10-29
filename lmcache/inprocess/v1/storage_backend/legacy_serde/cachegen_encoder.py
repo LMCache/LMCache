@@ -269,6 +269,18 @@ def encode_ntokens(
         output_buffer,
         output_lengths,
     )
+    # A stream longer than its slot means the CDF does not fit the symbols
+    # (for example a CDF built from other data). The encoders never write past
+    # a slot but report the full length, so such a chunk is rejected here
+    # instead of being stored truncated and decoded wrongly.
+    slot_bytes = output_buffer.shape[-1]
+    max_length = int(output_lengths.max())
+    if max_length > slot_bytes:
+        raise RuntimeError(
+            f"CacheGen encoder: a coded stream needs {max_length} bytes, but each "
+            f"stream slot holds {slot_bytes} bytes; the CDF does not fit the "
+            "symbols being encoded."
+        )
     byte_tensor = collect_bytes(output_buffer, output_lengths)
     return byte_tensor
     # return byte_tensor.cpu().numpy().tobytes()

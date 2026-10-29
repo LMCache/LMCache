@@ -19,20 +19,42 @@
 #define PRECISION 16
 
 /**
+ * Write one byte of a thread's stream into its slot of the shared buffer.
+ *
+ * A stream can need more bytes than its slot holds when the CDF does not fit
+ * the symbols (for example a CDF built from other data). The caller keeps
+ * counting the stream's length, so the host can detect the overflow from
+ * output_lengths, but no byte is written past the end of the thread's slot.
+ */
+__device__ __inline__ void write_output_byte(uint8_t* output_shared,
+                                             int output_shared_offset,
+                                             int output_shared_end,
+                                             uint8_t value) {
+  if (output_shared_offset < output_shared_end) {
+    output_shared[output_shared_offset] = value;
+  }
+}
+
+/**
  * Spill the register to the shared memory
  */
 __device__ __inline__ void spill_reg_to_shared(uint32_t output_reg,
                                                int& output_reg_len,
                                                uint8_t* output_shared,
-                                               int& output_shared_offset) {
+                                               int& output_shared_offset,
+                                               int output_shared_end) {
   output_reg <<= 32 - output_reg_len;
   output_reg_len = 0;
   // TODO: potential optimization: since it uses little endian, we can directly
   // write the 4 bytes
-  output_shared[output_shared_offset] = output_reg >> 24;
-  output_shared[output_shared_offset + 1] = (output_reg >> 16) & 0xFF;
-  output_shared[output_shared_offset + 2] = (output_reg >> 8) & 0xFF;
-  output_shared[output_shared_offset + 3] = output_reg & 0xFF;
+  write_output_byte(output_shared, output_shared_offset, output_shared_end,
+                    output_reg >> 24);
+  write_output_byte(output_shared, output_shared_offset + 1, output_shared_end,
+                    (output_reg >> 16) & 0xFF);
+  write_output_byte(output_shared, output_shared_offset + 2, output_shared_end,
+                    (output_reg >> 8) & 0xFF);
+  write_output_byte(output_shared, output_shared_offset + 3, output_shared_end,
+                    output_reg & 0xFF);
   output_shared_offset += 4;
   output_reg = 0;
 }
@@ -42,11 +64,12 @@ __device__ __inline__ void spill_reg_to_shared(uint32_t output_reg,
  */
 __device__ __inline__ void spill_partial_reg_to_shared(
     uint32_t output_reg, int& output_reg_len, uint8_t* output_shared,
-    int& output_shared_offset) {
+    int& output_shared_offset, int output_shared_end) {
   output_reg <<= 32 - output_reg_len;
   while (output_reg_len > 0) {
     output_reg_len -= 8;
-    output_shared[output_shared_offset] = output_reg >> 24;
+    write_output_byte(output_shared, output_shared_offset, output_shared_end,
+                      output_reg >> 24);
     output_shared_offset++;
     output_reg <<= 8;
   }
@@ -56,11 +79,9 @@ __device__ __inline__ void spill_partial_reg_to_shared(
  * Write N bits of 0/1 to the output. Save the overflow bits to the shared
  * memory
  */
-__device__ __inline__ void add_bits_to_output(uint32_t bit, int num,
-                                              uint32_t& output_reg,
-                                              int& output_reg_len,
-                                              uint8_t* output_shared,
-                                              int& output_shared_offset) {
+__device__ __inline__ void add_bits_to_output(
+    uint32_t bit, int num, uint32_t& output_reg, int& output_reg_len,
+    uint8_t* output_shared, int& output_shared_offset, int output_shared_end) {
   do {
     const int remaining = min(num, 32 - output_reg_len);
     output_reg <<= remaining;
@@ -69,7 +90,7 @@ __device__ __inline__ void add_bits_to_output(uint32_t bit, int num,
     output_reg_len += remaining;
     if (output_reg_len == 32) {
       spill_reg_to_shared(output_reg, output_reg_len, output_shared,
-                          output_shared_offset);
+                          output_shared_offset, output_shared_end);
     }
   } while (num > 0);
 }
@@ -79,11 +100,12 @@ __device__ __inline__ void add_bits_to_output(uint32_t bit, int num,
  */
 __device__ __inline__ void append_bit_and_pending(
     uint32_t bit, uint64_t& pending_bits, uint32_t& output_reg,
-    int& output_reg_len, uint8_t* output_shared, int& output_shared_offset) {
+    int& output_reg_len, uint8_t* output_shared, int& output_shared_offset,
+    int output_shared_end) {
   add_bits_to_output(bit, 1, output_reg, output_reg_len, output_shared,
-                     output_shared_offset);
+                     output_shared_offset, output_shared_end);
   add_bits_to_output(1 - bit, pending_bits, output_reg, output_reg_len,
-                     output_shared, output_shared_offset);
+                     output_shared, output_shared_offset, output_shared_end);
   pending_bits = 0;
 }
 
@@ -143,6 +165,9 @@ __global__ void encode_kernel(
   uint32_t output_reg = 0;
   int output_reg_len = 0;
   int output_shared_offset = threadIdx.x * OUTPUT_BUFFER_LENGTH_PER_THREAD;
+  // No byte of this thread's stream is written past its own slot.
+  const int output_shared_end =
+      output_shared_offset + OUTPUT_BUFFER_LENGTH_PER_THREAD;
 
   for (int i = 0; i < ntokens; i++) {
     const uint8_t sym =
@@ -161,13 +186,15 @@ __global__ void encode_kernel(
     while (true) {
       if (high < 0x80000000U) {
         append_bit_and_pending(0, pending_bits, output_reg, output_reg_len,
-                               output_shared, output_shared_offset);
+                               output_shared, output_shared_offset,
+                               output_shared_end);
         low <<= 1;
         high <<= 1;
         high |= 1;
       } else if (low >= 0x80000000U) {
         append_bit_and_pending(1, pending_bits, output_reg, output_reg_len,
-                               output_shared, output_shared_offset);
+                               output_shared, output_shared_offset,
+                               output_shared_end);
         low <<= 1;
         high <<= 1;
         high |= 1;
@@ -187,14 +214,16 @@ __global__ void encode_kernel(
 
   if (low < 0x40000000U) {
     append_bit_and_pending(0, pending_bits, output_reg, output_reg_len,
-                           output_shared, output_shared_offset);
+                           output_shared, output_shared_offset,
+                           output_shared_end);
   } else {
     append_bit_and_pending(1, pending_bits, output_reg, output_reg_len,
-                           output_shared, output_shared_offset);
+                           output_shared, output_shared_offset,
+                           output_shared_end);
   }
 
   spill_partial_reg_to_shared(output_reg, output_reg_len, output_shared,
-                              output_shared_offset);
+                              output_shared_offset, output_shared_end);
   output_lengths[layer_id * nchannels + channel_id] =
       output_shared_offset - threadIdx.x * OUTPUT_BUFFER_LENGTH_PER_THREAD;
 
@@ -209,7 +238,12 @@ __global__ void encode_kernel(
   // Copy the output buffer to global memory
   // then copy one "row" at a time, and make sure the write is coalesced
   for (int i = 0; i < BLOCK_SIZE; i++) {
-    int length = output_lengths_shared[i];
+    // output_lengths keeps a stream's full length so the host can detect an
+    // overflow; only the bytes that fit in the slot were written and are
+    // copied.
+    int length = min(
+        output_lengths_shared[i],
+        min(OUTPUT_BUFFER_LENGTH_PER_THREAD, output_buffer_length_per_thread));
     int current_channel = blockIdx.y * BLOCK_SIZE + i;
     for (int j = threadIdx.x; j < length; j += blockDim.x) {
       int global_offset =
@@ -265,6 +299,9 @@ __global__ void encode_with_accessor_kernel(
   uint32_t output_reg = 0;
   int output_reg_len = 0;
   int output_shared_offset = threadIdx.x * OUTPUT_BUFFER_LENGTH_PER_THREAD;
+  // No byte of this thread's stream is written past its own slot.
+  const int output_shared_end =
+      output_shared_offset + OUTPUT_BUFFER_LENGTH_PER_THREAD;
 
   for (int i = 0; i < ntokens; i++) {
     const uint8_t sym =
@@ -284,13 +321,15 @@ __global__ void encode_with_accessor_kernel(
     while (true) {
       if (high < 0x80000000U) {
         append_bit_and_pending(0, pending_bits, output_reg, output_reg_len,
-                               output_shared, output_shared_offset);
+                               output_shared, output_shared_offset,
+                               output_shared_end);
         low <<= 1;
         high <<= 1;
         high |= 1;
       } else if (low >= 0x80000000U) {
         append_bit_and_pending(1, pending_bits, output_reg, output_reg_len,
-                               output_shared, output_shared_offset);
+                               output_shared, output_shared_offset,
+                               output_shared_end);
         low <<= 1;
         high <<= 1;
         high |= 1;
@@ -310,14 +349,16 @@ __global__ void encode_with_accessor_kernel(
 
   if (low < 0x40000000U) {
     append_bit_and_pending(0, pending_bits, output_reg, output_reg_len,
-                           output_shared, output_shared_offset);
+                           output_shared, output_shared_offset,
+                           output_shared_end);
   } else {
     append_bit_and_pending(1, pending_bits, output_reg, output_reg_len,
-                           output_shared, output_shared_offset);
+                           output_shared, output_shared_offset,
+                           output_shared_end);
   }
 
   spill_partial_reg_to_shared(output_reg, output_reg_len, output_shared,
-                              output_shared_offset);
+                              output_shared_offset, output_shared_end);
   output_lengths[layer_id][channel_id] =
       output_shared_offset - threadIdx.x * OUTPUT_BUFFER_LENGTH_PER_THREAD;
 
@@ -332,7 +373,12 @@ __global__ void encode_with_accessor_kernel(
   // Copy the output buffer to global memory
   // then copy one "row" at a time, and make sure the write is coalesced
   for (int i = 0; i < BLOCK_SIZE; i++) {
-    int length = output_lengths_shared[i];
+    // output_lengths keeps a stream's full length so the host can detect an
+    // overflow; only the bytes that fit in the slot were written and are
+    // copied.
+    int length = min(output_lengths_shared[i],
+                     min(OUTPUT_BUFFER_LENGTH_PER_THREAD,
+                         static_cast<int>(output_buffer.size(2))));
     int current_channel = blockIdx.y * BLOCK_SIZE + i;
     for (int j = threadIdx.x; j < length; j += blockDim.x) {
       output_buffer[layer_id][current_channel][j] =
