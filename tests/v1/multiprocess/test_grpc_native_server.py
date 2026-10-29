@@ -805,3 +805,37 @@ def test_start_after_close_is_rejected() -> None:
     server.close()
     with pytest.raises(RuntimeError, match="closed"):
         server.start()
+
+
+def test_exports_grpc_server_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    # First Party
+    from lmcache.v1.mp_observability import otel_init
+
+    pygrpc_native = pytest.importorskip("pygrpc_native")
+    if not hasattr(pygrpc_native.NativeGrpcFront, "metrics"):
+        pytest.skip("needs pygrpc-native 0.3.0 or later")
+    monkeypatch.setattr(otel_init, "_GRPC_METRICS_ENABLED", True)
+    monkeypatch.setattr(otel_init, "_METRICS_SOURCES", [])
+    server = _serve([_EchoModule()])
+    client = _client(server)
+    try:
+        for _ in range(3):
+            assert _echo(client, b"ab") == b"ba"
+        (source,) = otel_init._METRICS_SOURCES
+        for _ in range(100):
+            metrics = {metric.name: metric for metric in source()}
+            if metrics and metrics["grpc.server.call.duration"].data.data_points:
+                break
+            time.sleep(0.01)
+    finally:
+        client.close()
+        server.close()
+
+    (started,) = metrics["grpc.server.call.started"].data.data_points
+    (duration,) = metrics["grpc.server.call.duration"].data.data_points
+    method = _SERVER_MODULE_CALL.lstrip("/")
+    assert started.attributes == {"grpc.method": method}
+    assert started.value == 3
+    assert duration.attributes == {"grpc.method": method, "grpc.status": "OK"}
+    assert duration.count == sum(duration.bucket_counts) == 3
+    assert otel_init._METRICS_SOURCES == []
