@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 import inspect
 
 # Third Party
@@ -36,6 +36,7 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.native_block_transfer import transfer_with_address_kernel
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -82,6 +83,21 @@ def supports_tensor_block_transfer(device: torch.device) -> bool:
     return _detect_block_transfer_accepts_tensor(
         resolve_device_ops(device.type).multi_layer_block_kv_transfer
     )
+
+
+def _stamp_region_strides(
+    shape_desc: PageBufferShapeDesc,
+    normalized: DiscoverableKVCache,
+    engine_kv_format: "lmcache_native.EngineKVFormat",
+) -> None:
+    """Stamp pointer-kernel strides after grouping has isolated equal layouts."""
+    if engine_kv_format != lmcache_native.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS:
+        return
+    layers = cast(list[list[torch.Tensor]], normalized)
+    strides = tuple(tuple(p.stride()) for p in layers[0])
+    if any(tuple(tuple(p.stride()) for p in layer) != strides for layer in layers):
+        raise ValueError("Region transfer layers must be grouped by component strides")
+    shape_desc.region_k_strides, shape_desc.region_v_strides = strides
 
 
 @dataclass
@@ -442,12 +458,22 @@ def gather_paged_kv_to_cpu(
             layer_idx=0,
             group_idx=0,
             allow_strided_regions=(
-                accepts_tensor
+                (
+                    accepts_tensor
+                    or bool(
+                        getattr(
+                            device_ops, "supports_strided_kv_regions", lambda: False
+                        )()
+                    )
+                )
                 and layout_hints is not None
                 and layout_hints.get("spec_transfer_regions", False)
             ),
         ),
     )
+
+    if not accepts_tensor:
+        _stamp_region_strides(shape_desc, normalized, engine_kv_format)
 
     iter_indices = (
         list(chunk_indices) if chunk_indices is not None else list(range(num_chunks))
@@ -668,12 +694,22 @@ def scatter_cpu_to_paged_kv(
             layer_idx=0,
             group_idx=0,
             allow_strided_regions=(
-                accepts_tensor
+                (
+                    accepts_tensor
+                    or bool(
+                        getattr(
+                            device_ops, "supports_strided_kv_regions", lambda: False
+                        )()
+                    )
+                )
                 and layout_hints is not None
                 and layout_hints.get("spec_transfer_regions", False)
             ),
         ),
     )
+
+    if not accepts_tensor:
+        _stamp_region_strides(shape_desc, normalized, engine_kv_format)
 
     selected_block_ids: list[int] = []
     for chunk_idx in range(len(chunks)):

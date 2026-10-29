@@ -45,6 +45,7 @@ from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import (
     get_device_spec,
+    resolve_device_ops,
     resolve_kv_wrapper_factory,
     synchronize_device,
 )
@@ -53,6 +54,10 @@ from lmcache.v1.platform.base.event_ipc import (
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.kv_wrap import wrap_kv_caches
+from lmcache.v1.platform.transfer_regions import (
+    describe_transfer_regions,
+    restore_transfer_regions,
+)
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -78,14 +83,22 @@ def _tensor_kv_caches(
         A plain tensor mapping accepted by the existing handle wrappers.
 
     Raises:
-        ValueError: A layer contains component views requiring tensor transfer.
+        ValueError: Component views were supplied without native IPC owners.
     """
     tensors: dict[str, torch.Tensor] = {}
     for name, cache in kv_caches.items():
         if not isinstance(cache, torch.Tensor):
-            raise ValueError("Spec transfer regions require MP engine_driven mode")
+            raise ValueError("Spec transfer regions require native_kv_caches for IPC")
         tensors[name] = cache
     return tensors
+
+
+def _supports_native_region_transfer(device: torch.device) -> bool:
+    """Probe the native op's explicit stride-aware region capability."""
+    capability = getattr(
+        resolve_device_ops(device.type), "supports_strided_kv_regions", None
+    )
+    return callable(capability) and bool(capability())
 
 
 def _supports_async_primitives() -> bool:
@@ -347,6 +360,7 @@ class TransferContext(ABC):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
         lmcache_chunk_tokens: int | None = None,
+        native_kv_caches: Mapping[str, torch.Tensor] | None = None,
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -362,6 +376,8 @@ class TransferContext(ABC):
                 contexts use it to normalize engine-specific KV layouts.
                 Adapters should pass their own :class:`EngineType`; the
                 default is :attr:`EngineType.VLLM` for backwards compatibility.
+            native_kv_caches: Native engine owners for IPC-exported region views.
+                Unused by engine-driven transfer.
             lmcache_chunk_tokens: Tokens in one LMCache chunk. Engine-driven
                 multi-group registration sizes every group from it; without
                 it the chunk is derived from ``blocks_in_chunk`` and this
@@ -596,6 +612,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
         lmcache_chunk_tokens: int | None = None,
+        native_kv_caches: Mapping[str, torch.Tensor] | None = None,
     ) -> None:
         """Register the worker KV cache with the LMCache server.
 
@@ -608,6 +625,8 @@ class LMCacheDrivenTransferContext(TransferContext):
             layout_hints: Optional KV-layout metadata.
             engine_group_infos: Optional engine KV-group metadata.
             engine_type: Serving engine that produced the caches.
+            lmcache_chunk_tokens: Chunk tokens (unused by this transfer mode).
+            native_kv_caches: Native engine owners when exporting region views.
 
         Raises:
             RuntimeError: If event IPC is unsupported for the KV-cache device.
@@ -617,14 +636,41 @@ class LMCacheDrivenTransferContext(TransferContext):
         event_backend = get_event_ipc_backend(device)
         event_backend.check_event_support(device)
 
+        hints: LayoutHints = layout_hints.copy() if layout_hints is not None else {}
+        if hints.get("spec_transfer_regions"):
+            if native_kv_caches is None:
+                raise ValueError(
+                    "Spec transfer regions require native_kv_caches for IPC"
+                )
+            recipes = describe_transfer_regions(native_kv_caches, kv_caches)
+            hints["transfer_region_views"] = recipes
+            owners = [
+                name
+                for name, layer in zip(native_kv_caches, recipes["layers"], strict=True)
+                if layer is not None
+            ]
+            wrapped = wrap_kv_caches(dict(native_kv_caches), region_owners=owners)
+            # CPU SHM migration rebinds the engine's owner tensor. Preserve
+            # existing canonical-plane references for heartbeat re-registration.
+            restored = restore_transfer_regions(list(native_kv_caches.values()), hints)
+            for cache, refreshed in zip(kv_caches.values(), restored, strict=True):
+                if isinstance(cache, list) and isinstance(refreshed, list):
+                    for plane, source in zip(cache, refreshed, strict=True):
+                        if isinstance(plane, torch.Tensor) and isinstance(
+                            source, torch.Tensor
+                        ):
+                            plane.set_(source)
+        else:
+            wrapped = wrap_kv_caches(_tensor_kv_caches(kv_caches))
+
         future = self._submit_registration(
             lambda: self._req_client.register_kv_cache(
                 self._instance_id,
-                wrap_kv_caches(_tensor_kv_caches(kv_caches)),
+                wrapped,
                 model_name,
                 world_size,
                 engine_type,
-                layout_hints or {},
+                hints,
                 list(engine_group_infos),
             )
         )
@@ -889,6 +935,7 @@ class EngineDrivenTransferContext(TransferContext):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
         lmcache_chunk_tokens: int | None = None,
+        native_kv_caches: Mapping[str, torch.Tensor] | None = None,
     ) -> None:
         """Register KV caches with the engine-driven context server.
 
@@ -927,10 +974,14 @@ class EngineDrivenTransferContext(TransferContext):
         if (
             layout_hints is not None
             and layout_hints.get("spec_transfer_regions", False)
-            and not supports_tensor_block_transfer(_get_kv_device(kv_caches))
+            and not (
+                supports_tensor_block_transfer(_get_kv_device(kv_caches))
+                or _supports_native_region_transfer(_get_kv_device(kv_caches))
+            )
         ):
             raise NotImplementedError(
-                "Spec transfer regions require tensor-based block transfer ops"
+                "Spec transfer regions require tensor-based block transfer ops "
+                "or native strided-region support; rebuild native extensions together"
             )
 
         # The wire field is named use_mla but only drives the object plane
@@ -1675,6 +1726,5 @@ def create_transfer_context(
         resolved_mode.value,
     )
     if resolved_mode is MPTransferMode.LMCACHE_DRIVEN:
-        _tensor_kv_caches(kv_caches)
         return _build_lmcache_driven_context(device_type, instance_id, req_client)
     return _build_engine_driven_context(instance_id, req_client)

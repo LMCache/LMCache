@@ -919,10 +919,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             layout_hints=layout_hints,
             dcp_size=self._dcp_size,
         )
+        native_kwargs = (
+            {"native_kv_caches": kv_caches}
+            if layout_hints.get("spec_transfer_regions")
+            else {}
+        )
         self.worker_adapter.register_kv_caches(
             transfer_kv_caches,
             engine_group_infos=engine_group_infos,
             layout_hints=layout_hints,
+            **native_kwargs,
         )
         if self.dispatcher is not None:
             dispatch(

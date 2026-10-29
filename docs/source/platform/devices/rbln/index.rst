@@ -123,8 +123,10 @@ cache; retrieve writes through those views into attention's storage.
 
 Use ``LMCacheMPConnector`` with engine-driven transfer as shown above. This
 integration supports unquantized dense K/V exports and tensor-based block ops.
-Pointer-wrapper transfer, the separate in-process vendor connector, and
-heterogeneous TP slicing are not covered. Without a region-exporting producer
+The separate in-process vendor connector and heterogeneous TP slicing are not
+covered. The generic region consumer also supports LMCache-driven IPC on CPU
+and CUDA, but RBLN still lacks its own IPC/event backend and must use
+engine-driven mode. Without a region-exporting producer
 spec, registration retains its legacy behavior; upgrading LMCache alone cannot
 recover the ambiguous axis semantics.
 

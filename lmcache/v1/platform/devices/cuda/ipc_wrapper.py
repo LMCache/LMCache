@@ -167,6 +167,11 @@ class CudaIPCWrapper(DeviceIPCWrapper):
     device_type: ClassVar[str] = "cuda"
 
     @classmethod
+    def wrap_region_owner(cls, tensor: torch.Tensor) -> DeviceIPCWrapper:
+        """Export the native owner; region offsets use its imported first element."""
+        return cls(tensor, preserve_view=True)
+
+    @classmethod
     def wrap(cls, tensor: torch.Tensor) -> "CudaIPCWrapper":
         """Factory used by
         :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`.
@@ -180,7 +185,7 @@ class CudaIPCWrapper(DeviceIPCWrapper):
         """
         return cls(tensor)
 
-    def __init__(self, tensor: torch.Tensor) -> None:
+    def __init__(self, tensor: torch.Tensor, *, preserve_view: bool = False) -> None:
         # First Party
         from lmcache.v1.gpu_connector.kv_format.contiguity import (
             attempt_permute_to_contiguous_view,
@@ -189,7 +194,9 @@ class CudaIPCWrapper(DeviceIPCWrapper):
         # Permute any non-contiguous view (e.g. vLLM's NHD-over-HND) so the
         # shape/stride we encode across IPC reflects the physical layout.
         # Offset is preserved by the wrapper's storage_offset field.
-        tensor = attempt_permute_to_contiguous_view(tensor)
+        # Spec-region owners retain their exact view and recipe origin.
+        if not preserve_view:
+            tensor = attempt_permute_to_contiguous_view(tensor)
 
         storage = tensor.untyped_storage()
         handle = storage._share_cuda_()
@@ -280,6 +287,11 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
     device_type: ClassVar[str] = "cuda"
 
     @classmethod
+    def wrap_region_owner(cls, tensor: torch.Tensor) -> DeviceIPCWrapper:
+        """Export the native owner; region offsets use its imported first element."""
+        return cls(tensor, preserve_view=True)
+
+    @classmethod
     def wrap(cls, tensor: torch.Tensor) -> "RawCudaIPCWrapper":
         """Factory used by
         :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`.
@@ -294,7 +306,7 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
         """
         return cls(tensor)
 
-    def __init__(self, tensor: torch.Tensor) -> None:
+    def __init__(self, tensor: torch.Tensor, *, preserve_view: bool = False) -> None:
         # First Party
         from lmcache.v1.gpu_connector.kv_format.contiguity import (
             attempt_permute_to_contiguous_view,
@@ -305,7 +317,9 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
         # ones, metadata-only. Anything still non-contiguous is a validated
         # dim-0-padded view (other layouts raise there), which to_tensor()
         # rebuilds from the shipped strides.
-        tensor = attempt_permute_to_contiguous_view(tensor)
+        # Spec-region owners retain their exact view and recipe origin.
+        if not preserve_view:
+            tensor = attempt_permute_to_contiguous_view(tensor)
 
         data_ptr = tensor.data_ptr()
         _bind_primary_context(tensor.device.index)
@@ -490,6 +504,11 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
     device_type: ClassVar[str] = "cuda"
 
     @classmethod
+    def wrap_region_owner(cls, tensor: torch.Tensor) -> DeviceIPCWrapper:
+        """Export the native owner; region offsets use its imported first element."""
+        return cls(tensor, preserve_view=True)
+
+    @classmethod
     def wrap(cls, tensor: torch.Tensor) -> "VmmCudaIPCWrapper":
         """Factory mirror of the other wrappers' ``wrap``.
 
@@ -501,7 +520,7 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
         """
         return cls(tensor)
 
-    def __init__(self, tensor: torch.Tensor) -> None:
+    def __init__(self, tensor: torch.Tensor, *, preserve_view: bool = False) -> None:
         # First Party
         from lmcache.v1.gpu_connector.kv_format.contiguity import (
             attempt_permute_to_contiguous_view,
@@ -511,7 +530,9 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
         # contiguous ones, metadata-only. Anything still non-contiguous is a
         # validated dim-0-padded view (other layouts raise there), which
         # to_tensor() rebuilds from the shipped strides.
-        tensor = attempt_permute_to_contiguous_view(tensor)
+        # Spec-region owners retain their exact view and recipe origin.
+        if not preserve_view:
+            tensor = attempt_permute_to_contiguous_view(tensor)
 
         data_ptr = tensor.data_ptr()
         device_index = tensor.device.index

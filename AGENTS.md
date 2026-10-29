@@ -253,3 +253,14 @@ When asked to review a PR, use the `pr-review` skill; before creating a PR,
 self-check with the `pre-pr-check` skill (both under `.claude/skills/`). Create
 the PR as a draft and leave the ready-for-review transition to the submitting
 human after their self-review.
+
+### Native transfer descriptor ABI
+
+When `PageBufferShapeDesc` or `KernelGroupSpec` changes, rebuild both
+`lmcache_native` and the accelerator extension from the same source revision.
+A `NO_GPU_EXT=1` common-only rebuild validates CPU imports but leaves an old
+CUDA extension ABI incompatible; do not reuse that mixed build for GPU tests.
+
+Some `lmcache/vllm-openai` images expose `/opt/venv/bin/python` without a pip
+module. Check the interpreter first; use `uv pip install --python <interpreter>`
+when available instead of installing through a different system Python.

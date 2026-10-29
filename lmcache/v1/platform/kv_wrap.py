@@ -12,6 +12,7 @@ them without importing the vLLM integration package.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Sequence
 from logging import DEBUG
 from typing import Any
 
@@ -27,13 +28,17 @@ from lmcache.v1.platform import resolve_kv_wrapper_factory
 logger = init_logger(__name__)
 
 
-def wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
+def wrap_one_kv_cache(tensor: torch.Tensor, *, region_owner: bool = False) -> Any:
     """Dispatch by the layer KVCache's device type via the platform registry.
 
     Concrete factories are supplied by the registered ``DeviceSpec`` objects,
     so this call site stays free of if/elif chains and external accelerators
     can provide their wrapper from an installed device-plugin wheel.
     """
+    if region_owner:
+        return resolve_kv_wrapper_factory(get_device(tensor).type, region_owner=True)(
+            tensor
+        )
     return resolve_kv_wrapper_factory(get_device(tensor).type)(tensor)
 
 
@@ -44,11 +49,14 @@ def _layer_shape_and_dtype(value: Any) -> tuple[object, str]:
     return tuple(tuple(p.shape) for p in value), str(tuple(p.dtype for p in value))
 
 
-def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
+def wrap_kv_caches(
+    kv_caches: dict[str, torch.Tensor], *, region_owners: Sequence[str] = ()
+) -> KVCache:
     """Wrap every KV cache value for IPC transport.
 
     Args:
         kv_caches: Mapping from layer name to worker-owned KV cache value.
+        region_owners: Native layers whose exact view must remain engine-owned.
 
     Returns:
         The list of per-layer IPC wrappers, ready for the msgspec wire.
@@ -76,8 +84,11 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
     # are skipped via the duck-typed ``shm_name`` check.
     wrappers: KVCache = []
     try:
-        for value in kv_caches.values():
-            wrappers.append(wrap_one_kv_cache(value))
+        for name, value in kv_caches.items():
+            if name in region_owners:
+                wrappers.append(wrap_one_kv_cache(value, region_owner=True))
+            else:
+                wrappers.append(wrap_one_kv_cache(value))
     except BaseException:
         _release_partial_kv_wrappers(wrappers)
         raise

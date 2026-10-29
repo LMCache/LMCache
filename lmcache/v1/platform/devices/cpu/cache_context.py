@@ -28,6 +28,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
+    get_dtype,
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
 )
@@ -35,6 +36,7 @@ from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.group_view import engine_group_layer_indices
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.devices.cpu.stub_cpu_device import StubStream
+from lmcache.v1.platform.transfer_regions import restore_transfer_regions
 
 if TYPE_CHECKING:
     # Standard
@@ -87,7 +89,9 @@ class CPUCacheContext(BaseCacheContext):
             unwrap_kv_cache_tensors,
         )
 
-        unwrapped = unwrap_kv_cache_tensors(kv_caches)
+        unwrapped = restore_transfer_regions(
+            unwrap_kv_cache_tensors(kv_caches), layout_hints
+        )
         self.device_ = torch.device("cpu")
 
         # Discover layout & build KV layer groups via the same path
@@ -103,7 +107,7 @@ class CPUCacheContext(BaseCacheContext):
             engine_type,
             layout_hints,
         )
-        kv_caches_list: list[torch.Tensor] = list(kv_caches_normalized)
+        kv_caches_list = list(kv_caches_normalized)
         num_layers_val = len(engine_kv_formats)
         kv_layer_groups_manager = KVLayerGroupsManager(
             kv_caches_list,
@@ -111,6 +115,9 @@ class CPUCacheContext(BaseCacheContext):
             engine_group_infos=engine_group_infos,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             separate_object_groups=separate_object_groups,
+            allow_strided_regions=bool(
+                layout_hints and layout_hints.get("spec_transfer_regions")
+            ),
         )
         # Set full_sw_kv before the temp buffer / object groups are sized so
         # both use the full (un-windowed) per-chunk geometry (mirrors
@@ -146,7 +153,12 @@ class CPUCacheContext(BaseCacheContext):
         ]
 
         self.kv_cache_pointers_ = torch.tensor(
-            [t.data_ptr() for t in self.kv_caches_], dtype=torch.long
+            [
+                t.data_ptr()
+                for layer in self.kv_caches_
+                for t in (layer if isinstance(layer, (list, tuple)) else [layer])
+            ],
+            dtype=torch.long,
         )
 
         # Temporary buffer for transfers (same layout as
@@ -189,7 +201,7 @@ class CPUCacheContext(BaseCacheContext):
             "CPUCacheContext: %d layers, %d blocks, dtype=%s (shm-backed)",
             self.num_layers_,
             self.num_blocks,
-            self.kv_caches_[0].dtype,
+            get_dtype(self.kv_caches_, engine_kv_formats[0]),
         )
 
     # -- Internal helpers --
@@ -205,7 +217,11 @@ class CPUCacheContext(BaseCacheContext):
         except OSError:
             return
         free_bytes = st.f_bavail * st.f_frsize
-        kv_bytes = sum(t.numel() * t.element_size() for t in self.kv_caches_)
+        kv_bytes = sum(
+            t.numel() * t.element_size()
+            for layer in self.kv_caches_
+            for t in (layer if isinstance(layer, (list, tuple)) else [layer])
+        )
         if kv_bytes > free_bytes:
             logger.warning(
                 "Insufficient /dev/shm space for CPU KV cache: "

@@ -35,6 +35,7 @@ import threading
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
@@ -248,6 +249,60 @@ def test_registration_builds_the_transfer_context_through_the_hook():
         adapter._send_register_kv_caches_request(kv_caches)
 
     assert seen == [kv_caches]
+
+
+@pytest.mark.parametrize("with_native_owner", [False, True], ids=["legacy", "regions"])
+def test_native_owners_survive_initial_registration_and_heartbeat(
+    monkeypatch, with_native_owner
+):
+    """Recovery must re-export engine owners, without adding kwargs to old hooks.
+
+    The adapter keeps canonical region planes for transfers and the separate
+    native mapping for IPC ownership. Exercise both public registration and the
+    real heartbeat recovery callback, since losing the latter mapping silently
+    breaks re-registration after CPU SHM migration or a server restart.
+    """
+    transfer_ctx = MagicMock()
+    built: list[object] = []
+
+    class _Adapter(LMCacheMPWorkerAdapter):
+        def _create_transfer_context(self, kv_caches):
+            built.append(kv_caches)
+            return transfer_ctx
+
+    adapter = _Adapter.__new__(_Adapter)
+    adapter.lmcache_tokens_per_chunk = 4
+    adapter.model_name = "model"
+    adapter.parallel_strategy = MagicMock(kv_world_size=1)
+    adapter.blocks_in_chunk = 2
+    adapter._mq_timeout = 1.0
+    adapter.req_client = MagicMock()
+    adapter._required_chunk_alignment = 1
+    adapter._server_url = "tcp://127.0.0.1:1"
+    adapter._heartbeat = None
+    adapter.dispatcher = None
+    monkeypatch.setattr(adapter_mod, "_verify_recovered_chunk_size", lambda *a: True)
+
+    owner = torch.empty(2, 3, 2, 1, 4)
+    caches = (
+        {"layer.0": [owner[0], owner[1]]} if with_native_owner else {"layer.0": owner}
+    )
+    native = {"layer.0": owner} if with_native_owner else None
+    hints = {"spec_transfer_regions": True} if with_native_owner else {}
+    adapter.register_kv_caches(caches, layout_hints=hints, native_kv_caches=native)
+    assert adapter._reregister_kv_caches_callback()
+
+    assert len(built) == 2 and all(value is caches for value in built)
+    assert transfer_ctx.register.call_count == 2
+    for call in transfer_ctx.register.call_args_list:
+        assert call.args[0] is caches
+        assert call.kwargs["layout_hints"] is hints
+        if with_native_owner:
+            assert call.kwargs["native_kv_caches"] is native
+            assert call.kwargs["native_kv_caches"]["layer.0"] is owner
+        else:
+            # Existing TransferContext subclasses need not accept the new kwarg.
+            assert "native_kv_caches" not in call.kwargs
 
 
 def test_default_transfer_context_hook_uses_adapter_settings(monkeypatch):

@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <array>
 #include <vector>
 #include <cstddef>
 #include <cstdint>
@@ -45,6 +46,13 @@ struct PageBufferShapeDesc {
   // pack non-block info into dim-0 or do not support dim-0 padding,
   // and ignore this field.
   int block_stride_elems;
+
+  // Logical [block, token, head, content] strides, in source-dtype elements,
+  // for independent K/V regions. Each plane pointer names its first element;
+  // no storage offset is added by the transfer kernel. Other formats ignore
+  // these fields. Regions must have non-overlapping, separable strides.
+  std::array<int64_t, 4> region_k_strides{};
+  std::array<int64_t, 4> region_v_strides{};
 
   template <typename ScalarType>
   LMC_TRANSFER_PLAN_HD inline size_t scalars_per_head() const {

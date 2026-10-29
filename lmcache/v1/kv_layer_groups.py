@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 # Third Party
 import torch
@@ -64,6 +64,7 @@ class KernelGroupIdentity(NamedTuple):
     engine_group_idx: int
     dtype: torch.dtype
     engine_kv_format: "lmcache_native.EngineKVFormat"
+    component_strides: tuple[tuple[int, ...], ...] = ()
 
 
 LayerGroupIdentity = KernelGroupIdentity  # Alias for compatibility
@@ -150,6 +151,14 @@ def group_layers_by_identity(
             engine_group_idx=engine_group_idx,
             dtype=dt,
             engine_kv_format=layer_format,
+            component_strides=(
+                tuple(
+                    tuple(plane.stride())
+                    for plane in cast(Sequence[torch.Tensor], kv_caches[idx])
+                )
+                if layer_format == lmcache_native.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS
+                else ()
+            ),
         )
         groups_dict[identity].append(idx)
     return sorted(groups_dict.items(), key=lambda kv: kv[1][0])
@@ -360,9 +369,8 @@ class KVLayerGroupsManager:
                 into one object group per sliding-window size; when False
                 (default), all kernel groups share a single full-attention
                 object group.
-            allow_strided_regions: Permit component-view strides for a
-                tensor-based transfer implementation; never enable for
-                pointer-only kernels.
+            allow_strided_regions: Permit component-view strides when the
+                transfer implementation supports declared region strides.
         """
         # Import here to break a circular import via
         # lmcache.inprocess.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
@@ -427,6 +435,10 @@ class KVLayerGroupsManager:
                 block_size=bs,
                 block_stride_elems=block_stride_elems,
             )
+
+            if identity.component_strides:
+                shape_desc.region_k_strides = identity.component_strides[0]
+                shape_desc.region_v_strides = identity.component_strides[1]
 
             info = engine_group_infos[group_idx] if engine_group_infos else None
             if info is not None and tuple(indices) != tuple(info.layer_indices):

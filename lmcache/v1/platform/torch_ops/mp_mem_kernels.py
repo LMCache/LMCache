@@ -196,6 +196,50 @@ def _normalize_paged_layers(
         )
     if format_spec.is_kv_second_tuple:
         is_mla_plane_tuple = format_spec.is_mla
+        if (
+            isinstance(paged_buffer_ptrs_tensor, torch.Tensor)
+            and _is_ptr_tensor(paged_buffer_ptrs_tensor)
+            and not is_mla_plane_tuple
+        ):
+            if shape_desc is None or device is None or dtype is None:
+                raise ValueError(
+                    "Region pointer reconstruction requires shape and dtype"
+                )
+            if torch.device(device).type != "cpu":
+                raise ValueError("Region pointer reconstruction is CPU-only")
+            nl = int(shape_desc.nl)
+            shape = tuple(
+                int(n)
+                for n in (shape_desc.nb, shape_desc.bs, shape_desc.nh, shape_desc.hs)
+            )
+            if paged_buffer_ptrs_tensor.numel() != 2 * nl:
+                raise ValueError(
+                    "Region pointers must be interleaved [K0,V0,K1,V1,...]"
+                )
+            strides = (
+                tuple(shape_desc.region_k_strides),
+                tuple(shape_desc.region_v_strides),
+            )
+            result: list[list[torch.Tensor]] = []
+            for layer in range(nl):
+                planes = []
+                for plane, stride in enumerate(strides):
+                    extent = 1
+                    for step, size in sorted(
+                        (s, n) for n, s in zip(shape, stride, strict=True) if n > 1
+                    ):
+                        if step < extent:
+                            raise ValueError(
+                                "Region strides must be separable and non-overlapping"
+                            )
+                        extent += (size - 1) * step
+                    if any(n <= 0 for n in shape) or any(s < 0 for s in stride):
+                        raise ValueError("Invalid region shape or strides")
+                    ptr = int(paged_buffer_ptrs_tensor[2 * layer + plane].item())
+                    storage = _tensor_from_ptr(ptr, (extent,), dtype, device)
+                    planes.append(torch.as_strided(storage, shape, stride))
+                result.append(planes)
+            return result
         if isinstance(paged_buffer_ptrs_tensor, list) and all(
             isinstance(t, (list, tuple))
             and (len(t) >= 1 if is_mla_plane_tuple else len(t) == 2)

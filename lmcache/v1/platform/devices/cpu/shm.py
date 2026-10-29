@@ -82,6 +82,11 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
     SHM_NAME_PREFIX = "/lmcache_kv_"
 
     @classmethod
+    def wrap_region_owner(cls, tensor: torch.Tensor) -> "CpuShmTensorWrapper":
+        """Migrate the native owner while preserving its shape and strides."""
+        return migrate_to_shm_and_wrap(tensor, preserve_view=True)
+
+    @classmethod
     def wrap(cls, tensor: torch.Tensor) -> "CpuShmTensorWrapper":
         """Factory used by
         :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`.
@@ -104,6 +109,8 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
         tensor: torch.Tensor,
         shm_name: str,
         segment_nbytes: int | None = None,
+        *,
+        preserve_view: bool = False,
     ) -> None:
         """Describe ``tensor``'s view of the SHM segment ``shm_name``.
 
@@ -114,16 +121,18 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
             segment_nbytes: Byte length of the SHM segment. Defaults to
                 the tensor's own span (``numel * element_size``); pass
                 the storage's byte size when views share one segment.
+            preserve_view: Accept a strided native owner without normalization.
 
         Raises:
-            ValueError: If the tensor is not a contiguous CPU tensor,
+            ValueError: If the tensor is not on CPU, is non-contiguous without
+                ``preserve_view``,
                 or its view does not fit inside the segment.
         """
         if tensor.device.type != "cpu":
             raise ValueError(
                 "CpuShmTensorWrapper requires a CPU tensor, got %s" % tensor.device
             )
-        if not tensor.is_contiguous():
+        if not preserve_view and not tensor.is_contiguous():
             raise ValueError("CpuShmTensorWrapper requires a contiguous tensor")
 
         self.shm_name = shm_name
@@ -143,7 +152,7 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
 
         # The view must land inside the segment, or ``to_tensor`` on
         # the receiving side would read past the mapping.
-        view_end = (self.storage_offset * tensor.element_size()) + view_nbytes
+        view_end = self.wire_metadata().byte_span()
         if self.shm_name and view_end > self.nbytes:
             raise ValueError(
                 "CpuShmTensorWrapper: view ends at byte %d but the SHM "
@@ -290,7 +299,9 @@ def _cleanup_shm_segment(
     shm_unlink(shm_name)
 
 
-def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
+def migrate_to_shm_and_wrap(
+    tensor: torch.Tensor, *, preserve_view: bool = False
+) -> CpuShmTensorWrapper:
     """Re-point ``tensor``'s storage at a POSIX SHM segment, then wrap.
 
     Used as the registered ``"cpu"`` KV-wrapper factory: the LMCache mp
@@ -302,6 +313,18 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
     its own ``storage_offset`` / stride preserved, so all views keep
     aliasing the same bytes. Views must be migrated *before* the buffer
     is written -- only the tensors handed in are re-pointed.
+
+    Args:
+        tensor: Engine-owned CPU tensor migrated in place.
+        preserve_view: Keep the native shape/stride for spec-region IPC owners;
+            otherwise apply the existing physical-layout normalization.
+
+    Returns:
+        An IPC wrapper retaining the migrated tensor's view metadata.
+
+    Raises:
+        ValueError: The tensor is on another device or is non-contiguous
+            without ``preserve_view``.
 
     The segment is released (``munmap`` + ``shm_unlink``) once the last
     migrated view of it is garbage-collected. Concurrent first-time
@@ -315,7 +338,7 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
 
     # Validate and normalise the tensor *before* touching the registry
     # or mutating storage, so a bad input never leaves things half-done.
-    normalized = attempt_permute_to_contiguous_view(tensor)
+    normalized = tensor if preserve_view else attempt_permute_to_contiguous_view(tensor)
     if not isinstance(normalized, torch.Tensor):
         raise TypeError(
             "attempt_permute_to_contiguous_view returned %s, expected a tensor"
@@ -325,7 +348,7 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
         raise ValueError(
             "migrate_to_shm_and_wrap requires a CPU tensor, got %s" % tensor.device
         )
-    if not normalized.is_contiguous():
+    if not preserve_view and not normalized.is_contiguous():
         raise ValueError("migrate_to_shm_and_wrap requires a contiguous tensor")
 
     if tensor.numel() == 0:
@@ -372,7 +395,9 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
                 int(tensor.storage_offset()),
                 hit_name,
             )
-        return CpuShmTensorWrapper(tensor, hit_name, segment_nbytes=hit_nbytes)
+        return CpuShmTensorWrapper(
+            tensor, hit_name, segment_nbytes=hit_nbytes, preserve_view=preserve_view
+        )
 
     shm_name = "%s%d_%d" % (
         CpuShmTensorWrapper.SHM_NAME_PREFIX,
@@ -436,7 +461,9 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
         int(tensor.storage_offset()),
         shm_name,
     )
-    return CpuShmTensorWrapper(tensor, shm_name, segment_nbytes=segment_nbytes)
+    return CpuShmTensorWrapper(
+        tensor, shm_name, segment_nbytes=segment_nbytes, preserve_view=preserve_view
+    )
 
 
 def inject_stale_cache_entry_for_test(

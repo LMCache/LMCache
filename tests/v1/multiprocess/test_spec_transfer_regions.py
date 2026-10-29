@@ -24,6 +24,7 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.group_view import expand_engine_block_ids
 from lmcache.v1.multiprocess.transfer_context import worker_transfer
 from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
     decode_grouped_tensors,
@@ -55,6 +56,7 @@ class _ProducerSpec:
 @dataclass
 class _PerLayerSpecs:
     kv_cache_specs: dict[str, _ProducerSpec]
+    block_size: int = 4
 
 
 @dataclass
@@ -170,14 +172,20 @@ def test_specs_without_region_export_keep_native_tensors() -> None:
     assert hints == {}
 
 
-def test_handle_transfer_rejects_component_views() -> None:
-    """A pointer wrapper must not silently lose the spec's strides or offsets."""
+def test_handle_transfer_requires_native_owners_for_component_views() -> None:
+    """Handle mode accepts regions, but cannot export detached plane handles."""
     values = torch.zeros(1, 2, 2, 3, 4, 5)
-    caches, _ = _export(_native(values, 1), 1)
-    with pytest.raises(ValueError, match="engine_driven"):
-        create_transfer_context(
-            caches, instance_id=1, req_client=MagicMock(), mode="lmcache_driven"
-        )
+    caches, hints = _export(_native(values, 1), 1)
+    client = MagicMock()
+    context = create_transfer_context(
+        caches, instance_id=1, req_client=client, mode="lmcache_driven"
+    )
+    try:
+        with pytest.raises(ValueError, match="native"):
+            context.register(caches, "model", 1, 1, 1.0, layout_hints=hints)
+        client.register_kv_cache.assert_not_called()
+    finally:
+        context.close()
 
 
 def test_region_copies_are_rejected_before_registration() -> None:
@@ -375,3 +383,46 @@ def test_two_spec_region_groups_preserve_geometry_and_native_writeback() -> None
     finally:
         for context in contexts:
             context.close()
+
+
+def test_one_engine_group_splits_region_strides_and_reuses_its_block_ids() -> None:
+    """Physical copy groups share their original engine block address space.
+
+    Both layers have identical logical sizes, including the ambiguous B=2, but
+    their native K/V axis positions give different per-block plane strides.
+    The producer grouping and request expansion must agree on that split.
+    """
+    values = torch.arange(2 * 2 * 2 * 3 * 4 * 5, dtype=torch.float32).view(
+        2, 2, 2, 3, 4, 5
+    )
+    native = {
+        "kv_first": _native(values[:1], 0)["layer_0"],
+        "blocks_first": _native(values[1:], 1)["layer_0"],
+    }
+    config = _Config(
+        [
+            _Group(
+                list(native),
+                _PerLayerSpecs(
+                    {
+                        "kv_first": _ProducerSpec(0),
+                        "blocks_first": _ProducerSpec(1),
+                    }
+                ),
+            )
+        ]
+    )
+    hints: LayoutHints = {}
+    caches = apply_spec_transfer_regions(config, native, hints)
+    infos = create_engine_group_infos_from_vllm(config, caches, hints)
+
+    assert len(config.kv_cache_groups) == 1
+    assert [info.engine_group_id for info in infos] == [0, 0]
+    assert [info.layer_indices for info in infos] == [(0,), (1,)]
+    assert [info.tokens_per_block for info in infos] == [4, 4]
+    engine_block_ids = [[1, 0]]
+    expanded = expand_engine_block_ids(infos, engine_block_ids)
+    assert expanded == [[1, 0], [1, 0]]
+    # Independent lists prevent a group's trailing-window edits changing peers.
+    expanded[0].pop()
+    assert expanded[1] == engine_block_ids[0] == [1, 0]
