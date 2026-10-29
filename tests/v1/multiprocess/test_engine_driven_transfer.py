@@ -2167,7 +2167,9 @@ def test_transfer_observations_expire_independently_of_worker_reaping(
             assert sum(event.event_type == end_type for event in events) == 1
             if use_shm:
                 if operation == "store":
-                    storage.finish_write.assert_called_once_with(["obj"])
+                    storage.finish_write.assert_called_once_with(
+                        ["obj"], l1_owners={"obj": memory_obj.get_l1_manager()}
+                    )
                 else:
                     storage.finish_read_prefetched.assert_called_once_with(["obj"])
         finally:

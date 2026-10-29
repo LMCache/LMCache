@@ -2379,7 +2379,7 @@ class TestStagingAccounting:
         """A buffer narrowed with set_used_size() while staged (what the serde
         processor does after serialize()) releases the bytes it was charged,
         on every release path."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         keys = [make_object_key(i) for i in range(4)]
 
         reserved = manager.reserve_write(keys, [True] * 4, basic_layout, tag="w")
@@ -2409,7 +2409,7 @@ class TestStagingAccounting:
     ):
         """Handing an expired, narrowed buffer to a new writer neither
         re-charges it nor loses the charge recorded at allocation."""
-        manager = L1Manager(short_write_ttl_l1_config)
+        manager = DramL1Manager(short_write_ttl_l1_config)
         key = make_object_key(1)
 
         reserved = manager.reserve_write([key], [True], basic_layout, tag="w")
@@ -2432,7 +2432,7 @@ class TestStagingAccounting:
         self, short_write_ttl_l1_config, basic_layout
     ):
         """Reclaiming an expired reservation subtracts what it was charged."""
-        manager = L1Manager(short_write_ttl_l1_config)
+        manager = DramL1Manager(short_write_ttl_l1_config)
         key = make_object_key(1)
 
         reserved = manager.reserve_write([key], [False], basic_layout, tag="w")

@@ -202,7 +202,7 @@ def _finish_write(ctx: ReplayContext, args: dict[str, Any]) -> None:
             len(keys),
         )
     if owners:
-        ctx.sm.finish_write(list(owners.keys()), l1_owners=owners)
+        ctx.sm.finish_write(keys=list(owners.keys()), l1_owners=owners)
 
 
 def _enter_read_prefetched(ctx: ReplayContext, args: dict[str, Any]) -> None:
