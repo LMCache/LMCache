@@ -8,8 +8,8 @@ import torch
 
 # First Party
 from lmcache import torch_device_type
-from lmcache.v1.compute.attention.utils import infer_attn_backend_from_vllm
-from lmcache.v1.compute.positional_encoding import get_fused_rope
+from lmcache.inprocess.v1.compute.attention.utils import infer_attn_backend_from_vllm
+from lmcache.inprocess.v1.compute.positional_encoding import get_fused_rope
 
 # TODO(Jiayi): A few things need to be tested/supported:
 # TP, PP, Multimodal

@@ -11,12 +11,10 @@ import pytest
 import torch
 
 # First Party
-from lmcache.inprocess.v1.pin_monitor import PinMonitor
 from lmcache.inprocess.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
 )
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, TensorMemoryObj
 from tests.v1.utils import (
     check_method_signatures,
@@ -130,15 +128,6 @@ def _make_memory_obj(adapter: CxlMemoryAdapter) -> TensorMemoryObj:
 # =========================================================================
 # Fixtures
 # =========================================================================
-
-
-@pytest.fixture(autouse=True)
-def _init_pin_monitor():
-    """Initialize PinMonitor singleton required by TensorMemoryObj.pin()."""
-    PinMonitor._instance = None
-    PinMonitor.GetOrCreate(LMCacheEngineConfig.from_defaults())
-    yield
-    PinMonitor._instance = None
 
 
 @pytest.fixture

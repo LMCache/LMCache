@@ -90,6 +90,8 @@ import pytest  # noqa: E402
 import torch  # noqa: E402
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig  # noqa: E402
+from lmcache.inprocess.v1.metadata import LMCacheMetadata  # noqa: E402
 from lmcache.inprocess.v1.storage_backend.connector.bigtable_connector import (  # noqa: E402
     BigtableConnector,
 )
@@ -100,9 +102,7 @@ from lmcache.inprocess.v1.storage_backend.remote_backend import (  # noqa: E402
     RemoteBackend,
 )
 from lmcache.utils import CacheEngineKey  # noqa: E402
-from lmcache.v1.config import LMCacheEngineConfig  # noqa: E402
 from lmcache.v1.memory_management import MemoryObj  # noqa: E402
-from lmcache.v1.metadata import LMCacheMetadata  # noqa: E402
 from tests.v1.utils import create_test_memory_obj  # noqa: E402
 
 

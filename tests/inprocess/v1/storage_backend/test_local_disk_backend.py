@@ -13,13 +13,13 @@ import torch
 
 # First Party
 from lmcache import torch_device_type
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.config_base import _parse_local_disk
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.inprocess.v1.storage_backend.local_disk_backend import LocalDiskBackend
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.config_base import _parse_local_disk
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
 
 
 class MockLookupServer:
