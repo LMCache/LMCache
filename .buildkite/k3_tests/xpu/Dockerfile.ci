@@ -2,7 +2,7 @@ ARG XPU_BASE_IMAGE
 FROM ${XPU_BASE_IMAGE}
 
 USER root
-COPY tools/install_xpu_dpcpp_compiler.sh /tmp/install_xpu_dpcpp_compiler.sh
+COPY .buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh /tmp/install_xpu_dpcpp_compiler.sh
 
 RUN apt-get update -qq -o Acquire::Retries=3 \
     && apt-get install -y --no-install-recommends jq \

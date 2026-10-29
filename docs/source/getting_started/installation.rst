@@ -371,7 +371,7 @@ runtime, see :doc:`compatibility` before installing.
                             fi
                             if ! command -v icpx >/dev/null 2>&1; then
                                 PYTHON="$(command -v python3)" \
-                                    bash tools/install_xpu_dpcpp_compiler.sh
+                                    bash .buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh
                                 source /opt/intel/oneapi/setvars.sh
                             fi
 

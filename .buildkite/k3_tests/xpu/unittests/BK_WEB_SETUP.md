@@ -9,7 +9,7 @@
 
 The scheduled nightly builds an XPU CI candidate from the current
 `vllm/vllm-openai-xpu:nightly` digest. Its Dockerfile installs DPC++ using
-`tools/install_xpu_dpcpp_compiler.sh` and preinstalls
+`.buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh` and preinstalls
 `requirements/common.txt`, `requirements/test.txt`, and MP extras
 (`lm-eval[api]`, pandas, matplotlib), but does not install LMCache.
 Job setup still resolves requirements so PR dependency changes are applied.

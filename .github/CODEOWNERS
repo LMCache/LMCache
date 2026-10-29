@@ -108,7 +108,6 @@
 # CI / Infrastructure
 /.github/                              @hickeyma @sammshen @ApostaC @deng451e @VincyZhang
 /.buildkite/                           @sammshen @ApostaC @deng451e @hickeyma @VincyZhang
-/tools/install_xpu_dpcpp_compiler.sh    @sammshen @ApostaC @deng451e @hickeyma @VincyZhang
 
 # Operator
 /operator/                             @royyhuang @DongDongJu @ruizhang0101 @VincyZhang

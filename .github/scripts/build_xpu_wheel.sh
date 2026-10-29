@@ -59,7 +59,7 @@ fi
 # runtime instead of installing a newer compiler with different libraries.
 if ! command -v icpx >/dev/null 2>&1; then
     PYTHON="$PY" bash \
-        "${SCRIPT_DIR}/../../tools/install_xpu_dpcpp_compiler.sh"
+        "${SCRIPT_DIR}/../../.buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh"
     source_oneapi_environment
 fi
 
