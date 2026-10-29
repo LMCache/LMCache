@@ -5,8 +5,9 @@ Managing objects and memory for L1 cache
 
 # Standard
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import count
+from time import monotonic
 import threading
 import weakref
 
@@ -53,6 +54,36 @@ from lmcache.v1.mp_observability.otel_init import register_gauge
 
 logger = init_logger(__name__)
 _l1_manager_ids = count()
+_read_generations = count(1)
+
+
+@dataclass(slots=True)
+class _ReadLock:
+    """Shared reader count and TTL, mutated under the L1 manager mutex.
+
+    Expiry and generation renewal use one clock sample so a new lifetime
+    cannot accidentally inherit an expired reader's generation.
+    """
+
+    ttl_seconds: int
+    generation: int = 0
+    _count: int = 0
+    _expires_at: float = 0.0
+
+    def lock(self, count: int = 1) -> None:
+        now = monotonic()
+        if self._count == 0 or now >= self._expires_at:
+            self._count = 0
+            self.generation = next(_read_generations)
+        self._count += count
+        self._expires_at = now + self.ttl_seconds
+
+    def unlock(self, count: int = 1) -> None:
+        self._count = max(0, self._count - count)
+
+    def is_locked(self) -> bool:
+        return self._count > 0 and monotonic() < self._expires_at
+
 
 # Upper bound for the count parameter in reserve_read / finish_read
 # to prevent a single call from holding the global lock for too long.
@@ -106,8 +137,11 @@ class L1ObjectState:
     write_lock: TTLLock
     """ The writer's reservation; held while the object is staged. """
 
-    read_lock: TTLLock
+    read_lock: _ReadLock
     """ The read lock with TTL for the object. """
+
+    read_buffer_pins: dict[str, int] = field(default_factory=dict, kw_only=True)
+    """ Non-expiring transfer claims, keyed by unique transfer tag. """
 
     is_temporary: bool
     """ Whether the object is temporary (need to be deleted after read). """
@@ -299,6 +333,8 @@ class L1Manager(L1ManagerInterface):
         self,
         keys: list[ObjectKey],
         read_locks: int = 1,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Reserve read access for the given keys.
 
@@ -309,6 +345,7 @@ class L1Manager(L1ManagerInterface):
                 one per worker that consumes a read lock
                 for the same key (e.g. MLA models with
                 TP > 1).
+            read_generations: Optional output mapping of acquired lock generations.
 
         Returns:
             A dictionary mapping each object key to a tuple
@@ -330,11 +367,9 @@ class L1Manager(L1ManagerInterface):
                 ret[key] = (L1Error.KEY_NOT_EXIST, None)
                 continue
 
-            # TODO(perf): support a count argument in
-            # TTLLock.lock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.lock()
+            entry.read_lock.lock(total)
+            if read_generations is not None:
+                read_generations[key] = entry.read_lock.generation
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
 
@@ -380,10 +415,105 @@ class L1Manager(L1ManagerInterface):
         return ret
 
     @l1_mgr_synchronized
+    def pin_read_buffers(
+        self,
+        keys: list[ObjectKey],
+        read_generations: dict[ObjectKey, int],
+        tag: str,
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Validate original leases and retain their buffers until transfer completion.
+
+        Args:
+            keys: Resident objects about to be used by asynchronous I/O.
+            read_generations: Generations acquired by the original lookup.
+            tag: Process-unique transfer identity, never reused.
+
+        Returns:
+            Objects protected against normal reclamation, or KEY_NOT_READABLE
+            for expired, missing-generation or repeated transfer claims.
+
+        The caller must exclusively own one original read share per key and
+        must not also release that share through finish_read. The Session
+        claim API arbitrates cancellation versus transfer ownership.
+        """
+        ret: dict[ObjectKey, L1OperationResult] = {}
+        for key in keys:
+            entry = self._objects.get(key)
+            if entry is None:
+                ret[key] = (L1Error.KEY_NOT_EXIST, None)
+            elif (
+                not tag
+                or tag in entry.read_buffer_pins
+                or not entry.read_lock.is_locked()
+                or read_generations.get(key) != entry.read_lock.generation
+            ):
+                ret[key] = (L1Error.KEY_NOT_READABLE, None)
+            else:
+                entry.read_buffer_pins[tag] = entry.read_lock.generation
+                ret[key] = (L1Error.SUCCESS, entry.memory_obj)
+        return ret
+
+    @l1_mgr_synchronized
+    def finish_read_transfer(
+        self, keys: list[ObjectKey], tag: str
+    ) -> dict[ObjectKey, L1Error]:
+        """Release a transfer's pin and its original reservation at most once.
+
+        Args:
+            keys: Objects the completed transfer attempted to pin.
+            tag: The identity passed to pin_read_buffers.
+
+        Returns:
+            SUCCESS when the original read count was released. Expired or absent
+            claims return KEY_IN_WRONG_STATE; any owned pin is still released.
+        """
+        ret: dict[ObjectKey, L1Error] = {}
+        finished: list[ObjectKey] = []
+        deleted: list[ObjectKey] = []
+        freed: list[MemoryObj] = []
+        for key in keys:
+            entry = self._objects.get(key)
+            if entry is None:
+                ret[key] = L1Error.KEY_NOT_EXIST
+                continue
+            generation = entry.read_buffer_pins.pop(tag, None)
+            if generation is None:
+                ret[key] = L1Error.KEY_IN_WRONG_STATE
+                continue
+            released = (
+                generation == entry.read_lock.generation and entry.read_lock.is_locked()
+            )
+            if released:
+                entry.read_lock.unlock()
+            if (
+                entry.is_temporary
+                and not entry.read_lock.is_locked()
+                and not entry.read_buffer_pins
+            ):
+                freed.append(entry.memory_obj)
+                deleted.append(key)
+                del self._objects[key]
+            ret[key] = L1Error.SUCCESS if released else L1Error.KEY_IN_WRONG_STATE
+            if released:
+                finished.append(key)
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_read_finished(finished)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_READ_FINISHED,
+                metadata={"l1_tag": self._config.tag, "keys": finished},
+            )
+        )
+        self._free_and_report_deleted(deleted, freed)
+        return ret
+
+    @l1_mgr_synchronized
     def finish_read(
         self,
         keys: list[ObjectKey],
         read_locks: int = 1,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1Error]:
         """Finish read access for the given keys.
 
@@ -398,6 +528,8 @@ class L1Manager(L1ManagerInterface):
                 default); the reservation owner releasing the
                 whole reservation passes the ``reserve_read``
                 total.
+            read_generations: If supplied, release only matching generations;
+                missing keys are rejected. Omit for legacy key-only completion.
 
         Returns:
             A dictionary mapping each object key to an
@@ -425,6 +557,11 @@ class L1Manager(L1ManagerInterface):
                 ret[key] = L1Error.KEY_NOT_EXIST
                 continue
 
+            if read_generations is not None and (
+                read_generations.get(key) != entry.read_lock.generation
+            ):
+                ret[key] = L1Error.KEY_IN_WRONG_STATE
+                continue
             if not entry.read_lock.is_locked():
                 logger.warning(
                     "L1Manager: finish read on non-read-locked key %s, "
@@ -434,12 +571,12 @@ class L1Manager(L1ManagerInterface):
                 ret[key] = L1Error.KEY_IN_WRONG_STATE
                 continue
 
-            # TODO(perf): support a count argument in
-            # TTLLock.unlock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.unlock()
-            if entry.is_temporary and not entry.read_lock.is_locked():
+            entry.read_lock.unlock(total)
+            if (
+                entry.is_temporary
+                and not entry.read_lock.is_locked()
+                and not entry.read_buffer_pins
+            ):
                 need_to_free.append(entry.memory_obj)
                 need_to_free_keys.append(key)
                 del self._objects[key]
@@ -567,7 +704,7 @@ class L1Manager(L1ManagerInterface):
                 entry = L1ObjectState(
                     memory_obj=mem_obj,
                     write_lock=TTLLock(self._write_ttl_seconds),
-                    read_lock=TTLLock(self._read_ttl_seconds),
+                    read_lock=_ReadLock(self._read_ttl_seconds),
                     is_temporary=is_temp,
                 )
                 entry.write_lock.lock()
@@ -669,6 +806,8 @@ class L1Manager(L1ManagerInterface):
         keys: list[ObjectKey],
         read_locks: int = 1,
         tag: str = "",
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Atomically finish write and acquire read lock for the given keys.
 
@@ -683,6 +822,7 @@ class L1Manager(L1ManagerInterface):
                 worker that consumes a read lock for the same key
                 (e.g. MLA models with TP > 1).
             tag: The writer's tag passed to ``reserve_write``.
+            read_generations: Optional output mapping of acquired lock generations.
 
         Returns:
             A dictionary mapping each object key to a tuple of
@@ -727,8 +867,9 @@ class L1Manager(L1ManagerInterface):
                 discarded.append(entry.memory_obj)
                 resident_keys.append(key)
                 entry = resident
-            for _ in range(total):
-                entry.read_lock.lock()
+            entry.read_lock.lock(total)
+            if read_generations is not None:
+                read_generations[key] = entry.read_lock.generation
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
 
         self._memory_manager.free(discarded)
@@ -770,8 +911,8 @@ class L1Manager(L1ManagerInterface):
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_IS_LOCKED: The key is read-locked, or a live staging object
-                exists for it, so it cannot be deleted. Never returned when
+            KEY_IS_LOCKED: The key is read-locked or transfer-pinned, or a live
+                staging object exists, so it cannot be deleted. Never returned when
                 ``force`` is True.
         """
         need_to_free: list[MemoryObj] = []
@@ -796,7 +937,7 @@ class L1Manager(L1ManagerInterface):
                 gone_keys.append(key)
                 continue
 
-            locked = entry.read_lock.is_locked()
+            locked = entry.read_lock.is_locked() or bool(entry.read_buffer_pins)
             if locked and not force:
                 ret[key] = L1Error.KEY_IS_LOCKED
                 continue
@@ -884,8 +1025,8 @@ class L1Manager(L1ManagerInterface):
                 every staging object. This may corrupt in-flight
                 store/prefetch operations. If False (default), only clear
                 unlocked resident objects and staging objects whose write
-                lock expired, keeping read-locked objects and live staging
-                objects intact.
+                lock expired, keeping read-locked or transfer-pinned objects
+                and live staging objects intact.
         """
         if force:
             staging_count = sum(len(per_tag) for per_tag in self._staging.values())
@@ -930,7 +1071,7 @@ class L1Manager(L1ManagerInterface):
         locked_count = 0
 
         for key, entry in list(self._objects.items()):
-            if entry.read_lock.is_locked():
+            if entry.read_lock.is_locked() or entry.read_buffer_pins:
                 locked_count += 1
                 continue
             keys_to_clear.append(key)
@@ -972,11 +1113,15 @@ class L1Manager(L1ManagerInterface):
             key: The object key to check.
 
         Returns:
-            True if the key has a resident object that is not read-locked,
+            True if the key has a resident object with no read lock or transfer pin,
             or a staging object whose write lock expired; False otherwise.
         """
         entry = self._objects.get(key, None)
-        if entry is not None and not entry.read_lock.is_locked():
+        if (
+            entry is not None
+            and not entry.read_lock.is_locked()
+            and not entry.read_buffer_pins
+        ):
             return True
         per_tag = self._staging.get(key, None)
         if per_tag is None:

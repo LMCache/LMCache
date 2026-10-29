@@ -14,6 +14,7 @@ from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1ManagerListener
 from lmcache.v1.distributed.l1_manager import L1Manager
+import lmcache.v1.distributed.l1_manager as l1_manager_module
 import lmcache.v1.memory_management as memory_management
 
 pytestmark = pytest.mark.no_shared_allocator
@@ -132,3 +133,78 @@ def test_tags_are_independent_writers(l1: L1ManagerInterface) -> None:
     # Only tag "a" can finish its reservation.
     assert l1.finish_write([key(4)], tag="b") == {key(4): L1Error.KEY_NOT_EXIST}
     assert l1.finish_write([key(4)], tag="a") == {key(4): L1Error.SUCCESS}
+
+
+@pytest.mark.parametrize("release", ["expiry", "free"])
+def test_transfer_pin_retains_buffer_until_completion(
+    l1: L1ManagerInterface, monkeypatch: pytest.MonkeyPatch, release: str
+) -> None:
+    """Logical read release must not free memory still used by a device copy."""
+    clock = [1.0]
+    monkeypatch.setattr(l1_manager_module, "monotonic", lambda: clock[0])
+    keys = [key(5)]
+    generations: dict[ObjectKey, int] = {}
+    _, obj = l1.reserve_write(keys, [True], LAYOUT)[keys[0]]
+    assert obj is not None and obj.tensor is not None
+    obj.tensor.fill_(5)
+    l1.finish_write_and_reserve_read(keys, read_generations=generations)
+    assert l1.pin_read_buffers(keys, generations, "copy")[keys[0]] == (
+        L1Error.SUCCESS,
+        obj,
+    )
+    if release == "expiry":
+        clock[0] += l1.config.read_ttl_seconds + 1
+    else:
+        l1.finish_read(keys, read_generations=generations)
+    l1.clear()
+    assert l1.delete(keys) == {keys[0]: L1Error.KEY_IS_LOCKED}
+    assert not l1.is_key_evictable(keys[0])
+    assert obj.tensor is not None and torch.all(obj.tensor == 5)
+    l1.finish_read_transfer(keys, "copy")
+    assert l1.get_memory_usage()[0] == 0
+
+
+def test_expired_transfer_completion_preserves_new_generation(
+    l1: L1ManagerInterface, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delayed completion releases its pin without consuming a newer lease."""
+    clock = [1.0]
+    monkeypatch.setattr(l1_manager_module, "monotonic", lambda: clock[0])
+    keys = [key(6)]
+    old: dict[ObjectKey, int] = {}
+    new: dict[ObjectKey, int] = {}
+    l1.reserve_write(keys, [False], LAYOUT)
+    l1.finish_write_and_reserve_read(keys, read_generations=old)
+    assert l1.pin_read_buffers(keys, old, "old")[keys[0]][0] is L1Error.SUCCESS
+    clock[0] += l1.config.read_ttl_seconds + 1
+    l1.reserve_read(keys, read_generations=new)
+    assert old != new
+    assert l1.pin_read_buffers(keys, old, "stale")[keys[0]][0] is (
+        L1Error.KEY_NOT_READABLE
+    )
+    l1.finish_read_transfer(keys, "old")
+    l1.clear()
+    assert l1.unsafe_read(keys)[keys[0]][0] is L1Error.SUCCESS
+    l1.finish_read(keys, read_generations=new)
+    assert l1.delete(keys) == {keys[0]: L1Error.SUCCESS}
+
+
+def test_duplicate_transfer_completion_preserves_other_reader(
+    l1: L1ManagerInterface,
+) -> None:
+    """A tag's second completion must not consume another reader's count."""
+    keys = [key(7)]
+    generations: dict[ObjectKey, int] = {}
+    l1.reserve_write(keys, [False], LAYOUT)
+    l1.finish_write_and_reserve_read(keys, read_locks=2, read_generations=generations)
+    assert l1.pin_read_buffers(keys, generations, "copy")[keys[0]][0] is (
+        L1Error.SUCCESS
+    )
+    assert l1.finish_read_transfer(keys, "copy") == {keys[0]: L1Error.SUCCESS}
+    assert l1.finish_read_transfer(keys, "copy") == {
+        keys[0]: L1Error.KEY_IN_WRONG_STATE
+    }
+    l1.clear()
+    assert l1.unsafe_read(keys)[keys[0]][0] is L1Error.SUCCESS
+    l1.finish_read(keys, read_generations=generations)
+    assert l1.delete(keys) == {keys[0]: L1Error.SUCCESS}
