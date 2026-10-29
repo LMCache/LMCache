@@ -46,15 +46,30 @@ staging object `(key, tag)`:
 - `finish_write_and_delete` never admits; it frees the staging object.
 
 **Expiry and eviction.** A staging object keeps its write TTL lock. Once the
-lock expires the reservation is abandoned:
+lock expires the reservation is abandoned, but active I/O must finish before
+its memory can be reclaimed:
 
-- `finish_write*` on it returns `KEY_IN_WRONG_STATE` and leaves it in place;
-- `is_key_evictable(key)` is true and `delete([key])` reclaims every expired
-  staging object of the key (all of them with `force=True`). `delete` then
+- `finish_write` and `finish_write_and_reserve_read` return
+  `KEY_IN_WRONG_STATE` after expiry and leave it staged;
+- `finish_write_and_delete` discards the writer's staging object even after
+  expiry, once its I/O pins are released;
+- An expired, unpinned staging object makes `is_key_evictable(key)` true.
+  `delete([key])` reclaims every expired unpinned staging object of the key
+  (all of them with `force=True`). `delete` then
   returns `SUCCESS` when nothing is left for the key, and `KEY_IS_LOCKED`
   while a live staging object remains -- a live reservation pins the key
   even if its resident object is unlocked. `clear()` reclaims expired
-  staging objects too.
+  unpinned staging objects too.
+
+**I/O buffer pins.** `pin_write_buffers(keys, tag)` takes one non-expiring pin
+on each of that writer's staging buffers. `unpin_write_buffers(keys, tag)`
+releases one pin after the adapter reports completion. The count lives on the
+staging entry and belongs to its writer tag; it does not use the legacy
+`MemoryObj` pin monitor. Taking a new reservation with the same tag, admission,
+and discard are refused while I/O pins remain. Normal eviction and clear cannot
+reclaim a borrowed buffer even when its write TTL has expired. A completed load
+whose TTL expired is discarded and reported as a miss, rather than admitted.
+Explicit force deletion still overrides this protection.
 
 The eviction policy learns about the key from `on_l1_keys_reserved_write`
 (`L1EvictionPolicy` maps it to `on_keys_created`), so the regular eviction

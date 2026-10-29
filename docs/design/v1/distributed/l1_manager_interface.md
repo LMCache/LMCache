@@ -10,7 +10,8 @@ without changes on the caller side.
 
 - Members are exactly the calls the callers make today: reserve and finish
   for writes and reads, including the combined `finish_write_and_reserve_read`
-  and `finish_write_and_delete`; `unsafe_read`, `delete`, `clear`,
+  and `finish_write_and_delete`; writer-owned `pin_write_buffers` and
+  `unpin_write_buffers` for asynchronous I/O; `unsafe_read`, `delete`, `clear`,
   `touch_keys`, `is_key_evictable`, `register_listener`; the usage, capacity
   and status getters; the Device-DAX hot-plug calls; `owns_device`,
   `memory_region_count`, `memcheck`, `close`. An implementation that cannot

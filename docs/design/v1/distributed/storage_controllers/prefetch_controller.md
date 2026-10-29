@@ -43,6 +43,9 @@ leaves nothing behind.
 - **Admission is per adapter.** Each adapter's load result is admitted into L1
   as it arrives; the request does not wait for the slowest adapter before
   making the fast ones' objects resident and read-locked.
+- **I/O completion precedes reclamation.** Loads pin their writer-owned L1
+  staging buffers before submission, independently of the write TTL. Pins are
+  released after the load reports completion, including on the abort path.
 - **An adapter stays attached while any request references it**: an in-flight
   lookup or load task, or an entry in `l2_locked_keys`. Draining adapters are
   never planned or looked up; they detach once no request references them.
@@ -146,10 +149,14 @@ afterwards.
    the request is re-planned on what was reserved. Staging buffers the replan
    drops are deleted (`finish_write_and_delete`).
 5. **Load** (`_submit_load_tasks`). One load task per adapter in the plan,
-   carrying the reserved buffers.
+   carrying the reserved buffers with non-expiring I/O pins. A submission
+   failure returns that adapter's pins; earlier submitted loads keep theirs.
 6. **Admit** (`_poll_load_results`), per adapter as its result arrives. Loaded
-   keys go through `finish_write_and_reserve_read` and join `l1_locked_keys`
-   and the request's `l2_loaded_cells`; failed keys are deleted
+   keys release their I/O pins, go through `finish_write_and_reserve_read`,
+   and join `l1_locked_keys` and `l2_loaded_cells` only if admission succeeds.
+   Expired or force-cleared reservations are misses; remaining failed staging
+   buffers are discarded, with `L2_PREFETCH_FAILED` reason
+   `l1_admission_failed`. Keys not loaded by the adapter are deleted
    (`finish_write_and_delete`, `L2_PREFETCH_FAILED` reason `not_found`); the
    adapter's L2 locks are returned and its entries leave `l2_locked_keys` and
    `l1_reserved_keys`.
@@ -176,11 +183,17 @@ Under `NO_LOCK` the finish row releases every L1 lock; loaded objects stay
 resident and evictable. Under `full` fetching there is no fold: every locked
 cell is a hit cell.
 
-**Errors.** Any exception while advancing a request aborts it
-(`_abort_request`): the three maps are walked to return L2 locks, delete
-staging buffers and release L1 read locks, an all-zero result is published,
-and the request is retired. `stop()` does the same for every in-flight
-request. Outstanding adapter tasks are left to complete on their own.
+**Errors and shutdown.** An exception publishes an all-zero result once and
+marks the request aborted. It remains in the in-flight table while outstanding
+adapter operations drain. Late lookup results record their L2 locks; load
+completion releases the borrowed buffer pins without admitting objects. Once
+every submitted operation completes, the three maps return L2 locks, discard
+staging buffers and release L1 read locks, then retire the request.
+
+`stop()` rejects new submissions, publishes misses for queued and in-flight
+requests, and joins only after outstanding adapter operations drain. It may
+wait for a stalled adapter: the current adapter interface supplies no forced
+cancellation fence, and a timeout cannot prove that I/O has stopped.
 
 ## Policy
 
@@ -213,7 +226,7 @@ selected with `--l2-prefetch-policy`.
 | `L2_PREFETCH_LOAD_SUBMITTED` | Load tasks submitted (once per request). |
 | `L2_LOAD_TASK_SUBMITTED` / `L2_LOAD_TASK_COMPLETED` | Per adapter, per request. |
 | `L2_PREFETCH_LOAD_COMPLETED` | Per adapter, as its load is admitted. |
-| `L2_PREFETCH_FAILED` | `l1_oom` / `l1_contended` from the reserve step, `not_found` from admission. |
+| `L2_PREFETCH_FAILED` | `l1_oom` / `l1_contended` from reservation, `not_found` from L2 loading, `l1_admission_failed` from L1 publication. |
 
 Gauges: `lmcache_mp.num_inflight_l2_loads`,
 `lmcache_mp.inflight_load_memory_usage_bytes` (per adapter) and
@@ -261,3 +274,8 @@ with a real `L1Manager` and `MockL2Adapter`:
 
 `tests/v1/distributed/test_prefetch_policy.py` tests the policies black-box
 against their docstrings.
+
+`tests/v1/distributed/test_prefetch_lifecycle.py` gates real asynchronous L2
+loads and lookups to check shutdown, exception draining, queued request
+settlement, writer-owned pins across TTL expiry, and admission failure before
+publishing a hit.

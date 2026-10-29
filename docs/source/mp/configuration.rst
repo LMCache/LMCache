@@ -635,6 +635,11 @@ controller stops accepting writes and waits for admitted stores to finish before
 releasing these pins. An adapter that never completes can block shutdown; raising
 the read TTL or releasing buffers on a controller timeout is not an I/O fence.
 
+L2 prefetch buffers have additional I/O pins that keep them alive until the
+adapter finishes, even if the write TTL expires. An expired reservation is
+discarded and treated as a cache miss after completion. During shutdown,
+outstanding adapter operations are drained before their buffers are released.
+
 Eviction Policy
 ---------------
 
