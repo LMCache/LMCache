@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
@@ -13,7 +13,6 @@ import uuid
 
 # Third Party
 from prometheus_client import Counter, Gauge
-import torch
 import zmq
 
 # First Party
@@ -34,6 +33,7 @@ from lmcache.utils import (
     _lmcache_nvtx_annotate,
     init_logger,
 )
+from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_REMOVED,
@@ -1347,7 +1347,7 @@ class LMCacheMPWorkerAdapter:
         )
 
         # Registered kv caches from vLLM
-        self.kv_caches: dict[str, torch.Tensor] = {}
+        self.kv_caches: Mapping[str, DiscoverableKVCache] = {}
         self._layout_hints: "LayoutHints | None" = None
         self.engine_group_infos: list[EngineGroupInfo] = []
         # Transport context for transfer operations.
@@ -1519,7 +1519,7 @@ class LMCacheMPWorkerAdapter:
 
     def register_kv_caches(
         self,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         layout_hints: "LayoutHints | None" = None,
     ) -> None:
@@ -1562,7 +1562,9 @@ class LMCacheMPWorkerAdapter:
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
 
-    def _create_transfer_context(self, kv_caches: dict) -> TransferContext:
+    def _create_transfer_context(
+        self, kv_caches: Mapping[str, DiscoverableKVCache]
+    ) -> TransferContext:
         """Build the worker-side transfer context; subclasses swap transports."""
         return create_transfer_context(
             kv_caches,
@@ -1573,7 +1575,7 @@ class LMCacheMPWorkerAdapter:
 
     def _send_register_kv_caches_request(
         self,
-        kv_caches: dict[str, torch.Tensor],
+        kv_caches: Mapping[str, DiscoverableKVCache],
     ) -> None:
         """Submit a REGISTER_KV_CACHE request and wait for the response.
 

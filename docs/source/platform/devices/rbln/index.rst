@@ -110,3 +110,27 @@ Tests that need an NPU skip when none can be opened; skipped cases are not
 hardware validation. The ``rbln`` Buildkite pipeline
 (``.buildkite/k3_tests/rbln``) runs these tests and an end-to-end vLLM-RBLN
 check on RBLN hardware.
+
+Producer-declared transfer regions
+----------------------------------
+
+With a vLLM-RBLN build implementing
+``KVCacheSpec.get_kv_cache_transfer_regions``, the MP connector obtains the
+producer's K/V views from the existing cache config. Both native layout orders
+then use the same logical regions, including when ``num_blocks == 2`` and their
+raw shapes and strides are identical. Region creation aliases the original
+cache; retrieve writes through those views into attention's storage.
+
+Use ``LMCacheMPConnector`` with engine-driven transfer as shown above. This
+integration supports unquantized dense K/V exports and tensor-based block ops.
+Pointer-wrapper transfer, the separate in-process vendor connector, and
+heterogeneous TP slicing are not covered. Without a region-exporting producer
+spec, registration retains its legacy behavior; upgrading LMCache alone cannot
+recover the ambiguous axis semantics.
+
+The region path currently uses shared torch gather/scatter, so its NPU
+performance must be validated separately from the tuned native-layout path.
+
+Kernel-block subdivision is rejected by the companion exporter: its physical
+block size must match the cache spec. Scheduler-to-kernel block-ID remapping
+is not implemented by this integration.

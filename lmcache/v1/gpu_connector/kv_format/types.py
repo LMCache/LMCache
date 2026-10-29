@@ -54,6 +54,8 @@ class LayoutHints(TypedDict, total=False):
             identifies canonical per-component zero-copy views, where tensor
             rank distinguishes MLA ``[NB, BS, HS]`` from independent
             components ``[NB, BS, NH, HS]``.
+        spec_transfer_regions: Producer exports already normalized to logical
+            NHD component views. Preserve their strides and require tensor ops.
         head_dim: Per-head dimension. Used by TRT-LLM (same).
     """
 
@@ -62,3 +64,4 @@ class LayoutHints(TypedDict, total=False):
     tokens_per_block: int
     kv_list_layout: Literal["k_v", "unified"]
     head_dim: int
+    spec_transfer_regions: bool

@@ -505,3 +505,39 @@ def test_mla_blocked_scale_layout_is_refused() -> None:
             EngineKVFormat.NL_X_NB_BSV_BSS,
             0,
         )
+
+
+@pytest.mark.parametrize("kv_axis", [0, 1])
+def test_spec_component_views_preserve_wire_and_native_writes(kv_axis: int) -> None:
+    """The RBLN dispatcher accepts declared planes with HND strides and gaps."""
+    source = _paged_layers()
+    if kv_axis == 0:
+        source = [layer.transpose(0, 1).contiguous() for layer in source]
+    destination = [torch.zeros_like(layer) for layer in source]
+    chunks = _chunks()
+    for direction, native in (
+        (TransferDirection.D2H, source),
+        (TransferDirection.H2D, destination),
+    ):
+        planes = [
+            [layer.select(kv_axis, kv).squeeze(2).permute(0, 2, 1, 3) for kv in (0, 1)]
+            for layer in native
+        ]
+        RblnDeviceOps().multi_layer_block_kv_transfer(
+            planes,
+            chunks,
+            list(range(NUM_BLOCKS)),
+            torch.device("cpu"),
+            direction,
+            _shape_desc(),
+            CHUNK_TOKENS,
+            EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS,
+            0,
+        )
+    for got, expected in zip(destination, source, strict=True):
+        torch.testing.assert_close(got, expected)
+    for li, layer in enumerate(source):
+        for kv in (0, 1):
+            expected = layer.select(kv_axis, kv).squeeze(2)[:BLOCKS_PER_CHUNK]
+            expected = expected.permute(0, 2, 1, 3).reshape(CHUNK_TOKENS, -1)
+            torch.testing.assert_close(chunks[0][kv, li], expected)

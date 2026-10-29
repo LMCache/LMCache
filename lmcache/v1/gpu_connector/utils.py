@@ -509,6 +509,7 @@ def resolve_block_stride_and_log_layout(
     engine_kv_format: "lmcache_native.EngineKVFormat",
     layer_idx: int,
     group_idx: int,
+    allow_strided_regions: bool = False,
 ) -> Optional[int]:
     """Resolve the per-block stride for a KV layer group and log its layout.
 
@@ -531,6 +532,9 @@ def resolve_block_stride_and_log_layout(
         engine_kv_format: Format of ``kv_caches``.
         layer_idx: 0-based layer index used as the layout probe.
         group_idx: 0-based group index, used only for logging.
+        allow_strided_regions: Tensor-based transfers may consume exported
+            component views with arbitrary strides; pointer-only callers must
+            leave this disabled.
 
     Returns:
         ``stride(0)`` for block-axis formats; ``None`` otherwise.
@@ -565,7 +569,13 @@ def resolve_block_stride_and_log_layout(
     rep = _pick_layout_probe_tensor()
 
     block_stride_elems: Optional[int]
-    if engine_kv_format in _BLOCK_AXIS_FORMATS and rep.ndim > 0:
+    if rep.ndim > 0 and (
+        engine_kv_format in _BLOCK_AXIS_FORMATS
+        or (
+            allow_strided_regions
+            and lmcache_native.is_kv_second_tuple(engine_kv_format)
+        )
+    ):
         block_stride_elems = int(rep.stride(0))
     else:
         # Non-block-axis format: detect forbidden dim-0 padding.

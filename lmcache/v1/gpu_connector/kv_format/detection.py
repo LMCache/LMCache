@@ -59,6 +59,23 @@ def detect_format(
         ValueError: If no detector exists for *serving_engine*, or the structure
             matches no known format.
     """
+    if (
+        layout_hints is not None
+        and layout_hints.get("spec_transfer_regions", False)
+        and isinstance(kv_caches, list)
+        and kv_caches
+        and all(
+            isinstance(layer, list)
+            and len(layer) == 2
+            and all(
+                isinstance(plane, torch.Tensor) and plane.ndim == 4 for plane in layer
+            )
+            for layer in kv_caches
+        )
+    ):
+        # Spec exports already have semantic NHD order; stride sorting would
+        # undo that contract for HND storage and silently swap heads and states.
+        return lmcache_native.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS, kv_caches
     kv_caches = attempt_permute_to_contiguous_view(kv_caches)
     detector = get_detector(serving_engine)
     if detector is None:

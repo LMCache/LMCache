@@ -17,7 +17,7 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING
@@ -30,6 +30,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -64,6 +65,23 @@ def _detect_block_transfer_accepts_tensor(transfer_fn: Callable[..., None]) -> b
 
 
 # ---------------------------------------------------------------------------
+
+
+def supports_tensor_block_transfer(device: torch.device) -> bool:
+    """Whether the selected block-transfer op consumes real tensor views.
+
+    Tensor-based ops preserve component strides; pointer-only ops reconstruct
+    geometry and cannot consume arbitrary exported region views.
+
+    Args:
+        device: Device whose registered block-transfer implementation is probed.
+
+    Returns:
+        Whether that implementation accepts tensor buffers instead of pointers.
+    """
+    return _detect_block_transfer_accepts_tensor(
+        resolve_device_ops(device.type).multi_layer_block_kv_transfer
+    )
 
 
 @dataclass
@@ -269,7 +287,7 @@ def create_engine_driven_context(
 
 
 def compute_kv_layout(
-    kv_caches: dict[str, torch.Tensor],
+    kv_caches: Mapping[str, DiscoverableKVCache],
     layout_hints: LayoutHints | None = None,
     engine_type: EngineType = EngineType.VLLM,
 ) -> tuple[int, int, int, str, "lmcache_native.EngineKVFormat", int]:
@@ -326,7 +344,7 @@ def compute_kv_layout(
 
 
 def gather_paged_kv_to_cpu(
-    kv_caches: dict[str, torch.Tensor],
+    kv_caches: Mapping[str, DiscoverableKVCache],
     block_ids: list[int],
     blocks_per_chunk: int,
     layout_hints: LayoutHints | None = None,
@@ -419,7 +437,15 @@ def gather_paged_kv_to_cpu(
         num_blocks=num_blocks,
         block_size=block_size,
         block_stride_elems=resolve_block_stride_and_log_layout(
-            normalized, engine_kv_format, layer_idx=0, group_idx=0
+            normalized,
+            engine_kv_format,
+            layer_idx=0,
+            group_idx=0,
+            allow_strided_regions=(
+                accepts_tensor
+                and layout_hints is not None
+                and layout_hints.get("spec_transfer_regions", False)
+            ),
         ),
     )
 
@@ -526,7 +552,7 @@ def gather_paged_kv_to_cpu(
 
 
 def scatter_cpu_to_paged_kv(
-    kv_caches: dict[str, torch.Tensor],
+    kv_caches: Mapping[str, DiscoverableKVCache],
     block_ids: list[int],
     chunks: list[torch.Tensor],
     blocks_per_chunk: int,
@@ -637,7 +663,15 @@ def scatter_cpu_to_paged_kv(
         num_blocks=num_blocks,
         block_size=block_size,
         block_stride_elems=resolve_block_stride_and_log_layout(
-            normalized, engine_kv_format, layer_idx=0, group_idx=0
+            normalized,
+            engine_kv_format,
+            layer_idx=0,
+            group_idx=0,
+            allow_strided_regions=(
+                accepts_tensor
+                and layout_hints is not None
+                and layout_hints.get("spec_transfer_regions", False)
+            ),
         ),
     )
 

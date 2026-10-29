@@ -338,6 +338,7 @@ class KVLayerGroupsManager:
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         lmcache_tokens_per_chunk: int = 256,
         separate_object_groups: bool = False,
+        allow_strided_regions: bool = False,
     ) -> None:
         """Partition the layers into kernel groups for this set of KV caches.
 
@@ -359,6 +360,9 @@ class KVLayerGroupsManager:
                 into one object group per sliding-window size; when False
                 (default), all kernel groups share a single full-attention
                 object group.
+            allow_strided_regions: Permit component-view strides for a
+                tensor-based transfer implementation; never enable for
+                pointer-only kernels.
         """
         # Import here to break a circular import via
         # lmcache.inprocess.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
@@ -412,6 +416,7 @@ class KVLayerGroupsManager:
                 group_format,
                 layer_idx=indices[0],
                 group_idx=group_idx,
+                allow_strided_regions=allow_strided_regions,
             )
             shape_desc = make_page_buffer_shape_desc(
                 kv_caches,

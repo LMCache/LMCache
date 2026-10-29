@@ -8,15 +8,90 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+# Third Party
+import torch
+
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.gpu_connector.utils import LayoutHints
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 logger = init_logger(__name__)
+
+
+def apply_spec_transfer_regions(
+    kv_cache_config: Any,
+    kv_caches: Mapping[str, torch.Tensor],
+    layout_hints: "LayoutHints",
+) -> dict[str, DiscoverableKVCache]:
+    """Resolve producer-owned dense K/V regions before format normalization.
+
+    Args:
+        kv_cache_config: Resolved vLLM config containing the layer specs.
+        kv_caches: The actual registered per-layer tensors.
+        layout_hints: Updated to preserve the exported logical plane order.
+
+    Returns:
+        Native caches for legacy specs and aliasing NHD K/V pairs for exporters.
+
+    Raises:
+        ValueError: Exported regions are not matching, storage-sharing BHNC views.
+        NotImplementedError: A spec exports components other than dense K/V.
+    """
+    result: dict[str, DiscoverableKVCache] = dict(kv_caches)
+    if kv_cache_config is None:
+        return result
+    exported_by_tensor: dict[int, DiscoverableKVCache] = {}
+    for group in kv_cache_config.kv_cache_groups:
+        per_layer = getattr(group.kv_cache_spec, "kv_cache_specs", None)
+        for name in group.layer_names:
+            if name not in kv_caches:
+                continue
+            spec = per_layer[name] if per_layer is not None else group.kv_cache_spec
+            export = getattr(spec, "get_kv_cache_transfer_regions", None)
+            if export is None:
+                continue
+            native = kv_caches[name]
+            regions = export(native)
+            if regions is None:
+                continue
+            if native.device.type == "meta":
+                raise ValueError(
+                    f"Layer {name} transfer regions require materialized cache tensors"
+                )
+            if set(regions) != {"key", "value"}:
+                raise NotImplementedError(
+                    f"Layer {name} exports unsupported components: {tuple(regions)}"
+                )
+            key, value = regions["key"], regions["value"]
+            for region in (key, value):
+                if (
+                    region.ndim != 4
+                    or region.shape != key.shape
+                    or region.dtype != native.dtype
+                    or region.device != native.device
+                    or region.untyped_storage().data_ptr()
+                    != native.untyped_storage().data_ptr()
+                ):
+                    raise ValueError(f"Layer {name} must export aliasing BHNC regions")
+            result[name] = [key.permute(0, 2, 1, 3), value.permute(0, 2, 1, 3)]
+            exported_by_tensor[id(native)] = result[name]
+            layout_hints["kv_list_layout"] = "unified"
+            layout_hints["spec_transfer_regions"] = True
+    # Shared-layer aliases may be absent from the allocation specs, but retain
+    # the exact registered tensor object of their producer.
+    for name, native in kv_caches.items():
+        if id(native) in exported_by_tensor:
+            result[name] = exported_by_tensor[id(native)]
+        elif exported_by_tensor and native.ndim == 6:
+            raise NotImplementedError(
+                f"Layer {name} needs its own spec transfer-region declaration"
+            )
+    return result
 
 
 def _is_attention_spec(spec: Any) -> bool:
