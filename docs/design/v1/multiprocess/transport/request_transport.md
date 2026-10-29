@@ -91,7 +91,7 @@ call also runs grpcio's own Python layer (call state, metadata, status, a
 thread hand-off) under that GIL, which for small requests such as lookups
 costs about as much as the handler. The `native` server does the HTTP/2 and
 gRPC framing in Rust through
-[pygrpc-native](https://github.com/theminjunchoi/pygrpc-native), without the
+[pygrpc-native](https://github.com/pygrpc/pygrpc-native), without the
 GIL, and hands Python only the method id and the request bytes:
 
 ```
@@ -124,10 +124,7 @@ is only created when a module has a registrar. In their handlers
 `native` needs the `pygrpc-native` package (`pip install "lmcache[grpc-native]"`),
 a general-purpose gRPC server kept outside LMCache so that LMCache carries no
 Rust code for it. The `lmcache/vllm-openai` and `lmcache/standalone` images
-include it. grpc-core sends a Unix socket's path
-as `:authority`, which the Rust HTTP/2 stack rejects, so a `grpc+unix://`
-native server only serves clients that set `grpc.default_authority`;
-`GrpcMultiprocessClient` does not, so use TCP with it.
+include it.
 
 The gRPC runtime metrics (`grpc_metrics_enabled`, from
 `grpcio-observability`) measure grpcio's own servers, so they only see the

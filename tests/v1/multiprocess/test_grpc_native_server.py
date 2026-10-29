@@ -493,9 +493,6 @@ def test_unix_socket_forms_and_restart_after_a_stale_file() -> None:
     # pytest's tmp_path can exceed the 104-byte socket path limit on macOS.
     directory = Path(tempfile.mkdtemp(prefix="lmc", dir="/tmp"))
     path = directory / "s.sock"
-    request = extension_service_pb2.ServerModuleCallRequest(
-        method="echo", payload=b"ab"
-    )
     try:
         stale = socket.socket(socket.AF_UNIX)
         stale.bind(str(path))
@@ -505,20 +502,13 @@ def test_unix_socket_forms_and_restart_after_a_stale_file() -> None:
             server.add_modules([_EchoModule()])
             server.start()
             assert server.bound_port == 1
-            # grpc-core sends the socket path as :authority, which the front
-            # rejects as invalid HTTP/2, so name the authority explicitly.
-            channel = grpc.insecure_channel(
-                f"unix:{path}", options=[("grpc.default_authority", "localhost")]
+            client = GrpcMultiprocessClient(  # type: ignore[abstract]
+                f"grpc+unix://{path}"
             )
             try:
-                call = channel.unary_unary(
-                    _SERVER_MODULE_CALL,
-                    request_serializer=extension_service_pb2.ServerModuleCallRequest.SerializeToString,
-                    response_deserializer=extension_service_pb2.ServerModuleCallResponse.FromString,
-                )
-                assert call(request, timeout=5).payload == b"ba"
+                assert _echo(client, b"ab") == b"ba"
             finally:
-                channel.close()
+                client.close()
                 server.close()
             assert not path.exists()
     finally:
