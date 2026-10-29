@@ -7,6 +7,7 @@ Tests for engine-driven multi-group (uniform coverage) transfers.
 from contextlib import contextmanager
 from typing import Any
 from unittest.mock import MagicMock
+from uuid import uuid4
 import threading
 
 # Third Party
@@ -17,12 +18,26 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     GroupLayout,
     IPCCacheServerKey,
+    PrepareRetrieveResponse,
     RegisterEngineDrivenContextPayload,
+    RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+    EngineDrivenTransferModule,
+)
+from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.server_transfer import (
     InlineTransferStrategy,
     ShmTransferStrategy,
@@ -41,6 +56,8 @@ from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
 )
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 
 
 def _detected_block_size(kv_caches: dict[str, torch.Tensor]) -> int:
@@ -640,6 +657,100 @@ def test_inline_strategy_store_shape_mismatch_releases_reservations() -> None:
     assert _obj_key(2, 1) not in sm.objs
 
 
+@pytest.mark.parametrize("use_shm", [False, True], ids=["inline", "shm"])
+@pytest.mark.parametrize("window_tokens", [-1, 512], ids=["full", "sliding"])
+def test_single_compressed_group_worker_server_roundtrip(
+    use_shm: bool, window_tokens: int, unused_tcp_port: int
+) -> None:
+    """A single compressed group survives real RPC, storage and retrieval.
+
+    Both transports must preserve the physical slot layout and the absolute
+    chunk positions when a sliding window drops the leading chunks.
+    """
+    chunk_tokens = 512
+    tokens_per_block = 256
+    slots_per_block = 2
+    num_blocks = 6
+    shm_name = f"lmcache_l1_pool_test_compressed_{uuid4().hex}" if use_shm else ""
+    config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=8 * 1024 * 1024,
+                use_lazy=False,
+                shm_name=shm_name,
+            )
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+    )
+    engine = MPCacheServerContext(config, chunk_size=chunk_tokens)
+    module = EngineDrivenTransferModule(engine)
+    lookup = LookupModule(engine)
+    server = create_request_server(
+        [module, lookup], MPServerConfig(host="127.0.0.1", port=unused_tcp_port)
+    )
+    server.start()
+    client = RequestClientFactory.create(f"tcp://127.0.0.1:{unused_tcp_port}")
+    worker = EngineDrivenTransferContext(1, client)
+    source = {
+        "layer_0": torch.arange(
+            (2 * num_blocks + 1) * slots_per_block * 16, dtype=torch.float32
+        ).reshape(-1, slots_per_block, 16)
+    }
+    destination = {"layer_0": torch.full_like(source["layer_0"], -1)}
+    store_ids = list(range(1, num_blocks + 1))
+    retrieve_ids = list(range(num_blocks + 1, 2 * num_blocks + 1))
+    key = IPCCacheServerKey.from_token_ids(
+        "compressed", 1, 0, [1] * 1536, start=0, end=1536, request_id="compressed"
+    )
+    try:
+        worker.register(
+            source,
+            "compressed",
+            1,
+            2,
+            5.0,
+            engine_group_infos=[
+                EngineGroupInfo(
+                    0,
+                    (0,),
+                    tokens_per_block=tokens_per_block,
+                    sw_size_tokens=window_tokens,
+                )
+            ],
+            lmcache_chunk_tokens=chunk_tokens,
+        )
+        for _ in range(2):
+            assert worker.submit_store(
+                key.request_id, key, source, [store_ids], None, 2
+            ).result(timeout=5)
+
+        client.lookup(key, 1).result(timeout=5)
+        assert client.wait_prefetch_status(key.request_id, 5).result(timeout=10) == 3
+        assert worker.submit_retrieve(
+            key.request_id, key, destination, [retrieve_ids], None, 2
+        ).result(timeout=5)
+
+        expected = torch.full_like(source["layer_0"], -1)
+        first_block = (
+            0 if window_tokens < 0 else num_blocks - window_tokens // tokens_per_block
+        )
+        expected[retrieve_ids[first_block:]] = source["layer_0"][
+            store_ids[first_block:]
+        ]
+        assert torch.equal(destination["layer_0"], expected)
+        client.end_session(key.request_id).result(timeout=5)
+        unregistration = worker.unregister()
+        assert unregistration is not None
+        unregistration.result(timeout=5)
+    finally:
+        worker.close()
+        client.close()
+        server.close()
+        lookup.close()
+        module.close()
+        engine.close()
+
+
 def test_register_payload_carries_group_layouts() -> None:
     """Two full-attention groups produce per-group layouts in the payload."""
     kv = {f"layer_{i}": torch.zeros(2, 6, 4, 2, 8) for i in range(3)}
@@ -745,24 +856,123 @@ def test_register_payload_carries_per_group_kv_size() -> None:
     assert [len(s.layout_desc.shapes[0]) for s in ctx._group_states] == [4, 3]
 
 
-def test_register_rejects_compressed_group() -> None:
-    """A group whose block covers more tokens than it has slots (compressed
-    paging, e.g. DeepSeek V4 indexer pages) must fail at registration: its
-    layout would be sized in tokens while gather produces fewer slots, so
-    registration would succeed and every store would then fail."""
-    kv = {f"layer_{i}": torch.zeros(2, 4, 4, 2, 8) for i in range(2)}
-    slots = _detected_block_size(kv)
-
-    with pytest.raises(NotImplementedError, match="compressed"):
-        _register_capturing_payload(
-            kv,
-            [
-                EngineGroupInfo(engine_group_id=0, layer_indices=(0,)),
-                EngineGroupInfo(
-                    engine_group_id=1, layer_indices=(1,), tokens_per_block=4 * slots
-                ),
-            ],
+@pytest.mark.parametrize("device", sorted({"cpu", torch_device_type}))
+@pytest.mark.parametrize("mixed_groups", [False, True])
+@pytest.mark.parametrize("skip_tokens", [0, 768])
+def test_compressed_groups_roundtrip(
+    device: str, mixed_groups: bool, skip_tokens: int
+) -> None:
+    """Compressed, padded pages retain their bytes and logical skip boundaries."""
+    chunk_tokens = 512
+    # (logical tokens/block, physical slots/block, dtype, sliding window)
+    geometry = [(256, 2, torch.float32, -1)]
+    if mixed_groups:
+        geometry += [
+            (256, 64, torch.uint8, -1),
+            (64, 64, torch.uint8, 256),
+            (256, 2, torch.float32, 256),
+        ]
+    source: dict[str, torch.Tensor] = {}
+    destination: dict[str, torch.Tensor] = {}
+    destination_pools: list[torch.Tensor] = []
+    infos: list[EngineGroupInfo] = []
+    store_ids: list[list[int]] = []
+    retrieve_ids: list[list[int]] = []
+    expected_layouts: list[tuple[torch.Size, torch.dtype, int]] = []
+    for gid, (tokens, slots, dtype, window) in enumerate(geometry):
+        count = 3 * chunk_tokens // tokens
+        width = slots * 16
+        pool = (
+            (torch.arange((2 * count + 2) * (width + 32)) % 251)
+            .to(device=device, dtype=dtype)
+            .reshape(2 * count + 2, width + 32)
         )
+        target = torch.full_like(pool, 255)
+        name = f"layer_{gid}"
+        source[name] = pool[:, :width].view(-1, slots, 16)
+        destination[name] = target[:, :width].view(-1, slots, 16)
+        destination_pools.append(target)
+        infos.append(
+            EngineGroupInfo(gid, (gid,), tokens_per_block=tokens, sw_size_tokens=window)
+        )
+        store_ids.append(list(range(1, count + 1)))
+        retrieve_ids.append(list(range(count + 1, 2 * count + 1)))
+        window_tokens = chunk_tokens if window < 0 else min(chunk_tokens, window)
+        expected_layouts.append(
+            (torch.Size([1, window_tokens * slots // tokens, 16]), dtype, 3)
+        )
+
+    client = MagicMock()
+    client.register_kv_cache_engine_driven_context.return_value.result.return_value = (
+        RegisterEngineDrivenContextResponse("", 0)
+    )
+    client.commit_store.return_value.result.return_value = True
+    ctx = EngineDrivenTransferContext(1, client)
+    ctx.register(
+        source,
+        "compressed",
+        1,
+        2,
+        1.0,
+        engine_group_infos=infos,
+        lmcache_chunk_tokens=chunk_tokens,
+    )
+    try:
+        payload = client.register_kv_cache_engine_driven_context.call_args.args[0]
+        assert [g.num_physical_slots for g in payload.group_layouts] == [
+            shape[-2] for shape, _, _ in expected_layouts
+        ]
+        key = IPCCacheServerKey.from_token_ids(
+            "compressed", 1, 0, [1] * 1536, start=0, end=1536, request_id="compressed"
+        )
+        assert ctx.submit_store("compressed", key, source, store_ids, None, 2).result()
+        stored = decode_grouped_tensors(
+            client.commit_store.call_args.args[2], expected=expected_layouts
+        )
+        retrieved = []
+        for gid, (indices, chunks) in enumerate(stored):
+            tokens, slots, _, window = geometry[gid]
+            blocks_per_chunk = chunk_tokens // tokens
+            keep = (
+                blocks_per_chunk if window < 0 else min(window, chunk_tokens) // tokens
+            )
+            for index, chunk in zip(indices, chunks, strict=True):
+                ids = store_ids[gid][
+                    (index + 1) * blocks_per_chunk - keep : (index + 1)
+                    * blocks_per_chunk
+                ]
+                expected = (
+                    source[f"layer_{gid}"][ids].reshape(1, keep * slots, 16).cpu()
+                )
+                assert torch.equal(chunk, expected)
+            first = 0 if window < 0 else 3 - (window + chunk_tokens - 1) // chunk_tokens
+            retrieved.append((indices[first:], chunks[first:]))
+        client.prepare_retrieve.return_value.result.return_value = (
+            PrepareRetrieveResponse(
+                success=True, data=encode_grouped_tensors(retrieved), context={}
+            )
+        )
+        assert ctx.submit_retrieve(
+            "compressed",
+            key,
+            destination,
+            retrieve_ids,
+            None,
+            2,
+            skip_first_n_tokens=skip_tokens,
+        ).result()
+        for gid, (tokens, _, _, window) in enumerate(geometry):
+            expected = torch.full_like(destination[f"layer_{gid}"], 255)
+            first_token = max(skip_tokens, 0 if window < 0 else 1536 - window)
+            for pos, (src, dst) in enumerate(
+                zip(store_ids[gid], retrieve_ids[gid], strict=True)
+            ):
+                if pos * tokens >= first_token:
+                    expected[dst] = source[f"layer_{gid}"][src]
+            assert torch.equal(destination[f"layer_{gid}"], expected)
+            assert torch.all(destination_pools[gid][:, -32:] == 255)
+    finally:
+        ctx.close()
 
 
 @pytest.mark.parametrize(
