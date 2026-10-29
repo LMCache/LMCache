@@ -123,6 +123,34 @@ class TestDefaultDispatcher:
             ),
         ]
 
+    def test_legacy_finish_read_extra_count_is_migrated(self):
+        sm = _FakeSM()
+        ctx = ReplayContext(sm=sm)
+        d = build_default_dispatcher()
+        keys = [_key(1)]
+
+        d.dispatch(
+            f"{_SM_PREFIX}.finish_read_prefetched",
+            ctx,
+            {"keys": keys, "extra_count": 2},
+        )
+
+        assert sm.calls == [("finish_read_prefetched", {"keys": keys, "read_locks": 3})]
+
+    def test_current_finish_read_args_pass_through(self):
+        sm = _FakeSM()
+        ctx = ReplayContext(sm=sm)
+        d = build_default_dispatcher()
+        keys = [_key(1)]
+
+        d.dispatch(
+            f"{_SM_PREFIX}.finish_read_prefetched",
+            ctx,
+            {"keys": keys, "read_locks": 4},
+        )
+
+        assert sm.calls == [("finish_read_prefetched", {"keys": keys, "read_locks": 4})]
+
     def test_read_prefetched_enter_exit_fifo(self):
         """Two overlapping contexts with identical keys exit in FIFO order."""
         sm = _FakeSM()
