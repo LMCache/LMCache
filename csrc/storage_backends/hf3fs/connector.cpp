@@ -634,16 +634,13 @@ bool Hf3fsConnector::do_single_delete(WorkerHf3fsConn& conn,
  * collecting on-disk file sizes.
  *
  * The scan roots are the base paths, or with ``shard_dirs_`` the first-level
- * shard directories under every base path. Splits the roots into
- * num_workers_ contiguous slices (bounded by the number of roots). Each
- * thread scans one slice of directories into a
- * private local set to avoid contention, then all local sets are merged into
- * key_buffer_ in a single-threaded pass.
+ * shard directories under every base path. Each thread scans one slice of
+ * directories into a private local set to avoid contention,
+ * then all local sets are merged into a global set in a single-threaded pass.
  *
- * The scan is gated on ``buffer_enabled_ || collect_file_sizes_`` (see
- * the constructor): when only the key buffer is enabled, filenames are
- * gathered into ``key_buffer_``; when usage accounting is requested
- * (``collect_file_sizes_``), the on-disk ``file_size`` of every valid
+ * The scan is gated on buffer_enabled_ || collect_file_sizes_:
+ *  when buffer_enabled_ is True, filenames are gathered into ``key_buffer_``;
+ *  when ollect_file_sizes_ is True, the on-disk ``file_size`` of every valid
  * ``.data`` file is gathered alongside the key into
  * ``existing_keys_with_sizes_``.
  *
@@ -729,8 +726,7 @@ void Hf3fsConnector::scan_existing_keys() {
  * This keeps directory traversal local to the connector; the per-file
  * mapping from filename to the original wire key is delegated to the
  * shared ``keys.h::filename_to_key`` (the inverse of
- * ``keys.h::key_to_filename``), so the on-disk encoding stays consistent
- * with the fs_native connector.
+ * ``keys.h::key_to_filename``).
  *
  * Without sharding, each root is a base path holding the .data files. With
  * sharding, each root is a first-level shard directory and the .data files

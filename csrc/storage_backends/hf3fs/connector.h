@@ -149,8 +149,7 @@ class Hf3fsConnector : public ConnectorBase<WorkerHf3fsConn> {
                  int num_workers, int ior_entries = 256, int io_depth = 0,
                  int numa_id = -1, size_t iov_size = 209715200,
                  int time_out = 200, bool enable_key_buffer = true,
-                 bool shard_dirs = false,
-                 bool collect_file_sizes = false,
+                 bool shard_dirs = false, bool collect_file_sizes = false,
                  WorkerPoolConfig worker_pool_config = {});
 
   /// Return the (key, size) pairs collected during the startup scan.

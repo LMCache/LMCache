@@ -114,10 +114,6 @@ The **BUILD_HF3FS** environment variable controls compilation:
 - ``shard_dirs`` (bool, default ``False``): Store each file under two
   chunk-hash prefix subdirectories instead of directly in its base path.
   See *Directory Sharding* below.
-- ``collect_file_sizes`` (bool, default ``False``): Collect the on-disk
-  byte size of every existing KVCache file during the startup scan so the
-  adapter can pre-seed eviction usage accounting.  Enabled automatically
-  when capacity accounting (``max_capacity_gb > 0``) is turned on.
 
 **Configuration Example**
 

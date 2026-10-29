@@ -104,8 +104,7 @@ PYBIND11_MODULE(lmcache_hf3fs, m) {
                        int num_workers, int ior_entries, int io_depth,
                        int numa_id, size_t iov_size, int time_out,
                        bool enable_key_buffer, bool shard_dirs,
-                       bool collect_file_sizes,
-                       py::object per_op_workers) {
+                       bool collect_file_sizes, py::object per_op_workers) {
              return new lmcache::connector::Hf3fsConnector(
                  std::move(mount_point), std::move(base_paths), num_workers,
                  ior_entries, io_depth, numa_id, iov_size, time_out,
@@ -124,7 +123,6 @@ PYBIND11_MODULE(lmcache_hf3fs, m) {
 
       // Return (ObjectKey, file_size) from the client's startup scan.
       // Returns an empty list when collect_file_sizes was disabled
-      //  (no capacity accounting).
       .def("get_existing_keys_with_sizes",
            [](lmcache::connector::Hf3fsConnector& self) {
              // Lazily resolve the callable Python ObjectKey so pybind never
@@ -158,8 +156,7 @@ PYBIND11_MODULE(lmcache_hf3fs, m) {
                               py::arg("cache_salt") = cache_salt),
                      size));
                } catch (const std::exception& e) {
-                 // A single bad key must not abort the whole hydration scan ,
-                 // so skip it and keep decoding the rest
+                 // A single bad key must not abort the whole hydration scan
                  fprintf(stderr,
                          "[LMCache HF3FS] hydration: skipping unparsable key "
                          "%s (size %llu): %s\n",
