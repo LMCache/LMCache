@@ -114,7 +114,7 @@ def group_layers_by_identity(
         get_head_size,
         get_kv_size,
         get_num_heads,
-        resolve_block_stride_and_log_layout,
+        resolve_block_stride,
     )
 
     num_layers = len(engine_kv_formats)
@@ -145,9 +145,7 @@ def group_layers_by_identity(
         hs = get_head_size(kv_caches, layer_format, idx)
         dt = get_dtype(kv_caches, layer_format, idx)
         bs = get_block_size(kv_caches, layer_format, idx)
-        block_stride_elems = resolve_block_stride_and_log_layout(
-            kv_caches, layer_format, idx
-        )
+        block_stride_elems = resolve_block_stride(kv_caches, layer_format, idx)
 
         identity = LayerGroupIdentity(
             kv_size=kv_size,
@@ -372,8 +370,8 @@ class KVLayerGroupsManager:
         # First Party
         from lmcache.v1.gpu_connector.utils import (
             get_num_blocks,
+            log_kv_layout,
             make_page_buffer_shape_desc,
-            resolve_block_stride_and_log_layout,
         )
         from lmcache.v1.multiprocess.group_view import get_engine_group_indices
 
@@ -414,7 +412,7 @@ class KVLayerGroupsManager:
             # Block count is per engine group (each is its own block-id space), so
             # read it from this group's own tensor rather than a context-wide value.
             group_num_blocks = get_num_blocks([kv_caches[indices[0]]], group_format)
-            resolve_block_stride_and_log_layout(
+            log_kv_layout(
                 kv_caches,
                 group_format,
                 layer_idx=indices[0],

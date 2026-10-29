@@ -80,10 +80,11 @@ KVLayerGroupInfo list   --STORE/RETRIEVE block_ids per info-->  transfer kernels
    `EXCLUDED_ENGINE_GROUP` and dropped (see Cross-layer KV sharing).
 3. `group_layers_by_identity` splits layers by transfer identity
    `(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype,
-   engine_kv_format)` — `engine_group_idx` keeps identically-shaped layers from
-   different engine groups in separate infos, and `engine_kv_format` keeps
-   different layouts that share one engine group apart (the 5-D key+value vs the
-   3-D key-only cache from step 1).
+   engine_kv_format, block_stride_elems)` — `engine_group_idx` keeps
+   identically-shaped layers from different engine groups in separate infos,
+   `engine_kv_format` keeps different layouts that share one engine group apart
+   (the 5-D key+value vs the 3-D key-only cache from step 1), and
+   `block_stride_elems` separates physically different block layouts.
 4. Emit one `EngineGroupInfo` per identity; send the list in the
    `REGISTER_KV_CACHE` payload (the message queue encodes it).
 

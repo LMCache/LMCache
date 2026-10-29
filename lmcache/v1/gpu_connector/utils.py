@@ -504,18 +504,44 @@ _BLOCK_AXIS_FORMATS: frozenset = frozenset(
 )
 
 
-def resolve_block_stride_and_log_layout(
+def _pick_layout_probe_tensor(
     kv_caches: DiscoverableKVCache,
     engine_kv_format: "lmcache_native.EngineKVFormat",
     layer_idx: int,
-    group_idx: int | None = None,
-) -> Optional[int]:
-    """Resolve a layer's per-block stride, optionally logging its layout.
+) -> torch.Tensor:
+    """Return the tensor whose physical layout represents a KV layer."""
+    # Layout probe only (shape/stride/storage_offset/dtype); not
+    # the K/V slice fed to the transfer kernel.
+    # - Cross-layer formats: ``kv_caches`` is the single backing
+    #   tensor packing all layers along dim-1; indexing dim-0
+    #   (= NB) would yield a per-block slice, so return the whole
+    #   tensor (its ``stride(0)`` is the authoritative per-NB step).
+    # - SGL MHA: outer list is K/V (length 2), inner list is
+    #   per-layer; K & V share shape/stride by construction.
+    # - Other formats: ``kv_caches`` is already a per-layer list.
+    if lmcache_native.is_cross_layer(engine_kv_format):
+        if not isinstance(kv_caches, torch.Tensor):
+            raise TypeError(
+                "Cross-layer EngineKVFormat expects a single backing "
+                f"torch.Tensor, got {type(kv_caches).__name__}."
+            )
+        return kv_caches
+    if lmcache_native.is_kv_list(engine_kv_format):
+        return kv_caches[0][layer_idx]  # type: ignore[index,return-value]
+    if lmcache_native.is_kv_second_tuple(engine_kv_format):
+        return kv_caches[layer_idx][0]  # type: ignore[index,return-value]
+    return kv_caches[layer_idx]  # type: ignore[index,return-value]
 
-    Used for both layer grouping and the ``block_stride_elems`` value of
-    :class:`PageBufferShapeDesc`. Supplying ``group_idx`` also emits a
-    one-shot layout audit line. All ``EngineKVFormat``-aware reasoning is
-    kept here so callers never touch a "representative KV cache" tensor.
+
+def resolve_block_stride(
+    kv_caches: DiscoverableKVCache,
+    engine_kv_format: "lmcache_native.EngineKVFormat",
+    layer_idx: int,
+) -> Optional[int]:
+    """Resolve a layer's per-block stride and validate dim-0 padding.
+
+    All ``EngineKVFormat``-aware reasoning is kept here so callers never
+    inspect a representative KV cache tensor directly.
 
     * Block-axis formats (:data:`_BLOCK_AXIS_FORMATS`): ``stride(0)`` is
       the per-block step and is returned as-is. A value larger than the
@@ -530,8 +556,6 @@ def resolve_block_stride_and_log_layout(
         kv_caches: Full KV cache structure (already normalised).
         engine_kv_format: Format of ``kv_caches``.
         layer_idx: 0-based layer index used as the layout probe.
-        group_idx: 0-based group index for logging. When omitted, resolve
-            the stride without emitting a layout audit line.
 
     Returns:
         ``stride(0)`` for block-axis formats; ``None`` otherwise.
@@ -540,30 +564,7 @@ def resolve_block_stride_and_log_layout(
         ValueError: Non-block-axis format carries dim-0 padding.
     """
 
-    def _pick_layout_probe_tensor() -> torch.Tensor:
-        # Layout probe only (shape/stride/storage_offset/dtype); not
-        # the K/V slice fed to the transfer kernel.
-        # - Cross-layer formats: ``kv_caches`` is the single backing
-        #   tensor packing all layers along dim-1; indexing dim-0
-        #   (= NB) would yield a per-block slice, so return the whole
-        #   tensor (its ``stride(0)`` is the authoritative per-NB step).
-        # - SGL MHA: outer list is K/V (length 2), inner list is
-        #   per-layer; K & V share shape/stride by construction.
-        # - Other formats: ``kv_caches`` is already a per-layer list.
-        if lmcache_native.is_cross_layer(engine_kv_format):
-            if not isinstance(kv_caches, torch.Tensor):
-                raise TypeError(
-                    "Cross-layer EngineKVFormat expects a single backing "
-                    f"torch.Tensor, got {type(kv_caches).__name__}."
-                )
-            return kv_caches
-        if lmcache_native.is_kv_list(engine_kv_format):
-            return kv_caches[0][layer_idx]  # type: ignore[index,return-value]
-        if lmcache_native.is_kv_second_tuple(engine_kv_format):
-            return kv_caches[layer_idx][0]  # type: ignore[index,return-value]
-        return kv_caches[layer_idx]  # type: ignore[index,return-value]
-
-    rep = _pick_layout_probe_tensor()
+    rep = _pick_layout_probe_tensor(kv_caches, engine_kv_format, layer_idx)
 
     block_stride_elems: Optional[int]
     if engine_kv_format in _BLOCK_AXIS_FORMATS and rep.ndim > 0:
@@ -592,8 +593,24 @@ def resolve_block_stride_and_log_layout(
                 )
         block_stride_elems = None
 
-    if group_idx is None:
-        return block_stride_elems
+    return block_stride_elems
+
+
+def log_kv_layout(
+    kv_caches: DiscoverableKVCache,
+    engine_kv_format: "lmcache_native.EngineKVFormat",
+    layer_idx: int,
+    group_idx: int,
+) -> None:
+    """Emit a best-effort audit log for one KV layer group's layout.
+
+    Args:
+        kv_caches: Full KV cache structure (already normalised).
+        engine_kv_format: Format of ``kv_caches``.
+        layer_idx: 0-based layer index used as the layout probe.
+        group_idx: 0-based group index included in the log message.
+    """
+    rep = _pick_layout_probe_tensor(kv_caches, engine_kv_format, layer_idx)
 
     # Best-effort layout audit log; the log line itself must not raise.
     shape = tuple(rep.shape)
@@ -627,6 +644,29 @@ def resolve_block_stride_and_log_layout(
         padding_per_block,
     )
 
+
+def resolve_block_stride_and_log_layout(
+    kv_caches: DiscoverableKVCache,
+    engine_kv_format: "lmcache_native.EngineKVFormat",
+    layer_idx: int,
+    group_idx: int,
+) -> Optional[int]:
+    """Resolve a layer's block stride and emit its group layout audit log.
+
+    Args:
+        kv_caches: Full KV cache structure (already normalised).
+        engine_kv_format: Format of ``kv_caches``.
+        layer_idx: 0-based layer index used as the layout probe.
+        group_idx: 0-based group index included in the log message.
+
+    Returns:
+        ``stride(0)`` for block-axis formats; ``None`` otherwise.
+
+    Raises:
+        ValueError: Non-block-axis format carries dim-0 padding.
+    """
+    block_stride_elems = resolve_block_stride(kv_caches, engine_kv_format, layer_idx)
+    log_kv_layout(kv_caches, engine_kv_format, layer_idx, group_idx)
     return block_stride_elems
 
 

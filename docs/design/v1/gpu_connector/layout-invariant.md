@@ -246,15 +246,15 @@ consumer code must never do any of the following — it queries via the
 ## Consumers
 
 - **`lmcache/v1/kv_layer_groups.py::KVLayerGroupsManager.__init__`** —
-  partitions layers by the 5-tuple `(kv_size, num_heads, head_size,
-  block_size, dtype)` using `is_mla`, `get_num_heads`, `get_head_size`,
-  `get_block_size`, and `get_dtype` with each layer's index. Including
-  `block_size` in the identity lets compressed groups (e.g. a DeepSeek
-  V4 indexer with a smaller physical slot count) sit alongside
-  non-compressed groups under a single `GPUCacheContext`. Builds a
-  `PageBufferShapeDesc` per group via `make_page_buffer_shape_desc`,
-  passing the `block_stride_elems` resolved by
-  `resolve_block_stride_and_log_layout`. The real constructor is the
+  partitions layers by the full `KernelGroupIdentity` field list
+  `(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype,
+  engine_kv_format, block_stride_elems)`. Including `block_size` in the
+  identity lets compressed groups (e.g. a DeepSeek V4 indexer with a smaller
+  physical slot count) sit alongside non-compressed groups under a single
+  `GPUCacheContext`; including `block_stride_elems` separates physically
+  different block layouts. Builds a `PageBufferShapeDesc` per group via
+  `make_page_buffer_shape_desc`, stamping `block_stride_elems` from the
+  group's identity. The real constructor is the
   only way in — no test-only shortcuts, no cached topology fields; the
   manager exposes only `kv_layer_groups`, `num_groups`, and
   `get_shape_desc`.
