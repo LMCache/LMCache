@@ -5,7 +5,7 @@
 The observability system uses an **EventBus with pub/sub dispatch** and
 **OpenTelemetry** for metrics instrumentation.
 
-- **Producers** (`L1Manager`, `StorageManager`, `MPCacheServer`) publish `Event` objects
+- **Producers** (`BaseL1Manager`, `StorageManager`, `MPCacheServer`) publish `Event` objects
   to the EventBus.
 - **Metrics subscribers** (e.g. `L1MetricsSubscriber`, `L2MetricsSubscriber`) subscribe to
   specific event types and update OTel counters.
@@ -109,11 +109,11 @@ datapoints and are orthogonal to these Resource attributes.
 | `lmcache_mp.l1_evicted` | `lmcache_mp_l1_evicted_chunks_total` | Counter (attr: `cache_salt`) | `L1_KEYS_EVICTED` | `+len(keys)` per `cache_salt` |
 | `lmcache_mp.l1_eviction_loop_ticks` | `lmcache_mp_l1_eviction_loop_ticks_total` | Counter | `L1_EVICTION_LOOP_TICK` | +1 per loop iteration |
 | `lmcache_mp.l1_eviction_loop_triggered` | `lmcache_mp_l1_eviction_loop_triggered_total` | Counter | `L1_EVICTION_LOOP_TICK` | +1 when `triggered=True` |
-| `lmcache_mp.l1_usage_ratio` | `lmcache_mp_l1_usage_ratio` | Observable Gauge | (callback on `L1Manager`) | `used / total` at scrape time |
+| `lmcache_mp.l1_usage_ratio` | `lmcache_mp_l1_usage_ratio` | Observable Gauge | (callback on `BaseL1Manager`) | `used / total` at scrape time |
 
 **What it answers:** How aggressively is the eviction controller clearing L1?  Is the eviction loop alive but staying below the watermark, or actively firing?  What is the current L1 fullness?
 
-The two loop counters distinguish "loop is alive" from "eviction fired" — important when debugging short-lived benchmarks (a workload that completes in <1 s never gives the 1Hz polling loop a chance to fire even when usage exceeds the watermark).  `l1_usage_ratio` is registered via :func:`register_gauge` against `L1Manager`, so its value reflects current state at scrape time, not a per-tick sample.
+The two loop counters distinguish "loop is alive" from "eviction fired" — important when debugging short-lived benchmarks (a workload that completes in <1 s never gives the 1Hz polling loop a chance to fire even when usage exceeds the watermark).  `l1_usage_ratio` is registered via :func:`register_gauge` against `BaseL1Manager`, so its value reflects current state at scrape time, not a per-tick sample.
 
 ---
 
@@ -620,8 +620,8 @@ the same backend type — same shape as the existing
 
 | OTel metric name | Prometheus name | Type | Source of truth | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l1_memory_usage_bytes` | `lmcache_mp_l1_memory_usage_bytes` | ObservableGauge | `L1Manager.get_memory_usage()` | Bytes currently held in L1 at scrape time |
-| `lmcache_mp.l1_staging_bytes` | `lmcache_mp_l1_staging_bytes` | ObservableGauge | `L1Manager.get_staging_memory_usage()` | Bytes held by L1 staging objects (write-reserved, not yet admitted: in-flight stores and L2 prefetch loads) at scrape time; a subset of `l1_memory_usage_bytes` |
+| `lmcache_mp.l1_memory_usage_bytes` | `lmcache_mp_l1_memory_usage_bytes` | ObservableGauge | `BaseL1Manager.get_memory_usage()` | Bytes currently held in L1 at scrape time |
+| `lmcache_mp.l1_staging_bytes` | `lmcache_mp_l1_staging_bytes` | ObservableGauge | `BaseL1Manager.get_staging_memory_usage()` | Bytes held by L1 staging objects (write-reserved, not yet admitted: in-flight stores and L2 prefetch loads) at scrape time; a subset of `l1_memory_usage_bytes` |
 | `lmcache_mp.l2_usage_bytes` | `lmcache_mp_l2_usage_bytes` | ObservableGauge (attr: `l2_name`) | `StorageManager.get_l2_usages()` (calls `L2AdapterInterface.get_usage().total_bytes_used`) | Per-adapter bytes currently held in L2 at scrape time; one observation per configured adapter.  Adapters whose `get_usage()` raises are skipped silently. |
 | `lmcache_mp.num_inflight_l2_stores` | `lmcache_mp_num_inflight_l2_stores` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `StoreController.get_inflight_count_by_adapter()` | Snapshot of in-flight L2 store tasks grouped by adapter |
 | `lmcache_mp.num_inflight_l2_loads` | `lmcache_mp_num_inflight_l2_loads` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `PrefetchController.get_inflight_load_state_by_adapter()` | Per-adapter count from the same snapshot |
@@ -635,7 +635,7 @@ plateauing).
 that have not landed yet? A high or climbing value means many concurrent
 stores / prefetch loads (input for in-flight prefetch planning); a value
 that never returns to zero means abandoned reservations waiting for their
-write TTL to expire. See `../../distributed/l1_manager.md`.
+write TTL to expire. See `../distributed/l1_manager/staging-and-write-tags.md`.
 
 **What `l2_usage_bytes` answers:** How full is each L2 backend? Lets
 operators query how much each L2 tier currently holds, decide whether
@@ -663,7 +663,7 @@ prefetch reservations are crowding out cacheable data.
 > each in-flight byte is attributed to exactly one `(l2_name,
 > adapter_index)` pair — sums across adapters are not double-counted.
 
-> **Singleton dispatch.** L1Manager / StoreController / PrefetchController
+> **Singleton dispatch.** BaseL1Manager / StoreController / PrefetchController
 > are singletons in MP mode.  Each controller registers its gauge once
 > (guarded by a class-level `_gauge_registered` flag) and the callback
 > dispatches via a class-level `_gauge_target` so the most recently

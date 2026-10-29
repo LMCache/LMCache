@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Unit tests for L1Manager.
+Unit tests for DramL1Manager.
 
-These tests verify the behavior of L1Manager as described in the
+These tests verify the behavior of DramL1Manager as described in the
 interface docstrings. The tests focus on:
 
 1. reserve_read() - Reserve read access for given keys
@@ -41,7 +41,7 @@ interface docstrings. The tests focus on:
 
 7. get_object_state() - Debugging API to get internal state
 
-8. close() - Close the L1Manager and free all resources
+8. close() - Close the DramL1Manager and free all resources
 
 9. Staging objects (TestStaging*) - tags, admission, discard, expiry,
    eviction of abandoned reservations and staging-memory accounting
@@ -69,9 +69,9 @@ from tests.v1.distributed.utils import should_use_lazy_alloc
 
 try:
     # First Party
-    from lmcache.v1.distributed.l1_manager import L1Manager
+    from lmcache.v1.distributed.l1_manager import DramL1Manager
 except ImportError:
-    # Skip tests if L1Manager cannot be imported
+    # Skip tests if DramL1Manager cannot be imported
     pytest.skip(
         "Skipping because L1 manager cannot be imported", allow_module_level=True
     )
@@ -168,13 +168,13 @@ def make_object_key(chunk_hash: int, model_name: str = "test_model", kv_rank: in
 
 
 # =============================================================================
-# Tests for L1Manager.reserve_read()
+# Tests for DramL1Manager.reserve_read()
 # =============================================================================
 
 
 class TestReserveRead:
     """
-    Tests for L1Manager.reserve_read() method.
+    Tests for DramL1Manager.reserve_read() method.
 
     Per the docstring:
     - KEY_NOT_EXIST: The key does not exist (staging objects are invisible).
@@ -185,7 +185,7 @@ class TestReserveRead:
         self, basic_l1_config, basic_layout
     ):
         """Test that reserve_read returns KEY_NOT_EXIST for non-existing keys."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         result = manager.reserve_read([key])
@@ -201,7 +201,7 @@ class TestReserveRead:
         self, basic_l1_config, basic_layout
     ):
         """A key that is only being written (staging object) is invisible."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Reserve write (but don't finish) - the key is staged, not resident
@@ -225,7 +225,7 @@ class TestReserveRead:
         self, basic_l1_config, basic_layout
     ):
         """Test that reserve_read returns SUCCESS for ready (unlocked) keys."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create object: reserve write -> finish write
@@ -247,7 +247,7 @@ class TestReserveRead:
 
     def test_reserve_read_multiple_keys(self, basic_l1_config, basic_layout):
         """Test reserve_read with multiple keys in a single call."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key1 = make_object_key(1)
         key2 = make_object_key(2)
         key3 = make_object_key(3)
@@ -276,7 +276,7 @@ class TestReserveRead:
         self, basic_l1_config, basic_layout
     ):
         """Test that multiple read reservations can be made on the same key."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object
@@ -301,7 +301,7 @@ class TestReserveRead:
 
     def test_reserve_read_with_multiple_read_locks(self, basic_l1_config, basic_layout):
         """Test reserve_read(read_locks=N) acquires N locks."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object
@@ -335,7 +335,7 @@ class TestReserveRead:
         self, basic_l1_config, basic_layout
     ):
         """Default read_locks=1 acquires exactly 1 lock."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         manager.reserve_write([key], [False], basic_layout)
@@ -353,13 +353,13 @@ class TestReserveRead:
 
 
 # =============================================================================
-# Tests for L1Manager.unsafe_read()
+# Tests for DramL1Manager.unsafe_read()
 # =============================================================================
 
 
 class TestUnsafeRead:
     """
-    Tests for L1Manager.unsafe_read() method.
+    Tests for DramL1Manager.unsafe_read() method.
 
     Per the docstring:
     - This method does not acquire read locks.
@@ -373,7 +373,7 @@ class TestUnsafeRead:
         self, basic_l1_config, basic_layout
     ):
         """Test that unsafe_read returns KEY_NOT_EXIST for non-existing keys."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         result = manager.unsafe_read([key])
@@ -389,7 +389,7 @@ class TestUnsafeRead:
         self, basic_l1_config, basic_layout
     ):
         """Test that unsafe_read returns KEY_NOT_READABLE if not read-locked."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object (not read-locked)
@@ -410,7 +410,7 @@ class TestUnsafeRead:
         self, basic_l1_config, basic_layout
     ):
         """Test that unsafe_read cannot see a staging object."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Reserve write without finishing: staging object only
@@ -426,7 +426,7 @@ class TestUnsafeRead:
         self, basic_l1_config, basic_layout
     ):
         """Test that unsafe_read returns SUCCESS for read-locked keys."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object and reserve read
@@ -450,7 +450,7 @@ class TestUnsafeRead:
         self, basic_l1_config, basic_layout
     ):
         """Test that unsafe_read returns the same MemoryObj as reserve_read."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object
@@ -476,7 +476,7 @@ class TestUnsafeRead:
         self, basic_l1_config, basic_layout
     ):
         """Test that multiple unsafe_reads don't add to read lock count."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create temporary object
@@ -501,7 +501,7 @@ class TestUnsafeRead:
 
     def test_unsafe_read_multiple_keys(self, basic_l1_config, basic_layout):
         """Test unsafe_read with multiple keys in a single call."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key1 = make_object_key(1)
         key2 = make_object_key(2)
         key3 = make_object_key(3)
@@ -533,7 +533,7 @@ class TestUnsafeRead:
         self, basic_l1_config, basic_layout
     ):
         """Test proper usage: unsafe_read between reserve_read and finish_read."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object
@@ -559,13 +559,13 @@ class TestUnsafeRead:
 
 
 # =============================================================================
-# Tests for L1Manager.finish_read()
+# Tests for DramL1Manager.finish_read()
 # =============================================================================
 
 
 class TestFinishRead:
     """
-    Tests for L1Manager.finish_read() method.
+    Tests for DramL1Manager.finish_read() method.
 
     Per the docstring:
     - KEY_NOT_EXIST: The key does not exist.
@@ -577,7 +577,7 @@ class TestFinishRead:
         self, basic_l1_config, basic_layout
     ):
         """Test that finish_read returns KEY_NOT_EXIST for non-existing keys."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         result = manager.finish_read([key])
@@ -589,7 +589,7 @@ class TestFinishRead:
 
     def test_finish_read_success(self, basic_l1_config, basic_layout):
         """Test that finish_read returns SUCCESS after proper read reservation."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object
@@ -608,7 +608,7 @@ class TestFinishRead:
         self, basic_l1_config, basic_layout
     ):
         """Test that finish_read returns KEY_IN_WRONG_STATE if not read-locked."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object (not read-locked)
@@ -626,7 +626,7 @@ class TestFinishRead:
         self, basic_l1_config, basic_layout
     ):
         """Test that finish_read cannot see a staging object."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Reserve write without finishing: staging object only
@@ -642,7 +642,7 @@ class TestFinishRead:
         self, basic_l1_config, basic_layout
     ):
         """Test that temporary objects are deleted when read count reaches zero."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create temporary object
@@ -666,7 +666,7 @@ class TestFinishRead:
 
     def test_finish_read_multiple_reads_count_down(self, basic_l1_config, basic_layout):
         """Test that multiple finish_reads count down properly."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create temporary object
@@ -693,7 +693,7 @@ class TestFinishRead:
         self, basic_l1_config, basic_layout
     ):
         """finish_read(read_locks=3) releases 3 locks at once."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object
@@ -715,7 +715,7 @@ class TestFinishRead:
 
     def test_finish_read_partial_read_lock_release(self, basic_l1_config, basic_layout):
         """Partial read-lock release leaves remaining locks."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         manager.reserve_write([key], [False], basic_layout)
@@ -742,7 +742,7 @@ class TestFinishRead:
         self, basic_l1_config, basic_layout
     ):
         """Temp objects deleted when the release covers all read locks."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create temporary object
@@ -764,7 +764,7 @@ class TestFinishRead:
         self, basic_l1_config, basic_layout
     ):
         """Temp object survives a partial share release."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         manager.reserve_write([key], [True], basic_layout)
@@ -785,13 +785,13 @@ class TestFinishRead:
 
 
 # =============================================================================
-# Tests for L1Manager.reserve_write()
+# Tests for DramL1Manager.reserve_write()
 # =============================================================================
 
 
 class TestReserveWrite:
     """
-    Tests for L1Manager.reserve_write() method.
+    Tests for DramL1Manager.reserve_write() method.
 
     Per the docstring:
     - KEY_NOT_WRITABLE: The key is resident, or the tag already stages it.
@@ -801,7 +801,7 @@ class TestReserveWrite:
 
     def test_reserve_write_new_key_returns_success(self, basic_l1_config, basic_layout):
         """Test that reserve_write returns SUCCESS for new keys."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         result = manager.reserve_write([key], [False], basic_layout)
@@ -818,7 +818,7 @@ class TestReserveWrite:
         self, basic_l1_config, basic_layout
     ):
         """Test that reserve_write refuses a key the same tag already stages."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # First reserve write
@@ -837,7 +837,7 @@ class TestReserveWrite:
         self, basic_l1_config, basic_layout
     ):
         """Test that reserve_write refuses a resident (here read-locked) key."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object
@@ -859,7 +859,7 @@ class TestReserveWrite:
         self, basic_l1_config, basic_layout
     ):
         """Test that reserve_write refuses a resident temporary object."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create temporary object
@@ -875,7 +875,7 @@ class TestReserveWrite:
 
     def test_reserve_write_multiple_keys(self, basic_l1_config, basic_layout):
         """Test reserve_write with multiple keys in a single call."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         keys = [make_object_key(i) for i in range(5)]
         is_temporary = [False] * 5
 
@@ -891,7 +891,7 @@ class TestReserveWrite:
 
     def test_reserve_write_out_of_memory(self, small_l1_config, large_layout):
         """Test that reserve_write returns OUT_OF_MEMORY when allocation fails."""
-        manager = L1Manager(small_l1_config)
+        manager = DramL1Manager(small_l1_config)
         keys = [make_object_key(i) for i in range(10)]
         is_temporary = [False] * 10
 
@@ -907,7 +907,7 @@ class TestReserveWrite:
 
     def test_reserve_write_resident_keys(self, basic_l1_config, basic_layout):
         """Test that reserve_write returns KEY_NOT_WRITABLE for resident keys."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         keys = [make_object_key(i) for i in range(5)]
         is_temporary = [False] * 5
 
@@ -932,13 +932,13 @@ class TestReserveWrite:
 
 
 # =============================================================================
-# Tests for L1Manager.finish_write()
+# Tests for DramL1Manager.finish_write()
 # =============================================================================
 
 
 class TestFinishWrite:
     """
-    Tests for L1Manager.finish_write() method.
+    Tests for DramL1Manager.finish_write() method.
 
     Per the docstring:
     - KEY_NOT_EXIST: The tag stages nothing for the key.
@@ -949,7 +949,7 @@ class TestFinishWrite:
         self, basic_l1_config, basic_layout
     ):
         """Test that finish_write returns KEY_NOT_EXIST for non-existing keys."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         result = manager.finish_write([key])
@@ -961,7 +961,7 @@ class TestFinishWrite:
 
     def test_finish_write_success(self, basic_l1_config, basic_layout):
         """Test that finish_write returns SUCCESS after proper write reservation."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Reserve write
@@ -984,7 +984,7 @@ class TestFinishWrite:
         self, basic_l1_config, basic_layout
     ):
         """After admission the tag stages nothing for the key any more."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object (admitted)
@@ -1000,13 +1000,13 @@ class TestFinishWrite:
 
 
 # =============================================================================
-# Tests for L1Manager.finish_write_and_reserve_read()
+# Tests for DramL1Manager.finish_write_and_reserve_read()
 # =============================================================================
 
 
 class TestFinishWriteAndReserveRead:
     """
-    Tests for L1Manager.finish_write_and_reserve_read() method.
+    Tests for DramL1Manager.finish_write_and_reserve_read() method.
 
     This method atomically finishes write and acquires read lock,
     preventing a race window where eviction could interfere.
@@ -1019,7 +1019,7 @@ class TestFinishWriteAndReserveRead:
 
     def test_normal_transition(self, basic_l1_config, basic_layout):
         """Test normal write-locked -> read-locked transition."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Reserve write (key is now write-locked)
@@ -1046,7 +1046,7 @@ class TestFinishWriteAndReserveRead:
 
     def test_key_not_exist(self, basic_l1_config, basic_layout):
         """Test that non-existing key returns KEY_NOT_EXIST."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         result = manager.finish_write_and_reserve_read([key])
@@ -1060,7 +1060,7 @@ class TestFinishWriteAndReserveRead:
 
     def test_already_admitted(self, basic_l1_config, basic_layout):
         """Test that an already admitted key returns KEY_NOT_EXIST."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object (admitted, nothing staged any more)
@@ -1078,7 +1078,7 @@ class TestFinishWriteAndReserveRead:
 
     def test_multiple_keys_mixed_results(self, basic_l1_config, basic_layout):
         """Test with multiple keys where some succeed and some fail."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key1 = make_object_key(1)
         key2 = make_object_key(2)  # will not exist
         key3 = make_object_key(3)
@@ -1110,7 +1110,7 @@ class TestFinishWriteAndReserveRead:
 
     def test_can_unsafe_read_after_transition(self, basic_l1_config, basic_layout):
         """Test that unsafe_read works on the transitioned key."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Write and transition
@@ -1128,16 +1128,16 @@ class TestFinishWriteAndReserveRead:
 
 
 # =============================================================================
-# Tests for L1Manager.finish_write_and_delete()
+# Tests for DramL1Manager.finish_write_and_delete()
 # =============================================================================
 
 
 class TestFinishWriteAndDelete:
-    """Tests for L1Manager.finish_write_and_delete()."""
+    """Tests for DramL1Manager.finish_write_and_delete()."""
 
     def test_discards_staged_keys_only(self, basic_l1_config, basic_layout):
         """Staged keys are discarded; other states error out intact."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         locked_key = make_object_key(1)
         ready_key = make_object_key(2)
         missing_key = make_object_key(3)
@@ -1157,13 +1157,13 @@ class TestFinishWriteAndDelete:
 
 
 # =============================================================================
-# Tests for L1Manager.delete()
+# Tests for DramL1Manager.delete()
 # =============================================================================
 
 
 class TestDelete:
     """
-    Tests for L1Manager.delete() method.
+    Tests for DramL1Manager.delete() method.
 
     Per the docstring:
     - KEY_NOT_EXIST: The key does not exist.
@@ -1174,7 +1174,7 @@ class TestDelete:
         self, basic_l1_config, basic_layout
     ):
         """Test that delete returns KEY_NOT_EXIST for non-existing keys."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         result = manager.delete([key])
@@ -1186,7 +1186,7 @@ class TestDelete:
 
     def test_delete_success(self, basic_l1_config, basic_layout):
         """Test that delete returns SUCCESS for unlocked keys."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object
@@ -1208,7 +1208,7 @@ class TestDelete:
         self, basic_l1_config, basic_layout
     ):
         """Test that delete returns KEY_IS_LOCKED for write-locked keys."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create write-locked object
@@ -1225,7 +1225,7 @@ class TestDelete:
         self, basic_l1_config, basic_layout
     ):
         """Test that delete returns KEY_IS_LOCKED for read-locked keys."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object
@@ -1244,7 +1244,7 @@ class TestDelete:
 
     def test_delete_multiple_keys(self, basic_l1_config, basic_layout):
         """Test delete with multiple keys in a single call."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key1 = make_object_key(1)
         key2 = make_object_key(2)
         key3 = make_object_key(3)
@@ -1268,7 +1268,7 @@ class TestDelete:
 
     def test_force_delete_removes_write_locked_key(self, basic_l1_config, basic_layout):
         """force=True deletes a write-locked key that non-force refuses."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
         manager.reserve_write([key], [False], basic_layout)  # write-locked
 
@@ -1280,7 +1280,7 @@ class TestDelete:
 
     def test_force_delete_removes_read_locked_key(self, basic_l1_config, basic_layout):
         """force=True deletes a read-locked key that non-force refuses."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
         manager.reserve_write([key], [False], basic_layout)
         manager.finish_write([key])
@@ -1296,7 +1296,7 @@ class TestDelete:
         self, basic_l1_config, basic_layout
     ):
         """force does not invent keys: a missing key still reports KEY_NOT_EXIST."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(999)
 
         assert manager.delete([key], force=True) == {key: L1Error.KEY_NOT_EXIST}
@@ -1305,13 +1305,13 @@ class TestDelete:
 
 
 # =============================================================================
-# Tests for L1Manager.get_object_state()
+# Tests for DramL1Manager.get_object_state()
 # =============================================================================
 
 
 class TestGetObjectState:
     """
-    Tests for L1Manager.get_object_state() method.
+    Tests for DramL1Manager.get_object_state() method.
 
     Per the docstring:
     - Returns the L1ObjectState if the object exists, None otherwise.
@@ -1321,7 +1321,7 @@ class TestGetObjectState:
         self, basic_l1_config, basic_layout
     ):
         """Test that get_object_state returns None for non-existing keys."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         state = manager.get_object_state(key)
@@ -1334,7 +1334,7 @@ class TestGetObjectState:
         self, basic_l1_config, basic_layout
     ):
         """Test that get_object_state returns L1ObjectState for existing keys."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create object
@@ -1351,7 +1351,7 @@ class TestGetObjectState:
 
     def test_get_object_state_staged_returns_none(self, basic_l1_config, basic_layout):
         """A staging object is not reported as the key's object."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         manager.reserve_write([key], [False], basic_layout)
@@ -1363,7 +1363,7 @@ class TestGetObjectState:
 
     def test_get_object_state_read_locked(self, basic_l1_config, basic_layout):
         """Test get_object_state for read-locked objects."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object, then read lock it
@@ -1380,28 +1380,28 @@ class TestGetObjectState:
 
 
 # =============================================================================
-# Tests for L1Manager.close()
+# Tests for DramL1Manager.close()
 # =============================================================================
 
 
 class TestClose:
     """
-    Tests for L1Manager.close() method.
+    Tests for DramL1Manager.close() method.
 
     Per the docstring:
-    - Close the L1Manager and free all resources.
+    - Close the DramL1Manager and free all resources.
     """
 
     def test_close_empty_manager(self, basic_l1_config):
         """Test that close works on an empty manager."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
 
         # Should not raise any exceptions
         manager.close()
 
     def test_close_with_objects(self, basic_l1_config, basic_layout):
         """Test that close frees all objects in the manager."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
 
         # Create multiple objects
         keys = [make_object_key(i) for i in range(5)]
@@ -1412,7 +1412,7 @@ class TestClose:
 
     def test_close_clears_objects(self, basic_l1_config, basic_layout):
         """Test that close clears all objects from the manager."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create object
@@ -1438,12 +1438,12 @@ class TestClose:
 class TestStateMachineTransitions:
     """
     Integration tests verifying the state machine transitions as described in the
-    L1Manager class docstring.
+    DramL1Manager class docstring.
     """
 
     def test_full_write_read_cycle(self, basic_l1_config, basic_layout):
         """Test full cycle: None -> write_locked -> ready -> read_locked -> ready."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # None state (key doesn't exist)
@@ -1481,7 +1481,7 @@ class TestStateMachineTransitions:
 
     def test_full_write_read_with_unsafe_read(self, basic_l1_config, basic_layout):
         """Test cycle with unsafe_read between reserve_read and finish_read."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object
@@ -1508,7 +1508,7 @@ class TestStateMachineTransitions:
 
     def test_delete_from_ready_state(self, basic_l1_config, basic_layout):
         """Test deletion from ready state."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object
@@ -1524,7 +1524,7 @@ class TestStateMachineTransitions:
 
     def test_temporary_object_lifecycle(self, basic_l1_config, basic_layout):
         """Test temporary object lifecycle: deleted after last read."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create temporary object
@@ -1542,7 +1542,7 @@ class TestStateMachineTransitions:
 
     def test_temporary_object_with_unsafe_read(self, basic_l1_config, basic_layout):
         """Test temporary object with unsafe_read doesn't affect deletion."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create temporary object
@@ -1572,7 +1572,7 @@ class TestStateMachineTransitions:
         reserve_read(read_locks=N) acquires N locks,
         finish_read(read_locks=N) releases them all.
         """
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
         read_locks = 4
 
@@ -1598,7 +1598,7 @@ class TestStateMachineTransitions:
 
     def test_temp_object_multi_reader_deletion(self, basic_l1_config, basic_layout):
         """Temporary object deleted after all read locks are released."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
         read_locks = 3
 
@@ -1620,13 +1620,13 @@ class TestStateMachineTransitions:
 
 
 class TestThreadSafety:
-    """Tests verifying thread-safety of L1Manager operations."""
+    """Tests verifying thread-safety of DramL1Manager operations."""
 
     def test_concurrent_reserve_write_different_keys(
         self, basic_l1_config, basic_layout
     ):
         """Test concurrent reserve_write on different keys."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         num_threads = 8
         keys_per_thread = 5
         results = []
@@ -1659,7 +1659,7 @@ class TestThreadSafety:
 
     def test_concurrent_read_same_key(self, basic_l1_config, basic_layout):
         """Test concurrent reads on the same key."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object
@@ -1690,7 +1690,7 @@ class TestThreadSafety:
 
     def test_concurrent_unsafe_read_same_key(self, basic_l1_config, basic_layout):
         """Test concurrent unsafe_reads on the same read-locked key."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(12345)
 
         # Create ready object and reserve read
@@ -1724,7 +1724,7 @@ class TestThreadSafety:
         self, basic_l1_config, basic_layout
     ):
         """Test concurrent mixed operations don't cause crashes."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         num_threads = 8
         operations_per_thread = 10
         errors = []
@@ -1769,16 +1769,16 @@ class TestThreadSafety:
 
 
 # =============================================================================
-# Tests for L1Manager.is_key_evictable()
+# Tests for DramL1Manager.is_key_evictable()
 # =============================================================================
 
 
 class TestIsKeyEvictable:
-    """Tests for L1Manager.is_key_evictable() method."""
+    """Tests for DramL1Manager.is_key_evictable() method."""
 
     def test_evictable_key_in_ready_state(self, basic_l1_config, basic_layout):
         """A key that has been written and finished should be evictable."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
 
         # Write and finish -> key is in ready state
@@ -1791,7 +1791,7 @@ class TestIsKeyEvictable:
 
     def test_write_locked_key_is_not_evictable(self, basic_l1_config, basic_layout):
         """A write-locked key should not be evictable."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
 
         # Reserve write but don't finish -> key is write-locked
@@ -1805,7 +1805,7 @@ class TestIsKeyEvictable:
 
     def test_read_locked_key_is_not_evictable(self, basic_l1_config, basic_layout):
         """A read-locked key should not be evictable."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
 
         # Write, finish, then reserve read -> key is read-locked
@@ -1821,7 +1821,7 @@ class TestIsKeyEvictable:
 
     def test_nonexistent_key_is_not_evictable(self, basic_l1_config):
         """A key that does not exist should not be evictable."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(999)
 
         assert manager.is_key_evictable(key) is False
@@ -1832,7 +1832,7 @@ class TestIsKeyEvictable:
         self, basic_l1_config, basic_layout
     ):
         """A key should become evictable after all read locks are released."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
 
         # Write and finish
@@ -1853,7 +1853,7 @@ class TestIsKeyEvictable:
         self, basic_l1_config, basic_layout
     ):
         """A key should become evictable after write lock is released."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
 
         # Reserve write -> not evictable
@@ -1868,7 +1868,7 @@ class TestIsKeyEvictable:
 
     def test_multiple_keys_mixed_evictability(self, basic_l1_config, basic_layout):
         """Test evictability with multiple keys in different states."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key_ready = make_object_key(1)
         key_write_locked = make_object_key(2)
         key_read_locked = make_object_key(3)
@@ -1896,7 +1896,7 @@ class TestIsKeyEvictable:
 
     def test_deleted_key_is_not_evictable(self, basic_l1_config, basic_layout):
         """A key that has been deleted should not be evictable."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
 
         # Write, finish, then delete
@@ -1913,7 +1913,7 @@ class TestIsKeyEvictable:
     ):
         """A key with multiple read locks should not be evictable
         until all locks are released."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
 
         # Write and finish
@@ -1940,7 +1940,7 @@ class TestIsKeyEvictable:
 # =============================================================================
 
 
-def write_ready(manager: L1Manager, keys, layout, is_temporary=False):
+def write_ready(manager: DramL1Manager, keys, layout, is_temporary=False):
     """Stage and admit ``keys`` so they are resident and unlocked."""
     result = manager.reserve_write(keys, [is_temporary] * len(keys), layout)
     for key in keys:
@@ -1955,7 +1955,7 @@ class TestStagingReservation:
 
     def test_same_tag_twice_returns_not_writable(self, basic_l1_config, basic_layout):
         """One tag holds at most one staging object per key."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
 
         first = manager.reserve_write([key], [False], basic_layout, tag="w")
@@ -1968,7 +1968,7 @@ class TestStagingReservation:
 
     def test_different_tags_stage_same_key(self, basic_l1_config, basic_layout):
         """Writers with different tags get independent buffers for one key."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
 
         result_a = manager.reserve_write([key], [False], basic_layout, tag="a")
@@ -1990,7 +1990,7 @@ class TestStagingReservation:
 
     def test_resident_key_refused_for_any_tag(self, basic_l1_config, basic_layout):
         """Residency is tag-independent: every tag is refused a resident key."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
         write_ready(manager, [key], basic_layout)
 
@@ -2002,7 +2002,7 @@ class TestStagingReservation:
 
     def test_refused_keys_do_not_consume_memory(self, basic_l1_config, basic_layout):
         """Only the newly staged keys are allocated."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         resident = make_object_key(1)
         staged = make_object_key(2)
         fresh = make_object_key(3)
@@ -2024,7 +2024,7 @@ class TestStagingReservation:
 
     def test_rejects_mismatched_lengths(self, basic_l1_config, basic_layout):
         """keys and is_temporary must have the same length."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         keys = [make_object_key(i) for i in range(2)]
 
         with pytest.raises(ValueError):
@@ -2040,7 +2040,7 @@ class TestStagingAdmission:
         self, basic_l1_config, basic_layout
     ):
         """A tag can only admit its own staging objects."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
         manager.reserve_write([key], [False], basic_layout, tag="a")
 
@@ -2055,7 +2055,7 @@ class TestStagingAdmission:
         self, basic_l1_config, basic_layout
     ):
         """The resident object is kept; the late staging copy is discarded."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
         first = manager.reserve_write([key], [False], basic_layout, tag="a")
         second = manager.reserve_write([key], [True], basic_layout, tag="b")
@@ -2076,7 +2076,7 @@ class TestStagingAdmission:
 
     def test_discard_keeps_resident_read_locks(self, basic_l1_config, basic_layout):
         """Discarding a late copy never disturbs readers of the resident object."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
         late = manager.reserve_write([key], [False], basic_layout, tag="late")
         assert late[key][0] == L1Error.SUCCESS
@@ -2094,7 +2094,7 @@ class TestStagingAdmission:
     def test_live_staging_pins_resident_key(self, basic_l1_config, basic_layout):
         """A key with a live staging object cannot be deleted, even when its
         resident object is unlocked; it can once the reservation is gone."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
         manager.reserve_write([key], [False], basic_layout, tag="w")
         write_ready(manager, [key], basic_layout)
@@ -2114,7 +2114,7 @@ class TestStagingAdmission:
     ):
         """Two tagged writers: the late one gets read locks on the resident
         object and its own buffer is freed (the concurrent-prefetch case)."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
         first = manager.reserve_write([key], [True], basic_layout, tag="p1")
         second = manager.reserve_write([key], [True], basic_layout, tag="p2")
@@ -2145,7 +2145,7 @@ class TestStagingAdmission:
         self, basic_l1_config, basic_layout
     ):
         """Discarding under one tag leaves other tags' staging objects alone."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
         manager.reserve_write([key], [False], basic_layout, tag="a")
         manager.reserve_write([key], [False], basic_layout, tag="b")
@@ -2162,7 +2162,7 @@ class TestStagingAdmission:
 
     def test_partial_admission(self, basic_l1_config, basic_layout):
         """Admitting a subset leaves the rest staged."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         keys = [make_object_key(i) for i in range(3)]
         manager.reserve_write(keys, [False] * 3, basic_layout)
 
@@ -2184,7 +2184,7 @@ class TestStagingEviction:
 
     def test_live_staging_is_locked(self, basic_l1_config, basic_layout):
         """delete refuses a key whose only object is a live staging object."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
         manager.reserve_write([key], [False], basic_layout)
 
@@ -2198,7 +2198,7 @@ class TestStagingEviction:
         self, short_write_ttl_l1_config, basic_layout
     ):
         """An expired reservation makes the key evictable; delete reclaims it."""
-        manager = L1Manager(short_write_ttl_l1_config)
+        manager = DramL1Manager(short_write_ttl_l1_config)
         key = make_object_key(1)
         manager.reserve_write([key], [False], basic_layout)
         time.sleep(1.2)
@@ -2217,7 +2217,7 @@ class TestStagingEviction:
         self, short_write_ttl_l1_config, basic_layout
     ):
         """Mixed tags: expired ones go, the live one stays and locks the key."""
-        manager = L1Manager(short_write_ttl_l1_config)
+        manager = DramL1Manager(short_write_ttl_l1_config)
         key = make_object_key(1)
         manager.reserve_write([key], [False], basic_layout, tag="stale")
         time.sleep(1.2)
@@ -2234,7 +2234,7 @@ class TestStagingEviction:
 
     def test_force_delete_discards_live_staging(self, basic_l1_config, basic_layout):
         """force=True drops live staging objects as well as the resident one."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         key = make_object_key(1)
         write_ready(manager, [key], basic_layout)
         manager.reserve_read([key])
@@ -2260,7 +2260,7 @@ class TestStagingEviction:
         self, short_write_ttl_l1_config, basic_layout
     ):
         """Non-force clear frees expired staging objects only."""
-        manager = L1Manager(short_write_ttl_l1_config)
+        manager = DramL1Manager(short_write_ttl_l1_config)
         stale, live = make_object_key(1), make_object_key(2)
         manager.reserve_write([stale], [False], basic_layout)
         time.sleep(1.2)
@@ -2277,7 +2277,7 @@ class TestStagingEviction:
 
     def test_force_clear_frees_staging(self, basic_l1_config, basic_layout):
         """Force clear drops every staging object."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         keys = [make_object_key(i) for i in range(3)]
         manager.reserve_write(keys, [False] * 3, basic_layout, tag="w")
 
@@ -2297,7 +2297,7 @@ class TestStagingEviction:
         """End to end through the listener: the LRU policy learns the key at
         reservation time, skips it while the write lock is live, and evicts
         it once the lock expired -- passing the original key to delete."""
-        manager = L1Manager(short_write_ttl_l1_config)
+        manager = DramL1Manager(short_write_ttl_l1_config)
         policy = LRUEvictionPolicy()
         manager.register_listener(L1EvictionPolicy(policy))
         key = make_object_key(1)
@@ -2330,7 +2330,7 @@ class TestStagingEviction:
         self, basic_l1_config, basic_layout
     ):
         """A key dropped via finish_write_and_delete leaves the policy too."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         policy = LRUEvictionPolicy()
         manager.register_listener(L1EvictionPolicy(policy))
         key = make_object_key(1)
@@ -2349,7 +2349,7 @@ class TestStagingAccounting:
     def test_staging_bytes_follow_lifecycle(self, basic_l1_config, basic_layout):
         """Staging bytes grow on reserve and drop on admission or discard,
         while allocator usage only drops on discard."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         keys = [make_object_key(i) for i in range(4)]
         assert manager.get_staging_memory_usage() == 0
 
@@ -2379,7 +2379,7 @@ class TestStagingAccounting:
         """A buffer narrowed with set_used_size() while staged (what the serde
         processor does after serialize()) releases the bytes it was charged,
         on every release path."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         keys = [make_object_key(i) for i in range(4)]
 
         reserved = manager.reserve_write(keys, [True] * 4, basic_layout, tag="w")
@@ -2409,7 +2409,7 @@ class TestStagingAccounting:
     ):
         """Handing an expired, narrowed buffer to a new writer neither
         re-charges it nor loses the charge recorded at allocation."""
-        manager = L1Manager(short_write_ttl_l1_config)
+        manager = DramL1Manager(short_write_ttl_l1_config)
         key = make_object_key(1)
 
         reserved = manager.reserve_write([key], [True], basic_layout, tag="w")
@@ -2432,7 +2432,7 @@ class TestStagingAccounting:
         self, short_write_ttl_l1_config, basic_layout
     ):
         """Reclaiming an expired reservation subtracts what it was charged."""
-        manager = L1Manager(short_write_ttl_l1_config)
+        manager = DramL1Manager(short_write_ttl_l1_config)
         key = make_object_key(1)
 
         reserved = manager.reserve_write([key], [False], basic_layout, tag="w")
@@ -2449,7 +2449,7 @@ class TestStagingAccounting:
 
     def test_report_status_counts(self, basic_l1_config, basic_layout):
         """report_status separates resident, read-locked and staging objects."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         ready, locked, temp = (make_object_key(i) for i in range(3))
         staged = [make_object_key(10 + i) for i in range(2)]
         write_ready(manager, [ready, locked], basic_layout)
@@ -2478,7 +2478,7 @@ class TestStagingAccounting:
         """Many tagged writers race on the same keys: a reservation either
         succeeds or finds the key already resident, every admission
         succeeds, and exactly one copy per key survives."""
-        manager = L1Manager(basic_l1_config)
+        manager = DramL1Manager(basic_l1_config)
         keys = [make_object_key(i) for i in range(4)]
         num_threads = 8
         errors = []
