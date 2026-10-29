@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, call
 import pytest
 
 # First Party
+from lmcache.v1.distributed.internal_api import L1ReadReservation
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
@@ -168,13 +169,23 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
 
     read_calls: list[list[str]] = []
 
-    def fake_read(keys, l1_owners=None):
-        read_calls.append(list(keys))
-        return list(keys), [
-            MagicMock(get_size=MagicMock(return_value=10)) for _ in keys
+    def fake_pin(completion, tag):
+        keys = [
+            key for _owner, reservations in completion for key, _gen in reservations
         ]
+        read_calls.append(list(keys))
+        return {key: MagicMock(get_size=MagicMock(return_value=10)) for key in keys}
 
-    ctx.storage_manager.unsafe_read = MagicMock(side_effect=fake_read)
+    ctx.session_manager.get.return_value.claim_worker_read.side_effect = (
+        lambda key, instance_id, keys: tuple(
+            L1ReadReservation(obj_key, 7, 10, 1) for obj_key in keys
+        )
+    )
+    prepare_completion = ctx.storage_manager.prepare_read_generation_completion
+    prepare_completion.side_effect = lambda claims: (
+        (10, tuple((claim.key, claim.generation) for claim in claims)),
+    )
+    ctx.storage_manager.pin_read_buffers.side_effect = fake_pin
     module._ctx = ctx
 
     transfer_calls: list[tuple[int, list]] = []
@@ -197,6 +208,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     monkeypatch.setattr(mod, "submit_callback_to_stream", lambda *a, **k: None)
     monkeypatch.setattr(mod, "torch_dev", MagicMock())
     monkeypatch.setattr(mod, "Event", MagicMock())
+    monkeypatch.setattr(mod, "next_transfer_key", lambda _request_id: "transfer")
 
     return module, read_calls, transfer_calls
 
@@ -271,8 +283,7 @@ def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
     assert ok is True
 
     # Full-attention group reads all 5 keys; mamba group reads only the last.
-    assert read_calls[0] == [f"g0c{c}" for c in range(5)]
-    assert read_calls[1] == ["g1c4"]
+    assert read_calls == [[f"g0c{c}" for c in range(5)] + ["g1c4"]]
 
     # memory_objs handed to the transfer stay full-length; the mamba group's
     # skipped prefix is None-padded (skip = num_chunks - window = 4).
@@ -327,7 +338,7 @@ def test_retrieve_never_reads_aux_groups(monkeypatch):
 
     # Recurrent group reads its one-block window; attention reads everything;
     # the aux group is read by NOBODY and transferred by nobody.
-    assert read_calls == [["g0c2"], [f"g1c{c}" for c in range(3)]]
+    assert read_calls == [["g0c2"] + [f"g1c{c}" for c in range(3)]]
     assert [g for g, _ in transfer_calls] == [0, 1]
 
 
@@ -335,10 +346,8 @@ def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
     module, reads, _ = _make_module(monkeypatch, 2, [-1, 1])
     cache_context = module.get_and_touch_context_entry(1).cache_context
     cache_context.hold_imported_event.return_value = 7
-    owners = {"g0c0": 10, "g0c1": 10, "g1c1": 20}
-    completion = [(10, ["g0c0", "g0c1"]), (20, ["g1c1"])]
-    module.context.get_read_owners.return_value = owners
-    module.context.storage_manager.prepare_read_completion.return_value = completion
+    claims = tuple(L1ReadReservation(key, 7, 10, 1) for key in ["g0c0", "g0c1", "g1c1"])
+    completion = ((10, tuple((claim.key, 7) for claim in claims)),)
     callback = MagicMock()
     monkeypatch.setattr(mod, "submit_callback_to_stream", callback)
     cache_context.transfer_object_group.side_effect = RuntimeError(
@@ -351,13 +360,15 @@ def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
         b"producer",
     )
     assert not ok
-    assert reads == [["g0c0", "g0c1"]]
-    module.context.storage_manager.prepare_read_completion.assert_called_once_with(
-        ["g0c0", "g0c1", "g1c1"], owners
+    assert reads == [["g0c0", "g0c1", "g1c1"]]
+    module.context.storage_manager.prepare_read_generation_completion.assert_called_once_with(
+        claims
     )
     assert callback.call_args_list == [
         call(cache_context.cupy_stream, "release_imported_event", (1, 7)),
-        call(cache_context.cupy_stream, "finish_read_by_owner", completion),
+        call(
+            cache_context.cupy_stream, "finish_read_transfer", ("transfer", completion)
+        ),
     ]
     module.context.storage_manager.finish_read_prefetched.assert_not_called()
 

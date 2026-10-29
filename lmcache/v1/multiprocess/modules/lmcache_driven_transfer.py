@@ -18,7 +18,12 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
-from lmcache.v1.distributed.storage_manager import L1WriteCompletion
+from lmcache.v1.distributed.internal_api import L1ReadReservation
+from lmcache.v1.distributed.storage_manager import (
+    L1ReadGenerationCompletion,
+    L1ReadTransferCompletion,
+    L1WriteCompletion,
+)
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
@@ -220,6 +225,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             payload_type=L1WriteCompletion,
         )
         self._device_host_func_dispatcher.register(
+            "finish_read_transfer",
+            self._ctx.storage_manager.finish_read_transfer,
+            payload_type=L1ReadTransferCompletion,
+        )
+        self._device_host_func_dispatcher.register(
             "release_imported_event",
             self._release_imported_event,
             payload_type=tuple[int, int],
@@ -278,8 +288,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         The lookup session is the ownership record.  If it is absent or does
         not match the RETRIEVE range, no release is attempted: L1 locks are
         anonymous refcounts, so guessing could consume a concurrent reader's
-        lock.  ``claim_failed_retrieve_release`` also makes duplicate failure
-        responses idempotent.
+        lock. The same per-worker claim is used by successful RETRIEVE and
+        FREE, so a duplicate failure cannot consume another worker's share.
         """
         session = self._ctx.session_manager.get(key.request_id)
         if session is None:
@@ -302,20 +312,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             locked_gids,
             group_windows=group_windows,
         )
-        if not session.claim_failed_retrieve_release(
-            instance_id, key, lookup_generation
-        ):
-            return
-        if obj_keys:
-            # One failed RETRIEVE owns one read lock per key.  In
-            # particular, do not release the scheduler's whole MLA
-            # reservation here: the remaining TP workers and concurrent
-            # requests still own their independent read locks.
-            self._ctx.storage_manager.finish_read_prefetched(
-                obj_keys,
-                read_locks=1,
-                l1_owners=self._ctx.get_read_owners(key.request_id),
-            )
+        claims = session.claim_worker_read(
+            key, instance_id, obj_keys, lookup_generation=lookup_generation
+        )
+        if claims:
+            self._ctx.storage_manager.finish_read_reservations(claims)
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
@@ -1055,7 +1056,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             )
 
             prefetched_keys: list[ObjectKey] = []
-            read_owners = self._ctx.get_read_owners(key.request_id)
             retained_keys = [
                 obj_key
                 for group, keys in enumerate(obj_keys_per_obj_group)
@@ -1064,22 +1064,37 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ]
             # Capture every retained lock before enqueuing GPU work, including
             # groups that a later transfer failure may leave unvisited.
-            read_completion = self._ctx.storage_manager.prepare_read_completion(
-                retained_keys, read_owners
-            )
+            claims: tuple[L1ReadReservation, ...] = ()
+            read_completion: L1ReadGenerationCompletion = ()
             total_bytes = 0
             retrieve_succeeded = True
             try:
+                session = self._ctx.session_manager.get(key.request_id)
+                claimed = (
+                    session.claim_worker_read(key, instance_id, retained_keys)
+                    if session is not None
+                    else None
+                )
+                if claimed is None:
+                    raise ValueError(
+                        "RETRIEVE read shares are already claimed or freed"
+                    )
+                claims = claimed
+                read_completion = (
+                    self._ctx.storage_manager.prepare_read_generation_completion(claims)
+                )
+                pinned = self._ctx.storage_manager.pin_read_buffers(
+                    read_completion, transfer_key
+                )
+                if any(obj_key not in pinned for obj_key in retained_keys):
+                    raise ValueError("RETRIEVE original read lease is unavailable")
                 for obj_group_id in range(num_object_groups):
                     if obj_group_id in skipped_groups:
                         continue
                     skip = group_skips[obj_group_id]
                     in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
-                    found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
-                        in_window_keys, l1_owners=read_owners
-                    )
-                    if not window_objs or found_keys != in_window_keys:
-                        logger.error("Some keys not found during retrieve!")
+                    window_objs = [pinned[obj_key] for obj_key in in_window_keys]
+                    if not window_objs:
                         retrieve_succeeded = False
                         break
 
@@ -1099,15 +1114,27 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     prefetched_keys.extend(in_window_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
+                if claims and not read_completion:
+                    self._ctx.storage_manager.finish_read_reservations(claims)
                 retrieve_succeeded = False
             finally:
-                event_backend.record_event(event, cache_context.stream)
-                if retained_keys:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_read_by_owner",
-                        read_completion,
-                    )
+                try:
+                    event_backend.record_event(event, cache_context.stream)
+                    if read_completion:
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream,
+                            "finish_read_transfer",
+                            (transfer_key, read_completion),
+                        )
+                except Exception:
+                    logger.exception("Cannot publish RETRIEVE completion")
+                    # A failed synchronization must leave the pins in place.
+                    cache_context.stream.synchronize()
+                    if read_completion:
+                        self._ctx.storage_manager.finish_read_transfer(
+                            (transfer_key, read_completion)
+                        )
+                    raise
                 num_tokens = (
                     num_chunks * self._ctx.chunk_size
                     if len(prefetched_keys) == expected_retained

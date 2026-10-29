@@ -36,6 +36,7 @@ from lmcache.v1.distributed.internal_api import (
     L1ManagerInterface,
     L1MemoryDesc,
     L1OperationResult,
+    L1ReadReservation,
     L2AdapterListener,
 )
 from lmcache.v1.distributed.l1_manager import L1Manager
@@ -97,6 +98,8 @@ _L1_WRITE_TAG = "storage_manager"
 
 # Internal stream-callback payload. No MemoryObj or device pointer crosses msgpack.
 L1WriteCompletion = list[tuple[int, list[ObjectKey]]]
+L1ReadGenerationCompletion = tuple[tuple[int, tuple[tuple[ObjectKey, int], ...]], ...]
+L1ReadTransferCompletion = tuple[str, L1ReadGenerationCompletion]
 
 
 class StorageManager:
@@ -568,12 +571,13 @@ class StorageManager:
                     {"keys": keys},
                 )
 
-    @enable_tracing(redact=("l1_owners",))
     def finish_read_prefetched(
         self,
         keys: list[ObjectKey],
         read_locks: int = 1,
         l1_owners: dict[ObjectKey, int] | None = None,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> None:
         """Finish reading prefetched objects.
 
@@ -581,19 +585,15 @@ class StorageManager:
             keys: Object keys that have been read.
             read_locks: Read locks to release per key (the whole
                 reservation when releasing a lookup's locks).
+            l1_owners: Runtime L1 manager IDs retained by prefetch; required
+                when multiple L1 managers are configured.
+            read_generations: Optional generations captured at acquisition;
+                supplied missing or stale generations cannot release a lock.
         """
-        finish_result = self._finish_read_objects(keys, read_locks, l1_owners)
-        successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
-        failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.SM_READ_PREFETCHED_FINISHED,
-                metadata={
-                    "succeeded_keys": successful_keys,
-                    "failed_keys": failed_keys,
-                },
-            )
+        finish_result = self._finish_read_objects(
+            keys, read_locks, l1_owners, read_generations=read_generations
         )
+        self._report_read_finished(finish_result, read_locks)
 
     @enable_tracing()
     def submit_prefetch_task(
@@ -1416,6 +1416,133 @@ class StorageManager:
         for owner, keys in completion:
             self.finish_read_prefetched(keys, l1_owners=dict.fromkeys(keys, owner))
 
+    def prepare_read_generation_completion(
+        self,
+        reservations: tuple[L1ReadReservation, ...],
+    ) -> L1ReadGenerationCompletion:
+        """Capture known lookup reservations for stream-ordered release.
+
+        Args:
+            reservations: Original shares exclusively claimed by this transfer.
+
+        Returns:
+            Immutable serializable owner/key/generation groups.
+
+        Raises:
+            ValueError: A retained key has no registered L1 owner.
+        """
+        groups: dict[int, list[tuple[ObjectKey, int]]] = defaultdict(list)
+        for reservation in reservations:
+            if reservation.count != 1:
+                raise ValueError("A transfer must own exactly one read share per key")
+            owners = (
+                {reservation.key: reservation.owner}
+                if reservation.owner is not None
+                else None
+            )
+            for owner in self._read_groups([reservation.key], owners):
+                groups[owner].append((reservation.key, reservation.generation))
+        return tuple((owner, tuple(keys)) for owner, keys in groups.items())
+
+    def finish_read_reservations(
+        self, reservations: tuple[L1ReadReservation, ...]
+    ) -> None:
+        """Settle exclusively claimed, unpinned lookup shares exactly once.
+
+        Args:
+            reservations: Shares removed from Session cancellation authority.
+                The caller must not reuse a receipt or pass a pinned share here.
+        """
+        groups: dict[tuple[int | None, int], list[L1ReadReservation]] = defaultdict(
+            list
+        )
+        for reservation in reservations:
+            groups[(reservation.owner, reservation.count)].append(reservation)
+        for (owner, count), group in groups.items():
+            keys = [item.key for item in group]
+            self.finish_read_prefetched(
+                keys,
+                read_locks=count,
+                l1_owners=dict.fromkeys(keys, owner) if owner is not None else None,
+                read_generations={item.key: item.generation for item in group},
+            )
+
+    def pin_read_buffers(
+        self, completion: L1ReadGenerationCompletion, tag: str
+    ) -> dict[ObjectKey, MemoryObj]:
+        """Retain known original lookup generations before asynchronous reads.
+
+        Args:
+            completion: Original owner/key/generation groups captured by lookup.
+            tag: Process-unique transfer identity.
+
+        Returns:
+            Only objects whose original leases were live at pin acquisition.
+
+        Raises:
+            ValueError: An owner is unregistered. The caller must always submit
+                finish_read_transfer for these groups after any queued device work.
+        """
+        if any(owner not in self._l1_managers_by_id for owner, _ in completion):
+            raise ValueError("Read transfer requires a registered L1 owner")
+        objects: dict[ObjectKey, MemoryObj] = {}
+        for owner, reservations in completion:
+            result = self._l1_managers_by_id[owner].pin_read_buffers(
+                [key for key, _ in reservations], dict(reservations), tag
+            )
+            for key, (error, obj) in result.items():
+                if error == L1Error.SUCCESS and obj is not None:
+                    objects[key] = obj
+                else:
+                    self.finish_read_prefetched(
+                        [key],
+                        l1_owners={key: owner},
+                        read_generations=dict(reservations),
+                    )
+        return objects
+
+    def finish_read_transfer(self, completion: L1ReadTransferCompletion) -> None:
+        """Release transfer pins after stream completion without consulting Sessions.
+
+        Args:
+            completion: The unique transfer tag and its captured lookup groups.
+
+        Raises:
+            ValueError: A captured L1 owner is no longer registered.
+        """
+        tag, groups = completion
+        if any(owner not in self._l1_managers_by_id for owner, _ in groups):
+            raise ValueError("Read completion requires a registered L1 owner")
+        results: dict[ObjectKey, L1Error] = {}
+        for owner, reservations in groups:
+            results.update(
+                self._l1_managers_by_id[owner].finish_read_transfer(
+                    [key for key, _ in reservations], tag
+                )
+            )
+        self._report_read_finished(results, 1)
+
+    def _report_read_finished(
+        self, finish_result: dict[ObjectKey, L1Error], read_locks: int
+    ) -> None:
+        successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
+        failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
+        # Trace effects, not rejected stale releases or process-local generations.
+        if successful_keys:
+            publish_call_event(
+                "lmcache.v1.distributed.storage_manager.StorageManager.finish_read_prefetched",
+                {"keys": successful_keys, "read_locks": read_locks},
+            )
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_READ_PREFETCHED_FINISHED,
+                metadata={
+                    "succeeded_keys": successful_keys,
+                    "failed_keys": failed_keys,
+                },
+            )
+        )
+
     def _read_groups(
         self, keys: list[ObjectKey], owners: dict[ObjectKey, int] | None
     ) -> dict[int, list[ObjectKey]]:
@@ -1440,12 +1567,19 @@ class StorageManager:
         return results
 
     def _finish_read_objects(
-        self, keys: list[ObjectKey], count: int, owners: dict[ObjectKey, int] | None
+        self,
+        keys: list[ObjectKey],
+        count: int,
+        owners: dict[ObjectKey, int] | None,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1Error]:
         results = {}
         for owner, group in self._read_groups(keys, owners).items():
             results.update(
-                self._l1_managers_by_id[owner].finish_read(group, read_locks=count)
+                self._l1_managers_by_id[owner].finish_read(
+                    group, read_locks=count, read_generations=read_generations
+                )
             )
         return results
 
