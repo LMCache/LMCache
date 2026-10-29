@@ -10,7 +10,10 @@ the full integration without mocking internals.
 """
 
 # Standard
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from typing import NoReturn
+import asyncio
 import select
 import threading
 import time
@@ -20,14 +23,16 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import torch_dev
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.eviction_policy.noop import (
     NoOpEvictionPolicy,
 )
+from lmcache.v1.distributed.internal_api import L1OperationResult, L2StoreResult
 from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l2_adapters.base import L2TaskId
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
@@ -44,12 +49,10 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.memory_management import MemoryObj
 from tests.v1.distributed.utils import should_use_lazy_alloc
+import lmcache.v1.distributed.l1_manager as l1_manager_module
+import lmcache.v1.memory_management as memory_management
 
-if not torch_dev.is_available():
-    pytest.skip(
-        f"Requires available {torch_device_type} runtime",
-        allow_module_level=True,
-    )
+pytestmark = pytest.mark.no_shared_allocator
 
 # =============================================================================
 # Helpers
@@ -130,14 +133,24 @@ def write_keys_to_l1(
 
 
 @pytest.fixture
-def l1_manager():
+def l1_manager(monkeypatch: pytest.MonkeyPatch) -> Iterator[L1Manager]:
     """Create an L1Manager with a reasonable memory config."""
+    if not torch_dev.is_available():
+        monkeypatch.setattr(
+            memory_management,
+            "_allocate_cpu_memory",
+            lambda size, *a, **kw: torch.empty(size, dtype=torch.uint8),
+        )
+        monkeypatch.setattr(
+            memory_management, "_free_cpu_memory", lambda *a, **kw: None
+        )
     config = L1ManagerConfig(
         memory_config=L1MemoryManagerConfig(
             size_in_bytes=128 * 1024 * 1024,
             use_lazy=should_use_lazy_alloc(),
             init_size_in_bytes=64 * 1024 * 1024,
             align_bytes=0x1000,
+            shm_name="",
         ),
         write_ttl_seconds=600,
         read_ttl_seconds=300,
@@ -160,6 +173,271 @@ def make_descriptor(index: int) -> L2AdapterDescriptor:
     """Create an L2AdapterDescriptor for testing."""
     config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
     return L2AdapterDescriptor(index=index, config=config)
+
+
+class GatedStoreAdapter(MockL2Adapter):
+    """Hold source reads until the test releases an admitted store."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.fail_completion = False
+        super().__init__(MockL2AdapterConfig(0.01, 10.0))
+
+    async def _execute_store_in_the_loop(
+        self, keys: list[ObjectKey], objects: list[MemoryObj], task_id: L2TaskId
+    ) -> None:
+        self.started.set()
+        while not self.release.is_set():
+            await asyncio.sleep(0.01)
+        await super()._execute_store_in_the_loop(keys, objects, task_id)
+
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
+        """Optionally report a failed result after all source reads have ended."""
+        results = super().pop_completed_store_tasks()
+        if self.fail_completion:
+            return {task: L2StoreResult(False, 0) for task in results}
+        return results
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_store_pins_survive_read_expiry(
+    l1_manager: L1Manager, monkeypatch: pytest.MonkeyPatch, failed: bool
+) -> None:
+    """TTL expiry cannot recycle a source before success or failure completion."""
+    clock = [0.0]
+    monkeypatch.setattr(l1_manager_module, "monotonic", lambda: clock[0])
+    adapter = GatedStoreAdapter()
+    adapter.fail_completion = failed
+    ctrl = StoreController(
+        l1_manager, [adapter], [make_descriptor(0)], DefaultStorePolicy()
+    )
+    ctrl.start()
+    keys = [make_object_key(0)]
+    try:
+        write_keys_to_l1(l1_manager, keys, make_layout())
+        assert adapter.started.wait(5)
+        clock[0] += 1000
+        assert l1_manager.delete(keys)[keys[0]] == L1Error.KEY_IS_LOCKED
+        generations: dict[ObjectKey, int] = {}
+        assert l1_manager.reserve_read(keys, read_generations=generations)[keys[0]][
+            0
+        ] == (L1Error.SUCCESS)
+        adapter.release.set()
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 0
+        )
+        assert l1_manager.delete(keys)[keys[0]] == L1Error.KEY_IS_LOCKED
+        l1_manager.finish_read(keys, read_generations=generations)
+        assert l1_manager.delete(keys)[keys[0]] == L1Error.SUCCESS
+    finally:
+        adapter.release.set()
+        ctrl.stop()
+        adapter.close()
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_stop_drains_store_and_ignores_later_l1_writes(
+    l1_manager: L1Manager, failed: bool
+) -> None:
+    """Shutdown retains sources and detaches admission before closing eventfds."""
+    adapter = GatedStoreAdapter()
+    adapter.fail_completion = failed
+    ctrl = StoreController(
+        l1_manager, [adapter], [make_descriptor(0)], DefaultStorePolicy()
+    )
+    ctrl.start()
+    key = make_object_key(0)
+    try:
+        write_keys_to_l1(l1_manager, [key], make_layout())
+        assert adapter.started.wait(5)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            stopped = executor.submit(ctrl.stop)
+            try:
+                assert wait_for_condition(lambda: ctrl.report_status()["is_stopping"])
+                assert not stopped.done()
+                assert l1_manager.delete([key])[key] == L1Error.KEY_IS_LOCKED
+                write_keys_to_l1(l1_manager, [make_object_key(1)], make_layout())
+            finally:
+                adapter.release.set()
+            stopped.result(timeout=10)
+        assert adapter.debug_has_key(key)
+        assert not adapter.debug_has_key(make_object_key(1))
+        assert l1_manager.delete([key])[key] == L1Error.SUCCESS
+        assert write_keys_to_l1(l1_manager, [make_object_key(2)], make_layout())
+        with pytest.raises(RuntimeError, match="stopping"):
+            ctrl.request_remove_adapter(0)
+        with pytest.raises(RuntimeError, match="stopping"):
+            ctrl.add_adapter(1, adapter, make_descriptor(1))
+    finally:
+        adapter.release.set()
+        if not ctrl.report_status()["is_stopping"]:
+            ctrl.stop()
+        adapter.close()
+
+
+def test_each_adapter_retains_its_own_store_pin(
+    l1_manager: L1Manager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Completing one replica does not release the other replica's source."""
+    clock = [0.0]
+    monkeypatch.setattr(l1_manager_module, "monotonic", lambda: clock[0])
+    adapters = [GatedStoreAdapter(), GatedStoreAdapter()]
+    policy = DefaultStorePolicy()
+    monkeypatch.setattr(
+        policy,
+        "select_store_targets",
+        lambda keys, descs: {d.index: keys * 2 for d in descs},
+    )
+    ctrl = StoreController(
+        l1_manager,
+        [*adapters],
+        [make_descriptor(i) for i in range(2)],
+        policy,
+    )
+    ctrl.start()
+    keys = [make_object_key(0)]
+    try:
+        write_keys_to_l1(l1_manager, keys, make_layout())
+        assert all(a.started.wait(5) for a in adapters)
+        clock[0] += 1000
+        adapters[0].release.set()
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 1
+        )
+        assert l1_manager.delete(keys)[keys[0]] == L1Error.KEY_IS_LOCKED
+        adapters[1].release.set()
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 0
+        )
+        assert l1_manager.delete(keys)[keys[0]] == L1Error.SUCCESS
+    finally:
+        for adapter in adapters:
+            adapter.release.set()
+        ctrl.stop()
+        for adapter in adapters:
+            adapter.close()
+
+
+def test_rejected_replica_does_not_release_admitted_store(
+    l1_manager: L1Manager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later submission rejection must preserve an earlier replica's pin."""
+    clock = [0.0]
+    monkeypatch.setattr(l1_manager_module, "monotonic", lambda: clock[0])
+    admitted = GatedStoreAdapter()
+    rejected = make_adapter()
+    rejection = threading.Event()
+
+    def reject(keys: list[ObjectKey], objects: list[MemoryObj]) -> NoReturn:
+        rejection.set()
+        raise BufferError("not admitted")
+
+    monkeypatch.setattr(rejected, "submit_store_task", reject)
+    ctrl = StoreController(
+        l1_manager,
+        [admitted, rejected],
+        [make_descriptor(i) for i in range(2)],
+        DefaultStorePolicy(),
+    )
+    ctrl.start()
+    keys = [make_object_key(0)]
+    try:
+        write_keys_to_l1(l1_manager, keys, make_layout())
+        assert admitted.started.wait(5) and rejection.wait(5)
+        clock[0] += 1000
+        assert l1_manager.delete(keys)[keys[0]] == L1Error.KEY_IS_LOCKED
+    finally:
+        admitted.release.set()
+        ctrl.stop()
+        admitted.close()
+        rejected.close()
+    assert l1_manager.delete(keys)[keys[0]] == L1Error.SUCCESS
+
+
+def test_expired_pin_claim_preserves_newer_reader(
+    l1_manager: L1Manager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An expired pre-submission reservation cannot consume a newer read share."""
+    clock = [0.0]
+    monkeypatch.setattr(l1_manager_module, "monotonic", lambda: clock[0])
+    newer: dict[ObjectKey, int] = {}
+    original_pin = l1_manager.pin_read_buffers
+    original_finish = l1_manager.finish_read
+    retired = threading.Event()
+
+    def expire_before_pin(
+        keys: list[ObjectKey], generations: dict[ObjectKey, int], tag: str
+    ) -> dict[ObjectKey, L1OperationResult]:
+        clock[0] += 1000
+        l1_manager.reserve_read(keys, read_generations=newer)
+        return original_pin(keys, generations, tag)
+
+    def observe_finish(
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
+    ) -> dict[ObjectKey, L1Error]:
+        result = original_finish(keys, read_locks, read_generations=read_generations)
+        retired.set()
+        return result
+
+    monkeypatch.setattr(l1_manager, "pin_read_buffers", expire_before_pin)
+    monkeypatch.setattr(l1_manager, "finish_read", observe_finish)
+    adapter = make_adapter()
+    ctrl = StoreController(
+        l1_manager, [adapter], [make_descriptor(0)], DefaultStorePolicy()
+    )
+    ctrl.start()
+    keys = [make_object_key(0)]
+    try:
+        write_keys_to_l1(l1_manager, keys, make_layout())
+        assert retired.wait(5)
+        assert not adapter.debug_has_key(keys[0])
+        assert l1_manager.delete(keys)[keys[0]] == L1Error.KEY_IS_LOCKED
+        original_finish(keys, read_generations=newer)
+        assert l1_manager.delete(keys)[keys[0]] == L1Error.SUCCESS
+    finally:
+        ctrl.stop()
+        adapter.close()
+
+
+def test_stop_finishes_adapter_operations_accepted_before_shutdown(
+    l1_manager: L1Manager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An accepted remove cannot be stranded behind the final queue drain."""
+    adapter = make_adapter()
+    attaching = threading.Event()
+    release = threading.Event()
+    original_fd = adapter.get_store_event_fd
+
+    def delayed_fd() -> int:
+        attaching.set()
+        assert release.wait(5)
+        return original_fd()
+
+    monkeypatch.setattr(adapter, "get_store_event_fd", delayed_fd)
+    ctrl = StoreController(l1_manager, [], [], DefaultStorePolicy())
+    ctrl.start()
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            added = executor.submit(ctrl.add_adapter, 0, adapter, make_descriptor(0))
+            assert attaching.wait(5)
+            removed = ctrl.request_remove_adapter(0)
+            stopped = executor.submit(ctrl.stop)
+            try:
+                assert wait_for_condition(lambda: ctrl.report_status()["is_stopping"])
+            finally:
+                release.set()
+            added.result(timeout=5)
+            stopped.result(timeout=5)
+            assert removed.is_set()
+    finally:
+        release.set()
+        if not ctrl.report_status()["is_stopping"]:
+            ctrl.stop()
+        adapter.close()
 
 
 # =============================================================================

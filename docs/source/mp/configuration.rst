@@ -629,6 +629,12 @@ Source: ``lmcache/v1/distributed/config.py``
      - ``300``
      - Time-to-live for each object's read lock (seconds).
 
+Submitted L2 stores pin their L1 source buffers until the adapter reports a
+terminal result, even if the read-lock TTL expires. During shutdown, the store
+controller stops accepting writes and waits for admitted stores to finish before
+releasing these pins. An adapter that never completes can block shutdown; raising
+the read TTL or releasing buffers on a controller timeout is not an I/O fence.
+
 Eviction Policy
 ---------------
 
