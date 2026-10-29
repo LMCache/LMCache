@@ -23,12 +23,12 @@ To avoid that ordering problem, the worker adapter owns startup:
 ```text
 worker rank 0
   -> parse autostart config
-  -> start local lmcache MP HTTP server if ZMQ PING is not already healthy
-  -> wait for ZMQ PING
+  -> start local lmcache MP HTTP server if PING is not already healthy
+  -> wait for PING
   -> create transport request client
 
 other local workers
-  -> wait for ZMQ PING
+  -> wait for PING
   -> create transport request client
 
 scheduler adapter
@@ -47,19 +47,23 @@ Autostart is controlled through `kv_connector_extra_config`:
 | Key | Meaning |
 |---|---|
 | `lmcache.mp.autostart` | Enables worker-0 startup when true. |
-| `lmcache.mp.autostart.wait_timeout` | Seconds to wait for ZMQ PING readiness. |
+| `lmcache.mp.autostart.wait_timeout` | Seconds to wait for PING readiness. |
 | `lmcache.mp.autostart.server_args` | Extra CLI args for the server process. |
 
 The launcher uses the connector's resolved server URL. When
 `lmcache.mp.server_urls` is set, `lmcache.mp.host` and `lmcache.mp.port` are
 ignored, including during auto-start. Otherwise the connector builds the URL
 from those host/port settings.
+The URL scheme picks the server transport: `tcp://` starts a ZMQ server and
+`grpc://` starts a gRPC server (`--transport grpc`). `grpc+unix://` is not
+accepted, because auto-start binds a local TCP port.
 Only `localhost` and `127.0.0.1` are accepted. IPv6 endpoints (including `::1`)
 raise `ValueError` before probing or starting a process: the MP ZMQ transport
 does not enable IPv6 sockets. Disabling auto-start leaves connect-only behavior
 unchanged. Endpoint CLI flags
-`--host`, `--port`, and `--http-host` are rejected in `server_args` because the
-autostarted server must bind the same local endpoint the connector will use.
+`--host`, `--port`, `--http-host`, and `--transport` are rejected in
+`server_args` because the autostarted server must bind the same local endpoint,
+over the same transport, that the connector will use.
 
 Required server sizing options, such as `--l1-size-gb` and `--eviction-policy`,
 remain explicit in `server_args`; the connector does not infer them from the
@@ -67,7 +71,7 @@ vLLM configuration.
 
 ## Health check and failure handling
 
-Readiness is checked through the same ZMQ path the connector uses for normal MP
+Readiness is checked through the same transport path the connector uses for normal MP
 communication: `RequestClientFactory.create` creates a temporary client and
 `client.ping(None)` checks server readiness without requiring an already
 registered worker instance. The transport handles PING payload serialization;
@@ -99,7 +103,7 @@ this startup convenience feature.
 ## Tests
 
 Unit coverage validates config parsing, local-host restrictions, endpoint flag
-rejection, ZMQ PING health checks, failure cleanup, worker-0 ownership,
+rejection, PING health checks, failure cleanup, worker-0 ownership,
 non-owner worker waiting, legacy connector connect-only behavior, and scheduler
 connect-only behavior.
 
