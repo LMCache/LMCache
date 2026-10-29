@@ -515,6 +515,105 @@ class TestStoreBudget:
         ctrl.stop()
         adapter.close()
 
+    def test_group_larger_than_budget_goes_alone(self, l1_manager):
+        """A group larger than the budget goes out when nothing is in flight,
+        and later groups wait for it, so the overshoot never builds up."""
+        object_bytes = make_layout().shapes[0].numel() * 2  # bf16
+        total_bytes = l1_manager.config.memory_config.size_in_bytes
+        assert wait_for_condition(
+            lambda: l1_manager.get_memory_usage()[1] == total_bytes
+        )
+        eviction = EvictionConfig(
+            eviction_policy="LRU",
+            trigger_watermark=0.5,
+            eviction_ratio=0.5 - 6 * object_bytes / total_bytes,
+        )
+        # About 2 s for the large group, so it stays in flight below.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=5 * object_bytes / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy(),
+            eviction_config=eviction,
+        )
+        ctrl.start()
+
+        large = [make_object_key(i) for i in range(10)]
+        small = [make_object_key(i) for i in range(10, 14)]
+        for keys in (large, small):
+            write_keys_to_l1(l1_manager, keys, make_layout())
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_keys_count"] == 0
+            )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 1
+            and ctrl.report_status()["queued_keys_count"] == 4
+        )
+        assert wait_for_condition(
+            lambda: all(adapter.debug_has_key(k) for k in large + small),
+            timeout=10.0,
+        )
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_key_stored_to_two_adapters_counts_once(self, l1_manager):
+        """A key stored to two adapters is one L1 object, so it uses the
+        budget once, until the slower adapter finishes."""
+        group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
+        total_bytes = l1_manager.config.memory_config.size_in_bytes
+        assert wait_for_condition(
+            lambda: l1_manager.get_memory_usage()[1] == total_bytes
+        )
+        eviction = EvictionConfig(
+            eviction_policy="LRU",
+            trigger_watermark=0.5,
+            eviction_ratio=0.5 - 1.5 * group_bytes / total_bytes,
+        )
+        # About 1 s and 3 s per group.
+        adapters = [
+            MockL2Adapter(
+                MockL2AdapterConfig(
+                    max_size_gb=0.01, mock_bandwidth_gb=group_bytes / s / (1 << 30)
+                )
+            )
+            for s in (1, 3)
+        ]
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=adapters,
+            adapter_descriptors=[make_descriptor(i) for i in range(2)],
+            policy=DefaultStorePolicy(),
+            eviction_config=eviction,
+        )
+        ctrl.start()
+
+        groups = [[make_object_key(g * 4 + i) for i in range(4)] for g in range(3)]
+        for keys in groups:
+            write_keys_to_l1(l1_manager, keys, make_layout())
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_keys_count"] == 0
+            )
+
+        def tasks_and_queued() -> tuple[int, int]:
+            status = ctrl.report_status()
+            return status["in_flight_task_count"], status["queued_keys_count"]
+
+        # Two groups go to both adapters and the third waits, also after the
+        # fast adapter is done: the slow one still locks both groups.
+        assert wait_for_condition(lambda: tasks_and_queued() == (4, 4))
+        assert wait_for_condition(lambda: tasks_and_queued() == (2, 4))
+        assert wait_for_condition(lambda: tasks_and_queued() == (0, 0), timeout=10.0)
+
+        ctrl.stop()
+        for a in adapters:
+            a.close()
+
 
 class TestStoreControllerMultipleAdapters:
     """Test StoreController with multiple L2 adapters."""

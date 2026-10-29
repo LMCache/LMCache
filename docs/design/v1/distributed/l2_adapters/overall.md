@@ -210,8 +210,8 @@ locked keys. When L2 writes slower than L1 fills, unbounded submission would
 lock all of L1 and new writes and prefetches would fail to allocate.
 
 So in-flight stores may read-lock at most `trigger_watermark - eviction_ratio`
-of L1 (taken from the L1's eviction config), which leaves eviction enough
-unlocked data to free `eviction_ratio` once usage reaches the watermark. The
+of L1's bytes (taken from the L1's eviction config), so stores leave at least
+`eviction_ratio` of L1 unlocked once usage reaches the watermark. The
 check happens before each group, so the last group may overshoot it; one group
 always goes out when nothing is in flight. Queued keys hold no locks: if one is
 evicted while it waits, `reserve_read` reports it as not found and it is never

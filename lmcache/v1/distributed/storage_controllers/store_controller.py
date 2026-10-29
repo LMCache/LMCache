@@ -191,9 +191,6 @@ class InFlightStoreTask:
     l2_bytes_transferred: int = 0
     """Bytes actually transferred by the adapter for this task."""
 
-    num_bytes: int = 0
-    """L1 bytes this task keeps read-locked."""
-
 
 # Main class
 
@@ -283,6 +280,10 @@ class StoreController(StorageControllerInterface):
         # Same-shape key groups waiting for the budget; they hold no locks.
         self._queued: deque[list[ObjectKey]] = deque()
         self._status_queued_count: int = 0
+        # Keys read-locked by in-flight stores -> (tasks holding the key, its
+        # physical L1 size). A key stored to several adapters is one L1
+        # object, so ``_in_flight_bytes`` counts it once.
+        self._locked_objects: dict[ObjectKey, tuple[int, int]] = {}
         self._in_flight_bytes: int = 0
 
         StoreController._gauge_target = self
@@ -718,18 +719,23 @@ class StoreController(StorageControllerInterface):
                 l1_mgr.finish_read(successful_keys)
                 continue
 
-            # All objects for a single store task share one layout (L1
-            # allocates uniform MemoryObjs per chunk), so total bytes is
-            # size * count — avoids summing N identical values.
-            total_bytes = successful_objs[0].get_size() * len(successful_objs)
             self._in_flight_tasks[(adapter_index, task_id)] = InFlightStoreTask(
                 adapter_index=adapter_index,
                 keys=successful_keys,
                 read_locked_keys=list(successful_keys),
-                num_bytes=total_bytes,
             )
             self._status_in_flight_count += 1
-            self._in_flight_bytes += total_bytes
+            for key, obj in zip(successful_keys, successful_objs, strict=True):
+                holders, size = self._locked_objects.get(key, (0, 0))
+                if holders == 0:
+                    size = obj.get_physical_size()
+                    self._in_flight_bytes += size
+                self._locked_objects[key] = (holders + 1, size)
+
+            # All objects for a single store task share one layout (L1
+            # allocates uniform MemoryObjs per chunk), so total bytes is
+            # size * count — avoids summing N identical values.
+            total_bytes = successful_objs[0].get_size() * len(successful_objs)
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L2_STORE_SUBMITTED,
@@ -795,9 +801,14 @@ class StoreController(StorageControllerInterface):
         success = task.l2_store_result
 
         l1_mgr.finish_read(task.read_locked_keys)
+        for key in task.read_locked_keys:
+            holders, size = self._locked_objects.pop(key)
+            if holders > 1:
+                self._locked_objects[key] = (holders - 1, size)
+            else:
+                self._in_flight_bytes -= size
         del self._in_flight_tasks[task_key]
         self._status_in_flight_count -= 1
-        self._in_flight_bytes -= task.num_bytes
 
         l2_name = self._adapter_descriptors[adapter_index].type_name
         completion_meta: dict[str, object] = {
