@@ -2,13 +2,20 @@
 """Device-DAX L1 memory manager."""
 
 # Standard
-from typing import cast
+from dataclasses import dataclass
+from typing import Any, cast
+import mmap
+import os
+
+# Third Party
+import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import L1BackendType
+from lmcache.utils import get_device_identity, get_size_bytes
+from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
-from lmcache.v1.distributed.error import L1ReconfigureError
+from lmcache.v1.distributed.error import L1Error, L1ReconfigureError
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.memory_manager.l1_memory_manager import L1MemoryManager
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
@@ -17,9 +24,50 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxNotMappedError,
     DevDaxRemoveMode,
 )
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import (
+    MemoryFormat,
+    MemoryObj,
+    MemoryObjMetadata,
+    TensorMemoryObj,
+)
+from lmcache.v1.memory_orchestrator.api import RegionContract
+from lmcache.v1.platform import current_device_spec
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class _SharedRegionMapping:
+    """The mapping of a region whose extents a memory orchestrator grants."""
+
+    path: str
+    offset: int
+    capacity: int
+    alignment: int
+    fd: int
+    mmap_obj: mmap.mmap
+    mmap_buffer: Any
+    buffer: torch.Tensor
+    registered: bool = False
+
+    def close(self) -> None:
+        """Unregister and unmap the region once; live views keep it mapped."""
+        if self.fd < 0:
+            return
+        if self.registered:
+            current_device_spec.unpin_memory(self.buffer.data_ptr())
+            self.registered = False
+        self.buffer = torch.empty(0, dtype=torch.uint8)
+        self.mmap_buffer = None
+        try:
+            self.mmap_obj.close()
+        except BufferError:
+            logger.warning(
+                "Shared Device-DAX region %s still has live views; leaving it mapped",
+                self.path,
+            )
+        os.close(self.fd)
+        self.fd = -1
 
 
 class DevDaxL1MemoryManager(L1MemoryManager):
@@ -27,74 +75,70 @@ class DevDaxL1MemoryManager(L1MemoryManager):
 
     This is a peer of
     :class:`~lmcache.v1.distributed.memory_manager.l1_memory_manager.L1MemoryManager`
-    and owns the Device-DAX allocator path that used to live inside the generic
-    CPU L1 manager. A pure Device-DAX configuration maps the DAX device as the
-    full L1 arena. A hybrid configuration uses DRAM first and spills overflow
-    allocations into Device-DAX.
+    and owns the Device-DAX allocator path. The configured device range is
+    the primary arena; more arenas can be added at runtime.
+
+    A shared region (``shared_region`` set) has no arenas and no allocator:
+    the manager maps and GPU-registers the memory orchestrator's region and
+    builds bounds-checked views of the extents it grants.
     """
 
-    def __init__(self, config: L1MemoryManagerConfig) -> None:
+    def __init__(
+        self,
+        config: L1MemoryManagerConfig,
+        shared_region: RegionContract | None = None,
+    ) -> None:
         """Create a Device-DAX L1 memory manager.
 
         Args:
             config: L1 memory configuration with ``devdax_path`` set.
+            shared_region: Contract of the memory orchestrator's region when
+                the range is shared. The manager then maps the region's
+                capacity at ``devdax_offset_in_bytes`` and GPU-registers it.
 
         Raises:
             ValueError: If ``devdax_path`` is not configured.
+            RuntimeError: If a shared region leaves the device, breaks its
+                alignment, or cannot be GPU-registered.
+            OSError: If a shared region cannot be opened or mapped.
         """
         if not config.devdax_path:
             raise ValueError("DevDaxL1MemoryManager requires devdax_path")
 
-        devdax_size = config.devdax_size_in_bytes or config.size_in_bytes
-        local_size = config.size_in_bytes if config.devdax_size_in_bytes else 0
+        self._shared: _SharedRegionMapping | None = None
+        if shared_region is not None:
+            self._shared = self._map_shared_region(
+                config.devdax_path, config.devdax_offset_in_bytes, shared_region
+            )
+            return
+
         logger.debug(
-            "use devdax memory allocator, dram size is %d bytes, "
-            "devdax path is %s, devdax size is %d bytes, align bytes is %d bytes",
-            local_size,
+            "use devdax memory allocator, devdax path is %s, devdax size is %d "
+            "bytes, align bytes is %d bytes",
             config.devdax_path,
-            devdax_size,
+            config.size_in_bytes,
             config.align_bytes,
         )
         self._allocator = DevDaxMemoryAllocator(
-            devdax_size,
+            config.size_in_bytes,
             config.devdax_path,
-            local_size=local_size,
-            shm_name=config.shm_name or None,
             align_bytes=config.align_bytes,
-            use_hugepages=config.use_hugepages,
             offset=config.devdax_offset_in_bytes,
         )
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
 
-    def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
-        """Return the storage medium backing ``memory_obj``.
-
-        Args:
-            memory_obj: An object allocated by this manager.
-
-        Returns:
-            ``L1BackendType.DEVDAX`` for objects in the Device-DAX arena,
-            ``L1BackendType.DRAM`` for objects in the local DRAM pool of a
-            hybrid configuration.
-        """
-        allocator = cast(DevDaxMemoryAllocator, self._allocator)
-        if allocator.is_devdax_obj(memory_obj):
-            return L1BackendType.DEVDAX
-        return L1BackendType.DRAM
-
     def get_l1_memory_desc(self) -> L1MemoryDesc:
-        """Return a descriptor for the primary L1 buffer.
-
-        Existing callers expect Device-DAX L1 to expose the mapped buffer here.
-        Hybrid DRAM + Device-DAX L1 is still rejected by transfer paths that
-        require one registerable L1 region via ``l1_exposes_single_memory_region``.
+        """Return a descriptor for the primary arena.
 
         Returns:
-            The descriptor for the primary L1 buffer.
+            The descriptor of the primary (configured) arena; arenas added at
+            runtime are not part of it.
+
+        Raises:
+            L1ReconfigureError: 409 for a shared region, which has no arena.
         """
-        allocator = cast(DevDaxMemoryAllocator, self._allocator)
-        buffer = allocator.buffer
+        buffer = self._arenas().buffer
         return L1MemoryDesc(
             ptr=buffer.data_ptr(),
             size=self._size_in_bytes,
@@ -112,10 +156,66 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             size_in_bytes: Length of the candidate range.
 
         Returns:
-            ``True`` while an overlapping arena remains mapped.
+            ``True`` while an overlapping arena, or the overlapping shared
+            region, remains mapped.
         """
-        return cast(DevDaxMemoryAllocator, self._allocator).owns_range(
-            device_path, offset_in_bytes, size_in_bytes
+        shared = self._shared
+        if shared is not None:
+            identity = get_device_identity(device_path)
+            return (
+                identity is not None
+                and identity == get_device_identity(shared.fd)
+                and offset_in_bytes < shared.offset + shared.capacity
+                and shared.offset < offset_in_bytes + size_in_bytes
+            )
+        return self._arenas().owns_range(device_path, offset_in_bytes, size_in_bytes)
+
+    def view(
+        self, offset: int, length: int, layout: MemoryLayoutDesc
+    ) -> TensorMemoryObj:
+        """Return a parentless view of an extent the orchestrator granted.
+
+        Dropping the view never frees or unmaps the orchestrator's bytes.
+
+        Args:
+            offset: Byte offset of the extent in the region.
+            length: Aligned extent length in bytes.
+            layout: Shapes and dtypes of the object's tensors.
+
+        Returns:
+            A memory object over ``[offset, offset + length)`` of the region.
+
+        Raises:
+            ValueError: The extent is negative, misaligned, outside the region,
+                or smaller than the layout's payload.
+        """
+        shared = self._shared
+        assert shared is not None, "view() requires a shared Device-DAX region"
+        payload = get_size_bytes(layout.shapes, layout.dtypes)
+        if (
+            offset < 0
+            or offset % shared.alignment
+            or length < payload
+            or offset + length > shared.capacity
+        ):
+            raise ValueError(
+                f"extent [{offset}, {offset + length}) for a {payload}-byte "
+                f"object does not fit the {shared.capacity}-byte region"
+            )
+        return TensorMemoryObj(
+            raw_data=shared.buffer[offset : offset + length],
+            metadata=MemoryObjMetadata(
+                layout.shapes[0],
+                layout.dtypes[0],
+                offset,
+                length,
+                1,
+                0,
+                MemoryFormat.KV_2LTD,
+                shapes=list(layout.shapes),
+                dtypes=list(layout.dtypes),
+            ),
+            parent_allocator=None,
         )
 
     def add_device(
@@ -123,7 +223,7 @@ class DevDaxL1MemoryManager(L1MemoryManager):
     ) -> DevDaxArenaStatus:
         """Map an additional Device-DAX range into the L1 arena pool at runtime.
 
-        The new range becomes overflow capacity available to subsequent
+        The new range becomes extra capacity available to subsequent
         allocations. Existing allocations are untouched.
 
         Args:
@@ -137,9 +237,10 @@ class DevDaxL1MemoryManager(L1MemoryManager):
         Raises:
             L1ReconfigureError: 409 when the request conflicts with the device
                 or pool state (range overlap, capacity exceeded, allocator
-                closed, device not openable, invalid offset).
+                closed, device not openable, invalid offset), or the region
+                is shared.
         """
-        allocator = cast(DevDaxMemoryAllocator, self._allocator)
+        allocator = self._arenas()
         try:
             return allocator.add_device(device_path, size_in_bytes, offset_in_bytes)
         except (ValueError, RuntimeError, OSError) as exc:
@@ -155,8 +256,7 @@ class DevDaxL1MemoryManager(L1MemoryManager):
 
         The arena stops accepting new allocations and is unmapped once its
         already-issued allocations are all freed. The primary arena (the one
-        backing :meth:`get_l1_memory_desc` in a pure Device-DAX configuration)
-        may not be removed.
+        backing :meth:`get_l1_memory_desc`) may not be removed.
 
         Args:
             device_path: Path of the arena to remove.
@@ -170,9 +270,10 @@ class DevDaxL1MemoryManager(L1MemoryManager):
 
         Raises:
             L1ReconfigureError: 404 when no arena matches; 409 when ``mode`` is
-                unsupported or the arena is primary and non-removable.
+                unsupported, the arena is primary and non-removable, or the
+                region is shared.
         """
-        allocator = cast(DevDaxMemoryAllocator, self._allocator)
+        allocator = self._arenas()
         try:
             return allocator.remove_device(device_path, mode, offset_in_bytes)
         except DevDaxNotMappedError as exc:
@@ -193,9 +294,10 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             The arena's current status.
 
         Raises:
-            L1ReconfigureError: 404 when no arena matches.
+            L1ReconfigureError: 404 when no arena matches; 409 for a shared
+                region.
         """
-        allocator = cast(DevDaxMemoryAllocator, self._allocator)
+        allocator = self._arenas()
         try:
             return allocator.arena_status(device_path, offset_in_bytes)
         except DevDaxNotMappedError as exc:
@@ -205,10 +307,12 @@ class DevDaxL1MemoryManager(L1MemoryManager):
         """Return the number of memory regions backing L1.
 
         Returns:
-            One for the DRAM tier of a hybrid configuration, if present, plus
-            one per mapped Device-DAX arena, active or draining.
+            One per mapped Device-DAX arena, active or draining; one for a
+            shared region.
         """
-        return cast(DevDaxMemoryAllocator, self._allocator).memory_region_count()
+        if self._shared is not None:
+            return 1
+        return self._arenas().memory_region_count()
 
     def get_arena_statuses(self) -> list[DevDaxArenaStatus]:
         """Return a status snapshot of every Device-DAX arena in the L1 pool.
@@ -216,6 +320,67 @@ class DevDaxL1MemoryManager(L1MemoryManager):
         Returns:
             One :class:`DevDaxArenaStatus` per arena currently mapped, in pool
             order (the primary arena first).
+
+        Raises:
+            L1ReconfigureError: 409 for a shared region, which has no arenas.
         """
-        allocator = cast(DevDaxMemoryAllocator, self._allocator)
-        return allocator.arena_statuses()
+        return self._arenas().arena_statuses()
+
+    def free(self, mem_objs: list[MemoryObj]) -> L1Error:
+        """Free objects; a shared region's views are never freed (see ``view``).
+
+        Args:
+            mem_objs: Objects to free; empty for a shared region.
+
+        Returns:
+            ``L1Error.SUCCESS``.
+        """
+        if self._shared is None:
+            return super().free(mem_objs)
+        assert not mem_objs, "A shared Device-DAX region frees nothing locally"
+        return L1Error.SUCCESS
+
+    def close(self) -> None:
+        """Release all resources; close a shared region after its copies drain."""
+        if self._shared is None:
+            super().close()
+            return
+        self._shared.close()
+
+    def _arenas(self) -> DevDaxMemoryAllocator:
+        """Return the arena pool; a shared region has none."""
+        if self._shared is not None:
+            raise L1ReconfigureError(
+                409,
+                "A shared Device-DAX region has no arenas: its memory "
+                "orchestrator owns the mapping, so hot-plug is unsupported",
+            )
+        return cast(DevDaxMemoryAllocator, self._allocator)
+
+    def _map_shared_region(
+        self, path: str, offset: int, contract: RegionContract
+    ) -> _SharedRegionMapping:
+        """Map the region's capacity at ``offset`` of ``path``; GPU-register it."""
+        mapping = _SharedRegionMapping(
+            path,
+            offset,
+            contract.capacity_bytes,
+            contract.alignment_bytes,
+            *DevDaxMemoryAllocator.open_devdax_mapping(
+                path, contract.capacity_bytes, offset
+            ),
+        )
+        try:
+            # Shared direct transfers require registered memory; unlike the
+            # private path there is no pageable fallback.
+            mapping.registered = current_device_spec.pin_memory(
+                mapping.buffer.data_ptr(), mapping.capacity
+            )
+            if not mapping.registered:
+                raise RuntimeError(
+                    f"A shared Device-DAX region must be GPU-registered: {path}"
+                )
+        except BaseException:
+            mapping.close()
+            raise
+        return mapping

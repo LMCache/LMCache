@@ -210,7 +210,7 @@ class TestStorageManagerReportStatus:
         assert l1["memory_used_bytes"] >= l1["staging_bytes"]
 
         # Finish writes: admission empties the staging area.
-        storage_manager_no_l2.finish_write(keys)
+        storage_manager_no_l2.finish_write(list(reserved))
         l1 = storage_manager_no_l2.report_status()["l1_manager"]
         assert l1["total_object_count"] == 3
         assert l1["write_locked_count"] == 0

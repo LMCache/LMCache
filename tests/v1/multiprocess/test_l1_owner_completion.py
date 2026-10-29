@@ -21,22 +21,23 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager.base import BaseL1Manager
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
-from lmcache.v1.distributed.storage_manager import L1WriteCompletion, StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess import native_completion
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as transfer
+from tests.v1.distributed.utils import ROUND_ROBIN_WRITE_POLICY
 
 
 @pytest.mark.parametrize("owner_count", [1, 2])
-@pytest.mark.parametrize("failure", ["none", "copy", "owner"])
+@pytest.mark.parametrize("failure", ["none", "copy"])
 def test_store_owner_callback_round_trip(
     monkeypatch: pytest.MonkeyPatch,
     owner_count: int,
-    failure: Literal["none", "copy", "owner"],
+    failure: Literal["none", "copy"],
 ) -> None:
     """Real reservations survive serialization and finish only after dispatch.
 
@@ -62,17 +63,17 @@ def test_store_owner_callback_round_trip(
             shm_name="",
         )
     )
-    managers = tuple(
-        L1Manager(replace(config, tag=f"l1-{index}")) for index in range(owner_count)
-    )
+    configs = [replace(config, tag=f"l1-{index}") for index in range(owner_count)]
     storage = StorageManager(
         StorageManagerConfig(
-            l1_manager_config=config,
+            l1_manager_config=configs[0],
             eviction_config=EvictionConfig(eviction_policy="noop"),
             l2_adapter_config=L2AdaptersConfig(adapters=[]),
-        ),
-        _l1_managers=managers,
+            l1_manager_configs=configs,
+            write_policy=ROUND_ROBIN_WRITE_POLICY,
+        )
     )
+    managers = tuple(cast(BaseL1Manager, m) for m in storage.l1_managers())
     queued: list[tuple[str, bytes]] = []
     order: list[str] = []
 
@@ -108,8 +109,6 @@ def test_store_owner_callback_round_trip(
         copied.extend(args[1])
         if failure == "copy" and len(copied) == 2:
             raise RuntimeError("device copy failed")
-        if failure == "owner" and len(copied) == 2:
-            copied[-1].reset_l1_manager()
 
     keys = [ObjectKey(b"chunk", "model", 0, gid) for gid in range(2)]
     ctx = SimpleNamespace(
@@ -161,22 +160,23 @@ def test_store_owner_callback_round_trip(
         release_kind, release_encoded = queued[0]
         assert release_kind == "release_imported_event"
         assert msgspec.msgpack.decode(release_encoded, type=tuple[int, int]) == (1, 7)
-        if failure != "none":
-            assert len(queued) == 1
-            assert order == ["callback", "copy", "copy", "record"]
+        # A failed store aborts every reservation once its copies drain,
+        # routed by the owner each reservation had before any copy ran.
+        assert order == ["callback", "copy", "copy", "record", "callback"]
+        kind, encoded = queued[1]
+        assert kind == ("finish_write" if succeeded else "abort_write")
+        payload = msgspec.msgpack.decode(encoded, type=dict[ObjectKey, int])
+        assert payload == {
+            k: managers[0 if owner_count == 1 else i].l1_manager_id
+            for i, k in enumerate(keys)
+        }
+        if not succeeded:
             assert all(obj.is_valid() for obj in copied)
-        else:
-            assert order == ["callback", "copy", "copy", "record", "callback"]
-            kind, encoded = queued[1]
-            assert kind == "finish_write_by_owner"
-            payload = msgspec.msgpack.decode(encoded, type=L1WriteCompletion)
-            assert payload == [
-                (manager.l1_manager_id, keys if owner_count == 1 else [keys[index]])
-                for index, manager in enumerate(managers)
-            ]
         module.close()
         cache_context.release_imported_event.assert_called_once_with(7)
         for index, manager in enumerate(managers):
+            # close() drained the queue: an aborted store left no staging behind.
+            assert manager.report_status()["staging_object_count"] == 0
             found = manager.reserve_read(keys)
             expected = (
                 [] if failure != "none" else keys if owner_count == 1 else [keys[index]]

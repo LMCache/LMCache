@@ -116,7 +116,7 @@ class TestStoreControllerMultimodel:
                 ret_b[k].tensor.fill_(float(100 + i))
 
             # Single finish_write forces a mixed-model batch in the listener.
-            sm.finish_write(keys_a + keys_b)
+            sm.finish_write(list({**ret_a, **ret_b}))
 
             # Wait until every key has landed in L2 — avoids a race on the
             # in_flight counter (which is briefly 0 between pop and submit).

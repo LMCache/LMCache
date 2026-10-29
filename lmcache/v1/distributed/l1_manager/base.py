@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Managing objects and memory for L1 cache
-"""
+"""Object lifecycle state machine shared by every L1 manager medium."""
 
 # Standard
+from abc import abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import count
@@ -16,36 +15,19 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     L1BackendType,
     MemoryLayoutDesc,
-    MemoryResidency,
-    MemorySegment,
     MemoryTags,
     ObjectKey,
 )
 from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
-from lmcache.v1.distributed.error import L1Error, L1ReconfigureError
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import (
     L1ManagerInterface,
     L1ManagerListener,
+    L1MemoryDesc,
     L1ObjectMeta,
     L1OperationResult,
 )
-from lmcache.v1.distributed.memory_manager import (
-    GDSL1MemoryManager,
-    L1ManagerProtocol,
-    L1MemoryManager,
-)
-from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
-    DevDaxL1MemoryManager,
-)
-from lmcache.v1.gpu_connector.gds_context import (
-    close_l1_gds_context,
-    initialize_l1_gds_context,
-)
-from lmcache.v1.memory_allocators.devdax_memory_allocator import (
-    DevDaxArenaState,
-    DevDaxArenaStatus,
-    DevDaxRemoveMode,
-)
+from lmcache.v1.distributed.memory_manager import L1MemoryManagerProtocol
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -118,14 +100,14 @@ def l1_mgr_synchronized(func):
     Decorator to mark L1Manager methods as thread-safe
     """
 
-    def wrapper(self: "L1Manager", *args, **kwargs):
+    def wrapper(self: "BaseL1Manager", *args, **kwargs):
         with self._lock:
             return func(self, *args, **kwargs)
 
     return wrapper
 
 
-def _l1_usage_ratio_or_zero(target: "L1Manager | None") -> float:
+def _l1_usage_ratio_or_zero(target: "BaseL1Manager | None") -> float:
     """Return ``target.get_memory_usage()`` as a 0.0-1.0 ratio.
 
     Returns 0.0 when ``target`` is None or ``total_bytes`` is zero so the
@@ -139,7 +121,7 @@ def _l1_usage_ratio_or_zero(target: "L1Manager | None") -> float:
     return used / total
 
 
-def _l1_staging_bytes_or_zero(target: "L1Manager | None") -> int:
+def _l1_staging_bytes_or_zero(target: "BaseL1Manager | None") -> int:
     """Return ``target.get_staging_memory_usage()``, or 0 without a target."""
     if target is None:
         return 0
@@ -149,9 +131,14 @@ def _l1_staging_bytes_or_zero(target: "L1Manager | None") -> int:
 # Main classes
 
 
-class L1Manager(L1ManagerInterface):
+class BaseL1Manager(L1ManagerInterface):
     """
     Object lifecycle state machine for L1 cache
+
+    Subclasses bind one memory medium (``DramL1Manager``, ``DevDaxL1Manager``,
+    ``GdsL1Manager``): they build the memory manager that allocates the
+    buffers and declare the medium's memory tags and gauge label. Everything
+    about keys, locks, staging and notifications is shared here.
 
     A write creates a *staging object* owned by the writer's ``tag``. Staging
     objects are kept apart from the resident objects: readers of the key do
@@ -199,11 +186,20 @@ class L1Manager(L1ManagerInterface):
     # OTel registers each gauge once; its callback snapshots all live managers.
     _gauge_registered: bool = False
     _gauge_lock = threading.Lock()
-    _gauge_targets: weakref.WeakValueDictionary[int, "L1Manager"] = (
+    _gauge_targets: weakref.WeakValueDictionary[int, "BaseL1Manager"] = (
         weakref.WeakValueDictionary()
     )
 
-    def __init__(self, config: L1ManagerConfig):
+    def __init__(
+        self, config: L1ManagerConfig, memory_manager: L1MemoryManagerProtocol
+    ):
+        """Bind the state machine to the medium's memory manager.
+
+        Args:
+            config: Lifetime and reporting settings for this L1.
+            memory_manager: Allocator facade for the medium; this manager owns
+                it from now on and closes it in :meth:`close`.
+        """
         self._config = config
         self._l1_manager_id = next_l1_manager_id()
         self._lock = threading.Lock()
@@ -216,40 +212,11 @@ class L1Manager(L1ManagerInterface):
         # Bytes held by staging objects (kept in sync with ``_staging``).
         self._staging_bytes: int = 0
 
-        # GDS, Device-DAX, and CPU L1 are mutually exclusive tiers. Each tier
-        # owns its backing allocator instead of branching inside the CPU path.
-        self._memory_manager: L1ManagerProtocol
-        if config.gds_l1_config is not None:
-            if config.memory_config.devdax_path:
-                raise ValueError("GDS and Device-DAX require separate L1 managers")
-            self._memory_manager = GDSL1MemoryManager(config.gds_l1_config)
-            initialize_l1_gds_context(self._l1_manager_id, config.gds_l1_config)
-            logger.info("L1Manager: GDS L1 tier enabled; CPU pinned-DRAM L1 disabled")
-        elif config.memory_config.devdax_path:
-            self._memory_manager = DevDaxL1MemoryManager(config.memory_config)
-            logger.info("L1Manager: Device-DAX L1 tier enabled; CPU-only L1 disabled")
-        else:
-            self._memory_manager = L1MemoryManager(config.memory_config)
+        self._memory_manager = memory_manager
 
-        # ``use_hugepages`` only ever backs a DRAM L1 pool, so it is a no-op
-        # for the device-backed GDS tier and for a pure (non-hybrid)
-        # Device-DAX arena.
-        l1_cfg = config.memory_config
-        if l1_cfg.use_hugepages:
-            if config.gds_l1_config is not None:
-                logger.warning(
-                    "l1-use-hugepages is a no-op for the GDS L1 tier; "
-                    "hugepages are ignored."
-                )
-            elif l1_cfg.devdax_path and not l1_cfg.devdax_size_in_bytes:
-                logger.warning(
-                    "l1-use-hugepages is a no-op for a pure Device-DAX L1 "
-                    "arena (no local DRAM pool)."
-                )
-
-        # CPU and GDS capacity is fixed at boot. Device-DAX overlays its entry
-        # from the live arena pool because devices can be added or drained.
-        self._boot_capacity_bytes_by_backend = get_configured_capacity_bytes(config)
+        # CPU and GDS capacity is fixed at boot. Device-DAX overrides
+        # get_capacity_bytes with its live arena pool.
+        self._boot_capacity_bytes = get_configured_capacity_bytes(config)
         self._write_ttl_seconds = config.write_ttl_seconds
         self._read_ttl_seconds = config.read_ttl_seconds
 
@@ -257,33 +224,56 @@ class L1Manager(L1ManagerInterface):
 
         self._event_bus = get_event_bus()
 
-        with L1Manager._gauge_lock:
-            L1Manager._gauge_targets[self._l1_manager_id] = self
-            if not L1Manager._gauge_registered:
-                L1Manager._gauge_registered = True
+        # Class-level state is addressed through BaseL1Manager on purpose: one
+        # registration per process must observe every subclass instance.
+        with BaseL1Manager._gauge_lock:
+            BaseL1Manager._gauge_targets[self._l1_manager_id] = self
+            if not BaseL1Manager._gauge_registered:
+                BaseL1Manager._gauge_registered = True
                 register_gauge(
                     "lmcache.l1_manager",
                     "lmcache_mp.l1_memory_usage_bytes",
                     "Bytes currently held in L1 cache",
-                    lambda: L1Manager._observations(lambda m: m.get_memory_usage()[0]),
+                    lambda: BaseL1Manager._observations(
+                        lambda m: m.get_memory_usage()[0]
+                    ),
                 )
                 register_gauge(
                     "lmcache.l1_manager",
                     "lmcache_mp.l1_usage_ratio",
                     "L1 used/total ratio (0.0–1.0)",
-                    lambda: L1Manager._observations(_l1_usage_ratio_or_zero),
+                    lambda: BaseL1Manager._observations(_l1_usage_ratio_or_zero),
                 )
                 register_gauge(
                     "lmcache.l1_manager",
                     "lmcache_mp.l1_staging_bytes",
                     "Bytes held by L1 staging objects (write-reserved, not admitted)",
-                    lambda: L1Manager._observations(_l1_staging_bytes_or_zero),
+                    lambda: BaseL1Manager._observations(_l1_staging_bytes_or_zero),
                 )
 
     @property
     def l1_manager_id(self) -> int:
         """Return this manager's stable process-local memory-object owner tag."""
         return self._l1_manager_id
+
+    @property
+    @abstractmethod
+    def backend_type(self) -> L1BackendType:
+        """Return the medium backing this L1.
+
+        Note:
+            Fixed at construction. Read by the gauge callback as soon as the
+            base constructor registers the manager, so subclasses must be able
+            to answer before calling ``super().__init__``.
+        """
+
+    @abstractmethod
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this L1's primary pool.
+
+        Note:
+            Tags are fixed at construction.
+        """
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for L1Manager events.
@@ -965,7 +955,7 @@ class L1Manager(L1ManagerInterface):
         """Check if a key is eligible for eviction (not locked).
 
         This method does NOT acquire the global L1Manager lock.
-        L1Manager.delete() will check again and safely reject a key
+        ``delete()`` will check again and safely reject a key
         that became locked between the check and the actual deletion.
 
         Args:
@@ -1012,169 +1002,25 @@ class L1Manager(L1ManagerInterface):
         """
         return self._staging_bytes
 
-    def get_capacity_bytes_by_backend(self) -> dict[L1BackendType, int]:
-        """Return the current declared L1 capacity per backing medium.
+    def get_capacity_bytes(self) -> int:
+        """Return the current declared L1 capacity in bytes.
 
-        CPU and GDS retain their boot-configured capacity. For Device-DAX,
-        only active arenas count as usable capacity; draining arenas stop
-        accepting allocations and are excluded immediately.
+        The base reports the boot-configured capacity; a medium whose
+        capacity changes at runtime overrides this.
 
         Returns:
-            A fresh mapping from backing-medium type to usable capacity in
-            bytes, with zero-sized media omitted.
-
-        Note:
-            Device-DAX arena state is snapshotted under the allocator's pool
-            lock. A separate usage query may observe an adjacent topology if
-            reconfiguration is concurrent.
+            The usable capacity in bytes.
         """
-        capacities = self._boot_capacity_bytes_by_backend.copy()
-        manager = self._memory_manager
-        if isinstance(manager, DevDaxL1MemoryManager):
-            active_bytes = sum(
-                status.size_in_bytes
-                for status in manager.get_arena_statuses()
-                if status.state is DevDaxArenaState.ACTIVE
-            )
-            if active_bytes > 0:
-                capacities[L1BackendType.DEVDAX] = active_bytes
-            else:
-                capacities.pop(L1BackendType.DEVDAX, None)
-        return capacities
+        return self._boot_capacity_bytes
 
-    def get_l1_memory_desc(self):
-        """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
+    def get_l1_memory_desc(self) -> L1MemoryDesc | None:
+        """Describe the L1 memory buffer that L2 adapters and channels register.
+
+        Returns:
+            The descriptor of the underlying buffer, or None when the medium
+            has no registerable buffer.
+        """
         return self._memory_manager.get_l1_memory_desc()
-
-    def get_memory_tags(self) -> MemoryTags:
-        """Return the memory tags of this L1's primary pool.
-
-        Returns:
-            ``GDS`` for a GDS slab, ``CXL`` for a pure Device-DAX tier, and
-            ``DRAM`` otherwise, all ``LOCAL``.
-
-        Note:
-            A hybrid DRAM + Device-DAX tier reports ``DRAM``, its primary
-            pool. Tags are fixed at construction.
-        """
-        memory_config = self._config.memory_config
-        if self._config.gds_l1_config is not None:
-            segment = MemorySegment.GDS
-        elif memory_config.devdax_path and not memory_config.devdax_size_in_bytes:
-            segment = MemorySegment.CXL
-        else:
-            segment = MemorySegment.DRAM
-        return MemoryTags(segment=segment, residency=MemoryResidency.LOCAL)
-
-    def get_devdax_arena_statuses(self) -> list[DevDaxArenaStatus]:
-        """Return runtime status for every Device-DAX arena.
-
-        Returns:
-            One status per mapped arena, in pool order.
-
-        Raises:
-            L1ReconfigureError: If L1 is not Device-DAX backed.
-        """
-        return self._require_devdax_memory_manager().get_arena_statuses()
-
-    def get_devdax_arena_status(
-        self, device_path: str, offset_in_bytes: int = 0
-    ) -> DevDaxArenaStatus:
-        """Return the status of the Device-DAX arena at ``(device_path, offset)``.
-
-        Args:
-            device_path: The exact path used when the arena was added.
-            offset_in_bytes: Device offset the arena was added with.
-
-        Returns:
-            The arena's current status.
-
-        Raises:
-            L1ReconfigureError: If L1 is not Device-DAX backed (409) or no
-                arena matches (404).
-        """
-        return self._require_devdax_memory_manager().get_arena_status(
-            device_path, offset_in_bytes
-        )
-
-    def owns_range(
-        self, device_path: str, offset_in_bytes: int, size_in_bytes: int
-    ) -> bool:
-        """Return whether L1 maps a range overlapping one on a physical device.
-
-        Args:
-            device_path: Candidate device path or alias.
-            offset_in_bytes: Start of the candidate range on that device.
-            size_in_bytes: Length of the candidate range.
-
-        Returns:
-            ``True`` while an overlapping arena is mapped; ``False`` for
-            non-DAX L1.
-        """
-        manager = self._memory_manager
-        return isinstance(manager, DevDaxL1MemoryManager) and manager.owns_range(
-            device_path, offset_in_bytes, size_in_bytes
-        )
-
-    def memory_region_count(self) -> int:
-        """Return the number of memory regions backing L1.
-
-        Returns:
-            For Device-DAX, the optional DRAM region plus all mapped arenas,
-            including draining arenas. For other memory managers, 1.
-        """
-        manager = self._memory_manager
-        if isinstance(manager, DevDaxL1MemoryManager):
-            return manager.memory_region_count()
-        return 1
-
-    def add_devdax_device(
-        self,
-        device_path: str,
-        size_in_bytes: int,
-        offset_in_bytes: int = 0,
-    ) -> DevDaxArenaStatus:
-        """Add a Device-DAX range to the L1 arena pool.
-
-        Args:
-            device_path: Path of the Device-DAX device to map.
-            size_in_bytes: Number of bytes to map.
-            offset_in_bytes: Byte offset into the device.
-
-        Returns:
-            Status of the newly added arena.
-
-        Raises:
-            L1ReconfigureError: If L1 is not Device-DAX backed or the request
-                cannot be applied.
-        """
-        return self._require_devdax_memory_manager().add_device(
-            device_path, size_in_bytes, offset_in_bytes
-        )
-
-    def remove_devdax_device(
-        self,
-        device_path: str,
-        mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
-        offset_in_bytes: int = 0,
-    ) -> DevDaxArenaStatus:
-        """Remove a Device-DAX arena from the L1 arena pool.
-
-        Args:
-            device_path: Path of the mapped Device-DAX device.
-            mode: Removal strategy. Only drain mode is currently supported.
-            offset_in_bytes: Device offset the arena was added with.
-
-        Returns:
-            Status of the arena after the removal request.
-
-        Raises:
-            L1ReconfigureError: If L1 is not Device-DAX backed or the request
-                cannot be applied.
-        """
-        return self._require_devdax_memory_manager().remove_device(
-            device_path, mode, offset_in_bytes
-        )
 
     @property
     def config(self) -> L1ManagerConfig:
@@ -1182,8 +1028,7 @@ class L1Manager(L1ManagerInterface):
         return self._config
 
     def close(self) -> None:
-        """Close the L1Manager and free all resources."""
-        close_l1_gds_context(self._l1_manager_id)
+        """Free every object, close the memory manager and drop the gauge target."""
         with self._lock:
             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
             for per_tag in self._staging.values():
@@ -1194,8 +1039,8 @@ class L1Manager(L1ManagerInterface):
             self._staging_bytes = 0
 
         self._memory_manager.close()
-        with L1Manager._gauge_lock:
-            L1Manager._gauge_targets.pop(self._l1_manager_id, None)
+        with BaseL1Manager._gauge_lock:
+            BaseL1Manager._gauge_targets.pop(self._l1_manager_id, None)
 
     # Status reporting
     @l1_mgr_synchronized
@@ -1223,10 +1068,9 @@ class L1Manager(L1ManagerInterface):
                 if staged.is_temporary:
                     temporary += 1
         used, total = self._memory_manager.get_memory_usage()
-        capacities = self.get_capacity_bytes_by_backend()
         # ``memory_total_bytes`` is what the allocator currently backs (the
         # grown heap on the lazy tier). ``memory_configured_bytes`` is the
-        # current declared capacity, summed to fit this dict's flat shape.
+        # current declared capacity.
         return {
             "is_healthy": self._memory_manager.memcheck(),
             "total_object_count": len(self._objects) + staging,
@@ -1237,10 +1081,8 @@ class L1Manager(L1ManagerInterface):
             "staging_bytes": self._staging_bytes,
             "memory_used_bytes": used,
             "memory_total_bytes": total,
-            "memory_configured_bytes": sum(capacities.values()),
-            "capacity_bytes_by_backend": {
-                backend.value: size for backend, size in capacities.items()
-            },
+            "memory_configured_bytes": self.get_capacity_bytes(),
+            "backend": self.backend_type.value,
             "memory_usage_ratio": used / total if total > 0 else 0.0,
             "write_ttl_seconds": self._write_ttl_seconds,
             "read_ttl_seconds": self._read_ttl_seconds,
@@ -1421,40 +1263,16 @@ class L1Manager(L1ManagerInterface):
 
     def _object_meta(self, memory_obj: MemoryObj) -> L1ObjectMeta:
         """Build the listener-facing metadata for one resident object."""
-        return L1ObjectMeta(
-            size_bytes=memory_obj.get_size(),
-            backend=self._memory_manager.get_backend_type(memory_obj),
-        )
-
-    def _require_devdax_memory_manager(self) -> DevDaxL1MemoryManager:
-        """Return the Device-DAX manager or raise a reconfiguration error."""
-        if not isinstance(self._memory_manager, DevDaxL1MemoryManager):
-            raise L1ReconfigureError(
-                409,
-                "L1 is not Device-DAX backed (--l1-devdax-path not set)",
-            )
-        return self._memory_manager
+        return L1ObjectMeta(size_bytes=memory_obj.get_size(), backend=self.backend_type)
 
     @classmethod
     def _observations(
-        cls, value: Callable[["L1Manager"], int | float]
+        cls, value: Callable[["BaseL1Manager"], int | float]
     ) -> list[tuple[int | float, dict[str, object]]]:
-        with cls._gauge_lock:
-            managers = list(cls._gauge_targets.values())
+        """Snapshot ``value`` for every live manager, tagged by L1 tag and medium."""
+        with BaseL1Manager._gauge_lock:
+            managers = list(BaseL1Manager._gauge_targets.values())
         return [
-            (
-                value(m),
-                {
-                    "l1_tag": m.config.tag,
-                    "backend": "gds"
-                    if m.config.gds_l1_config
-                    else "dram+devdax"
-                    if m.config.memory_config.devdax_path
-                    and m.config.memory_config.devdax_size_in_bytes
-                    else "devdax"
-                    if m.config.memory_config.devdax_path
-                    else "dram",
-                },
-            )
+            (value(m), {"l1_tag": m.config.tag, "backend": m.backend_type.value})
             for m in managers
         ]

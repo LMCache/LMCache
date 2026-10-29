@@ -74,6 +74,23 @@ def _l1_offset_bytes(values: dict[str, object]) -> int:
     return int(value * (1 << 30))
 
 
+def _parse_shared_devdax(raw: object) -> "SharedDevDaxConfig":
+    """Read the JSON ``shared`` object; ``SharedDevDaxConfig`` checks the values."""
+    if not isinstance(raw, dict):
+        raise ValueError("shared must be a JSON object")
+    fields = {"orchestrator", "region_id", "client_id", "rpc_timeout_seconds"}
+    if unknown := set(raw) - fields:
+        raise ValueError(f"Unknown shared fields: {sorted(unknown)}")
+    names = ("orchestrator", "region_id", "client_id")
+    for name in names:
+        if not isinstance(raw.get(name), str):
+            raise ValueError(f"shared.{name} must be a string")
+    return SharedDevDaxConfig(
+        **{name: raw[name] for name in names},
+        rpc_timeout_seconds=_l1_number(raw, "rpc_timeout_seconds", 5.0),
+    )
+
+
 def _parse_l1_common(
     cls: type[_L1ConfigT],
     values: dict[str, object],
@@ -159,7 +176,7 @@ HUGEPAGE_SIZE_BYTES = 2 * 1024 * 1024
 _COMPACT_UNEVICTABLE_ALLOWED = "/proc/sys/vm/compact_unevictable_allowed"
 
 
-_HYBRID_L1_SINGLE_REGION_L2_ADAPTERS = {
+_SINGLE_REGION_L2_ADAPTERS = {
     "nixl_store",
     "nixl_store_dynamic",
 }
@@ -190,7 +207,7 @@ def requires_single_l1_memory_region(
     """Return the adapter type requiring a single L1 memory region, if any."""
     adapter_config = unwrap_l2_adapter_config(adapter_config)
     type_name = get_type_name_for_config(adapter_config)
-    if type_name in _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS:
+    if type_name in _SINGLE_REGION_L2_ADAPTERS:
         return type_name
     if (
         type_name == "mooncake_store"
@@ -237,63 +254,6 @@ def _check_hugepage_availability(size_in_bytes: int) -> None:
         )
 
 
-def _infer_l1_devdax_overflow_from_dax_adapter(
-    memory_config: "L1MemoryManagerConfig",
-    l2_adapter_config: L2AdaptersConfig,
-) -> None:
-    if not memory_config.devdax_path or memory_config.devdax_size_in_bytes:
-        return
-
-    l1_devdax_path = memory_config.devdax_path
-    remaining_adapters: list[L2AdapterConfigBase] = []
-    matched_dax_device: Any | None = None
-    for adapter_config in l2_adapter_config.adapters:
-        if get_type_name_for_config(adapter_config) != "dax":
-            remaining_adapters.append(adapter_config)
-            continue
-
-        dax_adapter = cast(Any, adapter_config)
-        devices = list(getattr(dax_adapter, "devices", []))
-        matched_devices = [
-            device
-            for device in devices
-            if getattr(device, "device_path", None) == l1_devdax_path
-            and getattr(device, "offset_bytes", 0)
-            == memory_config.devdax_offset_in_bytes
-        ]
-        if not matched_devices:
-            remaining_adapters.append(adapter_config)
-            continue
-        if matched_dax_device is not None or len(matched_devices) > 1:
-            raise ValueError(
-                "Only one DAX device can match l1-devdax-path for hybrid L1"
-            )
-
-        matched_dax_device = matched_devices[0]
-        remaining_devices = [
-            device for device in devices if device is not matched_dax_device
-        ]
-        if remaining_devices:
-            remaining_dax_adapter = type(dax_adapter)(
-                devices=remaining_devices,
-                hotplug_enabled=dax_adapter.hotplug_enabled,
-                slot_bytes=dax_adapter.slot_bytes,
-                num_store_workers=dax_adapter.num_store_workers,
-                num_lookup_workers=dax_adapter.num_lookup_workers,
-                num_load_workers=dax_adapter.num_load_workers,
-            )
-            remaining_dax_adapter.eviction_config = dax_adapter.eviction_config
-            remaining_dax_adapter.persist_config = dax_adapter.persist_config
-            remaining_dax_adapter.serde_config = dax_adapter.serde_config
-            remaining_adapters.append(remaining_dax_adapter)
-
-    if matched_dax_device is None:
-        return
-    max_dax_size_gb = matched_dax_device.max_dax_size_gb
-    memory_config.devdax_size_in_bytes = int(max_dax_size_gb * (1 << 30))
-    l2_adapter_config.adapters = remaining_adapters
-
-
 @dataclass
 class L1MemoryManagerConfig:
     """
@@ -319,10 +279,8 @@ class L1MemoryManagerConfig:
     """ Allocate the L1 pool from the pre-allocated 2 MiB hugepage pool. """
 
     devdax_path: str | None = None
-    """ Optional Device-DAX path to use as the L1 backing arena. """
-
-    devdax_size_in_bytes: int = 0
-    """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
+    """ Optional Device-DAX path to use as the L1 backing arena; the whole
+    pool then lives on the device. """
 
     devdax_offset_in_bytes: int = 0
     """ Page-aligned byte offset into ``devdax_path`` where the L1 mapping
@@ -337,10 +295,6 @@ class L1MemoryManagerConfig:
         if self.devdax_path is not None:
             self.devdax_path = self.devdax_path.strip()
 
-        if self.devdax_size_in_bytes < 0:
-            raise ValueError("devdax_size_in_bytes must be >= 0")
-        if self.devdax_size_in_bytes and not self.devdax_path:
-            raise ValueError("devdax_size_in_bytes requires devdax_path")
         if self.devdax_offset_in_bytes < 0:
             raise ValueError("devdax_offset_in_bytes must be >= 0")
         if self.devdax_offset_in_bytes and not self.devdax_path:
@@ -429,6 +383,36 @@ class GdsL1Config:
     """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
 
 
+@dataclass(frozen=True)
+class SharedDevDaxConfig:
+    """The ``shared`` object of a Device-DAX L1.
+
+    A memory orchestrator owns the region's allocation and object readiness;
+    each MP server maps the region through its L1's own ``path`` and ``offset_gb``.
+    """
+
+    orchestrator: str
+    """ ``host:port`` of the region's memory orchestrator. """
+
+    region_id: str
+    """ Must equal the orchestrator's region ID. """
+
+    client_id: str
+    """ Stable identity of this MP server, unique among the region's servers. """
+
+    rpc_timeout_seconds: float = 5.0
+    """ Deadline of each orchestrator RPC attempt. """
+
+    def __post_init__(self) -> None:
+        for name in ("orchestrator", "region_id", "client_id"):
+            if not getattr(self, name).strip():
+                raise ValueError(f"shared.{name} must be a non-empty string")
+        if not (
+            math.isfinite(self.rpc_timeout_seconds) and self.rpc_timeout_seconds > 0
+        ):
+            raise ValueError("shared.rpc_timeout_seconds must be finite and positive")
+
+
 @dataclass
 class L1ManagerConfig:
     """
@@ -455,51 +439,44 @@ class L1ManagerConfig:
     """Per-L1 eviction settings; None inherits StorageManagerConfig defaults."""
 
 
-def get_configured_capacity_bytes(
-    config: L1ManagerConfig,
-) -> dict[L1BackendType, int]:
-    """Return the boot-configured L1 capacity of each backing medium.
+def get_configured_capacity_bytes(config: L1ManagerConfig) -> int:
+    """Return the boot-configured capacity of an L1 in bytes.
 
     The boot-time source for "how large is L1". Unlike
-    ``L1Manager.get_memory_usage()``, whose total is the grown heap on the
-    lazy tier, this is stable from boot. Keyed per medium because a hybrid
-    Device-DAX tier spans two, matching how L1 events tag placements.
-    Reports the *configured* topology, so devices added later via
-    ``add_device`` are not counted. ``L1Manager`` overlays live Device-DAX
-    arena capacity when it builds a runtime declaration.
-
-    Expects a **normalized** config: ``normalize_storage_manager_config``
-    back-fills ``devdax_size_in_bytes`` from a matching DAX L2 adapter,
-    without which a hybrid deployment reads as pure Device-DAX. A config
-    from a constructed ``StorageManagerConfig`` satisfies this already.
+    ``BaseL1Manager.get_memory_usage()``, whose total is the grown heap on
+    the lazy tier, this is stable from boot. Reports the *configured*
+    topology, so Device-DAX arenas added later via ``add_device`` are not
+    counted; ``DevDaxL1Manager.get_capacity_bytes()`` reports the live value.
 
     Args:
         config: The L1 manager configuration.
 
     Returns:
-        Configured bytes per medium, omitting any sized zero.
+        Configured bytes of the medium ``config`` selects.
     """
     if config.gds_l1_config is not None:
-        size = config.gds_l1_config.size_in_bytes
-        return {L1BackendType.GDS: size} if size > 0 else {}
+        return config.gds_l1_config.size_in_bytes
+    return config.memory_config.size_in_bytes
 
-    memory_config = config.memory_config
-    if memory_config.devdax_path:
-        # Mirrors DevDaxL1MemoryManager.__init__: an unset devdax size means
-        # the whole tier is Device-DAX, else size_in_bytes is the DRAM half.
-        devdax_size = memory_config.devdax_size_in_bytes or memory_config.size_in_bytes
-        local_size = (
-            memory_config.size_in_bytes if memory_config.devdax_size_in_bytes else 0
-        )
-        capacities: dict[L1BackendType, int] = {}
-        if devdax_size > 0:
-            capacities[L1BackendType.DEVDAX] = devdax_size
-        if local_size > 0:
-            capacities[L1BackendType.DRAM] = local_size
-        return capacities
 
-    size = memory_config.size_in_bytes
-    return {L1BackendType.DRAM: size} if size > 0 else {}
+def l1_medium_name(config: L1ManagerConfig) -> str:
+    """Return the medium an L1 configuration selects.
+
+    Mirrors ``create_l1_manager``: GDS when ``gds_l1_config`` is set,
+    Device-DAX when ``memory_config.devdax_path`` is set, else DRAM.
+
+    Args:
+        config: The L1 manager configuration.
+
+    Returns:
+        ``"gds"``, ``"devdax"`` or ``"dram"``, the manager's ``backend_type``
+        wire value.
+    """
+    if config.gds_l1_config is not None:
+        return L1BackendType.GDS.value
+    if config.memory_config.devdax_path:
+        return L1BackendType.DEVDAX.value
+    return L1BackendType.DRAM.value
 
 
 @dataclass
@@ -582,7 +559,10 @@ class DRAML1ManagerConfig(L1ManagerConfig):
 
 @dataclass
 class DevDaxL1ManagerConfig(L1ManagerConfig):
-    """A separate Device-DAX L1 with no implicit DRAM overflow pool."""
+    """A Device-DAX L1 whose whole pool lives on the device."""
+
+    shared: SharedDevDaxConfig | None = None
+    """ Memory orchestrator binding; None keeps the private Device-DAX L1. """
 
     @classmethod
     def from_dict(
@@ -596,6 +576,8 @@ class DevDaxL1ManagerConfig(L1ManagerConfig):
 
         Args:
             values: JSON fields for this backend, including tag and size_gb.
+                An optional ``shared`` object binds the range to a memory
+                orchestrator; its eviction policy then defaults to ``noop``.
             defaults: Global eviction settings, or None to require a local policy.
             read_ttl: Default read-lock lifetime in seconds.
             write_ttl: Default write-lock lifetime in seconds.
@@ -606,15 +588,34 @@ class DevDaxL1ManagerConfig(L1ManagerConfig):
         Raises:
             ValueError: A field is unknown, malformed, or incompatible.
         """
+        if "shared" in values and "eviction" not in values:
+            values = {**values, "eviction": {"eviction_policy": "noop"}}
         config = _parse_l1_common(
-            cls, values, defaults, read_ttl, write_ttl, {"path", "offset_gb"}
+            cls, values, defaults, read_ttl, write_ttl, {"path", "offset_gb", "shared"}
         )
         config.memory_config = replace(
             config.memory_config,
             devdax_path=_l1_path(values),
             devdax_offset_in_bytes=_l1_offset_bytes(values),
         )
+        if "shared" in values:
+            config.shared = _parse_shared_devdax(values["shared"])
         return config
+
+
+def validate_shared_devdax_l1(config: DevDaxL1ManagerConfig) -> None:
+    """Reject a shared Device-DAX L1 this revision cannot serve, before mapping.
+
+    Args:
+        config: A Device-DAX L1 configuration with ``shared`` set.
+
+    Raises:
+        ValueError: The path is missing or the eviction policy is not ``noop``.
+    """
+    if not config.memory_config.devdax_path:
+        raise ValueError("A shared Device-DAX L1 requires a path")
+    if config.eviction is not None and config.eviction.eviction_policy != "noop":
+        raise ValueError("A shared Device-DAX L1 requires eviction_policy noop")
 
 
 @dataclass
@@ -684,6 +685,9 @@ class StorageManagerConfig:
     prefetch_policy: str = "default"
     """ The L2 prefetch policy name. """
 
+    write_policy: str = "default"
+    """ The L1 write-placement policy name. """
+
     prefetch_inflight_watermark: float = 0.5
     """ Fraction of each L1's capacity that in-flight L2 prefetches may stage
     before new prefetch requests wait, in (0, 1]. """
@@ -714,41 +718,11 @@ class StorageManagerConfig:
                 "prefetch_inflight_watermark must be in (0, 1], got "
                 f"{self.prefetch_inflight_watermark}"
             )
-        normalize_storage_manager_config(self)
         validate_storage_manager_config(self)
-
-
-def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
-    """Normalize storage manager configuration.
-
-    This consumes a matching DAX adapter as hybrid L1 Device-DAX overflow
-    capacity.
-
-    Args:
-        config: Storage manager configuration to normalize in place.
-
-    Returns:
-        None.
-
-    Raises:
-        ValueError: If more than one DAX device matches ``l1-devdax-path``.
-    """
-    # Preserve legacy hybrid inference only for the legacy single-L1 interface.
-    if (
-        len(config.l1_manager_configs) == 1
-        and type(config.l1_manager_config) is L1ManagerConfig
-    ):
-        _infer_l1_devdax_overflow_from_dax_adapter(
-            config.l1_manager_config.memory_config,
-            config.l2_adapter_config,
-        )
 
 
 def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     """Validate storage manager configuration.
-
-    This rejects L2 adapters that require a single contiguous L1 memory
-    descriptor when hybrid L1 Device-DAX overflow is enabled.
 
     Args:
         config: Storage manager configuration to validate.
@@ -757,10 +731,21 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         None.
 
     Raises:
-        ValueError: If mutually exclusive L1 tiers are both configured, or
-            hybrid L1 is paired with incompatible L2 adapters.
+        ValueError: If mutually exclusive L1 tiers are both configured, DRAM
+            managers share a shared-memory name, a ``dax`` L2 adapter maps
+            the device range of a Device-DAX L1, or more than one shared
+            Device-DAX L1 or an unsupported one is configured.
     """
     by_tag = {c.tag: c for c in config.l1_manager_configs}
+    shared = [
+        c
+        for c in by_tag.values()
+        if isinstance(c, DevDaxL1ManagerConfig) and c.shared is not None
+    ]
+    if len(shared) > 1:
+        raise ValueError("Only one shared Device-DAX L1 is supported per MP server")
+    for c in shared:
+        validate_shared_devdax_l1(c)
     shm_names = [
         c.memory_config.shm_name
         for c in by_tag.values()
@@ -773,19 +758,25 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     for l1 in by_tag.values():
         if l1.gds_l1_config is not None and l1.memory_config.devdax_path:
             raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
-    # A hybrid L1 only appears in single-L1 configs, so every adapter binds
-    # to it.
-    has_hybrid_l1 = any(
-        c.memory_config.devdax_path and c.memory_config.devdax_size_in_bytes
+    # A device range belongs to exactly one owner, an L1 or a dax L2 adapter;
+    # reject the overlap here, before the mapping fails deep inside startup.
+    l1_devices = {
+        (c.memory_config.devdax_path, c.memory_config.devdax_offset_in_bytes)
         for c in by_tag.values()
-    )
+        if c.memory_config.devdax_path
+    }
     for adapter_config in config.l2_adapter_config.adapters:
-        adapter_name = requires_single_l1_memory_region(adapter_config)
-        if has_hybrid_l1 and adapter_name:
-            raise ValueError(
-                "Hybrid DRAM + Device-DAX L1 cannot be used with L2 adapters "
-                f"that register a single L1 memory region: {adapter_name}"
-            )
+        device_config = unwrap_l2_adapter_config(adapter_config)
+        if get_type_name_for_config(device_config) != "dax":
+            continue
+        for device in cast(Any, device_config).devices:
+            if (device.device_path, device.offset_bytes) in l1_devices:
+                raise ValueError(
+                    f"Device-DAX range {device.device_path}@{device.offset_bytes} "
+                    "is both an L1 and a dax L2 adapter device. Hybrid DRAM + "
+                    "Device-DAX overflow is gone: give the DAX L1 its own "
+                    "--l1-manager entry and keep the adapter on another range."
+                )
 
 
 def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
@@ -894,9 +885,8 @@ def add_storage_manager_args(
             "Optional /dev/dax device or mmap-able file to use as the L1 "
             "backing arena. When set, L1 lazy allocation and SHM transfer "
             "advertising must be disabled because the L1 bytes live in the DAX "
-            'map. Set --no-l1-use-lazy and --shm-name "". '
-            "If a DAX L2 adapter with the same device_path is registered, "
-            "that adapter's max_dax_size_gb is used as L1 overflow size."
+            'map. Set --no-l1-use-lazy and --shm-name "". The whole L1 pool '
+            "lives on the device; a dax L2 adapter must use another range."
         ),
     )
     memory_group.add_argument(

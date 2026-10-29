@@ -156,7 +156,7 @@ class TestFp8SerdeFsRoundTrip:
             mem_obj = reserved[k]
             assert mem_obj.tensor is not None
             mem_obj.tensor.view(kv_shape).view(kv_dtype).copy_(orig)
-        sm.finish_write(keys)
+        sm.finish_write(list(reserved))
 
         # ---- Step 2: wait for L2 store to disk ----
         # The FS adapter writes one file per key (staged as "*.tmp" in the

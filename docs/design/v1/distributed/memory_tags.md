@@ -1,13 +1,18 @@
 # Memory Tags for L1 Managers and L2 Adapters
 
 > **Scope — read before using these types.**
-> `MemorySegment`, `MemoryResidency` and `MemoryTags` exist for exactly two
+> `MemorySegment`, `MemoryResidency` and `MemoryTags` exist for exactly three
 > purposes:
 >
 > 1. **L1-L2 affinity**: choosing the L1 manager whose buffers an L2 adapter
 >    stores from and loads into.
 > 2. **Prefetch target filtering**: restricting a prefetch to part of L1/L2
 >    (e.g. P2P serving looks only at local DRAM L1 and local L2).
+> 3. **Addressing an L1**: `StorageManager.get_l1_manager_by_tags(tags)`
+>    returns the one L1 manager with exactly those tags, so a component that
+>    needs a particular L1 (the P2P controller registering the local DRAM
+>    buffer with the transfer channel, the Device-DAX reconfigure routes)
+>    asks for it by what it is, not by position.
 >
 > Do **not** use them for anything else, such as store routing, eviction,
 > quotas, metrics labels, capacity reporting, or feature gating, without first
@@ -88,7 +93,6 @@ All L1 managers are `LOCAL`. The segment names the primary pool:
 |---|---|
 | `DRAM` | `(DRAM, LOCAL)` |
 | `DEVDAX` (pure Device-DAX) | `(CXL, LOCAL)` |
-| legacy hybrid DRAM + Device-DAX overflow | `(DRAM, LOCAL)` |
 | `GDS` slab | `(GDS, LOCAL)` |
 
 ### L2 own tags
@@ -136,11 +140,24 @@ The function is pure and its inputs are fixed after startup, so
 Consequences:
 
 - An L2 adapter sees completed stores only from its L1. In a DRAM + DEVDAX
-  server, objects that overflow into Device-DAX are not stored to L2.
+  server, objects the write policy places in Device-DAX are not stored to L2.
 - With several DRAM L1s, every adapter binds to the first one. Choosing among
   them (e.g. by NUMA node) would need the typed field described above.
 - A future GDS/GDR adapter overrides `get_wanted_l1_memory_tags()`, for
   example to `((VRAM, DUMMY),)`, once a dummy L1 exists.
+
+## Addressing an L1
+
+`StorageManager.get_l1_manager_by_tags(tags)` returns the one manager in
+`l1_managers()` whose tags equal `tags` and raises `ValueError` when there
+is none or more than one. Two callers:
+
+- `p2p_controller.py` resolves `MemoryTags(DRAM, LOCAL)` at start and
+  registers that manager's `get_l1_memory_desc()` with the transfer channel
+  (a `ValueError` or a `None` descriptor fails startup).
+- The `/reconfigure/dax/l1/*` routes resolve `MemoryTags(CXL, LOCAL)`
+  (`StorageManager._devdax_l1()`), narrow it to `DevDaxL1Manager`, and answer
+  `409` when there is no Device-DAX L1 or more than one.
 
 ## Prefetch target filtering
 

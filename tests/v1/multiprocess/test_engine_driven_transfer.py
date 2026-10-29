@@ -2299,7 +2299,10 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
     assert isinstance(prepare_response, PrepareStoreResponse)
     assert prepare_response.context == {"slots": [], "chunk_indices": []}
     reserved_keys = mock_storage.reserve_write.call_args[0][0]
-    mock_storage.finish_write.assert_called_once_with(reserved_keys)
+    mock_storage.finish_write.assert_called_once_with(
+        reserved_keys,
+        l1_owners={k: memory_obj.get_l1_manager() for k in reserved_keys},
+    )
 
 
 def test_server_shm_transport_uses_engine_level_config(

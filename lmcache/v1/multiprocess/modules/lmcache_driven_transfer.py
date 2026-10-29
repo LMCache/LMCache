@@ -18,7 +18,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
-from lmcache.v1.distributed.storage_manager import L1WriteCompletion
+from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
@@ -201,13 +201,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._device_host_func_dispatcher = DeviceHostFuncDispatcher()
         self._device_host_func_dispatcher.register(
             "finish_write",
-            self._ctx.storage_manager.finish_write,
-            payload_type=list[ObjectKey],
+            self._finish_write,
+            payload_type=dict[ObjectKey, int],
         )
         self._device_host_func_dispatcher.register(
-            "finish_write_by_owner",
-            self._ctx.storage_manager.finish_write_by_owner,
-            payload_type=L1WriteCompletion,
+            "abort_write",
+            self._abort_write,
+            payload_type=dict[ObjectKey, int],
         )
         self._device_host_func_dispatcher.register(
             "finish_read_prefetched",
@@ -236,6 +236,24 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         entry = self.get_and_touch_context_entry(instance_id)
         if entry is not None:
             entry.cache_context.release_imported_event(import_token)
+
+    def _finish_write(self, l1_owners: dict[ObjectKey, int]) -> None:
+        """Admit a store's reserved objects once their device copies landed.
+
+        Args:
+            l1_owners: The L1 manager that reserved each stored key.
+        """
+        self._ctx.storage_manager.finish_write(
+            list(l1_owners.keys()), l1_owners=l1_owners
+        )
+
+    def _abort_write(self, l1_owners: dict[ObjectKey, int]) -> None:
+        """Discard a failed store's reserved objects once their copies drained.
+
+        Args:
+            l1_owners: The L1 manager that reserved each key.
+        """
+        self._ctx.storage_manager.abort_write(list(l1_owners.keys()), l1_owners)
 
     def register_host_func(self, kind: str, handler: Any, payload_type: Any) -> None:
         """Register *handler* for *kind* on the per-process device host-func
@@ -620,9 +638,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             store is skipped and nothing is committed; a subsequent retrieve misses
             and the engine recomputes. The boolean result reports whether the
             store completed without such a failure.
-            Failed copies or completion preparation retain staging reservations
-            under the existing write-TTL rules; queued GPU writes may still
-            reference those buffers.
+            Failed copies or completion preparation abort their reservations
+            on the copy stream, after the queued GPU writes into them drain.
         """
         st = time.perf_counter()
 
@@ -760,6 +777,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
             reserved_dict: dict[ObjectKey, MemoryObj] = {}
             all_dict: dict[ObjectKey, MemoryObj] = {}
+            # Captured before any copy runs, so a failed store aborts per owner.
+            l1_owners: dict[ObjectKey, int] = {}
             total_bytes: int = 0
             store_succeeded = False
             try:
@@ -778,6 +797,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         keys_to_reserve, layout_desc
                     )
                     all_dict.update(reserved_dict)
+                    l1_owners.update(l1_owners_of(reserved_dict))
                     if reserved_dict:
                         total_bytes += next(
                             iter(reserved_dict.values())
@@ -802,11 +822,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         block_ids_host=gpu_block_ids,
                     )
 
-                completion = (
-                    self._ctx.storage_manager.prepare_write_completion(all_dict)
-                    if all_dict
-                    else []
-                )
                 store_succeeded = True
             except Exception:
                 logger.exception("Cannot store keys due to exception")
@@ -818,11 +833,16 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 if stored_count:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
-                        "finish_write_by_owner",
-                        completion,
+                        "finish_write",
+                        l1_owners,
                     )
                 else:
                     total_bytes = 0
+                    if l1_owners:
+                        # Abort after the partial copies drain, not at write TTL.
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream, "abort_write", l1_owners
+                        )
                 num_tokens = num_chunks * self._ctx.chunk_size if stored_count else 0
                 self._ctx.event_bus.publish_on_stream(
                     cache_context.cupy_stream,

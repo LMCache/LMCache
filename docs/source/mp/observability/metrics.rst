@@ -723,7 +723,7 @@ Adapters with no in-flight work emit no datapoint for that scrape.
    * - ``lmcache_mp.l1_usage_ratio``
      - ObservableGauge
      - L1 used/total ratio (``0.0``–``1.0``), sampled at scrape time
-       from ``L1Manager.get_memory_usage()``. Returns ``0.0`` when the
+       from ``BaseL1Manager.get_memory_usage()``. Returns ``0.0`` when the
        gauge target is not yet wired up or ``total_bytes`` is zero, so
        the callback never raises during a scrape. Compare against the
        eviction watermark (default ``0.8``) to read whether the

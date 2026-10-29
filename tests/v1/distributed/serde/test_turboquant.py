@@ -459,7 +459,7 @@ def test_turboquant_storage_manager_roundtrip(
             obj.tensor.copy_(data)
             original_by_key[key] = data.detach().clone()
 
-        sm.finish_write(list(ret.keys()))
+        sm.finish_write(list(ret))
 
         ok = _wait_for_mock_l2_store(
             sm,
@@ -689,7 +689,7 @@ def test_turboquant_fs_storage_manager_roundtrip(
             obj.tensor.copy_(data)
             original_by_key[key] = data.detach().clone()
 
-        sm.finish_write(list(ret.keys()))
+        sm.finish_write(list(ret))
 
         ok = _wait_for_fs_l2_store(
             sm,
