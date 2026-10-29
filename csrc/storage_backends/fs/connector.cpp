@@ -84,8 +84,9 @@ static size_t effective_read_budget(int num_read_workers, size_t budget) {
 FSConnector::FSConnector(std::string base_path, int num_workers,
                          std::string relative_tmp_dir, bool use_odirect,
                          size_t read_ahead_size, int num_read_workers,
-                         size_t read_max_bytes_in_flight)
-    : ConnectorBase(num_workers),
+                         size_t read_max_bytes_in_flight,
+                         WorkerPoolConfig worker_pool_config)
+    : ConnectorBase(num_workers, std::move(worker_pool_config)),
       base_path_(std::move(base_path)),
       relative_tmp_dir_(std::move(relative_tmp_dir)),
       use_odirect_(use_odirect),
