@@ -16,7 +16,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import quote as url_quote
 from urllib.parse import urlencode
 import asyncio
@@ -450,9 +450,8 @@ class S3L2Adapter(L2AdapterInterface):
             set()
         )  # tenant buckets provisioned this process
         self._bucket_creation_lock = threading.Lock()  # serialize provisioning
-        self._mgmt_s3 = (
-            None  # lazy boto3 client for bucket create/lifecycle (control plane)
-        )
+        # lazy boto3 client for bucket create/lifecycle (control plane)
+        self._mgmt_s3: Optional[Any] = None
         # Auto-provision a tenant bucket on first use (+ TTL). Disable to require
         # buckets to be pre-created by an onboarding hook.
         self._auto_create_bucket = config.s3_bucket_mode == "per_cache_salt"
@@ -921,20 +920,22 @@ class S3L2Adapter(L2AdapterInterface):
                 from botocore.exceptions import ClientError
                 import boto3
 
-                if self._mgmt_s3 is None:
-                    self._mgmt_s3 = boto3.client(
+                mgmt_s3 = self._mgmt_s3
+                if mgmt_s3 is None:
+                    mgmt_s3 = boto3.client(
                         "s3",
                         region_name=self._region,
                         aws_access_key_id=self._config.aws_access_key_id,
                         aws_secret_access_key=self._config.aws_secret_access_key,
                     )
+                    self._mgmt_s3 = mgmt_s3
                 try:
                     # us-east-1 is the S3 default region and rejects an explicit
                     # LocationConstraint; every other region requires it.
                     if self._region == "us-east-1":
-                        self._mgmt_s3.create_bucket(Bucket=bucket)
+                        mgmt_s3.create_bucket(Bucket=bucket)
                     else:
-                        self._mgmt_s3.create_bucket(
+                        mgmt_s3.create_bucket(
                             Bucket=bucket,
                             CreateBucketConfiguration={
                                 "LocationConstraint": self._region
@@ -945,7 +946,7 @@ class S3L2Adapter(L2AdapterInterface):
                     code = e.response.get("Error", {}).get("Code", "")
                     if code not in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
                         raise
-                self._mgmt_s3.put_bucket_lifecycle_configuration(
+                mgmt_s3.put_bucket_lifecycle_configuration(
                     Bucket=bucket,
                     LifecycleConfiguration={
                         "Rules": [
