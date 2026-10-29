@@ -375,8 +375,8 @@ tiers selected at startup (all satisfy ``L1ManagerProtocol``):
 - ``DevDaxL1MemoryManager`` -- a Device-DAX-backed L1 slab when
   ``--l1-devdax-path`` is set. A pure Device-DAX configuration maps the DAX
   device as the full L1 arena; a hybrid configuration uses DRAM first and
-  spills overflow allocations into Device-DAX. See the *L1 Memory Manager*
-  section of :doc:`configuration` for the accepted knobs.
+  spills overflow allocations into Device-DAX. See :ref:`mp-devdax-l1` for
+  the deployment guide and accepted knobs.
 - ``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is set.
   The bytes live on disk; reads/writes DMA directly between the GPU staging
   buffer and the slab, driven by the process-global ``GDSContext``

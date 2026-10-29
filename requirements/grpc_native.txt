@@ -1,0 +1,2 @@
+# `lmcache[grpc-native]` extra: Rust gRPC front for --grpc-server-mode native
+pygrpc-native>=0.1.0

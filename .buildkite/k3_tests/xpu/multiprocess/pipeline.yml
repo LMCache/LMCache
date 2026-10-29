@@ -55,34 +55,321 @@ x-pod-2xpu: &pod-2xpu
     - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
     - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 128Gi } }
 
+x-mp-env: &mp-env
+  MODEL: "Qwen/Qwen3-0.6B"
+  LMCACHE_MP_TRANSFER_MODE: "engine_driven"
+  L1_USE_LAZY: "false"
+  CPU_BUFFER_SIZE: "80"
+  BATCH_INVARIANT: "0"
+  VLLM_DISABLE_PREFIX_CACHING: "true"
+  MAX_MODEL_LEN: "40960"
+  MAX_NUM_BATCHED_TOKENS: "32768"
+  MAX_WAIT_SECONDS: "900"
+  ENFORCE_EAGER: "1"
+  VLLM_USE_STANDALONE_COMPILE: "0"
+
 steps:
   - group: ":xpu: Multiprocess (1-pod)"
     steps:
-      - label: ":xpu: lm_eval"
+      - label: ":xpu: lm_eval_full_attn / engine_driven / {{matrix.transport}}"
         command: |
-          export LMCACHE_MP_TRANSFER_MODE="engine_driven"
-          export L1_USE_LAZY="false"
-          export ENFORCE_EAGER="1"
-          export VLLM_USE_STANDALONE_COMPILE="0"
-          export CPU_BUFFER_SIZE="80"
+          case "{{matrix.transport}}" in
+            inline) export L1_USE_LAZY="true" ;;
+            shm) export L1_USE_LAZY="false" ;;
+          esac
           .buildkite/k3_tests/xpu/multiprocess/run.sh lm_eval
+        env:
+          <<: *mp-env
+          MODEL: "Qwen/Qwen3-1.7B"
+          NUM_CONCURRENT: "64"
+          BATCH_INVARIANT: "1"
+          VERIFY_LMCACHE_RETRIEVAL: "true"
+          VLLM_DISABLE_PREFIX_CACHING: "false"
+          MAX_MODEL_LEN: "auto"
+          MAX_NUM_BATCHED_TOKENS: ""
+          MAX_WAIT_SECONDS: "300"
+        matrix:
+          setup:
+            transport:
+              - "inline"
+              - "shm"
         timeout_in_minutes: 45
         retry: *flaky-retry
         agents: { queue: "intel-xpu" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
 
-      - label: ":xpu: vllm_bench"
+      # Engine-driven multi-group (hybrid KV) coverage: a GDN + full-attention
+      # hybrid at TP1 on one XPU, over both transports. Inline keeps L1 lazy;
+      # SHM disables it so the server maps its SHM pool. vLLM's XPU platform
+      # rounds a GDN model's block size up to a multiple of 64 (544 -> 576), so
+      # the LMCache chunk follows it. The scheduler token budget is larger
+      # to improve evaluation throughput.
+      - label: ":xpu: lm_eval_gdn / engine_driven / {{matrix.transport}}"
         command: |
-          export LMCACHE_MP_TRANSFER_MODE="engine_driven"
-          export L1_USE_LAZY="false"
-          export ENFORCE_EAGER="1"
-          export VLLM_USE_STANDALONE_COMPILE="0"
-          export CPU_BUFFER_SIZE="80"
-          export VLLM_DISABLE_PREFIX_CACHING="true"
-          .buildkite/k3_tests/xpu/multiprocess/run.sh vllm_bench
+          case "{{matrix.transport}}" in
+            inline) export L1_USE_LAZY="true" ;;
+            shm) export L1_USE_LAZY="false" ;;
+          esac
+          .buildkite/k3_tests/xpu/multiprocess/run.sh hma_lm_eval_qwen3_5
+        env:
+          <<: *mp-env
+          MODEL: "Qwen/Qwen3.5-0.8B"
+          ENGINE_DRIVEN_TRANSPORT: "{{matrix.transport}}"
+          CHUNK_SIZE: "576"
+          NUM_CONCURRENT: "64"
+          VLLM_DISABLE_PREFIX_CACHING: "false"
+          MAX_MODEL_LEN: "auto"
+          MAX_WAIT_SECONDS: "300"
+        matrix:
+          setup:
+            transport:
+              - "inline"
+              - "shm"
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      # Random weights make task accuracy meaningless. Warm both caches, then
+      # compare GPU APC and LMCache token IDs/logprobs at the same prefix boundary.
+      - label: ":xpu: hma_kda_mla_correctness / engine_driven / {{matrix.transport}}"
+        command: |
+          case "{{matrix.transport}}" in
+            inline) export L1_USE_LAZY="true" ;;
+            shm) export L1_USE_LAZY="false" ;;
+          esac
+          .buildkite/k3_tests/xpu/multiprocess/run.sh hma_kda_mla_correctness
+        env:
+          <<: *mp-env
+          MODEL: "yujiepan/kimi-linear-tiny-random"
+          CPU_BUFFER_SIZE: "4"
+          MAX_WAIT_SECONDS: "300"
+          VLLM_KV_LOAD_FAILURE_POLICY: "fail"
+          ENGINE_DRIVEN_TRANSPORT: "{{matrix.transport}}"
+          VLLM_TRUST_REMOTE_CODE: "1"
+          VLLM_MAX_LOGPROBS: "100"
+          VLLM_BLOCK_SIZE: "128"
+          CHUNK_SIZE: "128"
+          MAX_NUM_BATCHED_TOKENS: "8192"
+          MAX_MODEL_LEN: "8192"
+          MAMBA_CACHE_MODE: "align"
+          SEPARATE_OBJECT_GROUPS: "1"
+          VLLM_DISABLE_PREFIX_CACHING: "false"
+        matrix:
+          setup:
+            transport:
+              - "inline"
+              - "shm"
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      # Gemma3-270M has a 512-token sliding window plus full-attention layers.
+      # Keep chunks smaller than the window to exercise multi-chunk SWA lookup.
+      # Compare GPU APC against LMCache with identical cached-prefix boundaries;
+      # cold prefill is only for warming caches, not the numerical reference.
+      - label: ":xpu: hma_swa_correctness / engine_driven / {{matrix.transport}}"
+        command: |
+          case "{{matrix.transport}}" in
+            inline) export L1_USE_LAZY="true" ;;
+            shm) export L1_USE_LAZY="false" ;;
+          esac
+          .buildkite/k3_tests/xpu/multiprocess/run.sh hma_swa_correctness
+        env:
+          <<: *mp-env
+          MODEL: "unsloth/gemma-3-270m-it"
+          VLLM_MAX_LOGPROBS: "100"
+          VLLM_KV_LOAD_FAILURE_POLICY: "fail"
+          ENGINE_DRIVEN_TRANSPORT: "{{matrix.transport}}"
+          CPU_BUFFER_SIZE: "4"
+          CHUNK_SIZE: "64"
+          VLLM_BLOCK_SIZE: "64"
+          MAX_MODEL_LEN: "8192"
+          MAX_NUM_BATCHED_TOKENS: ""
+          MAX_WAIT_SECONDS: "300"
+          VLLM_DISABLE_PREFIX_CACHING: "false"
+          SEPARATE_OBJECT_GROUPS: "1"
+        matrix:
+          setup:
+            transport:
+              - "inline"
+              - "shm"
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: long_doc_qa_l2 / engine_driven / shm"
+        command: .buildkite/k3_tests/xpu/multiprocess/run.sh long_doc_qa_l2
+        env:
+          <<: *mp-env
+          MODEL: "Qwen/Qwen3-8B"
+          MAX_MODEL_LEN: "16384"
+          MAX_NUM_BATCHED_TOKENS: "8192"
+          MAX_INFLIGHT_REQUESTS: "2"
+          NUM_DOCUMENTS: "10"
+          REPEAT_COUNT: "2"
         timeout_in_minutes: 45
         retry: *flaky-retry
         agents: { queue: "intel-xpu" }
         plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      # Pin both the block size and count: 1280 * 16 = 20K resident tokens,
+      # independent of XPU memory. The workload asserts no baseline preemption,
+      # real preemption + resume-load with LMCache, and byte-identical answers.
+      - label: ":xpu: preemption_correctness / engine_driven / shm / async"
+        command: .buildkite/k3_tests/xpu/multiprocess/run.sh preemption_correctness
+        env:
+          <<: *mp-env
+          MODEL: "Qwen/Qwen3-8B"
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          BATCH_INVARIANT: "1"
+          VLLM_DISABLE_PREFIX_CACHING: "false"
+          ATTENTION_BACKEND: "TRITON_ATTN"
+          ASYNC_SCHEDULING: "1"
+          VLLM_BLOCK_SIZE: "16"
+          NUM_GPU_BLOCKS_OVERRIDE: "1280"
+          # Leave headroom for the connector and runtime on 24 GiB CI XPUs.
+          GPU_MEMORY_UTILIZATION: "0.85"
+          MAX_MODEL_LEN: "8192"
+          MAX_NUM_BATCHED_TOKENS: ""
+          CHUNK_SIZE: "256"
+          PREEMPT_NUM_REQUESTS: "40"
+          PREEMPT_REF_CONCURRENCY: "4"
+          MAX_WAIT_SECONDS: "600"
+        timeout_in_minutes: 60
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: fault_tolerance / engine_driven / shm"
+        command: .buildkite/k3_tests/xpu/multiprocess/run.sh fault_tolerance
+        env:
+          # Keep repeated benchmark prompts from bypassing the outage via APC.
+          <<: *mp-env
+          MODEL: "Qwen/Qwen3-8B"
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          CPU_BUFFER_SIZE: "8"
+          ASYNC_SCHEDULING: "1"
+          GPU_MEMORY_UTILIZATION: "0.85"
+          MAX_MODEL_LEN: "16384"
+          MAX_NUM_BATCHED_TOKENS: ""
+          CHUNK_SIZE: "256"
+          MAX_WAIT_SECONDS: "600"
+        timeout_in_minutes: 30
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: restart_recovery / engine_driven / shm"
+        command: .buildkite/k3_tests/xpu/multiprocess/run.sh restart_recovery
+        env:
+          <<: *mp-env
+          MODEL: "Qwen/Qwen3-8B"
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          # Old and new SHM mappings can coexist until worker re-registration.
+          CPU_BUFFER_SIZE: "8"
+          VLLM_DISABLE_PREFIX_CACHING: "false"
+          ASYNC_SCHEDULING: "1"
+          GPU_MEMORY_UTILIZATION: "0.85"
+          MAX_MODEL_LEN: "8192"
+          MAX_NUM_BATCHED_TOKENS: ""
+          CHUNK_SIZE: "256"
+          # Engine-driven status lacks KV sizes; BF16 Qwen3-8B uses 147456 B/token.
+          RR_TOKENS_PER_GB: "7281"
+          MAX_WAIT_SECONDS: "600"
+        timeout_in_minutes: 30
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: mp_autostart_tp2 / engine_driven / shm"
+        command: .buildkite/k3_tests/xpu/multiprocess/run.sh mp_autostart_tp2
+        env: *mp-env
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: long_doc_qa / engine_driven / shm"
+        command: .buildkite/k3_tests/xpu/multiprocess/run.sh long_doc_qa
+        env:
+          <<: *mp-env
+          MODEL: "Qwen/Qwen3-8B"
+          MAX_MODEL_LEN: "16384"
+          MAX_NUM_BATCHED_TOKENS: "8192"
+          MAX_INFLIGHT_REQUESTS: "2"
+          NUM_DOCUMENTS: "10"
+          REPEAT_COUNT: "2"
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: p2p / engine_driven"
+        command: |
+          .buildkite/k3_tests/xpu/multiprocess/run.sh p2p
+        env:
+          MODEL: "Qwen/Qwen3-0.6B"
+          LMCACHE_MP_TRANSFER_MODE: "engine_driven"
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          MAX_MODEL_LEN: "4096"
+          VLLM_DISABLE_PREFIX_CACHING: "true"
+          MAX_WAIT_SECONDS: "900"
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: vllm_bench"
+        command: .buildkite/k3_tests/xpu/multiprocess/run.sh vllm_bench
+        env:
+          <<: *mp-env
+          MODEL: "Qwen/Qwen3-8B"
+          MAX_MODEL_LEN: "auto"
+          MAX_NUM_BATCHED_TOKENS: ""
+          MAX_WAIT_SECONDS: "300"
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: cache_stats"
+        command: .buildkite/k3_tests/xpu/multiprocess/run.sh cache_stats
+        env: *mp-env
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: lazy_offload"
+        command: .buildkite/k3_tests/xpu/multiprocess/run.sh lazy_offload
+        env:
+          <<: *mp-env
+          VLLM_DISABLE_PREFIX_CACHING: "false"
+          CHUNK_SIZE: "64"
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
+        artifact_paths: ["*.log", "ci_results_*/**"]
+
+      - label: ":xpu: http_api"
+        command: .buildkite/k3_tests/xpu/multiprocess/run.sh http_api
+        env: *mp-env
+        timeout_in_minutes: 45
+        retry: *flaky-retry
+        agents: { queue: "intel-xpu" }
+        plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]

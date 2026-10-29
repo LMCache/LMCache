@@ -57,6 +57,8 @@ def test_allocator_submodule_first_import_keeps_core_surface() -> None:
     """Importing concrete allocator modules first does not create a cycle."""
     _run_import_script(
         """
+        import sys
+
         from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
             PagedAddressManager,
             PagedTensorMemoryAllocator,
@@ -74,6 +76,7 @@ def test_allocator_submodule_first_import_keeps_core_surface() -> None:
         assert TensorMemoryAllocator.__name__ == "TensorMemoryAllocator"
         assert MemoryAllocatorInterface.__name__ == "MemoryAllocatorInterface"
         assert MemoryFormat.KV_2LTD.name == "KV_2LTD"
+        assert not any(name.startswith("lmcache.inprocess") for name in sys.modules)
         """
     )
 

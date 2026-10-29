@@ -32,6 +32,7 @@ EXPECTED = {
     F.NL_X_TWO_NB_NH_BS_HS: (False, False, True, False, False),
     F.NL_X_NB_TWO_NH_BS_HS: (False, False, True, False, False),
     F.NL_X_TWO_NB_NH_ONE_BS_HS: (False, False, True, False, False),
+    F.NL_X_NB_TWO_NH_ONE_BS_HS: (False, False, True, False, False),
     F.NL_X_NB_NH_BS_TWO_HS: (False, False, True, False, False),
     F.NL_X_NB_BS_NH_TWO_HS: (False, False, True, False, False),
     F.NL_X_NB_NH_BS_CS: (False, False, True, False, False),
@@ -71,6 +72,7 @@ EXPECTED_SPEC_FACTS = {
     F.NL_X_TWO_NB_NH_BS_HS: (True, False, True, False),
     F.NL_X_TWO_NB_NH_ONE_BS_HS: (True, False, True, False),
     F.NL_X_NB_TWO_NH_BS_HS: (True, False, False, False),
+    F.NL_X_NB_TWO_NH_ONE_BS_HS: (True, False, False, False),
     F.NL_X_NB_NH_BS_TWO_HS: (True, True, False, False),
     F.NL_X_NB_BS_NH_TWO_HS: (False, True, False, False),
     F.NL_X_NB_NH_BS_CS: (True, True, False, False),
@@ -120,6 +122,52 @@ def test_paged_layer_shape_rejects_non_single_layer_tensor_formats(
     """Reject formats whose pointer structure is not one tensor per layer."""
     with pytest.raises(ValueError, match="one paged tensor per layer"):
         get_spec_class(engine_kv_format).paged_layer_shape(2, 3, 5, 7)
+
+
+@pytest.mark.parametrize(
+    ("engine_kv_format", "expected_shape"),
+    [
+        (F.NL_X_NB_BS_HS, (2, 3, 7)),
+        (F.NL_X_TWO_NB_BS_NH_HS, (2, 2, 3, 5, 7)),
+        (F.TWO_X_NL_X_NB_BS_NH_HS, (2, 3, 5, 7)),
+    ],
+)
+def test_paged_pointer_shape_uses_format_geometry(
+    engine_kv_format: lmcache_native.EngineKVFormat,
+    expected_shape: tuple[int, ...],
+) -> None:
+    """Return the physical shape represented by one wire pointer."""
+    assert (
+        get_spec_class(engine_kv_format).paged_pointer_shape(2, 3, 5, 7)
+        == expected_shape
+    )
+
+
+@pytest.mark.parametrize(
+    ("engine_kv_format", "kv_size", "expected_shape"),
+    [
+        (F.NL_X_NB_BS_HS, 1, (2, 12, 40)),
+        (F.TWO_X_NL_X_NB_BS_NH_HS, 2, (2, 2, 12, 40)),
+        (F.NL_X_NB_BS_HS, 0, (2, 12, 40)),
+        (F.TWO_X_NL_X_NB_BS_NH_HS, 0, (2, 2, 12, 40)),
+    ],
+)
+def test_staging_shape_uses_kv_axis_geometry(
+    engine_kv_format: lmcache_native.EngineKVFormat,
+    kv_size: int,
+    expected_shape: tuple[int, ...],
+) -> None:
+    """Return one staging chunk shape from the format's K/V axis."""
+    assert (
+        get_spec_class(engine_kv_format).staging_shape(2, 12, 40, kv_size)
+        == expected_shape
+    )
+
+
+def test_blocked_scale_is_distinct_from_regular_mla() -> None:
+    """Keep blocked-scale physical encoding distinct from ordinary MLA."""
+    assert get_spec_class(F.NL_X_NB_BS_HS).requires_blocked_scale_repacking is False
+    assert get_spec_class(F.NL_X_NB_BSV_BSS).requires_blocked_scale_repacking is True
 
 
 def _all_formats():

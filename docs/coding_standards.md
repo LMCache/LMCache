@@ -120,6 +120,37 @@ A full docstring must include:
 - Use `isinstance()` on config objects to determine behavior, not string-based type names.
 - Config classes should follow existing conventions (e.g., `@dataclass`). Controllers and managers should always be created (even with empty/default config), never wrapped in `Optional`.
 
+### 4.6 Open-Source Extensibility and Layer Boundaries
+
+- When several real implementations share a contract, prefer a small typed
+  interface with polymorphic implementations over conditionals spread through
+  callers. Use inheritance only when the subtype relationship and lifecycle are
+  stable; prefer composition for independently varying capabilities.
+- When implementations are maintained independently, prefer registry,
+  entry-point, plugin, or bounded subclass discovery over a central list of
+  vendor names. Discovery must have deterministic ordering, validation,
+  conflict handling, and failure isolation.
+- Draw responsibility boundaries before adding an abstraction. Dependencies
+  should point from concrete adapters toward stable contracts, not from core
+  orchestration toward vendor or engine implementations. Do not introduce a
+  plugin hook, base class, or configuration option without a concrete extension
+  need.
+- Outside `lmcache/integration/<engine>/`, production code must remain
+  inference-engine and model agnostic. Engine-specific cache layouts, request
+  objects, scheduler semantics, and model-family decisions belong in the
+  corresponding integration adapter and must cross into core code through
+  LMCache-owned typed contracts.
+- Middle-layer orchestration and contracts must remain accelerator,
+  storage-backend, and transport agnostic. Hardware operations, storage
+  implementations, and wire/IPC mechanisms belong behind their platform,
+  storage, and transfer interfaces; do not branch on concrete backend names in
+  unrelated orchestration code.
+- On non-critical paths, optimize for readability and maintainability. Prefer
+  explicit typed data structures and direct dispatch over compact but opaque
+  encodings, reflection, metaprogramming, or implicit mutation. Use advanced
+  mechanisms only for a demonstrated requirement, document the invariant, and
+  test failure behavior.
+
 ---
 
 ## 5. New Functionality
@@ -223,7 +254,7 @@ import os
 import torch
 
 # First Party
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 
 # Local
 from .utils import helper
@@ -238,6 +269,34 @@ from .utils import helper
 All code must pass `pre-commit run --all-files` (mirrors CI: ruff lint/format,
 isort, mypy, codespell). C++/CUDA files use clang-format (Google style, 80-col).
 Rust code uses `cargo fmt` and `cargo clippy`.
+
+#### Direct torch device check
+
+The `ban-direct-torch-device` hook uses
+[`tools/check_direct_torch_device.py`](../tools/check_direct_torch_device.py).
+It checks executable Python syntax, including annotations and definition fields,
+while ignoring comments and strings. It recognizes direct backend references,
+import/assignment aliases, constant `getattr`, and literal list/tuple contents
+through indexing, unpacking and direct iteration. Function, class, lambda and
+comprehension bindings respect lexical scope.
+
+This is a bounded lint check, not a general Python data-flow analyzer:
+
+- Function bodies are inspected independently, not simulated at call sites.
+  Arguments, return values, escaping closures and call effects are not propagated.
+- Deferred function globals use a conservative union of module-level bindings.
+  An import after a definition is recognized, but exact call timing is not.
+- Mutable container writes and alias identity, dictionary contents, container
+  arithmetic/slices, wrapper iterators and generator consumption are not inferred.
+  Generator expressions are still inspected for direct references.
+- Branches conservatively join bindings. Loops flatten sequence shapes to keep
+  analysis finite; only simple match captures propagate their subject.
+
+These limits can produce both missed indirect references and conservative
+matches (for example, clearing a list after storing torch is not modeled).
+Do not use indirect access to bypass the rule; use platform abstractions instead.
+Keep regression tests for supported syntax and explicit boundary cases rather
+than adding Python execution machinery to cover unusual indirection.
 
 ### 7.4 Logging
 

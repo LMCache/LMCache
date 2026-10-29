@@ -18,6 +18,9 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
     MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
     ObjectKey,
     PrefetchHandle,
     PrefetchTaskSpec,
@@ -314,12 +317,19 @@ class P2PController(DiscoverableModule):
 
         key_groups = _group_keys_by_object_group(keys, group_layout_descs)
         if key_groups:
-            # NOTE: skip_l2=True -- only objects already resident in L1 are
-            # locked; "full" keeps every resident key, gaps allowed.
+            # NOTE: only objects already resident in the local DRAM L1 (the L1
+            # registered with the transfer channel) are locked, from no other
+            # L1 and no L2; "full" keeps every resident key, gaps allowed.
             handle = self._ctx.storage_manager.submit_prefetch_task(
-                PrefetchTaskSpec(key_groups=key_groups, fetching_policy="full"),
+                PrefetchTaskSpec(
+                    key_groups=key_groups,
+                    fetching_policy="full",
+                    allowed_l1_memory_tags=frozenset(
+                        {MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)}
+                    ),
+                    allowed_l2_memory_tags=frozenset(),
+                ),
                 external_request_id=f"p2p-{task_id}",
-                skip_l2=True,
             )
         else:
             # Nothing to look up: an already-complete empty handle.

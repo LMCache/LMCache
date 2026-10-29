@@ -31,7 +31,13 @@ import aiofiles.os
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -457,6 +463,13 @@ class FSL2Adapter(L2AdapterInterface):
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return local storage tags; remote when the adapter is shared."""
+        residency = (
+            MemoryResidency.REMOTE if self._config.shared else MemoryResidency.LOCAL
+        )
+        return MemoryTags(MemorySegment.STORAGE, residency)
 
     def close(self) -> None:
         async def _stop_tasks():

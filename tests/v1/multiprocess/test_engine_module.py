@@ -32,6 +32,10 @@ class _Dependent(_Module):
     module_dependencies = (_Dependency,)
 
 
+class _Replacement(_Dependency):
+    pass
+
+
 def test_dependencies_and_lookup_survive_rename(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -43,6 +47,18 @@ def test_dependencies_and_lookup_survive_rename(
     module = MagicMock(spec=EngineModule)
     build_ctx.register(_Dependency, module)
     assert build_ctx.require(_Dependency) is module
+
+
+def test_dependencies_and_lookup_resolve_same_named_subclass() -> None:
+    assert order_modules([_Dependent, _Replacement]) == [
+        _Replacement,
+        _Dependent,
+    ]
+    build_ctx = ModuleBuildContext(MagicMock(), MPServerConfig(), CoordinatorConfig())
+    module = MagicMock(spec=EngineModule)
+    build_ctx.register(_Replacement, module)
+    assert build_ctx.require(_Dependency) is module
+    assert build_ctx.require(_Replacement) is module
 
 
 @pytest.mark.parametrize(
