@@ -192,9 +192,9 @@ def requires_single_l1_memory_region(
     type_name = get_type_name_for_config(adapter_config)
     if type_name in _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS:
         return type_name
-    if (
-        type_name == "mooncake_store"
-        and getattr(adapter_config, "setup_config", {}).get("protocol") == "rdma"
+    if type_name == "mooncake_store" and (
+        getattr(adapter_config, "setup_config", {}).get("protocol") == "rdma"
+        or getattr(adapter_config, "process_config", None) is not None
     ):
         return type_name
     return None

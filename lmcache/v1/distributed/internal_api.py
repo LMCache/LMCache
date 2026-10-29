@@ -31,6 +31,23 @@ L1OperationResult = tuple[L1Error, "MemoryObj | None"]
 
 
 @dataclass(frozen=True)
+class L1ReadReservation:
+    """Read shares transferred out of a lookup's cancellation authority.
+
+    Attributes:
+        key: Exact object whose reader count was acquired.
+        generation: Original shared L1 read-lock generation.
+        owner: Original L1 manager, or None for the single-L1 configuration.
+        count: Number of shares exclusively owned by this receipt.
+    """
+
+    key: ObjectKey
+    generation: int
+    owner: int | None
+    count: int
+
+
+@dataclass(frozen=True)
 class L1MemoryDesc:
     """Describe the contiguous L1 memory arena exposed to external backends.
 
@@ -42,12 +59,14 @@ class L1MemoryDesc:
             allocator, this is a snapshot of the currently pinned prefix and
             does not change as the allocator grows. ``None`` means that no
             stable size is exposed.
+        shm_name: Allocator-owned POSIX shared-memory basename, if available.
     """
 
     ptr: int
     size: int
     align_bytes: int
     stable_registration_size: int | None = None
+    shm_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -274,19 +293,49 @@ class L1ManagerInterface(Protocol):
         ...
 
     def reserve_read(
-        self, keys: list[ObjectKey], read_locks: int = 1
+        self,
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Take ``read_locks`` read locks on each resident key."""
+        """Take read locks and optionally record acquired generations by key."""
         ...
 
     def unsafe_read(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1OperationResult]:
         """Return already read-locked objects without new locks."""
         ...
 
-    def finish_read(
-        self, keys: list[ObjectKey], read_locks: int = 1
+    def pin_read_buffers(
+        self,
+        keys: list[ObjectKey],
+        read_generations: dict[ObjectKey, int],
+        tag: str,
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Atomically validate original leases and pin buffers for a unique transfer.
+
+        Pins survive read TTL expiry and FREE until finish_read_transfer. A stale
+        generation must return KEY_NOT_READABLE without exposing the buffer.
+        """
+        ...
+
+    def finish_read_transfer(
+        self, keys: list[ObjectKey], tag: str
     ) -> dict[ObjectKey, L1Error]:
-        """Release ``read_locks`` read locks on each key."""
+        """Release only this transfer's pins and original reservations, at most once."""
+        ...
+
+    def finish_read(
+        self,
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
+    ) -> dict[ObjectKey, L1Error]:
+        """Release read locks only if supplied acquisition generations match.
+
+        With no generation map, retain the ordinary key-only completion path.
+        """
         ...
 
     def reserve_write(
@@ -299,6 +348,40 @@ class L1ManagerInterface(Protocol):
         """Reserve a write buffer per key for the writer ``tag``."""
         ...
 
+    def pin_write_buffers(
+        self, keys: list[ObjectKey], tag: str = ""
+    ) -> dict[ObjectKey, L1Error]:
+        """Keep writer-owned staging buffers alive until asynchronous I/O ends.
+
+        Each successful call acquires one non-expiring pin per key, independent
+        of its write TTL. Pins prevent admission, discard and normal eviction.
+
+        Args:
+            keys: Object keys whose staging buffers will be borrowed.
+            tag: The writer tag used to reserve these buffers.
+
+        Returns:
+            SUCCESS per pinned key, or KEY_NOT_EXIST when this writer has no
+            staging buffer. Other writers and resident objects are unaffected.
+        """
+        ...
+
+    def unpin_write_buffers(
+        self, keys: list[ObjectKey], tag: str = ""
+    ) -> dict[ObjectKey, L1Error]:
+        """Release one completed I/O borrow per writer-owned staging buffer.
+
+        Args:
+            keys: Object keys whose I/O has completed.
+            tag: The writer tag passed to pin_write_buffers.
+
+        Returns:
+            SUCCESS per released pin, KEY_NOT_EXIST after force deletion, or
+            KEY_IN_WRONG_STATE when no pin is held. Buffers remain staged for
+            admission or explicit discard.
+        """
+        ...
+
     def finish_write(
         self, keys: list[ObjectKey], tag: str = ""
     ) -> dict[ObjectKey, L1Error]:
@@ -306,15 +389,20 @@ class L1ManagerInterface(Protocol):
         ...
 
     def finish_write_and_reserve_read(
-        self, keys: list[ObjectKey], read_locks: int = 1, tag: str = ""
+        self,
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        tag: str = "",
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Commit ``tag``'s buffers and read-lock the resident objects."""
+        """Commit tagged buffers, take read locks and optionally record generations."""
         ...
 
     def finish_write_and_delete(
         self, keys: list[ObjectKey], tag: str = ""
     ) -> dict[ObjectKey, L1Error]:
-        """Discard ``tag``'s write reservations without committing them."""
+        """Discard ``tag``'s reservations, including expired ones, after I/O ends."""
         ...
 
     def delete(

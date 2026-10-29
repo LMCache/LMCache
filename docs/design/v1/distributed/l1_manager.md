@@ -46,15 +46,30 @@ staging object `(key, tag)`:
 - `finish_write_and_delete` never admits; it frees the staging object.
 
 **Expiry and eviction.** A staging object keeps its write TTL lock. Once the
-lock expires the reservation is abandoned:
+lock expires the reservation is abandoned, but active I/O must finish before
+its memory can be reclaimed:
 
-- `finish_write*` on it returns `KEY_IN_WRONG_STATE` and leaves it in place;
-- `is_key_evictable(key)` is true and `delete([key])` reclaims every expired
-  staging object of the key (all of them with `force=True`). `delete` then
+- `finish_write` and `finish_write_and_reserve_read` return
+  `KEY_IN_WRONG_STATE` after expiry and leave it staged;
+- `finish_write_and_delete` discards the writer's staging object even after
+  expiry, once its I/O pins are released;
+- An expired, unpinned staging object makes `is_key_evictable(key)` true.
+  `delete([key])` reclaims every expired unpinned staging object of the key
+  (all of them with `force=True`). `delete` then
   returns `SUCCESS` when nothing is left for the key, and `KEY_IS_LOCKED`
   while a live staging object remains -- a live reservation pins the key
   even if its resident object is unlocked. `clear()` reclaims expired
-  staging objects too.
+  unpinned staging objects too.
+
+**I/O buffer pins.** `pin_write_buffers(keys, tag)` takes one non-expiring pin
+on each of that writer's staging buffers. `unpin_write_buffers(keys, tag)`
+releases one pin after the adapter reports completion. The count lives on the
+staging entry and belongs to its writer tag; it does not use the legacy
+`MemoryObj` pin monitor. Taking a new reservation with the same tag, admission,
+and discard are refused while I/O pins remain. Normal eviction and clear cannot
+reclaim a borrowed buffer even when its write TTL has expired. A completed load
+whose TTL expired is discarded and reported as a miss, rather than admitted.
+Explicit force deletion still overrides this protection.
 
 The eviction policy learns about the key from `on_l1_keys_reserved_write`
 (`L1EvictionPolicy` maps it to `on_keys_created`), so the regular eviction
@@ -98,3 +113,52 @@ That window is the L2 lookup latency, not the L2 load time as before; see
 
 `tests/v1/distributed/test_l1_manager.py` (`TestStaging*` classes) and
 `tests/v1/distributed/test_prefetch_controller.py::TestConcurrentPrefetchSameKeys`.
+
+## Asynchronous resident reads
+
+A lookup read generation rejects completion from an expired lifetime, but
+neither its TTL nor its shared reader count proves that a device copy has
+finished. `pin_read_buffers` validates the lookup's original generation and
+retains each source buffer under a unique transfer tag. `finish_read_transfer`
+removes that pin after the stream finishes. If the original generation has
+expired, it does not decrement a later reader's count. Duplicate tag completion
+is harmless. Normal deletion and temporary-object cleanup respect these pins;
+`force=True` retains its explicit unsafe semantics and requires quiescent I/O.
+
+The MP Session arbitrates cancellation and transfer ownership. It starts with
+the actual read count per retained ObjectKey. A worker claims one share per
+key before pinning; FREE atomically takes only the remaining shares. Both
+successful and unregistered-worker RETRIEVE use that ledger. Per-key claims
+allow disjoint head/tail requests while rejecting repeated or overlapping
+claims by the same worker instance. MLA instances can share a KV worker ID,
+so the existing `(instance_id, worker_id)` wire identity distinguishes them.
+Claims cannot exceed that Session's original reservation. A changed instance
+ID does not provide proof of stable physical-rank identity across restarts.
+
+The completion receipt contains only immutable original owner/key/generation
+groups and the transfer tag. It does not consult mutable Session state. Pins
+rejected through the documented L1 error results retire their claimed original
+shares immediately; successful pins remain until stream completion. If
+recording or publishing completion fails, the handler synchronizes first and
+then completes the tag. Failed synchronization keeps the pins in place.
+An unexpected exception from an L1 implementation after partial pinning does
+not prove which copies or claims completed: known tag pins can settle, while
+unvisited reader shares may remain until their TTL. The concrete L1's pin
+operation returns ordinary failures as `L1Error` and performs no device calls.
+
+This protocol has no lookup-attempt ID in a RETRIEVE or FREE message. Identical
+lookups reusing a request ID cannot distinguish a late message from an earlier
+attempt solely from its model/token/range fields. Original-generation checks
+and per-instance claims are not a replacement for an attempt ID or a client
+ordering guarantee.
+
+Public contract tests live in `test_l1_interface.py`, `test_multi_l1.py`,
+`test_session.py` and `test_lookup_lock_generation.py`. The latter runs actual
+lookup, FREE and RETRIEVE handlers against real CPU L1/L2 storage while
+controlling only device completion ordering.
+
+## Lookup read-lock cleanup
+
+Each shared read-lock lifetime has a process-local generation. Acquisition after expiry or after the reader count reaches zero creates a fresh generation, including when the same object key is recreated. Prefetch captures this value at L1 acquisition or L2 admission; its cleanup and the session's `free_lookup_locks` release only matching generations. A missing session cannot authorize key-only cleanup.
+
+Readers within a live lifetime retain the existing shared count and TTL refresh behavior. Normal key-only read/completion and P2P APIs are unchanged; delayed completions on those paths and reuse of one request ID across lookup attempts are outside this cleanup fix. Storage traces record successful releases without serializing process-local generations; rejected releases remain visible in the completion event's `failed_keys`.
