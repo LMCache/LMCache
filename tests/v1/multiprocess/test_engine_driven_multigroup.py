@@ -505,6 +505,7 @@ class _FakeStorageManager:
         self.finished_reads: list[ObjectKey] = []
         self.read_owners: list[Any] = []
         self.deleted: list[ObjectKey] = []
+        self.aborted: list[ObjectKey] = []
 
     def reserve_write(self, obj_keys, _layout):
         reserved = {}
@@ -528,6 +529,12 @@ class _FakeStorageManager:
         for owner, keys in completion:
             self.finished_owners.add(owner)
             self.finished_writes.extend(keys)
+
+    def abort_write_by_owner(self, completion):
+        for _owner, keys in completion:
+            self.aborted.extend(keys)
+            for key in keys:
+                self.objs.pop(key, None)
 
     def delete_l1_keys(self, keys, force=False):
         self.deleted.extend(keys)
@@ -618,8 +625,8 @@ def test_inline_strategy_multigroup_store_retrieve_roundtrip() -> None:
 
 def test_inline_strategy_store_shape_mismatch_releases_reservations() -> None:
     """A chunk whose shape disagrees with the reserved object fails the store,
-    and the unwritten reservations are released and deleted -- they must not
-    wedge later writes or surface as garbage cache hits."""
+    and the unwritten reservations are aborted -- they must not wedge later
+    writes, be published to store listeners, or surface as cache hits."""
     shapes: dict[int, tuple[int, ...]] = {0: (2, 2, 8, 16), 1: (2, 1, 4, 4)}
     sm = _FakeStorageManager(shapes)
     strategy = InlineTransferStrategy(sm)  # type: ignore[arg-type]
@@ -649,10 +656,11 @@ def test_inline_strategy_store_shape_mismatch_releases_reservations() -> None:
         )
         is False
     )
-    # Every reservation was finished (written or released) and the two
-    # mismatched group-1 objects were deleted rather than left as garbage.
-    assert set(sm.finished_writes) == set(group_keys[0]) | set(group_keys[1])
-    assert set(sm.deleted) == set(group_keys[1])
+    # Only the written group-0 objects were finished; the two mismatched
+    # group-1 reservations were aborted rather than published as garbage.
+    assert set(sm.finished_writes) == set(group_keys[0])
+    assert set(sm.aborted) == set(group_keys[1])
+    assert sm.deleted == []
     assert _obj_key(1, 1) not in sm.objs
     assert _obj_key(2, 1) not in sm.objs
 
