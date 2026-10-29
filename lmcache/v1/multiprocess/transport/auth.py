@@ -7,6 +7,7 @@ from pathlib import Path
 
 # First Party
 from lmcache.security.api_key import APIKeyVerifier, load_service_api_keys
+from lmcache.security.http import bearer_authorization_header
 
 
 def load_request_authentication(
@@ -48,3 +49,22 @@ def load_request_client_api_key(api_key: str | None = None) -> str | None:
     if len(api_keys) > 1:
         raise ValueError("Configure exactly one request client API key source")
     return api_keys[0] if api_keys else None
+
+
+def request_client_auth_headers() -> dict[str, str]:
+    """Build outbound HTTP headers carrying the single configured client key.
+
+    Used by the MP server's calls to an authenticated coordinator (instance
+    registration, heartbeats, event publishing, chunk-size negotiation) and by
+    the coordinator's calls to authenticated MP servers.
+
+    Returns:
+        An ``Authorization: Bearer`` header when one client key source is
+        configured, or an empty mapping when none is. The empty mapping keeps
+        the no-key default: a fleet without a configured key exchanges no
+        credentials.
+    """
+    api_key = load_request_client_api_key()
+    if api_key is None:
+        return {}
+    return {"Authorization": bearer_authorization_header(api_key)}

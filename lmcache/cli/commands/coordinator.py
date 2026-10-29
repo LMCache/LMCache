@@ -13,6 +13,7 @@ import json
 # First Party
 from lmcache.cli.commands.base import BaseCommand
 from lmcache.logging import init_logger
+from lmcache.security.api_key import add_api_key_args
 
 logger = init_logger(__name__)
 
@@ -244,6 +245,10 @@ class CoordinatorCommand(BaseCommand):
                 "--event-transport kafka."
             ),
         )
+        # Shared authentication option (--api-key-file / LMCACHE_API_KEY*). An
+        # unset flag leaves the coordinator open; supplying a key closes every
+        # route except /healthz.
+        add_api_key_args(parser)
 
     def execute(self, args: argparse.Namespace) -> None:
         """Build the coordinator config and serve the app with uvicorn.
@@ -271,6 +276,9 @@ class CoordinatorCommand(BaseCommand):
             from lmcache.v1.mp_coordinator.config import (
                 KafkaCacheEventSourceConfig,
                 MPCoordinatorConfig,
+            )
+            from lmcache.v1.mp_coordinator.http_auth import (
+                CoordinatorAuthenticationConfig,
             )
             from lmcache.v1.mp_coordinator.observability import (
                 init_coordinator_metrics,
@@ -324,7 +332,10 @@ class CoordinatorCommand(BaseCommand):
         config = MPCoordinatorConfig(**fields)
 
         init_coordinator_metrics(config)
-        app = create_app(config)
+        http_authentication = CoordinatorAuthenticationConfig.from_sources(
+            args.api_key_file
+        )
+        app = create_app(config, http_authentication=http_authentication)
         uvicorn.run(
             app,
             host=config.host,

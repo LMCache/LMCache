@@ -121,8 +121,15 @@ class HttpCacheEventSink(CacheEventSink):
     """
 
     def __init__(self, coordinator_url: str, timeout: float = 2.0) -> None:
+        # First Party
+        from lmcache.v1.multiprocess.transport.auth import (
+            request_client_auth_headers,
+        )
+
         self._base_url = coordinator_url.rstrip("/")
-        self._client = httpx.Client(timeout=timeout)
+        self._client = httpx.Client(
+            timeout=timeout, headers=request_client_auth_headers()
+        )
         self._dropped_events = 0
 
     def publish(self, batches: list[CacheEventBatch]) -> None:

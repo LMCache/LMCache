@@ -44,10 +44,16 @@ def bind_coordinator_chunk_size(
     timeout: float = _DEFAULT_CHUNK_SIZE_BIND_TIMEOUT,
 ) -> int:
     """Synchronously bind coordinator hashing to an MP server's final size."""
+    # First Party
+    from lmcache.v1.multiprocess.transport.auth import (
+        request_client_auth_headers,
+    )
+
     body = ChunkSizeBindRequest(chunk_size=chunk_size)
     response = httpx.put(
         f"{base_url.rstrip('/')}/config/chunk-size",
         json=body.model_dump(mode="json"),
+        headers=request_client_auth_headers(),
         timeout=timeout,
     )
     response.raise_for_status()
