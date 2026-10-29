@@ -25,7 +25,7 @@ from __future__ import annotations
 # Standard
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Protocol
 
 # Third Party
 import torch
@@ -35,14 +35,35 @@ from lmcache import torch_device_type
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.inprocess.v1.config import LMCacheEngineConfig
-    from lmcache.inprocess.v1.metadata import LMCacheMetadata
     from lmcache.v1.distributed.config import StorageManagerConfig
     from lmcache.v1.multiprocess.config import MPServerConfig
 
 
 USAGE_SCHEMA_VERSION = 1
 """Version stamped on every usage payload; bump when fields change meaning."""
+
+
+class EngineConfigLike(Protocol):
+    """InProcess configuration fields consumed by usage telemetry."""
+
+    chunk_size: int
+    local_cpu: bool
+    max_local_cpu_size: float
+    remote_url: str | None
+    remote_serde: str | None
+    save_decode_cache: bool
+    enable_blending: bool
+    blend_min_tokens: int
+
+
+class EngineMetadataLike(Protocol):
+    """InProcess metadata fields consumed by usage telemetry."""
+
+    model_name: str
+    world_size: int
+    worker_id: int
+    kv_dtype: torch.dtype
+    kv_shape: tuple[int, int, int, int, int]
 
 
 class DeploymentMode(Enum):
@@ -116,7 +137,7 @@ class EngineMessage(UsageMessage):
 
     @classmethod
     def from_config(
-        cls, config: LMCacheEngineConfig, metadata: LMCacheMetadata
+        cls, config: EngineConfigLike, metadata: EngineMetadataLike
     ) -> EngineMessage:
         """Build the message from the engine configuration and metadata.
 

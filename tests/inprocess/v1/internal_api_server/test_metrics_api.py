@@ -11,7 +11,7 @@ from lmcache.inprocess.v1.internal_api_server.api_server import app
 
 def test_metrics_reset_compatibility_route_is_available_inprocess():
     with patch(
-        "lmcache.v1.multiprocess.http_apis.common.metrics_api."
+        "lmcache.inprocess.v1.internal_api_server.vllm.metrics_api."
         "reset_observability_metrics"
     ) as reset_metrics:
         response = TestClient(app).post("/metrics/reset")

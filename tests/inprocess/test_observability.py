@@ -464,12 +464,3 @@ def test_prometheus_logger_reset_reinitializes_all_label_views(
         )
         == 0
     )
-
-
-def test_legacy_module_reexports_inprocess_observability():
-    """The former module path remains compatible for external callers."""
-    # First Party
-    from lmcache import observability as legacy_observability
-
-    assert legacy_observability.LMCStatsMonitor is LMCStatsMonitor
-    assert legacy_observability.PrometheusLogger is PrometheusLogger

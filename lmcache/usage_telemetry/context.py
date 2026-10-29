@@ -12,7 +12,6 @@ from __future__ import annotations
 # Standard
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import TYPE_CHECKING
 import threading
 
 # First Party
@@ -25,7 +24,9 @@ from lmcache.usage_telemetry.identity import (
 )
 from lmcache.usage_telemetry.messages import (
     DeploymentMode,
+    EngineConfigLike,
     EngineMessage,
+    EngineMetadataLike,
     MetadataMessage,
     UsageMessage,
 )
@@ -35,11 +36,6 @@ from lmcache.usage_telemetry.transport import (
     build_usage_payload,
     usage_server_url,
 )
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.inprocess.v1.config import LMCacheEngineConfig
-    from lmcache.inprocess.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -112,8 +108,8 @@ class UsageContext(UsageContextBase):
 
     def __init__(
         self,
-        config: LMCacheEngineConfig,
-        metadata: LMCacheMetadata,
+        config: EngineConfigLike,
+        metadata: EngineMetadataLike,
         local_log: str | None = None,
         sender: UsageMessageSender | None = None,
     ) -> None:
@@ -145,8 +141,8 @@ class UsageContext(UsageContextBase):
 
 @swallow_telemetry_errors
 def InitializeUsageContext(
-    config: LMCacheEngineConfig,
-    metadata: LMCacheMetadata,
+    config: EngineConfigLike,
+    metadata: EngineMetadataLike,
     local_log: str | None = None,
     sender: UsageMessageSender | None = None,
 ) -> UsageContext | None:
