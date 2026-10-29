@@ -114,8 +114,9 @@ compatibility with the vLLM-embedded API server.
 .. note::
 
    Several handlers report failure in the response **body** rather than via a
-   non-200 status code (e.g. ``DELETE /cache/objects`` returns ``200`` with ``ok=false``,
-   and ``/periodic-threads-health`` returns ``200`` with ``healthy=false``).
+   non-200 status code (e.g. ``DELETE /cache/objects`` returns ``200`` with
+   ``ok=false``, and ``/periodic-threads-health`` returns ``200`` with
+   ``healthy=false``).
    The error-field name is also not uniform: ``/healthcheck`` and
    ``/cache/clear`` use ``reason`` on failure, while ``/status``, ``/config``,
    and ``/cache/checksums`` use ``error``. Per-endpoint details below are
@@ -186,6 +187,10 @@ compatibility with the vLLM-embedded API server.
      - Delete a caller-supplied list of object keys from L1, L2, or both (body:
        ``keys``, ``tier``, ``force``, ``adapter``). ``force`` deletes L1 keys
        even if locked.
+   * - POST
+     - ``/cache/objects/download``
+     - Download one node-local L1 object by exact ``EncodedObjectKey`` as raw
+       bytes. Supports DRAM and Device-DAX; GDS/AIS downloads return ``501``.
    * - POST
      - ``/cache/prefetches``
      - Warm a node's L1 by loading a token sequence from L2 ahead of traffic;
@@ -722,10 +727,10 @@ When ``layerwise=true``, ``chunk_checksums`` is a dict keyed by
 Cache Objects And Prefetch
 --------------------------
 
-Two endpoints — ``DELETE /cache/objects`` and ``GET /cache/objects`` — let
-operators purge keys from a configured cache backend and enumerate what is
-currently resident. (To enumerate the configured backends themselves, use
-``GET /config/adapters`` in the config group.)
+Three endpoints under ``/cache/objects`` let operators purge keys, enumerate
+resident L2 objects, and download one node-local L1 object by exact key. (To
+enumerate the configured backends themselves, use ``GET /config/adapters`` in
+the config group.)
 
 A further pair — ``POST /cache/prefetches`` and
 ``GET /cache/prefetches/{request_id}`` — lets an operator (or the
@@ -822,12 +827,13 @@ are optional for backward compatibility with older wire payloads.
 
 ``deleted`` is the total keys removed across the requested tiers (L1 removals
 plus the L2 batch size); ``skipped`` is the L1 keys refused because they were
-locked (non-force only). On an L2 adapter failure the response is still ``200``
-with ``ok=false`` and an ``error`` field carrying the reason.
+locked (non-force only). For an L2 adapter failure, the response remains
+``200`` with ``"ok": false`` and an ``"error"`` message; the deletion counts
+reflect completed work.
 
 **HTTP status codes:**
 
-- ``200``: request processed (check ``ok`` for the L2 adapter outcome).
+- ``200``: request processed.
 - ``400``: batch exceeds the limit, or a key payload violates an
   ``ObjectKey`` invariant (bad hex, ``@`` in ``model_name``, forbidden
   ``cache_salt`` character).
@@ -851,6 +857,102 @@ with ``ok=false`` and an ``error`` field carrying the reason.
             ]
         }'
     # -> {"deleted": 2, "skipped": 0, "ok": true}
+
+``POST /cache/objects/download``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Download an independent snapshot of one object currently resident in this MP
+server's L1. The endpoint is node-local and accepts an exact
+``EncodedObjectKey``; it does not resolve tokens, query the coordinator, select
+a remote placement, or fall back to L2.
+
+This capability exposes **raw KV cache contents** and is disabled by default
+(``403 Forbidden``). Deploy the MP HTTP interface on a **trusted network**;
+the opt-in flag is not authentication. Enable it explicitly when starting the
+HTTP server, for example:
+
+.. code-block:: bash
+
+    python -m lmcache.v1.multiprocess.http_server \
+        --enable-l1-cache-download \
+        --l1-cache-download-max-size-bytes 67108864 \
+        --l1-cache-download-max-concurrency 2
+
+The default limit is 64 MiB of logical bytes per object, checked before copying;
+larger objects return ``413``. Both limit values must be positive. Each HTTP
+server process allows at most two concurrent snapshot copies by default.
+Additional requests wait for a slot. Cancelling a request during copying keeps
+its slot occupied until the worker finishes.
+These settings are also available as ``HTTPFrontendConfig`` fields:
+``enable_l1_cache_download``, ``l1_cache_download_max_size_bytes``, and
+``l1_cache_download_max_concurrency``.
+
+An inspection pin prevents the source allocation from being freed or reused
+while its logical bytes and layout metadata are copied, without holding the
+L1 manager lock for the copy. Ordinary deletion and eviction respect this pin;
+force deletion removes the key immediately but defers freeing the allocation
+until copying finishes. Inspection does not update LRU state or count as a
+normal cache retrieve. If the key was removed or replaced during copying, the
+snapshot is discarded and the endpoint returns ``409``. The pin is released
+before the HTTP response is sent.
+Copying runs in a worker thread, but ``tobytes()`` may hold the GIL throughout
+the copy, so this does not guarantee a non-blocking event loop.
+
+**Request body:**
+
+.. code-block:: json
+
+    {
+      "key": {
+        "chunk_hash_hex": "abc123",
+        "model_name": "meta-llama/Llama-3-8B",
+        "kv_rank": 0,
+        "object_group_id": 0,
+        "cache_salt": "user-a"
+      }
+    }
+
+Only one key is accepted per request. The key uses the same
+``EncodedObjectKey`` schema documented for ``DELETE /cache/objects`` above.
+
+**Response** (``200 OK``):
+
+- ``Content-Type: application/octet-stream``
+- Body: the object's logical raw bytes, excluding allocator alignment padding.
+- ``X-LMCache-Object-Metadata``: compact JSON containing ``size_bytes``,
+  ``backend``, ``memory_format``, and ordered ``shapes`` / ``dtypes`` arrays.
+
+For example, the metadata header may contain:
+
+.. code-block:: json
+
+    {"size_bytes":4194304,"backend":"dram","memory_format":"undefined","shapes":[[2,256,8,128]],"dtypes":["torch.bfloat16"]}
+
+Only DRAM and Device-DAX L1 objects are supported in this version.
+GDS/AIS-based downloads are not supported in this version and return HTTP 501.
+Support for these paths may be added in a future release.
+
+**HTTP status codes:**
+
+- ``200``: snapshot returned.
+- ``400``: malformed hex or another ``ObjectKey`` invariant violation.
+- ``403``: raw KV download has not been enabled.
+- ``413``: object exceeds the configured logical byte limit.
+- ``404``: the exact key is not resident in this node's L1.
+- ``409``: the object exists but is temporarily unreadable, such as while a
+  writer holds it.
+- ``422``: request-body schema validation failure.
+- ``501``: the object requires an unsupported GDS/AIS download path.
+- ``503``: the MP server context is not initialized.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -sS -X POST http://localhost:8080/cache/objects/download \
+        -H 'Content-Type: application/json' \
+        -d '{"key":{"chunk_hash_hex":"aa","model_name":"m","kv_rank":0}}' \
+        -D object.headers -o object.bin
 
 ``GET /cache/objects``
 ~~~~~~~~~~~~~~~~~~~~~~

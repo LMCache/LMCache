@@ -20,3 +20,15 @@ class NotFound(CacheControlError): ...  # referenced adapter / job missing
 
 
 class Unavailable(CacheControlError): ...  # backend can't serve the request
+
+
+class Conflict(CacheControlError): ...  # object exists but is temporarily locked
+
+
+class Unsupported(CacheControlError): ...  # backend lacks the requested capability
+
+
+class Disabled(CacheControlError): ...  # capability requires explicit opt-in
+
+
+class TooLarge(CacheControlError): ...  # object exceeds the configured byte limit

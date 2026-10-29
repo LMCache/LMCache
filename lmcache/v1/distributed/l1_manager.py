@@ -5,8 +5,10 @@ Managing objects and memory for L1 cache
 
 # Standard
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import count
+from typing import Iterator
 import threading
 import weakref
 
@@ -21,8 +23,15 @@ from lmcache.v1.distributed.api import (
     MemoryTags,
     ObjectKey,
 )
-from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
-from lmcache.v1.distributed.error import L1Error, L1ReconfigureError
+from lmcache.v1.distributed.config import (
+    L1ManagerConfig,
+    get_configured_capacity_bytes,
+)
+from lmcache.v1.distributed.error import (
+    InspectionReadError,
+    L1Error,
+    L1ReconfigureError,
+)
 from lmcache.v1.distributed.internal_api import (
     L1ManagerInterface,
     L1ManagerListener,
@@ -207,6 +216,10 @@ class L1Manager(L1ManagerInterface):
         self._config = config
         self._l1_manager_id = next_l1_manager_id()
         self._lock = threading.Lock()
+        self._inspection_done = threading.Condition(self._lock)
+        self._inspection_pins: dict[MemoryObj, int] = {}
+        self._deferred_inspection_frees: set[MemoryObj] = set()
+        self._closing = False
 
         # Resident objects: readable, never write-locked.
         self._objects: dict[ObjectKey, L1ObjectState] = {}
@@ -293,6 +306,77 @@ class L1Manager(L1ManagerInterface):
         """
         with self._lock:
             self._registered_listeners.append(listener)
+
+    @contextmanager
+    def reserve_read_for_inspection(
+        self, key: ObjectKey
+    ) -> Iterator[L1OperationResult]:
+        """Protect one object for a read-only management inspection.
+
+        Lookup and inspection pin acquisition are atomic under the manager lock.
+        The object's allocation cannot be freed or reused until the context
+        exits. Unlike :meth:`reserve_read`, this does not use the expiring
+        ``TTLLock``, emit normal-read notifications, or touch LRU state.
+
+        Args:
+            key: Object key to protect for inspection.
+
+        Yields:
+            ``(L1Error, MemoryObj | None)``. ``SUCCESS`` includes the protected
+            object; missing and temporarily unreadable objects include ``None``.
+
+        Raises:
+            InspectionReadError: The object was removed or replaced during the
+                inspection.
+
+        Note:
+            Force deletion and clearing remove the key immediately, but defer
+            freeing its allocation until the inspection exits.
+        """
+        with self._lock:
+            entry = self._objects.get(key)
+            if self._closing:
+                result: L1OperationResult = (L1Error.KEY_NOT_READABLE, None)
+            elif entry is None:
+                result = (L1Error.KEY_NOT_EXIST, None)
+            elif entry.write_lock.is_locked():
+                result = (L1Error.KEY_NOT_READABLE, None)
+            else:
+                obj = entry.memory_obj
+                self._inspection_pins[obj] = self._inspection_pins.get(obj, 0) + 1
+                result = (L1Error.SUCCESS, obj)
+            if result[0] == L1Error.KEY_NOT_EXIST and key in self._staging:
+                result = (L1Error.KEY_NOT_READABLE, None)
+
+        try:
+            yield result
+        finally:
+            if result[0] == L1Error.SUCCESS:
+                with self._lock:
+                    assert result[1] is not None
+                    obj = result[1]
+                    still_resident = self._still_resident_locked(key, obj)
+                    remaining = self._inspection_pins[obj] - 1
+                    if remaining:
+                        self._inspection_pins[obj] = remaining
+                    else:
+                        del self._inspection_pins[obj]
+                        if obj in self._deferred_inspection_frees:
+                            self._deferred_inspection_frees.remove(obj)
+                            self._memory_manager.free([obj])
+                        elif still_resident:
+                            resident = self._objects[key]
+                            if (
+                                resident.is_temporary
+                                and not resident.read_lock.is_locked()
+                            ):
+                                del self._objects[key]
+                                self._free_and_report_deleted([key], [obj])
+                        self._inspection_done.notify_all()
+                    if not still_resident:
+                        raise InspectionReadError(
+                            "inspection object removed or replaced"
+                        )
 
     @l1_mgr_synchronized
     def reserve_read(
@@ -409,68 +493,11 @@ class L1Manager(L1ManagerInterface):
                 means the reader may read inconsistent data.
         """
         total = validate_read_locks(read_locks)
-        need_to_free: list[MemoryObj] = []
-        need_to_free_keys: list[ObjectKey] = []
-        ret: dict[ObjectKey, L1Error] = {}
-        successful_keys: list[ObjectKey] = []
-
-        for key in keys:
-            entry = self._objects.get(key, None)
-            if entry is None:
-                logger.warning(
-                    "L1Manager: finish read on non-existing key %s, "
-                    "potential inconsistent data might be read",
-                    key,
-                )
-                ret[key] = L1Error.KEY_NOT_EXIST
-                continue
-
-            if not entry.read_lock.is_locked():
-                logger.warning(
-                    "L1Manager: finish read on non-read-locked key %s, "
-                    "potential inconsistent data might be read",
-                    key,
-                )
-                ret[key] = L1Error.KEY_IN_WRONG_STATE
-                continue
-
-            # TODO(perf): support a count argument in
-            # TTLLock.unlock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.unlock()
-            if entry.is_temporary and not entry.read_lock.is_locked():
-                need_to_free.append(entry.memory_obj)
-                need_to_free_keys.append(key)
-                del self._objects[key]
-
-            ret[key] = L1Error.SUCCESS
-            successful_keys.append(key)
-
-        freed_meta = [self._object_meta(obj) for obj in need_to_free]
-        self._memory_manager.free(need_to_free)
-
-        for listener in self._registered_listeners:
-            listener.on_l1_keys_read_finished(successful_keys)
-            listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.L1_READ_FINISHED,
-                metadata={"l1_tag": self._config.tag, "keys": successful_keys},
-            )
+        return self._finish_read_locked(
+            keys,
+            total=total,
+            notify=True,
         )
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.L1_KEYS_EVICTED,
-                metadata={
-                    "l1_tag": self._config.tag,
-                    "keys": need_to_free_keys,
-                    "meta": freed_meta,
-                },
-            )
-        )
-
-        return ret
 
     @l1_mgr_synchronized
     def reserve_write(
@@ -796,7 +823,9 @@ class L1Manager(L1ManagerInterface):
                 gone_keys.append(key)
                 continue
 
-            locked = entry.read_lock.is_locked()
+            locked = entry.read_lock.is_locked() or bool(
+                self._inspection_pins.get(entry.memory_obj)
+            )
             if locked and not force:
                 ret[key] = L1Error.KEY_IS_LOCKED
                 continue
@@ -899,7 +928,7 @@ class L1Manager(L1ManagerInterface):
             all_keys = list(self._objects.keys())
             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
             all_meta = [self._object_meta(obj) for obj in all_memory_objs]
-            self._memory_manager.free(all_memory_objs)
+            self._free_resident_objects(all_memory_objs)
             self._objects.clear()
             for listener in self._registered_listeners:
                 listener.on_l1_keys_deleted_by_manager(all_keys)
@@ -930,7 +959,9 @@ class L1Manager(L1ManagerInterface):
         locked_count = 0
 
         for key, entry in list(self._objects.items()):
-            if entry.read_lock.is_locked():
+            if entry.read_lock.is_locked() or self._inspection_pins.get(
+                entry.memory_obj
+            ):
                 locked_count += 1
                 continue
             keys_to_clear.append(key)
@@ -976,7 +1007,11 @@ class L1Manager(L1ManagerInterface):
             or a staging object whose write lock expired; False otherwise.
         """
         entry = self._objects.get(key, None)
-        if entry is not None and not entry.read_lock.is_locked():
+        if (
+            entry is not None
+            and not entry.read_lock.is_locked()
+            and not self._inspection_pins.get(entry.memory_obj)
+        ):
             return True
         per_tag = self._staging.get(key, None)
         if per_tag is None:
@@ -1045,6 +1080,17 @@ class L1Manager(L1ManagerInterface):
     def get_l1_memory_desc(self):
         """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
         return self._memory_manager.get_l1_memory_desc()
+
+    def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
+        """Return the storage medium backing an L1 memory object.
+
+        Args:
+            memory_obj: Object allocated by this manager.
+
+        Returns:
+            The object's L1 backend type.
+        """
+        return self._memory_manager.get_backend_type(memory_obj)
 
     def get_memory_tags(self) -> MemoryTags:
         """Return the memory tags of this L1's primary pool.
@@ -1183,6 +1229,10 @@ class L1Manager(L1ManagerInterface):
 
     def close(self) -> None:
         """Close the L1Manager and free all resources."""
+        with self._inspection_done:
+            self._closing = True
+            while self._inspection_pins:
+                self._inspection_done.wait()
         close_l1_gds_context(self._l1_manager_id)
         with self._lock:
             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
@@ -1408,7 +1458,7 @@ class L1Manager(L1ManagerInterface):
         """Free ``objs`` and report ``keys`` as deleted to listeners and
         the event bus."""
         freed_meta = [self._object_meta(obj) for obj in objs]
-        self._memory_manager.free(objs)
+        self._free_resident_objects(objs)
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_deleted_by_manager(keys)
@@ -1418,6 +1468,108 @@ class L1Manager(L1ManagerInterface):
                 metadata={"l1_tag": self._config.tag, "keys": keys, "meta": freed_meta},
             )
         )
+
+    def _still_resident_locked(self, key: ObjectKey, obj: MemoryObj | None) -> bool:
+        """Check identity while the caller holds the manager lock."""
+        entry = self._objects.get(key)
+        return entry is not None and entry.memory_obj is obj
+
+    def _free_resident_objects(self, objs: list[MemoryObj]) -> None:
+        """Defer allocator reuse of objects held by inspection readers."""
+        ready: list[MemoryObj] = []
+        for obj in objs:
+            if self._inspection_pins.get(obj):
+                self._deferred_inspection_frees.add(obj)
+            else:
+                ready.append(obj)
+        self._memory_manager.free(ready)
+
+    def _finish_read_locked(
+        self,
+        keys: list[ObjectKey],
+        total: int,
+        notify: bool,
+    ) -> dict[ObjectKey, L1Error]:
+        """Release read locks while the caller holds the manager lock."""
+        need_to_free: list[MemoryObj] = []
+        need_to_free_keys: list[ObjectKey] = []
+        ret: dict[ObjectKey, L1Error] = {}
+        successful_keys: list[ObjectKey] = []
+
+        for key in keys:
+            entry = self._objects.get(key, None)
+            if entry is None:
+                logger.warning(
+                    "L1Manager: finish read on non-existing key %s, "
+                    "potential inconsistent data might be read",
+                    key,
+                )
+                ret[key] = L1Error.KEY_NOT_EXIST
+                continue
+
+            if entry.write_lock.is_locked():
+                logger.warning(
+                    "L1Manager: finish read on write-locked key %s, "
+                    "potential inconsistent data might be read",
+                    key,
+                )
+                ret[key] = L1Error.KEY_IN_WRONG_STATE
+                continue
+
+            if not entry.read_lock.is_locked():
+                logger.warning(
+                    "L1Manager: finish read on non-read-locked key %s, "
+                    "potential inconsistent data might be read",
+                    key,
+                )
+                ret[key] = L1Error.KEY_IN_WRONG_STATE
+                continue
+
+            # TODO(perf): support a count argument in TTLLock.unlock() to avoid
+            # Python for-loop overhead (TTLLock is C++ std::atomic).
+            for _ in range(total):
+                entry.read_lock.unlock()
+            if (
+                entry.is_temporary
+                and not entry.read_lock.is_locked()
+                and not self._inspection_pins.get(entry.memory_obj)
+            ):
+                # NOTE: temporary objects shouldn't have write-locks
+                need_to_free.append(entry.memory_obj)
+                need_to_free_keys.append(key)
+                del self._objects[key]
+
+            ret[key] = L1Error.SUCCESS
+            successful_keys.append(key)
+
+        freed_meta = [self._object_meta(obj) for obj in need_to_free]
+        self._free_resident_objects(need_to_free)
+
+        notify_deletion = notify or bool(need_to_free_keys)
+        for listener in self._registered_listeners:
+            if notify:
+                listener.on_l1_keys_read_finished(successful_keys)
+            if notify_deletion:
+                listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
+        if notify:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_READ_FINISHED,
+                    metadata={"l1_tag": self._config.tag, "keys": successful_keys},
+                )
+            )
+        if notify_deletion:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_KEYS_EVICTED,
+                    metadata={
+                        "l1_tag": self._config.tag,
+                        "keys": need_to_free_keys,
+                        "meta": freed_meta,
+                    },
+                )
+            )
+        return ret
 
     def _object_meta(self, memory_obj: MemoryObj) -> L1ObjectMeta:
         """Build the listener-facing metadata for one resident object."""
