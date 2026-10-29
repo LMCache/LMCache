@@ -81,6 +81,9 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.cpu_lock = threading.Lock()
 
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+        self.memory_allocator.set_metrics_callback(
+            self.stats_monitor.update_allocator_metrics
+        )
 
         self.layerwise = config.use_layerwise
         self.enable_blending = config.enable_blending

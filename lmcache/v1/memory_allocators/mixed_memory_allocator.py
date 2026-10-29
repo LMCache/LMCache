@@ -18,6 +18,7 @@ from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import (
     AddressManager,
+    AllocatorMetricsCallback,
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
@@ -86,6 +87,14 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
         self.buffer_allocator = BufferAllocator("cpu")
+
+    def set_metrics_callback(self, callback: AllocatorMetricsCallback) -> None:
+        """Forward allocator usage reporting to the pinned-memory allocator.
+
+        Args:
+            callback: Function receiving allocated bytes and active object count.
+        """
+        self.pin_allocator.set_metrics_callback(callback)
 
     @_lmcache_nvtx_annotate
     def allocate(

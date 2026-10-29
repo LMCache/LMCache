@@ -146,6 +146,38 @@ def test_tensor_allocator(use_paging):
     allocator.close()
 
 
+@pytest.mark.parametrize("use_paging", [False, True])
+def test_mixed_allocator_metrics_callback(use_paging: bool) -> None:
+    """Mixed allocators report byte and object counts for both implementations."""
+    shape = torch.Size([4096])
+    events: list[tuple[int, int]] = []
+    allocator = MixedMemoryAllocator(
+        8192,
+        use_paging=use_paging,
+        shapes=[shape],
+        dtypes=[torch.uint8],
+        fmt=MemoryFormat.KV_2LTD,
+    )
+    allocator.set_metrics_callback(
+        lambda allocated_bytes, active_objects: events.append(
+            (allocated_bytes, active_objects)
+        )
+    )
+
+    memory_objs = allocator.batched_allocate(
+        shape,
+        torch.uint8,
+        batch_size=2,
+    )
+    assert memory_objs is not None
+    assert events[-1] == (8192, 2)
+
+    for memory_obj in memory_objs:
+        memory_obj.ref_count_down()
+    assert events[-1] == (0, 0)
+    allocator.close()
+
+
 @pytest.mark.parametrize("batch_size", [-1, -5])
 @pytest.mark.parametrize("allocated_pages", [0, 2, 4])
 def test_tensor_allocator_negative_batch_size(

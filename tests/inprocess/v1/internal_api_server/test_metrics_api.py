@@ -9,9 +9,9 @@ from fastapi.testclient import TestClient
 from lmcache.inprocess.v1.internal_api_server.api_server import app
 
 
-def test_metrics_reset_is_owned_by_inprocess_api():
+def test_metrics_reset_compatibility_route_is_available_inprocess():
     with patch(
-        "lmcache.inprocess.v1.internal_api_server.vllm.metrics_api."
+        "lmcache.v1.multiprocess.http_apis.common.metrics_api."
         "reset_observability_metrics"
     ) as reset_metrics:
         response = TestClient(app).post("/metrics/reset")

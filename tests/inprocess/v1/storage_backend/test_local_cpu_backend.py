@@ -18,6 +18,7 @@ from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBacke
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_management import (
+    AllocatorMetricsCallback,
     MemoryFormat,
     MemoryObj,
 )
@@ -120,6 +121,30 @@ class TestLocalCPUBackend:
         assert backend.enable_blending is False
 
         memory_allocator.close()
+
+    def test_allocator_usage_metrics_follow_allocate_and_free(self):
+        """Local allocator activity keeps legacy usage gauges accurate."""
+        allocator = MixedMemoryAllocator(8192)
+        backend = LocalCPUBackend(
+            config=create_test_config(),
+            memory_allocator=allocator,
+        )
+
+        memory_obj = backend.allocate(
+            torch.Size([1024]),
+            torch.uint8,
+            eviction=False,
+        )
+        assert memory_obj is not None
+        allocated_stats = backend.stats_monitor.get_stats_and_clear()
+        assert allocated_stats.local_cache_usage_bytes == 4096
+        assert allocated_stats.active_memory_objs_count == 1
+
+        memory_obj.ref_count_down()
+        freed_stats = backend.stats_monitor.get_stats_and_clear()
+        assert freed_stats.local_cache_usage_bytes == 0
+        assert freed_stats.active_memory_objs_count == 0
+        allocator.close()
 
     def test_init_with_lookup_server_and_worker(self, memory_allocator):
         """Test LocalCPUBackend initialization with lookup server and worker."""
@@ -747,6 +772,9 @@ class TestLocalCPUBackendAllocatorAlignment:
             def close(self):
                 return None
 
+            def set_metrics_callback(self, callback: AllocatorMetricsCallback) -> None:
+                captured["metrics_callback"] = callback
+
         monkeypatch.setattr(
             local_cpu_backend_module,
             "MixedMemoryAllocator",
@@ -781,6 +809,9 @@ class TestLocalCPUBackendAllocatorAlignment:
 
             def close(self):
                 return None
+
+            def set_metrics_callback(self, callback: AllocatorMetricsCallback) -> None:
+                captured["metrics_callback"] = callback
 
         monkeypatch.setattr(
             local_cpu_backend_module,

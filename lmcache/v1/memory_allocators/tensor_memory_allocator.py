@@ -10,6 +10,7 @@ import torch
 from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
 from lmcache.v1.memory_management import (
     AddressManager,
+    AllocatorMetricsCallback,
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
@@ -53,6 +54,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         # For debugging purposes
         self.num_active_allocations = 0
+        self._metrics_callback: AllocatorMetricsCallback | None = None
 
     @property
     def total_allocated_size(self) -> int:
@@ -92,6 +94,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         # For debug
         self.num_active_allocations += 1
+        self._publish_metrics()
 
         # Allocate the block
         raw_data = self._get_buffer_slice(block_start, raw_size)
@@ -156,6 +159,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         # For debug
         self.num_active_allocations += batch_size
+        self._publish_metrics()
 
         tensor_mem_objs = []
         for raw_data, address in zip(raw_datas, addresses, strict=True):
@@ -195,6 +199,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         # For debug
         self.num_active_allocations -= 1
+        self._publish_metrics()
 
     @_lmcache_nvtx_annotate
     def batched_free(
@@ -256,6 +261,17 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         # For debug
         self.num_active_allocations -= total_count
+        if update_stats:
+            self._publish_metrics()
+
+    def set_metrics_callback(self, callback: AllocatorMetricsCallback) -> None:
+        """Publish allocator usage changes through ``callback``.
+
+        Args:
+            callback: Function receiving allocated bytes and active object count.
+        """
+        self._metrics_callback = callback
+        self._publish_metrics()
 
     def memcheck(self) -> bool:
         """Check allocator consistency for debugging.
@@ -296,3 +312,11 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
     def __str__(self) -> str:
         """Return the allocator name."""
         return "TensorMemoryAllocator"
+
+    def _publish_metrics(self) -> None:
+        """Publish the current accounting values when a callback is registered."""
+        if self._metrics_callback is not None:
+            self._metrics_callback(
+                self.total_allocated_size,
+                self.num_active_allocations,
+            )

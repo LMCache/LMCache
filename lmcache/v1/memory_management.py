@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import cache, wraps
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 import abc
 import ctypes
 import os
@@ -22,6 +22,8 @@ from lmcache.v1.platform import current_device_spec as current_device_spec  # no
 from lmcache.v1.system_detection import NUMAMapping
 
 logger = init_logger(__name__)
+
+AllocatorMetricsCallback = Callable[[int, int], None]
 
 
 # Cache for ctypes ubyte-array types keyed by length.
@@ -1278,6 +1280,17 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         """
         return True
 
+    def set_metrics_callback(self, callback: AllocatorMetricsCallback) -> None:
+        """Register a callback for allocator usage changes.
+
+        Allocators that expose byte and object accounting override this method.
+        Other allocators may keep the default no-op implementation.
+
+        Args:
+            callback: Function receiving allocated bytes and active object count.
+        """
+        return None
+
     # TODO(chunxiaozheng): remove if after all params replaced by shapes/dtypes
     def _adapt_shapes_and_dtypes(
         self,
@@ -1627,6 +1640,7 @@ class AddressManager:
 
 _CORE_EXPORTS = [
     "AddressManager",
+    "AllocatorMetricsCallback",
     "BytesBufferMemoryObj",
     "FreeBlock",
     "GDSMemoryObject",

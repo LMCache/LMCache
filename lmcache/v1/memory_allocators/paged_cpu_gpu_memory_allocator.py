@@ -12,6 +12,7 @@ from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
     PagedTensorMemoryAllocator,
 )
 from lmcache.v1.memory_management import (
+    AllocatorMetricsCallback,
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
@@ -88,6 +89,14 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
             fmt,
         )
         self.align_bytes = self.cpu_allocator.align_bytes
+
+    def set_metrics_callback(self, callback: AllocatorMetricsCallback) -> None:
+        """Forward local-memory usage reporting to the CPU allocator.
+
+        Args:
+            callback: Function receiving allocated bytes and active object count.
+        """
+        self.cpu_allocator.set_metrics_callback(callback)
 
     def allocate(
         self,
