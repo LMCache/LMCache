@@ -149,8 +149,7 @@ NixlConnector::NixlConnector(
     }
     contexts_.push_back(std::move(context));
   }
-  use_reactor_ =
-      nixl_reactor_eligible(backend, storage_capabilities_, enable_reactor);
+  use_reactor_ = nixl_reactor_eligible(storage_capabilities_, enable_reactor);
   start_workers();
 }
 

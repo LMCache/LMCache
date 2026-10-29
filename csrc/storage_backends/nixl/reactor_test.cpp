@@ -597,18 +597,12 @@ void test_reactor_eligibility_matrix() {
   NixlStorageCapabilities file_caps;
   CHECK(!file_caps.pending_transfers);
 
-  CHECK(nixl_reactor_eligible("RADOS", object_caps, true));
-  CHECK(nixl_reactor_eligible("REDIS", object_caps, true));
-  CHECK(!nixl_reactor_eligible("RADOS", object_caps, false));
-  CHECK(!nixl_reactor_eligible("REDIS", object_caps, false));
-  CHECK(!nixl_reactor_eligible("OBJ", object_caps, true));
-  CHECK(!nixl_reactor_eligible("S3", object_caps, true));
-  CHECK(!nixl_reactor_eligible("rados", object_caps, true));
-  CHECK(!nixl_reactor_eligible("RAD", object_caps, true));
-  CHECK(!nixl_reactor_eligible("RADOS", file_caps, true));
+  CHECK(nixl_reactor_eligible(object_caps, true));
+  CHECK(!nixl_reactor_eligible(object_caps, false));
+  CHECK(!nixl_reactor_eligible(file_caps, true));
   file_caps.pending_transfers = true;
-  CHECK(nixl_reactor_eligible("POSIX", file_caps, true));
-  CHECK(!nixl_reactor_eligible("POSIX", file_caps, false));
+  CHECK(nixl_reactor_eligible(file_caps, true));
+  CHECK(!nixl_reactor_eligible(file_caps, false));
   std::printf("PASS reactor_eligibility_matrix\n");
 }
 

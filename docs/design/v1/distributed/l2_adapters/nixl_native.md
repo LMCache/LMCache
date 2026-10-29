@@ -100,14 +100,13 @@ fails as one batch.
 
 One centralized construction-time rule (`nixl_reactor_eligible`) selects the
 worker loop: the cross-call reactor runs only when the public `enable_reactor`
-config field is true, the backend name is on the internal canonical allowlist
-(`RADOS` or `REDIS`, exact uppercase match), and the strategy reports
-`pending_transfers`; everything else stays on the untouched serial
-`ConnectorBase` loop. The allowlist is a safety gate: `enable_reactor` can
-enable the reactor only inside it and never widens eligibility, so widening
-the allowlist is a code change paired with validation evidence, not
-configuration. Field default and configuration semantics live in the
-`nixl_native` configuration reference (`docs/source/mp/l2_storage`).
+config field is true and the strategy reports `pending_transfers`; everything
+else stays on the untouched serial `ConnectorBase` loop. The capability means
+the strategy implements the pending-operation interface; it does not establish
+the selected NIXL plugin's request-lifetime behavior. Reactor enablement stays
+explicit until that behavior is validated for the installed plugin. Field
+default and configuration semantics live in the `nixl_native` configuration
+reference (`docs/source/mp/l2_storage`).
 
 The OBJECT strategy supports the split path by splitting its transfer into
 prepare/post/poll/finish (`NixlPendingOperation`), so one agent can hold

@@ -42,14 +42,10 @@ class NixlReactorDriver {
   virtual void log_load_error(const std::string& message) = 0;
 };
 
-// Centralized reactor eligibility: enable_reactor admits allowlisted backends
-// only.
-inline bool nixl_reactor_eligible(const std::string& backend,
-                                  const NixlStorageCapabilities& capabilities,
+// Centralized reactor eligibility: explicit enablement and pending support.
+inline bool nixl_reactor_eligible(const NixlStorageCapabilities& capabilities,
                                   bool enable_reactor) {
-  const bool allowlisted =
-      backend == "POSIX" || backend == "RADOS" || backend == "REDIS";
-  return enable_reactor && allowlisted && capabilities.pending_transfers;
+  return enable_reactor && capabilities.pending_transfers;
 }
 
 // Internal scheduler for one single-threaded agent on pending-capable

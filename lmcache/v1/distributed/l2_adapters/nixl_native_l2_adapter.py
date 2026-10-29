@@ -124,7 +124,7 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
             "- num_workers (int): worker/agent count (default 4, >0)\n"
             "- max_capacity_gb (float): accounting capacity (default 0)\n"
             "- enable_reactor (bool): opt-in cross-call reactor for "
-            "allowlisted backends (default false; serial worker path "
+            "pending-transfer storage (default false; serial worker path "
             "otherwise)"
         )
 
