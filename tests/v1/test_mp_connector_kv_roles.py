@@ -108,7 +108,9 @@ def _config(transfer_config: KVTransferConfig) -> VllmConfig:
                 world_size=1, rank=0, tensor_parallel_size=1, pipeline_parallel_size=1
             ),
             cache_config=SimpleNamespace(block_size=4, enable_prefix_caching=True),
-            scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
+            scheduler_config=SimpleNamespace(
+                disable_hybrid_kv_cache_manager=True, max_num_batched_tokens=256
+            ),
             kv_transfer_config=transfer_config,
         ),
     )
