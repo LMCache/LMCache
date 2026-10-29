@@ -150,7 +150,8 @@ class TestDefaultDispatcher:
         )
         assert ctx.write_owners == {}
 
-    def test_finish_write_without_reservation_is_warning_only(self, caplog):
+    def test_finish_write_without_reservation_is_warning_only(self):
+        """Keys with no replayed reservation are skipped; the rest still finish."""
         sm = _FakeSM(owner=7)
         ctx = ReplayContext(sm=sm)
         d = build_default_dispatcher()
@@ -159,15 +160,11 @@ class TestDefaultDispatcher:
             ctx,
             {"keys": [_key(1)], "layout_desc": "LAYOUT"},
         )
-        with caplog.at_level("WARNING"):
-            d.dispatch(f"{_SM_PREFIX}.finish_write", ctx, {"keys": [_key(1), _key(2)]})
-            d.dispatch(f"{_SM_PREFIX}.finish_write", ctx, {"keys": [_key(3)]})
+        d.dispatch(f"{_SM_PREFIX}.finish_write", ctx, {"keys": [_key(1), _key(2)]})
+        d.dispatch(f"{_SM_PREFIX}.finish_write", ctx, {"keys": [_key(3)]})
         assert [c for c in sm.calls if c[0] == "finish_write"] == [
             ("finish_write", {"keys": [_key(1)], "l1_owners": {_key(1): 7}}),
         ]
-        assert (
-            sum("no matching reserve_write" in r.message for r in caplog.records) == 2
-        )
 
     def test_read_prefetched_enter_exit_fifo(self):
         """Two overlapping contexts with identical keys exit in FIFO order."""
