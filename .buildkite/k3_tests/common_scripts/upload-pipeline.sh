@@ -77,5 +77,13 @@ if [[ "${PIPELINE_FILE}" == */xpu/*/pipeline.yml ]]; then
     export XPU_CI_IMAGE
 fi
 
+if [[ "${PIPELINE_FILE}" == */rbln/pipeline.yml && "${RBLN_SERVE_NIGHTLY_VERIFIED:-0}" == "1" ]]; then
+    # A failed lookup fails the build rather than falling back to the PR
+    # lane's pin, so the nightly lane never silently retests the pinned image.
+    RBLN_SERVE_IMAGE="$(python3 "${SCRIPT_DIR}/../rbln/resolve_nightly_image.py")"
+    echo "Using nightly-verified rbln-serve image: ${RBLN_SERVE_IMAGE}"
+    export RBLN_SERVE_IMAGE
+fi
+
 echo "--- :pipeline: Uploading ${PIPELINE_FILE}"
 exec buildkite-agent pipeline upload "${PIPELINE_FILE}"

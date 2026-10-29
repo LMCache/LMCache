@@ -1,0 +1,13 @@
+# Paste this into the rbln-mp-nightly Buildkite pipeline's "Steps" editor.
+# It runs the same RBLN hardware smoke as rbln-mp-test, but on the newest
+# rbln-serve image that passed rbln-serve's nightly CI.
+
+env:
+  RBLN_SERVE_NIGHTLY_VERIFIED: "1"
+
+agents:
+  queue: "rbln-queue"
+
+steps:
+  - label: ":pipeline: Upload pipeline"
+    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/rbln/pipeline.yml

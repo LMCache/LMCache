@@ -17,7 +17,8 @@ steps:
           podSpec:
             containers:
               - name: container-0
-                image: harbor.k8s.rebellions.in/rebellions-sw/rbln-serve:0.12.0rc0-ubuntu24.04-py3.12
+                # The nightly lane sets RBLN_SERVE_IMAGE; PR builds use the pin.
+                image: ${RBLN_SERVE_IMAGE:-harbor.k8s.rebellions.in/rebellions-sw/rbln-serve:0.12.0rc0-ubuntu24.04-py3.12}
                 securityContext:
                   runAsUser: 0
                 resources:
