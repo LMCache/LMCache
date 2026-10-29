@@ -22,6 +22,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -176,15 +177,22 @@ def completions(client, task_ids):
 
 
 @pytest.fixture
-def arena(tmp_path):
-    path = tmp_path / "lmcache_l1_pool_protocol_test"
-    with path.open("wb") as stream:
-        stream.truncate(65536)
-    with path.open("r+b") as stream:
-        region = mmap.mmap(stream.fileno(), 65536, access=mmap.ACCESS_WRITE)
-    base = ctypes.addressof(ctypes.c_ubyte.from_buffer(region))
-    yield SimpleNamespace(path=path, region=region, base=base, size=len(region))
-    region.close()
+def arena():
+    # Container /tmp may be overlayfs, whose mmap backing inode differs from
+    # fstat(open(path)). Exercise the actual shared-memory contract on tmpfs.
+    with tempfile.TemporaryDirectory(
+        prefix="lmcache-process-test-", dir="/dev/shm"
+    ) as root:
+        path = Path(root) / "lmcache_l1_pool_protocol_test"
+        with path.open("wb") as stream:
+            stream.truncate(65536)
+        with path.open("r+b") as stream:
+            region = mmap.mmap(stream.fileno(), 65536, access=mmap.ACCESS_WRITE)
+        base = ctypes.addressof(ctypes.c_ubyte.from_buffer(region))
+        try:
+            yield SimpleNamespace(path=path, region=region, base=base, size=len(region))
+        finally:
+            region.close()
 
 
 @pytest.fixture

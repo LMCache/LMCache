@@ -50,6 +50,12 @@ retains the verified FD and passes it to each child, so pathname replacement
 cannot redirect a restart to another arena. Both processes translate buffer
 views to checked offsets; no KV payload crosses the command socket.
 
+Use an arena on a filesystem with consistent mapped/open-file identity, normally
+tmpfs under `/dev/shm`. Overlayfs can expose a different underlying mapping inode
+from `fstat(open(path))`; such mappings are intentionally rejected rather than
+weakening the identity check. The regression fixture uses actual tmpfs SHM, not
+a container's potentially overlay-backed temporary directory.
+
 The caller owns allocation lifetime. GET destinations must remain exclusively
 writable and SET sources immutable until the terminal result or successful
 `quiesce()`. Holding a Python memoryview is not sufficient to prevent allocator
