@@ -13,7 +13,7 @@ logged and retried, and it never takes the MP server down.
 """
 
 # Standard
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 import asyncio
 import contextlib
 
@@ -42,6 +42,7 @@ def bind_coordinator_chunk_size(
     base_url: str,
     chunk_size: int,
     timeout: float = _DEFAULT_CHUNK_SIZE_BIND_TIMEOUT,
+    api_key_files: Sequence[str] = (),
 ) -> int:
     """Synchronously bind coordinator hashing to an MP server's final size."""
     # First Party
@@ -53,7 +54,7 @@ def bind_coordinator_chunk_size(
     response = httpx.put(
         f"{base_url.rstrip('/')}/config/chunk-size",
         json=body.model_dump(mode="json"),
-        headers=request_client_auth_headers(),
+        headers=request_client_auth_headers(api_key_files),
         timeout=timeout,
     )
     response.raise_for_status()

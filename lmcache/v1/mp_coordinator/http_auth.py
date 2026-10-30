@@ -40,6 +40,32 @@ PUBLIC_COORDINATOR_PATHS = frozenset({"/healthz"})
 class CoordinatorAuthenticationConfig(APIKeyVerifier):
     """API keys accepted by the mp coordinator fleet control plane."""
 
+    def __init__(self, api_keys: Sequence[str] = ()) -> None:
+        """Initialize accepted keys and select the first for outbound calls.
+
+        Args:
+            api_keys: Keys accepted by the coordinator. The first configured
+                key is also used when the coordinator calls MP servers.
+        """
+        super().__init__(api_keys)
+        self._client_api_key = api_keys[0] if api_keys else None
+
+    def client_auth_headers(self) -> dict[str, str]:
+        """Build credentials for the coordinator's outbound MP requests.
+
+        Returns:
+            Bearer headers using the first configured CLI/environment key, or
+            the environment fallback when this config has no keys.
+        """
+        # First Party
+        from lmcache.v1.multiprocess.transport.auth import (
+            request_client_auth_headers,
+        )
+
+        if self._client_api_key is not None:
+            return request_client_auth_headers(api_key=self._client_api_key)
+        return request_client_auth_headers()
+
     @classmethod
     def from_key_files(
         cls, key_files: Sequence[str | Path]

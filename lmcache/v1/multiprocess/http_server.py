@@ -137,7 +137,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
 
         coordinator_client = httpx.AsyncClient(
-            timeout=10.0, headers=request_client_auth_headers()
+            timeout=10.0,
+            headers=request_client_auth_headers(mp_config.api_key_files),
         )
         # Canonical id resolved by run_cache_server above; shared with
         # the OTel service.instance.id so membership matches metrics/traces.

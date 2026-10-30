@@ -9,6 +9,7 @@ from lmcache.v1.multiprocess.http_auth import HTTPAuthenticationConfig
 from lmcache.v1.multiprocess.transport.auth import (
     load_request_authentication,
     load_request_client_api_key,
+    request_client_auth_headers,
 )
 
 
@@ -56,6 +57,25 @@ def test_request_client_key_can_come_from_environment_file(
     monkeypatch.setenv("LMCACHE_API_KEY_FILE", str(key_file))
 
     assert load_request_client_api_key() == "secret"
+
+
+def test_request_client_uses_first_cli_key_file_for_outbound_auth(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CLI key files authenticate peers and the first key is sent outbound."""
+    old_key = tmp_path / "old-key"
+    old_key.write_text("old-secret\n", encoding="utf-8")
+    current_key = tmp_path / "current-key"
+    current_key.write_text("current-secret\n", encoding="utf-8")
+    monkeypatch.delenv("LMCACHE_API_KEY", raising=False)
+    monkeypatch.delenv("LMCACHE_API_KEY_FILE", raising=False)
+    monkeypatch.delenv("LMCACHE_HTTP_API_KEY", raising=False)
+    monkeypatch.delenv("LMCACHE_HTTP_API_KEY_FILE", raising=False)
+
+    assert load_request_client_api_key(key_files=[old_key, current_key]) == "old-secret"
+    assert request_client_auth_headers([old_key, current_key]) == {
+        "Authorization": "Bearer old-secret"
+    }
 
 
 def test_request_client_rejects_multiple_environment_sources(

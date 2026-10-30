@@ -6,7 +6,11 @@ from collections.abc import Sequence
 from pathlib import Path
 
 # First Party
-from lmcache.security.api_key import APIKeyVerifier, load_service_api_keys
+from lmcache.security.api_key import (
+    APIKeyVerifier,
+    load_api_keys_from_files,
+    load_service_api_keys,
+)
 from lmcache.security.http import bearer_authorization_header
 
 
@@ -24,15 +28,20 @@ def load_request_authentication(
     return APIKeyVerifier(load_service_api_keys(key_files))
 
 
-def load_request_client_api_key(api_key: str | None = None) -> str | None:
+def load_request_client_api_key(
+    api_key: str | None = None,
+    key_files: Sequence[str | Path] = (),
+) -> str | None:
     """Load the one API key sent by a request client.
 
-    An explicit value takes precedence. Otherwise the request-key environment
-    variables are used. A client cannot send multiple credentials in one
-    request.
+    An explicit value takes precedence. Otherwise the first configured CLI key
+    file is used, followed by the shared environment sources. Additional keys
+    remain valid server-side rotation keys, while clients send one credential.
 
     Args:
         api_key: Explicit client credential, if supplied programmatically.
+        key_files: API key files configured for the service. The first key is
+            used for outbound requests; all keys remain accepted inbound.
 
     Returns:
         The configured key, or ``None`` when authentication is not configured.
@@ -45,13 +54,19 @@ def load_request_client_api_key(api_key: str | None = None) -> str | None:
         if not api_key:
             raise ValueError("Request client API key must not be empty")
         return api_key
+    if key_files:
+        api_keys = load_api_keys_from_files(key_files)
+        return api_keys[0] if api_keys else None
     api_keys = load_service_api_keys(())
     if len(api_keys) > 1:
         raise ValueError("Configure exactly one request client API key source")
     return api_keys[0] if api_keys else None
 
 
-def request_client_auth_headers() -> dict[str, str]:
+def request_client_auth_headers(
+    key_files: Sequence[str | Path] = (),
+    api_key: str | None = None,
+) -> dict[str, str]:
     """Build outbound HTTP headers carrying the single configured client key.
 
     Used by the MP server's calls to an authenticated coordinator (instance
@@ -64,7 +79,7 @@ def request_client_auth_headers() -> dict[str, str]:
         the no-key default: a fleet without a configured key exchanges no
         credentials.
     """
-    api_key = load_request_client_api_key()
+    api_key = load_request_client_api_key(api_key, key_files)
     if api_key is None:
         return {}
     return {"Authorization": bearer_authorization_header(api_key)}

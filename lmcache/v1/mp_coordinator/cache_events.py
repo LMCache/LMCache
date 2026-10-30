@@ -120,7 +120,12 @@ class HttpCacheEventSink(CacheEventSink):
         timeout: Per-request timeout in seconds.
     """
 
-    def __init__(self, coordinator_url: str, timeout: float = 2.0) -> None:
+    def __init__(
+        self,
+        coordinator_url: str,
+        timeout: float = 2.0,
+        api_key_files: Sequence[str] = (),
+    ) -> None:
         # First Party
         from lmcache.v1.multiprocess.transport.auth import (
             request_client_auth_headers,
@@ -128,7 +133,8 @@ class HttpCacheEventSink(CacheEventSink):
 
         self._base_url = coordinator_url.rstrip("/")
         self._client = httpx.Client(
-            timeout=timeout, headers=request_client_auth_headers()
+            timeout=timeout,
+            headers=request_client_auth_headers(api_key_files),
         )
         self._dropped_events = 0
 
@@ -798,11 +804,16 @@ class CacheEventSubscriber(EventSubscriber):
             self.flush()
 
 
-def create_cache_event_sink(config: CoordinatorConfig) -> CacheEventSink:
+def create_cache_event_sink(
+    config: CoordinatorConfig,
+    api_key_files: Sequence[str] = (),
+) -> CacheEventSink:
     """Create the configured MP-server cache-event transport.
 
     Args:
         config: Coordinator connection and event-sink configuration.
+        api_key_files: MP server key files, used to authenticate to the
+            coordinator.
 
     Returns:
         The configured HTTP or Kafka sink.
@@ -814,7 +825,7 @@ def create_cache_event_sink(config: CoordinatorConfig) -> CacheEventSink:
         return KafkaCacheEventSink(config.event_sink_config)
     if not config.url:
         raise ValueError("HTTP cache-event reporting requires a coordinator URL")
-    return HttpCacheEventSink(config.url)
+    return HttpCacheEventSink(config.url, api_key_files=api_key_files)
 
 
 def maybe_create_cache_event_subscriber(
@@ -844,7 +855,9 @@ def maybe_create_cache_event_subscriber(
         and coordinator_config.url
         and coordinator_config.event_reporting
     ):
-        sinks.append(create_cache_event_sink(coordinator_config))
+        sinks.append(
+            create_cache_event_sink(coordinator_config, mp_config.api_key_files)
+        )
     trace_sink: TraceCacheEventSink | None = None
     recorder = get_active_trace_recorder()
     if isinstance(recorder, EventsTraceRecorder):

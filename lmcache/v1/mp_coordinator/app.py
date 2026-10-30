@@ -243,7 +243,10 @@ def create_app(
             # that may themselves enforce authentication, so present the
             # shared fleet key when one is configured.
             outbound_client = await stack.enter_async_context(
-                httpx.AsyncClient(timeout=30.0, headers=_outbound_http_headers())
+                httpx.AsyncClient(
+                    timeout=30.0,
+                    headers=_outbound_http_headers(http_authentication),
+                )
             )
             app.state.outbound_client = outbound_client
             if config.checkpoint_path:
@@ -320,17 +323,21 @@ def create_app(
     return app
 
 
-def _outbound_http_headers() -> dict[str, str]:
+def _outbound_http_headers(
+    authentication: CoordinatorAuthenticationConfig | None = None,
+) -> dict[str, str]:
     """Return default headers for the coordinator's outbound HTTP calls.
 
-    When the fleet key is configured through the shared API-key sources, present
-    it so outbound controller calls reach MP servers that enforce
-    authentication; otherwise no header is sent, matching the no-key default.
+    Present the first configured fleet key so outbound controller calls reach
+    MP servers that enforce authentication. When called without an explicit
+    key, the shared environment sources remain the fallback.
 
     Returns:
         Outbound authentication headers, or an empty mapping when no key is
         configured.
     """
+    if authentication is not None:
+        return authentication.client_auth_headers()
     # First Party
     from lmcache.v1.multiprocess.transport.auth import request_client_auth_headers
 

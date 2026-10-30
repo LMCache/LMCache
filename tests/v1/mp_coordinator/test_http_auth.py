@@ -8,7 +8,8 @@ default.
 """
 
 # Third Party
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 import pytest
 
@@ -90,6 +91,17 @@ def test_each_configured_key_is_accepted(api_key: str) -> None:
         )
 
     assert response.status_code == 200
+
+
+def test_cli_key_file_is_used_for_outbound_mp_requests(tmp_path) -> None:
+    """The coordinator presents the configured CLI key to MP servers."""
+    key_file = tmp_path / "coordinator-key"
+    key_file.write_text("fleet-secret\n", encoding="utf-8")
+    authentication = CoordinatorAuthenticationConfig.from_sources([key_file])
+
+    assert authentication.client_auth_headers() == {
+        "Authorization": "Bearer fleet-secret"
+    }
 
 
 def test_x_lmcache_api_key_header_is_accepted() -> None:
@@ -204,3 +216,55 @@ def test_live_server_without_key_stays_open_end_to_end() -> None:
             assert client.get("/instances").status_code == 200
     finally:
         server.should_exit = True
+
+
+def test_live_coordinator_uses_cli_key_for_outbound_mp_request(
+    tmp_path,
+) -> None:
+    """A file-configured coordinator authenticates a proxied MP call."""
+    key_file = tmp_path / "fleet-key"
+    key_file.write_text("fleet-secret\n", encoding="utf-8")
+    auth = CoordinatorAuthenticationConfig.from_sources([key_file])
+    target_app = FastAPI()
+
+    @target_app.post("/cache/prefetches")
+    async def prefetch(request: Request) -> JSONResponse:
+        if request.headers.get("authorization") != "Bearer fleet-secret":
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "coordinator did not send the configured key"},
+            )
+        return JSONResponse(
+            content={"request_id": "probe-1", "chunks": 0, "status": "submitted"}
+        )
+
+    target_server, target_url = _serve_live(target_app)
+    target_port = int(target_url.rsplit(":", maxsplit=1)[1])
+    try:
+        with TestClient(create_app(_config(), http_authentication=auth)) as client:
+            headers = {"Authorization": "Bearer fleet-secret"}
+            registration = client.post(
+                "/instances",
+                headers=headers,
+                json={
+                    "instance_id": "outbound-probe",
+                    "ip": "127.0.0.1",
+                    "http_port": target_port,
+                },
+            )
+            assert registration.status_code == 200
+            response = client.post(
+                "/cache/prefetches",
+                headers=headers,
+                json={
+                    "instance_id": "outbound-probe",
+                    "model_name": "probe",
+                    "world_size": 1,
+                    "token_ids": [],
+                },
+            )
+    finally:
+        target_server.should_exit = True
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "submitted"
