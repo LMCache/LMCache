@@ -33,6 +33,7 @@ from lmcache.v1.mp_observability.config import (
     parse_args_to_observability_config,
     resolve_grpc_metrics_enabled,
 )
+from lmcache.v1.mp_observability.event_bus import EventBus
 from lmcache.v1.mp_observability.gc_monitor import (
     init_gc_monitor,
     shutdown_gc_monitor,
@@ -272,6 +273,23 @@ def _build_server_components(
     return ServerBuildComponents(modules=modules)
 
 
+def close_cache_server(
+    server: RequestServer,
+    engine: MPCacheServer,
+    event_bus: EventBus,
+) -> None:
+    """Stop request handling and the engine before stopping the event bus.
+
+    Args:
+        server: Request server accepting new work.
+        engine: Cache engine that may publish teardown events.
+        event_bus: Bus that must outlive the engine's final events.
+    """
+    server.close()
+    engine.close()
+    event_bus.stop()
+
+
 def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
@@ -417,9 +435,7 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
-        event_bus.stop()
-        server.close()
-        engine.close()
+        close_cache_server(server, engine, event_bus)
     finally:
         shutdown_gc_monitor()
     return None

@@ -56,7 +56,7 @@ from lmcache.v1.multiprocess.http_auth import (
 from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
     MPRuntimePluginLauncher,
 )
-from lmcache.v1.multiprocess.server import run_cache_server
+from lmcache.v1.multiprocess.server import close_cache_server, run_cache_server
 
 logger = init_logger(__name__)
 
@@ -176,9 +176,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     launcher = getattr(app.state, "plugin_launcher", None)
     if launcher is not None:
         launcher.stop_plugins()
-    get_event_bus().stop()
-    request_server.close()
-    engine.close()
+    close_cache_server(request_server, engine, get_event_bus())
     logger.info("LMCache HTTP server stopped")
 
 
