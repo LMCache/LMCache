@@ -1596,3 +1596,7 @@ Token-addressed ``POST /directory/lookup``, ``POST /cache/pins``,
 The map defaults to ``{}``, selecting untagged content. Names must be nonempty
 strings and values must be strings. Flat encoded object keys carry the same
 map, and coordinator prefetch forwards it to the target node.
+
+``POST /directory/blend-lookup`` accepts the same map and limits candidates to
+the caller's complete ``model_name`` / ``cache_salt`` / ``world_size`` /
+``tags`` namespace.
