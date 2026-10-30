@@ -403,11 +403,20 @@ def test_descriptor_class_parity(cls_name: str) -> None:
     py_inst = _fallback_descs[cls_name]()
 
     def _public_data_attrs(inst: object) -> set[str]:
-        return {
-            a
-            for a in dir(inst)
-            if not a.startswith("_") and not callable(getattr(inst, a))
-        }
+        # Skip attributes that raise on access: OSError-derived exceptions
+        # (e.g. ShmExistsError) expose `characters_written`, which raises
+        # AttributeError while unset on a freshly constructed instance.
+        attrs = set()
+        for attr in dir(inst):
+            if attr.startswith("_"):
+                continue
+            try:
+                value = getattr(inst, attr)
+            except AttributeError:
+                continue
+            if not callable(value):
+                attrs.add(attr)
+        return attrs
 
     missing = sorted(_public_data_attrs(c_inst) - _public_data_attrs(py_inst))
     assert not missing, (

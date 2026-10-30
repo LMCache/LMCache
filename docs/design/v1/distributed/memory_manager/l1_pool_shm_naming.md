@@ -73,7 +73,7 @@ handling retries with a fresh UUID instead of unlinking.
 
 `alloc_shm_pinned_ptr` (in `lmcache/v1/platform/torch_ops/mem_alloc.py`)
 creates its segment with `O_CREAT | O_EXCL` and **never unlinks a
-pre-existing name**: a taken name raises `FileExistsError` up through
+pre-existing name**: a taken name raises `ShmExistsError` up through
 `MixedMemoryAllocator`, which is what makes the retry loop above observable.
 Reclaiming a pre-existing segment is a naming-policy decision that belongs to
 `create_memory_allocator`, not to the allocator.
@@ -84,7 +84,9 @@ The native CUDA implementation (`csrc/cuda/mem_alloc.cpp`, bound onto
 `cuda_ops.ShmExistsError` (a `FileExistsError` subclass, so
 `is_shm_name_collision` and the retry loop treat it identically), and the
 same `flock` liveness guard held for the segment's lifetime and released in
-`free_shm_pinned_ptr`.
+`free_shm_pinned_ptr`. The fallback raises
+`lmcache.v1.platform.torch_ops.ShmExistsError`, mirroring the native type
+one-for-one (enforced by the cuda_ops/torch_ops parity test).
 
 ## Crash / orphan segments
 

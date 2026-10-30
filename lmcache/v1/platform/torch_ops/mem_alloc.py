@@ -26,6 +26,17 @@ _pinned_ptr_registry: dict[int, int] = {}  # ptr -> size, for cudaHostUnregister
 # ptr -> liveness-lock fd held for the SHM segment's lifetime
 _shm_guard_registry: dict[int, int] = {}
 
+
+class ShmExistsError(FileExistsError):
+    """A POSIX SHM segment already owns the requested name.
+
+    Mirrors ``cuda_ops.ShmExistsError`` so ``alloc_shm_pinned_ptr``
+    raises the same exception type on the native and fallback paths;
+    retry logic (``is_shm_name_collision``) catches it as a
+    ``FileExistsError`` either way.
+    """
+
+
 # Cuda path goes through func cudaHostAlloc, which is
 # already page aligned by CUDA spec. This fallback shim mirrors that
 # guarantee so consumers that require page-aligned host buffers, in
@@ -148,12 +159,12 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     if pinning fails, continues without pinning.
 
     The segment is created exclusively (``O_CREAT | O_EXCL``): a name
-    that already exists -- live or stale -- raises ``FileExistsError``
-    instead of being unlinked, so callers can surface the collision
-    (see the L1 pool retry loop in
-    ``lmcache.v1.distributed.memory_manager``). Reclaiming a
-    pre-existing segment is a naming-policy decision that belongs to
-    the caller, not this allocator.
+    that already exists -- live or stale -- raises ``ShmExistsError``
+    (a ``FileExistsError`` subclass, matching ``cuda_ops``) instead of
+    being unlinked, so callers can surface the collision (see the L1
+    pool retry loop in ``lmcache.v1.distributed.memory_manager``).
+    Reclaiming a pre-existing segment is a naming-policy decision that
+    belongs to the caller, not this allocator.
 
     The segment's advisory liveness lock is held until
     ``free_shm_pinned_ptr`` (or process death) so
@@ -165,7 +176,10 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     # Strip leading '/' for SharedMemory name
     name = shm_name.lstrip("/") if shm_name else None
 
-    shm = shared_memory.SharedMemory(name=name, create=True, size=size)
+    try:
+        shm = shared_memory.SharedMemory(name=name, create=True, size=size)
+    except FileExistsError as exc:
+        raise ShmExistsError(str(exc)) from exc
 
     array_type = ctypes.c_uint8 * size
     buf = array_type.from_buffer(shm.buf)
