@@ -10,7 +10,8 @@ import urllib.parse
 import msgspec
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey, normalize_tags
+from lmcache.v1.distributed.api import ObjectKey, validate_identity_tags
+from lmcache.v1.utils.frozen_dict import freeze_dict
 
 
 def encode_tags(tags: Mapping[str, str]) -> str:
@@ -31,7 +32,9 @@ def decode_tags(token: str) -> Mapping[str, str]:
     payload = base64.b64decode(
         encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True
     )
-    tags = normalize_tags(msgspec.json.decode(payload, type=dict[str, str]))
+    decoded = msgspec.json.decode(payload, type=dict[str, str])
+    validate_identity_tags(decoded)
+    tags = freeze_dict(dict(sorted(decoded.items())))
     if encode_tags(tags) != token:
         raise ValueError("non-canonical identity tags token")
     return tags

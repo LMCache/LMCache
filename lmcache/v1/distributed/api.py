@@ -9,7 +9,7 @@ Could be implemented by native code in the future
 # Standard
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Literal, NoReturn, get_args
+from typing import TYPE_CHECKING, Literal, get_args
 import enum
 
 # Third Party
@@ -17,6 +17,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.utils.frozen_dict import freeze_dict
 
 if TYPE_CHECKING:
     # First Party
@@ -156,31 +157,11 @@ class MemoryTags:
     """Where the bytes reside relative to this host."""
 
 
-class _FrozenTags(dict[str, str]):
-    """An immutable dict snapshot that msgspec can serialize."""
-
-    def __hash__(self) -> int:  # type: ignore[override]
-        return hash(tuple(self.items()))
-
-    def _immutable(self, *args: object, **kwargs: object) -> NoReturn:
-        raise TypeError("identity tags are immutable")
-
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    clear = _immutable
-    pop = _immutable
-    popitem = _immutable
-    setdefault = _immutable
-    update = _immutable
-    __ior__ = _immutable
-
-
-def normalize_tags(tags: Mapping[str, str]) -> Mapping[str, str]:
-    """Validate and snapshot identity tags in canonical name order."""
+def validate_identity_tags(tags: Mapping[str, str]) -> None:
+    """Validate identity tag names and values."""
     for name, value in tags.items():
         if not isinstance(name, str) or not name or not isinstance(value, str):
             raise ValueError("tags require non-empty string names and string values")
-    return _FrozenTags(sorted(tags.items()))
 
 
 @dataclass(frozen=True)
@@ -203,7 +184,8 @@ class ObjectKeyIdentity:
             raise ValueError("cache_salt must not contain '@', '/', '\\' or NUL")
         if len(self.cache_salt) > 128:
             raise ValueError("cache_salt exceeds max length 128")
-        object.__setattr__(self, "tags", normalize_tags(self.tags))
+        validate_identity_tags(self.tags)
+        object.__setattr__(self, "tags", freeze_dict(dict(sorted(self.tags.items()))))
 
 
 @dataclass(frozen=True, init=False)
@@ -434,7 +416,8 @@ class EncodedObjectKey:
     """Canonical matching tags that participate in object identity."""
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "tags", normalize_tags(self.tags))
+        validate_identity_tags(self.tags)
+        object.__setattr__(self, "tags", freeze_dict(dict(sorted(self.tags.items()))))
 
     def to_object_key(self) -> ObjectKey:
         """Recover the corresponding :class:`ObjectKey`.
