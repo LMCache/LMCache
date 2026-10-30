@@ -69,10 +69,11 @@ the legacy ID table. The server accepts both encodings.
 
 The server follows the same boundary. `server.py` builds transport-neutral
 engine modules and passes them to `create_request_server()`, which returns the
-`RequestServer` protocol implemented by either `MessageQueueServer` or
-`GrpcMultiprocessServer`. Shared runtime code starts and closes only that
-protocol; concrete server classes are accessed only inside their transport
-packages and implementation-level tests.
+`RequestServer` protocol implemented by `MessageQueueServer` for ZMQ or by a
+`GrpcMultiprocessServerBase` subclass for gRPC (see [gRPC server
+modes](#grpc-server-modes) below for which subclass is picked). Shared runtime
+code starts and closes only that protocol; concrete server classes are accessed
+only inside their transport packages and implementation-level tests.
 
 ### gRPC server modes
 
