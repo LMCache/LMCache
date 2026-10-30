@@ -8,6 +8,33 @@ environments, along with production best practices.
    :local:
    :depth: 2
 
+Upgrading STORE completeness validation
+---------------------------------------
+
+.. warning::
+
+   Earlier versions of the LMCache-driven MP STORE path could publish an
+   incomplete hybrid-cache object under a valid token hash. The completeness
+   fix prevents new invalid writes; it does not detect, repair, or invalidate
+   existing entries. Restarting services alone does not remove entries in
+   persistent storage. See :doc:`release_notes`.
+
+If the deployment may contain such objects:
+
+#. Stop the inference workers and LMCache servers using the affected cache.
+#. Configure a fresh, empty cache namespace or storage location for every
+   persistent backend. Keep older writers out of the new namespace.
+#. Restart the services with the fixed version and rebuild their caches from
+   inference. Do not migrate old cache objects into the new namespace.
+
+For example, a deployment using the :doc:`FileSystem L2 adapter <l2_storage/fs>`
+can select a new, empty directory instead of reusing its previous ``base_path``:
+
+.. code-block:: bash
+
+   lmcache server --separate-object-groups \
+       --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2-store-completeness-v2"}'
+
 Docker
 ------
 
