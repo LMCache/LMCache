@@ -45,7 +45,7 @@ from lmcache.v1.distributed.api import (
     PrefetchTaskSpec,
     lookup_kv_ranks,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
@@ -528,7 +528,7 @@ class L1Resharder:
                 if reserved:
                     locked.update(
                         sm.finish_write_and_reserve_read(
-                            sm.prepare_write_completion(reserved), task.read_locks
+                            list(reserved), l1_owners_of(reserved), task.read_locks
                         )
                     )
                 # Another writer admitted these first: an earlier reshard of

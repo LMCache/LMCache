@@ -580,7 +580,7 @@ class TestStorageManagerLockOnWrite:
         reserved = sm.reserve_write(keys, basic_layout)
 
         owners = sm.finish_write_and_reserve_read(
-            sm.prepare_write_completion(reserved), read_locks=2
+            keys, l1_owners_of(reserved), read_locks=2
         )
 
         assert set(owners) == set(keys)
@@ -600,7 +600,7 @@ class TestStorageManagerLockOnWrite:
         handed = make_object_key(1)
         written = make_object_key(2)
         reserved = sm.reserve_write([handed], basic_layout)
-        owners = sm.finish_write_and_reserve_read(sm.prepare_write_completion(reserved))
+        owners = sm.finish_write_and_reserve_read([handed], l1_owners_of(reserved))
         sm.finish_read_prefetched([handed], l1_owners=owners)
 
         # Stores run in order, so once ``written`` is in L2 a store of
@@ -617,7 +617,8 @@ class TestStorageManagerLockOnWrite:
         """Resident keys are locked; missing and still-written keys are not."""
         sm = StorageManager(basic_storage_manager_config)
         resident, staged, missing = (make_object_key(i) for i in range(3))
-        sm.finish_write(list(sm.reserve_write([resident], basic_layout)))
+        reserved = sm.reserve_write([resident], basic_layout)
+        sm.finish_write([resident], l1_owners_of(reserved))
         sm.reserve_write([staged], basic_layout)
 
         owners = sm.reserve_read([resident, staged, missing], read_locks=2)

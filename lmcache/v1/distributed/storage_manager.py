@@ -381,17 +381,22 @@ class StorageManager:
         # TODO: global key states update
 
     def finish_write_and_reserve_read(
-        self, completion: L1WriteCompletion, read_locks: int = 1
+        self,
+        keys: list[ObjectKey],
+        l1_owners: dict[ObjectKey, int],
+        read_locks: int = 1,
     ) -> dict[ObjectKey, int]:
-        """Finish captured reservations and read-lock the admitted objects.
+        """Finish writing reserved objects and read-lock the admitted ones.
 
-        Like :meth:`finish_write_by_owner`, but each object moves from
-        write-locked to ``read_locks`` read locks in one step under its L1's
-        lock, so eviction cannot take it in between. Use it when the writer
-        hands the objects to a reader, as a prefetch does.
+        Like :meth:`finish_write`, but each object moves from write-locked to
+        ``read_locks`` read locks in one step under its L1's lock, so eviction
+        cannot take it in between. Use it when the writer hands the objects to
+        a reader, as a prefetch does.
 
         Args:
-            completion: Owner/key groups from :meth:`prepare_write_completion`.
+            keys: Keys reserved by :meth:`reserve_write` and written.
+            l1_owners: The L1 manager each key was reserved in, built from the
+                reserved objects with :func:`l1_owners_of`.
             read_locks: Read locks taken per key; release them with
                 :meth:`finish_read_prefetched`.
 
@@ -400,20 +405,19 @@ class StorageManager:
             reservation expired is absent.
 
         Raises:
-            ValueError: A captured owner is no longer registered.
+            ValueError: ``l1_owners`` omits a key or names an unregistered L1
+                manager.
 
         Note:
             The objects are not stored to L2: L1 reports them as prefetched,
             not as written. If a key became resident before admission, the
             resident object is locked instead.
         """
-        if any(owner not in self._l1_managers_by_id for owner, _ in completion):
-            raise ValueError("write completion requires a registered L1 owner")
         owners: dict[ObjectKey, int] = {}
         failed_keys: list[ObjectKey] = []
-        for owner, keys in completion:
+        for owner, group in self._group_by_owner(keys, l1_owners).items():
             results = self._l1_managers_by_id[owner].finish_write_and_reserve_read(
-                keys, read_locks=read_locks, tag=_L1_WRITE_TAG
+                group, read_locks=read_locks, tag=_L1_WRITE_TAG
             )
             for key, (err, _) in results.items():
                 if err == L1Error.SUCCESS:
