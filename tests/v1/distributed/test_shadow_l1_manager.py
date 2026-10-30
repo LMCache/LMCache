@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import Iterator
+from pathlib import Path
 
 # Third Party
 import pytest
@@ -18,15 +19,21 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
 )
 from lmcache.v1.distributed.config import (
+    EvictionConfig,
     L1ManagerConfig,
     L1MemoryManagerConfig,
+    StorageManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l1_manager import (
+    DevDaxL1Manager,
     DramL1Manager,
     ShadowL1Manager,
+    create_l1_managers,
 )
 from lmcache.v1.distributed.memory_manager import ShadowL1MemoryManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_management import (
     BorrowedTensorMemoryObj,
     MemoryFormat,
@@ -96,6 +103,19 @@ def shadow(fake_pinned_memory: None) -> Iterator[ShadowL1Manager]:
     yield manager
     manager.close()
     local.close()
+
+
+def _cxl_config(path: Path) -> L1ManagerConfig:
+    path.write_bytes(bytes(PAGE * 4))
+    return L1ManagerConfig(
+        L1MemoryManagerConfig(
+            size_in_bytes=PAGE,
+            use_lazy=False,
+            shm_name="",
+            devdax_path=str(path),
+            cxl_pool_id="pool",
+        )
+    )
 
 
 def test_shadow_mirrors_its_local_medium_as_remote(shadow: ShadowL1Manager) -> None:
@@ -188,3 +208,50 @@ def test_shadow_memory_manager_never_allocates() -> None:
     lease = Lease()
     assert manager.free([_view(lease)]) == L1Error.SUCCESS
     assert lease.releases == 1
+
+
+def test_factory_pairs_a_shadow_only_with_a_cxl_slab(
+    tmp_path: Path, fake_pinned_memory: None
+) -> None:
+    managers: list[L1ManagerInterface] = create_l1_managers(
+        [_cxl_config(tmp_path / "pool.bin")]
+    )
+    try:
+        assert [type(m) for m in managers] == [DevDaxL1Manager, ShadowL1Manager]
+        assert managers[1].get_memory_tags() == MemoryTags(
+            MemorySegment.CXL, MemoryResidency.REMOTE
+        )
+        assert managers[1].backend_type is L1BackendType.DEVDAX
+    finally:
+        for manager in reversed(managers):
+            manager.close()
+
+    plain = create_l1_managers(
+        [
+            L1ManagerConfig(
+                L1MemoryManagerConfig(size_in_bytes=PAGE, use_lazy=False, shm_name="")
+            )
+        ]
+    )
+    try:
+        assert [type(m) for m in plain] == [DramL1Manager]
+    finally:
+        plain[0].close()
+
+
+def test_writes_are_never_placed_in_the_shadow_l1(tmp_path: Path) -> None:
+    manager = StorageManager(
+        StorageManagerConfig(
+            l1_manager_config=_cxl_config(tmp_path / "pool.bin"),
+            eviction_config=EvictionConfig(eviction_policy="noop"),
+        )
+    )
+    try:
+        (shadow,) = [m for m in manager.l1_managers() if isinstance(m, ShadowL1Manager)]
+        obj = manager.reserve_write([KEY], LAYOUT)[KEY]
+        owners = l1_owners_of({KEY: obj})
+        assert owners[KEY] != shadow.l1_manager_id
+        manager.finish_write([KEY], owners)
+        assert manager.get_l1_usage() == (PAGE, PAGE)
+    finally:
+        manager.close()

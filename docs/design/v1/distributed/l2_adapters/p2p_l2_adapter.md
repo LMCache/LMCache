@@ -2,6 +2,9 @@
 
 `lmcache/v1/distributed/l2_adapters/p2p_l2_adapter.py`
 
+For the shared-pool CXL adapter built on the same base, see
+[Shared CXL KV sharing through a shadow L1](../../cxl-kv-sharing.md).
+
 An L2 adapter that treats a **single peer cache server** as a read-only L2
 tier. Instead of a storage backend, it looks up objects that are resident in
 the peer's L1 (CPU RAM) and pulls them directly over the transfer channel
@@ -29,8 +32,9 @@ sequence. `P2PL2Adapter` adds the part specific to copying: importing the
 peer's registered region over the transfer channel and loading from it.
 
 ```
-PeerL2AdapterBase   lookup/unlock RPCs, event fds, no-op stores, close
-└── P2PL2Adapter    import the peer region; RDMA load over the transfer channel
+PeerL2AdapterBase     lookup/unlock RPCs, event fds, no-op stores, close
+├── P2PL2Adapter      import the peer region; RDMA load over the transfer channel
+└── CxlPeerL2Adapter  map the peer's CXL slab; lend views to the shadow L1
 ```
 
 A subclass implements two lifecycle hooks and one lookup hook, all protected
@@ -52,7 +56,10 @@ that point is not unwound by the base. `P2PL2Adapter` creates its task dicts
 first and calls the base constructor last.
 
 The split lets a second way of reading a peer reuse the RPC control plane
-without copying it.
+without copying it. `CxlPeerL2Adapter` also passes the lookup's start time to
+`_process_lookup_result`, to bound the owner's TTL locally, and waits for
+unlock acknowledgments on its release worker (`submit_unlock(keys,
+wait=True)`) so peer removal drains them.
 
 ## Lifecycle
 
@@ -64,7 +71,7 @@ lookup-and-lock  → query (addresses)  → load (RDMA read)  → unlock
    peer; it read-locks every L1-resident key (sparse; gaps allowed) and
    returns a task id.
 2. **query** — poll `P2P_QUERY_LOOKUP_RESULTS(task_id)`; once ready the peer
-   returns one `TransferChannelAddress` per key (invalid offset for keys it did
+   returns one `MemoryRegionAddress` per key (invalid offset for keys it did
    not lock). The adapter stashes the valid addresses keyed by `ObjectKey` and
    reports a found/not-found `Bitmap` to the prefetch controller.
 3. **load** — for the found keys, translate the local destination objects'
@@ -131,12 +138,18 @@ storage manager owns its lifecycle. The config carries the peer's two URLs:
 ```json
 {
   "type": "p2p",
-  "peer_mq_server_url": "tcp://peer-host:5555",
+  "peer_rpc_url": "tcp://peer-host:5555",
   "peer_transfer_channel_server_url": "peer-host:7600",
   "lookup_timeout_s": 10.0,
   "load_timeout_s": 10.0
 }
 ```
+
+`peer_rpc_url` is the neutral configuration name for either ZMQ or gRPC;
+`peer_mq_server_url` remains accepted and retained in serialized configs.
+`MemoryRegionAddress` aliases the existing `TransferChannelAddress`; wire
+messages and field names are unchanged. Its `read_ttl_seconds` accessor exposes
+the owner TTL, or zero for legacy copying peers that omit it.
 
 ## close()
 
@@ -157,5 +170,6 @@ retried.
 For `P2PL2Adapter` itself the retry path is a contract, not an expected event:
 the nixl context's `remove_transfer_channel_client` pops the client before
 closing it and swallows close errors, so it does not raise in practice. The
-path matters for adapters whose region teardown can legitimately refuse, such
-as lenders that still have borrowed objects outstanding.
+path matters for adapters whose region teardown can legitimately refuse:
+`CxlPeerL2Adapter` refuses teardown while borrowed views are live and
+otherwise drains pending owner unlocks before unmapping.

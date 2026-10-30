@@ -138,8 +138,9 @@ L2 adapter that lends views                 ShadowL1Manager (metadata only)
   adapter's L1 affinity is a shadow L1: it calls `take_borrowed_objects` and
   `admit` instead of reserving L1 buffers and planning a copy load.
 
-The first lender is the shared-pool CXL peer adapter (a follow-up), paired
-with the Device-DAX L1 that maps the pool.
+The first lender is the shared-pool CXL peer adapter
+([../../cxl-kv-sharing.md](../../cxl-kv-sharing.md)): `create_l1_managers`
+appends a shadow L1 after each Device-DAX L1 that owns a CXL slab.
 
 ## Addressing one L1
 

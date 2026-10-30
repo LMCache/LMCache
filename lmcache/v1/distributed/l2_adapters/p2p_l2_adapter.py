@@ -3,18 +3,20 @@
 
 Lookups and unlocks are sent to the peer's P2P controller over RPC by
 :class:`PeerL2AdapterBase`; :class:`P2PL2Adapter` pulls the located objects
-from the peer's L1 over the transfer channel. A peer adapter never stores,
-evicts, or deletes -- a peer's cache is read-only here.
+over the transfer channel, while the CXL adapter borrows them in place. A peer
+adapter never stores, evicts, or deletes -- a peer's cache is read-only here.
 
 Because neither the lookup RPC nor the transfer-channel read exposes a
 completion fd, the lookup and load event fds are pulsed by the
 ``PeriodicEventNotifier`` singleton so the prefetch controller re-polls
 ``query_*`` periodically.
 
-Thread model: the lookup / load / unlock calls all come from the single
-prefetch-controller loop thread, and the store calls come from the
-store-controller loop thread. The two paths share no mutable state (each owns
-its own task-id counter and bookkeeping dicts), so these classes need no locks.
+Thread model: lookups and loads come from the single prefetch-controller loop
+thread, and stores from the store-controller loop thread; the two share no
+mutable state, so the base and :class:`P2PL2Adapter` take no locks. Unlocks
+come from the prefetch thread, except that the CXL adapter also sends them
+from its own unlock worker; the request client is safe for that concurrent
+use. The CXL adapter documents its own locking.
 """
 
 # Standard
@@ -49,7 +51,7 @@ from lmcache.v1.distributed.transfer_channel import (
     TransferChannelContext,
     get_transfer_channel_context,
 )
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.transfer_channel.api import MemoryRegionAddress
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
@@ -66,6 +68,7 @@ class _LookupTask:
     keys: list[ObjectKey]
     remote_task_id: int
     deadline: float
+    started_at: float
     failed: bool = False
 
 
@@ -81,7 +84,8 @@ class PeerL2AdapterConfigBase(L2AdapterConfigBase):
     """Fields shared by every adapter that looks up and locks keys on one peer.
 
     Fields:
-    - peer_mq_server_url: Peer request server URL (lookup/unlock RPCs).
+    - peer_mq_server_url: Peer request server URL (lookup/unlock RPCs), also
+      exposed as ``peer_rpc_url``.
     - lookup_timeout_s: deadline for a lookup result before it counts as a miss.
     """
 
@@ -89,12 +93,18 @@ class PeerL2AdapterConfigBase(L2AdapterConfigBase):
         self.peer_mq_server_url = peer_mq_server_url
         self.lookup_timeout_s = lookup_timeout_s
 
+    @property
+    def peer_rpc_url(self) -> str:
+        """Return the lookup/unlock endpoint, independent of RPC transport."""
+        return self.peer_mq_server_url
+
 
 class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
     """Config for the P2P L2 adapter.
 
     Fields:
-    - peer_mq_server_url: Peer request server URL (lookup/unlock RPCs).
+    - peer_rpc_url: Peer request server URL (lookup/unlock RPCs).
+      The constructor and serialized config retain ``peer_mq_server_url``.
     - peer_transfer_channel_server_url: the peer's transfer-channel server url.
     - lookup_timeout_s: deadline for a lookup result before it counts as a miss.
     - load_timeout_s: deadline for a load before it counts as a failure.
@@ -113,9 +123,21 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
 
     @classmethod
     def from_dict(cls, d: dict) -> "P2PL2AdapterConfig":
-        peer_mq_server_url = d.get("peer_mq_server_url")
+        """Parse peer endpoints and lookup/load deadlines.
+
+        Args:
+            d: Config fields; ``peer_rpc_url`` takes precedence over the legacy
+                ``peer_mq_server_url`` spelling when both are present.
+
+        Returns:
+            Validated peer adapter configuration.
+
+        Raises:
+            ValueError: If an endpoint is absent or a deadline is nonpositive.
+        """
+        peer_mq_server_url = d.get("peer_rpc_url", d.get("peer_mq_server_url"))
         if not isinstance(peer_mq_server_url, str) or not peer_mq_server_url:
-            raise ValueError("peer_mq_server_url must be a non-empty string")
+            raise ValueError("peer_rpc_url must be a non-empty string")
 
         peer_tc_url = d.get("peer_transfer_channel_server_url")
         if not isinstance(peer_tc_url, str) or not peer_tc_url:
@@ -139,9 +161,11 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
 
     @classmethod
     def help(cls) -> str:
+        """Return supported peer configuration fields and deadline defaults."""
         return (
             "P2P L2 adapter config fields:\n"
-            "- peer_mq_server_url (str): peer request server URL (required)\n"
+            "- peer_rpc_url (str): peer request server URL (required; "
+            "peer_mq_server_url is also accepted)\n"
             "- peer_transfer_channel_server_url (str): the peer's transfer channel "
             "server url (required)\n"
             "- lookup_timeout_s (float): lookup result deadline in seconds "
@@ -176,7 +200,7 @@ class PeerL2AdapterBase(L2AdapterInterface):
 
         with ExitStack() as resources:
             self._req_client: RequestClient = RequestClientFactory.create(
-                config.peer_mq_server_url,
+                config.peer_rpc_url,
                 context=zmq.Context.instance(),
             )
             resources.callback(self._req_client.close)
@@ -228,7 +252,8 @@ class PeerL2AdapterBase(L2AdapterInterface):
 
         Lifecycle hook called by ``close`` after controllers stop submissions
         and drain reads. If it raises, ``close`` leaves the adapter open,
-        with its RPC resources, so teardown can be retried.
+        with its RPC resources, so teardown can be retried; implementations
+        that lend views of the region raise while those views are live.
         """
 
     # --------------------
@@ -300,10 +325,15 @@ class PeerL2AdapterBase(L2AdapterInterface):
         """
         task_id = self._next_task_id
         self._next_task_id += 1
+        started_at = time.monotonic()
 
         if self._closed:
             self._lookup_tasks[task_id] = _LookupTask(
-                keys=keys, remote_task_id=-1, deadline=0.0, failed=True
+                keys=keys,
+                remote_task_id=-1,
+                deadline=0.0,
+                started_at=started_at,
+                failed=True,
             )
             return task_id
 
@@ -315,7 +345,7 @@ class PeerL2AdapterBase(L2AdapterInterface):
         except TimeoutError:
             logger.warning(
                 "P2P lookup submit to %s timed out; treating as a miss",
-                self._config.peer_mq_server_url,
+                self._config.peer_rpc_url,
             )
             failed = True
 
@@ -323,6 +353,7 @@ class PeerL2AdapterBase(L2AdapterInterface):
             keys=keys,
             remote_task_id=remote_task_id,
             deadline=time.monotonic() + self._config.lookup_timeout_s,
+            started_at=started_at,
             failed=failed,
         )
         return task_id
@@ -358,19 +389,33 @@ class PeerL2AdapterBase(L2AdapterInterface):
         if addresses is None:
             return None
 
-        bitmap = self._process_lookup_result(task.keys, addresses)
+        bitmap = self._process_lookup_result(
+            task_id, task.keys, addresses, task.started_at
+        )
         del self._lookup_tasks[task_id]
         return bitmap
 
-    def submit_unlock(self, keys: list[ObjectKey]) -> None:
-        """Release peer reservations through the unlock RPC; fire-and-forget.
+    def submit_unlock(self, keys: list[ObjectKey], *, wait: bool = False) -> None:
+        """Release peer reservations through the unlock RPC.
 
         Args:
             keys: Object keys to unlock. Empty input is a no-op.
+            wait: Wait for the RPC acknowledgment before returning. Borrowing
+                adapters use this on their release worker so draining waits
+                for queued unlocks; ordinary prefetch remains nonblocking.
+
+        Returns:
+            None.
+
+        Raises:
+            TimeoutError: If ``wait`` is True and the RPC acknowledgment times out.
+            Exception: If the transport fails to submit or acknowledge the RPC.
         """
         if not keys:
             return
-        self._req_client.p2p_unlock_objects(keys)
+        future = self._req_client.p2p_unlock_objects(keys)
+        if wait:
+            future.result(timeout=_LOOKUP_RPC_TIMEOUT_S)
 
     # --------------------
     # Lifecycle / status
@@ -383,6 +428,10 @@ class PeerL2AdapterBase(L2AdapterInterface):
         stays open, so callers keep the unlock connection and can retry. Once
         the region is released the adapter counts as closed: the RPC and fd
         resources are closed best effort and a failure there is not retried.
+
+        Raises:
+            RuntimeError: If a lending adapter still has live borrowed views.
+            BufferError: If a mapped region still has exported tensor buffers.
         """
         if self._closed:
             return
@@ -393,17 +442,24 @@ class PeerL2AdapterBase(L2AdapterInterface):
     def report_status(self) -> dict[str, Any]:
         """Return the peer endpoint and in-flight lookup count."""
         return {
-            "peer_mq_server_url": self._config.peer_mq_server_url,
+            "peer_rpc_url": self._config.peer_rpc_url,
+            "peer_mq_server_url": self._config.peer_rpc_url,
             "in_flight_lookups": len(self._lookup_tasks),
         }
 
     @abstractmethod
     def _process_lookup_result(
         self,
+        task_id: L2TaskId,
         keys: list[ObjectKey],
-        addresses: list[TransferChannelAddress],
+        addresses: list[MemoryRegionAddress],
+        started_at: float,
     ) -> Bitmap:
-        """Turn a completed lookup's addresses into a hit bitmap."""
+        """Turn a completed lookup's addresses into a hit bitmap.
+
+        ``started_at`` precedes lookup submission, allowing implementations
+        to bound remote TTLs without a second lookup timer or task dictionary.
+        """
 
 
 class P2PL2Adapter(PeerL2AdapterBase):
@@ -422,7 +478,7 @@ class P2PL2Adapter(PeerL2AdapterBase):
         # Prefetch-loop-thread state (load), set before the base constructor
         # runs the region hook so nothing is acquired after it returns.
         self._load_tasks: dict[L2TaskId, _LoadTask] = {}
-        self._remote_addresses: dict[ObjectKey, TransferChannelAddress] = {}
+        self._remote_addresses: dict[ObjectKey, MemoryRegionAddress] = {}
         super().__init__(config)
 
     def _register_peer_region(self) -> None:
@@ -445,13 +501,17 @@ class P2PL2Adapter(PeerL2AdapterBase):
             self._config.peer_transfer_channel_server_url
         )
 
-    def submit_unlock(self, keys: list[ObjectKey]) -> None:
+    def submit_unlock(self, keys: list[ObjectKey], *, wait: bool = False) -> None:
         """Release peer reservations and discard their cached transfer addresses.
 
         Args:
             keys: Object keys to unlock. Empty input is a no-op.
+            wait: Wait for the RPC acknowledgment before returning.
+
+        Raises:
+            TimeoutError: If ``wait`` is True and the RPC acknowledgment times out.
         """
-        super().submit_unlock(keys)
+        super().submit_unlock(keys, wait=wait)
         for key in keys:
             self._remote_addresses.pop(key, None)
 
@@ -480,7 +540,7 @@ class P2PL2Adapter(PeerL2AdapterBase):
         task_id = self._next_task_id
         self._next_task_id += 1
 
-        remote_addresses: list[TransferChannelAddress] = []
+        remote_addresses: list[MemoryRegionAddress] = []
         for key in keys:
             addr = self._remote_addresses.get(key)
             if addr is None or not addr.is_valid():
@@ -565,8 +625,10 @@ class P2PL2Adapter(PeerL2AdapterBase):
 
     def _process_lookup_result(
         self,
+        task_id: L2TaskId,
         keys: list[ObjectKey],
-        addresses: list[TransferChannelAddress],
+        addresses: list[MemoryRegionAddress],
+        started_at: float,
     ) -> Bitmap:
         """Cache each hit's transfer address for the following load."""
         bitmap = Bitmap(len(keys))
