@@ -1211,10 +1211,12 @@ spec:
                 description: |-
                   gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
                   GPU Operator's "nvidia" RuntimeClass; "amd" runs on the default container
-                  runtime.
+                  runtime. "rbln" also runs on the default runtime and uses engine-driven KV
+                  transfer, so the engine needs no accelerator access or IPC wiring.
                 enum:
                 - nvidia
                 - amd
+                - rbln
                 type: string
               hostIPC:
                 default: false

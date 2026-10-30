@@ -39,9 +39,16 @@ func (e *LMCacheEngine) SetDefaults() {
 		spec.GPUVendor = &v
 	}
 
-	if spec.NodeSelector == nil && *spec.GPUVendor == GPUVendorNvidia {
-		spec.NodeSelector = map[string]string{
-			"nvidia.com/gpu.present": labelValueTrue,
+	if spec.NodeSelector == nil {
+		switch *spec.GPUVendor {
+		case GPUVendorNvidia:
+			spec.NodeSelector = map[string]string{
+				"nvidia.com/gpu.present": labelValueTrue,
+			}
+		case GPUVendorRBLN:
+			spec.NodeSelector = map[string]string{
+				"rebellions.ai/npu.present": labelValueTrue,
+			}
 		}
 	}
 }
@@ -56,4 +63,16 @@ func (s *LMCacheEngineSpec) IsolatedIPCEnabled() bool {
 		return *s.IsolatedIPC
 	}
 	return s.GPUVendor == nil || *s.GPUVendor == GPUVendorNvidia
+}
+
+// EngineDrivenTransfer reports whether vLLM workers copy KV to and from the
+// server themselves (gpuVendor "rbln", which cannot share KV via IPC).
+func (s *LMCacheEngineSpec) EngineDrivenTransfer() bool {
+	return s.GPUVendor != nil && *s.GPUVendor == GPUVendorRBLN
+}
+
+// SharesHostIPC reports whether the engine and vLLM pods share the host's
+// /dev/shm or IPC namespace (neither isolated IPC nor engine-driven transfer).
+func (s *LMCacheEngineSpec) SharesHostIPC() bool {
+	return !s.IsolatedIPCEnabled() && !s.EngineDrivenTransfer()
 }

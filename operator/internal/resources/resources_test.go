@@ -1653,6 +1653,48 @@ func TestBuildDaemonSet_AMDDefaultsToLegacyIPC(t *testing.T) {
 	assertNoArg(t, podSpec.Containers[0].Args, "--isolated-ipc")
 }
 
+func TestBuildDaemonSet_GPUVendorRBLN(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.GPUVendor = ptr(lmcachev1alpha1.GPUVendorRBLN)
+	engine.SetDefaults()
+
+	ds := BuildDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	if podSpec.RuntimeClassName != nil {
+		t.Fatalf("expected nil RuntimeClassName for rbln, got %q", *podSpec.RuntimeClassName)
+	}
+	if podSpec.NodeSelector["rebellions.ai/npu.present"] != "true" {
+		t.Fatalf("expected rebellions.ai/npu.present NodeSelector, got %v", podSpec.NodeSelector)
+	}
+	if podSpec.HostIPC || len(podSpec.Volumes) != 0 {
+		t.Fatalf("expected no IPC wiring for rbln, got hostIPC=%v volumes=%+v", podSpec.HostIPC, podSpec.Volumes)
+	}
+	c := podSpec.Containers[0]
+	for _, e := range c.Env {
+		if strings.HasPrefix(e.Name, "NVIDIA_") {
+			t.Fatalf("unexpected NVIDIA env var on rbln vendor: %s=%s", e.Name, e.Value)
+		}
+	}
+	assertArg(t, c.Args, "--supported-transfer-mode", "engine_driven")
+	assertNoArg(t, c.Args, "--isolated-ipc")
+
+	cm := BuildConnectionConfigMap(engine)
+	if strings.Contains(cm.Data["kv-transfer-config.json"], "isolated_ipc") {
+		t.Fatalf("expected no isolated_ipc key for rbln, got:\n%s", cm.Data["kv-transfer-config.json"])
+	}
+}
+
+func TestBuildContainerArgs_SupportedTransferModeOnlyForRBLN(t *testing.T) {
+	spec := &lmcachev1alpha1.LMCacheEngineSpec{
+		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+	}
+	assertNoArg(t, BuildContainerArgs(spec), "--supported-transfer-mode")
+
+	spec.GPUVendor = ptr(lmcachev1alpha1.GPUVendorAMD)
+	assertNoArg(t, BuildContainerArgs(spec), "--supported-transfer-mode")
+}
+
 func TestBuildContainerArgs_IsolatedIPC(t *testing.T) {
 	spec := &lmcachev1alpha1.LMCacheEngineSpec{
 		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},

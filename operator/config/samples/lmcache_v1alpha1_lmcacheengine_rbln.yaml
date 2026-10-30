@@ -1,0 +1,11 @@
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: rbln-cache
+spec:
+  # Rebellions NPUs: vLLM workers copy KV to the server themselves
+  # (engine-driven transfer), so the engine needs no NPU access or IPC wiring.
+  # nodeSelector defaults to rebellions.ai/npu.present: "true".
+  gpuVendor: rbln
+  l1:
+    sizeGB: 60

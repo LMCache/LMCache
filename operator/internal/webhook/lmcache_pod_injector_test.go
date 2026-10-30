@@ -277,6 +277,23 @@ var _ = Describe("LMCachePodInjector", func() {
 			Expect(shm.HostPath).NotTo(BeNil())
 		})
 
+		It("gives the pod a private memory-backed /dev/shm for a gpuVendor rbln engine", func() {
+			vendor := lmcachev1alpha1.GPUVendorRBLN
+			engine := lmcacheEngineWithInjection("")
+			engine.Spec.GPUVendor = &vendor
+			injector := newLMCacheInjectorForEngine(engine)
+			pod := lmcachePod(nil)
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			Expect(out.Spec.HostIPC).To(BeFalse())
+			shm := findVolume(out, testDevShmVolumeName)
+			Expect(shm).NotTo(BeNil())
+			Expect(shm.HostPath).To(BeNil())
+			Expect(shm.EmptyDir).NotTo(BeNil())
+		})
+
 		It("leaves user-supplied /dev/shm wiring untouched under isolated IPC", func() {
 			engine := lmcacheEngineWithInjection("")
 			injector := newLMCacheInjectorForEngine(engine)

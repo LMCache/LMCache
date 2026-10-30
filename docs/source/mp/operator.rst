@@ -149,6 +149,38 @@ explicit ``true``/``false`` always wins.
    event import).  Set ``spec.isolatedIPC: false`` on existing CRs **before**
    upgrading to keep the old wiring.
 
+.. _mp-operator-rbln:
+
+Rebellions NPUs (RBLN)
+~~~~~~~~~~~~~~~~~~~~~~
+
+The RBLN runtime cannot export KV caches as IPC handles, so ``gpuVendor:
+rbln`` uses LMCache's engine-driven transfer: the vLLM workers copy KV to and
+from the server over the connection.  The engine needs no NPU access and no
+IPC wiring with the vLLM pods:
+
+- The server starts with ``--supported-transfer-mode engine_driven``.
+- The engine pod gets no ``runtimeClassName``, no NVIDIA env vars, no
+  ``hostIPC``, and no host ``/dev/shm`` mount.  The webhook gives opted-in
+  vLLM pods a pod-private ``/dev/shm``, as under isolated IPC.
+- ``nodeSelector`` defaults to ``rebellions.ai/npu.present: "true"``.
+- ``isolatedIPC: true``, ``hostIPC: true``, and ``pd`` are rejected.
+
+.. code-block:: yaml
+
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: LMCacheEngine
+    metadata:
+      name: rbln-cache
+    spec:
+      gpuVendor: rbln
+      l1:
+        sizeGB: 60
+
+The default ``lmcache/vllm-openai`` image is CUDA-built; set ``spec.image`` to
+an LMCache image that runs on your NPU nodes.  The vLLM image must include
+LMCache for ``LMCacheMPConnector``.
+
 Connecting vLLM
 ---------------
 
@@ -640,9 +672,10 @@ GPU & Security
      - Description
    * - ``gpuVendor``
      - ``nvidia``
-     - GPU vendor: ``nvidia`` (uses the ``nvidia`` RuntimeClass) or ``amd``
+     - GPU vendor: ``nvidia`` (uses the ``nvidia`` RuntimeClass), ``amd``
        (runs on the default runtime; also resolves ``isolatedIPC`` to
-       ``false``).
+       ``false``), or ``rbln`` (Rebellions NPUs, engine-driven transfer; see
+       :ref:`mp-operator-rbln`).
    * - ``runtimeClassName``
      - vendor default
      - Override the engine pod RuntimeClass. Unset keeps the vendor default
