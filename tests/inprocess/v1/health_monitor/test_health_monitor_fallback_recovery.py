@@ -17,18 +17,20 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.health_monitor.base import HealthMonitor
 from lmcache.inprocess.v1.health_monitor.checks.remote_backend_check import (
     RemoteBackendHealthCheck,
 )
 from lmcache.inprocess.v1.health_monitor.constants import FallbackPolicy
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
+from lmcache.inprocess.v1.storage_backend.connector.base_connector import (
+    RemoteConnector,
+)
+from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.inprocess.v1.storage_backend.remote_backend import RemoteBackend
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
-from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 
 
 class ControllablePingConnector(RemoteConnector):
@@ -623,7 +625,7 @@ class TestFallbackIntegrationWithRealStorageManager:
     def real_storage_manager(self, test_metadata):
         # First Party
         from lmcache.inprocess.v1.event_manager import EventManager
-        from lmcache.v1.storage_backend.storage_manager import StorageManager
+        from lmcache.inprocess.v1.storage_backend.storage_manager import StorageManager
 
         config = LMCacheEngineConfig.from_defaults(
             chunk_size=256,

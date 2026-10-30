@@ -6,7 +6,11 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from contextlib import nullcontext
 from dataclasses import dataclass
+from threading import Event
 from typing import TYPE_CHECKING, Any, Literal
 import hashlib
 import time
@@ -34,6 +38,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _get_chunk_size,
     _make_key,
     _poll_prefetch_status,
+    _query_checksum,
     _send_end_session,
     _send_lookup,
     _wait_for_result,
@@ -54,6 +59,7 @@ from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.multiprocess.transfer_context import TransferContext
+    from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
     from lmcache.v1.multiprocess.transport.base import RequestClient
 
 
@@ -209,10 +215,11 @@ class ServerBenchClient:
         self._zmq_context: Any | None = None
         self._req_client: "RequestClient | None" = None
         self._workers: list[WorkerContext] = []
+        self._transfer_executor: ThreadPoolExecutor | None = None
+        self._transfer_uncertain = False
         self._started = False
         self._requests: dict[int, RequestContext] = {}
         self._allocator = BlockAllocator(0, 0)
-        self._transfer_uncertain = False
 
         self._chunk_size = 0
         self._block_size = 0
@@ -233,6 +240,17 @@ class ServerBenchClient:
 
         try:
             self._initialize()
+            self._transfer_executor = ThreadPoolExecutor(max_workers=len(self._workers))
+            # Start all transfer threads outside measured operations.
+            ready = Event()
+            try:
+                warmup = [
+                    self._transfer_executor.submit(ready.wait) for _ in self._workers
+                ]
+            finally:
+                ready.set()
+            for future in warmup:
+                future.result(timeout=self._config.transfer_timeout_s)
         except BaseException:
             self.close()
             raise
@@ -369,7 +387,7 @@ class ServerBenchClient:
         start_token: int,
         token_count: int,
     ) -> TransferResult | None:
-        """STORE a token range on every write-enabled Worker.
+        """STORE a token range concurrently on write-enabled workers.
 
         Args:
             request: Request to store.
@@ -377,10 +395,12 @@ class ServerBenchClient:
             token_count: Number of tokens.
 
         Returns:
-            Worker results, or ``None`` for an empty range.
+            Worker results, including failed ranks on timeout, or ``None``
+            for an empty range. A timeout or transfer exception prevents
+            further operations until the client is closed.
 
         Raises:
-            RuntimeError: If the client is not started.
+            RuntimeError: If the request is inactive or the client is unavailable.
             ValueError: If a non-empty range is invalid or not chunk-aligned.
         """
         return self._transfer("store", request, start_token, token_count)
@@ -391,7 +411,7 @@ class ServerBenchClient:
         start_token: int,
         token_count: int,
     ) -> TransferResult | None:
-        """RETRIEVE a token range on every read-enabled Worker.
+        """RETRIEVE a token range concurrently on read-enabled workers.
 
         Args:
             request: Request to retrieve.
@@ -399,13 +419,26 @@ class ServerBenchClient:
             token_count: Number of tokens.
 
         Returns:
-            Worker results, or ``None`` for an empty range.
+            Worker results, including failed ranks on timeout, or ``None``
+            for an empty range. A timeout or transfer exception prevents
+            further operations until the client is closed.
 
         Raises:
-            RuntimeError: If the client is not started.
+            RuntimeError: If the request is inactive or the client is unavailable.
             ValueError: If a non-empty range is invalid or not chunk-aligned.
         """
         return self._transfer("retrieve", request, start_token, token_count)
+
+    def fill_deterministic_kv(self, request: RequestContext) -> None:
+        """Fill request blocks with reproducible pseudorandom KV, then synchronize."""
+        self._check_request_ready(request)
+        for worker in self._workers:
+            worker.buffers.fill_deterministic_kv(
+                request.block_allocation.as_block_ids(),
+                request.token_ids[: request.num_full_tokens],
+                worker.spec.kv_worker_id,
+            )
+            worker.buffers.synchronize()
 
     def zero_destination(
         self, request: RequestContext, start_token: int, token_count: int
@@ -511,12 +544,77 @@ class ServerBenchClient:
             )
         return checksums or None
 
-    def close(self) -> None:
-        """Close transfer contexts before releasing their worker-owned buffers.
+    def verify_server_checksums(
+        self,
+        request: RequestContext,
+        start_token: int,
+        token_count: int,
+        *,
+        operation: Literal["store", "retrieve"],
+    ) -> bool | None:
+        """Compare local and HTTP digests; return None for empty or disabled checks."""
+        self._check_request_ready(request)
+        self._validate_token_range(request, start_token, token_count)
+        if token_count == 0:
+            return None
+        if not self._config.uses_handle_transfer or not self._config.http_url:
+            self._log("  SERVER CHECKSUM SKIP: requires lmcache_driven mode and --url")
+            return None
 
-        Cleanup is idempotent, including after partial startup.
+        allocation = request.blocks(start_token, token_count)
+        matched = True
+        for worker in self._workers:
+            enabled = (
+                worker.spec.store_enabled
+                if operation == "store"
+                else worker.spec.retrieve_enabled
+            )
+            if not enabled:
+                continue
+            expected: dict[int, list[str]] = {}
+            for offset in range(
+                start_token, start_token + token_count, self._chunk_size
+            ):
+                for index, digest in worker.buffers.tensor_checksums(
+                    request.blocks(offset, self._chunk_size).as_block_ids()
+                ).items():
+                    expected.setdefault(index, []).append(digest)
+            queried: dict[tuple[int, ...], dict[str, list[str]] | None] = {}
+            for group, blocks in zip(
+                worker.buffers.engine_group_infos, allocation.groups, strict=True
+            ):
+                if blocks.block_ids not in queried:
+                    queried[blocks.block_ids] = _query_checksum(
+                        self._config.http_url,
+                        list(blocks.block_ids),
+                        self._blocks_in_chunk,
+                        worker.spec.instance_id,
+                    )
+                actual = queried[blocks.block_ids]
+                # The legacy endpoint hashes every tensor; select this group's results.
+                for index in group.layer_indices:
+                    if (
+                        actual is None
+                        or actual.get(f"layer_{index}") != expected[index]
+                    ):
+                        matched = False
+                        self._log(
+                            "  SERVER CHECKSUM FAIL: rank %d tensor %d (%s)"
+                            % (worker.spec.rank, index, operation)
+                        )
+        self._log("  SERVER CHECKSUM %s" % ("OK" if matched else "FAIL"))
+        return matched
+
+    def close(self) -> None:
+        """Wait for transfer threads, then synchronously release resources.
+
+        Cleanup is idempotent, including after partial startup. A blocked
+        native transfer can delay shutdown until it returns.
         """
         self._started = False
+        if self._transfer_executor is not None:
+            self._transfer_executor.shutdown(wait=True, cancel_futures=True)
+            self._transfer_executor = None
 
         if self._req_client is not None:
             for worker in self._workers:
@@ -584,61 +682,55 @@ class ServerBenchClient:
             return None
         self._validate_token_range(request, start_token, token_count)
 
-        attempted: list[int] = []
+        workers = [
+            worker
+            for worker in self._workers
+            if (
+                worker.spec.store_enabled
+                if operation == "store"
+                else worker.spec.retrieve_enabled
+            )
+        ]
+        attempted = [worker.spec.rank for worker in workers]
         successful: list[int] = []
         failed: list[int] = []
-        is_store = operation == "store"
-        success_status = "stored" if is_store else "retrieved"
+        success_status = "stored" if operation == "store" else "retrieved"
         status = success_status
-        started_at = time.monotonic()
         timed_out = False
-        for worker in self._workers:
-            enabled = (
-                worker.spec.store_enabled if is_store else worker.spec.retrieve_enabled
-            )
-            if not enabled:
-                continue
-            attempted.append(worker.spec.rank)
-            key = _make_key(
-                request.token_ids,
-                request.request_id,
-                start=start_token,
-                end=start_token + token_count,
-                worker_id=worker.spec.kv_worker_id,
-                world_size=self._kv_world_size,
-            )
-            block_ids_per_group = request.blocks(
-                start_token, token_count
-            ).as_block_ids()
+        started_at = time.monotonic()
+        assert self._transfer_executor is not None
+        deadline = started_at + self._config.transfer_timeout_s
+        pending: list[Future[str]] = []
+        for worker in workers:
+            # Record on the caller's producer stream before dispatching.
             event = worker.transfer_context.create_recorded_event()
-            submit = (
-                worker.transfer_context.submit_store
-                if is_store
-                else worker.transfer_context.submit_retrieve
-            )
             self._transfer_uncertain = True
-            future = submit(
-                request.request_id,
-                key,
-                worker.buffers.kv_caches,
-                block_ids_per_group,
-                event,
-                self._blocks_in_chunk,
+            pending.append(
+                self._transfer_executor.submit(
+                    self._transfer_worker,
+                    worker,
+                    operation,
+                    request,
+                    start_token,
+                    token_count,
+                    event,
+                    deadline,
+                )
             )
-            reply = _wait_for_result(
-                future, retain_refs=(event,) if event is not None else ()
-            )
-            if reply is _TIMEOUT:
-                timed_out = True
+        for worker, future in zip(workers, pending, strict=True):
+            try:
+                worker_status = future.result(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
+            except (FuturesTimeoutError, TimeoutError):
+                future.cancel()
                 worker_status = "timeout"
-            else:
-                worker_status = success_status if reply else f"{operation}_failed"
             if worker_status == success_status:
                 successful.append(worker.spec.rank)
             else:
                 failed.append(worker.spec.rank)
                 status = worker_status
-
+            timed_out |= worker_status == "timeout"
         self._transfer_uncertain = timed_out
         if timed_out:
             status = "timeout"
@@ -661,10 +753,58 @@ class ServerBenchClient:
                 token_count,
                 latency_ms,
                 len(attempted),
-                "writers" if is_store else "workers",
+                "writers" if operation == "store" else "workers",
             )
         )
         return result
+
+    def _transfer_worker(
+        self,
+        worker: WorkerContext,
+        operation: Literal["store", "retrieve"],
+        request: RequestContext,
+        start_token: int,
+        token_count: int,
+        event: IPCEvent | None,
+        deadline: float,
+    ) -> str:
+        """Submit and wait on one worker; its submit may itself block."""
+        key = _make_key(
+            request.token_ids,
+            request.request_id,
+            start=start_token,
+            end=start_token + token_count,
+            worker_id=worker.spec.kv_worker_id,
+            world_size=self._kv_world_size,
+        )
+        block_ids = request.blocks(start_token, token_count).as_block_ids()
+        submit = (
+            worker.transfer_context.submit_store
+            if operation == "store"
+            else worker.transfer_context.submit_retrieve
+        )
+        device = next(iter(worker.buffers.kv_caches.values())).device
+        with torch_dev.device(device) if device.type != "cpu" else nullcontext():
+            future = submit(
+                request.request_id,
+                key,
+                worker.buffers.kv_caches,
+                block_ids,
+                event,
+                self._blocks_in_chunk,
+            )
+            reply = _wait_for_result(
+                future,
+                timeout_s=max(0.0, deadline - time.monotonic()),
+                retain_refs=(event,) if event is not None else (),
+            )
+        if reply is _TIMEOUT:
+            return "timeout"
+        return (
+            ("stored" if operation == "store" else "retrieved")
+            if reply
+            else f"{operation}_failed"
+        )
 
     def _initialize(self) -> None:
         """Allocate resources and register Workers."""

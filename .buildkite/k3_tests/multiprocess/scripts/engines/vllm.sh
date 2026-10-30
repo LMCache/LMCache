@@ -100,6 +100,41 @@ PY
         VLLM_BATCH_ARGS=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
     fi
 
+    VLLM_MODEL_ARGS=()
+    if [[ "${VLLM_TRUST_REMOTE_CODE:-0}" == "1" ]]; then
+        VLLM_MODEL_ARGS+=(--trust-remote-code)
+    fi
+    if [[ -n "${VLLM_MAX_LOGPROBS:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--max-logprobs "$VLLM_MAX_LOGPROBS")
+    fi
+    if [[ -n "${TENSOR_PARALLEL_SIZE:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--tensor-parallel-size "$TENSOR_PARALLEL_SIZE")
+    fi
+    if [[ "${VLLM_ENABLE_EXPERT_PARALLEL:-0}" == "1" ]]; then
+        VLLM_MODEL_ARGS+=(--enable-expert-parallel)
+    fi
+    if [[ -n "${VLLM_LOAD_FORMAT:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--load-format "$VLLM_LOAD_FORMAT")
+    fi
+    if [[ -n "${VLLM_HF_OVERRIDES:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--hf-overrides "$VLLM_HF_OVERRIDES")
+    fi
+    if [[ -n "${VLLM_KV_CACHE_DTYPE:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--kv-cache-dtype "$VLLM_KV_CACHE_DTYPE")
+    fi
+    if [[ -n "${VLLM_TOKENIZER_MODE:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--tokenizer-mode "$VLLM_TOKENIZER_MODE")
+    fi
+    if [[ -n "${VLLM_WORKER_EXTENSION_CLS:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--worker-extension-cls "$VLLM_WORKER_EXTENSION_CLS")
+    fi
+    if [[ -n "${MAX_NUM_SEQS:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--max-num-seqs "$MAX_NUM_SEQS")
+    fi
+    if [[ -n "${KV_CACHE_MEMORY_BYTES:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--kv-cache-memory-bytes "$KV_CACHE_MEMORY_BYTES")
+    fi
+
     VLLM_BLOCK_ARGS=()
     if [[ -n "${VLLM_BLOCK_SIZE:-}" ]]; then
         VLLM_BLOCK_ARGS=(--block-size "$VLLM_BLOCK_SIZE")
@@ -205,6 +240,7 @@ engine_launch() {
         "VLLM_BATCH_INVARIANT=${batch_invariant}" \
         PYTHONHASHSEED=0 \
         vllm serve "$MODEL" \
+            "${VLLM_MODEL_ARGS[@]}" \
             "${mode_args[@]}" \
             "${VLLM_ATTENTION_ARGS[@]}" \
             --port "$port" \

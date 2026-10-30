@@ -27,8 +27,8 @@ from lmcache.v1.utils.subclass_discovery import discover_subclasses
 if TYPE_CHECKING:
     # First Party
     from lmcache.inprocess.v1.manager import LMCacheManager
-    from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-    from lmcache.v1.storage_backend.storage_manager import StorageManager
+    from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+    from lmcache.inprocess.v1.storage_backend.storage_manager import StorageManager
 
 logger = init_logger(__name__)
 
@@ -303,7 +303,9 @@ class HealthMonitor(PeriodicThread):
             Optional[LocalCPUBackend]: The LocalCPUBackend instance, or None
         """
         # First Party
-        from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+        from lmcache.inprocess.v1.storage_backend.local_cpu_backend import (
+            LocalCPUBackend,
+        )
 
         backend = storage_manager.local_cpu_backend
         if backend is not None and isinstance(backend, LocalCPUBackend):

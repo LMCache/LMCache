@@ -97,69 +97,88 @@ controller's decision.
 - `tests/v1/mp_observability/trace/test_codecs.py`: trace round-trips of the
   request types and of `PrefetchHandle.sliding_windows`.
 
-## Internal write overflow and object ownership
+## Write placement and object ownership
 
-The CLI configures one or more L1 managers. The internal `_l1_managers`
-constructor input also accepts existing managers for tests; `StorageManager`
-owns their lifetime. Key-only completion and legacy single-region/runtime
-Device-DAX APIs require a single manager. Serving reads carry exact owners;
-reporting and memory checks include every configured manager.
+The CLI configures one or more L1 managers; `StorageManager.__init__` builds
+them with `create_l1_managers(config.l1_manager_configs)` and owns their
+lifetime. `l1_managers()` returns them in placement order and
+`get_l1_manager_by_tags(tags)` the one manager with the given memory tags
+(`ValueError` for zero or several matches). Reporting and memory checks
+include every configured manager.
 
-`OrderedWritePolicy` supplies stable manager IDs in explicit order, primary first
-by default. Construction validates and captures that order; later mutations of
-the supplied policy do not reconfigure the manager. `reserve_write` visits each
-candidate synchronously and retries only
-its `OUT_OF_MEMORY` subset. Successful keys and terminal conflicts do not advance;
-exceptions propagate. Each L1 retains its allocation and staging rules. A failed
-batch is not split: two 4 KiB objects can fail on two L1s with 4 KiB free each,
-even though their combined free space is sufficient. Failed keys remain omitted
-from the returned object mapping.
+`reserve_write(keys, layout)` asks the configured `WritePolicy`
+(`StorageManagerConfig.write_policy`, default `"default"`; there is no CLI
+flag yet) for a mapping `l1_manager_id -> keys`, validates it (registered
+ids, every key placed exactly once) before touching any L1, and reserves each
+group in its selected manager. A key its L1 cannot allocate is omitted from
+the result: there is no overflow to another L1. The default policy sends every
+key to the first L1 in placement order. See
+`l1_manager/l1-manager-types.md` for the policy registry.
 
-`L1Manager.reserve_write` stamps each new object with its process-local integer
-`l1_manager_id`, including direct and prefetch reservations. `MemoryObj` starts
-unowned, rejects a different live owner, and resets ownership when an allocator
-reuses an object for a new lifetime. The tag is not a writer tag, key field, or
-serialized `MemoryObjMetadata` field. The manager registry is O(managers); there
-is no second object-to-owner table.
+`BaseL1Manager.reserve_write` stamps each new object with its process-local
+integer `l1_manager_id`, including direct and prefetch reservations.
+`MemoryObj` starts unowned, rejects a different live owner, and resets
+ownership when an allocator reuses an object for a new lifetime. The tag is not
+a writer tag, key field, or serialized `MemoryObjMetadata` field. The manager
+registry is O(managers); there is no second object-to-owner table.
 
 ```text
-reserve_write -> objects with owner IDs -> prepare_write_completion(objects)
-                                                |
-                                     [(owner_id, [ObjectKey, ...]), ...]
-                                                |
-                                     GPU copy completes on stream
-                                                |
-                                     finish_write_by_owner(payload)
+reserve_write(keys, layout) -> {key: MemoryObj}     objects carry their owner id
+                |
+                | l1_owners = l1_owners_of(objects)   {key: l1_manager_id}
+                v
+   GPU copy completes on stream; the callback (kind "finish_write")
+   carries the owners dict as its msgpack payload, never a MemoryObj
+                |
+                v
+   finish_write(keys, l1_owners)  -> groups the keys by owner
+                                  -> each L1's finish_write(keys, tag)
 ```
 
-The native callback uses that MessagePack-compatible payload, never Python
-objects or pointers. Its handler resolves the captured IDs and passes the
-original StorageManager writer tag to each L1's `finish_write`. Changing placement
-order cannot redirect completion. Unknown or unset owners fail explicitly; the
-legacy `finish_write(keys)` remains valid only with one L1. Existing staging and
-stream ordering retain allocations; the tag is neither a lifetime pin nor a write
-generation. It adds no stale-callback or crash-recovery guarantee.
+`finish_write(keys, l1_owners)` takes the owners the way
+`finish_read_prefetched` does, but requires them: every caller holds the
+objects `reserve_write` returned, so there is no owner-less completion. The
+caller builds `l1_owners` from those objects with the module-level
+`l1_owners_of(objects)` (it reads `MemoryObj.get_l1_manager()` and raises
+`ValueError` for an unowned object), so completion never re-runs the policy
+and the storage manager keeps no per-key state. A key whose owner is missing
+or unregistered raises `ValueError`. The stream callbacks in
+`lmcache_driven_transfer` and `qstore`
+submit kind `"finish_write"` with the owners dict; the shared-memory store
+path keeps the same dict in its pending-write table. Existing staging and
+stream ordering retain allocations. The owner tag is neither a lifetime pin
+nor a write generation and adds no stale-callback or crash-recovery guarantee.
 
-Completion preparation runs inside the store's failure boundary before success
-is recorded. Invalid ownership skips admission and reports `MP_STORE_END` with
+The owners are built inside the store's failure boundary before success is
+recorded. Invalid ownership skips admission and reports `MP_STORE_END` with
 zero stored objects. As with copy failures, staging reservations retain their
 write-TTL behavior because queued device writes can still reference the buffers.
 
-When tracing is enabled, both single-L1 completion entry points record one
-existing `finish_write(keys)` trace call. Process-local owner IDs are not written
-to the storage trace, so the unchanged dispatcher can replay it against a fresh
-manager. Multi-L1 trace replay remains unsupported.
+`prepare_read_completion` and `finish_read_by_owner` (typed with
+`L1WriteCompletion`) are the read-side pair from before this design. They
+still work but are deprecated (`lmcache_deprecate`, one warning per process):
+new callers pass `l1_owners` to `finish_read_prefetched` themselves.
 
-`test_multi_l1.py`, `test_l1_owner.py`, and `test_l1_owner_completion.py` cover
-overflow, batch cleanup, independent same-key copies, recycled ownership, and
-serialized completion.
+When tracing is enabled, `finish_write` and `finish_read_prefetched` redact
+`l1_owners` and record key-only calls, so process-local owner ids never reach
+the trace. The replay dispatcher keeps the owners of its own `reserve_write`
+replays in `ReplayContext.write_owners` and hands them to the matching
+`finish_write`; reads replay without owners, which fan out. A trace therefore
+replays against a fresh manager and against a multi-L1 target alike.
+
+`test_multi_l1.py`, `test_write_policy.py`, `test_l1_owner.py`, and
+`test_l1_owner_completion.py` cover placement, invalid policy answers,
+owner-grouped completion, independent same-key copies, recycled
+ownership, and serialized completion.
 
 ## Configured peer L1 serving
 
 `StorageManagerConfig.l1_manager_configs` lists tagged DRAM, Device-DAX, or GDS
-configurations. The legacy singular config aliases the first entry. Each manager
-owns its allocator, eviction controller, and store controller. Initialization
-rolls back already-created managers, adapters, and controllers on failure.
+configurations; `create_l1_manager` turns each into a `DramL1Manager`,
+`DevDaxL1Manager` or `GdsL1Manager`. The legacy singular config aliases the
+first entry. Each manager owns its allocator, eviction controller, and store
+controller. Initialization rolls back already-created managers, adapters, and
+controllers on failure.
 
 L2 affinity is resolved from memory tags (see `memory_tags.md`): each adapter's
 config lists the L1 memory tags it wants, most preferred first, and
@@ -172,23 +191,37 @@ thread; removal drops it after draining.
 
 Prefetch uses synchronous L1 calls and the existing per-manager lock maps. Its
 policy discards redundant copies and returns `PrefetchResult.l1_owners` for retained
-keys. Each session keeps its own owner map. Multi-L1 reads and releases require
-that map; they do not search for another copy by key. Stream callbacks carry
-owner/key groups captured before enqueue. A failed peer lookup releases earlier
-reservations, and a failed GPU retrieve releases all retained groups after
-already-enqueued work finishes.
+keys. Each session keeps its own owner map. `read_prefetched_results`,
+`finish_read_prefetched` and `unsafe_read` take that map as `l1_owners`;
+with it, each key goes exactly to its owner. Without it a single L1 serves
+every key, as before. With several L1s the storage manager probes them in
+placement order with `unsafe_read` and the first L1 holding the key
+read-locked serves or releases it, logging a warning on every such call
+(`unsafe_read` rather than `finish_read`, because an L1 without the key
+answers `unsafe_read` silently). That release is correct only while a key is
+read-locked in at most one L1, which holds today because the prefetch policy
+keeps one copy per cell and releases the others; engine lookups and retrieves
+always pass owners under multi-L1 (`engine_context.get_read_owners`), so the
+probe never runs on the hot path. Stream callbacks carry owner/key groups
+captured before enqueue. A failed peer lookup releases earlier reservations,
+and a failed GPU retrieve releases all retained groups after already-enqueued
+work finishes.
 
 GDS slab context lifetime belongs to its L1. GPU buffers register after L1
 construction, transfers resolve the slab by object owner, and shutdown drains
 GPU work before freeing the slab. One active GDS slab per process remains a hard
 limit because native stream registration is shared. Device-DAX peers own disjoint
-mappings; duplicate device ownership is rejected.
+mappings; `create_l1_managers` rejects duplicate device ownership.
 
 Status exposes manager and controller dictionaries keyed by tag. Capacity is
-summed by physical backing medium, while usage is the sum of allocator usage.
+summed by physical backing medium (`backend_type`, as
+`l1_capacity_bytes_by_backend`), while usage is the sum of allocator usage.
 Prometheus gauges distinguish managers by `l1_tag` and `backend`; L1 operation
 counters and optional lifecycle histograms include `l1_tag`. Lifecycle sampling
 tracks `(tag, key)` so one copy's eviction cannot end another copy's lifetime.
-Single-L1 status aliases and key-only completion remain
-compatible. Single-region descriptors, P2P, shared-memory transfer, and legacy
-Device-DAX hotplug remain guarded for multi-L1 configurations.
+Single-L1 status aliases remain. P2P startup still requires a single DRAM L1
+(`l1_exposes_single_memory_region`); the P2P controller resolves it with
+`get_l1_manager_by_tags((DRAM, LOCAL))`, registers its `get_l1_memory_desc()`
+with the transfer channel, and keeps its lookups and reads owner-less. The
+`/reconfigure/dax/l1/*` routes act on the one `(CXL, LOCAL)` L1
+(`_devdax_l1()`), answering `409` when there is none or more than one.
