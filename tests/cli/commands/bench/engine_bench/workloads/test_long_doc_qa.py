@@ -332,12 +332,8 @@ class TestLongDocQAStep:
 
         result = await w.step(0.0)
         assert result == 0.0
-        # Wait for the dispatched task to complete
-        if w._pending_tasks:
-            # Standard
-            import asyncio
-
-            await asyncio.gather(*w._pending_tasks)
+        while await w.step(0.1) >= 0:
+            pass
         assert sender.send_request.call_count == 1
 
     @pytest.mark.asyncio
@@ -350,14 +346,9 @@ class TestLongDocQAStep:
 
         # Dispatch the single request
         await w.step(0.0)
-        # Wait for task
-        # Standard
-        import asyncio
-
-        if w._pending_tasks:
-            await asyncio.gather(*w._pending_tasks)
-        # Now schedule is exhausted and no pending tasks
-        result = await w.step(0.1)
+        # The exhausted schedule stays active until the send completes.
+        while (result := await w.step(0.1)) >= 0:
+            pass
         assert result == -1.0
 
 
