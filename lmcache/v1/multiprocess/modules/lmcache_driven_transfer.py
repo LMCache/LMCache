@@ -18,7 +18,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
-from lmcache.v1.distributed.storage_manager import L1WriteCompletion
+from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
@@ -44,6 +44,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
@@ -200,13 +201,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._device_host_func_dispatcher = DeviceHostFuncDispatcher()
         self._device_host_func_dispatcher.register(
             "finish_write",
-            self._ctx.storage_manager.finish_write,
-            payload_type=list[ObjectKey],
-        )
-        self._device_host_func_dispatcher.register(
-            "finish_write_by_owner",
-            self._ctx.storage_manager.finish_write_by_owner,
-            payload_type=L1WriteCompletion,
+            self._finish_write,
+            payload_type=dict[ObjectKey, int],
         )
         self._device_host_func_dispatcher.register(
             "finish_read_prefetched",
@@ -235,6 +231,16 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         entry = self.get_and_touch_context_entry(instance_id)
         if entry is not None:
             entry.cache_context.release_imported_event(import_token)
+
+    def _finish_write(self, l1_owners: dict[ObjectKey, int]) -> None:
+        """Admit a store's reserved objects once their device copies landed.
+
+        Args:
+            l1_owners: The L1 manager that reserved each stored key.
+        """
+        self._ctx.storage_manager.finish_write(
+            list(l1_owners.keys()), l1_owners=l1_owners
+        )
 
     def register_host_func(self, kind: str, handler: Any, payload_type: Any) -> None:
         """Register *handler* for *kind* on the per-process device host-func
@@ -801,11 +807,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         block_ids_host=gpu_block_ids,
                     )
 
-                completion = (
-                    self._ctx.storage_manager.prepare_write_completion(all_dict)
-                    if all_dict
-                    else []
-                )
+                l1_owners = l1_owners_of(all_dict)
                 store_succeeded = True
             except Exception:
                 logger.exception("Cannot store keys due to exception")
@@ -817,8 +819,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 if stored_count:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
-                        "finish_write_by_owner",
-                        completion,
+                        "finish_write",
+                        l1_owners,
                     )
                 else:
                     total_bytes = 0
@@ -1164,7 +1166,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # imply a position without revealing it, so it is reported here. A
         # trailing partial chunk has no stored KV to bind to.
         chunk_size = self._ctx.chunk_size
-        token_ids = list(key.token_ids)
+        token_ids = unpack_token_ids(key.token_bytes)
         effective_len = min(len(token_ids), key.end)
         num_complete = effective_len - effective_len % chunk_size
         token_offsets = list(range(key.start, num_complete, chunk_size))

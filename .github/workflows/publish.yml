@@ -34,7 +34,7 @@ permissions:
 jobs:
     changes:
         name: Detect changes
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         permissions:
             pull-requests: read
         outputs:
@@ -70,6 +70,7 @@ jobs:
                         - '.github/workflows/build_rocm_artifacts.yml'
                         - '.github/workflows/build_xpu_artifacts.yml'
                         - '.github/workflows/build_musa_artifacts.yml'
+                        - '.github/workflows/build_rbln_artifacts.yml'
                         - '.github/workflows/build_rocm_torch210_artifacts.yml'
                         - '.github/actions/build-artifacts/action.yml'
                         - '.github/actions/publish-artifacts/action.yml'
@@ -77,6 +78,7 @@ jobs:
                         - '.github/scripts/rocm_wheel_common.sh'
                         - '.github/scripts/build_xpu_wheel.sh'
                         - '.github/scripts/build_musa_wheel.sh'
+                        - '.github/scripts/build_rbln_wheel.sh'
                         - '.github/scripts/build_rocm_torch210_wheel.sh'
                         - '.github/scripts/validate_rocm_torch210_wheel.py'
                         - '!operator/**'
@@ -128,7 +130,7 @@ jobs:
         needs: changes
         if: needs.changes.outputs.lmcache == 'true'
         name: Resolve XPU release runtime
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         outputs:
             image: ${{ steps.runtime.outputs.image }}
         steps:
@@ -159,6 +161,12 @@ jobs:
         if: needs.changes.outputs.lmcache == 'true'
         name: Build MUSA
         uses: ./.github/workflows/build_musa_artifacts.yml
+
+    build-rbln:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
+        name: Build RBLN
+        uses: ./.github/workflows/build_rbln_artifacts.yml
 
     build-rocm-torch210:
         needs: changes
@@ -201,7 +209,7 @@ jobs:
             contents: read
             # see https://docs.pypi.org/trusted-publishers/
             id-token: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-main, test, code-quality]
 
         steps:
@@ -241,7 +249,7 @@ jobs:
         permissions:
             contents: read
             id-token: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-cli, test, code-quality]
 
         steps:
@@ -279,7 +287,7 @@ jobs:
             # allow gh release upload
             contents: write
 
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-main, test, code-quality]
 
         steps:
@@ -323,7 +331,7 @@ jobs:
         permissions:
             id-token: write
             contents: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-cli, test, code-quality]
 
         steps:
@@ -364,7 +372,7 @@ jobs:
         permissions:
             id-token: write
             contents: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-raw-block, test, code-quality]
 
         steps:
@@ -403,7 +411,7 @@ jobs:
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
             contents: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-cu129, test, code-quality]
 
         steps:
@@ -453,7 +461,7 @@ jobs:
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
             contents: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-rocm, test, code-quality]
 
         steps:
@@ -480,7 +488,7 @@ jobs:
                     --title "Release ${{ github.ref_name }} · ROCm (gfx942, gfx950)" \
                     --notes "ROCm 7.2 wheel for LMCache ${{ github.ref_name }}, built for AMD
                   Instinct gfx942 (MI300X/MI325X) and gfx950 (MI350X/MI355X). ABI-matched
-                  to the upstream \`vllm/vllm-openai-rocm\` image (torch 2.11, cp312).
+                  to the upstream \`vllm/vllm-openai-rocm\` image (torch 2.13, cp312).
 
                   Install into an upstream vLLM ROCm container:
                   \`\`\`
@@ -502,7 +510,7 @@ jobs:
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
             contents: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-xpu, test, code-quality]
 
         steps:
@@ -552,7 +560,7 @@ jobs:
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
             contents: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-musa, test, code-quality]
 
         steps:
@@ -590,6 +598,56 @@ jobs:
                   \`\`\`" \
                     dist/*.whl
 
+    # Publish the RBLN wheel to GitHub Release (not PyPI) when a release is
+    # published. torch-rbln and the RBLN runtime stay host-owned.
+    publish-rbln-github-release:
+        name: Publish RBLN wheel to GitHub Release
+        if: |
+            needs.build-rbln.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
+            needs.changes.outputs.lmcache == 'true' &&
+            github.repository_owner == 'LMCache' && github.event.action == 'published'
+        permissions:
+            contents: write
+        runs-on: ubuntu-24.04
+        needs: [changes, build-rbln, test, code-quality]
+
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                  disable-sudo-and-containers: false
+                  egress-policy: audit
+
+            - name: Fetch RBLN release artifacts
+              uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+              with:
+                  name: release-rbln-artifacts
+                  path: dist
+
+            - name: Publish RBLN wheel to dedicated GitHub Release
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+              run: |
+                  gh release create "${{ github.ref_name }}-rbln" \
+                    --repo "${{ github.repository }}" \
+                    --target "$GITHUB_SHA" \
+                    --latest=false \
+                    --title "Release ${{ github.ref_name }} · Rebellions RBLN" \
+                    --notes "Rebellions RBLN NPU wheel for LMCache ${{ github.ref_name }}, built against
+                  torch-rbln ${{ needs.build-rbln.outputs.torch_rbln_version }} (torch ${{ needs.build-rbln.outputs.torch_version }}).
+
+                  torch-rbln, rebel-compiler, and the RBLN driver stay host-owned and are not bundled.
+
+                  Install into an environment that already has torch-rbln and rebel-compiler:
+                  \`\`\`bash
+                  VERSION=${{ github.ref_name }}
+                  pip install lmcache==${{ needs.build-rbln.outputs.rbln_version }} \\
+                    --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/\${VERSION}-rbln
+                  \`\`\`" \
+                    dist/*.whl
+
     # Publish the general ROCm wheel built against the torch 2.10 ABI.
     publish-rocm-torch210-github-release:
         name: Publish ROCm torch 2.10 wheel to GitHub Release
@@ -601,7 +659,7 @@ jobs:
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
             contents: write
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         needs: [changes, build-rocm-torch210, test, code-quality]
 
         steps:
@@ -665,7 +723,7 @@ jobs:
             matrix:
                 include:
                     - arch: amd64
-                      runner: ubuntu-latest
+                      runner: ubuntu-24.04
                     # Build CUDA images natively; QEMU is too slow and fragile
                     # for the package installation and extension build stages.
                     - arch: arm64
@@ -879,7 +937,7 @@ jobs:
         name: Publish multi-arch image manifests
         if: needs.publish-image.result == 'success'
         needs: [publish-image]
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
 
         steps:
             - name: "Harden Runner"
@@ -1011,7 +1069,7 @@ jobs:
             matrix:
                 include:
                     - arch: amd64
-                      runner: ubuntu-latest
+                      runner: ubuntu-24.04
                     # Keep RC validation identical to stable releases.
                     - arch: arm64
                       runner: ubuntu-24.04-arm
@@ -1084,7 +1142,7 @@ jobs:
         name: Publish multi-arch RC image manifest
         if: needs.publish-image-rc.result == 'success'
         needs: [publish-image-rc]
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
 
         steps:
             - name: "Harden Runner"

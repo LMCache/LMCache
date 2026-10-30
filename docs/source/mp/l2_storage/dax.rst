@@ -14,14 +14,20 @@ the DAX device, but they are unreachable after the LMCache server restarts.
 
 - ``device_path``: Path to the mmap-able DAX device or test file.
 - ``max_dax_size_gb``: Number of GiB to map from ``device_path``.
+- ``offset_gb`` (optional, default ``0``): GiB offset where the mapping
+  starts, so several servers, or L1 and L2 in one server, can share one CXL
+  device on disjoint ranges. The range must fit within the device and be a
+  multiple of the device alignment.
 - ``slot_bytes``: Fixed slot size in bytes. This must be large enough for one
   full LMCache chunk because MP memory descriptors do not expose the
   non-MP full-chunk size.
 
 **Required fields for the multi-device form:**
 
-- ``devices``: List of objects with ``device_path`` and ``max_dax_size_gb``.
-  The list may be empty only when ``hotplug_enabled`` is ``true``.
+- ``devices``: List of objects with ``device_path``, ``max_dax_size_gb``, and
+  optional ``offset_gb``. The same device may appear more than once with
+  disjoint ranges. The list may be empty only when ``hotplug_enabled`` is
+  ``true``.
 - ``slot_bytes``: Fixed slot size in bytes shared by every DAX device in the
   adapter facade.
 
@@ -64,7 +70,7 @@ the DAX device, but they are unreachable after the LMCache server restarts.
       "type": "dax",
       "devices": [
         {"device_path": "/dev/daxX.X", "max_dax_size_gb": 100},
-        {"device_path": "/dev/daxY.Y", "max_dax_size_gb": 100}
+        {"device_path": "/dev/daxX.X", "max_dax_size_gb": 100, "offset_gb": 100}
       ],
       "slot_bytes": 268435456,
       "hotplug_enabled": true,
@@ -85,7 +91,10 @@ future adapters such as P2P.
     curl http://127.0.0.1:9000/reconfigure/dax/l2/status
     curl -X POST http://127.0.0.1:9000/reconfigure/dax/l2/add \
       -H 'Content-Type: application/json' \
-      -d '{"device_path": "/dev/daxX.X", "size": "100GiB"}'
+      -d '{"device_path": "/dev/daxX.X", "size": "100GiB", "offset": "200GiB"}'
+
+Pass the same ``device_path`` and ``offset`` to ``remove`` and ``resize``.
+A range overlapping one this server already maps, in L1 or L2, returns ``409``.
 
 **Current limits:**
 

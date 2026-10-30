@@ -13,10 +13,10 @@ from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.cache_engine import LMCacheEngine
-    from lmcache.v1.config import LMCacheEngineConfig
-    from lmcache.v1.metadata import LMCacheMetadata
-    from lmcache.v1.rpc.transport import (
+    from lmcache.inprocess.v1.cache_engine import LMCacheEngine
+    from lmcache.inprocess.v1.config import LMCacheEngineConfig
+    from lmcache.inprocess.v1.metadata import LMCacheMetadata
+    from lmcache.inprocess.v1.rpc.transport import (
         RpcClientTransport,
         RpcServerTransport,
     )
@@ -65,7 +65,7 @@ class LMCacheLookupClient(LookupClientInterface):
         self.reqs_status: dict[str, int] = {}
 
         # First Party
-        from lmcache.v1.token_database import (
+        from lmcache.inprocess.v1.token_database import (
             ChunkedTokenDatabase,
             SegmentTokenDatabase,
             TokenDatabase,

@@ -44,6 +44,9 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
 from lmcache.integration.vllm.lmcache_mp_metrics import (  # noqa: E402
     LMCacheMPConnectorStats,
 )
+from lmcache.v1.multiprocess.token_codec import (  # noqa: E402
+    unpack_token_ids,
+)
 
 POLICIES = ("FIFO", "EVICTION_AWARE")
 
@@ -119,6 +122,7 @@ def _lazy_connector(
     connector._prompt_only_cache = True
     connector._hit_alignment_tokens = 16
     connector._reserve_last_token_for_lookup = False
+    connector._prefix_replay_tokens = 0
     connector._group_tokens_per_block = [16]
     connector._eager_prefetch = True
     connector._connector_stats = LMCacheMPConnectorStats()
@@ -202,7 +206,7 @@ def test_prompt_stores_wait_for_every_worker_before_releasing_session(
     assert len(metadata.requests) == 1
     store = metadata.requests[0]
     assert (store.op.start, store.op.end) == (0, 512)
-    assert store.op.token_ids == list(range(512))
+    assert unpack_token_ids(store.op.token_bytes) == list(range(512))
     assert store.op.flat_block_ids == [b.block_id for b in blocks[:32]]
     assert [b.ref_cnt for b in blocks] == [1] * 32 + [0] * 32
     assert connector.has_pending_push_work()
@@ -289,7 +293,7 @@ def test_new_tracker_restarts_the_prompt_without_reusing_stale_stores(
     assert len(metadata.requests) == 1
     store = metadata.requests[0]
     assert (store.op.start, store.op.end) == (0, 512)
-    assert store.op.token_ids == list(range(512))
+    assert unpack_token_ids(store.op.token_bytes) == list(range(512))
     assert store.op.flat_block_ids == [b.block_id for b in new_blocks[:32]]
     _receipt(connector, request.request_id)
     adapter.end_session.assert_not_called()

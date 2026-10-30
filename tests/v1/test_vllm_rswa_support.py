@@ -41,6 +41,10 @@ from lmcache.integration.vllm.lmcache_mp_metrics import (  # noqa: E402
     LMCacheMPConnectorStats,
 )
 from lmcache.integration.vllm.utils import is_rswa_model  # noqa: E402
+from lmcache.v1.multiprocess.token_codec import (  # noqa: E402
+    pack_token_ids,
+    unpack_token_ids,
+)
 
 
 class RSWASpec:
@@ -80,6 +84,10 @@ class _FakeRequest:
         self.status = RequestStatus.WAITING
         self.num_computed_tokens = 0
 
+    def append_output_token_ids(self, token_ids: list[int]) -> None:
+        """Append generated tokens to the request's live logical sequence."""
+        self._token_ids.extend(token_ids)
+
 
 def _vllm_config(
     *,
@@ -110,6 +118,7 @@ def _lookup_connector(
     adapter: MagicMock,
     *,
     eager_prefetch: bool = False,
+    prefix_replay_tokens: int = 0,
 ) -> LMCacheMPConnector:
     """Build callback state without starting network or device resources."""
     # These public-callback tests bypass the networked constructor, so seed
@@ -124,6 +133,7 @@ def _lookup_connector(
     connector._prompt_only_cache = True
     connector._hit_alignment_tokens = 16
     connector._reserve_last_token_for_lookup = False
+    connector._prefix_replay_tokens = prefix_replay_tokens
     connector._eager_prefetch = eager_prefetch
     connector._connector_stats = LMCacheMPConnectorStats()
     connector.lazy_offload = False
@@ -266,6 +276,23 @@ def test_prompt_only_tracker_excludes_decode_tokens() -> None:
     assert tracker.get_cache_token_ids() == list(range(256))
 
 
+@pytest.mark.parametrize("prompt_only", [False, True])
+def test_packed_tokens_follow_cache_policy_during_decode(prompt_only: bool) -> None:
+    """Decode extends ordinary keys while an R-SWA prompt key stays fixed."""
+    request = _FakeRequest(prompt_tokens=256, total_tokens=256)
+    tracker = LMCacheMPRequestTracker(request, prompt_only=prompt_only)
+    prompt_bytes = tracker.packed_token_ids()
+
+    request.append_output_token_ids(list(range(256, 512)))
+
+    expected = list(range(256 if prompt_only else 512))
+    assert unpack_token_ids(tracker.packed_token_ids()) == expected
+    assert tracker.get_cache_token_ids() == expected
+    assert tracker.get_token_ids() == list(range(512))
+    if prompt_only:
+        assert tracker.packed_token_ids() == prompt_bytes
+
+
 @pytest.mark.parametrize("max_offload_tokens", [None, 1024])
 def test_resumable_rswa_request_fails_closed(
     max_offload_tokens: int | None,
@@ -279,6 +306,7 @@ def test_resumable_rswa_request_fails_closed(
 
     assert tracker.num_cache_tokens == 0
     assert tracker.get_cache_token_ids() == []
+    assert tracker.packed_token_ids() == b""
 
 
 @pytest.mark.parametrize("resumable", [False, True])
@@ -344,7 +372,7 @@ def test_rswa_lookup_latency_spans_pending_polls(
     assert connector.get_kv_connector_stats() is None
     assert connector.request_trackers[request.request_id].lookup_started_at is None
     for call in adapter.maybe_submit_lookup_request.call_args_list:
-        assert call.kwargs["token_ids"] == list(range(256))
+        assert unpack_token_ids(call.kwargs["packed_token_ids"]) == list(range(256))
 
 
 def test_uncacheable_rswa_request_does_not_submit_lookup() -> None:
@@ -412,7 +440,7 @@ def test_rswa_apc_shrink_keeps_prompt_keys_and_releases_abandoned_locks() -> Non
     assert connector.get_num_new_matched_tokens(request, 256) == (None, True)
     assert adapter.maybe_submit_lookup_request.call_count == 2
     for call in adapter.maybe_submit_lookup_request.call_args_list:
-        assert call.kwargs["token_ids"] == list(range(768))
+        assert unpack_token_ids(call.kwargs["packed_token_ids"]) == list(range(768))
 
     assert connector.get_num_new_matched_tokens(request, 256) == (511, True)
     connector.update_state_after_alloc(
@@ -422,7 +450,7 @@ def test_rswa_apc_shrink_keeps_prompt_keys_and_releases_abandoned_locks() -> Non
     )
 
     free = adapter.free_lookup_locks.call_args.kwargs
-    assert free["token_ids"] == list(range(768))
+    assert unpack_token_ids(free["packed_token_ids"]) == list(range(768))
     assert (free["start"], free["end"]) == (0, 256)
     assert free["extra_ranges"] == ((512, 768),)
     assert tracker.pending_free_ranges == []
@@ -478,7 +506,7 @@ def test_rswa_store_respects_both_prompt_and_offload_limits(
     if expected_end:
         assert metadata is not None
         assert (metadata.op.start, metadata.op.end) == (0, expected_end)
-        assert metadata.op.token_ids == list(range(512))
+        assert unpack_token_ids(metadata.op.token_bytes) == list(range(512))
         assert metadata.op.block_ids == [list(range(1000, 1000 + expected_end // 16))]
     else:
         assert metadata is None
@@ -511,7 +539,7 @@ def test_rswa_offload_limit_does_not_shorten_prompt_retrieval(
 
     assert metadata is not None
     assert (metadata.op.start, metadata.op.end) == (0, 512)
-    assert metadata.op.token_ids == list(range(512))
+    assert unpack_token_ids(metadata.op.token_bytes) == list(range(512))
     assert metadata.op.block_ids == [list(range(1000, 1032))]
     assert (
         LMCacheMPRequestMetadata.GetStoreMetadata(
@@ -536,7 +564,7 @@ def test_rswa_retrieve_uses_only_prompt_blocks() -> None:
     )
 
     assert metadata is not None
-    assert metadata.op.token_ids == list(range(256))
+    assert unpack_token_ids(metadata.op.token_bytes) == list(range(256))
     assert metadata.op.block_ids == [list(range(1000, 1016))]
 
 
@@ -574,24 +602,30 @@ def test_rswa_mixed_groups_store_and_retrieve_only_prompt_blocks() -> None:
     assert retrieve is not None
     assert (retrieve.op.start, retrieve.op.end) == (0, 256)
     assert retrieve.op.block_ids == store.op.block_ids
-    assert retrieve.op.token_ids == list(range(256))
+    assert unpack_token_ids(retrieve.op.token_bytes) == list(range(256))
 
 
-def test_rswa_full_prompt_hit_recomputes_last_prompt_token() -> None:
-    """The full-hit adjustment compares against the prompt, not decode length."""
+@pytest.mark.parametrize("prefix_replay_tokens", [0, 128])
+def test_rswa_full_prompt_hit_preserves_recompute_boundary(
+    prefix_replay_tokens: int,
+) -> None:
+    """The prompt cap preserves both last-token and bounded-replay handling."""
     request = _FakeRequest(prompt_tokens=256, total_tokens=512)
     adapter = MagicMock()
     adapter.lmcache_tokens_per_chunk = 256
     adapter.check_lookup_result.return_value = 256
 
-    connector = _lookup_connector(adapter)
+    connector = _lookup_connector(adapter, prefix_replay_tokens=prefix_replay_tokens)
 
     matched_tokens, load_async = connector.get_num_new_matched_tokens(request, 0)
 
-    assert (matched_tokens, load_async) == (255, True)
+    expected = (0, False) if prefix_replay_tokens else (255, True)
+    assert (matched_tokens, load_async) == expected
+    tracker = connector.request_trackers[request.request_id]
+    assert tracker.pending_free_ranges == ([(0, 256)] if prefix_replay_tokens else [])
     adapter.maybe_submit_lookup_request.assert_called_once_with(
         request.request_id,
-        token_ids=list(range(256)),
+        packed_token_ids=pack_token_ids(range(256)),
         cache_salt="",
         request_configs={"lmcache.hint.engine_computed_tokens": 0},
         reserve_last_token=False,
@@ -614,7 +648,7 @@ def test_rswa_lock_release_uses_prompt_cache_key() -> None:
     connector.update_state_after_alloc(request, blocks, num_external_tokens=0)
 
     adapter.free_lookup_locks.assert_called_once_with(
-        token_ids=list(range(256)),
+        packed_token_ids=pack_token_ids(range(256)),
         start=0,
         end=256,
         request_id=request.request_id,
@@ -835,9 +869,9 @@ def test_rswa_preemption_replaces_stale_tracker_and_stays_prompt_only() -> None:
     assert fresh_tracker.allocated_block_ids == {}
     assert fresh_tracker.get_token_ids() == list(range(512))
     assert fresh_tracker.get_cache_token_ids() == list(range(256))
-    assert adapter.maybe_submit_lookup_request.call_args.kwargs["token_ids"] == list(
-        range(256)
-    )
+    assert unpack_token_ids(
+        adapter.maybe_submit_lookup_request.call_args.kwargs["packed_token_ids"]
+    ) == list(range(256))
 
     # Repeated scheduler polls keep the fresh tracker instead of recreating it.
     assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
@@ -845,7 +879,7 @@ def test_rswa_preemption_replaces_stale_tracker_and_stays_prompt_only() -> None:
     assert adapter.maybe_submit_lookup_request.call_count == 2
     assert adapter.check_lookup_result.call_count == 2
     for call in adapter.maybe_submit_lookup_request.call_args_list:
-        assert call.kwargs["token_ids"] == list(range(256))
+        assert unpack_token_ids(call.kwargs["packed_token_ids"]) == list(range(256))
 
     # A resumed R-SWA table contains nulls for the freed middle gap. Even after
     # accepting that full replacement table, only the prompt blocks may store.
@@ -905,7 +939,7 @@ def test_rswa_lookup_respects_short_and_unaligned_prompt_boundaries(
     assert connector.get_num_new_matched_tokens(request, 0) == expected
     adapter.maybe_submit_lookup_request.assert_called_once_with(
         request.request_id,
-        token_ids=list(range(prompt_tokens)),
+        packed_token_ids=pack_token_ids(range(prompt_tokens)),
         cache_salt="",
         request_configs={"lmcache.hint.engine_computed_tokens": 0},
         reserve_last_token=False,

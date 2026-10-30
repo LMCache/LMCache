@@ -12,10 +12,10 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.v1.cache_engine import LMCacheEngineBuilder
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.gpu_connector.xpu_connectors import VLLMPagedMemXPUConnectorV2
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
-from lmcache.v1.config import LMCacheEngineConfig
 from tests.v1.utils import (
     dumb_metadata,
     generate_kv_cache_paged_list_tensors,

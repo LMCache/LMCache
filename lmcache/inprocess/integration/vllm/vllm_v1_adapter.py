@@ -30,10 +30,7 @@ import torch
 # (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
 from lmcache import utils
 from lmcache.banner import print_banner_once
-from lmcache.inprocess.integration.vllm.vllm_service_factory import (
-    VllmServiceFactory,
-)
-from lmcache.integration.vllm.utils import (
+from lmcache.inprocess.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
@@ -41,14 +38,17 @@ from lmcache.integration.vllm.utils import (
     is_rswa_model,
     lmcache_get_or_create_config,
 )
+from lmcache.inprocess.integration.vllm.vllm_service_factory import (
+    VllmServiceFactory,
+)
+from lmcache.inprocess.v1.cache_engine import LMCacheEngine
+from lmcache.inprocess.v1.compute.blend import LMCBlenderBuilder
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.config_base import validate_and_set_config_value
+from lmcache.inprocess.v1.manager import LMCacheManager
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
-from lmcache.v1.cache_engine import LMCacheEngine
-from lmcache.v1.compute.blend import LMCBlenderBuilder
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.config_base import validate_and_set_config_value
-from lmcache.v1.manager import LMCacheManager
 
 if TYPE_CHECKING:
     # Third Party

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -8,6 +9,11 @@ import msgspec
 import torch
 
 # First Party
+from lmcache.v1.multiprocess.token_codec import (
+    TOKEN_STRIDE,
+    num_packed_tokens,
+    pack_token_ids,
+)
 from lmcache.v1.platform.base.ipc_wrapper import (  # noqa: E402,F401
     DeviceIPCWrapper,
 )
@@ -18,7 +24,7 @@ communications.
 
 Key Types:
 - IPCCacheServerKey: Token-based cache key
-  - Contains token_ids, start, end, request_id (all required)
+  - Contains token_bytes, start, end, request_id (all required)
   - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
 """
 
@@ -29,9 +35,14 @@ class IPCCacheServerKey:
 
     This key type is sent by the client over ZMQ (serialized via msgspec).
 
-    The client sends token_ids, start, end, and request_id (all required).
+    The client sends token_bytes, start, end, and request_id (all required).
     The server computes chunk hashes via TokenHasher and converts to
     ObjectKey for storage operations using ipc_key_to_object_keys().
+
+    ``token_bytes`` is packed by :mod:`lmcache.v1.multiprocess.token_codec`
+    (see there for the layout and why no chunk hash changes). It replaced a
+    ``token_ids`` tuple in place, so client and server must be upgraded
+    together.
 
     The request_id field is for session tracking and is NOT included
     in equality/hash comparisons (two keys with same content but different
@@ -42,7 +53,7 @@ class IPCCacheServerKey:
     world_size: int
     worker_id: int | None
 
-    token_ids: tuple[int, ...]  # frozen tuple for hashability
+    token_bytes: bytes  # packed big-endian uint32, one word per token
     start: int
     end: int
 
@@ -75,6 +86,11 @@ class IPCCacheServerKey:
     _SALT_MAX_LEN = 128
 
     def __post_init__(self) -> None:
+        if len(self.token_bytes) % TOKEN_STRIDE:
+            raise ValueError(
+                f"token_bytes of {len(self.token_bytes)} byte(s) is not a "
+                f"whole number of {TOKEN_STRIDE}-byte token ids"
+            )
         bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
         if bad:
             raise ValueError(
@@ -86,14 +102,13 @@ class IPCCacheServerKey:
                 f"(got {len(self.cache_salt)})"
             )
 
-    # Helper function for unit tests only
     @classmethod
     def from_token_ids(
         cls,
         model_name: str,
         world_size: int,
         worker_id: int | None,
-        token_ids: list[int],
+        token_ids: Sequence[int],
         start: int = 0,
         end: int = 0,
         request_id: str = "",
@@ -101,19 +116,43 @@ class IPCCacheServerKey:
         num_kv_readers: int = 1,
         request_configs: dict[str, Any] | None = None,
     ) -> "IPCCacheServerKey":
-        """Create a key from token ids. Only used by the tests."""
+        """Create a key from unpacked token ids.
+
+        The canonical way to build a key from a token list: it owns the
+        packing so callers never handle :mod:`token_codec` themselves.
+
+        Args:
+            model_name: Model the key belongs to.
+            world_size: Number of TP workers.
+            worker_id: Worker the key is scoped to, or ``None`` for all.
+            token_ids: The token sequence.
+            start: Start token index of the key's range.
+            end: End token index of the key's range (exclusive).
+            request_id: Request the key belongs to.
+            cache_salt: Per-user isolation salt.
+            num_kv_readers: Number of workers that will read the object.
+            request_configs: Optional LMCache request configs.
+
+        Returns:
+            The key, with ``token_ids`` packed into ``token_bytes``.
+        """
         return cls(
             model_name=model_name,
             world_size=world_size,
             worker_id=worker_id,
             num_kv_readers=num_kv_readers,
-            token_ids=tuple(token_ids),
+            token_bytes=pack_token_ids(token_ids),
             start=start,
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
+
+    @property
+    def num_tokens(self) -> int:
+        """How many token ids this key carries."""
+        return num_packed_tokens(self.token_bytes)
 
     def require_num_kv_readers(self) -> int:
         """Declared reader count; rejects keys from pre-field clients.
@@ -139,7 +178,7 @@ class IPCCacheServerKey:
             world_size=self.world_size,
             worker_id=None,
             num_kv_readers=self.num_kv_readers,
-            token_ids=self.token_ids,
+            token_bytes=self.token_bytes,
             start=self.start,
             end=self.end,
             request_id=self.request_id,
@@ -150,6 +189,48 @@ class IPCCacheServerKey:
 
 # Type exports
 KVCache = list[DeviceIPCWrapper]
+
+
+class GroupLayout(msgspec.Struct):
+    """Per-LMCache-group layout for multi-group engine-driven registration.
+
+    Attributes:
+        num_layers: Number of KV layers in this group.
+        hidden_dim_size: Flattened hidden dimension per token for this group.
+        dtype_str: Torch dtype name for this group's KV tensors.
+        tokens_per_block: Tokens covered by one paged block of this group
+            (``EngineGroupInfo.tokens_per_block``; falls back to the engine
+            ``block_size`` when the engine reported ``0``).
+        window_tokens: Tokens stored per LMCache chunk for this group. Equals
+            the full chunk token count for full-attention groups; for a
+            sliding-window group it is ``min(chunk_tokens, sw_size_tokens)`` so
+            the server sizes each per-chunk object to the window. ``0`` means
+            "full chunk" (legacy workers that predate SW support).
+        kv_size: Object planes for this group: ``2`` for separate K/V, ``1``
+            for single-plane formats (MLA, fused K/V, indexer caches). Groups
+            of one model can differ, so the server must not size them from the
+            top-level ``use_mla``. ``0`` means "unreported" (legacy workers)
+            and falls back to the top-level ``use_mla``.
+        window_chunks: Trailing LMCache chunks this group needs for a cache
+            hit (its attention window, rounded up to whole chunks). ``0``
+            means full attention, the whole prefix, which is also what
+            workers that predate windows send.
+        recurrent: Whether the group's pages hold recurrent state snapshots
+            (Mamba/GDN/linear attention) rather than per-token attention KV.
+        num_physical_slots: Physical slots stored per chunk, after windowing
+            and slot compression. ``None`` retains the legacy one-slot-per-token
+            layout derived from ``window_tokens``.
+    """
+
+    num_layers: int
+    hidden_dim_size: int
+    dtype_str: str
+    tokens_per_block: int
+    window_tokens: int = 0
+    kv_size: int = 0
+    window_chunks: int = 0
+    recurrent: bool = False
+    num_physical_slots: int | None = None
 
 
 class RegisterEngineDrivenContextPayload(msgspec.Struct):
@@ -167,6 +248,10 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         num_physical_slots: Number of physical KV slots gathered into one
             LMCache chunk. ``None`` accepts the legacy protocol, where the
             server assumed one physical slot per logical token.
+        group_layouts: Per-group layouts for multi-group (hybrid-KV) workers,
+            in protocol group order. Empty means legacy single-group; the
+            top-level ``num_layers``/``hidden_dim_size``/``dtype_str`` then
+            describe the sole group.
     """
 
     instance_id: int
@@ -178,14 +263,23 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     dtype_str: str
     use_mla: bool
     num_physical_slots: int | None = None
+    group_layouts: list[GroupLayout] = []
 
 
 @dataclass
 class RegisterEngineDrivenContextResponse:
-    """Shared response for engine-driven context registration."""
+    """Shared response for engine-driven context registration.
+
+    Attributes:
+        shm_name: Name of the server's SHM-backed L1 pool, or ``""``.
+        pool_size: Size of that pool in bytes.
+        null_block_id: Engine block ID the server treats as absent KV data.
+            Workers skip storing chunks whose blocks are all this ID.
+    """
 
     shm_name: str = ""
     pool_size: int = 0
+    null_block_id: int = 0
 
 
 @dataclass

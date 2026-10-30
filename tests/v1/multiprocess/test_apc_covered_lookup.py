@@ -26,6 +26,13 @@ import pytest
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
+
+# Test helpers
+from tests.v1.mp_scheduler_adapter_test_utils import (
+    make_request_client,
+    make_scheduler_adapter,
+)
 
 CHUNK_SIZE = 16
 
@@ -59,11 +66,11 @@ class _FakeRequest:
 
 def _make_key(n_chunks: int, start_chunks: int = 0) -> IPCCacheServerKey:
     n_tokens = n_chunks * CHUNK_SIZE
-    return IPCCacheServerKey(
+    return IPCCacheServerKey.from_token_ids(
         model_name="m",
         world_size=1,
         worker_id=None,
-        token_ids=tuple(range(n_tokens)),
+        token_ids=range(n_tokens),
         start=start_chunks * CHUNK_SIZE,
         end=n_tokens,
         request_id="r",
@@ -74,7 +81,7 @@ def _make_key(n_chunks: int, start_chunks: int = 0) -> IPCCacheServerKey:
 def _ctx_with_hashes(n_chunks: int) -> MagicMock:
     ctx = MagicMock()
     ctx.chunk_size = CHUNK_SIZE
-    ctx.token_hasher.compute_chunk_hashes.return_value = [
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = [
         bytes([i]) * 4 for i in range(n_chunks)
     ]
     return ctx
@@ -110,51 +117,30 @@ def test_touch_cached_keys_hits_both_tiers():
     l2_b.submit_touch.assert_called_once_with(keys)
 
 
-def test_submit_sends_key_start_and_reports_whether_it_sent():
+def test_submit_sends_key_start_and_reports_whether_it_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """``maybe_submit_lookup_request`` carries ``start`` on the key.
 
     The caller must key its frozen covered boundary off the return value: a
     poll that no-ops because a lookup is already in flight returns ``False``.
     """
-    # First Party
-    from lmcache.integration.vllm.vllm_multi_process_adapter import (
-        LMCacheMPSchedulerAdapter,
-    )
+    client = make_request_client(CHUNK_SIZE)
+    adapter = make_scheduler_adapter(monkeypatch, {"u": client}, CHUNK_SIZE)
+    token_ids = list(range(8 * CHUNK_SIZE))
 
-    adapter = MagicMock(spec=LMCacheMPSchedulerAdapter)
-    adapter.is_healthy = True
-    adapter.lmcache_tokens_per_chunk = CHUNK_SIZE
-    adapter.tp_size = 1
-    adapter._pending_lookups = set()
-    adapter._unacked_lookups = {}
-    adapter._lookup_params = {}
-    adapter._server_urls = ["u"]
-    adapter.req_clients = {"u": MagicMock()}
-    adapter._create_key = MagicMock()
-    adapter._ensure_heartbeat_started = MagicMock()
-
-    submit = LMCacheMPSchedulerAdapter.maybe_submit_lookup_request
-    assert (
-        submit(
-            adapter,
-            "req",
-            token_ids=list(range(8 * CHUNK_SIZE)),
-            start=3 * CHUNK_SIZE,
-        )
-        is True
+    assert adapter.maybe_submit_lookup_request(
+        "req", packed_token_ids=pack_token_ids(token_ids), start=3 * CHUNK_SIZE
     )
-    assert adapter._create_key.call_args.kwargs["start"] == 3 * CHUNK_SIZE
+    client.lookup.assert_called_once()
+    key = client.lookup.call_args.args[0]
+    assert (key.start, key.end) == (3 * CHUNK_SIZE, 8 * CHUNK_SIZE)
 
-    # Second poll: the request is still pending, so nothing is sent.
-    assert (
-        submit(
-            adapter,
-            "req",
-            token_ids=list(range(8 * CHUNK_SIZE)),
-            start=3 * CHUNK_SIZE,
-        )
-        is False
+    # Second poll: the lookup is still in flight, so nothing is sent.
+    assert not adapter.maybe_submit_lookup_request(
+        "req", packed_token_ids=pack_token_ids(token_ids), start=3 * CHUNK_SIZE
     )
+    client.lookup.assert_called_once()
 
 
 @requires_vllm
@@ -162,7 +148,7 @@ def test_covered_boundary_frozen_only_when_a_lookup_is_sent():
     """A no-op poll must not move ``apc_covered_tokens``.
 
     ``lookup_started_at`` is cleared once a result lands while the request
-    stays in ``_pending_lookups``, so a later poll re-enters the submit path.
+    stays tracked by the adapter, so a later poll re-enters the submit path.
     If that poll re-froze the boundary from the APC hit it happens to see,
     the frozen value would diverge from the one the in-flight lookup used --
     making the shrink check compare against a boundary the server never had.

@@ -6,15 +6,15 @@ from typing import Optional, Union
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.lookup_client.abstract_client import LookupClientInterface
-from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.connector.mooncakestore_connector import (
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
+from lmcache.inprocess.v1.storage_backend.connector.mooncakestore_connector import (
     MooncakeStoreConfig,
     setup_mooncake_store,
 )
+from lmcache.logging import init_logger
+from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)
 
@@ -51,7 +51,7 @@ class MooncakeLookupClient(LookupClientInterface):
         )
 
         # First Party
-        from lmcache.v1.token_database import ChunkedTokenDatabase
+        from lmcache.inprocess.v1.token_database import ChunkedTokenDatabase
 
         assert not config.enable_blending, (
             "LMCache v1 blending is not supported in MooncakeLookupClient yet."
@@ -67,7 +67,9 @@ class MooncakeLookupClient(LookupClientInterface):
         # process token_ids to cacheengine keys
         keys = []
         ends = []
-        for start, end, key in self.token_database.process_tokens(token_ids):
+        for start, end, key in self.token_database.process_tokens(
+            token_ids, request_configs=request_configs
+        ):
             assert isinstance(key, CacheEngineKey)
             keys.append(key.to_string())
             ends.append(end)

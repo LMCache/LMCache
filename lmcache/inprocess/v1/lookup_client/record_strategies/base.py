@@ -11,8 +11,8 @@ import time
 import torch
 
 # First Party
+from lmcache.inprocess.v1.token_database import ChunkedTokenDatabase
 from lmcache.logging import init_logger
-from lmcache.v1.token_database import ChunkedTokenDatabase
 
 logger = init_logger(__name__)
 
