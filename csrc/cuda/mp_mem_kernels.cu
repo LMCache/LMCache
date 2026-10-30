@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <deque>
 #include <mutex>
+#include <numeric>
 
 #if defined(USE_ROCM)
   #include <hip/hip_version.h>
@@ -227,22 +228,32 @@ void multi_layer_block_kv_transfer(
   TORCH_CHECK(head_bytes % sizeof(uint16_t) == 0, "head_size * element_size (",
               head_bytes, ") must be divisible by 2 for vectorized access");
 
+  // Block offsets are expressed in transfer units. The unit must divide
+  // both the head width and the physical block stride to avoid truncation.
+  size_t transfer_alignment = head_bytes;
+  if (shape_desc.block_stride_elems > 0) {
+    transfer_alignment = std::gcd(
+        transfer_alignment, static_cast<size_t>(shape_desc.block_stride_elems) *
+                                shape_desc.element_size);
+  }
+
   if (engine_kv_format == EngineKVFormat::NL_X_NB_BSV_BSS) {
     // Blocked-scale indexer cache: the per-token fp32 scale must be a whole
-    // number of transfer units, so pin 4-byte units regardless of row width.
+    // number of transfer units, so use units no larger than 4 bytes.
     TORCH_CHECK(head_bytes % sizeof(uint32_t) == 0,
                 "NL_X_NB_BSV_BSS row bytes (", head_bytes,
                 ") must be divisible by 4");
-    LAUNCH_TEMPLATED(uint32_t);
-    return;
+    transfer_alignment = std::gcd(transfer_alignment, sizeof(uint32_t));
   }
 
-  if (head_bytes % sizeof(uint4) == 0) {
+  if (transfer_alignment % sizeof(uint4) == 0) {
     LAUNCH_TEMPLATED(uint4);  // 16 bytes per copy
-  } else if (head_bytes % sizeof(uint32_t) == 0) {
+  } else if (transfer_alignment % sizeof(uint32_t) == 0) {
     LAUNCH_TEMPLATED(uint32_t);  // 4 bytes per copy
+  } else if (transfer_alignment % sizeof(uint16_t) == 0) {
+    LAUNCH_TEMPLATED(uint16_t);  // 2 bytes per copy
   } else {
-    LAUNCH_TEMPLATED(uint16_t);  // 2 bytes per copy (minimum granularity)
+    LAUNCH_TEMPLATED(uint8_t);  // Odd byte strides require byte-wise copies
   }
 }
 
