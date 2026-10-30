@@ -120,6 +120,26 @@ def test_get_address_out_of_region_raises_value_error(shared_contexts):
 # =========================================================
 # End-to-end read (submit_read / query_status)
 # =========================================================
+def test_cancel_stops_a_task_and_forgets_it(shared_contexts):
+    ctx_a, _, ctx_b, _ = shared_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    task_id = client.submit_read(
+        ctx_a.get_transfer_channel_address([(0, 512)]),
+        ctx_b.get_transfer_channel_address([(0, 512)]),
+    )
+
+    # False while nixl cannot stop the transfer yet; True once it is released.
+    deadline = time.monotonic() + 5.0
+    while not client.cancel(task_id):
+        assert time.monotonic() < deadline, "transfer was never stopped"
+        time.sleep(0.001)
+
+    with pytest.raises(KeyError):
+        client.query_status(task_id)
+    with pytest.raises(KeyError):
+        client.cancel(task_id)
+
+
 def test_read_copies_remote_data_into_local_buffer(shared_contexts):
     ctx_a, buf_a, ctx_b, buf_b = shared_contexts
     client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)

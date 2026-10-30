@@ -101,6 +101,8 @@ L1 managers that own payload are `LOCAL`. The segment names the primary pool:
 | `GDS` slab | `(GDS, LOCAL)` |
 | `SHADOW` (for borrowing L2 adapters) | the borrowed segment, `SHADOW` |
 
+The `p2p_gdr` adapter wants `((DRAM, SHADOW),)`.
+
 ### L2 own tags
 
 `REMOTE` means the bytes are off this host or in a domain shared with other

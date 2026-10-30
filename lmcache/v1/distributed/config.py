@@ -820,6 +820,35 @@ class StorageManagerConfig:
             )
 
 
+def with_shadow_l1(
+    config: StorageManagerConfig, segment: MemorySegment
+) -> StorageManagerConfig:
+    """Return ``config`` with a shadow L1 of ``segment``, added if missing.
+
+    Args:
+        config: The storage manager configuration.
+        segment: The segment whose shadow L1 the config must have.
+
+    Returns:
+        ``config`` itself when it has one; otherwise a copy with a shadow L1
+        (tag ``shadow.<segment>``, the first L1's lock TTLs) appended.
+    """
+    if any(
+        isinstance(c, ShadowL1ManagerConfig) and c.segment is segment
+        for c in config.l1_manager_configs
+    ):
+        return config
+    first = config.l1_manager_config
+    shadow = ShadowL1ManagerConfig(
+        tag=f"shadow.{segment.value}",
+        segment=segment,
+        read_ttl_seconds=first.read_ttl_seconds,
+        write_ttl_seconds=first.write_ttl_seconds,
+        eviction=config.eviction_config,
+    )
+    return replace(config, l1_manager_configs=[*config.l1_manager_configs, shadow])
+
+
 def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     """Validate storage manager configuration.
 

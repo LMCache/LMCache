@@ -137,6 +137,8 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
   `delete_l2_adapter` keeps a failed close for a retry as for any adapter. The
   storage manager knows no borrower; the prefetch controller excludes `SHADOW`
   affinity from `NO_LOCK`.
+- **Borrowers**: the GPU-direct peer adapter (`p2p_gdr`,
+  [../l2_adapters/gdr_peer_l2_adapter.md](../l2_adapters/gdr_peer_l2_adapter.md)).
 
 ## Addressing one L1
 

@@ -4,7 +4,7 @@ Tests for P2PController lookup jobs, locks, discovery and adapter lifecycle.
 """
 
 # Standard
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # Third Party
 import httpx
@@ -23,6 +23,10 @@ from lmcache.v1.distributed.api import (
     PrefetchResult,
 )
 from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.l2_adapters.gdr_peer_l2_adapter import (
+    GdrPeerL2AdapterConfig,
+)
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
@@ -35,6 +39,7 @@ from lmcache.v1.multiprocess.modules.p2p_controller import (
 )
 
 _INVALID = TransferChannelAddress(offset=-1, size=0)
+_READ_TTL = 300
 
 
 def _result(rows: list[Bitmap]) -> PrefetchResult:
@@ -81,6 +86,10 @@ def test_transfer_channel_address_validity():
 def _make_controller() -> tuple[P2PController, MagicMock]:
     """Build a P2P-disabled controller (no thread / transfer channel)."""
     ctx = MagicMock()
+    # The local DRAM L1's read-lock TTL bounds a borrowing peer adapter's leases.
+    ctx.storage_manager.get_l1_manager_by_tags.return_value.config.read_ttl_seconds = (
+        _READ_TTL
+    )
     controller = P2PController(
         ctx,
         P2PConfig(),
@@ -516,6 +525,7 @@ def test_reconcile_adds_new_peer() -> None:
     ctx.storage_manager.add_l2_adapter.assert_called_once()
     config = ctx.storage_manager.add_l2_adapter.call_args.args[0]
     assert isinstance(config, P2PL2AdapterConfig)
+    assert not isinstance(config, GdrPeerL2AdapterConfig)
     assert config.peer_mq_server_url == "grpc://10.0.0.2:5555"
     assert config.peer_transfer_channel_server_url == "tc-host:9"
     assert controller.report_status()["p2p_peers"] == ["peerA"]
@@ -563,6 +573,33 @@ def test_p2p_config_rejects_invalid_write_settings(
         P2PConfig(store_timeout=store_timeout, write_l1_usage_threshold=threshold)
 
 
+@pytest.mark.parametrize(
+    "kwargs", [{"enable_write": True}, {"transfer_engine": "mooncake_te"}]
+)
+def test_gdr_load_mode_rejects_writes_and_other_engines(kwargs: dict) -> None:
+    with pytest.raises(ValueError, match="gdr"):
+        P2PConfig(load_mode="gdr", **kwargs)
+
+
+def test_reconcile_adds_a_gdr_peer_in_gdr_load_mode() -> None:
+    """Under ``--p2p-load-mode gdr`` a discovered peer gets a borrowing
+    adapter, configured with the same endpoints and deadlines."""
+    controller, ctx = _make_controller()
+    controller._p2p_config = P2PConfig(
+        advertise_url="me:1", load_mode="gdr", lookup_timeout=7.0, load_timeout=3.0
+    )
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+
+    config = ctx.storage_manager.add_l2_adapter.call_args.args[0]
+    assert isinstance(config, GdrPeerL2AdapterConfig)
+    assert config.peer_transfer_channel_server_url == "tc-host:9"
+    assert config.read_ttl_s == _READ_TTL
+    assert config.lookup_timeout_s == 7.0
+    assert config.load_timeout_s == 3.0
+
+
 def test_reconcile_no_op_when_peer_unchanged():
     """A still-present, unchanged peer is not re-added on the next cycle."""
     controller, ctx = _make_controller()
@@ -599,6 +636,45 @@ def test_reconcile_removes_peer_after_grace():
 
     ctx.storage_manager.delete_l2_adapter.assert_called_once_with(7)
     assert controller.report_status()["p2p_peers"] == []
+
+
+def test_reconcile_retries_a_removal_the_storage_manager_refused():
+    """A borrowing adapter refuses to close while local readers hold its
+    objects; the controller keeps retrying the removal on later cycles until
+    it succeeds, without re-adding the peer."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+    ctx.storage_manager.delete_l2_adapter.side_effect = [
+        RuntimeError("live borrowed objects"),
+        RuntimeError("live borrowed objects"),
+        None,
+    ]
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+    for _ in range(_MAX_MISSES + 1):
+        controller._apply_state(_P2PState.REGISTERED, {})
+    assert ctx.storage_manager.delete_l2_adapter.call_count == 1
+    assert controller.report_status()["p2p_peers"] == []
+
+    controller._apply_state(_P2PState.REGISTERED, {})
+    controller._apply_state(_P2PState.REGISTERED, {})
+    controller._apply_state(_P2PState.REGISTERED, {})
+    assert ctx.storage_manager.delete_l2_adapter.call_count == 3
+    assert ctx.storage_manager.add_l2_adapter.call_count == 1
+
+
+def test_close_keeps_the_transfer_channel_under_an_unremoved_adapter():
+    """An adapter that refuses removal may still be reading; closing the
+    channel would release its transfers under it."""
+    controller, ctx = _make_controller()
+    controller._p2p_config = P2PConfig(advertise_url="me:1")
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+    ctx.storage_manager.delete_l2_adapter.side_effect = RuntimeError("reading")
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+
+    with patch.object(p2p_controller, "delete_transfer_channel_context") as delete:
+        controller.close()
+    delete.assert_not_called()
 
 
 def test_reconcile_readds_on_url_change():
@@ -737,3 +813,43 @@ def test_poll_cycle_skips_peer_without_p2p_url():
 
     ctx.storage_manager.add_l2_adapter.assert_not_called()
     assert controller.report_status()["p2p_peers"] == []
+
+
+# ============================================================================
+# GDR load mode: startup requirements and the device-region target
+# ============================================================================
+
+
+def _start_controller(p2p_config: P2PConfig) -> P2PController:
+    """Construct an enabled controller with the transfer channel and poll
+    thread patched out. The DRAM L1 exists."""
+    ctx = MagicMock()
+    dram = MagicMock()
+    dram.get_l1_memory_desc.return_value = L1MemoryDesc(
+        ptr=0, size=4096, align_bytes=4096
+    )
+    dram.config.read_ttl_seconds = _READ_TTL
+    ctx.storage_manager.get_l1_manager_by_tags.return_value = dram
+    tc_context = MagicMock()
+    with (
+        patch.object(p2p_controller, "initialize_transfer_channel_context"),
+        patch.object(
+            p2p_controller, "get_transfer_channel_context", return_value=tc_context
+        ),
+        patch.object(p2p_controller, "delete_transfer_channel_context"),
+        patch.object(
+            p2p_controller, "create_periodic_thread", return_value=MagicMock()
+        ),
+        patch.object(p2p_controller.httpx, "Client", return_value=MagicMock()),
+    ):
+        controller = P2PController(ctx, p2p_config, CoordinatorConfig(), "self")
+        controller.close()
+    return controller
+
+
+def test_gdr_mode_requires_a_read_ttl_above_the_load_timeout() -> None:
+    """Otherwise no lease ever has time for a read and every hit is a miss."""
+    with pytest.raises(ValueError, match="l1-read-ttl-seconds"):
+        _start_controller(
+            P2PConfig(advertise_url="me:1", load_mode="gdr", load_timeout=_READ_TTL)
+        )

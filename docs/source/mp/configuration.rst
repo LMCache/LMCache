@@ -391,6 +391,9 @@ is set, which additionally requires a coordinator URL via
    * - ``--p2p-store-timeout``
      - ``30.0``
      - Seconds before a store into a peer counts as a failure.
+   * - ``--p2p-load-mode``
+     - ``l1``
+     - ``l1`` copies a peer's objects; ``gdr`` borrows them. See :doc:`p2p`.
 
 L1 Memory Manager
 ------------------
