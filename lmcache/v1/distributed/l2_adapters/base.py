@@ -218,15 +218,17 @@ class L2AdapterInterface(ABC):
         a batch of keys.
 
         Args:
-            keys (list[ObjectKey]): the list of keys to be stored. Request-level
-                adapter metadata is available through
-                ``ObjectKey.extra_attributes`` and must be treated as read-only.
+            keys (list[ObjectKey]): the list of keys to be stored.
             objects (list[MemoryObj]): the list of memory objects to be stored.
                 The length of the objects list should be the same as the length of
                 the keys list.
 
         Returns:
             L2TaskId: the task id of the submitted store task.
+
+        Notes:
+            Upstream modules may enrich ``ObjectKey.extra_attributes`` before
+            dispatch; L2 adapters should not mutate it.
         """
         pass
 
