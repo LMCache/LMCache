@@ -3,7 +3,7 @@
 
 # Standard
 from collections.abc import Mapping
-from typing import NoReturn, TypeVar
+from typing import Any, NoReturn, TypeVar, cast
 
 K = TypeVar("K")
 V = TypeVar("V")
@@ -32,6 +32,8 @@ class FrozenDict(dict[K, V]):
     __ior__ = _immutable
 
 
-def freeze_dict(mapping: Mapping[K, V]) -> FrozenDict[K, V]:
-    """Return an immutable snapshot of a mapping."""
+def freeze_dict(mapping: Mapping[K, V], *, sort_keys: bool = False) -> FrozenDict[K, V]:
+    """Return an immutable snapshot, optionally ordered by key."""
+    if sort_keys:
+        return FrozenDict(sorted(mapping.items(), key=lambda item: cast(Any, item[0])))
     return FrozenDict(mapping)

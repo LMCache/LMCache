@@ -185,7 +185,7 @@ class ObjectKeyIdentity:
         if len(self.cache_salt) > 128:
             raise ValueError("cache_salt exceeds max length 128")
         validate_identity_tags(self.tags)
-        object.__setattr__(self, "tags", freeze_dict(dict(sorted(self.tags.items()))))
+        object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
 
 @dataclass(frozen=True, init=False)
@@ -417,7 +417,7 @@ class EncodedObjectKey:
 
     def __post_init__(self) -> None:
         validate_identity_tags(self.tags)
-        object.__setattr__(self, "tags", freeze_dict(dict(sorted(self.tags.items()))))
+        object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
     def to_object_key(self) -> ObjectKey:
         """Recover the corresponding :class:`ObjectKey`.

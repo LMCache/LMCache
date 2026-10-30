@@ -34,7 +34,7 @@ def decode_tags(token: str) -> Mapping[str, str]:
     )
     decoded = msgspec.json.decode(payload, type=dict[str, str])
     validate_identity_tags(decoded)
-    tags = freeze_dict(dict(sorted(decoded.items())))
+    tags = freeze_dict(decoded, sort_keys=True)
     if encode_tags(tags) != token:
         raise ValueError("non-canonical identity tags token")
     return tags
