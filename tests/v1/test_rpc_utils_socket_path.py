@@ -17,7 +17,7 @@ across the binding server and the connecting client.
 import pytest
 
 # First Party
-from lmcache.v1.rpc_utils import (
+from lmcache.inprocess.v1.rpc_utils import (
     IPC_SOCKET_PATH_MAX_LEN,
     get_zmq_rpc_path_lmcache,
 )

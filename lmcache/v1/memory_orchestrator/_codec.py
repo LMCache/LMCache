@@ -4,7 +4,7 @@
 # Standard
 from collections.abc import Mapping
 from dataclasses import asdict
-from typing import TypeVar
+from typing import TypeVar, cast
 
 # Third Party
 from google.protobuf.message import Message
@@ -28,6 +28,10 @@ from lmcache.v1.memory_orchestrator.api import (
     WriteStatus,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import p2p_service_pb2
+from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
+    compile_response_decoder_for_type,
+    compile_response_encoder_for_type,
+)
 
 _WireT = TypeVar("_WireT")
 _ApiT = TypeVar("_ApiT")
@@ -46,28 +50,22 @@ def _from_proto(cls: type[_ApiT], msg: Message) -> _ApiT:
     return cls(**{f.name: getattr(msg, f.name) for f in msg.DESCRIPTOR.fields})
 
 
-# Keys and handles are converted once per batch entry, so they spell out their
-# fields; the generic helper costs about twice as much per entry.
+_encode_key = compile_response_encoder_for_type(
+    p2p_service_pb2.ObjectKey, WireObjectKey
+)
+_decode_key = compile_response_decoder_for_type(
+    p2p_service_pb2.ObjectKey, WireObjectKey
+)
+
+
 def _key_to_proto(key: WireObjectKey) -> p2p_service_pb2.ObjectKey:
     """Convert an object key to its wire form."""
-    return p2p_service_pb2.ObjectKey(
-        chunk_hash=key.chunk_hash,
-        model_name=key.model_name,
-        kv_rank=key.kv_rank,
-        object_group_id=key.object_group_id,
-        cache_salt=key.cache_salt,
-    )
+    return cast(p2p_service_pb2.ObjectKey, _encode_key(key))
 
 
 def _key_from_proto(msg: p2p_service_pb2.ObjectKey) -> WireObjectKey:
     """Convert a wire object key."""
-    return WireObjectKey(
-        chunk_hash=msg.chunk_hash,
-        model_name=msg.model_name,
-        kv_rank=msg.kv_rank,
-        object_group_id=msg.object_group_id,
-        cache_salt=msg.cache_salt,
-    )
+    return cast(WireObjectKey, _decode_key(msg))
 
 
 def _handle_to_proto(handle: ExtentHandle | None) -> pb2.Handle | None:

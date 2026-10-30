@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "mp_mem_kernels.cuh"
+#include "mp_mem_kernels_detail.cuh"
 
 #include "phase_timing_recorder.cuh"
 
@@ -14,308 +15,8 @@
 
 namespace {
 
-/**
- * Key logic in the kernel implementation:
- * 1. Each thread block is for (BS, NH, HS) part (i.e., a single block in the
- * paged buffer)
- * 2. The thread block is 3D: threadIdx.x strides over the transfer units
- * within a head (at most 32 threads), threadIdx.y selects the head (one head
- * per y index, and threadIdx.z partitions the BS dimension (i.e., number of
- * tokens in the block).
- * 3. Within a thread block, we do loop over the BS dimension with a stride of
- * blockDim.z.
- * 4. The grid will take over (2, NB, NL) dimensions. No matter what the actual
- * layout in memory is, we will calculate the global offset for the start of the
- * block
- * 5. For LMCache, we assume it is always using 2LTD layout, e.g.,
- * [2, L, 256, NH * HS], where 256 means that 256 tokens
- */
-
-/**
- * Calculate the offset for the current block in the paged buffer
- */
-template <typename ScalarType, EngineKVFormat format>
-__device__ inline size_t calculate_engine_global_offset(
-    const int k_or_v, const int engine_block_idx, const int layer_idx,
-    const PageBufferShapeDesc shape_desc) {
-  size_t scalars_per_block = shape_desc.scalars_per_block<ScalarType>();
-  if constexpr (format == EngineKVFormat::NB_NL_TWO_BS_NH_HS) {
-    // Cross-layer: single tensor [NB, NL, 2, BS, NH, HS]
-    return k_or_v * scalars_per_block +
-           layer_idx * shape_desc.kv_size * scalars_per_block +
-           engine_block_idx * shape_desc.kv_size * scalars_per_block *
-               shape_desc.nl;
-  } else if constexpr (format == EngineKVFormat::NL_X_TWO_NB_BS_NH_HS) {
-    // Normal: L tensors [2, NB, BS, NH, HS]
-    return engine_block_idx * scalars_per_block +
-           k_or_v * shape_desc.nb * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS) {
-    // Normal HND: L tensors [2, NB, NH, BS, HS]
-    return engine_block_idx * scalars_per_block +
-           k_or_v * shape_desc.nb * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_NB_TWO_BS_NH_HS) {
-    // Flash Infer: L tensors [NB, 2, BS, NH, HS]
-    return engine_block_idx * shape_desc.kv_size * scalars_per_block +
-           k_or_v * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS) {
-    // Flash Infer HND: L tensors [NB, 2, NH, BS, HS]
-    return engine_block_idx * shape_desc.kv_size * scalars_per_block +
-           k_or_v * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS ||
-                       format == EngineKVFormat::NL_X_NB_BSV_BSS) {
-    // MLA: L tensors [NB, BS, HS]; blocked-scale shares the block base,
-    // only its within-block layout differs (handled in the transfer body).
-    return engine_block_idx * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS) {
-    // SGLang MHA (in-process): 2L tensors [NBBS, NH, HS]
-    return engine_block_idx * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS) {
-    // SGLang MHA (MP daemon): 2L tensors [NB, BS, NH, HS]
-    return engine_block_idx * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_NBBS_ONE_HS) {
-    // SGLang MLA: L tensors [NBBS, 1, HS]
-    return engine_block_idx * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS) {
-    // Fused-K/V HND: L tensors [NB, NH, BS, 2*HS], handled like
-    // NL_X_TWO_NB_NH_BS_HS but with an empty K/V axis: the desc carries
-    // kv_size == 1 and hs == 2 * head_size, so k_or_v is always 0 and each
-    // head copy moves the packed K+V pair.
-    return engine_block_idx * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS) {
-    // Fused-K/V NHD: L tensors [NB, BS, NH, 2*HS]; same empty K/V axis as
-    // NL_X_NB_NH_BS_TWO_HS (kv_size == 1, hs == 2 * head_size), tokens
-    // before heads within a block.
-    return engine_block_idx * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_NB_NH_BS_CS) {
-    // Content-size HND: L tensors [NB, NH, BS, CS]; same empty K/V axis as
-    // NL_X_NB_NH_BS_TWO_HS (kv_size == 1, hs == content_size).
-    return engine_block_idx * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_CS ||
-                       format == EngineKVFormat::NL_X_NB_BS_NH_HS) {
-    // Content-size NHD: L tensors [NB, BS, NH, CS]; same empty K/V axis as
-    // NL_X_NB_NH_BS_CS, tokens before heads within a block. Independent
-    // SGLang components share the same addressing with HS as the content.
-    return engine_block_idx * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NB_NL_TWO_NH_BS_HS) {
-    // TRT-LLM cross-layer HND: single tensor [NB, NL, 2, NH, BS, HS]
-    // same block-level strides as NB_NL_TWO_BS_NH_HS
-    return k_or_v * scalars_per_block +
-           layer_idx * shape_desc.kv_size * scalars_per_block +
-           engine_block_idx * shape_desc.kv_size * scalars_per_block *
-               shape_desc.nl;
-  }
-}
-
-/**
- * Calculate the offset for the current token against the start
- * of the block in the paged buffer.
- */
-template <typename ScalarType, EngineKVFormat format>
-__device__ inline size_t calculate_engine_local_offset(
-    const int token_offset, const int head_idx,
-    const PageBufferShapeDesc shape_desc) {
-  size_t scalars_per_head = shape_desc.scalars_per_head<ScalarType>();
-  size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
-  if constexpr (format == EngineKVFormat::NB_NL_TWO_NH_BS_HS ||
-                format == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS ||
-                format == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS ||
-                format == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS ||
-                format == EngineKVFormat::NL_X_NB_NH_BS_CS) {
-    // HND: [NH, BS, HS] — heads are outermost within a block
-    size_t scalars_per_head_block =
-        shape_desc.bs * scalars_per_head;  // BS * HS
-    return head_idx * scalars_per_head_block + token_offset * scalars_per_head;
-  } else {
-    // NHD: [BS, NH, HS] — tokens are outermost within a block
-    return head_idx * scalars_per_head + token_offset * scalars_per_token;
-  }
-}
-
-/**
- * Calculate the global offset for the current `block` in the LMCache object.
- * The `block` here is the memory region corresponding to a thread-block.
- */
-template <typename ScalarType, EngineKVFormat format>
-__device__ inline size_t calculate_lmcache_global_offset(
-    const int k_or_v,
-    const int
-        token_offset_in_lmcache_object,  // 0~255 if LMCache chunk size is 256
-    const int layer_idx,
-    const int lmcache_chunk_size,  // e.g., 256
-    const PageBufferShapeDesc shape_desc) {
-  size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
-  // LMCache is using 2LTD all the times
-  return token_offset_in_lmcache_object * scalars_per_token +
-         layer_idx * lmcache_chunk_size * scalars_per_token +
-         k_or_v * shape_desc.nl * lmcache_chunk_size * scalars_per_token;
-}
-
-/**
- * Calculate the local offset for the current token against the start of the
- * block in the LMCache object.
- */
-template <typename ScalarType, EngineKVFormat format>
-__device__ inline size_t calculate_lmcache_local_offset(
-    const int token_offset, const int head_idx,
-    const PageBufferShapeDesc shape_desc) {
-  size_t scalars_per_head = shape_desc.scalars_per_head<ScalarType>();
-  size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
-  return head_idx * scalars_per_head + token_offset * scalars_per_token;
-}
-
-__device__ inline uint4 ld_cs(const uint4* addr) {
-#if defined(__CUDA_ARCH__) && !defined(LMCACHE_DISABLE_STREAMING_IO)
-  // Cache-streaming load: some compilers (e.g. MetaX's) don't support this
-  // raw PTX asm; define LMCACHE_DISABLE_STREAMING_IO to fall through to the
-  // plain deref below.
-  uint4 val;
-  asm volatile("ld.global.cs.v4.u32 {%0, %1, %2, %3}, [%4];"
-               : "=r"(val.x), "=r"(val.y), "=r"(val.z), "=r"(val.w)
-               : "l"(addr));
-  return val;
-#else
-  return *addr;
-#endif
-}
-
-__device__ inline void st_cs(uint4* addr, uint4 val) {
-#if defined(__CUDA_ARCH__) && !defined(LMCACHE_DISABLE_STREAMING_IO)
-  asm volatile("st.global.cs.v4.u32 [%0], {%1, %2, %3, %4};"
-               :
-               : "l"(addr), "r"(val.x), "r"(val.y), "r"(val.z), "r"(val.w));
-#else
-  *addr = val;
-#endif
-}
-
-template <typename ScalarType>
-__device__ inline void warp_copy(ScalarType* __restrict__ dst,
-                                 const ScalarType* __restrict__ src,
-                                 size_t num_elements) {
-  int idx = threadIdx.x;
-  int stride = blockDim.x;
-  if constexpr (std::is_same_v<ScalarType, uint4>) {
-    for (size_t i = idx; i < num_elements; i += stride) {
-      st_cs(dst + i, ld_cs(src + i));
-    }
-  } else {
-    for (size_t i = idx; i < num_elements; i += stride) {
-      dst[i] = src[i];
-    }
-  }
-}
-
-template <typename ScalarType, bool lmcache_to_engine, EngineKVFormat format>
-__device__ void multi_layer_block_transfer_single_block(
-    ScalarType* __restrict__ lmcache_object,
-    ScalarType** __restrict__ paged_buffer_ptrs, const int engine_block_idx,
-    const int offset_in_lmcache_block, const PageBufferShapeDesc shape_desc,
-    const int lmcache_chunk_size  // e.g., 256, used to calculate global offset
-                                  // in LMCache object
-) {
-  const int head_idx = threadIdx.y;
-  const int init_token_offset = threadIdx.z;
-  const int token_stride = blockDim.z;
-  const int k_or_v = blockIdx.x;
-  const int layer_idx = blockIdx.z;
-
-  const size_t engine_global_offset =
-      calculate_engine_global_offset<ScalarType, format>(
-          k_or_v, engine_block_idx, layer_idx, shape_desc);
-  const size_t lmcache_global_offset =
-      calculate_lmcache_global_offset<ScalarType, format>(
-          k_or_v, offset_in_lmcache_block, layer_idx, lmcache_chunk_size,
-          shape_desc);
-  ScalarType* paged_buffer_layer_ptr;
-  if constexpr (format == EngineKVFormat::NB_NL_TWO_BS_NH_HS ||
-                format == EngineKVFormat::NB_NL_TWO_NH_BS_HS) {
-    paged_buffer_layer_ptr = (ScalarType*)paged_buffer_ptrs[0];
-  } else if constexpr (format == EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS) {
-    // SGLang MHA (in-process): ptrs[0..NL-1] = K per layer, ptrs[NL..2NL-1] = V
-    // per layer
-    paged_buffer_layer_ptr =
-        (ScalarType*)paged_buffer_ptrs[k_or_v * shape_desc.nl + layer_idx];
-  } else if constexpr (format == EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS) {
-    // SGLang MHA (MP daemon): ptrs[0..NL-1] = K per layer, ptrs[NL..2NL-1] = V
-    // per layer
-    paged_buffer_layer_ptr =
-        (ScalarType*)paged_buffer_ptrs[k_or_v * shape_desc.nl + layer_idx];
-  } else {
-    paged_buffer_layer_ptr = (ScalarType*)paged_buffer_ptrs[layer_idx];
-  }
-
-  if constexpr (format == EngineKVFormat::NL_X_NB_BSV_BSS) {
-    // Blocked page [BSxvals][BSxscales] vs token-major chunk row: two
-    // copies per token (host pins <=4B units, so scale is whole units).
-    const size_t spt = shape_desc.scalars_per_token<ScalarType>();
-    const size_t scale_units = 4 / sizeof(ScalarType);
-    const size_t val_units = spt - scale_units;
-    for (int t = init_token_offset; t < shape_desc.bs; t += token_stride) {
-      ScalarType* eng_vals =
-          paged_buffer_layer_ptr + engine_global_offset + t * val_units;
-      ScalarType* eng_scale = paged_buffer_layer_ptr + engine_global_offset +
-                              shape_desc.bs * val_units + t * scale_units;
-      ScalarType* lmc_row = lmcache_object + lmcache_global_offset + t * spt;
-      if constexpr (lmcache_to_engine) {
-        warp_copy<ScalarType>(eng_vals, lmc_row, val_units);
-        warp_copy<ScalarType>(eng_scale, lmc_row + val_units, scale_units);
-      } else {
-        warp_copy<ScalarType>(lmc_row, eng_vals, val_units);
-        warp_copy<ScalarType>(lmc_row + val_units, eng_scale, scale_units);
-      }
-    }
-    return;
-  }
-
-  for (int token_offset = init_token_offset; token_offset < shape_desc.bs;
-       token_offset += token_stride) {
-    const size_t engine_local_offset =
-        calculate_engine_local_offset<ScalarType, format>(token_offset,
-                                                          head_idx, shape_desc);
-    const size_t lmcache_local_offset =
-        calculate_lmcache_local_offset<ScalarType, format>(
-            token_offset, head_idx, shape_desc);
-    ScalarType* engine_ptr =
-        paged_buffer_layer_ptr + engine_global_offset + engine_local_offset;
-    ScalarType* lmcache_ptr =
-        lmcache_object + lmcache_global_offset + lmcache_local_offset;
-    if constexpr (lmcache_to_engine) {
-      warp_copy<ScalarType>(engine_ptr, lmcache_ptr,
-                            shape_desc.scalars_per_head<ScalarType>());
-    } else {
-      warp_copy<ScalarType>(lmcache_ptr, engine_ptr,
-                            shape_desc.scalars_per_head<ScalarType>());
-    }
-  }
-}
-
-template <typename ScalarType, bool lmcache_to_engine, EngineKVFormat format>
-__global__ void multi_layer_block_transfer_kernel(
-    MemoryObj4<ScalarType> lmcache_objects,
-    ScalarType** __restrict__ paged_buffer_ptrs,
-    const int64_t* engine_block_ids,
-    const int num_blocks_per_object,  // e.g. 16 for lmcache chunk size =
-                                      // 256 and block size = 16
-    const PageBufferShapeDesc shape_desc,
-    const int lmcache_chunk_size,  // e.g., 256, used to calculate global offset
-                                   // in LMCache object
-    const int skip_prefix_n_blocks) {
-  // blockIdx.y spans all blocks across all objects (total_blocks).
-  // Derive which object and local block index from the flat index.
-  const int flat_block_idx = blockIdx.y;
-  if (flat_block_idx < skip_prefix_n_blocks) {
-    return;
-  }
-  const int obj_idx = flat_block_idx / num_blocks_per_object;
-  const int block_idx_in_object = flat_block_idx % num_blocks_per_object;
-
-  const int engine_block_idx = engine_block_ids[flat_block_idx];
-  multi_layer_block_transfer_single_block<ScalarType, lmcache_to_engine,
-                                          format>(
-      lmcache_objects.objects[obj_idx], paged_buffer_ptrs, engine_block_idx,
-      block_idx_in_object * shape_desc.bs,  // offset in LMCache object
-      shape_desc, lmcache_chunk_size);
-}
+using lmcache_mp::MemoryObj4;
+using lmcache_mp::multi_layer_block_transfer_kernel;
 
 #define LAUNCH_KERNEL(DIRECTION, FORMAT)                                 \
   multi_layer_block_transfer_kernel<ScalarType, DIRECTION, FORMAT>       \
@@ -383,7 +84,7 @@ __global__ void multi_layer_block_transfer_kernel(
 template <typename ScalarType>
 void multi_layer_block_kv_transfer_templated(
     const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
+    std::vector<uintptr_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
     EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
@@ -518,7 +219,7 @@ int64_t calculate_kernel_section_bytes(
 
 void multi_layer_block_kv_transfer(
     const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
+    std::vector<uintptr_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
     EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
@@ -631,7 +332,7 @@ void execute_object_group_transfer(
         const at::Tensor block_ids = at::from_blob(
             reinterpret_cast<void*>(block_ids_addr),
             {static_cast<int64_t>(launch.total_blocks)}, int64_opts);
-        std::vector<int64_t> lmcache_objects_ptrs(
+        std::vector<uintptr_t> lmcache_objects_ptrs(
             group.lmcache_objects_ptrs.begin(),
             group.lmcache_objects_ptrs.begin() + launch.num_objects);
 
@@ -666,6 +367,14 @@ void execute_object_group_transfer(
   #define LMC_HAS_BATCH_MEMCPY 1
 #else
   #define LMC_HAS_BATCH_MEMCPY 0
+#endif
+
+// The 2-D path (cudaMemcpy3DBatchAsync) is CUDA-only; HIP builds keep one
+// 1-D entry per layer.
+#if LMC_HAS_BATCH_MEMCPY && !defined(USE_ROCM)
+  #define LMC_HAS_2D_BATCH_MEMCPY 1
+#else
+  #define LMC_HAS_2D_BATCH_MEMCPY 0
 #endif
 
 namespace {
@@ -713,6 +422,7 @@ bool resolve_block_addressing(EngineKVFormat format,
     case EngineKVFormat::NL_X_NBBS_ONE_HS:      // SGLang MLA [NBBS, 1, HS]
     case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:  // fused NHD [NB, BS, NH, 2HS]
     case EngineKVFormat::NL_X_NB_BS_NH_CS:      // fused NHD [NB, BS, NH, CS]
+    case EngineKVFormat::NL_X_NB_BS_NH_HS:  // SGLang component [NB, BS, NH, HS]
       out = {B::kPerLayer, 0, 0, blk, tight};
       return true;
     case EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS:  // SGLang MHA, K then V ptrs
@@ -768,6 +478,120 @@ inline void append_split(std::vector<void*>& dsts, std::vector<void*>& srcs,
     offset += piece;
   }
 }
+
+#if LMC_HAS_2D_BATCH_MEMCPY
+// This function calculates the engine-side pitch of a 2-D copy that moves one
+// block of every layer of a kernel group at once (width = block bytes,
+// height = layers): the byte distance in the engine KV cache from a block of
+// layer l to the same block (and kv plane) of layer l + 1.
+// Returns:
+// - that distance, if it is the same for every pair of consecutive layers and
+//   one block of every layer fits inside one block stride. This is the
+//   block-outermost layout (e.g. vLLM's BLNHC for DeepSeek-V4), where each
+//   block packs one padded page per layer side by side, so the distance is
+//   the padded page size;
+// - 0 otherwise (e.g. layer-outermost layouts, whose layers are a whole
+//   layer apart); the caller then copies each layer with its own 1-D entry.
+// A non-zero pitch puts each layer's base inside the previous layer's first
+// block, so all layers lie in one allocation, as the rows of a 2-D copy must,
+// and the pitch stays far below cudaDevAttrMaxPitch.
+size_t uniform_layer_pitch(const BlockAddressing& addr,
+                           const DirectCopyGroupSpec& spec) {
+  const PageBufferShapeDesc& sd = spec.shape_desc;
+  if (sd.nl < 2 || sd.nb < 2) return 0;
+  const auto& ptrs = spec.paged_layer_ptrs;
+  size_t pitch = addr.layer_stride;
+  if (addr.base != BlockAddressing::Base::kSingleTensor) {
+    if (ptrs[1] <= ptrs[0]) return 0;
+    pitch = ptrs[1] - ptrs[0];
+    const int planes =
+        addr.base == BlockAddressing::Base::kPerPlaneLayer ? sd.kv_size : 1;
+    for (int p = 0; p < planes; ++p) {
+      for (int l = 1; l < sd.nl; ++l) {
+        const size_t i = static_cast<size_t>(p) * sd.nl + l;
+        if (ptrs[i] - ptrs[i - 1] != pitch) return 0;
+      }
+    }
+  }
+  const bool fits_in_block =
+      pitch >= addr.block_bytes &&
+      (sd.nl - 1) * pitch + addr.block_bytes <= addr.block_stride;
+  return fits_in_block ? pitch : 0;
+}
+
+// Append one 2-D host<->device copy of `height` rows of `width` bytes (row r
+// at host + r * host_pitch and dev + r * dev_pitch), split like append_split
+// so no op crosses a `host_buffer_alignment` boundary of the allocator's
+// virtual offset: consecutive rows inside one pin chunk stay one op, and a row
+// that straddles a boundary becomes single-row pieces.
+void append_2d_split(std::vector<cudaMemcpy3DBatchOp>& ops, uintptr_t host,
+                     uintptr_t dev, size_t width, size_t height,
+                     size_t host_pitch, size_t dev_pitch,
+                     size_t host_virtual_offset, size_t host_buffer_alignment,
+                     bool is_h2d) {
+  auto emit = [&](uintptr_t h, uintptr_t d, size_t w, size_t rows) {
+    cudaMemcpy3DBatchOp op{};
+    cudaMemcpy3DOperand host_op{};
+    host_op.type = cudaMemcpyOperandTypePointer;
+    host_op.op.ptr.ptr = reinterpret_cast<void*>(h);
+    host_op.op.ptr.rowLength = host_pitch;
+    host_op.op.ptr.layerHeight = rows;
+    cudaMemcpy3DOperand dev_op{};
+    dev_op.type = cudaMemcpyOperandTypePointer;
+    dev_op.op.ptr.ptr = reinterpret_cast<void*>(d);
+    dev_op.op.ptr.rowLength = dev_pitch;
+    dev_op.op.ptr.layerHeight = rows;
+    op.src = is_h2d ? host_op : dev_op;
+    op.dst = is_h2d ? dev_op : host_op;
+    op.extent = make_cudaExtent(w, rows, 1);  // bytes, rows, 1 layer
+    op.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+    ops.push_back(op);
+  };
+  // Consecutive rows inside one pin chunk accumulate into a pending 2-D op:
+  // `run_start` is the first row of the pending op, `run_rows` is how many
+  // rows it has (0 = nothing pending), and `run_chunk` is the index of the
+  // cudaHostRegister chunk (virtual offset / host_buffer_alignment) that all
+  // of its rows lie in. flush() emits the pending op.
+  size_t run_start = 0;
+  size_t run_rows = 0;
+  size_t run_chunk = 0;
+  auto flush = [&]() {
+    if (run_rows > 0) {
+      emit(host + run_start * host_pitch, dev + run_start * dev_pitch, width,
+           run_rows);
+      run_rows = 0;
+    }
+  };
+  for (size_t r = 0; r < height; ++r) {
+    // Pin chunks holding the first and the last byte of row r.
+    const size_t v = host_virtual_offset + r * host_pitch;
+    const size_t first_chunk = v / host_buffer_alignment;
+    const size_t last_chunk = (v + width - 1) / host_buffer_alignment;
+    if (first_chunk != last_chunk) {
+      flush();
+      size_t off = 0;
+      while (off < width) {
+        const size_t boundary =
+            ((v + off) / host_buffer_alignment + 1) * host_buffer_alignment;
+        const size_t end = std::min(width, boundary - v);
+        emit(host + r * host_pitch + off, dev + r * dev_pitch + off, end - off,
+             1);
+        off = end;
+      }
+      continue;
+    }
+    if (run_rows > 0 && first_chunk == run_chunk) {
+      ++run_rows;
+    } else {
+      flush();
+      run_start = r;
+      run_rows = 1;
+      run_chunk = first_chunk;
+    }
+  }
+  flush();
+}
+#endif
 
 }  // namespace
 
@@ -838,7 +662,7 @@ bool direct_copy_format_supported(EngineKVFormat engine_kv_format) {
   return resolve_block_addressing(engine_kv_format, probe, unused);
 }
 
-void execute_direct_copy_transfer(
+size_t execute_direct_copy_transfer(
     TransferDirection direction, const torch::Device& device,
     size_t host_buffer_alignment,
     const std::vector<DirectCopyGroupSpec>& group_specs,
@@ -850,13 +674,19 @@ void execute_direct_copy_transfer(
                   (host_buffer_alignment & (host_buffer_alignment - 1)) == 0,
               "host_buffer_alignment must be a power of two, got ",
               host_buffer_alignment);
+  size_t num_ops = 0;
 #if LMC_HAS_BATCH_MEMCPY
   const bool is_h2d = (direction == TransferDirection::H2D);
 
   // --- Per-group addressing, resolved once ---
   std::vector<BlockAddressing> addressing(group_specs.size());
   std::vector<int> blocks_per_chunk(group_specs.size());
-  std::vector<size_t> layer_bytes(group_specs.size());
+  // Bytes of one (kv plane, layer) region of a chunk in the LMCache object.
+  std::vector<size_t> lmcache_layer_bytes(group_specs.size());
+  // Bytes from a block of one layer to the same block of the next layer in
+  // the engine KV cache; non-zero means one 2-D copy moves the block of every
+  // layer (see uniform_layer_pitch).
+  std::vector<size_t> engine_layer_pitch(group_specs.size());
   for (size_t g = 0; g < group_specs.size(); ++g) {
     const DirectCopyGroupSpec& spec = group_specs[g];
     const PageBufferShapeDesc& sd = spec.shape_desc;
@@ -868,8 +698,8 @@ void execute_direct_copy_transfer(
                 "slots_per_chunk (", spec.slots_per_chunk,
                 ") must be a positive multiple of block size (", sd.bs, ")");
     blocks_per_chunk[g] = spec.slots_per_chunk / sd.bs;
-    layer_bytes[g] = static_cast<size_t>(spec.slots_per_chunk) * sd.nh * sd.hs *
-                     sd.element_size;
+    lmcache_layer_bytes[g] = static_cast<size_t>(spec.slots_per_chunk) * sd.nh *
+                             sd.hs * sd.element_size;
     const size_t ptrs_needed =
         addressing[g].base == BlockAddressing::Base::kSingleTensor ? 1
         : addressing[g].base == BlockAddressing::Base::kPerPlaneLayer
@@ -878,6 +708,9 @@ void execute_direct_copy_transfer(
     TORCH_CHECK(spec.paged_layer_ptrs.size() >= ptrs_needed, "group ", g,
                 " has ", spec.paged_layer_ptrs.size(),
                 " paged layer pointers, needs ", ptrs_needed);
+  #if LMC_HAS_2D_BATCH_MEMCPY
+    engine_layer_pitch[g] = uniform_layer_pitch(addressing[g], spec);
+  #endif
   }
 
   const at::cuda::OptionalCUDAGuard device_guard(device);
@@ -895,10 +728,15 @@ void execute_direct_copy_transfer(
   size_t attrs_idx = 0;
 
   // Entry tables are rebuilt per object and reused across objects: the CUDA
-  // call consumes the host arrays before it returns.
+  // call consumes the host arrays before it returns. 1-D entries (one per
+  // kv plane, layer and block) go to cudaMemcpyBatchAsync; 2-D ops (one per
+  // kv plane and block, covering every layer) to cudaMemcpy3DBatchAsync.
   std::vector<void*> dsts;
   std::vector<void*> srcs;
   std::vector<size_t> sizes;
+  #if LMC_HAS_2D_BATCH_MEMCPY
+  std::vector<cudaMemcpy3DBatchOp> ops;
+  #endif
 
   for (const DirectCopyObject& obj : objects) {
     TORCH_CHECK(obj.skip_prefix_n_blocks.size() == group_specs.size(),
@@ -910,6 +748,9 @@ void execute_direct_copy_transfer(
     dsts.clear();
     srcs.clear();
     sizes.clear();
+  #if LMC_HAS_2D_BATCH_MEMCPY
+    ops.clear();
+  #endif
 
     for (size_t g = 0; g < group_specs.size(); ++g) {
       const DirectCopyGroupSpec& spec = group_specs[g];
@@ -928,19 +769,23 @@ void execute_direct_copy_transfer(
       // every entry below because (kv, layer, block) only ever move forward.
       const size_t region_end =
           spec.byte_offset_in_object +
-          static_cast<size_t>(sd.kv_size) * sd.nl * layer_bytes[g];
+          static_cast<size_t>(sd.kv_size) * sd.nl * lmcache_layer_bytes[g];
       TORCH_CHECK(region_end <= obj.nbytes, "group ", g,
                   " region ends at byte ", region_end, " past the object size ",
                   obj.nbytes);
 
+      // With a uniform layer pitch, one 2-D copy starting at layer 0 covers
+      // every layer of a block, so the layer loop runs once.
+      const int layers_per_copy = engine_layer_pitch[g] > 0 ? sd.nl : 1;
       for (int kv = 0; kv < sd.kv_size; ++kv) {
-        for (int layer = 0; layer < sd.nl; ++layer) {
+        for (int layer = 0; layer < sd.nl; layer += layers_per_copy) {
           const uintptr_t dev_base = select_base(addr, spec, kv, layer) +
                                      kv * addr.kv_stride +
                                      layer * addr.layer_stride;
           const uintptr_t host_base =
               obj.host_ptr + spec.byte_offset_in_object +
-              (static_cast<size_t>(kv) * sd.nl + layer) * layer_bytes[g];
+              (static_cast<size_t>(kv) * sd.nl + layer) *
+                  lmcache_layer_bytes[g];
           for (int b = skip; b < bpc; ++b) {
             const int64_t block_id = spec.block_ids[block_base + b];
             TORCH_CHECK(block_id >= 0 && block_id < sd.nb, "block id ",
@@ -949,6 +794,15 @@ void execute_direct_copy_transfer(
             const uintptr_t host = host_base + b * addr.block_bytes;
             const uintptr_t dev =
                 dev_base + static_cast<size_t>(block_id) * addr.block_stride;
+  #if LMC_HAS_2D_BATCH_MEMCPY
+            if (layers_per_copy > 1) {
+              append_2d_split(ops, host, dev, addr.block_bytes, sd.nl,
+                              lmcache_layer_bytes[g], engine_layer_pitch[g],
+                              obj.host_offset + (host - obj.host_ptr),
+                              host_buffer_alignment, is_h2d);
+              continue;
+            }
+  #endif
             append_split(dsts, srcs, sizes, host, dev, addr.block_bytes,
                          obj.host_offset + (host - obj.host_ptr),
                          host_buffer_alignment, is_h2d);
@@ -956,6 +810,22 @@ void execute_direct_copy_transfer(
         }
       }
     }
+  #if LMC_HAS_2D_BATCH_MEMCPY
+    if (!ops.empty()) {
+    #if CUDART_VERSION >= 13000
+      const cudaError_t err =
+          cudaMemcpy3DBatchAsync(ops.size(), ops.data(), 0, stream);
+    #else
+      size_t fail_idx = 0;
+      const cudaError_t err =
+          cudaMemcpy3DBatchAsync(ops.size(), ops.data(), &fail_idx, 0, stream);
+    #endif
+      TORCH_CHECK(err == cudaSuccess, "cudaMemcpy3DBatchAsync failed with ",
+                  cudaGetErrorString(err), " (", ops.size(), " 2-D ops, chunk ",
+                  obj.chunk_idx, ")");
+      num_ops += ops.size();
+    }
+  #endif
     if (dsts.empty()) continue;
 
   #if CUDART_VERSION >= 13000
@@ -972,6 +842,8 @@ void execute_direct_copy_transfer(
     TORCH_CHECK(err == cudaSuccess, "cudaMemcpyBatchAsync failed with ",
                 cudaGetErrorString(err), " (", dsts.size(), " entries, chunk ",
                 obj.chunk_idx, ")");
+    num_ops += dsts.size();
   }
 #endif
+  return num_ops;
 }

@@ -18,14 +18,13 @@ from lmcache.inprocess.integration.vllm.vllm_v1_adapter import (
     LoadSpec,
     ReqMeta,
 )
+from lmcache.inprocess.v1.cache_engine import LMCacheEngine
 from lmcache.observability import LMCStatsMonitor
-from lmcache.v1.cache_engine import LMCacheEngine
 
 # Local
 from .test_retrieve_pin_ownership import (  # noqa: F401 -- register shared fixtures
     _CacheCase,
     cache_case,
-    pin_monitor,
 )
 
 pytestmark = pytest.mark.no_shared_allocator

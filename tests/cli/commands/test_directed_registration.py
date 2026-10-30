@@ -140,6 +140,28 @@ def test_nested_tool_route() -> None:
     assert not res["mods"][_L2_WRAPPER]
 
 
+def test_nested_bench_quality_routes() -> None:
+    """Each quality stage imports only its own runtime; the group none."""
+    quality = "lmcache.cli.commands.bench.quality_bench"
+    run_stage, analyze_stage = (
+        f"{quality}.core.run_stage",
+        f"{quality}.core.analyze_stage",
+    )
+    for tokens, run_expected, analyze_expected in (
+        (["bench", "quality", "-h"], False, False),
+        (["bench", "quality", "run", "-h"], True, False),
+        (["bench", "quality", "analyze", "-h"], False, True),
+    ):
+        res = _run(tokens, want=(f"{quality}.core.config", run_stage, analyze_stage))
+        assert res["exit"] == 0, tokens
+        assert res["mods"][run_stage] is run_expected, tokens
+        assert res["mods"][analyze_stage] is analyze_expected, tokens
+        if tokens[-1] == "-h" and len(tokens) == 3:
+            assert res["mods"][f"{quality}.core.config"] is False
+            for child in ("run", "analyze"):
+                assert child in res["text"]
+
+
 def test_explicit_argv_ignores_decoy_ambient_argv() -> None:
     """main(tokens) registers and parses tokens, never the process sys.argv."""
     decoy = ["mock", "--name", "decoy"]

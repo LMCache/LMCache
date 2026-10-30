@@ -1,0 +1,139 @@
+name: Build RBLN Artifacts
+
+# Reusable workflow for the Rebellions RBLN NPU wheel.
+#
+# RBLN has no in-repo native kernels, so the wheel carries the common C++
+# extensions compiled against the torch that torch-rbln pins. It is built in
+# the manylinux_2_34 image (torch-rbln's own glibc floor), smoke-installed
+# next to torch-rbln on the runner, and published to a dedicated v{tag}-rbln
+# GitHub Release (or nightly-rbln), never to PyPI: PyPI's lmcache wheel is
+# built against the CUDA torch and has no slot for a second build of the same
+# version.
+
+on:
+    workflow_call:
+        inputs:
+            dev_version:
+                description: >-
+                    Build a .devN pre-release from the newest stable tag for
+                    nightly validation instead of the stable release version.
+                type: boolean
+                default: false
+                required: false
+        outputs:
+            rbln_version:
+                description: Full LMCache version baked into the RBLN wheel.
+                value: ${{ jobs.build-rbln-artifacts.outputs.rbln_version }}
+            torch_rbln_version:
+                description: torch-rbln release the wheel is built against.
+                value: ${{ jobs.build-rbln-artifacts.outputs.torch_rbln_version }}
+            torch_version:
+                description: torch version (pinned by torch-rbln) the wheel links.
+                value: ${{ jobs.build-rbln-artifacts.outputs.torch_version }}
+    # Release and nightly runs only build after merge, so validate changes to
+    # the RBLN build itself before they land.
+    pull_request:
+        branches:
+            - dev
+            - "release-**"
+        paths:
+            - '.github/workflows/build_rbln_artifacts.yml'
+            - '.github/scripts/build_rbln_wheel.sh'
+            - 'setup_extensions/build_profiles/rbln.py'
+
+env:
+    LC_ALL: en_US.UTF-8
+    # The ABI target: torch-rbln pins the torch the wheel is compiled against
+    # (0.12.0 pins torch==2.13.0+cpu). Bump with each RBLN SDK release.
+    TORCH_RBLN_VERSION: "0.12.0"
+    RBLN_PYTHON_VERSION: "3.12"
+    RBLN_BUILD_IMAGE: quay.io/pypa/manylinux_2_34_x86_64:2026.10.26-1@sha256:834a2a31de5eabacd4411417b3bbc9fcb6ff9f959972711ab3b73355e7b0928d
+    RBLN_MANYLINUX_PLATFORM: manylinux_2_34_x86_64
+    # torch-rbln's device-backend autoload needs the RBLN runtime
+    # (rebel-compiler), which is not on the public PyPI index.
+    TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
+
+defaults:
+    run:
+        shell: bash
+
+permissions:
+    contents: read
+
+jobs:
+    build-rbln-artifacts:
+        name: Build RBLN wheel
+        runs-on: ubuntu-24.04
+        outputs:
+            rbln_version: ${{ steps.prepare.outputs.version }}
+            torch_rbln_version: ${{ env.TORCH_RBLN_VERSION }}
+            torch_version: ${{ steps.smoke.outputs.torch_version }}
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                  disable-sudo-and-containers: false
+                  egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                  fetch-depth: 0
+
+            - name: Prepare artifact build
+              id: prepare
+              uses: ./.github/actions/build-artifacts
+              with:
+                  python_version: ${{ env.RBLN_PYTHON_VERSION }}
+                  resolve_version: "true"
+                  dev_version: ${{ inputs.dev_version }}
+                  version_suffix: +rbln
+                  version_environment_variable: RBLN_VERSION
+
+            - name: Build RBLN wheel in the manylinux image
+              run: |
+                  docker run --rm \
+                      -e SETUPTOOLS_SCM_PRETEND_VERSION="${RBLN_VERSION}" \
+                      -e TORCH_RBLN_VERSION="${TORCH_RBLN_VERSION}" \
+                      -e RBLN_PYTHON_VERSION="${RBLN_PYTHON_VERSION}" \
+                      -e RBLN_MANYLINUX_PLATFORM="${RBLN_MANYLINUX_PLATFORM}" \
+                      -v "${PWD}:/work/LMCache" \
+                      --entrypoint bash "${RBLN_BUILD_IMAGE}" \
+                      /work/LMCache/.github/scripts/build_rbln_wheel.sh
+
+            # Install the way users do: torch-rbln first, then the wheel with
+            # its dependencies, which must keep torch-rbln's torch in place.
+            - name: Smoke-check wheel install next to torch-rbln
+              id: smoke
+              working-directory: ${{ runner.temp }}
+              run: |
+                  set -euo pipefail
+                  python -m venv rbln-smoke
+                  source rbln-smoke/bin/activate
+                  pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+                      "torch-rbln==${TORCH_RBLN_VERSION}"
+                  torch_version=$(python -c 'import torch; print(torch.__version__)')
+                  pip install "${GITHUB_WORKSPACE}"/dist/*.whl
+                  installed_torch=$(python -c 'import torch; print(torch.__version__)')
+                  if [[ "${installed_torch}" != "${torch_version}" ]]; then
+                      echo "::error::installing the wheel replaced torch ${torch_version} with ${installed_torch}"
+                      exit 1
+                  fi
+                  python -c "
+                  import lmcache
+                  import lmcache.lmcache_fs
+                  import lmcache.lmcache_native as native
+                  import lmcache.lmcache_redis
+                  assert hasattr(native, 'TransferDirection')
+                  print('LMCache', lmcache.__version__, 'imports on torch', '${torch_version}')
+                  "
+                  echo "torch_version=${torch_version}" >> "$GITHUB_OUTPUT"
+
+            - name: Upload RBLN release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                  name: release-rbln-artifacts
+                  path: dist/*.whl
+
+# On-device validation needs RBLN NPUs, which GitHub-hosted runners lack; the
+# rbln Buildkite pipeline (.buildkite/k3_tests/rbln) runs the device tests.

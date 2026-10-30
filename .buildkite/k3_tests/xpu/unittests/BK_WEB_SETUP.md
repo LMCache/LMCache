@@ -9,8 +9,11 @@
 
 The scheduled nightly builds an XPU CI candidate from the current
 `vllm/vllm-openai-xpu:nightly` digest. Its Dockerfile installs DPC++ using
-`.buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh`, but does not install
-LMCache. During nightly validation, both XPU pipelines install the wheel
+`.buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh` and preinstalls
+`requirements/common.txt`, `requirements/test.txt`, and MP extras
+(`lm-eval[api]`, pandas, matplotlib), but does not install LMCache.
+Job setup still resolves requirements so PR dependency changes are applied.
+During nightly validation, both XPU pipelines install the wheel
 built by this run. They download the GitHub Actions artifact by ID, verify
 its SHA-256, and install it with its declared runtime dependencies using
 `uv pip install` in the same immutable candidate image. Dependency resolution
@@ -23,8 +26,9 @@ The Buildkite checkout must match the GitHub Actions source commit; candidate
 validation refuses PR-base pre-merges so tests and wheel use the same revision.
 The temporary directory remains available for the lifetime of the job pod.
 Ordinary Buildkite runs still install LMCache from source. Only when
-both nightly Buildkite builds pass does the nightly record its digest on
-`buildkite_latest_tested_vllm`; failures keep the previous pin.
+both nightly Buildkite builds pass does the nightly pin that same candidate
+image digest on `buildkite_latest_tested_vllm`; failures keep the previous pin.
+No additional image is built after validation.
 Both XPU pipelines print the installed vLLM version in the Buildkite job log
 after setting up LMCache, rather than relying on the image tag.
 The same verified run also records the upstream vLLM XPU base image digest on

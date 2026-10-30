@@ -112,9 +112,17 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - gRPC request-dispatch threads. Used only with ``--transport grpc``.
    * - ``--grpc-server-mode``
      - ``sync``
-     - gRPC server implementation: ``sync`` or ``aio``. ``aio`` receives
-       requests on one event loop and hands only the handlers to worker
-       threads. Used only with ``--transport grpc``.
+     - gRPC server implementation: ``sync``, ``aio`` or ``native``.
+       ``aio`` receives requests on one event loop and hands only the
+       handlers to worker threads. ``native`` does the HTTP/2 and gRPC
+       framing in Rust, outside the GIL; it needs the ``pygrpc-native``
+       package (``pip install "lmcache[grpc-native]"``), which the
+       ``lmcache/vllm-openai`` and ``lmcache/standalone`` images include.
+       All three serve the same clients over TCP.
+       In ``native`` mode the native front reports the call count and
+       duration metrics itself (pygrpc-native 0.3.0 or later), under the
+       same names, but not the message size ones. Used only with
+       ``--transport grpc``.
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.
@@ -235,8 +243,7 @@ Source: ``lmcache/v1/multiprocess/config.py``
        size, mamba/GDN) at KV-cache registration. Off by default; pass
        ``--separate-object-groups`` to enable it. **Required for Mamba /
        linear-attention hybrids** (it lets their recurrent state be cached
-       independently, and is what allows ``--max-num-batched-tokens`` to exceed
-       twice the block size). For a non-hybrid model it makes no difference —
+       independently). For a non-hybrid model it makes no difference —
        every layer resolves to one object group. See :doc:`/mp/hybrid_models`.
 
 Lookup Hash Logging
@@ -293,11 +300,11 @@ The HTTP frontend is included when running ``lmcache server``.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
-   * - ``--http-api-key-file``
+   * - ``--api-key-file``
      - unset
      - Read a bearer API key from a file. Repeat the option to accept multiple
-       keys during rotation. ``LMCACHE_HTTP_API_KEY_FILE`` and
-       ``LMCACHE_HTTP_API_KEY`` provide environment alternatives. All sources
+       keys during rotation. ``LMCACHE_API_KEY_FILE`` and
+       ``LMCACHE_API_KEY`` provide environment alternatives. All sources
        are cumulative. When none are set, authentication is disabled. ``/``
        and ``/healthcheck`` remain public when authentication is enabled.
 
@@ -343,8 +350,8 @@ L1 Memory Manager
 Source: ``lmcache/v1/distributed/config.py``
 
 Use repeatable ``--l1-manager '<JSON>'`` for tagged DRAM, Device-DAX, and
-GDS managers. See :doc:`multi_l1` for the schema, placement order, fixed
-L2 affinity, and per-manager reporting. The flags below remain the legacy
+GDS managers. See :doc:`multi_l1` for the schema, placement order,
+automatic L2 affinity, and per-manager reporting. The flags below remain the legacy
 single-L1 interface. For placing L1 on CXL-attached memory see
 *Device-DAX / CXL L1* below.
 
@@ -382,10 +389,9 @@ single-L1 interface. For placing L1 on CXL-attached memory see
        backing arena.  When set, disable lazy allocation with
        ``--no-l1-use-lazy`` and leave ``--shm-name`` at its default ``""``
        (SHM transfer disabled) because the L1 bytes live in the DAX
-       mapping.  If a
-       DAX L2 adapter with the same ``device_path`` is registered, that
-       adapter's ``max_dax_size_gb`` is used as the L1 Device-DAX overflow
-       size. Pass the device node, for example
+       mapping.  A ``dax`` L2 adapter may not map the same device range;
+       give the L1 and the adapter disjoint ranges. Pass the device node,
+       for example
        ``--l1-devdax-path /dev/dax0.0 --l1-size-gb 512 --no-l1-use-lazy
        --shm-name ""``; find the node for a CXL region with ``daxctl list``.
        See *Device-DAX / CXL L1* below.
@@ -395,7 +401,7 @@ single-L1 interface. For placing L1 on CXL-attached memory see
        Lets several LMCache servers share one CXL device by mapping disjoint
        ranges, for example offset 0 and 512 with ``--l1-size-gb 512`` each.
        The range must fit within the device, and offset and size must be
-       multiples of the device alignment (usually 2 MiB).
+       multiples of the device alignment.
        ``--l1-manager`` key: ``offset_gb``.
    * - ``--l1-mlock``
      - ``False``
@@ -413,14 +419,13 @@ allocates KV objects inside the mapping. The index is in server memory, so
 the tier restarts empty.
 
 **Device path and offset.** The mapping covers ``[offset, offset + size)``
-of the device, with the offset defaulting to 0. Several servers can share
-one CXL device by giving each a disjoint range: ``--l1-devdax-offset-gb``
-in the legacy form, ``offset_gb`` in the tagged form. LMCache does not
-coordinate offsets between servers; overlapping ranges, or two nodes that
-alias the same physical CXL range, write over each other. The device must
-be in ``devdax`` mode (CXL memory is often onlined as ``system-ram``), the
-range must fit within the device, and offset and size must be multiples of
-the device alignment (usually 2 MiB); a range that does not is rejected:
+of the device; the offset defaults to 0 (``--l1-devdax-offset-gb`` in the
+legacy form, ``offset_gb`` in the tagged form). To share one CXL device, give
+each server, and the ``dax`` L2 adapter in the same server, a disjoint range.
+Overlapping ranges within a server are rejected; LMCache does not coordinate
+offsets between servers. The device must be in ``devdax`` mode (CXL memory
+is often onlined as ``system-ram``), the range must fit within the device,
+and offset and size must be multiples of the device alignment:
 
 .. code-block:: bash
 
@@ -430,16 +435,15 @@ the device alignment (usually 2 MiB); a range that does not is rejected:
    ls -l /dev/dax0.0                             # path to pass to LMCache
 
 **Tagged form (recommended).** ``size_gb`` is mapped from ``path`` starting
-at ``offset_gb`` (default 0); there is no implicit DRAM pool. Set every L2
-adapter's ``affinity_tag`` in a Device-DAX-only server, since the default
-``_default`` means DRAM. This is the second of two servers sharing a 1 TiB
-device:
+at ``offset_gb`` (default 0); there is no implicit DRAM pool. With no DRAM
+manager, L2 adapters use the Device-DAX L1. This is the second of two servers
+sharing a 1 TiB device:
 
 .. code-block:: bash
 
    lmcache server --chunk-size 256 --eviction-policy LRU --port 6555 \
        --l1-manager '{"type":"DEVDAX","tag":"cxl","size_gb":512,"offset_gb":512,"path":"/dev/dax0.0"}' \
-       --l2-adapter '{"type":"fs","base_path":"/mnt/archive/lmcache","affinity_tag":"cxl"}'
+       --l2-adapter '{"type":"fs","base_path":"/mnt/archive/lmcache"}'
 
 List a ``DRAM`` manager first to spill into CXL only on ``OUT_OF_MEMORY``.
 Schema in :doc:`multi_l1`.
@@ -454,10 +458,11 @@ off:
        --l1-devdax-path /dev/dax0.0 --l1-size-gb 512 --l1-devdax-offset-gb 512 \
        --no-l1-use-lazy --shm-name ""
 
-Hybrid DRAM + Device-DAX has no overflow flag: a ``dax`` L2 adapter whose
-``device_path`` matches ``--l1-devdax-path`` is consumed, its
-``max_dax_size_gb`` becomes the overflow size, and ``--l1-size-gb`` becomes
-the DRAM half.
+A Device-DAX L1 is a pool of its own. To combine it with DRAM, configure a
+``DRAM`` and a ``DEVDAX`` manager with ``--l1-manager`` (see
+:doc:`multi_l1`); the write policy decides which keys land in which pool.
+A ``dax`` L2 adapter on the same device range as the L1 is rejected at
+startup.
 
 **Verify.** ``GET /status`` reports ``l1_capacity_bytes_by_backend`` with a
 ``devdax`` entry equal to the mapped size; Prometheus
@@ -688,11 +693,14 @@ Source: ``lmcache/v1/distributed/config.py``
        The ``retain`` policy uses the same load plan but keeps
        prefetched keys permanently in L1.
        Choices: ``default``, ``retain``.
+   * - ``--l2-prefetch-inflight-watermark``
+     - ``0.5``
+     - Fraction of L1 capacity, in (0, 1], that in-flight prefetch
+       (L2 load) requests may stage in L1.
    * - ``--l2-prefetch-max-in-flight``
-     - ``8``
-     - Maximum number of concurrent prefetch (L2 load) requests.
-       Limits how many in-flight loads the PrefetchController may
-       issue at once, preventing excessive L1 memory pressure.
+     - (none)
+     - Deprecated and ignored; prefetch admission follows
+       ``--l2-prefetch-inflight-watermark``.  Logs a warning when set.
    * - ``--periodic-notifier-interval-ms``
      - ``5``
      - Interval in milliseconds for the periodic event notifier
@@ -708,8 +716,8 @@ Source: ``lmcache/v1/distributed/l2_adapters/config.py``
 
 L2 adapters are configured via repeatable ``--l2-adapter <JSON>`` arguments.
 Each JSON object must include a ``"type"`` field that selects the adapter type.
-The optional ``"affinity_tag"`` field (default ``"_default"``) names the
-host-backed L1 used for both stores and reloads; see :doc:`multi_l1`.
+Each adapter stores from and reloads into an L1 chosen automatically; see
+:doc:`multi_l1`.
 The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
 Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
@@ -974,6 +982,8 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
      - Whether vLLM worker 0 should start a local ``lmcache server`` process
        before workers connect to it. Other local workers wait for the server to
        become reachable. Only ``localhost`` and ``127.0.0.1`` are supported.
+       The URL scheme picks the server transport: ``tcp://`` starts a ZMQ
+       server and ``grpc://`` starts a gRPC server.
        IPv6 endpoints, including ``::1``, raise ``ValueError`` before startup
        because the MP ZMQ transport does not enable IPv6 sockets.
        Auto-start supports exactly one server endpoint; configuring
@@ -982,16 +992,16 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.autostart.wait_timeout``
      - ``90.0``
      - Timeout (seconds) to wait for the auto-started server to respond to
-       ZMQ ``PING`` requests. Must be positive and finite.
+       ``PING`` requests. Must be positive and finite.
    * - ``lmcache.mp.autostart.server_args``
      - ``""``
      - Extra command-line arguments passed to the auto-started MP HTTP server
        process. Required server settings such as ``--l1-size-gb`` and
        ``--eviction-policy`` must be supplied here. For example, pass
        ``--l1-size-gb 20 --eviction-policy LRU``. Endpoint flags such as
-       ``--host``, ``--port``, and ``--http-host`` are rejected because the
-       auto-started ZMQ and HTTP listeners are bound to the local connector
-       endpoint. If multiple auto-started MP servers run on the same host, pass
+       ``--host``, ``--port``, ``--http-host``, and ``--transport`` are
+       rejected because the auto-started request and HTTP listeners are bound
+       to the local connector endpoint and its transport. If multiple auto-started MP servers run on the same host, pass
        distinct ``--http-port`` values here to avoid HTTP frontend port
        conflicts.
    * - ``lmcache.mp.mp_transfer_mode``
@@ -1158,7 +1168,7 @@ Full Example
         --eviction-trigger-watermark 0.9 \
         --eviction-ratio 0.1 \
         --l2-prefetch-policy default \
-        --l2-prefetch-max-in-flight 8 \
+        --l2-prefetch-inflight-watermark 0.5 \
         --periodic-notifier-interval-ms 5 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \
         --prometheus-port 9090 \

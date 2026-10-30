@@ -15,6 +15,7 @@ import types
 import pytest
 
 # First Party
+from lmcache.v1.distributed.api import MemoryResidency, MemorySegment, MemoryTags
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     get_type_name_for_config,
@@ -32,6 +33,8 @@ from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
     RawBlockL2AdapterConfig,
 )
 from lmcache.v1.platform import create_event_notifier
+
+_MEMORY_TAGS = MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
 
 
 def _has_raw_block_ext() -> bool:
@@ -1036,7 +1039,7 @@ class TestFSNativeAdapterFactory:
                 NativeConnectorL2Adapter,
             )
 
-            return NativeConnectorL2Adapter(client)
+            return NativeConnectorL2Adapter(client, _MEMORY_TAGS)
 
         old = _L2_ADAPTER_FACTORY_REGISTRY["fs_native"]
         _L2_ADAPTER_FACTORY_REGISTRY["fs_native"] = _capture_factory
@@ -1156,7 +1159,7 @@ class TestFSNativeAdapterFactory:
                 NativeConnectorL2Adapter,
             )
 
-            return NativeConnectorL2Adapter(client)
+            return NativeConnectorL2Adapter(client, _MEMORY_TAGS)
 
         old = _L2_ADAPTER_FACTORY_REGISTRY["fs_native"]
         _L2_ADAPTER_FACTORY_REGISTRY["fs_native"] = _capture_factory2
@@ -1192,4 +1195,4 @@ def _patched_fs_factory(config, l1_memory_desc=None):
         config.use_odirect,
         config.read_ahead_size or 0,
     )
-    return NativeConnectorL2Adapter(client)
+    return NativeConnectorL2Adapter(client, _MEMORY_TAGS)
