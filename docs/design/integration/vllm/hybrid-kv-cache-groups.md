@@ -229,6 +229,79 @@ The server then sees an all-zero chunk for the Mamba group and skips it, and
 the next hit ends one chunk earlier. Needs `--separate-object-groups` and
 chunk size equal to the Mamba block size.
 
+## Tensor-parallel replicated groups
+
+vLLM marks a layer whose KV cache is identical on every TP rank with
+`max_tp_shards == 1`; an `MLAAttentionSpec` that leaves the field unset is
+treated the same, since the latent cache is one head held in full on every
+rank. A pure-MLA model
+collapses its whole key space in the connector (`ParallelStrategy.kv_world_size`
+is 1 per stage, `is_kv_writer` elects one rank). A hybrid model such as Kimi K3
+cannot: its KDA state is sharded. The connector instead tags each replicated
+group with the number of kv ranks that share its object:
+
+```python
+# lmcache_mp_connector.register_kv_caches
+create_engine_group_infos_from_vllm(..., tp_replicas=1 if strategy.mla_only else strategy.kv_tp_size)
+# -> EngineGroupInfo(tp_replicas=kv_tp_size) for the MLA group, 1 for KDA
+```
+
+`max_tp_shards` is a static property of the spec (the most TP shards the
+layer's KV can be split into, 1 for an MLA latent) and does not change under
+decode context parallelism; DCP is declared separately, by `dcp_sharded` on
+the spec and the deployment-wide `dcp_size`. DCP splits a replicated group's
+tokens across each run: rank `w` holds token shard `w % dcp_size`, so
+identical bytes sit on strided ranks, not consecutive ones. The connector
+sends that too, as `EngineGroupInfo.dcp_shards = dcp_size` on a replicated
+group (1 otherwise). For TP=8 on one server:
+
+| DCP | `max_tp_shards` on the MLA spec | `tp_replicas` sent | `dcp_shards` sent | MLA objects per chunk | readers per object |
+|---|---|---|---|---|---|
+| 1 | 1 | 8 | 1 | 1 | 8 |
+| 2 | 1 | 8 | 2 | 2 | 4 |
+| 4 | 1 | 8 | 4 | 4 | 2 |
+| 8 | 1 | 8 | 8 | 8 | 1 |
+
+
+```
+TP=8, one server, MLA group; same letter = identical bytes
+DCP=1  rank 0 1 2 3 4 5 6 7   tp_replicas=8, dcp_shards=1: one object, 8 readers
+       A A A A A A A A
+DCP=2  rank 0 1 2 3 4 5 6 7   tp_replicas=8, dcp_shards=2: two objects, 4 readers each
+       A B A B A B A B
+DCP=8  rank 0 1 2 3 4 5 6 7   tp_replicas=8, dcp_shards=8: eight objects, 1 reader each
+       A B C D E F G H
+```
+
+The server keeps both counts on `AttnWindowDesc` (`group_tp_replicas`,
+`group_dcp_shards`) and applies them in the one place an IPC key becomes
+object keys:
+
+```python
+# lmcache/v1/distributed/api.py
+def _lookup_kv_ranks(ipc_key, tp_replicas=1, dcp_shards=1):
+    if ipc_key.worker_id is None:  # lookup: one key per shard of each run
+        worker_ids = [run + shard
+                      for run in range(0, ipc_key.world_size, tp_replicas)
+                      for shard in range(dcp_shards)]
+    else:  # store / retrieve: the run's first rank holding this worker's shard
+        w = ipc_key.worker_id
+        worker_ids = [w - w % tp_replicas + w % dcp_shards]
+```
+
+`tp_replicas == 1` is the default, no-replication case: every TP rank holds
+a unique shard and gets its own object, exactly as before. A replicated
+group bundled with a sharded one (no `--separate-object-groups`) also keeps
+`tp_replicas == 1`, since the bundled object is not identical across ranks.
+
+For `tp_replicas > 1`, the store path is unchanged: every rank of the run
+reserves the same key, the first STORE to reach the server stages it in
+`L1Manager.reserve_write`, and the rest get `KEY_NOT_WRITABLE` and copy
+nothing. A lookup row of such a group carries
+`GroupedObjectKeys.num_kv_readers = tp_replicas // dcp_shards`, the ranks
+of the run holding that shard, so the prefetch controller takes one read lock
+per reader and each worker's retrieve releases one.
+
 ## Code map
 
 | Area | File |

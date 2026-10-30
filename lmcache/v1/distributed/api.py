@@ -40,32 +40,39 @@ group: serving a prefix needs every chunk of it present."""
 _VALID_FETCHING_POLICIES = frozenset(get_args(FetchingPolicy))
 
 
-def _lookup_kv_ranks(ipc_key: "IPCCacheServerKey") -> list[int]:
+def _lookup_kv_ranks(
+    ipc_key: "IPCCacheServerKey", tp_replicas: int = 1, dcp_shards: int = 1
+) -> list[int]:
     """The kv ranks an IPC key addresses, in rank order.
 
     A key without a ``worker_id`` (a lookup) fans out to every worker of its
     world size; a worker-specific key addresses that worker's shard only.
+    ``tp_replicas`` consecutive workers hold the same group, split into
+    ``dcp_shards`` token shards: worker ``w`` holds shard ``w % dcp_shards``.
+    Each shard is keyed by the first worker of its run that holds it, so a
+    lookup addresses ``dcp_shards`` ranks per run and a worker key the rank
+    of its own shard. ``(1, 1)`` is the per-rank layout.
     """
     if ipc_key.worker_id is None:
         # For look up request, we want to expand to all workers
         # TODO (ApostaC): include local world size/rank info
         # in the future once it's in IPCCacheServerKey
-        return [
-            ObjectKey.ComputeKVRank(
-                world_size=ipc_key.world_size,
-                global_rank=worker_id,
-                local_world_size=ipc_key.world_size,
-                local_rank=worker_id,
-            )
-            for worker_id in range(ipc_key.world_size)
+        worker_ids = [
+            run + shard
+            for run in range(0, ipc_key.world_size, tp_replicas)
+            for shard in range(dcp_shards)
         ]
+    else:
+        w = ipc_key.worker_id
+        worker_ids = [w - w % tp_replicas + w % dcp_shards]
     return [
         ObjectKey.ComputeKVRank(
             world_size=ipc_key.world_size,
-            global_rank=ipc_key.worker_id,
+            global_rank=worker_id,
             local_world_size=ipc_key.world_size,
-            local_rank=ipc_key.worker_id,
+            local_rank=worker_id,
         )
+        for worker_id in worker_ids
     ]
 
 
@@ -494,6 +501,14 @@ class AttnWindowDesc:
     Empty when the producer predates kinds (treat every group as
     attention)."""
 
+    group_tp_replicas: tuple[int, ...] = ()
+    """``EngineGroupInfo.tp_replicas`` per object group, parallel to
+    ``num_chunks_in_sw``; empty when no group is replicated."""
+
+    group_dcp_shards: tuple[int, ...] = ()
+    """``EngineGroupInfo.dcp_shards`` per object group, parallel to
+    ``group_tp_replicas``; empty when it is."""
+
     _VALID_GROUP_KINDS = frozenset(get_args(GroupKind))
 
     def __post_init__(self) -> None:
@@ -517,11 +532,51 @@ class AttnWindowDesc:
             bad = set(self.group_kinds) - self._VALID_GROUP_KINDS
             if bad:
                 raise ValueError(f"AttnWindowDesc: unknown group kinds {bad!r}")
+        if self.group_tp_replicas and len(self.group_tp_replicas) != len(
+            self.num_chunks_in_sw
+        ):
+            raise ValueError(
+                f"AttnWindowDesc: group_tp_replicas has "
+                f"{len(self.group_tp_replicas)} entries but num_chunks_in_sw "
+                f"has {len(self.num_chunks_in_sw)}"
+            )
+        if self.group_dcp_shards and len(self.group_dcp_shards) != len(
+            self.group_tp_replicas
+        ):
+            raise ValueError(
+                f"AttnWindowDesc: group_dcp_shards has "
+                f"{len(self.group_dcp_shards)} entries but group_tp_replicas "
+                f"has {len(self.group_tp_replicas)}"
+            )
 
     @property
     def num_object_groups(self) -> int:
         """Number of object groups this descriptor covers."""
         return len(self.num_chunks_in_sw)
+
+    def tp_replicas(self, object_group_idx: int) -> int:
+        """Consecutive kv ranks forming one run of the group; 1 when the
+        group is stored per rank."""
+        if not self.group_tp_replicas:
+            return 1
+        return self.group_tp_replicas[object_group_idx]
+
+    def dcp_shards(self, object_group_idx: int) -> int:
+        """Token shards each run of the group is split into; 1 without DCP."""
+        if not self.group_dcp_shards:
+            return 1
+        return self.group_dcp_shards[object_group_idx]
+
+    def num_kv_readers(
+        self, object_group_idx: int, ipc_key: "IPCCacheServerKey"
+    ) -> int:
+        """Workers that retrieve one object of the group for ``ipc_key``: the
+        ranks of a run holding the same shard for a replicated group, else
+        the key's ``num_kv_readers``."""
+        replicas = self.tp_replicas(object_group_idx)
+        if replicas > 1:
+            return replicas // self.dcp_shards(object_group_idx)
+        return ipc_key.num_kv_readers
 
     def is_full_attention(self, object_group_idx: int) -> bool:
         """Whether the object group depends on the entire prefix.
@@ -568,6 +623,8 @@ class GroupedObjectKeys:
             needs present to serve a prefix: ``FULL_ATTENTION_WINDOW_CHUNKS``
             (``-1``) for full attention, ``w >= 1`` for a sliding window of
             ``w`` chunks (``1`` for recurrent state).
+        num_kv_readers: Read locks per object of this row, or ``0`` for the
+            task-wide ``PrefetchTaskSpec.num_kv_readers``.
 
     Note:
         ``keys[i]`` is the object covering tokens
@@ -579,6 +636,7 @@ class GroupedObjectKeys:
     object_group_id: int
     layout_desc: MemoryLayoutDesc
     sliding_window_size: int = FULL_ATTENTION_WINDOW_CHUNKS
+    num_kv_readers: int = 0
 
     def __post_init__(self) -> None:
         if self.sliding_window_size == 0 or self.sliding_window_size < -1:
@@ -736,13 +794,16 @@ def ipc_key_to_object_keys(
     ipc_key: "IPCCacheServerKey",
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
+    group_tp_replicas: tuple[int, ...] = (),
+    group_dcp_shards: tuple[int, ...] = (),
 ) -> list[list[ObjectKey]]:
     """
     Convert a single IPCCacheServerKey and its chunk hashes to per-object-group
     lists of ObjectKey.
 
     When the ipc_key's worker_id is None, each chunk hash is exploded into
-    multiple ObjectKeys (one per worker in world_size).
+    multiple ObjectKeys (one per worker in world_size, or ``group_dcp_shards``
+    per run of ``group_tp_replicas`` workers; see :func:`_lookup_kv_ranks`).
 
     ``cache_salt`` is read directly from ``ipc_key`` so the produced
     ObjectKeys are per-user isolated whenever the sender set a non-empty
@@ -755,16 +816,16 @@ def ipc_key_to_object_keys(
             and cache_salt.
         chunk_hashes: List of chunk hash bytes, one per chunk.
         object_group_ids: Object group ids to produce keys for.
+        group_tp_replicas: ``AttnWindowDesc.group_tp_replicas`` of the
+            registration.
+        group_dcp_shards: ``AttnWindowDesc.group_dcp_shards`` of the
+            registration.
 
     Returns:
         list[list[ObjectKey]]: The i-th element is the list of ObjectKeys
         for ``object_group_ids[i]``.
     """
     cache_salt = ipc_key.cache_salt
-
-    # The (chunk_hash, kv_rank) expansion is independent of the object group,
-    # so compute it once and reuse it for every group.
-    kv_ranks = _lookup_kv_ranks(ipc_key)
 
     return [
         [
@@ -776,7 +837,11 @@ def ipc_key_to_object_keys(
                 cache_salt=cache_salt,
             )
             for chunk_hash in chunk_hashes
-            for kv_rank in kv_ranks
+            for kv_rank in _lookup_kv_ranks(
+                ipc_key,
+                group_tp_replicas[object_group_id] if group_tp_replicas else 1,
+                group_dcp_shards[object_group_id] if group_dcp_shards else 1,
+            )
         ]
         for object_group_id in object_group_ids
     ]
@@ -815,10 +880,11 @@ def ipc_key_to_grouped_object_keys(
 
     Note:
         A key without ``worker_id`` fans out to every kv rank of its world
-        size; a worker-specific key yields that rank only. ``cache_salt`` is
-        taken from ``ipc_key``.
+        size; a worker-specific key yields that rank only. A replicated
+        group (``attn_desc.group_tp_replicas``) yields one rank per token
+        shard of each run, with a row reader count of the ranks sharing
+        that shard. ``cache_salt`` is taken from ``ipc_key``.
     """
-    kv_ranks = _lookup_kv_ranks(ipc_key)
     rows: list[GroupedObjectKeys] = []
     for object_group_id in object_group_ids:
         layout_desc = group_layout_descs.get(object_group_id)
@@ -833,7 +899,12 @@ def ipc_key_to_grouped_object_keys(
                 f"outside attn_desc's {attn_desc.num_object_groups} groups"
             )
         window = attn_desc.num_chunks_in_sw[object_group_id]
-        for kv_rank in kv_ranks:
+        num_kv_readers = attn_desc.num_kv_readers(object_group_id, ipc_key)
+        for kv_rank in _lookup_kv_ranks(
+            ipc_key,
+            attn_desc.tp_replicas(object_group_id),
+            attn_desc.dcp_shards(object_group_id),
+        ):
             rows.append(
                 GroupedObjectKeys(
                     keys=[
@@ -849,6 +920,7 @@ def ipc_key_to_grouped_object_keys(
                     object_group_id=object_group_id,
                     layout_desc=layout_desc,
                     sliding_window_size=window,
+                    num_kv_readers=num_kv_readers,
                 )
             )
     return rows

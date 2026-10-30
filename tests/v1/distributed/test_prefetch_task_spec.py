@@ -168,3 +168,102 @@ class TestIpcKeyToGroupedObjectKeys:
         attn = AttnWindowDesc(num_chunks_in_sw=[-1])
         with pytest.raises(ValueError):
             ipc_key_to_grouped_object_keys(_ipc_key(1), [b"c0"], [1], {1: LAYOUT}, attn)
+
+
+def _kv_rank(world_size: int, worker_id: int) -> int:
+    """The encoded kv rank an ObjectKey carries for ``worker_id``."""
+    return ObjectKey.ComputeKVRank(
+        world_size=world_size,
+        global_rank=worker_id,
+        local_world_size=world_size,
+        local_rank=worker_id,
+    )
+
+
+class TestTpReplicatedGroups:
+    """``AttnWindowDesc.group_tp_replicas``: every worker's key for a
+    replicated group is the first rank of its run, so the run shares one
+    object."""
+
+    ATTN = AttnWindowDesc(
+        num_chunks_in_sw=[-1, 1], world_size=4, group_tp_replicas=(4, 1)
+    )
+
+    def test_lookup_expands_a_replicated_group_to_one_key(self):
+        per_group = ipc_key_to_object_keys(
+            _ipc_key(4), [b"c0"], [0, 1], self.ATTN.group_tp_replicas
+        )
+        assert [k.kv_rank for k in per_group[0]] == [_kv_rank(4, 0)]
+        assert [k.kv_rank for k in per_group[1]] == [_kv_rank(4, r) for r in range(4)]
+
+    def test_every_worker_key_resolves_a_replicated_group_to_rank_zero(self):
+        per_group = ipc_key_to_object_keys(
+            _ipc_key(4, worker_id=3), [b"c0"], [0, 1], self.ATTN.group_tp_replicas
+        )
+        assert [k.kv_rank for k in per_group[0]] == [_kv_rank(4, 0)]
+        assert [k.kv_rank for k in per_group[1]] == [_kv_rank(4, 3)]
+
+    def test_grouped_rows_of_a_replicated_group_count_every_worker(self):
+        rows = ipc_key_to_grouped_object_keys(
+            _ipc_key(4), [b"c0", b"c1"], [0, 1], {0: LAYOUT, 1: LAYOUT}, self.ATTN
+        )
+        assert [
+            (row.object_group_id, row.keys[0].kv_rank, row.num_kv_readers)
+            for row in rows
+        ] == [(0, _kv_rank(4, 0), 4)] + [(1, _kv_rank(4, r), 1) for r in range(4)]
+
+
+class TestDcpShardedReplicatedGroups:
+    """``AttnWindowDesc.group_dcp_shards``: a run of a replicated group is
+    split into token shards, worker ``w`` holding shard ``w % dcp_shards``,
+    so TP=4, DCP=2 keeps two objects per chunk, each read by two workers."""
+
+    ATTN = AttnWindowDesc(
+        num_chunks_in_sw=[-1, 1],
+        world_size=4,
+        group_tp_replicas=(4, 1),
+        group_dcp_shards=(2, 1),
+    )
+
+    def test_lookup_expands_a_run_to_one_key_per_shard(self):
+        per_group = ipc_key_to_object_keys(
+            _ipc_key(4),
+            [b"c0"],
+            [0, 1],
+            self.ATTN.group_tp_replicas,
+            self.ATTN.group_dcp_shards,
+        )
+        assert [k.kv_rank for k in per_group[0]] == [_kv_rank(4, 0), _kv_rank(4, 1)]
+        assert [k.kv_rank for k in per_group[1]] == [_kv_rank(4, r) for r in range(4)]
+
+    @pytest.mark.parametrize("worker_id,shard_rank", [(0, 0), (1, 1), (2, 0), (3, 1)])
+    def test_worker_key_resolves_to_its_shard(self, worker_id: int, shard_rank: int):
+        per_group = ipc_key_to_object_keys(
+            _ipc_key(4, worker_id=worker_id),
+            [b"c0"],
+            [0, 1],
+            self.ATTN.group_tp_replicas,
+            self.ATTN.group_dcp_shards,
+        )
+        assert [k.kv_rank for k in per_group[0]] == [_kv_rank(4, shard_rank)]
+        assert [k.kv_rank for k in per_group[1]] == [_kv_rank(4, worker_id)]
+
+    def test_grouped_rows_count_the_readers_of_each_shard(self):
+        rows = ipc_key_to_grouped_object_keys(
+            _ipc_key(4), [b"c0"], [0, 1], {0: LAYOUT, 1: LAYOUT}, self.ATTN
+        )
+        assert [
+            (row.object_group_id, row.keys[0].kv_rank, row.num_kv_readers)
+            for row in rows
+        ] == [(0, _kv_rank(4, 0), 2), (0, _kv_rank(4, 1), 2)] + [
+            (1, _kv_rank(4, r), 1) for r in range(4)
+        ]
+
+    def test_dcp_shards_must_parallel_tp_replicas(self):
+        with pytest.raises(ValueError, match="group_dcp_shards"):
+            AttnWindowDesc(
+                num_chunks_in_sw=[-1, 1],
+                world_size=4,
+                group_tp_replicas=(4, 1),
+                group_dcp_shards=(2,),
+            )

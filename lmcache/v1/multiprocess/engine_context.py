@@ -414,7 +414,8 @@ class MPCacheServerContext:
             ``object_group_ids[i]``.
 
         Raises:
-            ValueError: If ``key.worker_id`` is ``None``.
+            ValueError: If ``key.worker_id`` is ``None``, or no KV cache is
+                registered for the key's ``(model_name, world_size)``.
         """
         session = self.session_manager.get_or_create(key.request_id)
         session.set_tokens(key.token_bytes)
@@ -425,7 +426,16 @@ class MPCacheServerContext:
         ]
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
-        return ipc_key_to_object_keys(key, chunk_hashes, object_group_ids)
+        attn_desc = self.layout_desc_registry.find_attn_desc(
+            key.model_name, key.world_size
+        )
+        return ipc_key_to_object_keys(
+            key,
+            chunk_hashes,
+            object_group_ids,
+            attn_desc.group_tp_replicas,
+            attn_desc.group_dcp_shards,
+        )
 
     @staticmethod
     def _compute_shm_pool_info(
