@@ -261,6 +261,171 @@ class TestOtherApis:
         assert metrics["blend"]["num_namespaces"] == 2
 
 
+def _loop(**overrides: object) -> dict:
+    """One background loop's entry, healthy unless overridden."""
+    loop: dict[str, object] = {
+        "interval_seconds": 30.0,
+        "last_success_timestamp": 1000.0,
+        "passes_ok": 4,
+        "passes_failed": 0,
+        "last_error": None,
+        "last_error_timestamp": None,
+        "seconds_since_last_success": 12.5,
+    }
+    loop.update(overrides)
+    return loop
+
+
+# The shape a coordinator on the HTTP source returns, from a live /status.
+_STATUS = {
+    "event_source": {"source_name": "http", "replay_capability": "none"},
+    "ingest": {
+        "batches_applied": 2,
+        "batches_duplicate": 0,
+        "batches_stale": 0,
+        "batches_missing": 1,
+        "events_dropped": 0,
+        "streams": {
+            "node-a": {
+                "incarnation": 1,
+                "last_seq": 3,
+                "gap_detected": True,
+                "missing_batches": 1,
+                "events_dropped": 0,
+                "seconds_since_last_event": 0.5,
+                "event_delivery_delay_seconds": None,
+            }
+        },
+    },
+    "consumers": {
+        "KeyDirectory": {
+            "batches_delivered": 4,
+            "apply_seconds": 0.002,
+            "consume_failures": 0,
+            "fence_failures": 0,
+        },
+        "CacheUsageManager": {
+            "batches_delivered": 0,
+            "apply_seconds": 0.0,
+            "consume_failures": 0,
+            "fence_failures": 0,
+        },
+    },
+    "registry": {"seconds_since_heartbeat": {"node-a": 1.25}},
+    "controllers": {"FleetEvictionController": True, "PrefetchManager": False},
+    "background_loops": {
+        "checkpoint": _loop(),
+        "eviction": _loop(
+            last_success_timestamp=None,
+            passes_ok=0,
+            passes_failed=3,
+            last_error="RuntimeError: disk full",
+            last_error_timestamp=990.0,
+            seconds_since_last_success=None,
+        ),
+        "health_check": _loop(
+            passes_failed=1,
+            last_error="TimeoutError: node-b",
+            last_error_timestamp=900.0,
+        ),
+    },
+    "event_loop": {"blocked_seconds": 0.75},
+}
+
+
+def _kafka_status() -> dict:
+    """``_STATUS`` as a Kafka-fed coordinator returns it.
+
+    Partition keys are strings, as JSON makes them.
+    """
+    reads = {
+        "records_applied": 120,
+        "records_undecodable": 1,
+        "records_failed": 0,
+        "partitions_assigned": 2,
+        "unread_records": {"10": 7},
+        "next_offsets": {"2": 40, "10": 300},
+    }
+    return {
+        **_STATUS,
+        "event_source": {
+            "source_name": "kafka",
+            "replay_capability": "seekable",
+            "reads": reads,
+        },
+    }
+
+
+class TestStatus:
+    def test_every_component_gets_a_block(self) -> None:
+        metrics = _json(_render("status", _STATUS))["metrics"]
+        assert {
+            "event_source",
+            "ingest",
+            "streams",
+            "consumers",
+            "heartbeats",
+            "controllers",
+            "background_loops",
+            "event_loop",
+        } <= set(metrics)
+        assert metrics["event_loop"]["blocked_seconds"] == 0.75
+
+    def test_a_stream_with_a_gap_reads_as_an_incomplete_view(self) -> None:
+        stream = _json(_render("status", _STATUS))["metrics"]["streams"][0]
+        assert stream["server"] == "node-a"
+        assert stream["view"] == "incomplete"
+        assert stream["missing_batches"] == 1
+
+    def test_a_missing_delivery_delay_is_not_shown_as_zero(self) -> None:
+        # No batch carried a send time yet: that is "unknown", not "instant".
+        out = _terminal(_render("status", _STATUS))
+        row = next(ln for ln in out.splitlines() if ln.startswith("node-a  "))
+        assert row.rstrip().endswith("N/A")
+
+    def test_average_apply_time_needs_a_delivered_batch(self) -> None:
+        rows = _json(_render("status", _STATUS))["metrics"]["consumers"]
+        by_name = {row["consumer"]: row for row in rows}
+        assert by_name["KeyDirectory"]["average_apply_ms"] == pytest.approx(0.5)
+        assert by_name["CacheUsageManager"]["average_apply_ms"] is None
+
+    def test_a_loop_is_failing_only_if_its_last_pass_failed(self) -> None:
+        # health_check failed once, then succeeded: its error stays on the
+        # page, but the loop is no longer failing.
+        rows = _json(_render("status", _STATUS))["metrics"]["background_loops"]
+        by_loop = {row["loop"]: row for row in rows}
+        assert by_loop["eviction"]["failing"] == "yes"
+        assert by_loop["health_check"]["failing"] == "no"
+        assert by_loop["health_check"]["last_error"] == "TimeoutError: node-b"
+        assert by_loop["checkpoint"]["failing"] == "no"
+        assert by_loop["checkpoint"]["last_error"] == "--"
+
+    def test_a_controller_that_did_not_start_says_no(self) -> None:
+        rows = _json(_render("status", _STATUS))["metrics"]["controllers"]
+        assert {row["controller"]: row["started"] for row in rows} == {
+            "FleetEvictionController": "yes",
+            "PrefetchManager": "no",
+        }
+
+    def test_the_http_source_has_no_partitions(self) -> None:
+        metrics = _json(_render("status", _STATUS))["metrics"]
+        assert metrics["event_source"]["source_name"] == "http"
+        assert "partitions" not in metrics
+
+    def test_the_kafka_source_lists_its_partitions_in_order(self) -> None:
+        metrics = _json(_render("status", _kafka_status()))["metrics"]
+        assert metrics["event_source"]["records_applied"] == 120
+        assert metrics["event_source"]["partitions_assigned"] == 2
+        # Numeric order, not string order ("10" < "2").
+        assert metrics["partitions"] == [
+            {"partition": "2", "next_offset": 40, "unread_records": None},
+            {"partition": "10", "next_offset": 300, "unread_records": 7},
+        ]
+
+    def test_status_reads_the_status_endpoint(self) -> None:
+        assert APIS["status"].path(_args(api="status")) == "/status"
+
+
 class TestPaths:
     def test_usage_narrows_to_one_instance(self) -> None:
         assert APIS["usage"].path(_args()) == "/instances/usage"
