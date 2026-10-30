@@ -247,6 +247,7 @@ def test_prefetch_preserves_tags_on_every_rank_and_object_group(
     "path",
     [
         "/directory/lookup",
+        "/directory/blend-lookup",
         "/cache/pins",
         "/cache/delete",
         "/cache/prefetches",
