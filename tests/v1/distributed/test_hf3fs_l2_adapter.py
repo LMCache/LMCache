@@ -952,6 +952,74 @@ class TestHf3fsNativeConnector:
         assert bytes(buf) == data
         new_client.close()
 
+    def test_exists_sees_keys_stored_by_another_client(
+        self, hf3fs_native_client: tuple["LMCacheHf3fsClient", str, str]
+    ) -> None:
+        """Keys stored by another instance after startup are found by lookup."""
+        reader, mount_point, base_paths = hf3fs_native_client
+        key = _object_key_to_string(create_object_key(401))
+        own_key = _object_key_to_string(create_object_key(402))
+        absent_key = _object_key_to_string(create_object_key(403))
+        data = bytes(create_memory_obj(512).byte_array)
+        own_data = bytes(create_memory_obj(512, fill_value=2.0).byte_array)
+        reader.submit_batch_set([own_key], [memoryview(own_data)])
+        assert _wait_for_completions(reader)[0][1]
+
+        # First Party
+        from lmcache.lmcache_hf3fs import LMCacheHf3fsClient
+
+        # Created after ``reader`` scanned base_paths, like a peer node.
+        writer = LMCacheHf3fsClient(
+            mount_point=mount_point,
+            base_paths=base_paths,
+            num_workers=2,
+            ior_entries=128,
+            io_depth=0,
+            numa_id=-1,
+            iov_size=209715200,
+            time_out=200,
+            enable_key_buffer=True,
+        )
+        try:
+            writer.submit_batch_set([key], [memoryview(data)])
+            assert _wait_for_completions(writer)[0][1]
+        finally:
+            writer.close()
+
+        reader.submit_batch_exists([own_key, key, absent_key])
+        assert _wait_for_completions(reader)[0][3] == [True, True, False]
+
+        buf = bytearray(len(data))
+        reader.submit_batch_get([key], [memoryview(buf)])
+        assert _wait_for_completions(reader)[0][3] == [True]
+        assert bytes(buf) == data
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses permissions")
+    def test_key_buffer_miss_check_error_is_per_key(
+        self, hf3fs_native_client: tuple["LMCacheHf3fsClient", str, str]
+    ) -> None:
+        """A 3FS check error on a buffer miss is a miss for that key only.
+
+        The batch still succeeds, and buffered keys are still found.
+        """
+        client, _, base_paths = hf3fs_native_client
+        own_key = _object_key_to_string(create_object_key(520))
+        absent_key = _object_key_to_string(create_object_key(521))
+        data = bytes(create_memory_obj(512).byte_array)
+        client.submit_batch_set([own_key], [memoryview(data)])
+        assert _wait_for_completions(client)[0][1]
+
+        base_path = Path(base_paths)
+        mode = base_path.stat().st_mode
+        base_path.chmod(0)
+        try:
+            client.submit_batch_exists([own_key, absent_key])
+            completion = _wait_for_completions(client)[0]
+        finally:
+            base_path.chmod(mode)
+        assert completion[1]
+        assert completion[3] == [True, False]
+
     def test_key_buffer_scan_multipath_no_missing(self):
         """Regression: scan_and_build_buffer_ must scan every base_path even
         when there are more base_paths than worker threads.

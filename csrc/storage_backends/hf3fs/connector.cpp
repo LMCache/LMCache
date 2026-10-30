@@ -538,6 +538,14 @@ void Hf3fsConnector::do_single_set(WorkerHf3fsConn& conn,
 /**
  * Check if a key exists.
  *
+ * With the key buffer enabled, a buffer hit is answered without I/O. A
+ * buffer miss is confirmed against 3FS, because other instances sharing
+ * base_paths keep writing after this instance's startup scan; a key found
+ * that way is added to the buffer so later lookups hit in memory.
+ *
+ * A filesystem error (e.g. EACCES, EIO) is reported as a miss for this key
+ * only, so it does not fail the whole batch.
+ *
  * @param conn Connection to use
  * @param key Key to check
  * @return true if key exists, false otherwise
@@ -545,11 +553,22 @@ void Hf3fsConnector::do_single_set(WorkerHf3fsConn& conn,
 bool Hf3fsConnector::do_single_exists(WorkerHf3fsConn& conn,
                                       const std::string& key) {
   (void)conn;  // Unused
-  if (!buffer_enabled_) {
-    std::string file_path = key_to_path(key);
-    return std::filesystem::exists(file_path);
+  if (buffer_enabled_ && buffer_contains_(key)) {
+    return true;
   }
-  return buffer_contains_(key);
+  std::string file_path = key_to_path(key);
+  std::error_code ec;
+  if (!std::filesystem::exists(file_path, ec)) {
+    if (ec) {
+      fprintf(stderr, "[LMCache HF3FS] Check %s failed: %s\n",
+              file_path.c_str(), ec.message().c_str());
+    }
+    return false;
+  }
+  if (buffer_enabled_) {
+    buffer_add_(key);
+  }
+  return true;
 }
 
 /**
@@ -671,7 +690,8 @@ void Hf3fsConnector::buffer_scan_worker_(
  * Add a key to the buffer.
  *
  * Thread-safe via concurrent_flat_hash_set (sharded locks).
- * Called after a successful do_single_set().
+ * Called after a successful do_single_set(), and when do_single_exists()
+ * finds a key on 3FS that the buffer does not hold.
  */
 void Hf3fsConnector::buffer_add_(const std::string& key) {
   key_buffer_.Insert(key);
@@ -698,27 +718,6 @@ void Hf3fsConnector::buffer_remove_(const std::string& key) {
  */
 bool Hf3fsConnector::buffer_contains_(const std::string& key) const {
   return key_buffer_.Contains(key);
-}
-
-/**
- * Optimized batch exists using the in-memory key buffer.
- *
- * When the buffer is enabled, all lookups are answered from the hash
- * set in microseconds. When disabled, falls back to the base class
- * default which iterates do_single_exists (filesystem).
- */
-void Hf3fsConnector::do_batch_exists(WorkerHf3fsConn& conn,
-                                     const Request& req) {
-  (void)conn;
-  if (!buffer_enabled_) {
-    ConnectorBase::do_batch_exists(conn, req);
-    return;
-  }
-  // Buffer path: check cache for all keys
-  for (size_t i = 0; i < req.keys.size(); ++i) {
-    req.batch->per_key_results[req.start_idx + i] =
-        buffer_contains_(req.keys[i]) ? 1 : 0;
-  }
 }
 
 /**
