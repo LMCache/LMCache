@@ -104,6 +104,8 @@ Throughput (tokens/s):                   1100.64
 
 `output_tokens` uses the server's `completion_tokens` when present, including
 zero. The request's `max_tokens` is used only when the count is absent.
+`ttft_ms` stops at the first output token. For chat requests that includes
+reasoning (`reasoning_content`/`reasoning`) and tool-call deltas.
 
 ### `query kvcache`
 
