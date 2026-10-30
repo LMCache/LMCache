@@ -31,6 +31,9 @@ std::string key_to_filename(const std::string& key,
   // Salted:
   //     <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
   //
+  // Extended keys append a sixth field: @<cache_salt>@x1-<identity_token>.
+  // The salt placeholder is present even when empty.
+  //
   // Output filename (matching fs_l2_adapter.py._object_key_to_filename):
   // Unsalted::
   //     <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>.data
@@ -44,7 +47,7 @@ std::string key_to_filename(const std::string& key,
   // '@' (invariant enforced on the Python side), so splitting on '@'
   // is unambiguous — no marker, no rsplit.
 
-  // Split on '@' — must yield 4 (unsalted) or 5 (salted) fields.
+  // A sixth field carries the versioned, path-safe extension identity token.
   std::vector<std::string> parts;
   size_t start = 0;
   for (size_t pos = 0; pos <= key.size(); ++pos) {
@@ -53,9 +56,10 @@ std::string key_to_filename(const std::string& key,
       start = pos + 1;
     }
   }
-  if (parts.size() != 4 && parts.size() != 5) {
+  if (parts.size() != 4 && parts.size() != 5 && parts.size() != 6) {
     throw std::runtime_error(
-        "FSConnector: malformed key (expected 4 or 5 '@'-separated fields): " +
+        "FSConnector: malformed key (expected 4, 5 or 6 '@'-separated "
+        "fields): " +
         key);
   }
 
@@ -63,7 +67,7 @@ std::string key_to_filename(const std::string& key,
   const std::string& kv_rank_hex = parts[1];
   const std::string& object_group_id_hex = parts[2];
   const std::string& chunk_hash = parts[3];
-  const std::string cache_salt = parts.size() == 5 ? parts[4] : std::string();
+  const std::string cache_salt = parts.size() >= 5 ? parts[4] : std::string();
 
   // Replace '/' with '-SEP-' for filesystem safety
   std::string safe_model = replace_all(model_name, "/", PATH_SLASH_REPLACEMENT);
@@ -82,11 +86,24 @@ std::string key_to_filename(const std::string& key,
   result += object_group_id_hex;
   result += KEY_SEP;
   result += chunk_hash;
-  if (!cache_salt.empty()) {
+  if (!cache_salt.empty() || parts.size() == 6) {
     result += KEY_SEP;
     result += cache_salt;
   }
+  if (parts.size() == 6) {
+    if (parts[5].rfind("x1-", 0) != 0 ||
+        parts[5].find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq"
+                                   "rstuvwxyz0123456789-_") !=
+            std::string::npos) {
+      throw std::runtime_error("FSConnector: invalid extension token");
+    }
+    result += KEY_SEP;
+    result += parts[5];
+  }
   result += FILE_EXT;
+  if (parts.size() == 6 && result.size() > 255) {
+    throw std::runtime_error("extended ObjectKey filename exceeds NAME_MAX");
+  }
 
   if (!shard_directories) return result;
   if (chunk_hash.size() < 4) {
@@ -100,9 +117,9 @@ std::string key_to_filename(const std::string& key,
 // wire key.
 //
 // The flat (non-sharded) filename shape produced by key_to_filename():
-//   <safe_model>@0x<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>].data
+//   <safe_model>@0x<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>[@x1-<identity_token>]].data
 // Returns the wire key:
-//   <model>@<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>]
+//   <model>@<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>[@x1-<identity_token>]]
 //
 // Returns an empty string for any file that is not a well-formed KV-key
 // data file (e.g.: wrong extension, fewer than 4 '@'-separated fields).
@@ -125,7 +142,7 @@ std::string filename_to_key(const std::string& filename) {
     }
   }
   // Need model, kv_rank, ogid and chunk_hash (4 fields minimum).
-  if (parts.size() != 4 && parts.size() != 5) {
+  if (parts.size() != 4 && parts.size() != 5 && parts.size() != 6) {
     return {};
   }
 
@@ -158,7 +175,7 @@ std::string filename_to_key(const std::string& filename) {
 // Extract the ``chunk_hash`` field from key.
 //
 // Wire key format:
-//   <model>@<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>]
+//   <model>@<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>[@x1-<identity_token>]]
 //
 // The chunk_hash is always the 4th '@'-separated field (index 3).
 std::string get_chunk_hash_from_key(const std::string& key) {
@@ -170,9 +187,9 @@ std::string get_chunk_hash_from_key(const std::string& key) {
       start = pos + 1;
     }
   }
-  if (parts.size() != 4 && parts.size() != 5) {
+  if (parts.size() != 4 && parts.size() != 5 && parts.size() != 6) {
     throw std::runtime_error(
-        "Malformed key (expected 4 or 5 '@'-separated fields): " + key);
+        "Malformed key (expected 4, 5 or 6 '@'-separated fields): " + key);
   }
   if (parts[3].empty()) {
     throw std::runtime_error(

@@ -10,6 +10,7 @@ the full integration without mocking internals.
 """
 
 # Standard
+from dataclasses import replace
 from typing import NoReturn
 import select
 import threading
@@ -27,7 +28,8 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.eviction_policy.noop import (
     NoOpEvictionPolicy,
 )
-from lmcache.v1.distributed.l1_manager import DramL1Manager
+from lmcache.v1.distributed.l1_manager import DramL1Manager, L1Manager
+from lmcache.v1.distributed.l2_adapters.base import L2TaskId
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
@@ -799,4 +801,48 @@ class TestBufferOnlyMode:
         assert ok, "All keys should be deleted from L1 after buffer-only cleanup"
 
         ctrl.stop()
+        adapter.close()
+
+
+def test_matching_tags_split_store_batches(
+    l1_manager: L1Manager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One queued write batches chunks only within one tag identity."""
+    adapter = make_adapter()
+    batches: list[list[ObjectKey]] = []
+    submit = adapter.submit_store_task
+
+    def record_batch(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> L2TaskId:
+        batches.append(list(keys))
+        return submit(keys, memory_objs)
+
+    monkeypatch.setattr(adapter, "submit_store_task", record_batch)
+    controller = StoreController(
+        l1_manager=l1_manager,
+        l2_adapters=[adapter],
+        adapter_descriptors=[make_descriptor(0)],
+        policy=DefaultStorePolicy(),
+    )
+    base = make_object_key(0)
+    bf16 = ObjectKey(identity=replace(base.identity, tags={"dtype": "bf16"}))
+    keys = [
+        bf16,
+        ObjectKey(
+            identity=replace(
+                bf16.identity,
+                chunk_hash=ObjectKey.IntHash2Bytes(1),
+                tags={"dtype": "fp8"},
+            )
+        ),
+        ObjectKey(
+            identity=replace(bf16.identity, chunk_hash=ObjectKey.IntHash2Bytes(2))
+        ),
+    ]
+    try:
+        assert len(write_keys_to_l1(l1_manager, keys, make_layout())) == 3
+        controller.start()
+        assert wait_for_condition(lambda: adapter.debug_get_stored_object_count() == 3)
+        assert sorted(len(batch) for batch in batches) == [1, 2]
+    finally:
+        controller.stop()
         adapter.close()

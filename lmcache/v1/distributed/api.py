@@ -7,8 +7,9 @@ Could be implemented by native code in the future
 """
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Literal, get_args
+from typing import TYPE_CHECKING, Literal, NoReturn, get_args
 import enum
 
 # Third Party
@@ -155,15 +156,40 @@ class MemoryTags:
     """Where the bytes reside relative to this host."""
 
 
+class _FrozenTags(dict[str, str]):
+    """An immutable dict snapshot that msgspec can serialize."""
+
+    def _immutable(self, *args: object, **kwargs: object) -> NoReturn:
+        raise TypeError("identity tags are immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+    __ior__ = _immutable
+
+
+def normalize_tags(tags: Mapping[str, str]) -> Mapping[str, str]:
+    """Validate and snapshot identity tags in canonical name order."""
+    for name, value in tags.items():
+        if not isinstance(name, str) or not name or not isinstance(value, str):
+            raise ValueError("tags require non-empty string names and string values")
+    return _FrozenTags(sorted(tags.items()))
+
+
 @dataclass(frozen=True)
 class ObjectKeyIdentity:
-    """Matching fields shared by local objects and internal wire messages."""
+    """Complete matching identity of a stored object."""
 
     chunk_hash: bytes
     kv_rank: int
     model_name: str
     object_group_id: int = 0
     cache_salt: str = ""
+    tags: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if "@" in self.model_name:
@@ -174,6 +200,19 @@ class ObjectKeyIdentity:
             raise ValueError("cache_salt must not contain '@', '/', '\\' or NUL")
         if len(self.cache_salt) > 128:
             raise ValueError("cache_salt exceeds max length 128")
+        object.__setattr__(self, "tags", normalize_tags(self.tags))
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.chunk_hash,
+                self.kv_rank,
+                self.object_group_id,
+                self.model_name,
+                self.cache_salt,
+                tuple(self.tags.items()),
+            )
+        )
 
 
 @dataclass(frozen=True, init=False)
@@ -204,6 +243,7 @@ class ObjectKey:
         *,
         identity: ObjectKeyIdentity | None = None,
         extra_attributes: dict[str, object] | None = None,
+        tags: Mapping[str, str] | None = None,
     ) -> None:
         """Build a key from its identity or the existing flat constructor.
 
@@ -220,6 +260,7 @@ class ObjectKey:
             identity: Immutable identity providing fields not supplied explicitly.
             extra_attributes: Request-scoped metadata exposed to L2 adapters,
                 shallow-copied so the key can be enriched independently.
+            tags: Additional matching dimensions for the flat constructor.
 
         Raises:
             TypeError: A required flat field is missing without ``identity``.
@@ -234,13 +275,17 @@ class ObjectKey:
                 kv_rank=kv_rank,
                 object_group_id=object_group_id if object_group_id is not None else 0,
                 cache_salt=cache_salt if cache_salt is not None else "",
+                tags=tags if tags is not None else {},
             )
+        # Legacy flat-constructor compatibility; delete this branch when callers
+        # construct ObjectKey exclusively with identity=.
         elif (
             chunk_hash is not None
             or model_name is not None
             or kv_rank is not None
             or object_group_id is not None
             or cache_salt is not None
+            or tags is not None
         ):
             identity = replace(
                 identity,
@@ -259,6 +304,7 @@ class ObjectKey:
                 cache_salt=cache_salt
                 if cache_salt is not None
                 else identity.cache_salt,
+                tags=tags if tags is not None else identity.tags,
             )
         object.__setattr__(self, "identity", identity)
         object.__setattr__(
@@ -293,13 +339,14 @@ class ObjectKey:
         return self.identity.object_group_id
 
     def to_encoded_object_key(self) -> "EncodedObjectKey":
-        """Return the JSON-safe :class:`EncodedObjectKey` projection."""
+        """Return the JSON-safe :class:`EncodedObjectKey` identity projection."""
         return EncodedObjectKey(
             chunk_hash_hex=self.chunk_hash.hex(),
             model_name=self.model_name,
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            tags=self.identity.tags,
         )
 
     @staticmethod
@@ -380,23 +427,32 @@ class ObjectKey:
 
 @dataclass(frozen=True)
 class EncodedObjectKey:
-    """JSON-safe wire form of :class:`ObjectKey` — ``chunk_hash`` is
-    hex-encoded; other fields are preserved verbatim."""
+    """JSON-safe object identity for control-plane addressing."""
 
     chunk_hash_hex: str
-    """Hex-encoded ``ObjectKey.chunk_hash``."""
-
     model_name: str
     kv_rank: int
-
     object_group_id: int = 0
-    """Defaults to ``0`` so pre-``object_group_id`` wire payloads still
-    deserialize."""
-
     cache_salt: str = ""
+    tags: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tags", normalize_tags(self.tags))
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.chunk_hash_hex,
+                self.model_name,
+                self.kv_rank,
+                self.object_group_id,
+                self.cache_salt,
+                tuple(self.tags.items()),
+            )
+        )
 
     def to_object_key(self) -> ObjectKey:
-        """Recover the corresponding :class:`ObjectKey`.
+        """Recover an identity-equivalent :class:`ObjectKey`.
 
         Raises:
             ValueError: ``chunk_hash_hex`` is not valid hex, or one of
@@ -408,6 +464,7 @@ class EncodedObjectKey:
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            tags=self.tags,
         )
 
 
