@@ -86,6 +86,14 @@ Do the migration when the first of these lands, not before:
 - **A second engine integration wants shared keys with vLLM semantics**
   (SGLang/TRT-LLM beyond the bypass guard).
 
+LoRA isolation in the in-process connector (`LMCacheConnectorV1`) does not
+need this migration. The connector sets the `lora` tag (`lmcache.tag.lora`)
+of every `CacheEngineKey` to a digest of the adapter's vLLM `lora_name` and
+`lora_path`, and drops a value sent by the client. Tags already take part in
+key hashing, equality and `to_string`, and the lookup RPC forwards them as
+request configs, so neither the wire protocol nor the storage key schema
+changes.
+
 Migration sketch: (1) extend `CacheEngineKey`/`_hash_tokens` call sites to
 accept per-chunk `extra_keys`; (2) version the MP wire protocol and storage
 key schema (old entries miss, never collide); (3) reimplement `mm_hash` as

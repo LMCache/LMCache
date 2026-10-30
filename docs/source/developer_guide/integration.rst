@@ -47,6 +47,38 @@ When LMCache is integrated with vLLM, the inference pipeline is augmented to loo
 
 **Async Cache Write**: After processing the prompt, any newly generated KV cache chunks (corresponding to this prompt's content) are handed off to LMCache for storage. This put operation is done asynchronously (in the background) so it doesn't delay the response. The response is returned to the user promptly, and LMCache's background tasks will offload the new KV data to CPU, disk, or other backends for future reuse.
 
+LoRA cache isolation
+^^^^^^^^^^^^^^^^^^^^
+
+A LoRA adapter changes the attention projections, so the same prompt tokens
+produce different KV values under the base model and under each adapter. The
+in-process vLLM connector (``LMCacheConnectorV1``) therefore adds the request's
+adapter to every cache key as the ``lora`` tag, whose value is a SHA-256 digest
+of the adapter's vLLM ``lora_name`` and ``lora_path``. The base model and each
+adapter use separate keyspaces even when their prompt token IDs are identical,
+and base-model keys are unchanged:
+
+.. code-block:: text
+
+   Qwen/Qwen2.5-0.5B@1@0@1234abcd@bfloat16                 # base model
+   Qwen/Qwen2.5-0.5B@1@0@1234abcd@bfloat16@lora%<digest>   # an adapter
+
+The connector sets the ``lora`` tag itself and ignores an ``lmcache.tag.lora``
+value sent by the client in ``kv_transfer_params``.
+
+The digest identifies an adapter by its name and path, not by the contents of
+its weights. If an adapter's weights change, serve them under a new name or
+path. Keeping both can load KV computed with the previous weights from a
+persistent backend.
+
+.. warning::
+
+   Earlier versions stored KV computed under an adapter with base-model keys.
+   When upgrading, clear persistent backends (local disk and remote storage)
+   that may hold entries written by LoRA requests. Otherwise, base-model
+   requests can still load them. The in-memory CPU cache starts empty when
+   vLLM restarts.
+
 Integration with SGLang
 -----------------------
 
