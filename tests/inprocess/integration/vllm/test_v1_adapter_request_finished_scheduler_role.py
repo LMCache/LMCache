@@ -251,3 +251,102 @@ def test_request_finished_async_loading_without_lookup_client_skips_cancel() -> 
         "Expected a warning naming the request id and lookup_client; "
         f"got {[r.getMessage() for r in warnings]}"
     )
+
+
+def _make_finished_request(
+    req_id: str,
+    *,
+    status: RequestStatus,
+    output_token_ids: list[int],
+    kv_transfer_params: dict[str, object],
+) -> SimpleNamespace:
+    """Build the request shape ``request_finished`` reads for the
+    first-token streaming path."""
+    return SimpleNamespace(
+        request_id=req_id,
+        status=status,
+        _output_token_ids=list(output_token_ids),
+        kv_transfer_params=kv_transfer_params,
+    )
+
+
+def test_request_finished_aborted_without_first_token_does_not_crash() -> None:
+    """Regression for https://github.com/LMCache/LMCache/issues/5773.
+
+    ``ret_first_tok`` (disagg prefill) previously indexed
+    ``request._output_token_ids[0]`` unconditionally. A request aborted
+    before it produced its first output token has an empty list, so the
+    ``IndexError`` escaped the connector into EngineCore and killed the
+    engine. The abort must instead degrade to "no first token" and warn.
+    """
+    connector = _make_connector(engine=None, lookup_client=None, async_loading=False)
+    request = _make_finished_request(
+        "req-abort-no-token",
+        status=RequestStatus.FINISHED_ABORTED,
+        output_token_ids=[],
+        kv_transfer_params={"ret_first_tok": True},
+    )
+
+    with _capture_adapter_warnings() as records:
+        delay_free, return_params = connector.request_finished(request, [0, 1])
+
+    assert delay_free is False
+    assert return_params is None
+
+    warnings = [r for r in records if r.levelno == logging.WARNING]
+    assert any("req-abort-no-token" in r.getMessage() for r in warnings), (
+        "Expected a warning naming the aborted request; "
+        f"got {[r.getMessage() for r in warnings]}"
+    )
+
+
+def test_request_finished_aborted_without_first_token_keeps_cleanup() -> None:
+    """Engine-initialized variant of the abort above: the abort cleanup must
+    still run and no ``IndexError`` may escape."""
+    engine = _FakeEngine()
+    connector = _make_connector(engine=engine, lookup_client=None, async_loading=False)
+    request = _make_finished_request(
+        "req-abort-no-token-engine",
+        status=RequestStatus.FINISHED_ABORTED,
+        output_token_ids=[],
+        kv_transfer_params={"ret_first_tok": True},
+    )
+
+    delay_free, return_params = connector.request_finished(request, [0, 1])
+
+    assert delay_free is False
+    assert return_params is None
+    assert engine.storage_manager.cancelled == ["req-abort-no-token-engine"]
+
+
+def test_request_finished_returns_first_token_when_available() -> None:
+    """Happy path unchanged: a request that produced output tokens still
+    streams its first token back for disagg prefill."""
+    connector = _make_connector(engine=None, lookup_client=None, async_loading=False)
+    request = _make_finished_request(
+        "req-with-token",
+        status=RequestStatus.FINISHED_STOPPED,
+        output_token_ids=[42, 7],
+        kv_transfer_params={"ret_first_tok": True},
+    )
+
+    delay_free, return_params = connector.request_finished(request, [0, 1])
+
+    assert delay_free is False
+    assert return_params == {"first_tok": 42}
+
+
+def test_request_finished_returns_zero_first_token() -> None:
+    """Token id ``0`` is a valid first token; the guard must not treat it as
+    a missing (falsy) value and drop it."""
+    connector = _make_connector(engine=None, lookup_client=None, async_loading=False)
+    request = _make_finished_request(
+        "req-zero-token",
+        status=RequestStatus.FINISHED_STOPPED,
+        output_token_ids=[0],
+        kv_transfer_params={"ret_first_tok": True},
+    )
+
+    _, return_params = connector.request_finished(request, [0, 1])
+
+    assert return_params == {"first_tok": 0}
