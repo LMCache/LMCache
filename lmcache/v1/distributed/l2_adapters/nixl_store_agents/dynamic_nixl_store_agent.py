@@ -20,7 +20,7 @@ from nixl._api import nixlBind
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
-from lmcache.v1.distributed.key_codec import format_storage_key, storage_shard
+from lmcache.v1.distributed.key_codec import format_storage_key
 
 
 def _object_key_to_filename(key: ObjectKey) -> str:
@@ -47,7 +47,8 @@ def _object_key_to_relpath(key: ObjectKey) -> str:
     The shard remains independent of ``cache_salt``; salted keys with the same
     chunk hash have distinct filenames inside the same shard.
     """
-    return os.path.join(*storage_shard(key), _object_key_to_filename(key))
+    chunk_hex = key.chunk_hash.hex()
+    return os.path.join(chunk_hex[:2], chunk_hex[2:4], _object_key_to_filename(key))
 
 
 class DynamicNixlStorageAgent(ABC):

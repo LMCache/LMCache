@@ -23,6 +23,7 @@ from lmcache.utils import (
     _lmcache_nvtx_annotate,
 )
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.storage_manager import l1_owners_of
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
@@ -539,9 +540,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                         transfer_key=transfer_key,
                     )
 
-                completion = self._ctx.storage_manager.prepare_write_completion(
-                    all_dict
-                )
+                l1_owners = l1_owners_of(all_dict)
                 store_succeeded = True
             except Exception:
                 logger.exception("Cannot store Q keys due to exception")
@@ -553,8 +552,8 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                 if stored_count:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
-                        "finish_write_by_owner",
-                        completion,
+                        "finish_write",
+                        l1_owners,
                     )
                 else:
                     total_bytes = 0

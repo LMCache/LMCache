@@ -12,7 +12,6 @@ from lmcache.v1.distributed.key_codec import (
     encode_fs_filename,
     encode_storage_key,
     format_storage_key,
-    storage_shard,
 )
 from lmcache.v1.distributed.l2_adapters.bigtable_key_encoder import BigtableL2KeyEncoder
 from lmcache.v1.distributed.l2_adapters.raw_block.key_codec import (
@@ -33,7 +32,6 @@ def test_legacy_backend_bytes_and_recovery(salt: str) -> None:
     assert decode_fs_filename(encode_fs_filename(key)) == key
     assert object_key_to_string(key) == f"org%2Fmodel@0x0000002a@3@deadbeef{suffix}"
     assert decode_object_key(object_key_to_string(key)) == key
-    assert storage_shard(key) == ("de", "ad")
     assert (
         format_storage_key(
             key, "{model}_{rank}_{group}_{hash}{suffix}.bin", model_separator="--"

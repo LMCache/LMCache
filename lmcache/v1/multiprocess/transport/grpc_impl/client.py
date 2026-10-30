@@ -6,7 +6,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, cast
 from urllib.parse import urlparse
 import functools
 import socket
@@ -21,6 +21,10 @@ import grpc
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
@@ -44,6 +48,7 @@ _GRPC_OPTIONS = (
     ("grpc.max_reconnect_backoff_ms", MAX_RECONNECT_BACKOFF_MS),
 )
 _CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
+_SERVER_GONE = frozenset({grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.CANCELLED})
 
 # A ZMQ socket greets every new connection with this 10-byte ZMTP signature.
 _ZMTP_SIGNATURE_LEN = 10
@@ -51,6 +56,14 @@ _PEER_PROBE_TIMEOUT_S = 1.0
 _PEER_PROBE_INTERVAL_S = 5.0
 
 logger = init_logger(__name__)
+
+
+def _request_error(exc: grpc.RpcError) -> MPServerUnavailableError | MPRequestError:
+    """Map a failed call's status to the error the request client raises."""
+    call = cast(grpc.Call, exc)
+    code = call.code()
+    error_cls = MPServerUnavailableError if code in _SERVER_GONE else MPRequestError
+    return error_cls(code.name, call.details() or "")
 
 
 def parse_grpc_target(server_url: str) -> str:
@@ -260,12 +273,7 @@ class GrpcMultiprocessClient(RequestClient):
                 except grpc.RpcError as exc:
                     if self._wrong_transport is not None:
                         raise ConnectionError(self._wrong_transport) from exc
-                    if exc.code() in (
-                        grpc.StatusCode.UNAVAILABLE,
-                        grpc.StatusCode.CANCELLED,
-                    ):
-                        raise ConnectionError("gRPC event stream disconnected") from exc
-                    raise
+                    raise _request_error(exc) from exc
 
             return MessagingStream(read, call.cancel)
         future: MessagingFuture[Any] = MessagingFuture()
@@ -284,6 +292,10 @@ class GrpcMultiprocessClient(RequestClient):
                 return
             try:
                 result = rpc.codec.response_decoder(grpc_future.result())
+            except grpc.RpcError as exc:
+                error = _request_error(exc)
+                error.__cause__ = exc
+                future.set_exception(error)
             except BaseException as exc:
                 future.set_exception(exc)
             else:

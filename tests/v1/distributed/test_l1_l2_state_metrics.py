@@ -22,7 +22,8 @@ from lmcache.v1.distributed.api import (
     PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import create_l1_manager
+from lmcache.v1.distributed.l1_manager.base import BaseL1Manager
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
@@ -110,7 +111,7 @@ def wait_for_condition(predicate, timeout: float = 5.0) -> bool:
 
 
 def write_keys_to_l1(
-    l1_manager: L1Manager,
+    l1_manager: BaseL1Manager,
     keys: list[ObjectKey],
     layout: MemoryLayoutDesc,
 ) -> list[ObjectKey]:
@@ -192,7 +193,7 @@ def l1_manager():
         write_ttl_seconds=600,
         read_ttl_seconds=300,
     )
-    mgr = L1Manager(config)
+    mgr = create_l1_manager(config)
     yield mgr
     mgr.close()
 
@@ -419,7 +420,7 @@ class TestNumInflightL2Loads:
 @pytest.mark.no_shared_allocator
 def test_peer_l1_gauges_are_separate_and_removed_on_close() -> None:
     managers = [
-        L1Manager(
+        create_l1_manager(
             L1ManagerConfig(L1MemoryManagerConfig(8192, False, shm_name=""), tag=tag)
         )
         for tag in ("metric-a", "metric-b")
@@ -448,35 +449,3 @@ def test_peer_l1_gauges_are_separate_and_removed_on_close() -> None:
             )
             == 0
         )
-
-
-@pytest.mark.no_shared_allocator
-def test_legacy_hybrid_usage_is_labeled_as_both_media(tmp_path) -> None:
-    path = tmp_path / "dax"
-    path.write_bytes(b"\0" * 8192)
-    manager = L1Manager(
-        L1ManagerConfig(
-            L1MemoryManagerConfig(
-                8192,
-                False,
-                shm_name="",
-                devdax_path=str(path),
-                devdax_size_in_bytes=8192,
-            ),
-            tag="metric-mixed",
-        )
-    )
-    try:
-        keys = [make_object_key(0)]
-        layout = MemoryLayoutDesc([torch.Size([4096])], [torch.uint8])
-        manager.reserve_write(keys, [False], layout)
-        manager.finish_write(keys)
-        assert (
-            _value_for(
-                "lmcache_mp.l1_memory_usage_bytes",
-                {"l1_tag": "metric-mixed", "backend": "dram+devdax"},
-            )
-            == 4096
-        )
-    finally:
-        manager.close()
