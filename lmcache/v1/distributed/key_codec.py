@@ -132,9 +132,9 @@ def decode_storage_key(
     model, rank, group, chunk_hash, salt = parts
     return ObjectKey(
         chunk_hash=bytes.fromhex(chunk_hash),
-        model_name=model_decoder(model),
         kv_rank=int(rank, 16),
         object_group_id=int(group, 16),
+        model_name=model_decoder(model),
         cache_salt=salt,
         tags=decode_tags(token),
     )
