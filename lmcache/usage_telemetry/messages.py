@@ -203,8 +203,10 @@ class MPServerMessage(UsageMessage):
             storage_manager_config: The storage manager configuration.
 
         Returns:
-            The populated message. ``l1_medium`` is one of ``"dram"``,
-            ``"gds"``, or ``"dram+devdax"``; ``l2_adapter_types`` is a
+            The populated message. ``l1_medium`` joins the distinct media of
+            the configured L1s with ``+``, DRAM first: ``"dram"`` or ``"gds"``
+            for one L1, ``"dram+devdax"`` for a DRAM L1 beside a Device-DAX
+            L1; ``l2_adapter_types`` is a
             comma-joined list of adapter type names (empty when no L2 is
             configured); ``l2_serde_types`` is comma-joined and aligned
             with ``l2_adapter_types``, with an empty entry for adapters
@@ -215,19 +217,18 @@ class MPServerMessage(UsageMessage):
         # load it).
         # First Party
         from lmcache import __version__
-        from lmcache.v1.distributed.config import get_configured_capacity_bytes
+        from lmcache.v1.distributed.config import (
+            get_configured_capacity_bytes,
+            l1_medium_name,
+        )
         from lmcache.v1.distributed.l2_adapters.config import (
             get_type_name_for_config,
         )
 
         l1_configs = storage_manager_config.l1_manager_configs
-        capacities = [get_configured_capacity_bytes(c) for c in l1_configs]
-        l1_size_bytes = sum(sum(c.values()) for c in capacities)
-        l1_medium = "+".join(
-            sorted(
-                {b.value for c in capacities for b in c}, key=lambda n: (n != "dram", n)
-            )
-        )
+        l1_size_bytes = sum(get_configured_capacity_bytes(c) for c in l1_configs)
+        media = {l1_medium_name(c) for c in l1_configs}
+        l1_medium = "+".join(sorted(media, key=lambda n: (n != "dram", n)))
         memory_config = storage_manager_config.l1_manager_config.memory_config
         adapter_configs = storage_manager_config.l2_adapter_config.adapters
         l2_adapter_types = ",".join(

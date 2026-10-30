@@ -29,7 +29,7 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
@@ -222,7 +222,8 @@ def test_unfull_chunk_round_trip_carries_the_window_lead_block(
     context = cast(BaseCacheContext, stub)
     layout = get_unfull_chunk_layout_desc(context, 0)
     key = _unfull_keys(TokenHasher(chunk_size=CHUNK_SIZE), list(range(9)), 9)[0]
-    memory_obj = storage_manager.reserve_write([key], layout)[key]
+    reserved = storage_manager.reserve_write([key], layout)
+    memory_obj = reserved[key]
     prefill = [_paged_layers(torch.randn) for _ in range(2)]
     decode = [_paged_layers(torch.zeros) for _ in range(2)]
 
@@ -237,7 +238,7 @@ def test_unfull_chunk_round_trip_carries_the_window_lead_block(
 
     copy(prefill, [[1, 2, 3], [5, 6, 7]], lmcache_native.TransferDirection.D2H)
     copy(decode, [[0, 4, 6], [2, 3, 7]], lmcache_native.TransferDirection.H2D)
-    storage_manager.finish_write([key])
+    storage_manager.finish_write([key], l1_owners_of(reserved))
 
     moved = {0: {0: 1, 4: 2, 6: 3}, 1: {2: 5, 3: 6, 7: 7}}
     for group, block_map in moved.items():
@@ -483,7 +484,7 @@ def _write(
 ) -> None:
     reserved = storage_manager.reserve_write(keys, LAYOUT, is_temporary=is_temporary)
     assert set(reserved) == set(keys)
-    storage_manager.finish_write(keys)
+    storage_manager.finish_write(keys, l1_owners_of(reserved))
 
 
 def _lookup(

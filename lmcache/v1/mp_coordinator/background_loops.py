@@ -127,7 +127,9 @@ class EventLoopMonitor:
     Sleeps half a second at a time and adds up how late each wake-up was.
     A late wake-up means something held the loop: a request handler doing
     synchronous work, or ingest waiting on a checkpoint. Every handler,
-    heartbeat and background loop waited that long too.
+    heartbeat and background loop waited that long too. Wake-ups at most
+    10 ms late are not counted: that is timer jitter, which on an idle loop
+    would otherwise read as blocked about 0.5% of the time.
     """
 
     def __init__(self) -> None:
@@ -144,5 +146,5 @@ class EventLoopMonitor:
             started = time.monotonic()
             await asyncio.sleep(0.5)
             late = time.monotonic() - started - 0.5
-            if late > 0:
+            if late > 0.01:
                 self._blocked_seconds += late

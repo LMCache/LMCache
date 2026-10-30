@@ -335,3 +335,28 @@ class TestIsAbstention:
     def test_empty_answer_is_not_an_abstention(self) -> None:
         """An empty answer is unparsed, a different failure."""
         assert not is_abstention("")
+
+
+class TestAnswerTagVariants:
+    def test_answer_tags(self) -> None:
+        assert extract_final_answer("reasoning <answer> Oslo </answer>") == "Oslo"
+
+    def test_last_region_wins_across_tag_styles(self) -> None:
+        response = "form: <answer>answer</answer>. So <final_answer>Bern</final_answer>"
+        assert extract_final_answer(response) == "Bern"
+
+    def test_gpt_oss_channel_header_swallowing_the_opening_tag(self) -> None:
+        """``<|channel|>final`` + ``_answer>``: the ``<`` never appears."""
+        response = (
+            "We need the coach. Provide final answer.\n\n"
+            "<|start|>assistant<|channel|>final_answer>Lincoln Riley"
+            "</final_answer><|return|>"
+        )
+        assert extract_final_answer(response) == "Lincoln Riley"
+
+    def test_bare_tag_inside_a_word_is_not_an_answer(self) -> None:
+        assert extract_final_answer("my_final_answer>x</final_answer>") == ""
+        assert extract_final_answer("the answer> is</answer>") == ""
+
+    def test_unterminated_answer_tag_is_no_answer(self) -> None:
+        assert extract_final_answer("thinking... <answer>Par") == ""

@@ -236,6 +236,9 @@ class GroupLayout(msgspec.Struct):
             workers that predate windows send.
         recurrent: Whether the group's pages hold recurrent state snapshots
             (Mamba/GDN/linear attention) rather than per-token attention KV.
+        num_physical_slots: Physical slots stored per chunk, after windowing
+            and slot compression. ``None`` retains the legacy one-slot-per-token
+            layout derived from ``window_tokens``.
     """
 
     num_layers: int
@@ -246,6 +249,7 @@ class GroupLayout(msgspec.Struct):
     kv_size: int = 0
     window_chunks: int = 0
     recurrent: bool = False
+    num_physical_slots: int | None = None
 
 
 class RegisterEngineDrivenContextPayload(msgspec.Struct):
