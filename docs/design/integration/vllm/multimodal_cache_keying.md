@@ -15,6 +15,21 @@ through interfaces that carry only token IDs (lookup RPC, MP connector
 metadata), so LMCache instead substitutes the placeholder token IDs with
 values derived from the multimodal identifier before hashing.
 
+## Identifier validity
+
+Substitution requires the input identifier to distinguish media in the first
+place. With `mm_processor_cache_gb=0` and prefix caching disabled, vLLM skips
+content hashing and overrides even user-supplied UUIDs with request-local
+identifiers. Frontend-local counters can repeat across restarts or replicas;
+the same ID for different media still produces identical LMCache keys, no
+matter how much entropy the substitution preserves.
+
+`validate_vllm_multimodal_cache_config` rejects this combination for multimodal
+models before connector initialization, in the in-process adapter and all
+LMCache-shipped MP variants. A positive processor-cache budget or enabled
+prefix caching preserves content hashing. Text-only model configs are allowed.
+This is an engine-level restriction, including text-only requests to a VLM.
+
 ## Contract
 
 `lmcache/integration/vllm/utils.py`:

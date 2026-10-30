@@ -80,6 +80,7 @@ from lmcache.integration.vllm.mp_server_launcher import (
 )
 from lmcache.integration.vllm.utils import (
     mla_only,
+    validate_vllm_multimodal_cache_config,
     vllm_layout_hints,
 )
 from lmcache.utils import CacheRemoveEvent
@@ -594,10 +595,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             kv_cache_config: Resolved cache groups, if supplied by vLLM.
 
         Raises:
-            ValueError: If cache geometry or auto-start configuration is invalid,
-                including auto-start with multiple server endpoints.
+            ValueError: If multimodal cache identity, cache geometry or auto-start
+                configuration is invalid, including multiple server endpoints.
             ConnectionError: If the configured MP server cannot be reached.
         """
+        validate_vllm_multimodal_cache_config(vllm_config)
+
         # Older supported vLLM releases allow connectors to omit this value,
         # while current vLLM's type declaration requires it.
         super().__init__(vllm_config, role, kv_cache_config)  # type: ignore[arg-type]
