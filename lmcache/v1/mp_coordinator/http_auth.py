@@ -32,9 +32,10 @@ from lmcache.security.http import (
 # Paths that stay reachable without credentials even when authentication is on.
 # ``/healthz`` is the orchestrator liveness probe: it returns only
 # ``{"status": "healthy"}`` and must not force probe configuration through the
-# fleet key. Everything else -- fleet membership, quotas, events, the key
-# directory, and metrics -- requires a valid API key.
-PUBLIC_COORDINATOR_PATHS = frozenset({"/healthz"})
+# fleet key. The metrics endpoint is also public so monitoring can scrape it
+# without fleet credentials, matching the MP HTTP frontend. Fleet membership,
+# quotas, events, and the key directory still require a valid API key.
+PUBLIC_COORDINATOR_PATHS = frozenset({"/healthz", "/metrics"})
 
 
 class CoordinatorAuthenticationConfig(APIKeyVerifier):
