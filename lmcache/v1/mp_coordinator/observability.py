@@ -25,6 +25,7 @@ from lmcache.v1.mp_coordinator.background_loops import (
 )
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers.base import ControllerStatus
+from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
     CacheEventBroadcaster,
 )
@@ -39,11 +40,16 @@ from lmcache.v1.mp_coordinator.metric_sources import (
     MetricSource,
     get_and_clear_metric_sources,
 )
+from lmcache.v1.mp_coordinator.persistence.checkpoint import CheckpointMonitor
+from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
+from lmcache.v1.mp_coordinator.utils.histogram import Histogram
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import (
     DirectoryStats,
     KeyDirectory,
+    LookupStats,
 )
+from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from lmcache.v1.mp_observability.otel_init import init_otel_metrics
 
 if TYPE_CHECKING:
@@ -52,6 +58,7 @@ if TYPE_CHECKING:
 
 # ``(value, attributes)`` per series, as one metric reports at a scrape.
 Points = list[tuple[float, dict[str, str]]]
+
 
 _PREFIX = "lmcache_coordinator."
 
@@ -142,12 +149,37 @@ def _specs_for(source: MetricSource) -> list[_MetricSpec]:
             return _kafka_specs(source)
         case ControllerStatus():
             return _controller_status_specs(source)
+        case CacheUsageManager():
+            return _usage_specs(source)
+        case CheckpointMonitor():
+            return _checkpoint_specs(source)
+        case MetadataPersister():
+            return _metadata_specs(source)
+        case PrefetchManager():
+            return _prefetch_specs(source)
     raise TypeError(f"no metrics are defined for {type(source).__name__}")
 
 
 def _key_directory_specs(key_directory: KeyDirectory) -> list[_MetricSpec]:
-    """Return the key directory's placement metrics."""
+    """Return the key directory's contents, blend index and lookup metrics."""
     return [
+        _MetricSpec(
+            _PREFIX + "key_directory.keys_tracked",
+            "gauge",
+            "Keys with at least one placement in the key directory.",
+            lambda: [(key_directory.stats().num_keys, {})],
+        ),
+        _MetricSpec(
+            _PREFIX + "key_directory.server_l1_keys",
+            "gauge",
+            "L1 keys each server reported; a sudden drop to 0 is a fence.",
+            lambda: [
+                (keys, {"instance_id": instance_id})
+                for instance_id, keys in (
+                    key_directory.stats().l1_keys_by_instance.items()
+                )
+            ],
+        ),
         _MetricSpec(
             _PREFIX + "key_directory.placements",
             "gauge",
@@ -179,6 +211,53 @@ def _key_directory_specs(key_directory: KeyDirectory) -> list[_MetricSpec]:
             lambda: _tier_points(
                 key_directory, lambda s: (s.l1_size_bytes, s.l2_size_bytes)
             ),
+        ),
+        _MetricSpec(
+            _PREFIX + "blend_index.chunks_indexed",
+            "gauge",
+            "Chunks in the blend (fragment) index; reported only when blend "
+            "lookup is enabled.",
+            lambda: _blend_points(key_directory, lambda s: s.blend.num_chunks),
+        ),
+        _MetricSpec(
+            _PREFIX + "blend_index.unique_chunk_contents",
+            "gauge",
+            "Distinct chunk contents in the blend index; fewer than chunks "
+            "means the same content is stored more than once.",
+            lambda: _blend_points(key_directory, lambda s: s.blend.num_contents),
+        ),
+        _MetricSpec(
+            _PREFIX + "blend_index.namespaces",
+            "gauge",
+            "Namespaces (model, cache salt, world size) holding indexed content.",
+            lambda: _blend_points(key_directory, lambda s: s.blend.num_namespaces),
+        ),
+        _MetricSpec(
+            _PREFIX + "key_directory.lookups",
+            "counter",
+            "Lookup requests served, by lookup_type: prefix "
+            "(/directory/lookup) or non_prefix (/directory/blend-lookup).",
+            lambda: _lookup_points(key_directory, lambda s: s.lookups),
+        ),
+        _MetricSpec(
+            _PREFIX + "key_directory.lookup_chunks_requested",
+            "counter",
+            "Chunks the lookups asked for.",
+            lambda: _lookup_points(key_directory, lambda s: s.chunks_requested),
+        ),
+        _MetricSpec(
+            _PREFIX + "key_directory.lookup_chunks_found",
+            "counter",
+            "Chunks the lookups found; found / requested is the hit rate.",
+            lambda: _lookup_points(key_directory, lambda s: s.chunks_found),
+        ),
+        *_histogram_specs(
+            _PREFIX + "key_directory.lookup_chunks_found_per_request",
+            "How many chunks each lookup found.",
+            lambda: [
+                (stats.chunks_found_per_request, {"lookup_type": lookup_type})
+                for lookup_type, stats in key_directory.stats().lookups.items()
+            ],
         ),
     ]
 
@@ -325,8 +404,25 @@ def _event_loop_monitor_specs(monitor: EventLoopMonitor) -> list[_MetricSpec]:
 
 
 def _instance_registry_specs(registry: InstanceRegistry) -> list[_MetricSpec]:
-    """Return each registered server's heartbeat age."""
+    """Return fleet membership, its churn, and each server's heartbeat age."""
     return [
+        _MetricSpec(
+            _PREFIX + "registry.servers_registered",
+            "gauge",
+            "Number of mp servers registered with the coordinator.",
+            lambda: [(registry.stats().servers_registered, {})],
+        ),
+        _MetricSpec(
+            _PREFIX + "registry.server_membership_changes",
+            "counter",
+            "Fleet membership changes, by change: registered, re_registered, "
+            "deregistered, timed_out, unknown_heartbeat. A climbing "
+            "re_registered or timed_out means servers are flapping.",
+            lambda: [
+                (count, {"change": change})
+                for change, count in registry.stats().membership_changes.items()
+            ],
+        ),
         _MetricSpec(
             _PREFIX + "registry.server_seconds_since_heartbeat",
             "gauge",
@@ -353,6 +449,152 @@ def _controller_status_specs(status: ControllerStatus) -> list[_MetricSpec]:
                 (int(up), {"controller": controller})
                 for controller, up in status.stats().items()
             ],
+        ),
+    ]
+
+
+def _usage_specs(usage: CacheUsageManager) -> list[_MetricSpec]:
+    """Return the fleet's bytes per tier."""
+    return [
+        _MetricSpec(
+            _PREFIX + "usage.bytes_stored",
+            "gauge",
+            "Reported bytes the fleet holds, by tier.",
+            lambda: [
+                (n_bytes, {"tier": tier})
+                for tier, n_bytes in usage.stats().bytes_stored.items()
+            ],
+        ),
+    ]
+
+
+def _checkpoint_specs(monitor: CheckpointMonitor) -> list[_MetricSpec]:
+    """Return the checkpoint file's metrics."""
+    return [
+        _MetricSpec(
+            _PREFIX + "checkpoint_file.last_write_timestamp_seconds",
+            "gauge",
+            "Wall-clock time the last good checkpoint was written.",
+            lambda: _present_points(monitor.stats().last_write_timestamp),
+        ),
+        _MetricSpec(
+            _PREFIX + "checkpoint_file.writes",
+            "counter",
+            "Checkpoint writes, by result: ok, quiesce_timeout (a batch was "
+            "still being applied), error.",
+            lambda: [
+                (count, {"result": result})
+                for result, count in monitor.stats().writes.items()
+            ],
+        ),
+        *_histogram_specs(
+            _PREFIX + "checkpoint_file.write_duration_seconds",
+            "Time per checkpoint write phase: pause_ingest, copy (how long "
+            "ingest was paused), write.",
+            lambda: [
+                (histogram, {"phase": phase})
+                for phase, histogram in (monitor.stats().write_duration_seconds.items())
+            ],
+        ),
+        _MetricSpec(
+            _PREFIX + "checkpoint_file.size_bytes",
+            "gauge",
+            "Size of the last good checkpoint.",
+            lambda: _present_points(monitor.stats().size_bytes),
+        ),
+        _MetricSpec(
+            _PREFIX + "checkpoint_file.restored_on_start",
+            "gauge",
+            "1 for what startup did with the checkpoint: cold (none), "
+            "restored, or ignored (unreadable).",
+            lambda: _restore_points(monitor),
+        ),
+    ]
+
+
+def _metadata_specs(persister: MetadataPersister) -> list[_MetricSpec]:
+    """Return the metadata file's metrics."""
+    return [
+        _MetricSpec(
+            _PREFIX + "metadata_file.writes",
+            "counter",
+            "Metadata (pin and quota) saves, by result; an error is a change "
+            "that will not survive a restart.",
+            lambda: [
+                (count, {"result": result})
+                for result, count in persister.stats().writes.items()
+            ],
+        ),
+    ]
+
+
+def _prefetch_specs(prefetch: PrefetchManager) -> list[_MetricSpec]:
+    """Return the warm-prefetch relay's metrics."""
+    return [
+        _MetricSpec(
+            _PREFIX + "prefetch.requests_submitted",
+            "counter",
+            "Prefetches asked for, by result: submitted, noop (shorter than a "
+            "chunk), unknown_server, server_error.",
+            lambda: [
+                (count, {"result": result})
+                for result, count in prefetch.stats().requests_submitted.items()
+            ],
+        ),
+        *_histogram_specs(
+            _PREFIX + "prefetch.chunks_requested_per_request",
+            "Chunks each prefetch asked to warm.",
+            lambda: [(prefetch.stats().chunks_requested_per_request, {})],
+        ),
+        *_histogram_specs(
+            _PREFIX + "prefetch.submit_duration_seconds",
+            "Time for the mp server to accept a prefetch.",
+            lambda: [(prefetch.stats().submit_duration_seconds, {})],
+        ),
+        _MetricSpec(
+            _PREFIX + "prefetch.requests_in_flight",
+            "gauge",
+            "Prefetches submitted to each server and not yet seen completed.",
+            lambda: [
+                (count, {"instance_id": instance_id})
+                for instance_id, count in prefetch.stats().requests_in_flight.items()
+            ],
+        ),
+        *_histogram_specs(
+            _PREFIX + "prefetch.completion_duration_seconds",
+            "Submit to the first poll that saw the prefetch completed; "
+            "includes the caller's poll interval.",
+            lambda: [(prefetch.stats().completion_duration_seconds, {})],
+        ),
+        _MetricSpec(
+            _PREFIX + "prefetch.keys_requested",
+            "counter",
+            "Keys the completed prefetches asked to warm.",
+            lambda: [(prefetch.stats().keys_requested, {})],
+        ),
+        _MetricSpec(
+            _PREFIX + "prefetch.keys_found",
+            "counter",
+            "Keys found in L2 and loaded into L1; found / requested is the "
+            "prefetch hit rate.",
+            lambda: [(prefetch.stats().keys_found, {})],
+        ),
+        _MetricSpec(
+            _PREFIX + "prefetch.status_polls",
+            "counter",
+            "Prefetch status polls, by result: pending, completed, "
+            "unknown_request, server_error.",
+            lambda: [
+                (count, {"result": result})
+                for result, count in prefetch.stats().status_polls.items()
+            ],
+        ),
+        _MetricSpec(
+            _PREFIX + "prefetch.requests_abandoned",
+            "counter",
+            "Prefetches never polled to completion within 10 minutes: the "
+            "caller gave up, or the server left.",
+            lambda: [(prefetch.stats().requests_abandoned, {})],
         ),
     ]
 
@@ -387,6 +629,49 @@ def _kafka_specs(source: KafkaCacheEventSource) -> list[_MetricSpec]:
     ]
 
 
+def _histogram_specs(
+    name: str,
+    description: str,
+    read_histograms: Callable[[], list[tuple[Histogram, dict[str, str]]]],
+) -> list[_MetricSpec]:
+    """Return the ``_bucket``, ``_sum`` and ``_count`` counters of a
+    histogram a component keeps in its ``stats()``.
+
+    ``_bucket`` is cumulative and labelled ``le``, as Prometheus expects,
+    so ``histogram_quantile`` works on it.
+    """
+    return [
+        _MetricSpec(
+            name + "_bucket",
+            "counter",
+            description + " Cumulative bucket counts, labelled le.",
+            lambda: [
+                (count, {**attributes, "le": le})
+                for histogram, attributes in read_histograms()
+                for le, count in histogram.cumulative_buckets()
+            ],
+        ),
+        _MetricSpec(
+            name + "_sum",
+            "counter",
+            description + " Sum of the observed values.",
+            lambda: [
+                (histogram.sum, attributes)
+                for histogram, attributes in read_histograms()
+            ],
+        ),
+        _MetricSpec(
+            name + "_count",
+            "counter",
+            description + " Number of observations.",
+            lambda: [
+                (histogram.count, attributes)
+                for histogram, attributes in read_histograms()
+            ],
+        ),
+    ]
+
+
 def _make_observation_callback(
     read_points: Callable[[], Points],
 ) -> Callable[["CallbackOptions"], list["Observation"]]:
@@ -408,6 +693,42 @@ def _tier_points(
     """Return the directory's ``(l1, l2)`` values as one point per tier."""
     l1_value, l2_value = read_l1_and_l2(key_directory.stats())
     return [(l1_value, {"tier": "l1"}), (l2_value, {"tier": "l2"})]
+
+
+def _blend_points(
+    key_directory: KeyDirectory, read_value: Callable[[DirectoryStats], int]
+) -> Points:
+    """Return the blend index value, or nothing while blend lookup is off."""
+    directory_stats = key_directory.stats()
+    if not directory_stats.blend_lookup_enabled:
+        return []
+    return [(read_value(directory_stats), {})]
+
+
+def _lookup_points(
+    key_directory: KeyDirectory, read_value: Callable[[LookupStats], int]
+) -> Points:
+    """Return one point per lookup type."""
+    return [
+        (read_value(stats), {"lookup_type": lookup_type})
+        for lookup_type, stats in key_directory.stats().lookups.items()
+    ]
+
+
+def _present_points(value: float | None) -> Points:
+    """Return ``value`` as one point, or nothing while it is unknown."""
+    return [] if value is None else [(value, {})]
+
+
+def _restore_points(monitor: CheckpointMonitor) -> Points:
+    """Return 1 for what startup did with the checkpoint, 0 for the rest."""
+    outcome = monitor.stats().restored_on_start
+    if outcome is None:
+        return []
+    return [
+        (int(candidate == outcome), {"outcome": candidate})
+        for candidate in ("cold", "restored", "ignored")
+    ]
 
 
 def _server_points(

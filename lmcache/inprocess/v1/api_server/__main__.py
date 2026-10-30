@@ -57,9 +57,9 @@ from lmcache.inprocess.v1.cache_controller.message import (  # noqa: E501
     QueryWorkerInfoRetMsg,
     WorkerInfo,
 )
+from lmcache.inprocess.v1.config_base import parse_command_line_extra_params
 from lmcache.inprocess.v1.internal_api_server.api_registry import APIRegistry
 from lmcache.logging import init_logger
-from lmcache.v1.config_base import parse_command_line_extra_params
 
 logger = init_logger(__name__)
 
