@@ -21,7 +21,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager, ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import (
@@ -125,7 +125,13 @@ def verify_store_byte_coverage(
 
     No-ops (returns without raising) when the object group carries no
     engine-derived expectation (recurrent / sliding-window / padded /
-    unrecognized / DCP layouts).
+    unrecognized / DCP layouts) or the context exposes no real
+    :class:`KVLayerGroupsManager` (test harnesses mount stand-ins).
+
+    This is a reservation-size invariant: it proves the reserved host
+    object has the engine-spec byte capacity for the chunk, not that every
+    page was actually written -- transfer and restore correctness stay
+    with the restart/exact-answer test layer.
 
     Args:
         cache_context: The cache context holding the layer group manager.
@@ -139,6 +145,10 @@ def verify_store_byte_coverage(
             engine-spec expectation for one chunk.
     """
     manager = cache_context.kv_layer_groups_manager
+    if not isinstance(manager, KVLayerGroupsManager):
+        # Stand-in managers (unit-test harnesses) carry no engine-derived
+        # expectation; the check no-ops rather than misread a mock.
+        return
     expected = manager.expected_object_group_bytes_per_chunk(
         object_group_id, chunk_size
     )
@@ -246,6 +256,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     """
 
     module_name = "lmcache_driven_transfer"
+
+    # Class default so modules built without __init__ (unit-test harnesses
+    # construct instances by hand) still take the check; real instances
+    # resolve the env kill switch once in __init__.
+    _byte_coverage_enabled: bool = True
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:

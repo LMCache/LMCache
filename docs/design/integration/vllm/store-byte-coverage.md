@@ -31,17 +31,25 @@ Three properties keep the check honest (from the cross-family evidence in
    **memory object reserved for the chunk**, before any device transfer and
    before any (encoded/serialized) L2 persistence — never on serialized disk
    sizes, which are not byte-comparable to raw KV.
-3. **Coverage is not correctness.** A matching byte count proves no pages
-   went missing; it does not prove page identity or content (a right-sized
-   object can still be zero-filled, mis-ordered, or torn). The check is the
-   cheap always-on gate at the base of the test pyramid; restart/exact-answer
-   restore tests remain the correctness layer on top.
+3. **Reservation size is not transfer completeness.** A matching byte count
+   proves the reserved object had the engine-spec byte capacity for the
+   chunk — an independently derived reservation-size invariant. It does
+   not prove the device transfer populated every page (missing or
+   duplicated writes inside a right-sized allocation can still pass), nor
+   page identity or content (a right-sized object can still be
+   zero-filled, mis-ordered, or torn). The check is the cheap always-on
+   gate at the base of the test pyramid; restart/exact-answer restore
+   tests remain the transfer-and-restore correctness layer on top.
 
 ## Mechanics
 
 - At registration, each `EngineGroupInfo` carries
   `expected_bytes_per_token` (defaulted `msgspec` field, wire-compatible:
-  old daemons ignore it, new daemons see `None` from old connectors).
+  old daemons ignore it, new daemons see `None` from old connectors). The
+  grpc transport mirrors the struct field-for-field
+  (`common.proto` `EngineGroupInfo`, presence-typed `optional int64`
+  field 7): its structural codec enforces exact python↔proto field
+  parity, so the two definitions must move together.
   `KVLayerGroupsManager` stamps it onto each `KernelGroupInfo`, and
   `expected_object_group_bytes_per_chunk(og, chunk)` sums the rates over an
   object group's member kernel groups × the chunk size.
@@ -95,6 +103,15 @@ per store with no data scans.
   engine spec, so no independent expectation exists there. The modern MP
   (`LMCacheMPConnector` + LMCache server) path — where every known family
   instance ran — is covered.
+
+## Follow-ups
+
+- Registration-time operator visibility: expose checked-versus-skipped
+  object groups with the no-op reason (a log line and/or counter at
+  registration), so operators can tell "protected" from "not checked" on
+  a running cluster. Kept out of this PR to hold its footprint; the
+  no-op reason data (`expected_bytes_per_token is None` + which no-op
+  branch fired) is already computed at registration.
 
 [#4701]: https://github.com/LMCache/LMCache/issues/4701
 [#5971]: https://github.com/LMCache/LMCache/pull/5971
