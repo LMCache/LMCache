@@ -21,5 +21,8 @@ versioned token. Tagged filesystem names must fit within 255 UTF-8 bytes.
 ``ObjectKey`` keeps its flat constructor and accepts ``tags=`` for callers that
 do not construct ``ObjectKeyIdentity`` directly. ``EncodedObjectKey`` and the
 internal identity protobuf preserve tags across their existing projections.
-Choosing tags for an inference request and exposing them through control APIs
-are handled by separate integration layers.
+Multiprocess clients choose tags with string-valued
+``lmcache.tag.<name>`` entries in ``IPCCacheServerKey.request_configs``. The
+server applies those tags to every expanded object key and keeps pending
+transfers and session release checks isolated by the same mapping. Control APIs
+are handled by a separate integration layer.

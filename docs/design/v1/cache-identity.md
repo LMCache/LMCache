@@ -19,6 +19,7 @@ preserve the same representation; tagged filenames must fit within the
 255-byte filename limit.
 
 `EncodedObjectKey` and the internal `ObjectKeyIdentity` protobuf carry the same
-mapping. This layer defines and persists tagged identities but does not choose
-tags for requests; request propagation and control-plane behavior belong in
-separate changes.
+mapping. Multiprocess clients select matching tags with string-valued
+``lmcache.tag.<name>`` entries in ``IPCCacheServerKey.request_configs``. Object
+expansion strips the prefix and preserves the canonical mapping through store,
+lookup, and transfer paths. Control-plane behavior belongs in a separate layer.
