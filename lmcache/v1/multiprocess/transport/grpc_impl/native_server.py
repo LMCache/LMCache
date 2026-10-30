@@ -134,11 +134,20 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
         try:
             # Third Party
             from pygrpc_native import EVENT_CANCEL, NativeGrpcFront
+            import pygrpc_native
         except ImportError as exc:
             raise RuntimeError(
                 "grpc_server_mode='native' needs the pygrpc-native package. "
                 "Install it with `pip install pygrpc-native`, and retry."
             ) from exc
+        # ordered=True arrived in pygrpc-native 0.7.0.
+        version = getattr(pygrpc_native, "__version__", "0")
+        if tuple(int(part) for part in version.split(".")[:2]) < (0, 7):
+            raise RuntimeError(
+                "grpc_server_mode='native' needs pygrpc-native 0.7.0 or later, "
+                f"found {version}. Upgrade it with "
+                "`pip install -U pygrpc-native`, and retry."
+            )
         super().__init__(
             bind_url, max_cpu_workers, max_gpu_workers, grpc_server_workers
         )
@@ -159,6 +168,8 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
                 parse_grpc_target(bind_url),
                 paths,
                 client_key_metadata=CLIENT_ID_METADATA_KEY,
+                # Affinity handlers expect a client's calls in the order sent.
+                ordered=True,
                 **({"metrics": True} if metrics else {}),
             )
         except OSError as exc:
