@@ -503,6 +503,18 @@ _BLOCK_AXIS_FORMATS: frozenset = frozenset(
     }
 )
 
+# Formats whose per-layer entry is a tuple of paged [NB, BS, x, HS] plane
+# tensors: fmt 17 is vLLM-Ascend's MLA/DSA plane list (x == 1, one latent
+# head), fmt 16 its (K, V) pair (x == NH). No other format stores planes as
+# a per-layer tuple. :func:`make_page_buffer_shape_desc` attaches the
+# per-plane byte geometry backends need to carve such tuples into planes.
+_PLANE_TUPLE_FORMATS: frozenset = frozenset(
+    {
+        lmcache_native.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,
+        lmcache_native.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS,
+    }
+)
+
 
 def resolve_block_stride_and_log_layout(
     kv_caches: DiscoverableKVCache,
@@ -678,6 +690,21 @@ def make_page_buffer_shape_desc(
 
     resolved_stride = int(block_stride_elems) if block_stride_elems else 0
     desc.block_stride_elems = resolved_stride
+
+    if engine_kv_format in _PLANE_TUPLE_FORMATS:
+        # Per-plane byte geometry (per-token row, dim-0 block step) so
+        # backends can carve the tuple without re-deriving strides.
+        # num_planes first: the Ascend binding returns that many entries.
+        # Like ``dtype``, this is a Python-side side channel only.
+        planes = kv_caches[layer_idx]  # type: ignore[index]
+        desc.num_planes = len(planes)
+        desc.plane_slot_bytes = tuple(
+            int(t.shape[2]) * int(t.shape[3]) * int(t.element_size())
+            for t in planes
+        )
+        desc.plane_block_stride_bytes = tuple(
+            int(t.stride(0)) * int(t.element_size()) for t in planes
+        )
     return desc
 
 
