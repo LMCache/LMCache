@@ -26,7 +26,7 @@ translation.
 1. Something changes: the server registers, a Device-DAX L1 arena is added or
    starts draining, or an L2 adapter is added, removed, or reconfigured.
 2. The `StorageManager` capacity-publication path builds the topology —
-   `L1Manager.get_capacity_bytes_by_backend()` for L1 per medium, each
+   `L1ManagerInterface.get_capacity_bytes()` summed per `backend_type`, each
    adapter's `get_usage().total_capacity_bytes` for L2 — and publishes
    `SM_CAPACITY_CHANGED` on the observability bus.
 3. `CacheEventSubscriber` turns it into one `config` batch per compartment,
@@ -112,17 +112,17 @@ Two gotchas:
 | --- | --- | --- |
 | `L1MemoryManager` (default, lazy) | grown heap | configured DRAM size |
 | `GDSL1MemoryManager` | configured slab | configured GDS slab size |
-| `DevDaxL1MemoryManager` | DRAM + active arenas | active Device-DAX arenas + configured DRAM if hybrid |
+| `DevDaxL1MemoryManager` | active arenas | active Device-DAX arenas |
 
 The lazy allocator's total is the heap it has grown so far, so a freshly
 booted server would report itself nearly full and appear to drain as the pool
-warms. CPU, GDS, and hybrid DRAM capacities are fixed at startup. Device-DAX
-capacity is the sum of active arenas; draining arenas are excluded.
+warms. CPU and GDS capacities are fixed at startup. Device-DAX capacity is
+the sum of active arenas; draining arenas are excluded.
 
-L1 is declared **per medium** because one tier can span two: a hybrid
-Device-DAX tier backs objects with both `devdax` and `dram`, and each
-placement is tagged accordingly. One total would leave two compartments of
-usage sharing one denominator.
+L1 is declared **per medium**: every manager has exactly one
+(`backend_type`), managers of the same medium are summed, and each
+placement event carries its manager's medium, so usage and capacity share a
+compartment key.
 
 `report_status()` exposes the same number as `memory_configured_bytes`, so
 the status dict and this API cannot drift.

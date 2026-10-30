@@ -120,6 +120,37 @@ A full docstring must include:
 - Use `isinstance()` on config objects to determine behavior, not string-based type names.
 - Config classes should follow existing conventions (e.g., `@dataclass`). Controllers and managers should always be created (even with empty/default config), never wrapped in `Optional`.
 
+### 4.6 Open-Source Extensibility and Layer Boundaries
+
+- When several real implementations share a contract, prefer a small typed
+  interface with polymorphic implementations over conditionals spread through
+  callers. Use inheritance only when the subtype relationship and lifecycle are
+  stable; prefer composition for independently varying capabilities.
+- When implementations are maintained independently, prefer registry,
+  entry-point, plugin, or bounded subclass discovery over a central list of
+  vendor names. Discovery must have deterministic ordering, validation,
+  conflict handling, and failure isolation.
+- Draw responsibility boundaries before adding an abstraction. Dependencies
+  should point from concrete adapters toward stable contracts, not from core
+  orchestration toward vendor or engine implementations. Do not introduce a
+  plugin hook, base class, or configuration option without a concrete extension
+  need.
+- Outside `lmcache/integration/<engine>/`, production code must remain
+  inference-engine and model agnostic. Engine-specific cache layouts, request
+  objects, scheduler semantics, and model-family decisions belong in the
+  corresponding integration adapter and must cross into core code through
+  LMCache-owned typed contracts.
+- Middle-layer orchestration and contracts must remain accelerator,
+  storage-backend, and transport agnostic. Hardware operations, storage
+  implementations, and wire/IPC mechanisms belong behind their platform,
+  storage, and transfer interfaces; do not branch on concrete backend names in
+  unrelated orchestration code.
+- On non-critical paths, optimize for readability and maintainability. Prefer
+  explicit typed data structures and direct dispatch over compact but opaque
+  encodings, reflection, metaprogramming, or implicit mutation. Use advanced
+  mechanisms only for a demonstrated requirement, document the invariant, and
+  test failure behavior.
+
 ---
 
 ## 5. New Functionality
@@ -223,7 +254,7 @@ import os
 import torch
 
 # First Party
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 
 # Local
 from .utils import helper

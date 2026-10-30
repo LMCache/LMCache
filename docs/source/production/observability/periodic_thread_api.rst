@@ -66,8 +66,8 @@ Returns information about all registered periodic threads.
       },
       "threads": [
         {
-          "name": "pin_monitor",
-          "level": "high",
+          "name": "health-monitor-thread",
+          "level": "critical",
           "is_running": true,
           "is_active": true,
           "last_run_time": 1706000000.0,
@@ -86,8 +86,8 @@ Returns detailed information about a specific periodic thread.
 .. code-block:: json
 
     {
-      "name": "pin_monitor",
-      "level": "high",
+      "name": "health-monitor-thread",
+      "level": "critical",
       "is_running": true,
       "is_active": true,
       "last_run_time": 1706000000.0,
@@ -177,4 +177,4 @@ Check Specific Thread Status
 
 .. code-block:: bash
 
-    curl http://localhost:8080/periodic-threads/pin_monitor
+    curl http://localhost:8080/periodic-threads/health-monitor-thread

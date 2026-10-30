@@ -16,10 +16,10 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Union, cast
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.token_database import TokenDatabase
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -28,7 +28,7 @@ from lmcache.v1.memory_management import (
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.storage_backend.storage_manager import StorageManager
+    from lmcache.inprocess.v1.storage_backend.storage_manager import StorageManager
 
 logger = init_logger(__name__)
 

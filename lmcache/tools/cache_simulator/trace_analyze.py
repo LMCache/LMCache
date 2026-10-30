@@ -33,6 +33,7 @@ import argparse
 import html
 import json
 import logging
+import struct
 
 # First Party
 from lmcache.cli.metrics import Metrics
@@ -43,6 +44,9 @@ from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 #: Name of the span the tracing subscriber emits per traced request.
 TRACE_SPAN_NAME = "mp.request.trace"
+
+#: Instrumentation scope of the Dynamo frontend's request-trace ``otel`` sink.
+DYNAMO_TRACE_SCOPE = "dynamo.request_trace"
 
 _SIZE_SUFFIXES: dict[str, int] = {"k": 2**10, "m": 2**20, "g": 2**30, "t": 2**40}
 _DEFAULT_CAPACITY_START = 4096
@@ -231,6 +235,56 @@ def _lmcache_records(line: dict[str, Any]) -> Iterable[TraceRecord]:
         )
 
 
+def _chat_text(request: dict[str, Any]) -> str:
+    """A chat request's text in prompt order: tools, then each message.
+
+    Chat templates render the tools ahead of the conversation. Each message
+    adds its role and its text (the ``text`` parts of a list content).
+    """
+    parts: list[str] = []
+    if request.get("tools"):
+        parts.append(json.dumps(request["tools"], ensure_ascii=False, sort_keys=True))
+    for message in request["messages"]:
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "".join(part.get("text", "") for part in content)
+        parts.append(f"{message['role']}\n{content or ''}")
+    return "\n".join(parts)
+
+
+def _dynamo_records(line: dict[str, Any]) -> Iterable[TraceRecord]:
+    """Records in one line of the ``dynamo`` trace format.
+
+    A line is an OTLP JSON logs batch from the Dynamo frontend's request
+    trace sink. A ``request_payload`` record holds the chat request as text,
+    so its ids are that text packed four UTF-8 bytes per integer (about one
+    per token) and results are an estimate. Other records, and the marker
+    Dynamo sends without the request when a record is over its size limit,
+    are skipped.
+    """
+    for resource_logs in line.get("resourceLogs", []):
+        for scope_logs in resource_logs.get("scopeLogs", []):
+            if scope_logs.get("scope", {}).get("name") != DYNAMO_TRACE_SCOPE:
+                continue
+            for log in scope_logs.get("logRecords", []):
+                attrs = {
+                    a["key"]: _attribute_value(a["value"]) for a in log["attributes"]
+                }
+                if attrs["event_type"] != "request_payload":
+                    continue
+                request = json.loads(attrs["payload"])["payload"].get("request")
+                if request is None:
+                    continue
+                data = _chat_text(request).encode("utf-8")
+                data += b"\0" * (-len(data) % 4)
+                yield TraceRecord(
+                    timestamp_ns=int(log["timeUnixNano"]),
+                    model=attrs["model"],
+                    input_ids=list(struct.unpack(f">{len(data) // 4}I", data)),
+                    request_id=attrs["rid"],
+                )
+
+
 @dataclass(frozen=True)
 class TraceFormat:
     """A producer format: how to read it and what it expects to find.
@@ -253,6 +307,14 @@ TRACE_FORMATS: dict[str, TraceFormat] = {
         expects=(
             f"{TRACE_SPAN_NAME} spans with lmcache.input_ids, which the MP "
             "server emits under --enable-token-trace and the collector's file "
+            "exporter writes"
+        ),
+    ),
+    "dynamo": TraceFormat(
+        read=_dynamo_records,
+        expects=(
+            f"{DYNAMO_TRACE_SCOPE} request_payload log records, which the Dynamo "
+            "frontend's request trace otel sink sends and the collector's file "
             "exporter writes"
         ),
     ),
