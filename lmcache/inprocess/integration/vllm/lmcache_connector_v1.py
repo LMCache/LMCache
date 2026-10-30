@@ -35,7 +35,17 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
         kv_cache_config: Optional[Any] = None,
-    ):
+    ) -> None:
+        """Initialize the in-process adapter with resolved cache groups.
+
+        Args:
+            vllm_config: Active vLLM engine configuration.
+            role: Scheduler or worker connector role.
+            kv_cache_config: Resolved KV-cache groups, when supplied by vLLM.
+
+        Raises:
+            ValueError: If the model or resolved groups use unsupported R-SWA.
+        """
         if kv_cache_config is not None:
             super().__init__(
                 vllm_config=vllm_config,
@@ -44,7 +54,12 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
             )
         else:
             super().__init__(vllm_config=vllm_config, role=role)
-        self._lmcache_engine = LMCacheConnectorV1Impl(vllm_config, role, self)
+        self._lmcache_engine = LMCacheConnectorV1Impl(
+            vllm_config,
+            role,
+            self,
+            kv_cache_config=kv_cache_config,
+        )
 
     # ==============================
     # Worker-side methods

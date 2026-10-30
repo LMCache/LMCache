@@ -19,6 +19,7 @@ from lmcache.integration.vllm.utils import (
     extract_request_configs_from_sampling_params,
     get_size_bytes,
     is_dp_rank0,
+    is_rswa_model,
     mla_enabled,
     vllm_layout_hints,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "extract_request_configs_from_sampling_params",
     "get_size_bytes",
     "is_dp_rank0",
+    "is_rswa_model",
     "mla_enabled",
     "vllm_layout_hints",
 ]

@@ -166,6 +166,7 @@ def test_covered_boundary_frozen_only_when_a_lookup_is_sent():
     connector.request_trackers = {}
     connector.scheduler_adapter = adapter
     connector._reserve_last_token_for_lookup = False
+    connector._prompt_only_cache = False
     connector._hit_alignment_tokens = CHUNK_SIZE
     connector._connector_stats = MagicMock()
     connector.lazy_offload = False
@@ -203,6 +204,7 @@ def _shrink_connector(covered_chunks: int = 4):
     connector.request_trackers = {}
     connector.scheduler_adapter = adapter
     connector._reserve_last_token_for_lookup = False
+    connector._prompt_only_cache = False
     connector._hit_alignment_tokens = CHUNK_SIZE
     connector._connector_stats = MagicMock()
     connector.lazy_offload = False
