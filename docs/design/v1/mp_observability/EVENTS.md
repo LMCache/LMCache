@@ -225,8 +225,10 @@ per-transfer `transfer.kernel_interval` / `transfer.staging` child spans (see
 ### `num_tokens` on `MP_STORE_END` / `MP_RETRIEVE_END`
 
 Denormalized token count (`num_chunks * chunk_size`) so subscribers need
-not know `chunk_size`.  Fail-closed, matching `total_bytes`: `0` when the
-store committed nothing (`stored_count == 0`) or the retrieve did not
+not know `chunk_size`. For a store, `num_chunks` counts unique chunk positions
+for which at least one object group committed a new object; chunks that were
+already fully present are excluded. Fail-closed, matching `total_bytes`: `0`
+when the store committed nothing (`stored_count == 0`) or the retrieve did not
 fully succeed.
 
 ### `MP_LOOKUP_PREFETCH_END` metadata
