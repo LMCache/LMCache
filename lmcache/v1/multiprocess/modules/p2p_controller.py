@@ -18,6 +18,9 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
     MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
     ObjectKey,
     PrefetchHandle,
     PrefetchTaskSpec,
@@ -223,10 +226,28 @@ class P2PController(DiscoverableModule):
 
         Args:
             coordinator_config: Coordinator connection used for peer discovery.
+
+        Raises:
+            ValueError: There is not exactly one local DRAM L1, or it exposes
+                no registerable memory buffer.
         """
+        # Peers read the L1 registered with the transfer channel: the one
+        # local DRAM L1.
+        try:
+            l1_manager = self._ctx.storage_manager.get_l1_manager_by_tags(
+                MemoryTags(segment=MemorySegment.DRAM, residency=MemoryResidency.LOCAL)
+            )
+        except ValueError as e:
+            raise ValueError(f"P2P requires exactly one local DRAM L1: {e}") from e
+        l1_memory_desc = l1_manager.get_l1_memory_desc()
+        if l1_memory_desc is None:
+            raise ValueError(
+                f"P2P requires a registerable L1 buffer; L1 "
+                f"{l1_manager.config.tag!r} exposes none"
+            )
         initialize_transfer_channel_context(
             self._p2p_config.transfer_engine,
-            self._ctx.storage_manager.l1_memory_desc,
+            l1_memory_desc,
             listen_url=self._p2p_config.effective_listen_url,
             advertise_url=self._p2p_config.advertise_url,
         )
@@ -314,12 +335,19 @@ class P2PController(DiscoverableModule):
 
         key_groups = _group_keys_by_object_group(keys, group_layout_descs)
         if key_groups:
-            # NOTE: skip_l2=True -- only objects already resident in L1 are
-            # locked; "full" keeps every resident key, gaps allowed.
+            # NOTE: only objects already resident in the local DRAM L1 (the L1
+            # registered with the transfer channel) are locked, from no other
+            # L1 and no L2; "full" keeps every resident key, gaps allowed.
             handle = self._ctx.storage_manager.submit_prefetch_task(
-                PrefetchTaskSpec(key_groups=key_groups, fetching_policy="full"),
+                PrefetchTaskSpec(
+                    key_groups=key_groups,
+                    fetching_policy="full",
+                    allowed_l1_memory_tags=frozenset(
+                        {MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)}
+                    ),
+                    allowed_l2_memory_tags=frozenset(),
+                ),
                 external_request_id=f"p2p-{task_id}",
-                skip_l2=True,
             )
         else:
             # Nothing to look up: an already-complete empty handle.

@@ -84,7 +84,7 @@ class UnifiedLMCacheMPConnector:
     ) -> None:
         try:
             # First Party
-            from lmcache.v1.config import load_engine_config_with_overrides
+            from lmcache.v1.multiprocess.client_config import load_mp_client_config
             from lmcache.v1.multiprocess.transport.factory import (
                 RequestClientFactory,
             )
@@ -217,28 +217,28 @@ class UnifiedLMCacheMPConnector:
             )
         kv_tensors = [tensor for group in wire_groups for tensor in group.kv_tensors]
 
-        config = load_engine_config_with_overrides(config_file_path=config_file)
-        if not config.mp_host:  # type: ignore[attr-defined]
+        config = load_mp_client_config(config_file_path=config_file)
+        if not config.mp_host:
             raise ValueError(
                 "LMCache MP config must define mp_host; pass "
                 "--lmcache-config-file or LMCACHE_CONFIG_FILE"
             )
-        host = str(config.mp_host)  # type: ignore[attr-defined]
+        host = str(config.mp_host)
         if "://" not in host:
             host = f"tcp://{host}"
-        self.server_url = f"{host.rstrip(':')}:{int(config.mp_port)}"  # type: ignore[attr-defined]
+        self.server_url = f"{host.rstrip(':')}:{config.mp_port}"
         self._mq_timeout = float(
-            config.get_extra_config_value(  # type: ignore[attr-defined]
+            config.get_extra_config_value(
                 "lmcache.mp.mq_timeout", _DEFAULT_MQ_TIMEOUT_SECONDS
             )
         )
         self._heartbeat_interval = float(
-            config.get_extra_config_value(  # type: ignore[attr-defined]
+            config.get_extra_config_value(
                 "lmcache.mp.heartbeat_interval",
                 _DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
             )
         )
-        self._mp_transfer_mode = config.get_extra_config_value(  # type: ignore[attr-defined]
+        self._mp_transfer_mode = config.get_extra_config_value(
             "lmcache.mp.mp_transfer_mode", None
         )
         if any(
@@ -554,6 +554,7 @@ class UnifiedLMCacheMPConnector:
                 layout_hints={"kv_list_layout": "unified"},
                 engine_group_infos=engine_group_infos,
                 engine_type=EngineType.SGLANG,
+                lmcache_chunk_tokens=self.chunk_size,
             )
         except Exception:
             try:
@@ -609,7 +610,7 @@ class UnifiedLMCacheMPConnector:
         # First Party
         from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
-        return IPCCacheServerKey(
+        return IPCCacheServerKey.from_token_ids(
             model_name=self.model_name,
             world_size=self.kv_world_size,
             worker_id=worker_id,
@@ -617,7 +618,7 @@ class UnifiedLMCacheMPConnector:
             # TP ranks in a PP stage to one object, so lookup must reserve one
             # read lock for every rank that retrieves that object.
             num_kv_readers=self.num_kv_readers,
-            token_ids=tuple(operation.token_ids),
+            token_ids=operation.token_ids,
             start=start,
             end=end,
             request_id=operation.request_id,

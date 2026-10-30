@@ -126,6 +126,22 @@ straightforward with per-operation locks or lock-free queues.
 `L2TaskId` values are only unique **within a single adapter**. When tracking
 tasks across multiple adapters, use the composite key `(adapter_index, task_id)`.
 
+### Memory Tags
+
+```
+get_memory_tags() -> MemoryTags                      # adapter instance
+get_wanted_l1_memory_tags() -> tuple[MemoryTags, ...]  # adapter config
+```
+
+- **Own tags:** every adapter declares the segment and residency of the medium
+  it stores bytes in. Declare `REMOTE` for anything off this host or shared
+  with other hosts.
+- **Wanted L1 tags:** the config lists acceptable L1 tags, most preferred
+  first. The default `((DRAM, LOCAL), (CXL, LOCAL))` fits every host-buffer
+  adapter; override it only for adapters that need a different L1.
+- The storage manager picks the adapter's L1 from these tags before building
+  the adapter. See `../memory_tags.md` for the rules and the scope restriction.
+
 ## StoreController
 
 **Purpose:** Asynchronously replicate L1 data to L2 after writes complete.
@@ -147,8 +163,8 @@ StorageManager.close()
 
 The StoreController's background thread polls on:
 
-1. **StoreListener eventfd** — fired by L1Manager when `finish_write()` completes.
-   The listener is an `L1ManagerListener` registered with L1Manager.
+1. **StoreListener eventfd** — fired by BaseL1Manager when `finish_write()` completes.
+   The listener is an `L1ManagerListener` registered with BaseL1Manager.
 2. **Per-adapter store eventfds** — fired when L2 store tasks complete.
 
 ### Data Flow
@@ -156,7 +172,7 @@ The StoreController's background thread polls on:
 ```
 L1 finish_write()
   │
-  ▼ (L1Manager listener callback, inside L1 lock — must be non-blocking)
+  ▼ (BaseL1Manager listener callback, inside L1 lock — must be non-blocking)
 StoreListener.on_l1_keys_write_finished(keys)
   │  appends keys + signals eventfd
   ▼
@@ -177,7 +193,7 @@ _process_new_keys(keys)
   │       → dict[adapter_index, list[ObjectKey]]
   │
   ├─ 4. For each adapter target:
-  │     L1Manager.reserve_read(target_keys)  → get MemoryObj + read lock
+  │     BaseL1Manager.reserve_read(target_keys)  → get MemoryObj + read lock
   │     adapter.submit_store_task(keys, objs)
   │     Track as InFlightStoreTask
   │
@@ -193,7 +209,7 @@ _advance_request(task_key, task)  [state transition]
   ▼
 _finalize_store(task_key, task)  [terminal execution]
   │
-  ├─ 5. L1Manager.finish_read(read_locked_keys)  → release read locks
+  ├─ 5. BaseL1Manager.finish_read(read_locked_keys)  → release read locks
   │
   ├─ 6. If success: StorePolicy.select_l1_deletions(keys) → delete from L1
   │     If failure: log warning (best-effort, no retry)
@@ -277,7 +293,7 @@ detached once no in-flight request references it.
 
 ```python
 # Called from the serving thread
-request_id = controller.submit_prefetch_request(spec, skip_l2=False)
+request_id = controller.submit_prefetch_request(spec)
 
 # Polled (or waited on) by the serving thread
 result = controller.query_prefetch_result(request_id)  # PrefetchResult | None
@@ -285,8 +301,8 @@ controller.wait_prefetch_result(request_id, timeout)   # bool, does not consume
 ```
 
 - `submit_prefetch_request` enqueues the request and signals the background
-  thread via an eventfd. With `skip_l2`, or no attached adapter, the request
-  is served from L1 on the calling thread instead.
+  thread via an eventfd. When the spec allows no L2 adapter, or none is
+  attached, the request is served from L1 on the calling thread instead.
 - `query_prefetch_result` returns `None` while in progress, then the result
   exactly once (pop semantics): one hit bitmap per key group, split into the
   cells L1 already held and the cells loaded from L2.
@@ -359,14 +375,17 @@ Policies are selected by name via `--l2-prefetch-policy` (default: `"default"`).
 New policies self-register with `register_prefetch_policy(name, cls)` at import
 time and are auto-discovered by `storage_controllers/__init__.py`.
 
-### Max In-Flight Limiting
+### In-Flight Watermark Admission
 
-The controller limits concurrent prefetch requests to `max_in_flight` (default: 8).
-Requests beyond this limit are queued in `_pending_queue` and dequeued as
-in-flight requests complete.
-
-Note: This is a simple count-based limit. A future improvement would use a
-dynamic admission controller based on L1 memory usage of in-flight requests.
+The controller admits a queued prefetch request when, in every L1 manager that
+receives L2 loads, (1) the staging bytes plus the worst-case load bytes of
+requests still in the lookup phase stay below `inflight_watermark` (default:
+0.5, `--l2-prefetch-inflight-watermark`) of the L1 capacity, and (2) the free
+bytes left after those lookup-phase requests can hold the new request's
+worst-case load. Other requests wait in `_pending_queue` and start as in-flight
+loads complete, so many small requests run concurrently while a few large ones
+cannot overrun L1. See
+[Admission](../storage_controllers/prefetch_controller.md#admission).
 
 ## Integration: StorageManager
 
@@ -431,8 +450,8 @@ the hit cells split into those L1 already held and those loaded from L2.
    cells of the longest prefix every key row can serve are loaded from L2;
    under `"full"` every found cell is.
 
-6. **Listener callbacks run inside L1Manager's lock.** `StoreListener` must be
-   non-blocking (append + eventfd signal only). It must never call L1Manager
+6. **Listener callbacks run inside BaseL1Manager's lock.** `StoreListener` must be
+   non-blocking (append + eventfd signal only). It must never call BaseL1Manager
    methods (deadlock).
 
 7. **L1 write buffers for prefetch are staged per request.** They are

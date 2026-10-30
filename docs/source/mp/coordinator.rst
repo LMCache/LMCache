@@ -317,9 +317,10 @@ With the Kafka transport, start the coordinator with
 instead of serving ``POST /events``; without that, the broker retains the
 records but nothing reads them. Both sides need the optional
 ``lmcache[kafka]`` extra (``pip install 'lmcache[kafka]'``), imported only
-when Kafka is selected. A restarted coordinator resumes from its consumer
-group's committed offsets; coordinator-driven replay of a detected gap is a
-follow-up.
+when Kafka is selected. The ``lmcache/vllm-openai`` and
+``lmcache/standalone`` images include it. A restarted coordinator resumes
+from its consumer group's committed offsets; coordinator-driven replay of a
+detected gap is a follow-up.
 
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a
@@ -647,6 +648,12 @@ Set / read the default limit applied to salts with no explicit quota entry.
 
     {"default_limit_gb": 0.0}
 
+**HTTP status codes:**
+
+- ``200``: applied.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
+
 **Example:**
 
 .. code-block:: bash
@@ -695,6 +702,8 @@ empty salt).
 - ``200``: quota applied.
 - ``400``: invalid limit (negative or non-finite).
 - ``422``: request body fails field-level validation.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
 
 **Example:**
 
@@ -729,6 +738,8 @@ When no quota was registered for the salt, ``status`` is ``"not_found"`` (still
 **HTTP status codes:**
 
 - ``200``: removed, or ``not_found`` if no quota existed.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
 
 **Example:**
 
@@ -1211,6 +1222,8 @@ of L2 keys pinned (chunks times the per-rank fan-out).
 - ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt`` violates
   its invariants.
 - ``422``: request body fails field-level validation.
+- ``503``: the metadata file (``--metadata-path``) could not be written; the
+  change was undone, so retry once the storage is fixed.
 
 **Example:**
 
@@ -1348,6 +1361,8 @@ sequence returns ``status`` ``"noop"``.
 - ``200``: deleted (or a ``noop``).
 - ``404``: no server is registered under ``instance_id``.
 - ``502``: the target server was unreachable or rejected the delete.
+- ``503``: a forced delete removed the keys, but dropping their pins could not
+  be written to the metadata file; the pins are kept.
 
 **Example:**
 

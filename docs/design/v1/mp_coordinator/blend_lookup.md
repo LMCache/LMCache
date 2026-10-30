@@ -125,7 +125,7 @@ peer adapters included — so a matched chunk loads from whichever tier
 holds it: shared L2, or a peer's L1 via RDMA. The peer's
 `p2p_lookup_and_lock` locks sparse key sets (gaps allowed), not only the
 contiguous prefix, and the serving side never recurses into its own L2
-(`skip_l2` holds for sparse lookups too). Because chunks reach the
+(it allows no L2 adapter for sparse lookups too). Because chunks reach the
 directory on their store events regardless of L2 offload, chunks resident
 only in a storer's L1 are matchable fleet-wide.
 

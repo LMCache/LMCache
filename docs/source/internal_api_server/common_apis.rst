@@ -79,7 +79,7 @@ Get or set the log level for Python loggers. Behavior depends on query parameter
 
     === Loggers and Levels ===
     lmcache.v1.cache_engine: WARNING
-    lmcache.v1.storage_backend: INFO
+    lmcache.inprocess.v1.storage_backend: INFO
 
 **Example Response** (get):
 

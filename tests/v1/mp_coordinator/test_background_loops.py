@@ -91,3 +91,13 @@ async def test_the_monitor_adds_up_time_the_loop_was_blocked():
     task.cancel()
 
     assert monitor.stats().blocked_seconds >= 0.2
+
+
+@pytest.mark.asyncio
+async def test_the_monitor_counts_nothing_on_an_idle_loop():
+    monitor = EventLoopMonitor()
+    task = asyncio.create_task(monitor.run())
+    await asyncio.sleep(1.2)  # two wake-ups with nothing holding the loop
+    task.cancel()
+
+    assert monitor.stats().blocked_seconds == 0.0

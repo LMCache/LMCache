@@ -9,7 +9,7 @@ on:
     paths:
       - "csrc/storage_backends/aerospike/**"
       - "lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py"
-      - "lmcache/v1/storage_backend/native_clients/aerospike_client.py"
+      - "lmcache/inprocess/v1/storage_backend/native_clients/aerospike_client.py"
       - "setup.py"
       - "tests/aerospike_ce.conf.template"
       - "tests/v1/distributed/test_aerospike_*"
@@ -21,7 +21,7 @@ on:
     paths:
       - "csrc/storage_backends/aerospike/**"
       - "lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py"
-      - "lmcache/v1/storage_backend/native_clients/aerospike_client.py"
+      - "lmcache/inprocess/v1/storage_backend/native_clients/aerospike_client.py"
       - "setup.py"
       - "tests/aerospike_ce.conf.template"
       - "tests/v1/distributed/test_aerospike_*"
@@ -39,7 +39,7 @@ env:
 jobs:
   aerospike-native-l2:
     name: Aerospike native L2
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

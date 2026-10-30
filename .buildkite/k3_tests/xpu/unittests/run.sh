@@ -67,6 +67,7 @@ allowlist = {
   "tests/cli/**/test_*.py",
   "tests/disagg/test_*.py",
   "tests/v1/**/test_*.py",
+  "tests/inprocess/**/test_*.py",
 }
 selected: set[str] = set()
 
@@ -88,7 +89,7 @@ fi
 log "discovered ${#XPU_TEST_FILES[@]} XPU-related test files"
 printf '  %s\n' "${XPU_TEST_FILES[@]}"
 
-PYTEST_ARGS=(-q --maxfail=1 -m "not cuda and not musa and not sglang")
+PYTEST_ARGS=(-q --maxfail=1 -m "not cuda and not musa")
 if [ -n "${XPU_WHEEL_ARTIFACT_ID:-}" ]; then
   PYTEST_ARGS+=(--import-mode=importlib)
 fi

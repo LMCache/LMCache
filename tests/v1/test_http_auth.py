@@ -79,6 +79,55 @@ def test_each_configured_api_key_is_accepted(api_key: str) -> None:
     assert response.status_code == 200
 
 
+@pytest.mark.parametrize("api_key", ["current-key", "next-key"])
+@pytest.mark.parametrize("header", ["X-LMCache-API-Key", "x-lmcache-api-key"])
+def test_dedicated_header_accepts_each_configured_key(
+    api_key: str, header: str
+) -> None:
+    """Proxy-compatible headers use the same accepted keys as Bearer auth."""
+    auth_config = HTTPAuthenticationConfig(["current-key", "next-key"])
+    with TestClient(_make_app(auth_config)) as client:
+        response = client.get("/status", headers={header: api_key})
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("api_key", ["", "wrong", "Bearer secret", "wrong-é"])
+def test_dedicated_header_rejects_invalid_keys(api_key: str) -> None:
+    """The dedicated header contains the raw key, not a Bearer value."""
+    with TestClient(_make_app(HTTPAuthenticationConfig(["secret"]))) as client:
+        response = client.get(
+            "/status", headers={"X-LMCache-API-Key": api_key.encode("utf-8")}
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid or missing API key"}
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+@pytest.mark.parametrize(
+    ("authorization", "api_key", "expected_status"),
+    [
+        ("Bearer wrong", "secret", 200),
+        ("Basic cluster-credential", "secret", 200),
+        ("Bearer secret", "wrong", 200),
+        ("Bearer secret", "secret", 200),
+        ("Bearer wrong", "wrong", 401),
+    ],
+)
+def test_both_headers_accept_either_valid_credential(
+    authorization: str, api_key: str, expected_status: int
+) -> None:
+    """An unrelated proxy authorization value does not mask a valid API key."""
+    with TestClient(_make_app(HTTPAuthenticationConfig(["secret"]))) as client:
+        response = client.get(
+            "/status",
+            headers={"Authorization": authorization, "X-LMCache-API-Key": api_key},
+        )
+
+    assert response.status_code == expected_status
+
+
 def test_key_file_contents_are_loaded_and_hidden(tmp_path) -> None:
     """Key files produce usable config without exposing secret material."""
     key_file = tmp_path / "api-key"
@@ -97,7 +146,7 @@ def test_invalid_key_file_is_rejected(tmp_path, contents: str) -> None:
     key_file = tmp_path / "api-key"
     key_file.write_text(contents, encoding="utf-8")
 
-    with pytest.raises(ValueError, match="HTTP API key file"):
+    with pytest.raises(ValueError, match="API key file"):
         HTTPAuthenticationConfig.from_key_files([key_file])
 
 

@@ -39,7 +39,7 @@ from lmcache.v1.distributed.serde.turboquant import (
     TurboQuantSerdeConfig,
     TurboQuantSerializer,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import current_device_spec
 
@@ -113,6 +113,67 @@ def test_turboquant_config_sizes_head_dim_128(
     assert cfg.value_packed_size == value_packed_size
     assert cfg.slot_size == slot_size
     assert cfg.slot_size_aligned == slot_size_aligned
+
+
+def test_bf16_k8v4_store_compiles_on_ampere() -> None:
+    """BF16 keys must compile through the Ampere FP8 conversion path."""
+    triton = pytest.importorskip("triton")
+    pytest.importorskip("triton.backends.nvidia.compiler")
+
+    # Third Party
+    from triton.backends.compiler import GPUTarget
+    from triton.compiler import ASTSource
+
+    # First Party
+    from lmcache.v1.distributed.serde.turboquant import TurboQuantSerdeConfig
+    from lmcache.v1.distributed.serde.turboquant.store_kernel import _tq_fused_store_fp8
+
+    config = TurboQuantSerdeConfig(
+        preset="turboquant_k8v4",
+        head_dim=64,
+        block_size=16,
+    )
+    num_heads = 1
+    slot_bytes = config.slot_size_aligned
+    value_bytes = (config.head_dim * config.value_quant_bits + 7) // 8
+
+    kernel_args = {
+        "stride_cache_head": slot_bytes,
+        "stride_cache_pos": num_heads * slot_bytes,
+        "stride_cache_block": config.block_size * num_heads * slot_bytes,
+        "D": config.head_dim,
+        "H": num_heads,
+        "BLOCK_SIZE": config.block_size,
+        "BLOCK_D": triton.next_power_of_2(config.head_dim),
+        "KPS": config.key_packed_size,
+        "VQB": config.value_quant_bits,
+        "VAL_DATA_BYTES": value_bytes,
+        "BLOCK_VAL": triton.next_power_of_2(value_bytes),
+        "BLOCK_GRP": triton.next_power_of_2(config.head_dim // 8),
+        "FP8_E4B15": True,
+    }
+
+    pointer_types = {
+        "Key_ptr": "*bf16",
+        "Value_ptr": "*bf16",
+        "KV_cache_ptr": "*u8",
+        "Slot_mapping_ptr": "*i32",
+    }
+    source = ASTSource(
+        fn=_tq_fused_store_fp8,
+        signature={
+            **pointer_types,
+            **dict.fromkeys(kernel_args, "constexpr"),
+        },
+        constexprs=kernel_args,
+    )
+
+    # Compile for A100 regardless of which GPU is installed.
+    triton.compile(
+        source,
+        target=GPUTarget("cuda", 80, 32),
+        options={"num_warps": 4, "num_stages": 1},
+    )
 
 
 def test_turboquant_config_rejects_invalid_preset() -> None:
@@ -398,7 +459,7 @@ def test_turboquant_storage_manager_roundtrip(
             obj.tensor.copy_(data)
             original_by_key[key] = data.detach().clone()
 
-        sm.finish_write(list(ret.keys()))
+        sm.finish_write(list(ret), l1_owners_of(ret))
 
         ok = _wait_for_mock_l2_store(
             sm,
@@ -628,7 +689,7 @@ def test_turboquant_fs_storage_manager_roundtrip(
             obj.tensor.copy_(data)
             original_by_key[key] = data.detach().clone()
 
-        sm.finish_write(list(ret.keys()))
+        sm.finish_write(list(ret), l1_owners_of(ret))
 
         ok = _wait_for_fs_l2_store(
             sm,
