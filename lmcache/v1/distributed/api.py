@@ -159,6 +159,9 @@ class MemoryTags:
 class _FrozenTags(dict[str, str]):
     """An immutable dict snapshot that msgspec can serialize."""
 
+    def __hash__(self) -> int:  # type: ignore[override]
+        return hash(tuple(self.items()))
+
     def _immutable(self, *args: object, **kwargs: object) -> NoReturn:
         raise TypeError("identity tags are immutable")
 
@@ -182,7 +185,7 @@ def normalize_tags(tags: Mapping[str, str]) -> Mapping[str, str]:
 
 @dataclass(frozen=True)
 class ObjectKeyIdentity:
-    """Complete matching identity of a stored object."""
+    """Matching fields shared by local objects and internal wire messages."""
 
     chunk_hash: bytes
     kv_rank: int
@@ -201,18 +204,6 @@ class ObjectKeyIdentity:
         if len(self.cache_salt) > 128:
             raise ValueError("cache_salt exceeds max length 128")
         object.__setattr__(self, "tags", normalize_tags(self.tags))
-
-    def __hash__(self) -> int:
-        return hash(
-            (
-                self.chunk_hash,
-                self.kv_rank,
-                self.object_group_id,
-                self.model_name,
-                self.cache_salt,
-                tuple(self.tags.items()),
-            )
-        )
 
 
 @dataclass(frozen=True, init=False)
@@ -337,7 +328,7 @@ class ObjectKey:
         return self.identity.object_group_id
 
     def to_encoded_object_key(self) -> "EncodedObjectKey":
-        """Return the JSON-safe :class:`EncodedObjectKey` identity projection."""
+        """Return the JSON-safe :class:`EncodedObjectKey` projection."""
         return EncodedObjectKey(
             chunk_hash_hex=self.chunk_hash.hex(),
             model_name=self.model_name,
@@ -425,32 +416,28 @@ class ObjectKey:
 
 @dataclass(frozen=True)
 class EncodedObjectKey:
-    """JSON-safe object identity for control-plane addressing."""
+    """JSON-safe wire form of :class:`ObjectKey` — ``chunk_hash`` is
+    hex-encoded; other fields are preserved verbatim."""
 
     chunk_hash_hex: str
+    """Hex-encoded ``ObjectKey.chunk_hash``."""
+
     model_name: str
     kv_rank: int
+
     object_group_id: int = 0
+    """Defaults to ``0`` so pre-``object_group_id`` wire payloads still
+    deserialize."""
+
     cache_salt: str = ""
     tags: Mapping[str, str] = field(default_factory=dict)
+    """Canonical matching tags that participate in object identity."""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tags", normalize_tags(self.tags))
 
-    def __hash__(self) -> int:
-        return hash(
-            (
-                self.chunk_hash_hex,
-                self.model_name,
-                self.kv_rank,
-                self.object_group_id,
-                self.cache_salt,
-                tuple(self.tags.items()),
-            )
-        )
-
     def to_object_key(self) -> ObjectKey:
-        """Recover an identity-equivalent :class:`ObjectKey`.
+        """Recover the corresponding :class:`ObjectKey`.
 
         Raises:
             ValueError: ``chunk_hash_hex`` is not valid hex, or one of
