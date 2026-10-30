@@ -42,7 +42,20 @@ _LEGACY_INT_KEYS = {"global_segment_size", "local_buffer_size"}
 
 # Keys whose values may contain credentials and must be
 # redacted when the setup dict is logged.
-_SENSITIVE_SETUP_KEYS = {"metadata_server", "master_server_address"}
+_SENSITIVE_SETUP_KEYS = {
+    "metadata_server",
+    "master_server_address",
+    "master_server_addr",
+}
+
+# LMCache's (legacy) setup key -> the name the dict-based ``store.setup()``
+# reads. The dict API silently ignores unknown keys, so without the rename a
+# configured master address and device list are dropped: the client then looks
+# for a master on localhost and auto-discovers its devices.
+_DICT_API_KEY_RENAMES = {
+    "device_name": "rdma_devices",
+    "master_server_address": "master_server_addr",
+}
 
 
 def _sanitize_setup_config(
@@ -64,6 +77,21 @@ def _sanitize_setup_config(
         else:
             sanitized[k] = v
     return sanitized
+
+
+def _to_dict_api_keys(setup_dict: Dict[str, str]) -> Dict[str, str]:
+    """Rename LMCache's legacy setup keys to the dict-based ``setup()`` names.
+
+    A key already given under its dict-API name (e.g. via
+    ``mooncake_master_server_addr``) wins over the legacy one.
+    """
+    renamed = dict(setup_dict)
+    for old, new in _DICT_API_KEY_RENAMES.items():
+        if old in renamed:
+            value = renamed.pop(old)
+            if new not in renamed and value != "":
+                renamed[new] = value
+    return renamed
 
 
 def setup_mooncake_store(
@@ -97,7 +125,7 @@ def setup_mooncake_store(
     setup_dict = config.setup_config
     try:
         # New API (Mooncake PR #1445): setup(config: dict)
-        store.setup(setup_dict)
+        store.setup(_to_dict_api_keys(setup_dict))
         logger.info("Using dict-based setup API (new)")
     except TypeError:
         # Legacy API: setup with positional arguments.
@@ -109,6 +137,9 @@ def setup_mooncake_store(
         args: List[Any] = []
         for k in _LEGACY_SETUP_KEYS:
             v: Any = setup_dict.get(k, "")
+            if v == "" and k in _DICT_API_KEY_RENAMES:
+                # Also accept the dict-API spelling (e.g. mooncake_rdma_devices).
+                v = setup_dict.get(_DICT_API_KEY_RENAMES[k], "")
             if k in _LEGACY_INT_KEYS:
                 try:
                     v = int(v) if v != "" else 0
