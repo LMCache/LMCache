@@ -48,9 +48,8 @@ Dynamic Connector:
 
 Example usage of dynamic connector from LMCache: 
 
-The canonical dynamic connector path is under ``lmcache.inprocess``. The old
-``lmcache.integration.vllm.lmcache_connector_v1`` path remains available for
-compatibility with existing configurations.
+The dynamic connector is owned by InProcess and is available from the
+``lmcache.inprocess`` path.
 
 **Pythonic Transfer Config:** 
 

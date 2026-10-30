@@ -5,7 +5,6 @@
 ```
 lmcache/integration/tensorrt_llm/
 ├── __init__.py             # Optional-import surface
-├── tensorrt_adapter.py     # Compatibility exports for the lmcache preset
 └── tensorrt_mp_adapter.py  # Multi-process — engine in standalone server
 
 lmcache/inprocess/integration/tensorrt_llm/
@@ -16,10 +15,8 @@ lmcache/inprocess/integration/tensorrt_llm/
 ```
 
 Both adapters subclass TRT-LLM's `KvCacheConnectorScheduler` and
-`KvCacheConnectorWorker`. The TRT-LLM imports are *guarded at module
-level only via the package's `__init__`*; nothing in core LMCache
-imports the adapter modules. This keeps `pip install lmcache` unaffected
-when TRT-LLM is absent.
+`KvCacheConnectorWorker`. Nothing in core LMCache imports the adapter modules.
+This keeps `pip install lmcache` unaffected when TRT-LLM is absent.
 
 The TRT-LLM connector preset registry (PR
 [NVIDIA/TensorRT-LLM#12626](https://github.com/NVIDIA/TensorRT-LLM/pull/12626))
@@ -30,10 +27,10 @@ maps:
 | `lmcache` | `lmcache.integration.tensorrt_llm.tensorrt_adapter` | `LMCacheKvConnectorScheduler` | `LMCacheKvConnectorWorker` |
 | `lmcache-mp` | `lmcache.integration.tensorrt_llm.tensorrt_mp_adapter` | `LMCacheMPKvConnectorScheduler` | `LMCacheMPKvConnectorWorker` |
 
-The `lmcache` preset still uses the old module path in TensorRT-LLM's registry.
-That module re-exports the scheduler and worker from the canonical
-`lmcache.inprocess.integration.tensorrt_llm.tensorrt_adapter` module until
-upstream migrates its registry.
+The `lmcache` preset still uses the old module path in TensorRT-LLM's registry,
+so it requires an upstream registry update before it can be used with this
+package layout. Until then, configure the canonical
+`lmcache.inprocess.integration.tensorrt_llm.tensorrt_adapter` module explicitly.
 
 ## Lifecycle
 

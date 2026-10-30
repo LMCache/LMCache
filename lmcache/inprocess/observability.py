@@ -575,6 +575,21 @@ class LMCStatsMonitor:
         self.active_memory_objs_count = active_memory_objs_count
 
     @thread_safe
+    def update_allocator_metrics(
+        self,
+        local_cache_usage_bytes: int,
+        active_memory_objs_count: int,
+    ) -> None:
+        """Update the allocator gauges from one accounting snapshot.
+
+        Args:
+            local_cache_usage_bytes: Bytes currently allocated from local cache.
+            active_memory_objs_count: Number of active local memory objects.
+        """
+        self.local_cache_usage_bytes = local_cache_usage_bytes
+        self.active_memory_objs_count = active_memory_objs_count
+
+    @thread_safe
     def update_pinned_memory_objs_count(self, delta: int):
         self.pinned_memory_objs_count += delta
 

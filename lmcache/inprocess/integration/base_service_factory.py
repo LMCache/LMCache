@@ -21,6 +21,7 @@ from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.inprocess.observability import PrometheusLogger
     from lmcache.inprocess.v1.cache_engine import LMCacheEngine
     from lmcache.inprocess.v1.internal_api_server.api_server import InternalAPIServer
     from lmcache.inprocess.v1.lookup_client.abstract_client import LookupClientInterface
@@ -33,7 +34,6 @@ if TYPE_CHECKING:
     from lmcache.inprocess.v1.manager import LMCacheManager
     from lmcache.inprocess.v1.metadata import LMCacheMetadata
     from lmcache.inprocess.v1.offload_server.zmq_server import ZMQOffloadServer
-    from lmcache.observability import PrometheusLogger
     from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
 logger = init_logger(__name__)
@@ -107,7 +107,7 @@ class BaseServiceFactory(ABC):
         Shared implementation used by subclass maybe_create_health_monitor.
         """
         # First Party
-        from lmcache.observability import PrometheusLogger
+        from lmcache.inprocess.observability import PrometheusLogger
         from lmcache.v1.periodic_thread import (
             PeriodicThreadRegistry,
             ThreadLevel,

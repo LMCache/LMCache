@@ -3,14 +3,13 @@
 
 Two modes are supported:
 
-**In-process mode** (``lmcache``)
+**In-process mode**
     The LMCache engine runs inside the TRT-LLM process. Simple to set
     up; no extra services required.
 
-    .. code-block:: yaml
-
-       kv_connector_config:
-         connector: lmcache
+    Configure the canonical InProcess module explicitly as shown below. The
+    TensorRT-LLM ``lmcache`` preset still points to the removed legacy module
+    path until its registry is updated.
 
 **Multi-process mode** (``lmcache-mp``)
     The LMCache engine runs as a standalone request server, providing
@@ -44,24 +43,9 @@ Both modes can also be configured explicitly instead of via presets::
       connector_worker_class: LMCacheMPKvConnectorWorker
 """
 
-# tensorrt_llm is an optional dependency. Guard the import so importing
-# ``lmcache.integration.tensorrt_llm`` does not crash when the package
-# is absent (e.g. core LMCache unit tests, doc builds).
-try:
-    # First Party
-    from lmcache.inprocess.integration.tensorrt_llm.tensorrt_adapter import (
-        LMCacheKvConnectorScheduler,
-        LMCacheKvConnectorWorker,
-        destroy_engine,
-    )
-
-    __all__ = [
-        "LMCacheKvConnectorScheduler",
-        "LMCacheKvConnectorWorker",
-        "destroy_engine",
-    ]
-except ImportError:
-    __all__ = []
+# tensorrt_llm is an optional dependency. Guard the MP import so importing
+# ``lmcache.integration.tensorrt_llm`` does not crash when the package is absent.
+__all__ = []
 
 try:
     # First Party

@@ -60,6 +60,11 @@ class TestCommonApiAggregation:
         paths = set(app.openapi()["paths"])
         assert "/config" in paths
 
+    def test_inprocess_metrics_reset_endpoint_is_not_exposed_by_mp(self):
+        """The MP API must not depend on an InProcess-only reset operation."""
+        app = _app_with_all_apis()
+        assert "/metrics/reset" not in app.openapi()["paths"]
+
 
 @dataclass
 class _FakeAdapterConfig:

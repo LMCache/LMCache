@@ -12,6 +12,7 @@ import zmq
 import zmq.asyncio
 
 # First Party
+from lmcache.inprocess.observability import LMCStatsMonitor
 from lmcache.inprocess.v1.cache_controller.message import (
     BatchedP2PLookupMsg,
     BatchedP2PLookupRetMsg,
@@ -35,7 +36,6 @@ from lmcache.inprocess.v1.transfer_channel.transfer_utils import (
     P2PInitSideRetMsg,
 )
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
     PagedCpuGpuMemoryAllocator,
