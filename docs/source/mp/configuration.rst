@@ -350,6 +350,11 @@ is set, which additionally requires a coordinator URL via
    * - ``--p2p-transfer-engine``
      - ``nixl``
      - Transfer-channel implementation to use.
+   * - ``--p2p-load-mode``
+     - ``l1``
+     - ``l1`` copies a peer's objects into the DRAM L1 at lookup time; ``gdr``
+       borrows them and reads each straight into GPU memory at retrieve time
+       (requires ``nixl``). See :doc:`p2p`.
 
 L1 Memory Manager
 ------------------

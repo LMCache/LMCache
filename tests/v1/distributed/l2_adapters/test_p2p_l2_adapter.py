@@ -200,7 +200,7 @@ def test_missing_periodic_notifier_unwinds_before_the_region_hook() -> None:
 
 
 class _RecordingPeerAdapter(PeerL2AdapterBase):
-    """The smallest lender-shaped subclass: records the hook calls."""
+    """The smallest borrower-shaped subclass: records the hook calls."""
 
     def __init__(self, config: P2PL2AdapterConfig, log: list[str]) -> None:
         self.log = log
@@ -223,7 +223,7 @@ class _RecordingPeerAdapter(PeerL2AdapterBase):
     def get_memory_tags(self) -> MemoryTags:
         return MemoryTags(MemorySegment.DRAM, MemoryResidency.REMOTE)
 
-    def _process_lookup_result(self, keys, addresses) -> Bitmap:
+    def _process_lookup_result(self, task_id, keys, addresses, started_at) -> Bitmap:
         self.log.append(f"lookup:{len(keys)}")
         bitmap = Bitmap(len(keys))
         for i, address in enumerate(addresses):

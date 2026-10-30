@@ -31,8 +31,11 @@ the full system context.
 ## Class layout
 
 ```
-PeerL2AdapterBase   lookup/unlock RPCs, event fds, no-op stores, close
-└── P2PL2Adapter    import the peer region; RDMA load over the transfer channel
+PeerL2AdapterBase             lookup/unlock RPCs, event fds, no-op stores, close
+├── P2PL2Adapter              import the peer region; RDMA load over the transfer channel
+└── BorrowingPeerL2AdapterBase  borrow the peer's bytes: per-key reservations under the owner's
+    │                         lock, a load that binds the shadow L1's placeholders, batched unlocks
+    └── GdrPeerL2Adapter      remote handles (see [gdr_peer_l2_adapter.md](gdr_peer_l2_adapter.md))
 ```
 
 The base holds the RPC control plane so another way of reading a peer can
@@ -54,7 +57,24 @@ means, while the polling, timeout and failure handling around it stay shared:
 | Strategy | What `_process_lookup_result` does with a hit |
 |---|---|
 | Copy (`P2PL2Adapter`) | records the address; a later load copies the bytes into local L1 |
-| Lend (a follow-up subclass, e.g. GPU-direct or CXL in place) | keeps the reservation and hands L1 a borrowed view; no copy, no local capacity |
+| Borrow (`BorrowingPeerL2AdapterBase`, e.g. GPU-direct or CXL in place) | keeps the reservation; the load binds it into the shadow L1's placeholder; no copy, no local capacity |
+
+`BorrowingPeerL2AdapterBase` goes through the prefetch controller's ordinary
+load pipeline: the controller stages a `BorrowedMemoryObj` placeholder per
+planned key in the shadow L1 and submits a load with them; `submit_load_task`
+binds each placeholder to the key's reservation (its lease) through the
+`_bind_borrowed_object` hook, and `_accept_address` says whether a hit is
+usable at all. `_process_lookup_result(task_id, keys, addresses, started_at)`
+receives the time just before the lookup RPC was sent, a lower bound on when
+the owner's read locks started; `submit_unlock(keys, wait=True)` waits for the
+owner's acknowledgment, which borrowers use so peer removal drains their
+unlocks. A reservation bound into an object belongs to the object and returns
+at its release; `submit_unlock` returns only the others. `close` refuses while
+an object holds a live lease and drains one the owner's TTL has ended
+(`get_local_borrow_count` reports the live ones). The adapter wants a
+`SHADOW` L1 first: the
+configured shadow L1 of the segment it borrows. See
+`../l1_manager/l1-manager-types.md`, "Shadow L1".
 
 ## Lifecycle
 
@@ -156,7 +176,8 @@ touches and the capacity topology, but still counts as the owner of any
 device range it maps. Calling `delete_l2_adapter` again skips the drain and
 retries the close.
 
-The P2P controller logs a failed removal and does not retry;
+The P2P controller retries a failed removal on every later cycle (a
+borrower refuses to close while local readers hold its objects);
 `StorageManager.close()` closes every registered adapter again at shutdown;
 if any of them fails, it leaves the L1 managers open, because that adapter
 may still access L1 buffers.

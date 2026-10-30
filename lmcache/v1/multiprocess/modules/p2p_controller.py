@@ -25,10 +25,16 @@ from lmcache.v1.distributed.api import (
     PrefetchHandle,
     PrefetchTaskSpec,
 )
+from lmcache.v1.distributed.l2_adapters.gdr_peer_l2_adapter import (
+    GdrPeerL2AdapterConfig,
+)
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel import (
+    DeviceRegionTarget,
     delete_transfer_channel_context,
+    get_transfer_channel_context,
     initialize_transfer_channel_context,
+    set_device_region_target,
 )
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -49,6 +55,8 @@ from lmcache.v1.periodic_thread import (
 
 logger = init_logger(__name__)
 
+# Peers read the one local DRAM L1: the L1 registered with the transfer channel.
+_SERVED_L1_TAGS = MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)
 # Sentinel address for keys that were not found (or fell past the L1 prefix).
 _INVALID_ADDRESS = TransferChannelAddress(offset=-1, size=0)
 
@@ -211,6 +219,8 @@ class P2PController(DiscoverableModule):
         self._orch_lock = threading.Lock()
         self._state = _P2PState.UNREGISTERED
         self._adapters: dict[str, _PeerAdapter] = {}
+        # Adapter id -> peer id of removals the storage manager refused so far.
+        self._pending_removals: dict[int, str] = {}
 
         self._instances_url = ""
         self._http_client: httpx.Client | None = None
@@ -229,13 +239,15 @@ class P2PController(DiscoverableModule):
 
         Raises:
             ValueError: There is not exactly one local DRAM L1, or it exposes
-                no registerable memory buffer.
+                no registerable memory buffer; or GPU-direct borrowing is
+                requested with a transfer engine that cannot read into device
+                memory.
         """
         # Peers read the L1 registered with the transfer channel: the one
         # local DRAM L1.
         try:
             l1_manager = self._ctx.storage_manager.get_l1_manager_by_tags(
-                MemoryTags(segment=MemorySegment.DRAM, residency=MemoryResidency.LOCAL)
+                _SERVED_L1_TAGS
             )
         except ValueError as e:
             raise ValueError(f"P2P requires exactly one local DRAM L1: {e}") from e
@@ -251,6 +263,19 @@ class P2PController(DiscoverableModule):
             listen_url=self._p2p_config.effective_listen_url,
             advertise_url=self._p2p_config.advertise_url,
         )
+        if self._p2p_config.load_mode == "gdr":
+            context = get_transfer_channel_context()
+            if not context.supports_device_regions():
+                delete_transfer_channel_context()
+                raise ValueError(
+                    "--p2p-load-mode gdr reads into GPU memory, which "
+                    f"--p2p-transfer-engine {self._p2p_config.transfer_engine} "
+                    "cannot do"
+                )
+            # GPU cache contexts register their staging buffers with it.
+            set_device_region_target(
+                DeviceRegionTarget(context, l1_memory_desc.align_bytes)
+            )
         self._instances_url = coordinator_config.url.rstrip("/") + "/instances"
         timeout = max(1.0, coordinator_config.heartbeat_interval)
         self._http_client = httpx.Client(timeout=timeout)
@@ -293,12 +318,19 @@ class P2PController(DiscoverableModule):
 
         for peer_id in list(self._adapters.keys()):
             self._remove_adapter(peer_id)
+        self._retry_pending_removals()
+        if self._pending_removals:
+            logger.warning(
+                "%d P2P adapter(s) left for the storage manager to close",
+                len(self._pending_removals),
+            )
 
         if self._http_client is not None:
             self._http_client.close()
             self._http_client = None
 
         if self._p2p_config.enabled:
+            set_device_region_target(None)
             delete_transfer_channel_context()
 
     # -----------------------------------------------------------------
@@ -493,6 +525,10 @@ class P2PController(DiscoverableModule):
 
         good_keys, good_objs = self._ctx.storage_manager.unsafe_read(found_keys)
         obj_by_key = dict(zip(good_keys, good_objs, strict=True))
+        # A borrowing peer bounds its lease by the served L1's read-lock TTL.
+        read_ttl = self._ctx.storage_manager.get_l1_manager_by_tags(
+            _SERVED_L1_TAGS
+        ).config.read_ttl_seconds
 
         positions: dict[ObjectKey, list[int]] = {}
         for i, key in enumerate(job.keys):
@@ -506,6 +542,7 @@ class P2PController(DiscoverableModule):
             address = TransferChannelAddress(
                 offset=obj.shm_offset,
                 size=obj.shm_byte_length,
+                read_ttl_seconds=read_ttl,
             )
             for i in positions.get(key, ()):
                 addresses[i] = address
@@ -628,6 +665,7 @@ class P2PController(DiscoverableModule):
         """
         added = 0
         removed = 0
+        self._retry_pending_removals()
         for peer_id, inst in upstream.items():
             current = self._adapters.get(peer_id)
             if current is None:
@@ -677,7 +715,12 @@ class P2PController(DiscoverableModule):
         Returns:
             ``True`` if the adapter was created and tracked.
         """
-        config = P2PL2AdapterConfig(
+        config_type = (
+            GdrPeerL2AdapterConfig
+            if self._p2p_config.load_mode == "gdr"
+            else P2PL2AdapterConfig
+        )
+        config = config_type(
             peer_mq_server_url=(f"{self._request_scheme}://{inst.ip}:{inst.mq_port}"),
             peer_transfer_channel_server_url=inst.p2p_advertised_url,
             lookup_timeout_s=self._p2p_config.lookup_timeout,
@@ -706,6 +749,10 @@ class P2PController(DiscoverableModule):
     def _remove_adapter(self, peer_id: str) -> None:
         """Drain and remove the peer L2 adapter for ``peer_id``.
 
+        A removal the storage manager could not complete (a borrowing adapter
+        refuses to close while local readers hold its objects) is retried on
+        every later cycle until it succeeds.
+
         Args:
             peer_id: Instance id of the peer whose adapter to remove.
         """
@@ -713,12 +760,41 @@ class P2PController(DiscoverableModule):
             adapter = self._adapters.pop(peer_id, None)
         if adapter is None:
             return
+        if not self._delete_adapter(adapter.adapter_id, peer_id, retry=False):
+            self._pending_removals[adapter.adapter_id] = peer_id
+
+    def _retry_pending_removals(self) -> None:
+        """Retry every removal a previous cycle could not complete."""
+        for adapter_id, peer_id in list(self._pending_removals.items()):
+            if self._delete_adapter(adapter_id, peer_id, retry=True):
+                del self._pending_removals[adapter_id]
+
+    def _delete_adapter(self, adapter_id: int, peer_id: str, retry: bool) -> bool:
+        """Ask the storage manager to delete one peer adapter.
+
+        Returns:
+            Whether the adapter is gone. A first failure is logged with its
+            traceback, a failed retry as a warning.
+        """
         try:
-            self._ctx.storage_manager.delete_l2_adapter(adapter.adapter_id)
-        except Exception:
-            logger.exception("Failed to remove P2P adapter for peer %s", peer_id)
-            return
-        logger.debug("Removed P2P adapter for peer %s", peer_id)
+            self._ctx.storage_manager.delete_l2_adapter(adapter_id)
+        except Exception as exc:
+            if retry:
+                logger.warning(
+                    "P2P adapter %d for peer %s still cannot be removed: %s",
+                    adapter_id,
+                    peer_id,
+                    exc,
+                )
+            else:
+                logger.exception(
+                    "Failed to remove P2P adapter %d for peer %s; will retry",
+                    adapter_id,
+                    peer_id,
+                )
+            return False
+        logger.debug("Removed P2P adapter %d for peer %s", adapter_id, peer_id)
+        return True
 
     def _active_job_count(self) -> int:
         """Return the number of active P2P lookup jobs (thread-safe)."""

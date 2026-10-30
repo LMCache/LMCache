@@ -19,10 +19,12 @@ from lmcache.usage_telemetry.l1_usage import InitializeL1Usage
 from lmcache.usage_telemetry.l2_usage import InitializeL2ConnectorUsage
 from lmcache.usage_telemetry.mp import InitializeMPUsageContext
 from lmcache.usage_telemetry.mp_continuous import InitializeMPContinuousUsage
+from lmcache.v1.distributed.api import MemorySegment
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
     parse_args_to_config,
+    with_shadow_l1,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_coordinator.registrar import bind_coordinator_chunk_size
@@ -392,6 +394,12 @@ def _start_cache_server(
                     exc_info=True,
                 )
                 mem_cfg.shm_name = ""
+
+    if mp_config.p2p_config.load_mode == "gdr":
+        # Borrowed peer chunks are indexed by a DRAM shadow L1.
+        storage_manager_config = with_shadow_l1(
+            storage_manager_config, MemorySegment.DRAM
+        )
 
     # blend engine: full per-chunk SWA KV (blended chunks reuse at arbitrary
     # positions). full_sw_kv widens attention groups only; recurrent groups

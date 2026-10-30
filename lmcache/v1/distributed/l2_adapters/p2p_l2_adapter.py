@@ -18,9 +18,14 @@ its own task-id counter and bookkeeping dicts), so this class needs no locks.
 
 # Standard
 from abc import abstractmethod
+from collections import deque
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any
+from functools import partial
+from typing import Any, cast
+import math
+import queue
+import threading
 import time
 
 # Third Party
@@ -43,6 +48,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
     register_l2_adapter_type,
 )
 from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_factory
+from lmcache.v1.distributed.memory_manager import BorrowedMemoryObj, Lease
 from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_management import MemoryObj
@@ -61,6 +67,7 @@ class _LookupTask:
     keys: list[ObjectKey]
     remote_task_id: int
     deadline: float
+    started_at: float
     failed: bool = False
 
 
@@ -155,7 +162,7 @@ class PeerL2AdapterBase(L2AdapterInterface):
     Subclasses decide how a locked lookup hit becomes readable data
     (:meth:`_process_lookup_result`) and implement the load interface: a
     copying adapter records each hit's address for a later load, while a
-    lending adapter keeps the reservation and hands L1 a borrowed view of
+    borrowing adapter keeps the reservation and hands L1 a borrowed view of
     the peer's bytes instead of copying them.
 
     Constructor contract: the region hook runs inside this constructor,
@@ -263,10 +270,13 @@ class PeerL2AdapterBase(L2AdapterInterface):
 
         if self._closed:
             self._lookup_tasks[task_id] = _LookupTask(
-                keys=keys, remote_task_id=-1, deadline=0.0, failed=True
+                keys=keys, remote_task_id=-1, deadline=0.0, started_at=0.0, failed=True
             )
             return task_id
 
+        # The owner's read-lock TTL starts when it handles the lookup; this
+        # earlier timestamp bounds it from the borrower's side.
+        started_at = time.monotonic()
         future = self._req_client.p2p_lookup_and_lock(keys, group_layout_descs)
         failed = False
         remote_task_id = -1
@@ -282,7 +292,8 @@ class PeerL2AdapterBase(L2AdapterInterface):
         self._lookup_tasks[task_id] = _LookupTask(
             keys=keys,
             remote_task_id=remote_task_id,
-            deadline=time.monotonic() + self._config.lookup_timeout_s,
+            deadline=started_at + self._config.lookup_timeout_s,
+            started_at=started_at,
             failed=failed,
         )
         return task_id
@@ -308,14 +319,28 @@ class PeerL2AdapterBase(L2AdapterInterface):
         if addresses is None:
             return None
 
-        bitmap = self._process_lookup_result(task.keys, addresses)
+        bitmap = self._process_lookup_result(
+            task_id, task.keys, addresses, task.started_at
+        )
         del self._lookup_tasks[task_id]
         return bitmap
 
-    def submit_unlock(self, keys: list[ObjectKey]) -> None:
+    def submit_unlock(self, keys: list[ObjectKey], *, wait: bool = False) -> None:
+        """Release peer reservations through the unlock RPC.
+
+        Args:
+            keys: Object keys to unlock. Empty input is a no-op.
+            wait: Wait for the peer's acknowledgment instead of fire-and-forget.
+
+        Raises:
+            TimeoutError: If ``wait`` is True and no acknowledgment arrives
+                within the lookup RPC timeout.
+        """
         if not keys:
             return
-        self._req_client.p2p_unlock_objects(keys)
+        future = self._req_client.p2p_unlock_objects(keys)
+        if wait:
+            future.result(timeout=_LOOKUP_RPC_TIMEOUT_S)
 
     # --------------------
     # Lifecycle / status
@@ -373,22 +398,375 @@ class PeerL2AdapterBase(L2AdapterInterface):
     @abstractmethod
     def _process_lookup_result(
         self,
+        task_id: L2TaskId,
         keys: list[ObjectKey],
         addresses: list[TransferChannelAddress],
+        started_at: float,
     ) -> Bitmap:
         """Turn a completed lookup's addresses into a hit bitmap.
 
         Called once per completed lookup, before the task is forgotten. This
         is where the read strategy diverges: record the addresses for a copy
-        load, or keep the reservations to lend borrowed views.
+        load, or keep the reservations and hand out borrowed views.
 
         Args:
+            task_id: The local lookup task.
             keys: Keys of the lookup, in request order.
             addresses: The peer's address per key; invalid for a miss.
+            started_at: ``time.monotonic()`` just before the lookup was sent,
+                a lower bound on when the owner's read locks started.
 
         Returns:
             A bitmap with bit ``i`` set when ``keys[i]`` is readable.
         """
+
+
+# Stop trusting a borrowed object this long before the owner's read lock can
+# expire: a GPU read that passed the last validity check must finish before
+# the owner may reuse the bytes. Capped at a tenth of the TTL so short TTLs
+# still leave a usable window.
+_OWNER_TTL_MARGIN_S = 1.0
+
+
+@dataclass(eq=False)
+class _PendingUnlock:
+    """Owner reservations waiting for the unlock worker.
+
+    A lease is one reservation a borrowed object owns until its release; the
+    others are reservations ``submit_unlock`` returns without an object.
+    """
+
+    reservations: dict[ObjectKey, float]
+    is_lease: bool = False
+    ended: bool = False
+
+
+class BorrowingPeerL2AdapterBase(PeerL2AdapterBase):
+    """A peer adapter that borrows the peer's bytes under the owner's read lock.
+
+    A copying peer adapter (:class:`P2PL2Adapter`) moves a looked-up object
+    into this host's L1 and then releases the owner's read lock. A borrower
+    keeps that lock for as long as readers here use the object: the lookup
+    reservation becomes the lease of a
+    :class:`~lmcache.v1.distributed.memory_manager.BorrowedMemoryObj` that
+    the shadow L1 indexes, and the unlock is sent when the last reader frees
+    it. It wants a ``SHADOW`` L1, the configured shadow of the segment it
+    borrows, and maps the peer's memory itself.
+
+    It goes through the prefetch controller's ordinary load pipeline. Every
+    lookup hit adds one reservation for its key, with the owner's address and
+    a local expiry bounded by the owner's TTL. The controller stages a
+    placeholder per planned key in the shadow and submits a load with them;
+    :meth:`submit_load_task` binds each placeholder to one reservation of its
+    key, which the object now owns and returns at its release.
+    :meth:`submit_unlock` returns one reservation per key the caller did not
+    borrow. Every request looks the borrower up; a view already resident in the
+    shadow adopts the newer lease at admission, and the older reservation
+    comes back through the discarded placeholder. Releases only enqueue work;
+    a worker sends the unlock RPC outside L1 locks, batching everything queued
+    since its last RPC so a slow or dead owner costs one timeout per batch,
+    not per object.
+
+    A subclass decides how a placeholder is bound to the bytes
+    (:meth:`_bind_borrowed_object`) and when a lookup hit is usable at all
+    (:meth:`_accept_address`).
+
+    Thread model: lookups, loads and ``submit_unlock`` run on the prefetch
+    thread; a lease ends on whichever thread frees its object, under the L1
+    manager's lock, so ending it only flags the lease and enqueues its unlock.
+    The shadow L1 frees every placeholder it staged, so every lease ends.
+    """
+
+    # How long a read that passed the lease check may still take: a lease is
+    # valid only while that much of the owner's lock remains.
+    _read_window_s: float = 0.0
+
+    def __init__(self, config: PeerL2AdapterConfigBase) -> None:
+        """Set up the lease bookkeeping and the peer control plane.
+
+        The borrowing state is set up before the base constructor runs the
+        region hook, per the :class:`PeerL2AdapterBase` constructor contract.
+
+        Args:
+            config: Peer RPC endpoint and lookup deadline.
+        """
+        self._reservations: dict[
+            ObjectKey, deque[tuple[TransferChannelAddress, float]]
+        ] = {}
+        # Guards _leases and _pending_lookup_unlocks.
+        self._borrow_lock = threading.Lock()
+        # Leases whose unlock the worker has not yet sent.
+        self._leases: set[_PendingUnlock] = set()
+        self._pending_lookup_unlocks = 0
+        self._load_results: dict[L2TaskId, Bitmap] = {}
+        self._next_load_task = 0
+        self._unlocks: queue.SimpleQueue[_PendingUnlock | None] = queue.SimpleQueue()
+        self._unlock_worker = threading.Thread(
+            target=self._run_unlocks, name="peer-unlock", daemon=True
+        )
+        self._unlock_worker.start()
+        try:
+            super().__init__(config)
+        except BaseException:
+            # The base released the RPC resources; stop the worker too.
+            self._unlocks.put(None)
+            self._unlock_worker.join()
+            raise
+
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
+    ) -> L2TaskId:
+        """Submit an owner lookup whose hits this adapter will borrow.
+
+        Args:
+            keys: Object keys to look up, without duplicates.
+            group_layout_descs: Expected layouts indexed by object-group ID.
+
+        Returns:
+            The local lookup task ID.
+
+        Raises:
+            ValueError: If keys contain duplicates, which cannot identify
+                independent reservations within one result dictionary.
+        """
+        if len(set(keys)) != len(keys):
+            raise ValueError("Lookup keys of a borrowing adapter must be unique")
+        return super().submit_lookup_and_lock_task(keys, group_layout_descs)
+
+    def submit_load_task(
+        self, keys: list[ObjectKey], objects: list[MemoryObj]
+    ) -> L2TaskId:
+        """Bind each placeholder to one reservation of its key.
+
+        Args:
+            keys: Planned keys, at most once each.
+            objects: The shadow L1's placeholder per key.
+
+        Returns:
+            The load task id; :meth:`query_load_result` has its result at
+            once. A key with no reservation, a size mismatch or an expired
+            reservation reports a miss and its placeholder stays unbound;
+            the caller discards it and returns the reservation, if any,
+            with :meth:`submit_unlock`. No payload capacity is used.
+
+        Note:
+            Never raises once it has bound an object: the shadow L1 releases
+            every placeholder it staged, so a bound lease always ends.
+        """
+        bitmap = Bitmap(len(keys))
+        for i, (key, obj) in enumerate(zip(keys, objects, strict=True)):
+            held = self._reservations.get(key)
+            if not held:
+                continue
+            address, expires = held[0]
+            if not self._lease_open(expires) or obj.get_size() != address.size:
+                continue
+            borrowed = cast(BorrowedMemoryObj, obj)
+            pending = _PendingUnlock({key: expires}, is_lease=True)
+            lease: Lease = (
+                partial(self._lease_is_valid, pending, expires),
+                partial(self._end_lease, pending),
+            )
+            if not self._bind_borrowed_object(borrowed, address, lease):
+                continue
+            self._pop_reservation(key)
+            with self._borrow_lock:
+                self._leases.add(pending)
+            bitmap.set(i)
+        task_id = self._next_load_task
+        self._next_load_task += 1
+        self._load_results[task_id] = bitmap
+        self._load_efd.notify()
+        return task_id
+
+    def submit_unlock(self, keys: list[ObjectKey], *, wait: bool = False) -> None:
+        """Return one reservation per key to the owner, through the worker.
+
+        Args:
+            keys: Keys whose reservation to return; a key this adapter holds
+                no reservation for (its hit was refused at lookup time, or
+                became a borrowed object) is skipped.
+            wait: Ignored; the worker always waits for the owner.
+        """
+        release: dict[ObjectKey, float] = {}
+        for key in keys:
+            held = self._reservations.get(key)
+            if held:
+                release[key] = self._pop_reservation(key)
+        if release:
+            self._queue_unlock(release)
+
+    def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
+        """Return which keys of a load task were bound, once.
+
+        Args:
+            task_id: The id :meth:`submit_load_task` returned.
+
+        Returns:
+            The bound bitmap over the task's keys; None for an unknown or
+            already consumed task.
+        """
+        return self._load_results.pop(task_id, None)
+
+    def get_local_borrow_count(self) -> int:
+        """Return borrowed objects and pending unlocks that must drain."""
+        with self._borrow_lock:
+            return len(self._leases) + self._pending_lookup_unlocks
+
+    def report_status(self) -> dict[str, Any]:
+        """Return the peer endpoint and the outstanding borrow count."""
+        return {
+            **super().report_status(),
+            "local_borrows": self.get_local_borrow_count(),
+        }
+
+    @abstractmethod
+    def _accept_address(self, address: TransferChannelAddress) -> bool:
+        """Return whether a valid lookup hit can be borrowed by this adapter."""
+
+    @abstractmethod
+    def _bind_borrowed_object(
+        self, obj: BorrowedMemoryObj, address: TransferChannelAddress, lease: Lease
+    ) -> bool:
+        """Bind a placeholder to the bytes at one accepted hit.
+
+        Args:
+            obj: The shadow L1's unbound placeholder for the key.
+            address: The owner's address of the object.
+            lease: The reservation, to pass to ``obj.bind``.
+
+        Returns:
+            True once ``obj`` is bound; False to skip the key, leaving it
+            unbound and its reservation held.
+        """
+
+    def _drain_borrows_for_close(self) -> None:
+        """Return every unborrowed reservation and stop the unlock worker.
+
+        Called by a subclass's ``_unregister_peer_region`` before it releases
+        the peer's region.
+
+        A lease the owner's lock may have expired under is drained: no read
+        of it can be in flight, and the owner's own TTL reclaims the lock.
+
+        Raises:
+            RuntimeError: If an L1 still indexes live borrowed objects; the
+                caller retries once their readers finish.
+        """
+        with self._borrow_lock:
+            live = [
+                lease
+                for lease in self._leases
+                if not lease.ended
+                and any(self._lease_open(e) for e in lease.reservations.values())
+            ]
+            if live:
+                raise RuntimeError(
+                    f"Cannot close {type(self).__name__} with live borrowed objects"
+                )
+        for key, held in list(self._reservations.items()):
+            for _, expires in held:
+                self._queue_unlock({key: expires})
+        self._reservations.clear()
+        # The worker sends everything queued before this sentinel, then exits.
+        # A retry after a failed teardown finds it stopped with nothing queued:
+        # the first attempt returned every reservation and draining admits none.
+        if self._unlock_worker.is_alive():
+            self._unlocks.put(None)
+            self._unlock_worker.join()
+
+    def _process_lookup_result(
+        self,
+        task_id: L2TaskId,
+        keys: list[ObjectKey],
+        addresses: list[TransferChannelAddress],
+        started_at: float,
+    ) -> Bitmap:
+        """Keep one reservation per hit with a locally bounded expiry."""
+        result = Bitmap(len(keys))
+        for i, (key, address) in enumerate(zip(keys, addresses, strict=True)):
+            if not address.is_valid():
+                continue
+            ttl = address.read_ttl_seconds
+            # Without a reported TTL the reservation never expires locally, so
+            # its unlock is always sent (a borrower may still refuse the hit).
+            expires = (
+                started_at + ttl - min(_OWNER_TTL_MARGIN_S, ttl / 10)
+                if ttl > 0
+                else math.inf
+            )
+            if not self._accept_address(address) or not self._lease_open(expires):
+                self._queue_unlock({key: expires})
+            else:
+                result.set(i)
+                self._reservations.setdefault(key, deque()).append((address, expires))
+        return result
+
+    def _pop_reservation(self, key: ObjectKey) -> float:
+        held = self._reservations[key]
+        _, expires = held.popleft()
+        if not held:
+            del self._reservations[key]
+        return expires
+
+    def _lease_open(self, expires: float) -> bool:
+        """Whether a read starting now finishes before the owner's lock may."""
+        return time.monotonic() + self._read_window_s < expires
+
+    def _lease_is_valid(self, pending: _PendingUnlock, expires: float) -> bool:
+        """A lease ends at release or when the owner's lock may expire before
+        a read started now could finish."""
+        return not pending.ended and self._lease_open(expires)
+
+    def _end_lease(self, pending: _PendingUnlock) -> None:
+        # Runs under the L1 manager's lock on the releasing thread: flag and
+        # enqueue only; the worker sends the unlock. Idempotent.
+        with self._borrow_lock:
+            if pending.ended:
+                return
+            pending.ended = True
+        self._unlocks.put(pending)
+
+    def _queue_unlock(self, reservations: dict[ObjectKey, float]) -> None:
+        with self._borrow_lock:
+            self._pending_lookup_unlocks += 1
+        self._unlocks.put(_PendingUnlock(reservations))
+
+    def _run_unlocks(self) -> None:
+        """Send queued unlocks in batches until the close sentinel arrives."""
+        while True:
+            batch = [self._unlocks.get()]
+            while True:
+                try:
+                    batch.append(self._unlocks.get_nowait())
+                except queue.Empty:
+                    break
+            pending = [item for item in batch if item is not None]
+            # Expired reservations belong to the owner's TTL cleanup. A late
+            # key-only unlock must not consume a subsequent borrow's count;
+            # ``expires`` is early by the TTL margin, so skipping errs safe.
+            now = time.monotonic()
+            keys = [
+                key
+                for item in pending
+                for key, expires in item.reservations.items()
+                if now < expires
+            ]
+            if keys:
+                try:
+                    PeerL2AdapterBase.submit_unlock(self, keys, wait=True)
+                except Exception:
+                    logger.exception(
+                        "Peer unlock failed; reservations follow the owner TTL"
+                    )
+            with self._borrow_lock:
+                for item in pending:
+                    if item.is_lease:
+                        self._leases.discard(item)
+                    else:
+                        self._pending_lookup_unlocks -= 1
+            if len(pending) < len(batch):
+                return
 
 
 class P2PL2Adapter(PeerL2AdapterBase):
@@ -427,13 +805,14 @@ class P2PL2Adapter(PeerL2AdapterBase):
             self._config.peer_transfer_channel_server_url
         )
 
-    def submit_unlock(self, keys: list[ObjectKey]) -> None:
+    def submit_unlock(self, keys: list[ObjectKey], *, wait: bool = False) -> None:
         """Release peer reservations and discard their cached transfer addresses.
 
         Args:
             keys: Object keys to unlock. Empty input is a no-op.
+            wait: Wait for the peer's acknowledgment.
         """
-        super().submit_unlock(keys)
+        super().submit_unlock(keys, wait=wait)
         for key in keys:
             self._remote_addresses.pop(key, None)
 
@@ -522,8 +901,10 @@ class P2PL2Adapter(PeerL2AdapterBase):
 
     def _process_lookup_result(
         self,
+        task_id: L2TaskId,
         keys: list[ObjectKey],
         addresses: list[TransferChannelAddress],
+        started_at: float,
     ) -> Bitmap:
         """Cache each hit's transfer address for the following load."""
         bitmap = Bitmap(len(keys))
