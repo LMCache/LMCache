@@ -24,7 +24,7 @@ from lmcache.v1.distributed.l1_manager.base import (
     validate_read_locks,
 )
 from lmcache.v1.distributed.memory_manager import ShadowL1MemoryManager
-from lmcache.v1.memory_management import BorrowedTensorMemoryObj, MemoryObj
+from lmcache.v1.memory_management import BorrowedMemoryObj, MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 
 
@@ -32,7 +32,7 @@ class ShadowL1Manager(BaseL1Manager):
     """L1 manager whose objects are borrowed views: metadata only, no payload.
 
     An L2 adapter that lends views (e.g. of a peer's memory) produces
-    :class:`BorrowedTensorMemoryObj` objects; this manager indexes them by key
+    :class:`BorrowedMemoryObj` objects; this manager indexes them by key
     so the ordinary read path (read locks, ``finish_read``, eviction, events)
     serves them. Freeing an object ends its lease instead of returning memory,
     and the manager has no capacity, so write placement never targets it.
@@ -92,7 +92,7 @@ class ShadowL1Manager(BaseL1Manager):
     @l1_mgr_synchronized
     def admit(
         self,
-        objects: Mapping[ObjectKey, BorrowedTensorMemoryObj],
+        objects: Mapping[ObjectKey, BorrowedMemoryObj],
         read_locks: int = 1,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Make borrowed views resident and read-lock them, without allocating.

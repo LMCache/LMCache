@@ -2,7 +2,8 @@
 """Nixl-backed implementation of the transfer channel abstraction."""
 
 # Standard
-from typing import TYPE_CHECKING, Optional, Union
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Optional, Union
 import importlib
 import math
 import threading
@@ -16,6 +17,7 @@ import zmq
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.transfer_channel.abstract import (
+    L1_REGION,
     TransferChannelClient,
     TransferChannelContext,
     TransferChannelServer,
@@ -65,6 +67,15 @@ def _parse_url(url: str) -> tuple[str, int]:
     if not host or not port:
         raise ValueError(f"Invalid transfer channel url: {url!r} (expected host:port)")
     return host, int(port)
+
+
+@dataclass
+class _LocalRegion:
+    """One registered local buffer: its registration and prepped dlist."""
+
+    reg_descs: Any
+    xfer_descs: Any
+    handle: Any
 
 
 ############################################################
@@ -120,15 +131,22 @@ class NixlTransferChannelClient(TransferChannelClient):
         self,
         local_addresses: list[TransferChannelAddress],
         remote_addresses: list[TransferChannelAddress],
+        *,
+        local_region: int = L1_REGION,
     ) -> int:
         """Submit a read transfer from the remote addresses to the local addresses.
 
         Args:
-            local_addresses: The local addresses to read into.
+            local_addresses: The local addresses to read into, relative to
+                ``local_region``.
             remote_addresses: The remote addresses to read from.
+            local_region: The L1 buffer (default) or a registered device region.
 
         Returns:
             A unique task ID for this transfer.
+
+        Raises:
+            KeyError: If ``local_region`` is not registered.
         """
         if len(local_addresses) != len(remote_addresses):
             raise ValueError(
@@ -142,7 +160,7 @@ class NixlTransferChannelClient(TransferChannelClient):
         agent = self._ctx.agent
         handle = agent.make_prepped_xfer(
             "READ",
-            self._ctx.local_handle,
+            self._ctx.local_handle_for(local_region),
             local_idx,
             self._remote_handle,
             remote_idx,
@@ -338,17 +356,14 @@ class NixlTransferChannelContext(TransferChannelContext):
         self.agent_name = str(uuid.uuid4())
         self.agent = nixl_agent(self.agent_name, nixl_agent_config(backends=backends))
 
-        # Register the whole L1 buffer once (CPU/DRAM, fixed nixl dev_id=0).
+        # Local regions by id: the L1 buffer (CPU/DRAM, fixed nixl dev_id=0)
+        # plus device landing buffers registered later. Guarded by _lock.
+        self._regions: dict[int, _LocalRegion] = {}
+        self._next_region_id = L1_REGION + 1
         ptr, size = l1_memory_desc.ptr, l1_memory_desc.size
-        self._reg_descs = self.agent.get_reg_descs([(ptr, size, 0, "")], "cpu")
-        self.agent.register_memory(self._reg_descs)
-
-        # Build + prep a page-granular local xfer dlist over the whole buffer.
-        xfer_list = [
-            (addr, self._align, 0) for addr in range(ptr, ptr + size, self._align)
-        ]
-        self._xfer_descs = self.agent.get_xfer_descs(xfer_list, "cpu")
-        self.local_handle = self.agent.prep_xfer_dlist("", self._xfer_descs, "cpu")
+        self._regions[L1_REGION] = self._register_region(ptr, size, 0, "cpu")
+        self._xfer_descs = self._regions[L1_REGION].xfer_descs
+        self.local_handle = self._regions[L1_REGION].handle
         self.serialized_xfer_descs = self.agent.get_serialized_descs(self._xfer_descs)
 
         self.zmq_context = zmq.Context.instance()
@@ -395,6 +410,63 @@ class NixlTransferChannelContext(TransferChannelContext):
                 )
             out.append(TransferChannelAddress(offset=offset, size=obj_size))
         return out
+
+    def local_handle_for(self, region_id: int) -> "nixl_prepped_dlist_handle":
+        """Return the prepped local descriptor list of a registered region.
+
+        Args:
+            region_id: ``L1_REGION`` or an id from ``register_device_region``.
+
+        Raises:
+            KeyError: If the region is not registered.
+        """
+        with self._lock:
+            return self._regions[region_id].handle
+
+    def supports_device_regions(self) -> bool:
+        """nixl registers device buffers as ``VRAM`` regions."""
+        return True
+
+    def register_device_region(self, ptr: int, size: int, device_index: int) -> int:
+        """Register a device buffer as a read destination; see the base class.
+
+        Args:
+            ptr: Device address of the buffer.
+            size: Size in bytes; a multiple of the L1 alignment.
+            device_index: Ordinal of the device holding the buffer.
+
+        Returns:
+            The region id to pass to ``submit_read`` as ``local_region``.
+
+        Raises:
+            ValueError: If ``ptr`` or ``size`` is not a multiple of the L1
+                alignment.
+        """
+        if ptr % self._align or size % self._align or size <= 0:
+            raise ValueError(
+                f"Device region [{ptr:#x}, +{size:#x}) must be a non-empty multiple "
+                f"of the L1 alignment {self._align}"
+            )
+        region = self._register_region(ptr, size, device_index, "VRAM")
+        with self._lock:
+            region_id = self._next_region_id
+            self._next_region_id += 1
+            self._regions[region_id] = region
+        return region_id
+
+    def unregister_device_region(self, region_id: int) -> None:
+        """Release a device region; see the base class.
+
+        Args:
+            region_id: Id returned by ``register_device_region``; the L1
+                region and unknown ids are ignored.
+        """
+        if region_id == L1_REGION:
+            return
+        with self._lock:
+            region = self._regions.pop(region_id, None)
+        if region is not None:
+            self._release_region(region)
 
     def addresses_to_indices(
         self, addresses: list[TransferChannelAddress]
@@ -508,18 +580,40 @@ class NixlTransferChannelContext(TransferChannelContext):
         for client in clients:
             client.close()
 
-        try:
-            self.agent.release_dlist_handle(self.local_handle)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            self.agent.deregister_memory(self._reg_descs)
-        except Exception:  # noqa: BLE001
-            pass
+        with self._lock:
+            regions = list(self._regions.values())
+            self._regions.clear()
+        for region in regions:
+            self._release_region(region)
 
     ############################################################
     # Helper functions
     ############################################################
+    def _register_region(
+        self, ptr: int, size: int, device_index: int, mem_type: str
+    ) -> _LocalRegion:
+        """Register ``[ptr, ptr + size)`` and prep its page-granular dlist."""
+        reg_descs = self.agent.get_reg_descs([(ptr, size, device_index, "")], mem_type)
+        self.agent.register_memory(reg_descs)
+        xfer_list = [
+            (addr, self._align, device_index)
+            for addr in range(ptr, ptr + size, self._align)
+        ]
+        xfer_descs = self.agent.get_xfer_descs(xfer_list, mem_type)
+        handle = self.agent.prep_xfer_dlist("", xfer_descs, mem_type)
+        return _LocalRegion(reg_descs, xfer_descs, handle)
+
+    def _release_region(self, region: _LocalRegion) -> None:
+        """Release a region's dlist handle and registration, best effort."""
+        try:
+            self.agent.release_dlist_handle(region.handle)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.agent.deregister_memory(region.reg_descs)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _recv_handshake(self, socket: "zmq.Socket", server_url: str) -> bytes:
         """Receive one handshake reply, mapping a timeout to a clear error.
 

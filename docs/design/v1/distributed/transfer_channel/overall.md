@@ -61,7 +61,7 @@ All names below are exported from
 
 | Type | Fields | Notes |
 |---|---|---|
-| `TransferChannelAddress` | `offset: int`, `size: int` | A transfer-channel address (frozen). `offset` is relative to the L1 base. Wrapped in a class for future extensibility. |
+| `TransferChannelAddress` | `offset: int`, `size: int`, `read_ttl_seconds: int = 0` | A transfer-channel address (frozen). `offset` is relative to the L1 base. `read_ttl_seconds` is the owner's read-lock TTL, reported with every P2P lookup hit so a borrowing peer can bound its lease; copying peers ignore it. |
 | `TransferChannelReadResult` | `finished: bool`, `succeeded_mask: list[bool]` | Result of `query_read_status`. `is_finished()` accessor. `succeeded_mask` holds a per-object success flag aligned with the submitted addresses; empty while in flight. |
 
 ### Abstract interfaces (`abstract.py`)
@@ -81,14 +81,21 @@ All names below are exported from
     peer.
   - `get_transfer_channel_address(lmcache_addresses: list[tuple[int, int]]) -> list[TransferChannelAddress]`
     — validate `(offset, size)` pairs against the registered region and convert.
+  - `register_device_region(ptr, size, device_index) -> int` /
+    `unregister_device_region(region_id)` — register a device-memory buffer
+    (e.g. a GPU landing ring) as an additional **local** read destination.
+    Peers never see it; reads name it with `submit_read(...,
+    local_region=id)`, and offsets inside it follow the L1 alignment contract.
+    The base class raises `NotImplementedError`; only `nixl` implements it.
   - `get_num_connected_clients() -> int`
   - `close() -> None`
 - **`TransferChannelServer`** — listens for peer connections and exchanges
   transfer metadata during the handshake. `close()` frees its resources.
 - **`TransferChannelClient`** — reads from one remote peer's memory.
-  - `submit_read(local_addresses, remote_addresses) -> int` — returns a task id.
-    The two address lists must have equal length; element *i* of `remote` is read
-    into element *i* of `local`.
+  - `submit_read(local_addresses, remote_addresses, *, local_region=L1_REGION) -> int`
+    — returns a task id. The two address lists must have equal length;
+    element *i* of `remote` is read into element *i* of `local`, which lives
+    in the L1 buffer (region `L1_REGION`, 0) or in a registered device region.
   - `query_read_status(task_id: int) -> TransferChannelReadResult`
   - `close() -> None`
 
@@ -141,7 +148,10 @@ points:
 
 - **One agent per context.** The context creates a single `nixl_agent`, registers
   the whole L1 buffer once, and builds a page-granular transfer-descriptor list
-  over `[base, base+size)` using `align_bytes` as the page size.
+  over `[base, base+size)` using `align_bytes` as the page size. A device
+  region (`register_device_region`) is registered the same way with memory
+  type `VRAM` and gets its own prepped descriptor list; `submit_read` picks the
+  list by `local_region`.
 - **Handshake over ZMQ.** Metadata is exchanged over a ZMQ `REP`/`REQ` socket
   (not the LMCache MQ — that would be overkill and would leak transfer-channel
   functions into the global MQ). The messages are a small `msgspec` tagged union

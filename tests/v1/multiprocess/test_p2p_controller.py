@@ -6,7 +6,7 @@ definitions, MemoryLayoutDesc wire serialization, and server handlers.
 
 # Standard
 from typing import Literal
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call, patch
 
 # Third Party
 import httpx
@@ -22,6 +22,11 @@ from lmcache.v1.distributed.api import (
     MemoryTags,
     ObjectKey,
     PrefetchResult,
+)
+from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.l2_adapters.gdr_peer_l2_adapter import (
+    GdrPeerL2AdapterConfig,
+    TransferChannelRegionRegistrar,
 )
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
@@ -40,6 +45,7 @@ from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
 )
 
 _INVALID = TransferChannelAddress(offset=-1, size=0)
+_READ_TTL = 300
 
 
 def _result(rows: list[Bitmap]) -> PrefetchResult:
@@ -160,6 +166,10 @@ def _make_controller(
 ) -> tuple[P2PController, MagicMock]:
     """Build a P2P-disabled controller (no thread / transfer channel)."""
     ctx = MagicMock()
+    # The served DRAM L1 reports its read-lock TTL with every hit.
+    ctx.storage_manager.get_l1_manager_by_tags.return_value.config.read_ttl_seconds = (
+        _READ_TTL
+    )
     controller = P2PController(
         ctx,
         P2PConfig(),
@@ -280,8 +290,8 @@ def test_query_lookup_results_builds_addresses_for_prefix():
 
     addresses = controller.p2p_query_lookup_results(task_id)
     assert addresses == [
-        TransferChannelAddress(offset=100, size=10),
-        TransferChannelAddress(offset=200, size=20),
+        TransferChannelAddress(offset=100, size=10, read_ttl_seconds=_READ_TTL),
+        TransferChannelAddress(offset=200, size=20, read_ttl_seconds=_READ_TTL),
         TransferChannelAddress(offset=-1, size=0),
     ]
 
@@ -306,9 +316,9 @@ def test_query_lookup_results_builds_addresses_for_sparse_hits():
     addresses = controller.p2p_query_lookup_results(task_id)
     ctx.storage_manager.unsafe_read.assert_called_once_with([keys[0], keys[2]])
     assert addresses == [
-        TransferChannelAddress(offset=100, size=10),
+        TransferChannelAddress(offset=100, size=10, read_ttl_seconds=_READ_TTL),
         TransferChannelAddress(offset=-1, size=0),
-        TransferChannelAddress(offset=300, size=30),
+        TransferChannelAddress(offset=300, size=30, read_ttl_seconds=_READ_TTL),
     ]
 
 
@@ -340,8 +350,8 @@ def test_query_lookup_results_multi_group_addresses_in_request_order():
     ctx.storage_manager.unsafe_read.assert_called_once_with([keys[2], keys[1]])
     assert addresses == [
         TransferChannelAddress(offset=-1, size=0),
-        TransferChannelAddress(offset=100, size=10),
-        TransferChannelAddress(offset=200, size=20),
+        TransferChannelAddress(offset=100, size=10, read_ttl_seconds=_READ_TTL),
+        TransferChannelAddress(offset=200, size=20, read_ttl_seconds=_READ_TTL),
         TransferChannelAddress(offset=-1, size=0),
     ]
 
@@ -521,9 +531,28 @@ def test_reconcile_adds_new_peer(
     ctx.storage_manager.add_l2_adapter.assert_called_once()
     config = ctx.storage_manager.add_l2_adapter.call_args.args[0]
     assert isinstance(config, P2PL2AdapterConfig)
+    assert not isinstance(config, GdrPeerL2AdapterConfig)
     assert config.peer_mq_server_url == f"{expected_scheme}://10.0.0.2:5555"
     assert config.peer_transfer_channel_server_url == "tc-host:9"
     assert controller.report_status()["p2p_peers"] == ["peerA"]
+
+
+def test_reconcile_adds_a_gdr_peer_in_gdr_load_mode() -> None:
+    """Under ``--p2p-load-mode gdr`` a discovered peer gets a borrowing
+    adapter, configured with the same endpoints and deadlines."""
+    controller, ctx = _make_controller()
+    controller._p2p_config = P2PConfig(
+        advertise_url="me:1", load_mode="gdr", lookup_timeout=7.0, load_timeout=3.0
+    )
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+
+    config = ctx.storage_manager.add_l2_adapter.call_args.args[0]
+    assert isinstance(config, GdrPeerL2AdapterConfig)
+    assert config.peer_transfer_channel_server_url == "tc-host:9"
+    assert config.lookup_timeout_s == 7.0
+    assert config.load_timeout_s == 3.0
 
 
 def test_reconcile_no_op_when_peer_unchanged():
@@ -700,3 +729,86 @@ def test_poll_cycle_skips_peer_without_p2p_url():
 
     ctx.storage_manager.add_l2_adapter.assert_not_called()
     assert controller.report_status()["p2p_peers"] == []
+
+
+# ============================================================================
+# GDR load mode: startup requirements and the landing-ring registrar
+# ============================================================================
+
+
+def _start_controller(
+    p2p_config: P2PConfig, shadow_present: bool, device_regions: bool = True
+) -> P2PController:
+    """Construct an enabled controller with the transfer channel and poll
+    thread patched out. The DRAM L1 exists; the shadow L1 only if asked; the
+    transfer channel supports device regions unless told otherwise."""
+    ctx = MagicMock()
+    dram = MagicMock()
+    dram.get_l1_memory_desc.return_value = L1MemoryDesc(
+        ptr=0, size=4096, align_bytes=4096
+    )
+    dram.config.read_ttl_seconds = _READ_TTL
+    shadow_tags = MemoryTags(MemorySegment.DRAM, MemoryResidency.REMOTE)
+
+    def by_tags(tags: MemoryTags):
+        if tags == shadow_tags:
+            if shadow_present:
+                return MagicMock()
+            raise ValueError("no such L1")
+        return dram
+
+    ctx.storage_manager.get_l1_manager_by_tags.side_effect = by_tags
+    tc_context = MagicMock()
+    tc_context.supports_device_regions.return_value = device_regions
+    with (
+        patch.object(p2p_controller, "initialize_transfer_channel_context"),
+        patch.object(
+            p2p_controller, "get_transfer_channel_context", return_value=tc_context
+        ),
+        patch.object(p2p_controller, "delete_transfer_channel_context"),
+        patch.object(
+            p2p_controller, "create_periodic_thread", return_value=MagicMock()
+        ),
+        patch.object(p2p_controller.httpx, "Client", return_value=MagicMock()),
+    ):
+        controller = P2PController(ctx, p2p_config, CoordinatorConfig(), "self")
+        controller.close()
+    return controller
+
+
+def test_gdr_mode_installs_the_landing_ring_registrar_until_close() -> None:
+    installed: list[object] = []
+    with patch.object(
+        p2p_controller, "set_device_region_registrar", side_effect=installed.append
+    ):
+        _start_controller(P2PConfig(advertise_url="me:1", load_mode="gdr"), True)
+    assert len(installed) == 2
+    assert isinstance(installed[0], TransferChannelRegionRegistrar)
+    assert installed[0].align_bytes == 4096
+    assert installed[1] is None
+
+
+def test_l1_mode_installs_no_registrar() -> None:
+    with patch.object(p2p_controller, "set_device_region_registrar") as setter:
+        _start_controller(P2PConfig(advertise_url="me:1"), False)
+    assert setter.call_args_list == [call(None)]
+
+
+def test_gdr_mode_requires_an_engine_that_reads_into_device_memory() -> None:
+    with (
+        patch.object(p2p_controller, "set_device_region_registrar") as setter,
+        pytest.raises(ValueError, match="cannot do"),
+    ):
+        _start_controller(
+            P2PConfig(
+                advertise_url="me:1", load_mode="gdr", transfer_engine="mooncake_te"
+            ),
+            True,
+            device_regions=False,
+        )
+    setter.assert_not_called()
+
+
+def test_gdr_mode_requires_a_shadow_l1() -> None:
+    with pytest.raises(ValueError, match="shadow L1"):
+        _start_controller(P2PConfig(advertise_url="me:1", load_mode="gdr"), False)

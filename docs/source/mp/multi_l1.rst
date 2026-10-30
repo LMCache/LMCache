@@ -55,9 +55,12 @@ Use these combinations of ``--l1-manager`` arguments for the six profiles:
      - ``DRAM``, ``DEVDAX``, ``GDS``
 
 Common optional JSON fields are ``align_bytes`` (4096),
-``read_ttl_seconds`` (300), ``write_ttl_seconds`` (600), and ``eviction``.
-Alignment must be a positive power of two; GDS requires at least 4096 bytes.
-TTLs must be positive integers. Unknown fields are rejected.
+``read_ttl_seconds`` (300), ``write_ttl_seconds`` (600), ``eviction``, and
+``shadow`` (false). Alignment must be a positive power of two; GDS requires at
+least 4096 bytes. TTLs must be positive integers. ``shadow`` pairs the manager
+with a shadow L1 that indexes objects peers lend of its memory, as GPU-direct
+P2P borrowing requires for the DRAM L1 (:ref:`mp-p2p-gdr`); the shadow is
+tagged ``<tag>.shadow`` and holds no memory. Unknown fields are rejected.
 
 .. list-table::
    :header-rows: 1

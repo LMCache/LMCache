@@ -222,7 +222,7 @@ class _RecordingPeerAdapter(PeerL2AdapterBase):
     def get_memory_tags(self) -> MemoryTags:
         return MemoryTags(MemorySegment.DRAM, MemoryResidency.REMOTE)
 
-    def _process_lookup_result(self, keys, addresses) -> Bitmap:
+    def _process_lookup_result(self, task_id, keys, addresses, started_at) -> Bitmap:
         self.log.append(f"lookup:{len(keys)}")
         bitmap = Bitmap(len(keys))
         for i, address in enumerate(addresses):

@@ -66,6 +66,7 @@ class _LookupTask:
     keys: list[ObjectKey]
     remote_task_id: int
     deadline: float
+    started_at: float
     failed: bool = False
 
 
@@ -303,10 +304,13 @@ class PeerL2AdapterBase(L2AdapterInterface):
 
         if self._closed:
             self._lookup_tasks[task_id] = _LookupTask(
-                keys=keys, remote_task_id=-1, deadline=0.0, failed=True
+                keys=keys, remote_task_id=-1, deadline=0.0, started_at=0.0, failed=True
             )
             return task_id
 
+        # The owner's read-lock TTL starts when it handles the lookup; this
+        # earlier timestamp bounds it from the borrower's side.
+        started_at = time.monotonic()
         future = self._req_client.p2p_lookup_and_lock(keys, group_layout_descs)
         failed = False
         remote_task_id = -1
@@ -322,7 +326,8 @@ class PeerL2AdapterBase(L2AdapterInterface):
         self._lookup_tasks[task_id] = _LookupTask(
             keys=keys,
             remote_task_id=remote_task_id,
-            deadline=time.monotonic() + self._config.lookup_timeout_s,
+            deadline=started_at + self._config.lookup_timeout_s,
+            started_at=started_at,
             failed=failed,
         )
         return task_id
@@ -358,19 +363,28 @@ class PeerL2AdapterBase(L2AdapterInterface):
         if addresses is None:
             return None
 
-        bitmap = self._process_lookup_result(task.keys, addresses)
+        bitmap = self._process_lookup_result(
+            task_id, task.keys, addresses, task.started_at
+        )
         del self._lookup_tasks[task_id]
         return bitmap
 
-    def submit_unlock(self, keys: list[ObjectKey]) -> None:
-        """Release peer reservations through the unlock RPC; fire-and-forget.
+    def submit_unlock(self, keys: list[ObjectKey], *, wait: bool = False) -> None:
+        """Release peer reservations through the unlock RPC.
 
         Args:
             keys: Object keys to unlock. Empty input is a no-op.
+            wait: Wait for the peer's acknowledgment instead of fire-and-forget.
+
+        Raises:
+            TimeoutError: If ``wait`` is True and no acknowledgment arrives
+                within the lookup RPC timeout.
         """
         if not keys:
             return
-        self._req_client.p2p_unlock_objects(keys)
+        future = self._req_client.p2p_unlock_objects(keys)
+        if wait:
+            future.result(timeout=_LOOKUP_RPC_TIMEOUT_S)
 
     # --------------------
     # Lifecycle / status
@@ -400,10 +414,20 @@ class PeerL2AdapterBase(L2AdapterInterface):
     @abstractmethod
     def _process_lookup_result(
         self,
+        task_id: L2TaskId,
         keys: list[ObjectKey],
         addresses: list[TransferChannelAddress],
+        started_at: float,
     ) -> Bitmap:
-        """Turn a completed lookup's addresses into a hit bitmap."""
+        """Turn a completed lookup's addresses into a hit bitmap.
+
+        Args:
+            task_id: The local lookup task.
+            keys: The keys looked up, in request order.
+            addresses: One address per key; invalid for misses.
+            started_at: ``time.monotonic()`` just before the lookup was sent,
+                a lower bound on when the owner's read locks started.
+        """
 
 
 class P2PL2Adapter(PeerL2AdapterBase):
@@ -445,13 +469,14 @@ class P2PL2Adapter(PeerL2AdapterBase):
             self._config.peer_transfer_channel_server_url
         )
 
-    def submit_unlock(self, keys: list[ObjectKey]) -> None:
+    def submit_unlock(self, keys: list[ObjectKey], *, wait: bool = False) -> None:
         """Release peer reservations and discard their cached transfer addresses.
 
         Args:
             keys: Object keys to unlock. Empty input is a no-op.
+            wait: Wait for the peer's acknowledgment.
         """
-        super().submit_unlock(keys)
+        super().submit_unlock(keys, wait=wait)
         for key in keys:
             self._remote_addresses.pop(key, None)
 
@@ -565,8 +590,10 @@ class P2PL2Adapter(PeerL2AdapterBase):
 
     def _process_lookup_result(
         self,
+        task_id: L2TaskId,
         keys: list[ObjectKey],
         addresses: list[TransferChannelAddress],
+        started_at: float,
     ) -> Bitmap:
         """Cache each hit's transfer address for the following load."""
         bitmap = Bitmap(len(keys))

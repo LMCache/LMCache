@@ -343,6 +343,11 @@ is set, which additionally requires a coordinator URL via
    * - ``--p2p-transfer-engine``
      - ``nixl``
      - Transfer-channel implementation to use.
+   * - ``--p2p-load-mode``
+     - ``l1``
+     - ``l1`` copies a peer's objects into the DRAM L1 at lookup time; ``gdr``
+       borrows them and reads each straight into GPU memory at retrieve time
+       (requires ``nixl`` and ``--l1-shadow``). See :doc:`p2p`.
 
 L1 Memory Manager
 ------------------
@@ -407,6 +412,11 @@ single-L1 interface. For placing L1 on CXL-attached memory see
      - ``False``
      - ROCm only. ``mlock`` the DRAM L1 so memory compaction cannot migrate
        it. See *Locked L1 on ROCm* below. ``--l1-manager`` key: ``mlock``.
+   * - ``--l1-shadow``
+     - ``False``
+     - Pair the L1 with a shadow L1 that indexes objects peers lend of its
+       memory; required by ``--p2p-load-mode gdr`` (:ref:`mp-p2p-gdr`).
+       ``--l1-manager`` key: ``shadow``.
 
 .. _mp-devdax-l1:
 

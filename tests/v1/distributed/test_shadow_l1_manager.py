@@ -25,12 +25,16 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import (
     DramL1Manager,
     ShadowL1Manager,
+    create_l1_managers,
 )
 from lmcache.v1.distributed.memory_manager import ShadowL1MemoryManager
 from lmcache.v1.memory_management import (
     BorrowedTensorMemoryObj,
     MemoryFormat,
     MemoryObjMetadata,
+    PendingRead,
+    RemoteBorrowedMemoryObj,
+    TensorMemoryObj,
 )
 import lmcache.v1.memory_management as memory_management
 
@@ -188,3 +192,85 @@ def test_shadow_memory_manager_never_allocates() -> None:
     lease = Lease()
     assert manager.free([_view(lease)]) == L1Error.SUCCESS
     assert lease.releases == 1
+
+
+def _remote_view(lease: Lease) -> RemoteBorrowedMemoryObj:
+    def read_into(region_id: int, offset: int) -> PendingRead:
+        raise AssertionError("not read in this test")
+
+    return RemoteBorrowedMemoryObj(
+        MemoryObjMetadata(
+            shape=torch.Size([PAGE]),
+            dtype=torch.uint8,
+            address=0,
+            phy_size=PAGE,
+            ref_count=1,
+            fmt=MemoryFormat.KV_2LTD,
+            shapes=[torch.Size([PAGE])],
+            dtypes=[torch.uint8],
+        ),
+        lease_is_valid=lease.is_valid,
+        on_release=lease.release,
+        read_into=read_into,
+    )
+
+
+def test_remote_handles_are_admitted_and_released_like_views(
+    shadow: ShadowL1Manager,
+) -> None:
+    """A borrowed object without local bytes goes through the same index,
+    read locks and lease release as a tensor view."""
+    lease = Lease()
+    handle = _remote_view(lease)
+    assert shadow.admit({KEY: handle})[KEY] == (L1Error.SUCCESS, handle)
+    assert shadow.unsafe_read([KEY])[KEY] == (L1Error.SUCCESS, handle)
+    assert shadow.get_memory_usage() == (0, 0)
+    assert shadow.finish_read([KEY])[KEY] == L1Error.SUCCESS
+    assert lease.releases == 1
+    assert ShadowL1MemoryManager().free([_remote_view(Lease())]) == L1Error.SUCCESS
+
+
+def test_shadow_memory_manager_rejects_unleased_objects() -> None:
+    with pytest.raises(TypeError):
+        ShadowL1MemoryManager().free(
+            [
+                TensorMemoryObj(
+                    torch.zeros(PAGE, dtype=torch.uint8), _view(Lease()).meta, None
+                )
+            ]
+        )
+
+
+def test_factory_pairs_a_shadow_with_each_l1_that_asks(
+    fake_pinned_memory: None,
+) -> None:
+    """``shadow`` on an L1 config appends a shadow L1 paired with that L1, after
+    every configured manager, with the paired medium's segment as REMOTE."""
+
+    def dram(tag: str, shadow: bool) -> L1ManagerConfig:
+        return L1ManagerConfig(
+            L1MemoryManagerConfig(size_in_bytes=PAGE, use_lazy=False, shm_name=""),
+            tag=tag,
+            shadow=shadow,
+        )
+
+    managers = create_l1_managers([dram("a", True), dram("b", False)])
+    try:
+        assert [type(m) for m in managers] == [
+            DramL1Manager,
+            DramL1Manager,
+            ShadowL1Manager,
+        ]
+        assert managers[2].config.tag == "a.shadow"
+        assert managers[2].get_memory_tags() == MemoryTags(
+            MemorySegment.DRAM, MemoryResidency.REMOTE
+        )
+    finally:
+        for manager in reversed(managers):
+            manager.close()
+
+    plain = create_l1_managers([dram("c", False)])
+    try:
+        assert [type(m) for m in plain] == [DramL1Manager]
+    finally:
+        plain[0].close()

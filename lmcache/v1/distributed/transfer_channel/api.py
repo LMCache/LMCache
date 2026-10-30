@@ -26,6 +26,11 @@ class TransferChannelAddress:
     size: int
     """ The size (in bytes) of the memory object. """
 
+    read_ttl_seconds: int = 0
+    """Seconds the owner's read lock on the object lasts, counted from the
+    lookup; a borrower must stop trusting the bytes before it lapses. Zero
+    means the peer did not report one (copying peers never need it)."""
+
     def is_valid(self) -> bool:
         """Whether the address is valid (non-negative offset and size)."""
         return self.offset >= 0 and self.size > 0

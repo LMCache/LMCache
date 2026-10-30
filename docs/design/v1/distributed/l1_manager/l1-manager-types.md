@@ -138,8 +138,15 @@ L2 adapter that lends views                 ShadowL1Manager (metadata only)
   adapter's L1 affinity is a shadow L1: it calls `take_borrowed_objects` and
   `admit` instead of reserving L1 buffers and planning a copy load.
 
-The first lender is the shared-pool CXL peer adapter (a follow-up), paired
-with the Device-DAX L1 that maps the pool.
+A shadow is paired by configuration: `create_l1_managers` appends
+`ShadowL1Manager.next_to(manager)` for every L1 whose config has `shadow`
+set (`--l1-shadow`, or `"shadow": true` in `--l1-manager`), after the
+configured managers. The first lender is the GPU-direct borrowing peer
+adapter ([../l2_adapters/gdr_peer_l2_adapter.md](../l2_adapters/gdr_peer_l2_adapter.md)),
+which binds to the `(DRAM, REMOTE)` shadow of the DRAM L1 and lends
+`RemoteBorrowedMemoryObj` handles that are read into GPU memory at retrieve
+time. The shared-pool CXL peer adapter (a follow-up) pairs one with the
+Device-DAX L1 that maps the pool.
 
 ## Addressing one L1
 

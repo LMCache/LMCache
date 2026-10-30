@@ -27,10 +27,15 @@ the full system context.
 lookup/unlock RPC client, the event fds, the no-op store path, and the close
 sequence. `P2PL2Adapter` adds the part specific to copying: importing the
 peer's registered region over the transfer channel and loading from it.
+`LendingPeerL2AdapterBase` adds the part specific to borrowing (keeping the
+owner's read lock as a lease); see
+[`gdr_peer_l2_adapter.md`](gdr_peer_l2_adapter.md).
 
 ```
-PeerL2AdapterBase   lookup/unlock RPCs, event fds, no-op stores, close
-└── P2PL2Adapter    import the peer region; RDMA load over the transfer channel
+PeerL2AdapterBase             lookup/unlock RPCs, event fds, no-op stores, close
+├── P2PL2Adapter              import the peer region; RDMA load over the transfer channel
+└── LendingPeerL2AdapterBase  lend lookup hits as leased borrowed objects
+    └── GdrPeerL2Adapter      read them straight into GPU memory at retrieve time
 ```
 
 A subclass implements two lifecycle hooks and one lookup hook, all protected
@@ -42,17 +47,22 @@ A subclass implements two lifecycle hooks and one lookup hook, all protected
 - `_unregister_peer_region()` runs from `close()` after the controllers drain
   reads. If it raises, the adapter stays open with its RPC client, so outstanding
   unlocks still reach the peer and `close()` can be retried.
-- `_process_lookup_result(keys, addresses)` turns a completed lookup into a hit
-  bitmap; `P2PL2Adapter` caches the addresses for the following load.
+- `_process_lookup_result(task_id, keys, addresses, started_at)` turns a
+  completed lookup into a hit bitmap; `P2PL2Adapter` caches the addresses for
+  the following load, a lender keeps them per task and bounds the owner's TTL
+  from `started_at` (taken just before the lookup RPC was sent).
 
 Because the region hook runs inside the base constructor, a subclass sets every
 attribute its hook needs *before* calling `super().__init__()` and acquires
 nothing that needs releasing after it returns: a failure in the subclass after
 that point is not unwound by the base. `P2PL2Adapter` creates its task dicts
-first and calls the base constructor last.
+first and calls the base constructor last; `LendingPeerL2AdapterBase` sets up
+its lending state and starts its unlock worker first, and stops the worker if
+the base constructor fails.
 
 The split lets a second way of reading a peer reuse the RPC control plane
-without copying it.
+without copying it. `submit_unlock(keys, wait=True)` waits for the owner's
+acknowledgment; lenders use it so peer removal drains their unlocks.
 
 ## Lifecycle
 
@@ -65,7 +75,8 @@ lookup-and-lock  → query (addresses)  → load (RDMA read)  → unlock
    returns a task id.
 2. **query** — poll `P2P_QUERY_LOOKUP_RESULTS(task_id)`; once ready the peer
    returns one `TransferChannelAddress` per key (invalid offset for keys it did
-   not lock). The adapter stashes the valid addresses keyed by `ObjectKey` and
+   not lock), each carrying the owner's read-lock TTL (`read_ttl_seconds`).
+   The adapter stashes the valid addresses keyed by `ObjectKey` and
    reports a found/not-found `Bitmap` to the prefetch controller.
 3. **load** — for the found keys, translate the local destination objects'
    `(shm_offset, shm_byte_length)` into transfer-channel addresses, pair them

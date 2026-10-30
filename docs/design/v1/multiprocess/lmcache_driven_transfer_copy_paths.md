@@ -16,6 +16,12 @@ with vLLM's 1024-token MLA pages has 7 blocks of 1.1 MB per chunk -- the
 kernel runs 7 thread blocks and moves data at ~24 GB/s, about half the
 staging copy's line rate, so the kernel dominates the transfer.
 
+A third path, `run_borrowed_transfer`, serves object groups that hold
+objects borrowed from a peer (`RemoteBorrowedMemoryObj`): their bytes are read
+from the peer straight into a registered GPU landing ring, then scattered
+with the block kernel. It is selected before the two paths below; see
+`docs/design/v1/distributed/l2_adapters/gdr_peer_l2_adapter.md`.
+
 ## Two copy paths
 
 | | `kernel` (fallback) | `direct` (preferred when usable) |

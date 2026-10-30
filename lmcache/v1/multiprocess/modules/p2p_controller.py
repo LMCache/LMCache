@@ -25,12 +25,18 @@ from lmcache.v1.distributed.api import (
     PrefetchHandle,
     PrefetchTaskSpec,
 )
+from lmcache.v1.distributed.l2_adapters.gdr_peer_l2_adapter import (
+    GdrPeerL2AdapterConfig,
+    TransferChannelRegionRegistrar,
+)
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel import (
     delete_transfer_channel_context,
+    get_transfer_channel_context,
     initialize_transfer_channel_context,
 )
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.gpu_connector.gdr_context import set_device_region_registrar
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -49,6 +55,8 @@ from lmcache.v1.periodic_thread import (
 
 logger = init_logger(__name__)
 
+# Peers read the one local DRAM L1: the L1 registered with the transfer channel.
+_SERVED_L1_TAGS = MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)
 # Sentinel address for keys that were not found (or fell past the L1 prefix).
 _INVALID_ADDRESS = TransferChannelAddress(offset=-1, size=0)
 
@@ -229,13 +237,15 @@ class P2PController(DiscoverableModule):
 
         Raises:
             ValueError: There is not exactly one local DRAM L1, or it exposes
-                no registerable memory buffer.
+                no registerable memory buffer; or GPU-direct borrowing is
+                requested without a shadow L1 paired with the DRAM L1 or with
+                a transfer engine that cannot read into device memory.
         """
         # Peers read the L1 registered with the transfer channel: the one
         # local DRAM L1.
         try:
             l1_manager = self._ctx.storage_manager.get_l1_manager_by_tags(
-                MemoryTags(segment=MemorySegment.DRAM, residency=MemoryResidency.LOCAL)
+                _SERVED_L1_TAGS
             )
         except ValueError as e:
             raise ValueError(f"P2P requires exactly one local DRAM L1: {e}") from e
@@ -245,12 +255,36 @@ class P2PController(DiscoverableModule):
                 f"P2P requires a registerable L1 buffer; L1 "
                 f"{l1_manager.config.tag!r} exposes none"
             )
+        if self._p2p_config.load_mode == "gdr":
+            try:
+                self._ctx.storage_manager.get_l1_manager_by_tags(
+                    MemoryTags(MemorySegment.DRAM, MemoryResidency.REMOTE)
+                )
+            except ValueError as e:
+                raise ValueError(
+                    "--p2p-load-mode gdr requires the DRAM L1 to be paired with "
+                    'a shadow L1 (--l1-shadow, or "shadow": true in '
+                    f"--l1-manager): {e}"
+                ) from e
         initialize_transfer_channel_context(
             self._p2p_config.transfer_engine,
             l1_memory_desc,
             listen_url=self._p2p_config.effective_listen_url,
             advertise_url=self._p2p_config.advertise_url,
         )
+        if self._p2p_config.load_mode == "gdr":
+            context = get_transfer_channel_context()
+            if not context.supports_device_regions():
+                delete_transfer_channel_context()
+                raise ValueError(
+                    "--p2p-load-mode gdr reads into GPU memory, which "
+                    f"--p2p-transfer-engine {self._p2p_config.transfer_engine} "
+                    "cannot do"
+                )
+            # GPU cache contexts register their landing rings through it.
+            set_device_region_registrar(
+                TransferChannelRegionRegistrar(context, l1_memory_desc.align_bytes)
+            )
         self._instances_url = coordinator_config.url.rstrip("/") + "/instances"
         timeout = max(1.0, coordinator_config.heartbeat_interval)
         self._http_client = httpx.Client(timeout=timeout)
@@ -299,6 +333,7 @@ class P2PController(DiscoverableModule):
             self._http_client = None
 
         if self._p2p_config.enabled:
+            set_device_region_registrar(None)
             delete_transfer_channel_context()
 
     # -----------------------------------------------------------------
@@ -493,6 +528,10 @@ class P2PController(DiscoverableModule):
 
         good_keys, good_objs = self._ctx.storage_manager.unsafe_read(found_keys)
         obj_by_key = dict(zip(good_keys, good_objs, strict=True))
+        # A borrowing peer bounds its lease by the served L1's read-lock TTL.
+        read_ttl = self._ctx.storage_manager.get_l1_manager_by_tags(
+            _SERVED_L1_TAGS
+        ).config.read_ttl_seconds
 
         positions: dict[ObjectKey, list[int]] = {}
         for i, key in enumerate(job.keys):
@@ -506,6 +545,7 @@ class P2PController(DiscoverableModule):
             address = TransferChannelAddress(
                 offset=obj.shm_offset,
                 size=obj.shm_byte_length,
+                read_ttl_seconds=read_ttl,
             )
             for i in positions.get(key, ()):
                 addresses[i] = address
@@ -677,7 +717,12 @@ class P2PController(DiscoverableModule):
         Returns:
             ``True`` if the adapter was created and tracked.
         """
-        config = P2PL2AdapterConfig(
+        config_type = (
+            GdrPeerL2AdapterConfig
+            if self._p2p_config.load_mode == "gdr"
+            else P2PL2AdapterConfig
+        )
+        config = config_type(
             peer_mq_server_url=(f"{self._request_scheme}://{inst.ip}:{inst.mq_port}"),
             peer_transfer_channel_server_url=inst.p2p_advertised_url,
             lookup_timeout_s=self._p2p_config.lookup_timeout,

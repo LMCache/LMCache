@@ -32,12 +32,14 @@ class MemoryLayoutDesc(_message.Message):
     def __init__(self, shapes: _Optional[_Iterable[_Union[TensorShape, _Mapping]]] = ..., dtypes: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class TransferChannelAddress(_message.Message):
-    __slots__ = ("offset", "size")
+    __slots__ = ("offset", "size", "read_ttl_seconds")
     OFFSET_FIELD_NUMBER: _ClassVar[int]
     SIZE_FIELD_NUMBER: _ClassVar[int]
+    READ_TTL_SECONDS_FIELD_NUMBER: _ClassVar[int]
     offset: int
     size: int
-    def __init__(self, offset: _Optional[int] = ..., size: _Optional[int] = ...) -> None: ...
+    read_ttl_seconds: int
+    def __init__(self, offset: _Optional[int] = ..., size: _Optional[int] = ..., read_ttl_seconds: _Optional[int] = ...) -> None: ...
 
 class P2pLookupAndLockRequest(_message.Message):
     __slots__ = ("keys", "group_layout_descs")

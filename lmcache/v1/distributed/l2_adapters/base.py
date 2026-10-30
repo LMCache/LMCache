@@ -23,7 +23,7 @@ if TYPE_CHECKING:
         ObjectKey,
     )
     from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
-    from lmcache.v1.memory_management import BorrowedTensorMemoryObj, MemoryObj
+    from lmcache.v1.memory_management import BorrowedMemoryObj, MemoryObj
 
 # First Party
 from lmcache.logging import init_logger
@@ -157,7 +157,7 @@ class L2AdapterInterface(ABC):
         task_id: L2TaskId,
         keys: list[ObjectKey],
         layouts: dict[int, MemoryLayoutDesc],
-    ) -> dict[ObjectKey, BorrowedTensorMemoryObj]:
+    ) -> Mapping[ObjectKey, BorrowedMemoryObj]:
         """Lend views of found keys instead of copying them.
 
         Only adapters whose L1 affinity is a shadow L1 lend views; the

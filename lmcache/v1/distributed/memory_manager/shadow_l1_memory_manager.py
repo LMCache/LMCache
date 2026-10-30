@@ -5,15 +5,15 @@
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
-from lmcache.v1.memory_management import BorrowedTensorMemoryObj, MemoryObj
+from lmcache.v1.memory_management import BorrowedMemoryObj, MemoryObj
 
 
 class ShadowL1MemoryManager:
     """Memory manager behind :class:`ShadowL1Manager`.
 
-    Its objects are :class:`BorrowedTensorMemoryObj` views whose bytes
-    someone else owns, so it never allocates and has no capacity; freeing an
-    object ends its lease. Satisfies ``L1MemoryManagerProtocol``.
+    Its objects are :class:`BorrowedMemoryObj` views whose bytes someone
+    else owns, so it never allocates and has no capacity; freeing an object
+    ends its lease. Satisfies ``L1MemoryManagerProtocol``.
     """
 
     def allocate(
@@ -43,7 +43,7 @@ class ShadowL1MemoryManager:
             TypeError: If an object is not a borrowed view.
         """
         for obj in mem_objs:
-            if not isinstance(obj, BorrowedTensorMemoryObj):
+            if not isinstance(obj, BorrowedMemoryObj):
                 raise TypeError(f"Shadow L1 holds only borrowed views, got {obj!r}")
             obj.release()
         return L1Error.SUCCESS

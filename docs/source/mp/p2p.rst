@@ -87,6 +87,10 @@ P2P is enabled per server by the ``--p2p-advertise-url`` flag. The relevant
        (default ``30``).
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation (default ``nixl``).
+   * - ``--p2p-load-mode {l1,gdr}``
+     - How a peer's KV reaches this node: ``l1`` (default) copies it into the
+       DRAM L1 at lookup time; ``gdr`` borrows it and reads it straight into
+       GPU memory at retrieve time. See :ref:`mp-p2p-gdr`.
 
 P2P also reuses the coordinator connection flags (``--coordinator-url``,
 ``--coordinator-advertise-ip``, ``--coordinator-heartbeat-interval``); the
@@ -139,6 +143,49 @@ when starting each server. For example:
 
 Replace ``mlx5_0`` with the RDMA device available on the node. Both variables
 must be set for RDMA; when they are omitted, Mooncake Transfer Engine uses TCP.
+
+.. _mp-p2p-gdr:
+
+GPU-direct borrowing (``--p2p-load-mode gdr``)
+----------------------------------------------
+
+In the default mode a peer's chunk is copied into this node's DRAM L1 when the
+lookup completes, and copied again from DRAM to the GPU when the engine
+retrieves it. With ``--p2p-load-mode gdr`` the node **borrows** the chunk
+instead: the peer keeps its read lock while this node uses the chunk, nothing
+is staged in the local L1, and the bytes move once, from the peer's DRAM
+straight into GPU memory (RDMA with GPUDirect) when the engine retrieves them.
+
+.. code-block:: bash
+
+   lmcache server <argument-list> \
+       --p2p-advertise-url 10.0.0.1:7600 --coordinator-url http://coord:8080 \
+       --p2p-transfer-engine nixl --p2p-load-mode gdr --l1-shadow
+
+Requirements:
+
+* ``--p2p-transfer-engine nixl``: the only engine that can read into GPU
+  memory. The server refuses to start with another engine.
+* ``--l1-shadow`` (or ``"shadow": true`` in the DRAM ``--l1-manager`` JSON):
+  pairs the DRAM L1 with a *shadow L1* that indexes the borrowed chunks
+  without holding any bytes. The server refuses to start without it.
+* A GPUDirect-capable fabric and driver between the nodes.
+
+What to expect:
+
+* Borrowed chunks use no L1 capacity and no DRAM bandwidth on the borrowing
+  node, and each byte crosses the fabric once.
+* The network read happens during the retrieve, not during the lookup, so
+  retrieve latency depends on the fabric; the reads of one batch of chunks
+  overlap the GPU scatter of the previous batch. Measure both modes for your
+  deployment before choosing.
+* Each GPU worker's cache context reserves a small landing buffer
+  (``2 × batch size`` chunks) on its GPU.
+* A borrowed chunk stays valid until the peer's read-lock TTL
+  (``--l1-read-ttl-seconds`` on the peer, minus a one-second margin) and is
+  released, unlocking the peer, when the last local reader finishes. A chunk
+  whose lease lapsed before the retrieve is a cache miss.
+* Other engines (``mooncake_te``) keep copying into the L1.
 
 Running a multi-node deployment
 -------------------------------

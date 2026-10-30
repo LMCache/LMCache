@@ -68,3 +68,13 @@ def test_read_result_default_succeeded_masks_are_independent():
     b = TransferChannelReadResult(finished=False)
     a.succeeded_mask.append(True)
     assert b.succeeded_mask == []
+
+
+def test_address_carries_an_optional_owner_read_ttl() -> None:
+    """The owner's read-lock TTL rides along with a hit; copying peers leave
+    it at zero and validity does not depend on it."""
+    plain = TransferChannelAddress(offset=0, size=8)
+    assert plain.read_ttl_seconds == 0
+    leased = TransferChannelAddress(offset=0, size=8, read_ttl_seconds=300)
+    assert leased.is_valid() and plain.is_valid()
+    assert leased != plain
