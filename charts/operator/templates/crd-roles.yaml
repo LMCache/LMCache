@@ -1,0 +1,70 @@
+{{- if .Values.crdRoles.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-lmcacheengine-admin-role
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - lmcache.lmcache.ai
+  resources:
+  - lmcacheengines
+  verbs:
+  - '*'
+- apiGroups:
+  - lmcache.lmcache.ai
+  resources:
+  - lmcacheengines/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-lmcacheengine-editor-role
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - lmcache.lmcache.ai
+  resources:
+  - lmcacheengines
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - lmcache.lmcache.ai
+  resources:
+  - lmcacheengines/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-lmcacheengine-viewer-role
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - lmcache.lmcache.ai
+  resources:
+  - lmcacheengines
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - lmcache.lmcache.ai
+  resources:
+  - lmcacheengines/status
+  verbs:
+  - get
+{{- end }}
