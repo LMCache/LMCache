@@ -43,6 +43,7 @@ from lmcache.v1.distributed.bitmap_ops.fold import (
 )
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
+from lmcache.v1.distributed.l1_manager import ShadowL1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
@@ -420,6 +421,7 @@ class InFlightPrefetchRequest:
 
     # In flight L2 operations: L2 adapter idx -> L2 task ID
     inflight_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
+    lookup_task_ids: dict[int, L2TaskId] = field(default_factory=dict)
     inflight_load_tasks: dict[int, L2TaskId] = field(default_factory=dict)
 
     # L2 adapter idx -> L1 bytes reserved for that adapter's in-flight load.
@@ -902,6 +904,9 @@ class PrefetchController(StorageControllerInterface):
             poller.register(efd, select.POLLIN)
 
         while not self._stop_flag.is_set():
+            for manager in self._l1_managers.values():
+                if isinstance(manager, ShadowL1Manager):
+                    manager.reap_expired()
             # First, apply runtime add/remove of the L2 adapters.
             self._apply_pending_adapter_ops(poller)
 
@@ -1020,13 +1025,18 @@ class PrefetchController(StorageControllerInterface):
                 )
 
     def _adapter_in_use(self, adapter_id: int) -> bool:
-        """True if any in-flight request still references ``adapter_id``.
+        """True if the adapter has live borrowed views or queued unlocks, or
+        any in-flight request still references ``adapter_id``.
 
         Note:
+            An adapter that lends views stays attached until its views and
+            queued unlocks drain, so removal never tears down memory in use.
             Membership in ``l2_locked_keys`` keeps an adapter attached until
             the request has returned its L2 read locks; the entry is removed
             when the adapter's load result is admitted.
         """
+        if self._l2_adapters[adapter_id].get_active_borrow_count():
+            return True
         for request in self._in_flight_requests.values():
             if (
                 adapter_id in request.inflight_lookup_tasks
@@ -1172,6 +1182,7 @@ class PrefetchController(StorageControllerInterface):
                 flattened_keys, spec.group_layout_descs
             )
             request.inflight_lookup_tasks[adapter_idx] = task_id
+            request.lookup_task_ids[adapter_idx] = task_id
 
         self._event_bus.publish(
             Event(
@@ -1257,7 +1268,9 @@ class PrefetchController(StorageControllerInterface):
         for l2_idx, cells in l2_dropped.items():
             keys = _gather_keys(request.key_groups, cells)
             if keys:
-                self._l2_adapters[l2_idx].submit_unlock(keys)
+                self._l2_adapters[l2_idx].release_lookup(
+                    request.lookup_task_ids[l2_idx], keys
+                )
 
         states.l1_locked_keys = load_plan.l1_planned_keys.copy()
         states.l2_locked_keys = load_plan.l2_planned_keys.copy()
@@ -1332,6 +1345,45 @@ class PrefetchController(StorageControllerInterface):
         }
         self._plan_load(request, active_l2_descs)
 
+        # Adapters bound to a shadow L1 lend views instead of copying: admit
+        # them there without reserving destination capacity.
+        layouts = {
+            group.object_group_id: group.layout_desc for group in request.key_groups
+        }
+        for adapter_idx, cells in list(states.l2_locked_keys.items()):
+            l1_idx = self._get_l2_affinity_manager(adapter_idx)
+            manager = self._l1_managers[l1_idx]
+            if not isinstance(manager, ShadowL1Manager):
+                continue
+            adapter = self._l2_adapters[adapter_idx]
+            keys = _gather_keys(request.key_groups, cells)
+            task_id = request.lookup_task_ids[adapter_idx]
+            admitted = Bitmap(len(keys))
+            try:
+                # A view not admitted is released by admit (or, if admit
+                # never runs, by its lender when it is garbage-collected).
+                results = manager.admit(
+                    adapter.take_borrowed_objects(task_id, keys, layouts),
+                    read_locks=request.num_kv_readers,
+                )
+                for i, key in enumerate(keys):
+                    if key in results and results[key][0] == L1Error.SUCCESS:
+                        admitted.set(i)
+            finally:
+                # Adopted views own their reservations; release_lookup only returns
+                # reservations which were not moved into a view.
+                adapter.release_lookup(task_id, keys)
+                loaded = _scatter_bitmaps(cells, admitted)
+                if l1_idx in states.l1_locked_keys:
+                    states.l1_locked_keys[l1_idx] += loaded
+                else:
+                    states.l1_locked_keys[l1_idx] = loaded
+                if len(request.l2_loaded_cells):
+                    request.l2_loaded_cells += loaded
+                else:
+                    request.l2_loaded_cells = loaded.copy()
+                del states.l2_locked_keys[adapter_idx]
+
         # Step 3: reserve L1 write buffers for the planned L2 keys
         # with L1-L2 affinity.
         tag = _get_prefetch_write_tag(request.request_id)
@@ -1378,7 +1430,9 @@ class PrefetchController(StorageControllerInterface):
             for l2_idx, bitmap2d in l2_keys_to_unlock.items():
                 keys = _gather_keys(request.key_groups, bitmap2d)
                 if keys:
-                    self._l2_adapters[l2_idx].submit_unlock(keys)
+                    self._l2_adapters[l2_idx].release_lookup(
+                        request.lookup_task_ids[l2_idx], keys
+                    )
             states.l2_locked_keys = l2_locked_keys_new
 
             # Step 5: re-plan on what is actually reserved. An L2 cell dropped
@@ -1564,17 +1618,25 @@ class PrefetchController(StorageControllerInterface):
             loaded_keys = _gather_keys(request.key_groups, loaded)
             failed_keys = _gather_keys(request.key_groups, failed)
 
-            # Update L1 key status
+            # Update L1 key status. Only keys admitted with SUCCESS hold read
+            # locks; any other result (e.g. an expired write reservation) is a
+            # miss and must not be unlocked later.
             if loaded_keys:
-                l1_manager.finish_write_and_reserve_read(
+                admission = l1_manager.finish_write_and_reserve_read(
                     loaded_keys, read_locks=request.num_kv_readers, tag=tag
                 )
+                admitted = Bitmap(len(loaded_keys))
+                for i, key in enumerate(loaded_keys):
+                    if admission[key][0] == L1Error.SUCCESS:
+                        admitted.set(i)
+                loaded = _scatter_bitmaps(loaded, admitted)
             if failed_keys:
                 l1_manager.finish_write_and_delete(failed_keys, tag=tag)
 
             # Unlock L2
-            self._l2_adapters[adapter_idx].submit_unlock(
-                _gather_keys(request.key_groups, planned)
+            self._l2_adapters[adapter_idx].release_lookup(
+                request.lookup_task_ids[adapter_idx],
+                _gather_keys(request.key_groups, planned),
             )
 
             # Update the key states and the inflight load tasks
@@ -1754,7 +1816,9 @@ class PrefetchController(StorageControllerInterface):
         for l2_idx, cells in states.l2_locked_keys.items():
             keys = _gather_keys(request.key_groups, cells)
             if keys and l2_idx in self._l2_adapters:
-                self._l2_adapters[l2_idx].submit_unlock(keys)
+                self._l2_adapters[l2_idx].release_lookup(
+                    request.lookup_task_ids[l2_idx], keys
+                )
         for l1_idx, cells in states.l1_reserved_keys.items():
             keys = _gather_keys(request.key_groups, cells)
             if keys:

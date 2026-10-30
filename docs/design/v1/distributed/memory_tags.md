@@ -87,13 +87,19 @@ reserves temporary buffers in that L1.
 
 ### L1 tags
 
-All L1 managers are `LOCAL`. The segment names the primary pool:
+L1 managers that own payload are `LOCAL`. The segment names the primary pool:
 
 | L1 | Tags |
 |---|---|
 | `DRAM` | `(DRAM, LOCAL)` |
 | `DEVDAX` (pure Device-DAX) | `(CXL, LOCAL)` |
 | `GDS` slab | `(GDS, LOCAL)` |
+| shadow (paired with a local L1) | the paired L1's segment, `REMOTE` |
+
+A shadow L1 (`ShadowL1Manager`) holds only borrowed views of bytes a peer
+owns, so it is `REMOTE`. That tag binds lending adapters to it through L1
+affinity, and keeps it out of P2P serving, which resolves a `LOCAL` L1: a
+node never re-exports a view it borrowed.
 
 ### L2 own tags
 
