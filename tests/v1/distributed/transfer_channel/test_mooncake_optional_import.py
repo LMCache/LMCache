@@ -24,7 +24,7 @@ def _run_probe(
     (package / "__init__.py").write_text(package_source, encoding="utf-8")
     (package / "engine.py").write_text(textwrap.dedent(engine_source), encoding="utf-8")
     env = os.environ.copy()
-    paths = [str(tmp_path), str(Path(__file__).resolve().parents[4])]
+    paths = [str(tmp_path)]
     if env.get("PYTHONPATH"):
         paths.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(paths)

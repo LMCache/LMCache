@@ -19,6 +19,7 @@ message GroupLayout {
   int64 kv_size = 6;
   int64 window_chunks = 7;
   bool recurrent = 8;
+  optional int64 num_physical_slots = 9;
 }
 
 message RegisterKvCacheEngineDrivenContextRequest {

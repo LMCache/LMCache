@@ -219,6 +219,39 @@ runtime, see :doc:`compatibility` before installing.
                         Other torch 2.10, ROCm 7.2.x, Python, or C++ ABI combinations are not
                         covered by this artifact; build from source for those environments.
 
+                    .. tab-item:: Rebellions RBLN
+
+                        The RBLN wheel targets Rebellions NPUs (CPython 3.12,
+                        ``manylinux_2_34_x86_64``). It is built against the ``torch``
+                        that ``torch-rbln`` pins and is published to a dedicated
+                        `GitHub Release <https://github.com/LMCache/LMCache/releases>`__;
+                        each release's notes name the ``torch-rbln`` version it targets.
+                        It is not uploaded to PyPI, whose ``lmcache`` wheel is built
+                        against the CUDA ``torch``.
+
+                        Install the RBLN runtime stack (``torch-rbln`` and
+                        ``rebel-compiler``) by following the
+                        `RBLN SDK documentation <https://docs.rbln.ai>`__, then install
+                        the wheel into that environment:
+
+                        .. code-block:: bash
+
+                            VERSION=X.Y.Z  # target LMCache release
+                            pip install lmcache==${VERSION}+rbln \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-rbln
+
+                        .. note::
+
+                            LMCache's ``torch`` dependency is unpinned, so pip keeps the
+                            ``torch`` that ``torch-rbln`` installed and resolves only the
+                            other dependencies from PyPI. The ``+rbln`` local version is
+                            an exact pin that only the RBLN release satisfies.
+
+                            The wheel's C++ extensions link ``libtorch``, so it works only
+                            with the ``torch-rbln`` release its notes name. For other
+                            versions, build from source as described in
+                            :doc:`/platform/devices/rbln/index`.
+
             .. tab-item:: Nightly
 
                 Nightly wheels are built from the latest ``dev`` branch each day at 07:30 UTC

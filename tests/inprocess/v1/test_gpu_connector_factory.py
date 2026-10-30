@@ -9,10 +9,10 @@ import pytest
 import torch
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.gpu_connector import CreateGPUConnector
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.utils import EngineType
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.metadata import LMCacheMetadata
 import lmcache.inprocess.v1.gpu_connector as gpu_connector_module
 
 pytestmark = pytest.mark.musa

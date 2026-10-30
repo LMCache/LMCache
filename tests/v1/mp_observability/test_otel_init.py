@@ -29,6 +29,9 @@ def _mock_otel_provider(monkeypatch):
     from opentelemetry import metrics as otel_metrics
 
     monkeypatch.setattr(otel_metrics, "set_meter_provider", MagicMock())
+    monkeypatch.setattr(otel_init, "_GRPC_METRICS_ENABLED", False)
+    monkeypatch.setattr(otel_init, "_METRICS_RESOURCE", None)
+    monkeypatch.setattr(otel_init, "_METRICS_SOURCES", [])
 
 
 def test_init_otel_metrics_starts_http_server_by_default():
@@ -264,3 +267,58 @@ def test_init_observability_propagates_grpc_metrics_enabled(monkeypatch):
         init_observability(cfg)
     mock_init.assert_called_once()
     assert mock_init.call_args.kwargs["enable_grpc_metrics"] is True
+
+
+def test_metrics_sources_are_exported_with_sdk_metrics(monkeypatch):
+    # Third Party
+    from opentelemetry.exporter.prometheus import PrometheusMetricReader
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import (
+        AggregationTemporality,
+        Metric,
+        NumberDataPoint,
+        Sum,
+    )
+    from prometheus_client import REGISTRY, generate_latest
+
+    reader = otel_init._with_metrics_sources(PrometheusMetricReader)()
+    provider = MeterProvider(metric_readers=[reader])
+    provider.get_meter("sdk").create_counter("sdk.calls").add(1)
+
+    # Nothing registered: the collection is passed on untouched.
+    assert otel_init._add_source_metrics(None) is None
+
+    def source():
+        point = NumberDataPoint(
+            attributes={"kind": "native"},
+            start_time_unix_nano=1,
+            time_unix_nano=2,
+            value=7,
+        )
+        return [
+            Metric(
+                name="native.calls",
+                description="",
+                unit="",
+                data=Sum(
+                    data_points=[point],
+                    aggregation_temporality=AggregationTemporality.CUMULATIVE,
+                    is_monotonic=True,
+                ),
+            )
+        ]
+
+    def broken():
+        raise RuntimeError("source failed")
+
+    otel_init.register_metrics_source(broken)
+    unregister = otel_init.register_metrics_source(source)
+    try:
+        text = generate_latest(REGISTRY).decode()
+    finally:
+        unregister()
+        provider.shutdown()
+
+    assert 'native_calls_total{kind="native"} 7.0' in text
+    assert "sdk_calls_total" in text
+    assert otel_init._METRICS_SOURCES == [broken]

@@ -18,6 +18,11 @@ import zmq.asyncio
 
 # First Party
 from lmcache import torch_dev
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
+    PagedCpuGpuMemoryAllocator,
+)
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.rpc_utils import get_zmq_context
 from lmcache.inprocess.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
@@ -31,15 +36,10 @@ from lmcache.utils import (
     TORCH_DTYPE_TO_STR_DTYPE,
     CacheEngineKey,
 )
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
-    PagedCpuGpuMemoryAllocator,
-)
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -1649,7 +1649,9 @@ class PDBackendAsync(AllocatorBackendInterface):
 
     def close(self) -> None:
         """
-        Close the storage backend.
+        Close the storage backend and stop its background loops.
+
+        Repeated calls do not queue receiver shutdown work on a stopped loop.
         """
         self.running = False
         # Wake up any threads blocked on the sender staging condition so they
@@ -1680,7 +1682,7 @@ class PDBackendAsync(AllocatorBackendInterface):
         if hasattr(self, "_recv_loop"):
             # Wait for any in-flight allocation tasks to finish gracefully
             # before tearing down the loop.
-            if hasattr(self, "_pending_alloc_tasks"):
+            if hasattr(self, "_pending_alloc_tasks") and self._recv_loop.is_running():
                 try:
 
                     async def _wait_pending() -> None:

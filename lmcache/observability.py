@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# Future
+from __future__ import annotations
+
 # Standard
 from contextlib import contextmanager
 from copy import copy
@@ -25,11 +28,11 @@ import prometheus_client
 from lmcache.logging import init_logger
 from lmcache.usage_telemetry import ContinuousUsageContext
 from lmcache.utils import thread_safe
-from lmcache.v1.metadata import LMCacheMetadata
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.inprocess.v1.config import LMCacheEngineConfig
+    from lmcache.inprocess.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -69,8 +72,6 @@ class LMCacheStats:
     interval_local_cpu_evict_count: int  # evict count
     interval_local_cpu_evict_keys_count: int  # evict keys count
     interval_local_cpu_evict_failed_count: int  # evict failed count
-
-    interval_forced_unpin_count: int  # forced unpin count due to timeout
 
     # Real time value measurements (will be reset after each log)
     retrieve_hit_rate: float
@@ -293,8 +294,6 @@ class LMCStatsMonitor:
         self.interval_local_cpu_evict_count = 0
         self.interval_local_cpu_evict_keys_count = 0
         self.interval_local_cpu_evict_failed_count = 0
-
-        self.interval_forced_unpin_count = 0
 
         self.local_cache_usage_bytes = 0
         self.remote_cache_usage_bytes = 0
@@ -572,10 +571,6 @@ class LMCStatsMonitor:
         self.interval_local_cpu_evict_failed_count += evict_failed_count
 
     @thread_safe
-    def update_forced_unpin_count(self, delta: int):
-        self.interval_forced_unpin_count += delta
-
-    @thread_safe
     def update_active_memory_objs_count(self, active_memory_objs_count: int):
         self.active_memory_objs_count = active_memory_objs_count
 
@@ -627,8 +622,6 @@ class LMCStatsMonitor:
         self.interval_local_cpu_evict_count = 0
         self.interval_local_cpu_evict_keys_count = 0
         self.interval_local_cpu_evict_failed_count = 0
-
-        self.interval_forced_unpin_count = 0
 
         self.interval_p2p_requests = 0
         self.interval_p2p_transferred_tokens = 0
@@ -792,7 +785,6 @@ class LMCStatsMonitor:
             interval_local_cpu_evict_count=self.interval_local_cpu_evict_count,
             interval_local_cpu_evict_keys_count=self.interval_local_cpu_evict_keys_count,
             interval_local_cpu_evict_failed_count=self.interval_local_cpu_evict_failed_count,
-            interval_forced_unpin_count=self.interval_forced_unpin_count,
             local_cache_usage_bytes=self.local_cache_usage_bytes,
             remote_cache_usage_bytes=self.remote_cache_usage_bytes,
             local_storage_usage_bytes=self.local_storage_usage_bytes,
@@ -1035,12 +1027,6 @@ class PrometheusLogger:
         self.counter_local_cpu_evict_failed_count = self._create_counter(
             name="lmcache:local_cpu_evict_failed_count",
             documentation="Total number of failed eviction in local cpu backend",
-            labelnames=labelnames,
-        )
-
-        self.counter_forced_unpin_count = self._create_counter(
-            name="lmcache:forced_unpin_count",
-            documentation="Total number of forced unpin due to timeout",
             labelnames=labelnames,
         )
 
@@ -1522,12 +1508,6 @@ class PrometheusLogger:
             multiprocess_mode="livemostrecent",
         )
         self._create_dynamic_gauge(
-            name="lmcache:pin_monitor_pinned_objects_count",
-            documentation="The number of pinned objects in PinMonitor",
-            labelnames=labelnames,
-            multiprocess_mode="livemostrecent",
-        )
-        self._create_dynamic_gauge(
             name="lmcache:lmcache_is_healthy",
             documentation="The health status of LMCache (1=healthy, 0=unhealthy)",
             labelnames=labelnames,
@@ -1739,10 +1719,6 @@ class PrometheusLogger:
         self._log_counter(
             self.counter_local_cpu_evict_failed_count,
             stats.interval_local_cpu_evict_failed_count,
-        )
-        self._log_counter(
-            self.counter_forced_unpin_count,
-            stats.interval_forced_unpin_count,
         )
         self._log_counter(
             self.counter_lookup_0_hit_requests,

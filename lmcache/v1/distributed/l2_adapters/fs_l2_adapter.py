@@ -14,6 +14,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 import asyncio
+import ctypes
+import errno
 import os
 import threading
 
@@ -39,6 +41,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
 )
 from lmcache.v1.distributed.internal_api import L2StoreResult
+from lmcache.v1.distributed.key_codec import decode_fs_filename, encode_fs_filename
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -54,13 +57,68 @@ from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
-_KEY_SEP = "@"
-# ``@`` in both ``model_name`` and ``cache_salt`` is rejected by
-# ObjectKey.__post_init__, so splitting on ``@`` is unambiguous.
-# Kept in sync with native_connector_l2_adapter.py and
-# csrc/storage_backends/fs/connector.cpp.
-_PATH_SLASH_REPLACEMENT = "-SEP-"
-_FILE_EXT = ".data"
+# errnos with which a filesystem or device refuses O_DIRECT, at open() or
+# at the transfer itself. Any of these means "use buffered I/O instead",
+# not "this key is lost". (ENOTSUP equals EOPNOTSUPP on Linux.)
+_DIRECT_IO_REFUSED_ERRNOS = frozenset({errno.EINVAL, errno.EOPNOTSUPP})
+
+
+def _device_logical_block_size(path: Path) -> int:
+    """Return the logical block size of the block device holding *path*.
+
+    O_DIRECT alignment is set by the device's logical block size, not by
+    ``statvfs().f_bsize``, which is the filesystem's preferred I/O size and
+    is often larger (4096 on a disk whose logical block size is 512).
+
+    Returns 0 when it cannot be determined, for example on a filesystem
+    without a backing block device or on a platform without sysfs.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return 0
+    dev = Path(f"/sys/dev/block/{os.major(st.st_dev)}:{os.minor(st.st_dev)}")
+    # A partition has no queue/ of its own; its parent disk does.
+    for queue in (dev / "queue", dev / ".." / "queue"):
+        try:
+            return int((queue / "logical_block_size").read_text())
+        except (OSError, ValueError):
+            continue
+    return 0
+
+
+def _buffer_is_aligned(
+    buf: Union[bytearray, memoryview, bytes],
+    align: int,
+) -> bool:
+    """Whether *buf*'s start address is a multiple of *align*.
+
+    O_DIRECT needs the buffer address aligned as well as the offset and
+    length. A read-only or empty buffer exposes no address to check, so it
+    counts as unaligned and takes the buffered path.
+    """
+    if align <= 0:
+        return False
+    try:
+        ptr = ctypes.addressof((ctypes.c_byte * 1).from_buffer(buf))
+    except (TypeError, ValueError, BufferError):
+        return False
+    return ptr % align == 0
+
+
+def _write_full(fd: int, buf: Union[bytearray, memoryview, bytes]) -> None:
+    """Loop ``os.write`` until all of *buf* is written.
+
+    A single ``os.write`` may write fewer bytes than asked for. Ignoring
+    that would publish a truncated file under the key's final name.
+    """
+    mv = memoryview(buf).cast("B")
+    total = 0
+    while total < len(mv):
+        n = os.write(fd, mv[total:])
+        if n <= 0:
+            raise OSError(errno.EIO, "write returned no progress")
+        total += n
 
 
 def _readinto_full(
@@ -103,69 +161,16 @@ async def _async_readinto_full(
 
 
 def _object_key_to_filename(key: ObjectKey) -> str:
-    """Build a reversible, filesystem-safe filename.
-
-    Unsalted::
-
-        <safe_model>@0x<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>.data
-
-    Salted (trailing ``cache_salt``)::
-
-        <safe_model>@0x<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>.data
-
-    ``kv_rank`` is written in ``0x`` prefixed hex so each byte
-    of the bitmap ``(ws<<24)|(rank<<16)|(local_ws<<8)|local``
-    is directly readable. ``object_group_id`` is written in plain hex.
-    """
-    safe_model = key.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
-    base = (
-        f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}"
-        f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
-    )
-    if key.cache_salt:
-        return f"{base}{_KEY_SEP}{key.cache_salt}{_FILE_EXT}"
-    return f"{base}{_FILE_EXT}"
+    """Return the filename shared by Python and native FS."""
+    return encode_fs_filename(key)
 
 
 def _filename_to_object_key(
     filename: str,
 ) -> Optional[ObjectKey]:
-    """Reverse ``_object_key_to_filename``.
-
-    Accepts both the 4-field unsalted shape and the 5-field salted
-    shape (trailing ``cache_salt``). Returns ``None`` for anything
-    else. Since ``model_name`` is guaranteed not to contain ``@``,
-    plain ``split`` suffices — no marker, no rsplit.
-    """
-    if not filename.endswith(_FILE_EXT):
-        return None
-    stem = filename[: -len(_FILE_EXT)]
-    parts = stem.split(_KEY_SEP)
-    if len(parts) == 4:
-        safe_model, kv_rank_str, object_group_str, chunk_hash_hex = parts
-        cache_salt = ""
-    elif len(parts) == 5:
-        safe_model, kv_rank_str, object_group_str, chunk_hash_hex, cache_salt = parts
-    else:
-        return None
-
-    model_name = safe_model.replace(_PATH_SLASH_REPLACEMENT, "/")
+    """Recover an ObjectKey, or return None for a foreign/invalid filename."""
     try:
-        chunk_hash = bytes.fromhex(chunk_hash_hex)
-        kv_rank = int(kv_rank_str, 16)
-        object_group_id = int(object_group_str, 16)
-        # ObjectKey.__post_init__ raises ValueError when the decoded
-        # model_name / cache_salt violate the forbidden-char or length
-        # invariants (e.g. a stray file from another tool on disk).
-        # The contract here is to return None for anything unparsable,
-        # so keep the constructor inside the try block.
-        return ObjectKey(
-            chunk_hash=chunk_hash,
-            model_name=model_name,
-            kv_rank=kv_rank,
-            object_group_id=object_group_id,
-            cache_salt=cache_salt,
-        )
+        return decode_fs_filename(filename)
     except ValueError:
         return None
 
@@ -287,9 +292,15 @@ class FSL2Adapter(L2AdapterInterface):
         self._read_ahead_size = config.read_ahead_size
         self._use_odirect = config.use_odirect
         self._os_disk_bs = 0
+        # O_DIRECT fallbacks repeat for every object of a misaligned or
+        # refusing deployment, so each kind is logged once per adapter.
+        self._warned_unaligned = False
+        self._warned_refused = False
         if self._use_odirect:
-            stat = os.statvfs(self._base_path)
-            self._os_disk_bs = stat.f_bsize
+            self._os_disk_bs = (
+                _device_logical_block_size(self._base_path)
+                or os.statvfs(self._base_path).f_bsize
+            )
 
         self._store_efd = create_event_notifier()
         self._lookup_efd = create_event_notifier()
@@ -546,6 +557,37 @@ class FSL2Adapter(L2AdapterInterface):
 
     # ---- O_DIRECT helpers -----------------------------------------------
 
+    def _odirect_usable(
+        self, file_path: Path, buf: Union[bytearray, memoryview, bytes]
+    ) -> bool:
+        """Whether *buf* meets O_DIRECT's length and address alignment."""
+        bs = self._os_disk_bs
+        if bs > 0 and len(buf) % bs == 0 and _buffer_is_aligned(buf, bs):
+            return True
+        if not self._warned_unaligned:
+            self._warned_unaligned = True
+            logger.warning(
+                "Cannot use O_DIRECT for %s: buffer of %d bytes is not aligned "
+                "to block size %d, using buffered I/O. Further unaligned "
+                "buffers will not be logged.",
+                file_path.name,
+                len(buf),
+                bs,
+            )
+        return False
+
+    def _warn_refused(self, op: str, file_path: Path, e: OSError) -> None:
+        if self._warned_refused:
+            return
+        self._warned_refused = True
+        logger.warning(
+            "O_DIRECT %s of %s refused (%s), using buffered I/O. Further "
+            "refusals will not be logged.",
+            op,
+            file_path.name,
+            errno.errorcode.get(e.errno or 0, e.errno),
+        )
+
     def _read_with_odirect(
         self,
         file_path: Path,
@@ -553,60 +595,63 @@ class FSL2Adapter(L2AdapterInterface):
     ) -> int:
         """Synchronous O_DIRECT read into *dst_buf*.
 
+        Falls back to a buffered read when *dst_buf* is not aligned, or when
+        the filesystem refuses O_DIRECT. Any other error, including a missing
+        file, propagates to the caller, so a failed read is not mistaken for
+        a short one.
+
         Returns the number of bytes actually read.
         Runs in an executor (not on the event loop).
         """
-        fd = -1
-        size = len(dst_buf)
-        try:
-            aligned = self._os_disk_bs > 0 and size % self._os_disk_bs == 0
-            if not aligned:
-                logger.warning(
-                    "Cannot use O_DIRECT for %s, size is not aligned.",
-                    file_path,
+        if self._odirect_usable(file_path, dst_buf):
+            try:
+                fd = os.open(
+                    str(file_path),
+                    os.O_RDONLY | getattr(os, "O_DIRECT", 0),
                 )
-                with open(file_path, "rb") as f:
-                    return _readinto_full(f, dst_buf)
-
-            fd = os.open(
-                str(file_path),
-                os.O_RDONLY | getattr(os, "O_DIRECT", 0),
-            )
-            with os.fdopen(fd, "rb", buffering=0) as fdo:
-                fd = -1  # now managed by fdopen
-                return _readinto_full(fdo, dst_buf)
-        except Exception:
-            logger.exception("Failed to O_DIRECT read %s", file_path)
-            return 0
-        finally:
-            if fd >= 0:
                 try:
+                    fdo = os.fdopen(fd, "rb", buffering=0)
+                except BaseException:
                     os.close(fd)
-                except OSError:
-                    pass
+                    raise
+                with fdo:
+                    return _readinto_full(fdo, dst_buf)
+            except OSError as e:
+                if e.errno not in _DIRECT_IO_REFUSED_ERRNOS:
+                    raise
+                self._warn_refused("read", file_path, e)
+        with open(file_path, "rb") as f:
+            return _readinto_full(f, dst_buf)
 
-    def _write_with_odirect(self, file_path: Path, buf: bytes) -> None:
+    def _write_with_odirect(
+        self, file_path: Path, buf: Union[bytearray, memoryview, bytes]
+    ) -> None:
         """Synchronous O_DIRECT write of *buf*.
+
+        Falls back to a buffered write when *buf* is not aligned, or when
+        the filesystem refuses O_DIRECT. The buffered write starts over, so a
+        partial O_DIRECT write never survives. Any other error propagates.
 
         Runs in an executor (not on the event loop).
         """
-        fd = -1
-        try:
-            fd = os.open(
-                str(file_path),
-                os.O_CREAT | os.O_WRONLY | getattr(os, "O_DIRECT", 0),
-                0o644,
-            )
-            os.write(fd, buf)
-        except Exception:
-            logger.exception("Failed to O_DIRECT write %s", file_path)
-            raise
-        finally:
-            if fd >= 0:
+        if self._odirect_usable(file_path, buf):
+            try:
+                fd = os.open(
+                    str(file_path),
+                    os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_DIRECT", 0),
+                    0o644,
+                )
                 try:
+                    _write_full(fd, buf)
+                finally:
                     os.close(fd)
-                except OSError:
-                    pass
+                return
+            except OSError as e:
+                if e.errno not in _DIRECT_IO_REFUSED_ERRNOS:
+                    raise
+                self._warn_refused("write", file_path, e)
+        with open(file_path, "wb") as f:
+            f.write(buf)
 
     # ---- store ----------------------------------------------------------
 
@@ -631,22 +676,7 @@ class FSL2Adapter(L2AdapterInterface):
                 size = len(buf)
 
                 try:
-                    # Decide whether O_DIRECT is usable
-                    do_odirect = self._use_odirect
-                    if do_odirect:
-                        aligned = self._os_disk_bs > 0 and size % self._os_disk_bs == 0
-                        if not aligned:
-                            logger.warning(
-                                "Cannot use O_DIRECT for "
-                                "writing size %d, not "
-                                "aligned to block size "
-                                "%d.",
-                                size,
-                                self._os_disk_bs,
-                            )
-                            do_odirect = False
-
-                    if do_odirect:
+                    if self._use_odirect:
                         await self._loop.run_in_executor(
                             None,
                             self._write_with_odirect,

@@ -6,7 +6,7 @@ Unit tests for ``StorageManager.l2_adapters()`` — the lookup the
 adapters.
 
 Bypasses ``StorageManager.__init__`` (which requires CUDA, an
-L1Manager, and a full controller stack) and instead instantiates the
+BaseL1Manager, and a full controller stack) and instead instantiates the
 class via ``__new__`` with only the two attributes the method reads:
 ``_l2_adapters`` and ``_adapter_descriptors``.
 """

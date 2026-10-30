@@ -7,6 +7,7 @@ import asyncio
 import inspect
 
 # First Party
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.storage_backend.connector.base_connector import (
     RemoteConnector,
 )
@@ -16,7 +17,6 @@ from lmcache.inprocess.v1.storage_backend.job_executor.pq_executor import (
 from lmcache.inprocess.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, TTLCache
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.distributed.l2_adapters.bigtable_config import BigtablePluginConfig
 from lmcache.v1.distributed.l2_adapters.bigtable_sharder import (
     BigtablePayloadSharder,

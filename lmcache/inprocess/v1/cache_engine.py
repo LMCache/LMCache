@@ -29,12 +29,17 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 from lmcache.inprocess.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.inprocess.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 from lmcache.inprocess.v1.gpu_connector.utils import assert_layerwise_gpu_connector
 from lmcache.inprocess.v1.hidden_state_store import HiddenStateStore
-from lmcache.inprocess.v1.pin_monitor import PinMonitor
+from lmcache.inprocess.v1.memory_allocators.cu_file_memory_allocator import (
+    CuFileMemoryAllocator,
+)
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
 from lmcache.inprocess.v1.storage_backend.storage_manager import StorageManager
+from lmcache.inprocess.v1.system_detection import NUMADetector, NUMAMapping
 from lmcache.inprocess.v1.token_database import (
     ChunkedTokenDatabase,
     SegmentTokenDatabase,
@@ -50,8 +55,6 @@ from lmcache.utils import (
     compress_slot_mapping,
     convert_tokens_to_list,
 )
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_allocators.cu_file_memory_allocator import CuFileMemoryAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
     PagedTensorMemoryAllocator,
@@ -63,9 +66,7 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
-from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.platform import current_device_spec
-from lmcache.v1.system_detection import NUMADetector, NUMAMapping
 
 logger = init_logger(__name__)
 
@@ -220,8 +221,6 @@ class LMCacheEngine:
 
         InitializeUsageContext(config, metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
-        # Initialize PinMonitor singleton with config
-        PinMonitor.GetOrCreate(config, metadata)
 
         self.post_inited = False
 
