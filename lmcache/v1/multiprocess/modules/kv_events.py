@@ -41,7 +41,7 @@ _TOKEN_BINDING_CACHE_SIZE = 65536
 
 
 class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
-    """Own CPU event records, token bindings, and worker subscriptions.
+    """Own CPU event records, token bindings, and event subscriptions.
 
     Args:
         ctx: Shared engine context providing the event bus.
@@ -145,7 +145,7 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
                 stream.close()
 
     def touch_instance(self, instance_id: int) -> None:
-        """Refresh an existing subscription's last-seen time on worker PING."""
+        """Refresh an existing subscription's last-seen time on its owner's PING."""
         with self._kv_event_lock:
             if instance_id in self._kv_event_streams:
                 stream, _ = self._kv_event_streams[instance_id]
@@ -181,8 +181,8 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
         """Subscribe to CPU changes, replaying records after cursor.
 
         Sends an initial status batch, then waits for matching events or loss.
-        Each worker instance owns at most one subscription. Closing it or
-        reaping the worker wakes its reader. Raises ValueError for invalid
+        Each instance identity owns at most one subscription. Closing it or
+        expiring its liveness wakes its reader. Raises ValueError for invalid
         cursor/page size. Slow subscribers share the bounded replay log.
         """
         if cursor < 0 or not 0 < max_events <= 1024:
