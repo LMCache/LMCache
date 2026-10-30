@@ -63,6 +63,9 @@ class _Registry:
             raise ValueError("no attention-window descriptor registered")
         return self._windows
 
+    def find_rank_group_layouts(self, model_name, world_size):
+        return {}
+
 
 @dataclass
 class _Context:

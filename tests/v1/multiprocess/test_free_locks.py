@@ -134,6 +134,7 @@ def _make_free_locks_ctx(
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=windows
     )
+    ctx.layout_desc_registry.find_rank_group_layouts.return_value = {}
     session = ctx.session_manager.get_or_create.return_value
     session.prefetch_hit_chunks = hit_chunks
     session.prefetch_locked_gids = tuple(locked_gids)

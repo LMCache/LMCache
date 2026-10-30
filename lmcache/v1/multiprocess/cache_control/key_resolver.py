@@ -15,6 +15,7 @@ attention window.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 # First Party
@@ -23,6 +24,7 @@ from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
+    RankGroupLayouts,
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
@@ -117,6 +119,7 @@ def resolve_grouped_object_keys(
     cache_salt: str,
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
+    rank_groups: Mapping[int, RankGroupLayouts] | None = None,
 ) -> tuple[list[GroupedObjectKeys], int]:
     """Resolve a token sequence to prefetch key rows for every object group.
 
@@ -133,6 +136,9 @@ def resolve_grouped_object_keys(
         cache_salt: Per-tenant isolation salt.
         group_layout_descs: Each object group's memory layout.
         attn_desc: The model's per-group attention windows.
+        rank_groups: Worker id to the groups that rank registered on its own;
+            such a rank gets rows for exactly those (see
+            :func:`ipc_key_to_grouped_object_keys`).
 
     Returns:
         ``(key_groups, chunk_count)``; ``([], 0)`` for a sub-chunk sequence.
@@ -152,5 +158,6 @@ def resolve_grouped_object_keys(
         list(range(attn_desc.num_object_groups)),
         group_layout_descs,
         attn_desc,
+        rank_groups=rank_groups,
     )
     return key_groups, len(chunk_hashes)
