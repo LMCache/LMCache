@@ -4,6 +4,7 @@
 # Standard
 from collections.abc import Callable, Mapping
 import asyncio
+import threading
 import time
 
 # Third Party
@@ -390,6 +391,36 @@ def test_kafka_source_reports_no_unread_records_once_caught_up(
     assert asyncio.run(
         _run_until(source, lambda: source.stats().unread_records == {0: 0})
     )
+
+
+def test_stats_reads_watermarks_only_on_the_poll_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The HTTP stats path must not call into the Kafka Consumer."""
+    broker = FakeKafkaBroker()
+    for seq in (1, 2, 3):
+        _record(broker, _batch(seq))
+    source, kafka_consumer, _ = _source(monkeypatch, broker)
+    original = kafka_consumer.get_watermark_offsets
+    caller_threads: list[str] = []
+
+    def _record_thread(
+        partition: object, timeout: float | None = None, cached: bool = False
+    ) -> tuple[int, int]:
+        caller_threads.append(threading.current_thread().name)
+        return original(partition, timeout=timeout, cached=cached)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(kafka_consumer, "get_watermark_offsets", _record_thread)
+
+    assert asyncio.run(
+        _run_until(source, lambda: source.stats().unread_records == {0: 0})
+    )
+    calls_after_stop = len(caller_threads)
+    source.stats()
+
+    assert caller_threads
+    assert set(caller_threads) == {"lmcache-kafka-cache-events"}
+    assert len(caller_threads) == calls_after_stop
 
 
 def test_ingest_never_depends_on_the_watermark_lookup(
