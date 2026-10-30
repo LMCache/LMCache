@@ -163,6 +163,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Shutdown
     logger.info("Shutting down LMCache HTTP server...")
+    launcher = getattr(app.state, "plugin_launcher", None)
+    if launcher is not None:
+        launcher.stop_plugins()
+    # Stop the bus, which flushes the last cache events, before deregistering:
+    # the coordinator fences our L1 then, and nothing fences what arrives after.
+    get_event_bus().stop()
     coordinator_registration_task = getattr(
         app.state, "coordinator_registration_task", None
     )
@@ -173,10 +179,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     coordinator_client = getattr(app.state, "coordinator_client", None)
     if coordinator_client is not None:
         await coordinator_client.aclose()
-    launcher = getattr(app.state, "plugin_launcher", None)
-    if launcher is not None:
-        launcher.stop_plugins()
-    get_event_bus().stop()
     request_server.close()
     engine.close()
     logger.info("LMCache HTTP server stopped")
