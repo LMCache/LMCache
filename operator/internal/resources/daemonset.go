@@ -144,8 +144,8 @@ func buildDaemonSetCore(
 	// Isolated IPC needs neither the host IPC namespace nor the shared
 	// /dev/shm, and takes priority over spec.hostIPC (see the isolatedIPC
 	// field documentation).
-	isolatedIPC := spec.IsolatedIPCEnabled()
-	hostIPC := derefBool(spec.HostIPC, false) && !isolatedIPC
+	sharesHostIPC := spec.SharesHostIPC()
+	hostIPC := derefBool(spec.HostIPC, false) && sharesHostIPC
 
 	serverPort := derefInt32(getServerPort(spec), 5555)
 	imgRepo := defaultImageRepo
@@ -245,7 +245,7 @@ func buildDaemonSetCore(
 	// /dev/shm sharing is wired at all.
 	volumes := append([]corev1.Volume{}, spec.Volumes...)
 	volumeMounts := append([]corev1.VolumeMount{}, spec.VolumeMounts...)
-	if !isolatedIPC && !hostIPC &&
+	if sharesHostIPC && !hostIPC &&
 		!HasDevShmMount(volumeMounts) && !HasDevShmVolume(volumes) {
 		volumes = append(volumes, BuildDevShmVolume())
 		volumeMounts = append(volumeMounts, BuildDevShmVolumeMount())

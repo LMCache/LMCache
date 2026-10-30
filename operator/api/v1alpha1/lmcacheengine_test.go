@@ -483,3 +483,73 @@ func TestIsolatedIPCEnabled(t *testing.T) {
 		})
 	}
 }
+
+func TestSetDefaults_GPUVendorRBLNDefaultsNodeSelector(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		GPUVendor: ptr(GPUVendorRBLN),
+	}}
+	e.SetDefaults()
+	if len(e.Spec.NodeSelector) != 1 || e.Spec.NodeSelector["rebellions.ai/npu.present"] != labelValueTrue {
+		t.Fatalf("expected rebellions.ai/npu.present NodeSelector, got %v", e.Spec.NodeSelector)
+	}
+}
+
+func TestEngineDrivenTransferAndSharesHostIPC(t *testing.T) {
+	cases := []struct {
+		name         string
+		vendor       *string
+		isolated     *bool
+		engineDriven bool
+		shares       bool
+	}{
+		{"nvidia default: isolated IPC", nil, nil, false, false},
+		{"nvidia legacy IPC", ptr(GPUVendorNvidia), ptr(false), false, true},
+		{"amd: legacy IPC", ptr(GPUVendorAMD), nil, false, true},
+		{"rbln: engine-driven", ptr(GPUVendorRBLN), nil, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := &LMCacheEngineSpec{GPUVendor: c.vendor, IsolatedIPC: c.isolated}
+			if got := s.EngineDrivenTransfer(); got != c.engineDriven {
+				t.Fatalf("EngineDrivenTransfer() = %v, want %v", got, c.engineDriven)
+			}
+			if got := s.SharesHostIPC(); got != c.shares {
+				t.Fatalf("SharesHostIPC() = %v, want %v", got, c.shares)
+			}
+		})
+	}
+}
+
+func TestValidateSpec_RBLN(t *testing.T) {
+	cases := []struct {
+		name      string
+		mutate    func(s *LMCacheEngineSpec)
+		wantField string
+	}{
+		{"minimal is valid", func(*LMCacheEngineSpec) {}, ""},
+		{"isolatedIPC false is valid", func(s *LMCacheEngineSpec) { s.IsolatedIPC = ptr(false) }, ""},
+		{"isolatedIPC true", func(s *LMCacheEngineSpec) { s.IsolatedIPC = ptr(true) }, "spec.isolatedIPC"},
+		{"hostIPC true", func(s *LMCacheEngineSpec) { s.HostIPC = ptr(true) }, "spec.hostIPC"},
+		{"pd", func(s *LMCacheEngineSpec) { s.PD = &PDSpec{} }, "spec.pd"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+				L1:        L1BackendSpec{SizeGB: 10},
+				GPUVendor: ptr(GPUVendorRBLN),
+			}}
+			c.mutate(&e.Spec)
+			errs := e.ValidateSpec()
+			if c.wantField == "" {
+				if len(errs) != 0 {
+					t.Fatalf("expected no errors, got %v", errs)
+				}
+				return
+			}
+			if len(errs) != 1 || errs[0].Field != c.wantField {
+				t.Fatalf("expected one error on %s, got %v", c.wantField, errs)
+			}
+		})
+	}
+}
