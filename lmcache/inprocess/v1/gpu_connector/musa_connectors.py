@@ -11,9 +11,6 @@ from lmcache.inprocess.v1.gpu_connector.gpu_connectors import (
     GPUConnectorInterface,
     VLLMPagedMemGPUConnectorV2,
 )
-from lmcache.inprocess.v1.memory_allocators.gpu_memory_allocator import (
-    GPUMemoryAllocator,
-)
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format import get_spec_class
@@ -32,6 +29,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_page_buffer_size,
     normalize_kv_and_discover_format,
 )
+from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,

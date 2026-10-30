@@ -15,10 +15,8 @@ import torch
 from lmcache.inprocess.v1.gpu_connector.musa_connectors import (
     VLLMPagedMemMUSAConnectorV2,
 )
-from lmcache.inprocess.v1.memory_allocators.gpu_memory_allocator import (
-    GPUMemoryAllocator,
-)
 from lmcache.inprocess.v1.metadata import LMCacheMetadata
+from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
