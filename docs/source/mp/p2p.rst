@@ -84,7 +84,10 @@ P2P is enabled per server by the ``--p2p-advertise-url`` flag. The relevant
      - Deadline for a peer lookup before it counts as a miss (default ``30``).
    * - ``--p2p-load-timeout SECONDS``
      - Deadline for a peer KV read before it counts as a failure
-       (default ``30``).
+       (default ``30``). Failure is reported only after the transfer terminates,
+       preventing the load-result path from releasing its buffers and locks
+       early. This deadline does not cancel the read or change independent TTL
+       and shutdown policies.
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation (default ``nixl``).
 
