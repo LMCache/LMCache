@@ -15,6 +15,7 @@ attention window.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 # First Party
@@ -23,6 +24,7 @@ from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
+    ObjectKeyIdentity,
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
@@ -44,6 +46,8 @@ def _resolve_ipc_key_and_hashes(
     world_size: int,
     token_ids: list[int],
     cache_salt: str,
+    *,
+    tags: Mapping[str, str] | None = None,
 ) -> tuple[IPCCacheServerKey, list[bytes]]:
     """Build the lookup-side IPC key and hash the complete chunks.
 
@@ -55,6 +59,13 @@ def _resolve_ipc_key_and_hashes(
             f"too many token_ids in a single request "
             f"(limit={MAX_TOKEN_IDS}, got={len(token_ids)})"
         )
+    matching_tags = ObjectKeyIdentity(
+        chunk_hash=b"",
+        kv_rank=0,
+        model_name=model_name,
+        cache_salt=cache_salt,
+        tags=tags or {},
+    ).tags
     ipc_key = IPCCacheServerKey.from_token_ids(
         model_name=model_name,
         world_size=world_size,
@@ -64,6 +75,9 @@ def _resolve_ipc_key_and_hashes(
         end=len(token_ids),
         request_id="",
         cache_salt=cache_salt,
+        request_configs={
+            f"lmcache.tag.{name}": value for name, value in matching_tags.items()
+        },
     )
     chunk_hashes = token_hasher.compute_chunk_hashes(list(token_ids))
     return ipc_key, chunk_hashes
@@ -75,6 +89,8 @@ def resolve_object_keys(
     world_size: int,
     token_ids: list[int],
     cache_salt: str,
+    *,
+    tags: Mapping[str, str] | None = None,
 ) -> tuple[list[ObjectKey], int]:
     """Resolve a token sequence to the object keys of its complete chunks.
 
@@ -90,6 +106,7 @@ def resolve_object_keys(
         world_size: Tensor-parallel world size selecting the per-rank fan-out.
         token_ids: The token sequence to resolve.
         cache_salt: Per-tenant isolation salt.
+        tags: Matching tags supplied when the content was stored.
 
     Returns:
         ``(obj_keys, chunk_count)``. ``obj_keys`` holds one key per (chunk, rank)
@@ -101,7 +118,7 @@ def resolve_object_keys(
             (e.g. ``cache_salt``) is invalid.
     """
     ipc_key, chunk_hashes = _resolve_ipc_key_and_hashes(
-        token_hasher, model_name, world_size, token_ids, cache_salt
+        token_hasher, model_name, world_size, token_ids, cache_salt, tags=tags
     )
     if not chunk_hashes:
         return [], 0
@@ -117,6 +134,8 @@ def resolve_grouped_object_keys(
     cache_salt: str,
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
+    *,
+    tags: Mapping[str, str] | None = None,
 ) -> tuple[list[GroupedObjectKeys], int]:
     """Resolve a token sequence to prefetch key rows for every object group.
 
@@ -131,6 +150,7 @@ def resolve_grouped_object_keys(
         world_size: Tensor-parallel world size selecting the per-rank fan-out.
         token_ids: The token sequence to resolve.
         cache_salt: Per-tenant isolation salt.
+        tags: Matching tags supplied when the content was stored.
         group_layout_descs: Each object group's memory layout.
         attn_desc: The model's per-group attention windows.
 
@@ -142,7 +162,7 @@ def resolve_grouped_object_keys(
             (e.g. ``cache_salt``) is invalid, or a group has no layout.
     """
     ipc_key, chunk_hashes = _resolve_ipc_key_and_hashes(
-        token_hasher, model_name, world_size, token_ids, cache_salt
+        token_hasher, model_name, world_size, token_ids, cache_salt, tags=tags
     )
     if not chunk_hashes:
         return [], 0

@@ -122,6 +122,7 @@ async def submit_prefetch(body: PrefetchRequest, request: Request) -> dict[str, 
         body.cache_salt,
         body.source_tier,
         body.target_tier,
+        tags=body.tags,
     )
 
 
