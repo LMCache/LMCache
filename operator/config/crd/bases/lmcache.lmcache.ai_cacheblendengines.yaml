@@ -1633,7 +1633,9 @@ spec:
                     type: boolean
                   port:
                     default: 9090
-                    description: port is the Prometheus metrics port.
+                    description: |-
+                      port is the port of the metrics Service. It does not change where
+                      the process serves /metrics (the LMCache server uses its HTTP port).
                     format: int32
                     type: integer
                   serviceMonitor:
@@ -3856,7 +3858,8 @@ spec:
                       description: hostIP is the IP address of the host.
                       type: string
                     metricsPort:
-                      description: metricsPort is the Prometheus metrics port.
+                      description: metricsPort is the pod port serving /metrics (the
+                        server HTTP port).
                       format: int32
                       type: integer
                     nodeName:
