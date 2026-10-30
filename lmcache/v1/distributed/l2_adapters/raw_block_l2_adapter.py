@@ -266,7 +266,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_magic: Eight-byte ASCII metadata checkpoint magic.
             meta_version: Metadata checkpoint version.
             meta_checkpoint_interval_sec: Periodic checkpoint interval.
-            meta_idle_quiet_ms: Quiet period before periodic checkpoints.
+            meta_idle_quiet_ms: Quiet period before periodic checkpoints. A
+                checkpoint that has waited a full interval does not wait for it.
             meta_enable_periodic: Whether to run the checkpoint thread.
             load_checkpoint_on_init: Whether to load existing checkpoint metadata.
             meta_verify_on_load: Whether recovery verifies slot headers.

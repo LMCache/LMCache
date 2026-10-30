@@ -396,6 +396,10 @@ class RawBlockCore:
         self._meta_persisted: int = 0
         self._inflight_io_count: int = 0
         self._last_io_ts: float = time.monotonic()
+        # Start of the wait for the next checkpoint: the last checkpoint's
+        # snapshot, or when unpersisted metadata was first seen after a quiet
+        # period.
+        self._meta_dirty_since: Optional[float] = None
         self._meta_stop_evt = threading.Event()
         self._meta_thread: Optional[threading.Thread] = None
 
@@ -2390,23 +2394,47 @@ class RawBlockCore:
         return True
 
     def _checkpoint_once(self, force: bool) -> bool:
-        """Write a metadata checkpoint when dirty and sufficiently idle."""
+        """Write a metadata checkpoint when dirty and sufficiently idle.
+
+        Under steady traffic the device may never be idle for
+        ``meta_idle_quiet_ms``, so metadata that has waited a full checkpoint
+        interval is written anyway. Without that, a crash under load loses
+        every store since startup.
+        """
+        now = time.monotonic()
         with self._lock:
             dirty = self._meta_dirty_total > self._meta_persisted
-            idle_ok = self._inflight_io_count == 0 and (
-                time.monotonic() - self._last_io_ts
-            ) >= (self.meta_idle_quiet_ms / 1000.0)
+            idle_ok = self._inflight_io_count == 0 and (now - self._last_io_ts) >= (
+                self.meta_idle_quiet_ms / 1000.0
+            )
+            overdue = False
+            if not dirty:
+                self._meta_dirty_since = None
+            else:
+                dirty_since = self._meta_dirty_since
+                if dirty_since is None:
+                    dirty_since = now
+                    self._meta_dirty_since = now
+                overdue = now - dirty_since >= max(1, self.meta_checkpoint_interval_sec)
 
         if not dirty:
             return False
-        if not force and not idle_ok:
+        if not force and not idle_ok and not overdue:
             return False
 
+        snapshot_ts = time.monotonic()
         snapshot, dirty_total_snapshot = self._snapshot_state()
         payload = json.dumps(snapshot, separators=(",", ":"), ensure_ascii=True).encode(
             "utf-8"
         )
-        return self._write_checkpoint(payload, dirty_total_snapshot)
+        written = self._write_checkpoint(payload, dirty_total_snapshot)
+        if written:
+            with self._lock:
+                # Changes after the snapshot are due one interval after it, so
+                # steady traffic still gets one checkpoint per interval. The
+                # next check resets this if nothing changed.
+                self._meta_dirty_since = snapshot_ts
+        return written
 
     def _is_valid_checkpoint_entry(self, offset: int, size: int) -> bool:
         """Return whether a checkpoint entry references a valid data slot."""

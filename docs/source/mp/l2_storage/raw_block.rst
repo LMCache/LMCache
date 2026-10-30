@@ -34,7 +34,9 @@ the Rust wheel's version, so pin it yourself to guarantee a matching pair:
 - ``meta_magic`` / ``meta_version``: Metadata checkpoint identity/version knobs.
 - ``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` /
   ``meta_enable_periodic`` / ``meta_verify_on_load``: Checkpoint and recovery
-  controls carried over from the legacy raw-block backend.
+  controls carried over from the legacy raw-block backend. A periodic
+  checkpoint waits for ``meta_idle_quiet_ms`` without I/O, but not for more
+  than one extra interval, so steady traffic cannot hold it off.
 - ``load_checkpoint_on_init``: Load an existing on-device metadata checkpoint
   during startup (default ``true``). Set to ``false`` to start with an empty
   in-memory index instead.
