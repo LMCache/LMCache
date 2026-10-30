@@ -51,6 +51,17 @@ _SCALE_WORD = re.compile(
     r"\b(?:thousand|million|billion|trillion)s?\b|(?<=\d)\s?(?:k|m|mn|b|bn)\b",
     re.IGNORECASE,
 )
+_SCALE_FACTORS = {
+    "thousand": 1e3,
+    "k": 1e3,
+    "million": 1e6,
+    "m": 1e6,
+    "mn": 1e6,
+    "billion": 1e9,
+    "b": 1e9,
+    "bn": 1e9,
+    "trillion": 1e12,
+}
 
 # Typographic punctuation that models emit ("Patrick’s", "Goring‑on‑Thames",
 # "1,577\u202fmillion"), mapped to ASCII so it normalizes like the gold.
@@ -192,33 +203,45 @@ def _phrase(text: str) -> str:
     return normalize_answer(text.replace("-", " "))
 
 
-def _numbers(text: str) -> list[float]:
-    """Return the magnitude of every number in *text* except bare years.
+def _numbers(text: str) -> list[tuple[float, float | None]]:
+    """Return each numeric magnitude and its optional scale, except bare years.
 
     Thousands separators are removed.  Signs are dropped because answers
     state them in words as often as with a minus ("shrunk by 0.9%" vs
-    "-0.9%").
+    "-0.9%"). A scale belongs to the number immediately before it.
     """
-    values: list[float] = []
-    for match in _NUMBER.findall(text):
-        cleaned = match.replace(",", "")
-        if cleaned in ("", "-") or _YEAR.fullmatch(match):
+    values: list[tuple[float, float | None]] = []
+    for match in _NUMBER.finditer(text):
+        cleaned = match.group().replace(",", "")
+        if cleaned in ("", "-") or _YEAR.fullmatch(match.group()):
             continue
-        values.append(abs(float(cleaned)))
+        scale = None
+        scale_match = _SCALE_WORD.search(text, match.end())
+        if scale_match and not text[match.end() : scale_match.start()].strip():
+            scale = _SCALE_FACTORS[scale_match.group().strip().lower().rstrip("s")]
+        values.append((abs(float(cleaned)), scale))
     return values
 
 
 def _same_number(
-    gold: float, candidate: float, scales: tuple[float, ...] = _UNIT_SCALES
+    gold: tuple[float, float | None],
+    candidate: tuple[float, float | None],
+    scales: tuple[float, ...] = _UNIT_SCALES,
 ) -> bool:
-    """Whether *candidate* equals *gold* up to rounding and one of *scales*."""
+    """Compare explicit units, or allow *scales* when a unit is unspecified."""
+    gold_value, gold_scale = gold
+    candidate_value, candidate_scale = candidate
+    if gold_scale is not None and candidate_scale is not None:
+        gold_value *= gold_scale
+        candidate_value *= candidate_scale
+        scales = (1.0,)
     for scale in scales:
-        scaled = candidate * scale
-        if gold == 0.0:
+        scaled = candidate_value * scale
+        if gold_value == 0.0:
             if scaled == 0.0:
                 return True
             continue
-        if abs(scaled - gold) <= _NUMBER_REL_TOL * abs(gold):
+        if abs(scaled - gold_value) <= _NUMBER_REL_TOL * abs(gold_value):
             return True
     return False
 
@@ -232,8 +255,11 @@ def answer_match(prediction: str, references: list[str]) -> bool:
     numeric figures require every figure to appear in the prediction, up
     to 0.5% rounding. They cannot match by a punctuation-stripped phrase:
     removing a decimal point would equate different values ("1.5", "15").
-    When either side names a scale ("million", "billion", "5B", …), a rescale
-    by a power of 1000 is also accepted, so "$11588.00" (in millions) matches
+    When both figures have scale suffixes ("million", "billion", "5B", …),
+    their values are compared in the same unit: "3 million" does not match
+    "3 billion" or "3000 million". When a scale is unspecified on one side,
+    a rescale by a power of 1000 is accepted if either answer names a scale,
+    so "$11588.00" (in millions) matches
     "$11,588 million" and "$11.588 billion", but not "$3,033 million"; and a
     bare count of "3" does not match "3,000".  Bare years are context, not
     figures: they are ignored by the numeric check, so "flat in FY 2023 vs FY
