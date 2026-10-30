@@ -132,6 +132,13 @@ MTP-specific caveats:
 Caveats
 -------
 
+- **Engine-driven transfers:** Compressed KV groups are supported over SHM
+  and inline transport. To select this path explicitly, add
+  ``"kv_connector_extra_config": {"lmcache.mp.mp_transfer_mode": "engine_driven"}``
+  to ``--kv-transfer-config``. Use matching LMCache versions on the worker
+  and server: registration must communicate physical slot counts separately
+  from logical token counts. This does not require changing the model's
+  compression ratios.
 - **Requires the latest vLLM release.** The vLLM dev branch is currently broken
   for this model (see the warning above) -- use a tagged release installed via
   the vLLM recipe.

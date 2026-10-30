@@ -34,7 +34,8 @@ leaves nothing behind.
 - **One planning step, one fold.** The policy plans once on the union of the
   L1 locked map and every L2 locked map. The prefix fold runs once, at finish,
   over the final L1 locked map. L1 is never folded on its own and then handed
-  to L2 as a remainder.
+  to L2 as a remainder. The lookup step may fold L1 alone, but only to skip
+  L2 when L1 serves every chunk.
 - **Every planned cell is locked in the tier it is planned from, and no cell
   is planned twice.** This is the policy contract (`PrefetchPolicy.plan_load`).
   The controller releases every lock outside the plan and then sets the locked
@@ -45,34 +46,77 @@ leaves nothing behind.
 - **An adapter stays attached while any request references it**: an in-flight
   lookup or load task, or an entry in `l2_locked_keys`. Draining adapters are
   never planned or looked up; they detach once no request references them.
+- **Memory-tag filters bound the sources.** Only L1 managers allowed by
+  `allowed_l1_memory_tags` are read-locked, and only L2 adapters allowed by
+  `allowed_l2_memory_tags` are looked up or planned. Loads still land in each
+  adapter's affinity L1 manager (see `../memory_tags.md`).
 - **LRU is decoupled from locking.** Taking and releasing read locks never
   refreshes eviction recency. Finish touches the hit keys explicitly
-  (`L1Manager.touch_keys`), so locks held while the request decides do not
+  (`BaseL1Manager.touch_keys`), so locks held while the request decides do not
   pin recency.
 
 ## Interface
 
 ```python
 PrefetchController(l1_managers, l1_manager_descriptors,
-                   l2_adapters, adapter_descriptors, policy, max_in_flight=8,
+                   l2_adapters, adapter_descriptors, policy, inflight_watermark=0.5,
                    l2_load_timeout=None, clock=time.monotonic)
 
-submit_prefetch_request(spec: PrefetchTaskSpec, skip_l2=False) -> PrefetchRequestId
+submit_prefetch_request(spec: PrefetchTaskSpec) -> PrefetchRequestId
 query_prefetch_result(request_id) -> PrefetchResult | None   # consume-once
 wait_prefetch_result(request_id, timeout) -> bool            # does not consume
 add_adapter(adapter_id, adapter, descriptor) / request_remove_adapter(adapter_id)
 start() / stop()
 ```
 
-`submit_prefetch_request` is thread-safe. When `skip_l2` is set, or no L2
-adapter is attached, the request is served from L1 on the calling thread and
+`submit_prefetch_request` is thread-safe. When the spec allows no L2 adapter
+(an empty `allowed_l2_memory_tags`), or no L2 adapter is attached, the request
+is served from L1 on the calling thread and
 its result is queryable when the call returns. Otherwise it is queued for the
-background loop and admitted up to `max_in_flight` at a time.
+background loop and admitted in arrival order under the in-flight watermark
+(see [Admission](#admission)).
 
 `PrefetchResult` carries `hit_cells` (one bitmap per key group, in
 `key_groups` order), split into the disjoint `l1_hit_cells` (L1 already held
 them) and `l2_hit_cells` (loaded by this request). Under `LOCK` every hit cell
 is read-locked `num_kv_readers` times for the caller.
+
+## Admission
+
+Pending requests start while L1 has room for their loads, not up to a fixed
+count. `_can_admit_new_prefetch(spec)` admits the request at the head of the
+queue when, for every L1 manager that receives loads from a non-draining L2
+adapter, both conditions hold:
+
+```
+(1) staging_bytes + lookup_bytes < inflight_watermark * total_bytes
+(2) total_bytes - used_bytes - lookup_bytes >= request_bytes
+```
+
+- `staging_bytes` is `BaseL1Manager.get_staging_memory_usage()`: buffers reserved
+  but not yet admitted, i.e. loads in flight (plus in-flight stores).
+- `lookup_bytes` sums `InFlightPrefetchRequest.get_max_load_bytes()` (every
+  cell loaded from L2) over admitted requests still in `LOOKUP`. A request
+  reserves staging only after its lookups finish; without this charge a burst
+  of submissions would all be admitted while staging still reads 0.
+- `request_bytes` is the same worst case for the head request.
+- `used_bytes, total_bytes` come from `get_memory_usage()`, the same numbers
+  eviction uses (the total is the grown heap on the lazy tier).
+- With no request in flight the head request is admitted regardless, so a
+  request that can never fit does not block the queue; its reservations then
+  fail per cell as before (`l1_oom`).
+
+Condition (1) bounds how much of L1 prefetch may occupy; condition (2) keeps a
+request from starting when L1, full of resident data, could not hold its loads.
+
+The check runs at the end of every loop iteration, so a completed load (which
+wakes the loop) admits the next requests immediately. Staging held only by
+stores is re-checked at the poll timeout (500 ms) at the latest.
+
+Example: a 16 GiB L1 with the default 0.5 watermark (an 8 GiB budget) and
+requests of 288 MiB (2048 tokens of Qwen3-8B KV). 28 requests stage 7.9 GiB,
+still under the budget, so a 29th starts: 29 requests run at once, where the
+old fixed limit was 8.
 
 ## Flow
 
@@ -84,7 +128,11 @@ afterwards.
 1. **Lock pass** (`_lock_l1_keys`). `reserve_read` every key of the request in
    every L1 manager; the hits become `l1_locked_keys`. Locks are taken
    regardless of `lock_mode`.
-2. **Lookup** (`_start_lookup_phase`). Submit one `lookup_and_lock` task per
+2. **Lookup** (`_start_lookup_phase`). If no adapter is live, or the L1
+   hits alone serve the request (under `"prefix"` they fold to a hit over
+   every chunk, under `"full"` L1 holds every cell), plan from L1 alone and
+   finish (steps 3 and 7 with an empty L2 map).
+   Otherwise, submit one `lookup_and_lock` task per
    non-draining adapter, over the full key list. As each result arrives
    (`_poll_lookup_results`) it becomes that adapter's row in `l2_locked_keys`.
 3. **Plan** (`_plan_load`). Call `policy.plan_load` on the two maps. Release
@@ -151,7 +199,7 @@ without waiting for an admission slot.
 
 Outstanding I/O continues draining after the caller receives its fallback.
 The request keeps its staging buffers and L2 locks until that I/O completes,
-and still occupies an admission slot. Late successful loads use
+and its staging or lookup bytes still count toward admission. Late successful loads use
 `finish_prefetch`, which admits them without caller read locks or a new L2
 store notification; late failures release their staging buffers. Neither
 can change the published result or release its caller-owned locks.
@@ -167,6 +215,8 @@ locked maps plus the L1 manager and L2 adapter descriptors and returns a
 `PrefetchPlan` (`l1_planned_keys`, `l2_planned_keys`); `plan_l1_retention`
 returns one flag per key loaded from a given L2 adapter into a given L1
 manager. Neither raises; invalid input yields an empty plan.
+A policy plans every L1 hit from L1; the controller relies on this to skip
+L2 for a request the L1 hits alone serve.
 
 - `"default"`: serve each needed cell from the lowest-indexed tier that holds
   it (L1 managers before L2 adapters); nothing loaded from L2 is retained.
@@ -185,7 +235,7 @@ selected with `--l2-prefetch-policy`.
 
 | Event | When |
 |---|---|
-| `L2_PREFETCH_LOOKUP_SUBMITTED` | Lookup tasks submitted (once per request). |
+| `L2_PREFETCH_LOOKUP_SUBMITTED` | Lookup tasks submitted (once per request that looks up L2). |
 | `L2_PREFETCH_LOAD_SUBMITTED` | Load tasks submitted (once per request). |
 | `L2_LOAD_TASK_SUBMITTED` / `L2_LOAD_TASK_COMPLETED` | Per adapter, per request. |
 | `L2_PREFETCH_LOAD_COMPLETED` | Per adapter, as its load is admitted. |
@@ -201,10 +251,15 @@ Gauges: `lmcache_mp.num_inflight_l2_loads`,
 - **One L1 manager.** `_get_l2_affinity_manager` returns the only manager;
   `L1ManagerDescriptor` is the hook for describing managers to the policy once
   L1-L2 affinity is configurable.
-- **Static admission.** `max_in_flight` is a constructor constant rather than
-  a function of L1 memory committed to in-flight loads.
+- **Conservative multi-L1 admission.** A lookup-phase request's worst-case
+  bytes are charged in full to every L1 manager with an active L2 adapter,
+  because which adapter (and so which L1) serves each cell is known only after
+  planning. Exact for one L1; it under-admits with several.
 - **Full key list to L2.** Lookups are submitted with every key, not only the
   L1 misses, because the adapter interface carries a flat key list.
+- **L2 recency skips L1-only requests.** Adapters that refresh LRU recency on
+  lookup (S3, Valkey, Bigtable, HF bucket, SageMaker HyperPod) do not see a
+  request L1 alone serves, so a chunk hot in L1 can age out of L2 first.
 - **Write conflicts are misses.** A key that becomes resident between the
   lookup and the reserve step fails reservation (`l1_contended`) and is
   reported as a miss; the engine recomputes and re-stores it.
@@ -213,7 +268,7 @@ Gauges: `lmcache_mp.num_inflight_l2_loads`,
 ## Contract-anchoring tests
 
 `tests/v1/distributed/test_prefetch_controller.py` drives the public interface
-with a real `L1Manager` and `MockL2Adapter`:
+with a real `DramL1Manager` and `MockL2Adapter`:
 
 - `TestL1AndL2` — an L1 suffix extends an L2 prefix into one hit; resident
   keys are not reloaded; L1 hits outside the prefix are released.
@@ -225,6 +280,9 @@ with a real `L1Manager` and `MockL2Adapter`:
   retrieve, `"retain"` keeps them.
 - `TestSlidingWindowRows` — a windowed row keeps and loads only its trailing
   chunks; `"full"` refuses windowed rows.
+- `TestL1ServesWholeRequest` — a request L1 fully serves (a windowed row
+  needs only its window) finishes with no L2 lookup; one where L1 misses a
+  chunk, under `"prefix"` or `"full"`, still looks up L2.
 - `TestRuntimeAdapters`, `TestShutdown` — draining adapters are not planned
   and detach once unreferenced; `stop()` releases what the maps record.
 

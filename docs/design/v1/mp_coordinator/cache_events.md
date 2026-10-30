@@ -3,7 +3,7 @@
 Module: `lmcache/v1/mp_coordinator/cache_events.py`
 Contract vocabulary: `lmcache/v1/mp_coordinator/api.py`
 Consumer: `lmcache/v1/mp_coordinator/views/key_directory.py` (see
-[key_directory.md](key_directory.md))
+[key_directory.md](views/key_directory.md))
 
 This is the emission half of the key directory (M1 of the control-plane
 RFC, [issue #4226](https://github.com/LMCache/LMCache/issues/4226)): MP
@@ -114,20 +114,17 @@ observability `EventBus` (`mp_observability/event_bus.py`);
 cache-event emission rides the same bus instead of adding parallel
 listener plumbing or a dedicated flush task:
 
-- **Producers.** `L1Manager` publishes `l1.write.finished`,
+- **Producers.** `BaseL1Manager` publishes `l1.write.finished`,
   `l1.write_finished_and_read_reserved`, `l1.keys.evicted` (all delete
   paths), and the new `l1.keys.accessed` (`touch_keys` — the MP request
   end's unified touch of a request's retrieved and stored keys; the
   subscriber deliberately does **not** consume `l1.read.finished`,
   which would duplicate those accesses). The placement-bearing events
   (stores and evictions) carry `meta: list[L1ObjectMeta]` — each
-  object's `size_bytes` (`MemoryObj.get_size()`) and its
-  `L1BackendType` medium from `L1ManagerProtocol.get_backend_type()` (the
-  Device-DAX tier resolves it per object via
-  `DevDaxMemoryAllocator.is_devdax_obj`, i.e. `MemoryObj.parent()`) —
-  so a hybrid DRAM+DAX L1 reports exactly where each object landed,
-  and deletes target the same placement identity `(instance, tier,
-  backend)` their store reported. The L2 base adapter's
+  object's `size_bytes` (`MemoryObj.get_size()`) and the `L1BackendType`
+  of the L1 manager that holds it (its `backend_type`; every manager has
+  exactly one medium) — so deletes target the same placement identity
+  `(instance, tier, backend)` their store reported. The L2 base adapter's
   listener-notify funnel publishes the new `l2.keys.stored`
   (`keys`+`sizes`+`backend`), `l2.keys.accessed`, and `l2.keys.deleted`
   events; the backend name is the registered adapter type and the
@@ -163,7 +160,7 @@ listener plumbing or a dedicated flush task:
   so token bindings ride the store events themselves. Tokens are
   therefore repeated per rank/group/tier placement — an accepted wire
   trade for a self-contained protocol (see
-  [key_directory.md](key_directory.md) — Token index).
+  [key_directory.md](views/key_directory.md) — Token index).
   `ACCESS` batches carry an **empty backend**: the directory only
   refreshes key-level recency and access count on access, so there is
   no placement identity to name. The vocabulary requires a non-empty
@@ -192,8 +189,9 @@ listener plumbing or a dedicated flush task:
 ## L1 media
 
 L1 media are a closed set, hence the `L1BackendType` enum
-(`distributed/api.py`: `DRAM`, `DEVDAX`, `GDS`); L2 backends stay
-strings because adapter types are an open registry (plugins register
+(`distributed/api.py`: `DRAM`, `DEVDAX`, `GDS`, one per `BaseL1Manager`
+subclass, the same vocabulary as the capacity declarations); L2 backends
+stay strings because adapter types are an open registry (plugins register
 new type names).
 
 The `shared` flag is tier-agnostic, and L1 already contains the
@@ -204,7 +202,7 @@ DevDAX region privately (its own allocator, its own lifetime), so L1
 events emit `shared=False`. When pooled DevDAX lands (allocation
 governed by the pool's own controller, reporting still per instance),
 only the producer side changes: the subscriber already splits L1
-records per `L1BackendType`, so it stamps `shared` on the pooled
+records per medium, so it stamps `shared` on the pooled
 backend's runs — the vocabulary, batching identity, and directory
 semantics need no change.
 

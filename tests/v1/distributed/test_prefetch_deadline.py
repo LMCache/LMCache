@@ -23,7 +23,7 @@ from lmcache.v1.distributed.config import (
     parse_args,
 )
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
@@ -47,6 +47,9 @@ from lmcache.v1.distributed.storage_controllers.utils import (
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
 from tests.v1.distributed.test_prefetch_controller import (
+    CXL_TAGS,
+    DRAM_TAGS,
+    RetaggedL1Manager,
     make_descriptor,
     make_group,
     make_l1_config,
@@ -176,23 +179,25 @@ def _fast_loop(monkeypatch):
 
 @pytest.fixture
 def l1_manager():
-    mgr = L1Manager(make_l1_config())
+    mgr = DramL1Manager(make_l1_config())
     yield mgr
     mgr.close()
 
 
-def make_controller(l1_manager, adapter, clock, timeout, max_in_flight=8):
-    return make_controller_multi(l1_manager, [adapter], clock, timeout, max_in_flight)
+def make_controller(l1_manager, adapter, clock, timeout, inflight_watermark=0.5):
+    return make_controller_multi(
+        l1_manager, [adapter], clock, timeout, inflight_watermark
+    )
 
 
-def make_controller_multi(l1_manager, adapters, clock, timeout, max_in_flight=8):
+def make_controller_multi(l1_manager, adapters, clock, timeout, inflight_watermark=0.5):
     return PrefetchController(
         l1_managers=[l1_manager],
         l1_manager_descriptors=[L1ManagerDescriptor(index=0, config=make_l1_config())],
         l2_adapters=list(adapters),
         adapter_descriptors=[make_descriptor(i) for i in range(len(adapters))],
         policy=DefaultPrefetchPolicy(),
-        max_in_flight=max_in_flight,
+        inflight_watermark=inflight_watermark,
         l2_load_timeout=timeout,
         clock=clock,
     )
@@ -419,7 +424,7 @@ class TestLoadDeadline:
         adapter = make_gated_adapter()
         clock = FakeClock()
         ctrl = make_controller(
-            l1_manager, adapter, clock, timeout=0.005, max_in_flight=1
+            l1_manager, adapter, clock, timeout=0.005, inflight_watermark=1e-6
         )
         layout = make_layout()
         busy, warm, queued = [make_object_key(i) for i in range(3)]
@@ -609,11 +614,11 @@ class TestLoadDeadline:
 
 
 @pytest.fixture
-def managers() -> Iterator[list[L1Manager]]:
+def managers() -> Iterator[list[DramL1Manager]]:
     """Use distinct real L1 pools for the default and archive affinities."""
     config = make_l1_config(8 * 1024 * 1024)
     pools = [
-        L1Manager(
+        DramL1Manager(
             replace(
                 config,
                 tag=tag,
@@ -661,13 +666,15 @@ def test_multi_l1_cli_preserves_deadline(timeout: float | None) -> None:
 
 
 def test_partial_deadline_keeps_affinity_and_drains_without_store(
-    managers: list[L1Manager],
+    managers: list[DramL1Manager],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy, kept = "full", [0, 2]
     configs = [MockL2AdapterConfig(0.05, 10.0) for _ in managers]
-    for config, manager in zip(configs, managers, strict=True):
-        config.affinity_tag = manager.config.tag
+    for config, tags in zip(configs, (DRAM_TAGS, CXL_TAGS), strict=True):
+        monkeypatch.setattr(
+            config, "get_wanted_l1_memory_tags", lambda tags=tags: (tags,)
+        )
     adapters = [GatedLoadMockAdapter(config) for config in configs]
     slow, fast = adapters
     descriptors = [
@@ -682,7 +689,7 @@ def test_partial_deadline_keeps_affinity_and_drains_without_store(
     ]
     clock = FakeClock()
     controller = PrefetchController(
-        l1_managers=[managers[0], managers[1]],
+        l1_managers=[managers[0], RetaggedL1Manager(managers[1], CXL_TAGS)],  # type: ignore[list-item]
         l1_manager_descriptors=[
             L1ManagerDescriptor(index=manager.l1_manager_id, config=manager.config)
             for manager in managers

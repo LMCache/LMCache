@@ -35,14 +35,17 @@ MAGIC: bytes = b"LMCT"
 #: incompatible way (length prefix, header/record struct shape, etc.).
 FORMAT_VERSION: int = 1
 
-#: Bumped whenever the captured API surface changes in a way that makes
+#: Bumped whenever the captured storage API surface changes in a way that makes
 #: older traces undecodable or incorrect to replay — e.g. a traced
 #: StorageManager method gains/loses an argument, an argument type's
 #: codec wire form changes, or a new codec tag is introduced.  Owned by
 #: the trace subsystem, independent of the LMCache package version,
 #: because ``lmcache.__version__`` bumps cover many changes irrelevant
 #: to the trace contract.
-TRACE_SCHEMA_VERSION: int = 1
+#:
+#: Version 2: ``StorageManager.submit_prefetch_task`` no longer takes
+#: ``skip_l2``, and ``PrefetchTaskSpec`` carries memory-tag filters.
+TRACE_SCHEMA_VERSION: int = 2
 
 
 class Header(msgspec.Struct, tag="header", omit_defaults=True):
@@ -60,9 +63,9 @@ class Header(msgspec.Struct, tag="header", omit_defaults=True):
     Future levels (``"mq"``, ``"gpu"``) will share this format."""
 
     trace_schema_version: int
-    """:data:`TRACE_SCHEMA_VERSION` at record time.  Replay drivers may
-    refuse mismatched schemas rather than silently misinterpreting old
-    traces."""
+    """:data:`TRACE_SCHEMA_VERSION` at record time, enforced for storage
+    traces only. Event traces use ``level_meta.cache_event_schema_version``
+    for payload compatibility, independently of storage API changes."""
 
     t_mono_start: float
     """``time.monotonic()`` at recorder construction.  Record

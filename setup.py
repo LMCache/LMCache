@@ -81,6 +81,10 @@ if __name__ == "__main__":
     # Platform-neutral extras; the build profile adds its own below.
     extras_require: dict[str, list[str]] = {
         "kafka": _read_requirements(ROOT_DIR / "requirements" / "kafka.txt"),
+        "raw-block": ["lmcache-rust-raw-block-io"],
+        "grpc-native": _read_requirements(
+            ROOT_DIR / "requirements" / "grpc_native.txt"
+        ),
     }
     if (
         not BuildProfile.is_gpu_ext_disabled()

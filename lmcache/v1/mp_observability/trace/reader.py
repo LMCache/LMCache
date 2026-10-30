@@ -46,6 +46,10 @@ class TraceReader:
                 ...
 
     Closing the reader closes the underlying file handle.
+
+    File-format validation applies to every level. Storage traces must also
+    match ``TRACE_SCHEMA_VERSION``; event payload compatibility is checked
+    by ``EventsTrace.load`` against ``cache_event_schema_version`` instead.
     """
 
     def __init__(self, path: str) -> None:
@@ -122,7 +126,10 @@ class TraceReader:
                 f"trace file {self._path!r}: unsupported format_version "
                 f"{header.format_version} (this build expects {FORMAT_VERSION})"
             )
-        if header.trace_schema_version != TRACE_SCHEMA_VERSION:
+        if (
+            header.level == "storage"
+            and header.trace_schema_version != TRACE_SCHEMA_VERSION
+        ):
             raise ValueError(
                 f"trace file {self._path!r}: unsupported trace_schema_version "
                 f"{header.trace_schema_version} "
