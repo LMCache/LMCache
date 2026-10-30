@@ -544,7 +544,7 @@
     {
       "type": "row",
       "id": 10,
-      "title": "Ingest: is the view complete?",
+      "title": "Ingest completeness",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -896,7 +896,7 @@
     {
       "type": "row",
       "id": 17,
-      "title": "Ingest: how old is it?",
+      "title": "Ingest freshness",
       "collapsed": false,
       "gridPos": {
         "h": 1,
