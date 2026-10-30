@@ -14,13 +14,17 @@ import sys
 import textwrap
 
 # Third Party
+import msgspec
 import pytest
 
 # First Party
+from lmcache.v1.common.transfer_channel.api import CxlArenaDescriptor
+from lmcache.v1.distributed.p2p import P2PClient
 from lmcache.v1.distributed.transfer_channel import (
     TransferChannelAddress,
     TransferChannelTransferResult,
 )
+from lmcache.v1.transport.grpc.method_registry import get_method_codec_registry
 
 
 # =========================================================
@@ -44,6 +48,22 @@ def test_addresses_with_same_fields_are_equal():
     c = TransferChannelAddress(offset=10, size=21)
     assert a == b
     assert a != c
+
+
+@pytest.mark.parametrize("cxl", [False, True])
+def test_address_carries_its_cxl_arena_over_both_transports(cxl: bool) -> None:
+    """The slab identity of a CXL address survives msgpack and protobuf; an
+    address without one is unchanged for copying peers."""
+    arena = CxlArenaDescriptor("pool", 0, 8192, 4096, "owner") if cxl else None
+    address = TransferChannelAddress(4096, 4096, arena)
+    wire = msgspec.msgpack.encode(address)
+    assert msgspec.msgpack.decode(wire, type=TransferChannelAddress) == address
+    codec = get_method_codec_registry(P2PClient).by_full_name[
+        "lmcache.mp.P2PService.P2PQueryLookupResults"
+    ]
+    message = codec.response_encoder([address])
+    assert message.addresses.addresses[0].HasField("cxl_arena") is cxl
+    assert codec.response_decoder(message) == [address]
 
 
 # =========================================================

@@ -44,9 +44,9 @@ even where the code is short today.
 
 | L1 object | Engine | `stage` | Full-chunk copy path |
 |---|---|---|---|
-| Host memory (DRAM, DevDAX) | GPU DMA | host/GPU copy on the stream | `direct` when usable, else `kernel` (native plan, or per batch without it) |
+| Host memory (DRAM, DevDAX, a `BorrowedMemoryObj` bound to a local view of a peer's CXL slab) | GPU DMA | host/GPU copy on the stream | `direct` when usable, else `kernel` (native plan, or per batch without it) |
 | Storage-backed (`GDSMemoryObject`) | NVMe DMA | file read or write on the stream | `kernel`, per batch |
-| Owned by a peer (`BorrowedMemoryObj`) | NIC DMA | transfer-channel read, waited for; retrieve only | `kernel`, per batch |
+| Owned by a peer, not mapped locally (`BorrowedMemoryObj` bound to a `read_into`) | NIC DMA | transfer-channel read, waited for; retrieve only | `kernel`, per batch |
 
 `split_into_runs` cuts the group's chunks into consecutive runs of one engine
 and each copy path gets its run as a `[start, end)` chunk range over the full

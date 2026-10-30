@@ -3,6 +3,10 @@
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.transfer_channel.api import (
+    CxlArenaDescriptor,
+    TransferChannelAddress,
+)
 from lmcache.v1.distributed.api import (
     L1BackendType,
     MemoryResidency,
@@ -18,6 +22,7 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaStatus,
     DevDaxRemoveMode,
 )
+from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
@@ -64,6 +69,28 @@ class DevDaxL1Manager(BaseL1Manager):
     def get_memory_tags(self) -> MemoryTags:
         """Return ``(CXL, LOCAL)``."""
         return MemoryTags(segment=MemorySegment.CXL, residency=MemoryResidency.LOCAL)
+
+    @property
+    def cxl_arena(self) -> CxlArenaDescriptor | None:
+        """Return the owned shared-pool slab, or None without a CXL pool id."""
+        return self._devdax_memory_manager.cxl_arena
+
+    def get_cxl_address(self, obj: MemoryObj) -> TransferChannelAddress | None:
+        """Return the location of a read-reserved owned CXL object.
+
+        Args:
+            obj: Object held under an owner read reservation.
+
+        Returns:
+            A CXL address, or None for objects outside the owned slab.
+        """
+        arena = self.cxl_arena
+        if arena is None:
+            return None
+        offset = self._devdax_memory_manager.get_cxl_offset(obj)
+        if offset is None:
+            return None
+        return TransferChannelAddress(offset, obj.get_size(), arena)
 
     def get_capacity_bytes(self) -> int:
         """Return the bytes of every ACTIVE arena.

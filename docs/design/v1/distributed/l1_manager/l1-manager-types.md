@@ -120,9 +120,12 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
   borrower wants `(segment, SHADOW)` first, so tag affinity binds it there.
 - **`BorrowedMemoryObj`** (`lmcache/v1/memory_management.py`, with the other
   memory objects) is a `MemoryObj` with no tensor: a placeholder until the
-  borrower's load binds it to a lease and a `read_into(region, offset)` that
-  reads the bytes into a device region at retrieve time. `Lease` and
-  `PendingRead`, defined beside it, are the borrower's contract types.
+  borrower's load binds it to a lease and to the bytes: a
+  `read_into(region, offset)` that reads them into a device region at
+  retrieve time, or a `local_view` when the owner's bytes are mapped into
+  this process (a shared CXL slab), which the tensor accessors then return.
+  `Lease` and `PendingRead`, defined beside it, are the borrower's contract
+  types.
 - **No capacity check** in `reserve_write`; every placeholder is temporary.
   The shadow calls no listener and publishes no L1 event, so its store and
   eviction controllers are inert, and prefetch admission skips an L1 without
@@ -138,7 +141,10 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
   storage manager knows no borrower; the prefetch controller excludes `SHADOW`
   affinity from `NO_LOCK`.
 - **Borrowers**: the GPU-direct peer adapter (`p2p_gdr`,
-  [../l2_adapters/gdr_peer_l2_adapter.md](../l2_adapters/gdr_peer_l2_adapter.md)).
+  [../l2_adapters/gdr_peer_l2_adapter.md](../l2_adapters/gdr_peer_l2_adapter.md))
+  with a DRAM shadow, and the shared-pool CXL peer adapter (`cxl_peer`,
+  [../l2_adapters/cxl_peer_l2_adapter.md](../l2_adapters/cxl_peer_l2_adapter.md))
+  with a CXL shadow.
 
 ## Addressing one L1
 

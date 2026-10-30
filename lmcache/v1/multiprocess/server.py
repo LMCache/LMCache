@@ -437,6 +437,11 @@ def _start_cache_server(
         storage_manager_config = with_shadow_l1(
             storage_manager_config, MemorySegment.DRAM
         )
+    elif mp_config.p2p_config.transfer_engine == "cxl":
+        # Views of peers' shared CXL slabs are indexed by a CXL shadow L1.
+        storage_manager_config = with_shadow_l1(
+            storage_manager_config, MemorySegment.CXL
+        )
 
     # blend engine: full per-chunk SWA KV (blended chunks reuse at arbitrary
     # positions). full_sw_kv widens attention groups only; recurrent groups

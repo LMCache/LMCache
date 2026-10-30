@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for ``l1_exposes_single_memory_region`` (P2P L1 compatibility)."""
+"""Tests for ``l1_exposes_single_memory_region`` and ``l1_is_single_cxl_region``
+(P2P L1 compatibility)."""
+
+# Standard
+from dataclasses import replace
 
 # First Party
+from lmcache.v1.distributed.api import MemorySegment
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     GdsL1Config,
@@ -9,6 +14,8 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
     l1_exposes_single_memory_region,
+    l1_is_single_cxl_region,
+    with_shadow_l1,
 )
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 
@@ -54,3 +61,55 @@ def test_devdax_l1_is_not_single_region():
         )
     )
     assert l1_exposes_single_memory_region(config) is False
+
+
+def _devdax_memory(**overrides: object) -> L1MemoryManagerConfig:
+    fields: dict = {
+        "size_in_bytes": _SIZE,
+        "use_lazy": False,
+        "devdax_path": "/dev/dax0.0",
+        "shm_name": "",
+    }
+    fields.update(overrides)
+    return L1MemoryManagerConfig(**fields)
+
+
+def test_single_cxl_l1_is_cxl_region():
+    config = _config(_devdax_memory(cxl_pool_id="pool"))
+    assert l1_is_single_cxl_region(config) is True
+    assert l1_exposes_single_memory_region(config) is False
+
+
+def test_devdax_l1_without_pool_is_not_cxl_region():
+    assert l1_is_single_cxl_region(_config(_devdax_memory())) is False
+
+
+def test_plain_dram_is_not_cxl_region():
+    config = _config(L1MemoryManagerConfig(size_in_bytes=_SIZE, use_lazy=False))
+    assert l1_is_single_cxl_region(config) is False
+
+
+def test_cxl_l1_with_extra_l1_is_not_cxl_region():
+    """A second L1 manager holds objects peers cannot borrow."""
+    cxl = _config(_devdax_memory(cxl_pool_id="pool")).l1_manager_config
+    dram = replace(
+        cxl,
+        memory_config=L1MemoryManagerConfig(size_in_bytes=_SIZE, use_lazy=False),
+        tag="dram",
+    )
+    config = StorageManagerConfig(
+        l1_manager_config=cxl,
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+        l2_adapter_config=L2AdaptersConfig(adapters=[]),
+        l1_manager_configs=[cxl, dram],
+    )
+    assert l1_is_single_cxl_region(config) is False
+
+
+def test_cxl_l1_with_its_shadow_is_still_one_cxl_region():
+    """The shadow L1 that indexes borrowed views owns no memory."""
+    config = with_shadow_l1(
+        _config(_devdax_memory(cxl_pool_id="pool")), MemorySegment.CXL
+    )
+    assert [c.tag for c in config.l1_manager_configs] == ["_default", "shadow.cxl"]
+    assert l1_is_single_cxl_region(config) is True

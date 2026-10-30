@@ -36,7 +36,8 @@ PeerL2AdapterBase             lookup/unlock RPCs, event fds, no-op stores, close
 ├── P2PL2Adapter              import the peer region; RDMA load and, when enabled,
 │                             RDMA store over the transfer channel
 └── BorrowingPeerL2AdapterBase  keep the owner's lock as a lease; no copy
-    └── GdrPeerL2Adapter      see [gdr_peer_l2_adapter.md](gdr_peer_l2_adapter.md)
+    ├── GdrPeerL2Adapter      see [gdr_peer_l2_adapter.md](gdr_peer_l2_adapter.md)
+    └── CxlPeerL2Adapter      see [cxl_peer_l2_adapter.md](cxl_peer_l2_adapter.md)
 ```
 
 The base holds the RPC control plane so another way of reading a peer can
