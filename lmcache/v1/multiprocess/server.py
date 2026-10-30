@@ -37,6 +37,7 @@ from lmcache.v1.mp_observability.gc_monitor import (
     init_gc_monitor,
     shutdown_gc_monitor,
 )
+from lmcache.v1.mp_observability.otel_init import shutdown_grpc_otel_metrics
 from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
 from lmcache.v1.multiprocess.config import (
     DEFAULT_COORDINATOR_CONFIG,
@@ -422,6 +423,7 @@ def run_cache_server(
         engine.close()
     finally:
         shutdown_gc_monitor()
+        shutdown_grpc_otel_metrics()
     return None
 
 
