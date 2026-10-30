@@ -568,6 +568,69 @@ def l2_storage_manager_config(basic_l1_config):
     )
 
 
+class TestStorageManagerLockOnWrite:
+    """Tests for handing written objects to a reader with read locks held."""
+
+    def test_finish_write_and_reserve_read_locks_admitted_objects(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """Admitted objects carry ``read_locks`` locks until they are released."""
+        sm = StorageManager(basic_storage_manager_config)
+        keys = [make_object_key(i) for i in range(2)]
+        reserved = sm.reserve_write(keys, basic_layout)
+
+        owners = sm.finish_write_and_reserve_read(
+            keys, l1_owners_of(reserved), read_locks=2
+        )
+
+        assert set(owners) == set(keys)
+        with sm.read_prefetched_results(keys, owners) as objs:
+            assert objs is not None
+        sm.finish_read_prefetched(keys, read_locks=1, l1_owners=owners)
+        assert sm.delete_l1_keys(keys) == (0, len(keys))
+        sm.finish_read_prefetched(keys, read_locks=1, l1_owners=owners)
+        assert sm.delete_l1_keys(keys) == (len(keys), 0)
+        sm.close()
+
+    def test_finish_write_and_reserve_read_does_not_store_to_l2(
+        self, l2_storage_manager_config, basic_layout
+    ):
+        """Objects handed to a reader are not stored to L2; written ones are."""
+        sm = StorageManager(l2_storage_manager_config)
+        handed = make_object_key(1)
+        written = make_object_key(2)
+        reserved = sm.reserve_write([handed], basic_layout)
+        owners = sm.finish_write_and_reserve_read([handed], l1_owners_of(reserved))
+        sm.finish_read_prefetched([handed], l1_owners=owners)
+
+        # Stores run in order, so once ``written`` is in L2 a store of
+        # ``handed`` would have finished too.
+        write_keys_and_wait_for_l2(sm, [written], basic_layout)
+        sm.clear()
+        handle = sm.submit_prefetch_task(single_row_spec([handed], basic_layout))
+        assert wait_for_prefetch_status(sm, handle) == 0
+        sm.close()
+
+    def test_reserve_read_locks_only_resident_keys(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """Resident keys are locked; missing and still-written keys are not."""
+        sm = StorageManager(basic_storage_manager_config)
+        resident, staged, missing = (make_object_key(i) for i in range(3))
+        reserved = sm.reserve_write([resident], basic_layout)
+        sm.finish_write([resident], l1_owners_of(reserved))
+        sm.reserve_write([staged], basic_layout)
+
+        owners = sm.reserve_read([resident, staged, missing], read_locks=2)
+
+        assert list(owners) == [resident]
+        sm.finish_read_prefetched([resident], read_locks=1, l1_owners=owners)
+        assert sm.delete_l1_keys([resident]) == (0, 1)
+        sm.finish_read_prefetched([resident], read_locks=1, l1_owners=owners)
+        assert sm.delete_l1_keys([resident]) == (1, 0)
+        sm.close()
+
+
 class TestStorageManagerL2Prefetch:
     """Tests for prefetching from L2 through StorageManager."""
 

@@ -529,6 +529,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             layout_desc,
             attn_desc,
             group_layout_descs=group_layout_descs,
+            total_num_kv_heads=layout_hints.get("total_num_kv_heads"),
         )
 
         with self._lock:

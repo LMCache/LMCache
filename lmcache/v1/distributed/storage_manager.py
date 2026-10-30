@@ -380,6 +380,87 @@ class StorageManager:
 
         # TODO: global key states update
 
+    def finish_write_and_reserve_read(
+        self,
+        keys: list[ObjectKey],
+        l1_owners: dict[ObjectKey, int],
+        read_locks: int = 1,
+    ) -> dict[ObjectKey, int]:
+        """Finish writing reserved objects and read-lock the admitted ones.
+
+        Like :meth:`finish_write`, but each object moves from write-locked to
+        ``read_locks`` read locks in one step under its L1's lock, so eviction
+        cannot take it in between. Use it when the writer hands the objects to
+        a reader, as a prefetch does.
+
+        Args:
+            keys: Keys reserved by :meth:`reserve_write` and written.
+            l1_owners: The L1 manager each key was reserved in, built from the
+                reserved objects with :func:`l1_owners_of`.
+            read_locks: Read locks taken per key; release them with
+                :meth:`finish_read_prefetched`.
+
+        Returns:
+            The L1 owner of each key now read-locked. A key whose
+            reservation expired is absent.
+
+        Raises:
+            ValueError: ``l1_owners`` omits a key or names an unregistered L1
+                manager.
+
+        Note:
+            The objects are not stored to L2: L1 reports them as prefetched,
+            not as written. If a key became resident before admission, the
+            resident object is locked instead.
+        """
+        owners: dict[ObjectKey, int] = {}
+        failed_keys: list[ObjectKey] = []
+        for owner, group in self._group_by_owner(keys, l1_owners).items():
+            results = self._l1_managers_by_id[owner].finish_write_and_reserve_read(
+                group, read_locks=read_locks, tag=_L1_WRITE_TAG
+            )
+            for key, (err, _) in results.items():
+                if err == L1Error.SUCCESS:
+                    owners[key] = owner
+                else:
+                    failed_keys.append(key)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_WRITE_FINISHED,
+                metadata={
+                    "succeeded_keys": list(owners),
+                    "failed_keys": failed_keys,
+                },
+            )
+        )
+        return owners
+
+    def reserve_read(
+        self, keys: list[ObjectKey], read_locks: int = 1
+    ) -> dict[ObjectKey, int]:
+        """Read-lock objects already resident in L1, without loading from L2.
+
+        Args:
+            keys: Keys to lock.
+            read_locks: Read locks taken per key; release them with
+                :meth:`finish_read_prefetched`.
+
+        Returns:
+            The L1 owner of each key now read-locked. A key that is not
+            resident in any L1 (missing, or only being written) is absent.
+        """
+        owners: dict[ObjectKey, int] = {}
+        pending = keys
+        for owner, manager in self._l1_managers_by_id.items():
+            if not pending:
+                break
+            results = manager.reserve_read(pending, read_locks)
+            for key, (err, _) in results.items():
+                if err == L1Error.SUCCESS:
+                    owners[key] = owner
+            pending = [k for k in pending if k not in owners]
+        return owners
+
     @contextmanager
     def read_prefetched_results(
         self,

@@ -30,6 +30,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     get_lmcache_chunk_size,
 )
 from lmcache.utils import CacheRemoveEvent, CacheStoreEvent
+from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     KVEventBatch,
     KVEventRecord,
@@ -825,6 +826,44 @@ def test_register_kv_caches_tuple_caches_use_engine_driven_context(
     assert adapter.kv_caches is tuple_kv
     req_client.register_kv_cache_engine_driven_context.assert_called_once()
     assert adapter.create_recorded_event() is None
+
+
+@pytest.mark.parametrize(
+    "vllm_world_size,pp_size,dcp_size,keeps_heads",
+    [(2, 1, 1, True), (4, 2, 1, False), (2, 1, 2, False)],
+)
+def test_register_kv_caches_sends_head_count_only_for_plain_tp(
+    fake_adapter,
+    monkeypatch,
+    vllm_world_size: int,
+    pp_size: int,
+    dcp_size: int,
+    keeps_heads: bool,
+) -> None:
+    """``total_num_kv_heads`` reaches the server only without PP or DCP."""
+    local_ctx = MagicMock(name="local_transfer_ctx")
+    monkeypatch.setattr(
+        adapter_mod, "create_transfer_context", lambda kv, **_kwargs: local_ctx
+    )
+    adapter = _make_worker_adapter(
+        parallel_strategy=ParallelStrategy(
+            mla_only=False,
+            vllm_world_size=vllm_world_size,
+            vllm_worker_id=0,
+            tp_size=2,
+            pp_size=pp_size,
+            n_servers=1,
+            dcp_size=dcp_size,
+        )
+    )
+    hints: LayoutHints = {"kv_layout": "NHD", "total_num_kv_heads": 8}
+
+    adapter.register_kv_caches({"layer.0": MagicMock()}, layout_hints=hints)
+
+    sent = local_ctx.register.call_args.kwargs["layout_hints"]
+    expected = dict(hints) if keeps_heads else {"kv_layout": "NHD"}
+    assert sent == expected
+    assert hints == {"kv_layout": "NHD", "total_num_kv_heads": 8}
 
 
 def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):

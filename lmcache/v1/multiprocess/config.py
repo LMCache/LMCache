@@ -143,6 +143,16 @@ class MPServerConfig:
     the longest time a request can wait in the engine's queue between its
     lookup and its admission (minutes under deep agentic backlogs)."""
 
+    hetero_tp_source_world_size: int | None = None
+    """TP size other engines of the same model store with (e.g. a peer
+    instance at another TP). A lookup that hits fewer than all chunks at its
+    own TP size looks up the rest at this TP size, on every tier, and
+    reshards that hit into its own layout. ``None`` turns this off. Takes
+    effect only for engines that report their KV head count:
+    attention-only, non-MLA vLLM models without PP, DCP or multiple servers,
+    under LMCache-driven transfer, and only for models without sliding-window
+    layers. Both TP sizes must divide the model's KV head count."""
+
     kv_load_policy: str = "DEFAULT"
     """Per-request choice between serving a lookup and letting the engine
     recompute the prompt: a built-in name ("DEFAULT") or
@@ -553,6 +563,16 @@ def add_mp_server_args(
         "Raise it above the longest engine queueing delay. Default is 600.",
     )
     mp_group.add_argument(
+        "--hetero-tp-source-world-size",
+        type=int,
+        default=None,
+        help="TP size other engines of the same model store with. A lookup "
+        "that hits fewer than all chunks at its own TP size looks up the rest "
+        "at this TP size and reshards the hit. Attention-only, non-MLA models "
+        "without PP, DCP or sliding-window layers. "
+        "Example: --hetero-tp-source-world-size 1",
+    )
+    mp_group.add_argument(
         "--kv-load-policy",
         type=str,
         default="DEFAULT",
@@ -663,6 +683,7 @@ def parse_args_to_mp_server_config(
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         session_ttl_seconds=args.session_ttl_seconds,
         kv_load_policy=args.kv_load_policy,
+        hetero_tp_source_world_size=args.hetero_tp_source_world_size,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         kv_event_log_size=args.kv_event_log_size,
         server_modules=parse_server_module_specs(args.server_module or []),

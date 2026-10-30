@@ -28,6 +28,7 @@ from lmcache.v1.multiprocess.engine_module import (
     EngineModule,
     ModuleBuildContext,
 )
+from lmcache.v1.multiprocess.hetero_kv_view import HeteroKVView
 from lmcache.v1.multiprocess.kv_load_policy import (
     DefaultKVLoadPolicy,
     KVLoadContext,
@@ -152,15 +153,24 @@ class LookupModule(DiscoverableModule):
                 build_ctx.mp_config.kv_load_policy,
                 build_ctx.mp_config.runtime_plugin_config.extra_config,
             ),
+            hetero_tp_source_world_size=(
+                build_ctx.mp_config.hetero_tp_source_world_size
+            ),
         )
 
     def __init__(
         self,
         ctx: MPCacheServerContext,
         load_policy: KVLoadPolicy = _DEFAULT_LOAD_POLICY,
+        hetero_tp_source_world_size: int | None = None,
     ) -> None:
         self._ctx = ctx
         self._load_policy = load_policy
+        # Every prefetch goes through the view, so a lookup can complete its
+        # hit from another TP size without knowing it.
+        self._prefetch = HeteroKVView(
+            ctx.storage_manager, ctx.layout_desc_registry, hetero_tp_source_world_size
+        )
         self._prefetch_jobs: dict[str, _PrefetchJob] = {}
         self._prefetch_job_lock = threading.Lock()
         self._setup_metrics()
@@ -181,8 +191,8 @@ class LookupModule(DiscoverableModule):
         }
 
     def close(self) -> None:
-        """Release resources owned by this module (no-op)."""
-        pass
+        """Stop the cross-TP lookup threads; see :meth:`HeteroKVView.close`."""
+        self._prefetch.close()
 
     # -----------------------------------------------------------------
     # Handlers
@@ -360,7 +370,7 @@ class LookupModule(DiscoverableModule):
             ),
             num_kv_readers=num_kv_readers,
         )
-        handle = self._ctx.storage_manager.submit_prefetch_task(
+        handle = self._prefetch.submit_prefetch_task(
             spec,
             external_request_id=key.request_id,
         )
@@ -446,7 +456,7 @@ class LookupModule(DiscoverableModule):
             )
             return 0
 
-        if not self._ctx.storage_manager.wait_prefetch_status(job.handle, timeout):
+        if not self._prefetch.wait_prefetch_status(job.handle, timeout):
             return None
         return self.query_prefetch_status(request_id)
 
@@ -694,7 +704,7 @@ class LookupModule(DiscoverableModule):
             The hit chunk count, or None while the prefetch is still running
             (the job is kept so a later call can resolve it).
         """
-        result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        result = self._prefetch.query_prefetch_status(job.handle)
         if result is None:
             return None
         if job.row_windows:

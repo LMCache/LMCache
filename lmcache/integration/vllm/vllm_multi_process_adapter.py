@@ -1553,10 +1553,15 @@ class LMCacheMPWorkerAdapter:
                 )
         self.kv_caches = kv_caches
         self.engine_group_infos = list(engine_group_infos)
+        hints = layout_hints if layout_hints is not None else vllm_layout_hints()
+        strategy = self.parallel_strategy
+        if strategy.kv_world_size != strategy.tp_size or strategy.dcp_size != 1:
+            # The server maps its KV ranks to TP ranks when it reshards across
+            # TP sizes; PP, DCP and multiple servers break that mapping.
+            hints = hints.copy()
+            hints.pop("total_num_kv_heads", None)
         # Reused when heartbeat recovery re-registers.
-        self._layout_hints = (
-            layout_hints if layout_hints is not None else vllm_layout_hints()
-        )
+        self._layout_hints = hints
         self._send_register_kv_caches_request(kv_caches)
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
