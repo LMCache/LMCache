@@ -277,8 +277,6 @@ class ObjectKey:
                 cache_salt=cache_salt if cache_salt is not None else "",
                 tags=tags if tags is not None else {},
             )
-        # Legacy flat-constructor compatibility; delete this branch when callers
-        # construct ObjectKey exclusively with identity=.
         elif (
             chunk_hash is not None
             or model_name is not None
