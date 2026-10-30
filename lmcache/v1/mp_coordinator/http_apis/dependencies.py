@@ -18,8 +18,15 @@ from fastapi import Request
 import httpx
 
 # First Party
-from lmcache.v1.mp_coordinator.controllers.base import Controller
+from lmcache.v1.mp_coordinator.background_loops import (
+    BackgroundLoops,
+    EventLoopMonitor,
+)
+from lmcache.v1.mp_coordinator.controllers.base import Controller, ControllerStatus
 from lmcache.v1.mp_coordinator.discovery import Registry
+from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
+    CacheEventBroadcaster,
+)
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.ingest.event_source import CacheEventSource
 from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
@@ -57,6 +64,11 @@ class CoordinatorContext:
         metadata_persister: Durable store for operator intent. Every
             handler that changes a pin or a quota must ``save`` so the
             change survives a restart.
+        event_broadcaster: Fans admitted batches out to the consumers;
+            keeps each consumer's delivery and failure counts.
+        background_loops: Runs the periodic work; keeps each loop's stats.
+        event_loop_monitor: How long the event loop was blocked.
+        controller_status: Which controllers started.
     """
 
     controllers: Registry[Controller]
@@ -65,6 +77,10 @@ class CoordinatorContext:
     event_gate: EventGate
     event_source: CacheEventSource
     metadata_persister: MetadataPersister
+    event_broadcaster: CacheEventBroadcaster
+    background_loops: BackgroundLoops
+    event_loop_monitor: EventLoopMonitor
+    controller_status: ControllerStatus
     _configured_chunk_size: int = field(init=False, repr=False)
     _hash_algorithm: str = field(init=False, repr=False)
     _chunk_size_finalized: bool = field(default=False, init=False, repr=False)
