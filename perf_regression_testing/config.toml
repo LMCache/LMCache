@@ -62,6 +62,10 @@ tokenizer-mode = "deepseek_v41"
 enable-ep-weight-filter = true
 # The recipe sets no KV dtype on H200: the checkpoint's own KV format.
 kv-cache-dtype = "auto"
+# The sparse indexer's decode logits are decode tokens x max-model-len x 4 B,
+# up to 6 GiB at 256 seqs x 6 tokens x 1M, and the startup profile does not
+# reserve them: at 0.95 they ran out of memory 72 s into build 56's profiling.
+gpu-memory-utilization = 0.90
 speculative-config = '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}'
 prefix-cache-retention-interval = 1024
 reasoning-parser = "deepseek_v41"

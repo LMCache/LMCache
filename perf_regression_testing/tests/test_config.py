@@ -139,6 +139,14 @@ def test_lmcache_read_locks_outlast_the_queue_wait() -> None:
     assert int(v41.services[0].args.get("l1-read-ttl-seconds", 300)) > 313
 
 
+def test_v41_leaves_room_for_the_indexer_decode_logits() -> None:
+    # Build 56 ran out of GPU memory at 0.95, 72 s into profiling, allocating
+    # the sparse indexer's decode logits (decode tokens x max-model-len x 4 B).
+    for dep in ("vllm_lmcache", "vllm_native", "vllm_simple", "vllm_mooncake"):
+        v41 = resolve(load(), "agentic", dep)
+        assert float(v41.vllm_args["gpu-memory-utilization"]) <= 0.90
+
+
 def test_check_host_needs_rdma_devices_only_for_mooncake(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
