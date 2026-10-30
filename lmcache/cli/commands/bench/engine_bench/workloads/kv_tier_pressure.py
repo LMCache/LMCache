@@ -93,7 +93,9 @@ stored exactly once before measurement starts.
 
 # Standard
 from dataclasses import dataclass
+from enum import Enum
 import asyncio
+import itertools
 import math
 import random
 import urllib.error
@@ -115,6 +117,18 @@ from lmcache.cli.commands.bench.engine_bench.workloads.base import (
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
+
+
+class DocumentWorkloadMode(Enum):
+    """Request-generation and warm-up contracts for document workloads.
+
+    ``SAMPLED`` keeps the tier-pressure pool sweep and independent draws.
+    ``PERMUTATIONS`` preserves the legacy permutator's seeded text, distinct
+    full-pool permutations, request IDs, and single dummy warm-up.
+    """
+
+    SAMPLED = "sampled"
+    PERMUTATIONS = "permutations"
 
 
 @dataclass
@@ -283,13 +297,19 @@ class KVTierPressureConfig:
 # ---------------------------------------------------------------------------
 
 
-def _generate_text(length: int, pool: TokenPool, seed: int) -> str:
+def _generate_text(
+    length: int,
+    pool: TokenPool,
+    seed: int,
+    mode: DocumentWorkloadMode = DocumentWorkloadMode.SAMPLED,
+) -> str:
     """Generate text of exactly ``length`` tokens from ``pool``.
 
     Args:
         length: Exact number of tokens the text must encode to.
         pool: Single-token word pool and its joining convention.
         seed: Random seed; the same seed yields the same text.
+        mode: Selects the historical RNG algorithm for the workload.
 
     Returns:
         Text encoding to exactly ``length`` tokens, or "" when length is 0.
@@ -297,6 +317,9 @@ def _generate_text(length: int, pool: TokenPool, seed: int) -> str:
     if length == 0:
         return ""
     rng = random.Random(seed)
+    if mode is DocumentWorkloadMode.PERMUTATIONS:
+        # choices() and repeated choice() consume a seeded RNG differently.
+        return pool.join(rng.choices(pool.words, k=length))
     return pool.join([rng.choice(pool.words) for _ in range(length)])
 
 
@@ -305,6 +328,7 @@ def _generate_pool(
     length: int,
     pool: TokenPool,
     seed: int,
+    mode: DocumentWorkloadMode = DocumentWorkloadMode.SAMPLED,
 ) -> list[str]:
     """Generate ``pool_size`` documents of exactly ``length`` tokens each.
 
@@ -316,11 +340,42 @@ def _generate_pool(
         length: Exact token length of each document.
         pool: Single-token word pool and its joining convention.
         seed: Base random seed; document ``i`` uses ``seed + i``.
+        mode: Selects the historical RNG algorithm for the workload.
 
     Returns:
         List of ``pool_size`` document strings.
     """
-    return [_generate_text(length, pool, seed + i) for i in range(pool_size)]
+    return [_generate_text(length, pool, seed + i, mode) for i in range(pool_size)]
+
+
+def _enumerate_permutations(
+    num_contexts: int,
+    num_permutations: int,
+    seed: int,
+) -> list[tuple[int, ...]]:
+    """Return the legacy distinct permutation stream, capped at N!.
+
+    Args:
+        num_contexts: Positive number of documents in every request.
+        num_permutations: Positive maximum number of measured requests.
+        seed: Seed used when sampling a small fraction of all permutations.
+
+    Returns:
+        Full-pool permutations in the legacy enumeration or sorted-sample order.
+    """
+    total_possible = math.factorial(num_contexts)
+    if num_permutations >= total_possible:
+        return list(itertools.permutations(range(num_contexts)))
+    if total_possible > num_permutations * 10:
+        rng = random.Random(seed)
+        seen: set[tuple[int, ...]] = set()
+        indices = list(range(num_contexts))
+        while len(seen) < num_permutations:
+            seen.add(tuple(rng.sample(indices, len(indices))))
+        return sorted(seen)
+    return list(
+        itertools.islice(itertools.permutations(range(num_contexts)), num_permutations)
+    )
 
 
 def warmup_sweep(pool_size: int, docs_per_request: int) -> list[tuple[int, ...]]:
@@ -511,13 +566,11 @@ def scrape_lookup_tokens(metrics_url: str) -> dict[str, float | str]:
 
 
 class KVTierPressureWorkload(BaseWorkload):
-    """Workload that samples documents from a pool larger than the cache.
+    """Shared document-pool benchmark with tier-pressure sampling by default.
 
-    Generates a document pool sized to overflow L1, sweeps it once so every
-    document is resident before measurement, then sends requests that each
-    carry a sampled subset.  The overflow is what makes L2 reads happen, and
-    the sweep is what makes the measured share a steady-state property rather
-    than an artefact of run length.
+    Sampled mode generates a pool sized to overflow L1, sweeps it before
+    measurement, then sends sampled subsets. Permutation mode supports the
+    legacy full-pool workload with distinct permutations and a dummy warm-up.
     """
 
     def __init__(
@@ -529,6 +582,8 @@ class KVTierPressureWorkload(BaseWorkload):
         seed: int = 42,
         model_name: str | None = None,
         lmcache_url: str = "",
+        *,
+        mode: DocumentWorkloadMode = DocumentWorkloadMode.SAMPLED,
     ) -> None:
         """Build the document pool, the warm-up sweep and the request stream.
 
@@ -542,13 +597,24 @@ class KVTierPressureWorkload(BaseWorkload):
                 means auto-detected from the engine.
             lmcache_url: LMCache HTTP server, used to read cache-hit counters
                 across the measured phase.  Empty disables that reporting.
+            mode: ``SAMPLED`` uses independent draws and a pool sweep.
+                ``PERMUTATIONS`` keeps the long-doc-permutator contract and
+                requires every request to contain the entire pool.
 
         Raises:
-            ValueError: If no tokenizer can be loaded for ``model_name``.
+            ValueError: If no tokenizer can be loaded for ``model_name``, or
+                permutation mode is used with a partial pool or access skew.
         """
         super().__init__(request_sender, stats_collector, progress_monitor)
         self._config = config
         self._seed = seed
+        self._mode = mode
+        if mode is DocumentWorkloadMode.PERMUTATIONS and (
+            config.pool_size != config.docs_per_request or config.access_skew != 0.0
+        ):
+            raise ValueError(
+                "Permutation mode requires the full pool and uniform access"
+            )
 
         # The configured lengths are exact token counts, which is only
         # meaningful against the tokenizer the engine actually uses.  Without
@@ -557,8 +623,13 @@ class KVTierPressureWorkload(BaseWorkload):
         # describe a different operating point than the flags claim.
         tokenizer = try_load_tokenizer(model_name)
         if tokenizer is None:
+            workload_name = (
+                "long-doc-permutator"
+                if mode is DocumentWorkloadMode.PERMUTATIONS
+                else "kv-tier-pressure"
+            )
             raise ValueError(
-                "kv-tier-pressure needs a tokenizer to size its documents "
+                f"{workload_name} needs a tokenizer to size its documents "
                 f"in tokens, but none could be loaded for model {model_name!r} "
                 "(auto-detected from the engine when --model is omitted). "
                 "Pass --model with a HuggingFace repo ID or a local path, "
@@ -567,19 +638,24 @@ class KVTierPressureWorkload(BaseWorkload):
             )
 
         pool = build_single_token_pool(tokenizer, config.vocab_size, seed=seed)
+        prompt_seed = seed if mode is DocumentWorkloadMode.PERMUTATIONS else seed + 2
         self._system_prompt = _generate_text(
-            config.system_prompt_length, pool, seed + 2
+            config.system_prompt_length, pool, prompt_seed, mode
         )
         self._documents = _generate_pool(
-            config.pool_size, config.context_length, pool, seed + 1
+            config.pool_size, config.context_length, pool, seed + 1, mode
         )
         self._sweep_groups = warmup_sweep(config.pool_size, config.docs_per_request)
-        self._measured_groups = sample_requests(
-            config.pool_size,
-            config.docs_per_request,
-            config.num_requests,
-            config.access_skew,
-            seed,
+        self._measured_groups = (
+            _enumerate_permutations(config.pool_size, config.num_requests, seed)
+            if mode is DocumentWorkloadMode.PERMUTATIONS
+            else sample_requests(
+                config.pool_size,
+                config.docs_per_request,
+                config.num_requests,
+                config.access_skew,
+                seed,
+            )
         )
 
         # Measured rather than derived: the per-message totals are exact by
@@ -612,6 +688,16 @@ class KVTierPressureWorkload(BaseWorkload):
     # ------------------------------------------------------------------
     # Derived quantities
     # ------------------------------------------------------------------
+
+    @property
+    def num_requests(self) -> int:
+        """Actual measured request count, including the permutation cap."""
+        return len(self._measured_groups)
+
+    @property
+    def tokens_per_request(self) -> int:
+        """Token count of the first measured prompt, including separators."""
+        return self._tokens_per_request
 
     @property
     def working_set_tokens(self) -> int:
@@ -805,12 +891,15 @@ class KVTierPressureWorkload(BaseWorkload):
     # ------------------------------------------------------------------
 
     async def warmup(self) -> None:
-        """Sweep the pool so every document is cached exactly once.
+        """Run the pool sweep or the legacy single dummy warm-up.
 
         Runs ``ceil(pool_size / docs_per_request)`` requests at the
-        configured concurrency.  Without this the measured L2 read share
-        would describe a cold start rather than steady state.
+        configured concurrency in sampled mode. Permutation mode sends a
+        single unrelated request to preserve the legacy cold-corpus start.
         """
+        if self._mode is DocumentWorkloadMode.PERMUTATIONS:
+            await self._warmup_permutator()
+            return
         total = len(self._sweep_groups)
         self._progress_monitor.log_message(
             f"Warm-up sweep: {total} requests covering every document once"
@@ -877,8 +966,14 @@ class KVTierPressureWorkload(BaseWorkload):
             group: Document indices carried by this request.
             req_idx: Request index captured before incrementing the counter.
         """
-        request_id = f"sample{req_idx}"
+        request_id = (
+            f"perm{req_idx}_req{req_idx}"
+            if self._mode is DocumentWorkloadMode.PERMUTATIONS
+            else f"sample{req_idx}"
+        )
         self._progress_monitor.on_request_sent(request_id)
+        if self._mode is DocumentWorkloadMode.PERMUTATIONS:
+            self._progress_monitor.log_message(f"Dispatched permutation {req_idx}")
         try:
             await self._request_sender.send_request(
                 request_id,
@@ -907,3 +1002,17 @@ class KVTierPressureWorkload(BaseWorkload):
             request_id: Identifier of the completed request.
             output: Text the engine generated.
         """
+
+    async def _warmup_permutator(self) -> None:
+        """Prime the engine without warming the measured document corpus."""
+        request_id = "warmup_0"
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": " ".join(["warmup"] * 500)},
+        ]
+        self._progress_monitor.log_message("Warmup (1 dummy request)")
+        self._progress_monitor.on_request_sent(request_id)
+        result = await self._request_sender.send_warmup_request(request_id, messages)
+        if not result.successful:
+            self._progress_monitor.log_message(f"Warmup request failed: {result.error}")
+        self._progress_monitor.log_message("Warmup complete")
