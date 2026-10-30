@@ -495,27 +495,24 @@ func TestSetDefaults_GPUVendorRBLNDefaultsNodeSelector(t *testing.T) {
 	}
 }
 
-func TestEngineDrivenTransferAndSharesHostIPC(t *testing.T) {
+func TestEngineDrivenTransfer(t *testing.T) {
 	cases := []struct {
-		name         string
-		vendor       *string
-		isolated     *bool
-		engineDriven bool
-		shares       bool
+		name   string
+		vendor *string
+		want   bool
 	}{
-		{"nvidia default: isolated IPC", nil, nil, false, false},
-		{"nvidia legacy IPC", ptr(GPUVendorNvidia), ptr(false), false, true},
-		{"amd: legacy IPC", ptr(GPUVendorAMD), nil, false, true},
-		{"rbln: engine-driven", ptr(GPUVendorRBLN), nil, true, false},
+		{"nvidia default", nil, false},
+		{"amd", ptr(GPUVendorAMD), false},
+		{"rbln", ptr(GPUVendorRBLN), true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			s := &LMCacheEngineSpec{GPUVendor: c.vendor, IsolatedIPC: c.isolated}
-			if got := s.EngineDrivenTransfer(); got != c.engineDriven {
-				t.Fatalf("EngineDrivenTransfer() = %v, want %v", got, c.engineDriven)
+			s := &LMCacheEngineSpec{GPUVendor: c.vendor}
+			if got := s.EngineDrivenTransfer(); got != c.want {
+				t.Fatalf("EngineDrivenTransfer() = %v, want %v", got, c.want)
 			}
-			if got := s.SharesHostIPC(); got != c.shares {
-				t.Fatalf("SharesHostIPC() = %v, want %v", got, c.shares)
+			if s.EngineDrivenTransfer() && s.IsolatedIPCEnabled() {
+				t.Fatalf("engine-driven transfer needs the shared /dev/shm, but isolated IPC is on by default")
 			}
 		})
 	}
@@ -530,7 +527,7 @@ func TestValidateSpec_RBLN(t *testing.T) {
 		{"minimal is valid", func(*LMCacheEngineSpec) {}, ""},
 		{"isolatedIPC false is valid", func(s *LMCacheEngineSpec) { s.IsolatedIPC = ptr(false) }, ""},
 		{"isolatedIPC true", func(s *LMCacheEngineSpec) { s.IsolatedIPC = ptr(true) }, "spec.isolatedIPC"},
-		{"hostIPC true", func(s *LMCacheEngineSpec) { s.HostIPC = ptr(true) }, "spec.hostIPC"},
+		{"hostIPC true is valid", func(s *LMCacheEngineSpec) { s.HostIPC = ptr(true) }, ""},
 		{"pd", func(s *LMCacheEngineSpec) { s.PD = &PDSpec{} }, "spec.pd"},
 	}
 	for _, c := range cases {

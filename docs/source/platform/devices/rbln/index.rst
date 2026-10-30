@@ -94,9 +94,11 @@ Kubernetes (LMCache operator)
 With the :doc:`LMCache operator </mp/operator>`, set ``gpuVendor: rbln`` on
 the ``LMCacheEngine``. The operator then starts the server with
 ``--supported-transfer-mode engine_driven`` and defaults ``nodeSelector`` to
-``rebellions.ai/npu.present: "true"``. The server only holds KV in host
-memory and never opens an NPU, so the engine pod claims no NPU and gets no
-runtime class or IPC wiring; all NPUs stay with vLLM-RBLN.
+``rebellions.ai/npu.present: "true"``. The server keeps its L1 pool in the
+host ``/dev/shm`` (``--shm-name``) and never opens an NPU, so the engine pod
+claims no NPU and gets no runtime class; all NPUs stay with vLLM-RBLN. The
+injection webhook mounts the same host ``/dev/shm`` into opted-in vLLM-RBLN
+pods, and their workers copy KV between the NPU and the pool directly.
 
 .. code-block:: yaml
 
@@ -122,11 +124,19 @@ The settings from the previous section map to the deployment as follows:
   pods, but not ``--model-impl vllm``. Add that to the container args.
 * Set ``LMCACHE_DEVICE_BACKEND=rbln`` on the vLLM-RBLN pods only. The engine
   pod has no NPU, so pinning ``rbln`` there makes the server fail at startup.
-* The default image, ``lmcache/vllm-openai``, is built for CUDA. Set
-  ``spec.image`` to an LMCache image that runs on your nodes. The vLLM-RBLN
-  image must also include LMCache for ``LMCacheMPConnector``.
+* The server never opens an NPU, so the default image,
+  ``lmcache/vllm-openai``, runs on RBLN nodes even though it is built for
+  CUDA. Pick a ``spec.image`` tag whose LMCache version matches the LMCache in
+  the vLLM-RBLN image, which ``LMCacheMPConnector`` needs.
+* The server creates the pool readable only by its own user (uid ``1000`` in
+  ``lmcache/vllm-openai``). Run the vLLM-RBLN container as the same uid or as
+  root. Otherwise the workers cannot open the pool and fall back to sending KV
+  inline over the server connection, which is several times slower; the
+  worker log shows ``mode=SHM`` when the pool is in use.
+* ``/dev/shm`` in the vLLM-RBLN pod is the host's, shared with the server.
+  Do not clear it in the container's startup script.
 
-``isolatedIPC: true``, ``hostIPC: true``, and ``pd`` are rejected with
+``isolatedIPC: true`` and ``pd`` are rejected with
 ``gpuVendor: rbln``. See :doc:`/mp/operator` for the injection webhook and the
 other ``LMCacheEngine`` fields.
 

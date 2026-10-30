@@ -1667,17 +1667,22 @@ func TestBuildDaemonSet_GPUVendorRBLN(t *testing.T) {
 	if podSpec.NodeSelector["rebellions.ai/npu.present"] != "true" {
 		t.Fatalf("expected rebellions.ai/npu.present NodeSelector, got %v", podSpec.NodeSelector)
 	}
-	if podSpec.HostIPC || len(podSpec.Volumes) != 0 {
-		t.Fatalf("expected no IPC wiring for rbln, got hostIPC=%v volumes=%+v", podSpec.HostIPC, podSpec.Volumes)
-	}
 	c := podSpec.Containers[0]
+	if podSpec.HostIPC || !HasDevShmVolume(podSpec.Volumes) || !HasDevShmMount(c.VolumeMounts) {
+		t.Fatalf("expected the host /dev/shm mount for rbln, got hostIPC=%v volumes=%+v", podSpec.HostIPC, podSpec.Volumes)
+	}
 	for _, e := range c.Env {
 		if strings.HasPrefix(e.Name, "NVIDIA_") {
 			t.Fatalf("unexpected NVIDIA env var on rbln vendor: %s=%s", e.Name, e.Value)
 		}
 	}
 	assertArg(t, c.Args, "--supported-transfer-mode", "engine_driven")
+	assertArg(t, c.Args, "--shm-name", "lmcache-"+engine.Namespace+"-"+engine.Name)
 	assertNoArg(t, c.Args, "--isolated-ipc")
+
+	nvidia := minimalEngine()
+	nvidia.SetDefaults()
+	assertNoArg(t, BuildDaemonSet(nvidia).Spec.Template.Spec.Containers[0].Args, "--shm-name")
 
 	cm := BuildConnectionConfigMap(engine)
 	if strings.Contains(cm.Data["kv-transfer-config.json"], "isolated_ipc") {

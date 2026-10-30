@@ -47,9 +47,6 @@ func (e *LMCacheEngine) ValidateSpec() field.ErrorList {
 		if spec.IsolatedIPC != nil && *spec.IsolatedIPC {
 			errs = append(errs, field.Invalid(field.NewPath("spec", "isolatedIPC"), true, "must not be true with gpuVendor rbln"))
 		}
-		if spec.HostIPC != nil && *spec.HostIPC {
-			errs = append(errs, field.Invalid(field.NewPath("spec", "hostIPC"), true, "must not be true with gpuVendor rbln"))
-		}
 		if spec.PD != nil {
 			errs = append(errs, field.Forbidden(field.NewPath("spec", "pd"), "not supported with gpuVendor rbln"))
 		}

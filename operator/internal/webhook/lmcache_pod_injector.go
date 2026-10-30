@@ -135,7 +135,7 @@ func (p *LMCachePodInjector) Handle(ctx context.Context, req admission.Request) 
 			targetDefault = engine.Spec.Injection.TargetContainer
 		}
 		engineHostIPC = derefBool(engine.Spec.HostIPC)
-		engineIsolatedIPC = !engine.Spec.SharesHostIPC()
+		engineIsolatedIPC = engine.Spec.IsolatedIPCEnabled()
 	}
 
 	// Read the connection ConfigMap (existence gate), resolve the target
