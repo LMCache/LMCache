@@ -445,8 +445,10 @@ sharing a 1 TiB device:
        --l1-manager '{"type":"DEVDAX","tag":"cxl","size_gb":512,"offset_gb":512,"path":"/dev/dax0.0"}' \
        --l2-adapter '{"type":"fs","base_path":"/mnt/archive/lmcache"}'
 
-List a ``DRAM`` manager first to spill into CXL only on ``OUT_OF_MEMORY``.
-Schema in :doc:`multi_l1`.
+To combine DRAM with Device-DAX, list a ``DRAM`` manager alongside the
+``DEVDAX`` one; the default write policy sends every key to the first
+manager in argument order and does not retry on ``OUT_OF_MEMORY`` (see the
+hybrid guidance below). Schema in :doc:`multi_l1`.
 
 **Legacy form.** ``--l1-size-gb`` is the mapped size and
 ``--l1-devdax-offset-gb`` where it starts; lazy allocation and SHM must be
