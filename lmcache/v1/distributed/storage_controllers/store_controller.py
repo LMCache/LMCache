@@ -49,19 +49,20 @@ STORE_LOOP_POLL_TIMEOUT_MS = 500
 
 def _group_keys_by_shape(
     keys: list[ObjectKey],
-) -> dict[tuple, list[ObjectKey]]:
-    """Group ``keys`` by the fields that determine their KV cache shape.
-
-    Each bucket shares a single ``(shape, dtype)``, so each bucket can be
-    submitted as one ``submit_store_task`` call. Today the shape is pinned
-    by ``(model_name, kv_rank)`` — ``kv_rank`` packs ``world_size`` and
-    parallelism config, so different TP/PP setups land in different
-    buckets. Extend the grouping tuple when a new shape-affecting field is
-    added to ``ObjectKey``.
-    """
-    groups: dict[tuple, list[ObjectKey]] = defaultdict(list)
+) -> dict[tuple[str, int, tuple[tuple[str, str], ...]], list[ObjectKey]]:
+    """Group compatible chunks by model, rank and representation tags."""
+    groups: dict[
+        tuple[str, int, tuple[tuple[str, str], ...]],
+        list[ObjectKey],
+    ] = defaultdict(list)
     for key in keys:
-        groups[(key.model_name, key.kv_rank)].append(key)
+        groups[
+            (
+                key.model_name,
+                key.kv_rank,
+                tuple(key.identity.tags.items()),
+            )
+        ].append(key)
     return groups
 
 
