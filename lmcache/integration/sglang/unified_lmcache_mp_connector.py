@@ -1069,7 +1069,7 @@ class UnifiedLMCacheMPConnector:
             return None
         lookup = LMCacheLookupOperation(
             request_id=request_id,
-            token_ids=list(token_ids),
+            token_ids=token_ids,
             local_hit_tokens=0,
             cache_salt=cache_salt,
         )
