@@ -97,6 +97,12 @@ class MPServerConfig:
     (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
     engine-driven transfer (PREPARE/COMMIT), or 'auto' to enable both."""
 
+    rocm_host_event_wait: bool = False
+    """ROCm workaround: LMCache-driven STORE / RETRIEVE enqueue their copies
+    only once the engine's producer event has completed on the host, instead of
+    a stream wait on it; see lmcache.v1.multiprocess.rocm_host_event_wait.
+    LMCACHE_ROCM_HOST_EVENT_WAIT=1 enables it too. Ignored off ROCm."""
+
     isolated_ipc: bool = False
     """Whether IPC mechanisms must work across isolated containers (no shared
     host IPC namespace or /dev/shm); see lmcache.v1.platform.ipc_policy.
@@ -477,6 +483,17 @@ def add_mp_server_args(
         "Default is 'lmcache_driven'.",
     )
     mp_group.add_argument(
+        "--rocm-host-event-wait",
+        action="store_true",
+        help="ROCm workaround for an MI3xx command-processor limitation: a "
+        "stream wait on the engine's pending IPC event is offloaded and "
+        "reconnected on a timer, slowing the engine's kernels on the same "
+        "hardware pipe. With this flag STORE / RETRIEVE enqueue their copies "
+        "only once that event has completed (polled on the host). Enable it "
+        "when this server runs next to the engine on ROCm; ignored elsewhere. "
+        "LMCACHE_ROCM_HOST_EVENT_WAIT=1 enables it too. (Default is off)",
+    )
+    mp_group.add_argument(
         "--isolated-ipc",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -651,6 +668,7 @@ def parse_args_to_mp_server_config(
         enable_dedup_content=args.enable_dedup_content,
         enable_blend_reorder=args.enable_blend_reorder,
         supported_transfer_mode=args.supported_transfer_mode,
+        rocm_host_event_wait=args.rocm_host_event_wait,
         isolated_ipc=args.isolated_ipc,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),
