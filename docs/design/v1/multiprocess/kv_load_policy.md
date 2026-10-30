@@ -44,7 +44,7 @@ work.
   tokens as unserved (other early exits report 0 because nothing could be
   served).
 - The engine treats the miss like any other and stores the prompt KV. Chunks
-  already resident in L1 are rejected cheaply at `L1Manager.reserve_write`
+  already resident in L1 are rejected cheaply at `BaseL1Manager.reserve_write`
   (`KEY_NOT_WRITABLE`); chunks only in L2 are written to L1 again.
 
 ## Interface

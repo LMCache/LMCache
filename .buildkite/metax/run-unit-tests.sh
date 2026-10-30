@@ -19,7 +19,7 @@ pytest --maxfail=1 --cov=lmcache \
     --ignore=tests/v1/test_device_id_race.py \
     --ignore=tests/v1/test_nixl_multipath.py \
     --ignore=tests/skipped \
-    --ignore=tests/v1/storage_backend/test_eic.py \
+    --ignore=tests/inprocess/v1/storage_backend/test_eic.py \
     --deselect="tests/v1/distributed/serde/test_turboquant.py::test_turboquant_direct_roundtrip_cuda[turboquant_k8v4-2.6-0.95]" \
     --ignore=tests/v1/mp_coordinator/test_instances_usage_e2e.py \
     --ignore=tests/v1/platform/devices/cuda/test_cuda_ipc_wrapper.py \

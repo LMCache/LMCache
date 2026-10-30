@@ -7,16 +7,16 @@ import socket
 import subprocess
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.storage_backend.connector.base_connector import (
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.storage_backend.connector.base_connector import (
     RemoteConnector,
 )
-from lmcache.v1.storage_backend.local_cpu_backend import (
+from lmcache.inprocess.v1.storage_backend.local_cpu_backend import (
     LocalCPUBackend,
 )
+from lmcache.logging import init_logger
+from lmcache.utils import CacheEngineKey
+from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 

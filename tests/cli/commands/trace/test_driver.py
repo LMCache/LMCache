@@ -38,7 +38,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.trace.decorator import set_tracing_enabled
 from lmcache.v1.mp_observability.trace.recorder import StorageTraceRecorder
@@ -155,7 +155,7 @@ class TestRecordReplayRoundtrip:
         def script(sm: StorageManager) -> None:
             reserved = sm.reserve_write(keys, layout)
             assert len(reserved) == 3
-            sm.finish_write(keys)
+            sm.finish_write(keys, l1_owners_of(reserved))
 
         _record_sequence(trace_path, sm_config, script)
 
@@ -174,8 +174,8 @@ class TestRecordReplayRoundtrip:
         keys = [_make_key(i) for i in range(3)]
 
         def script(sm: StorageManager) -> None:
-            sm.reserve_write(keys, layout)
-            sm.finish_write(keys)
+            reserved = sm.reserve_write(keys, layout)
+            sm.finish_write(keys, l1_owners_of(reserved))
             handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
             assert handle is not None
             with sm.read_prefetched_results(keys) as objs:
@@ -210,8 +210,8 @@ class TestRecordReplayRoundtrip:
         keys = [_make_key(0)]
 
         def script(sm: StorageManager) -> None:
-            sm.reserve_write(keys, layout)
-            sm.finish_write(keys)
+            reserved = sm.reserve_write(keys, layout)
+            sm.finish_write(keys, l1_owners_of(reserved))
 
         _record_sequence(trace_path, sm_config, script)
 
@@ -309,9 +309,9 @@ class TestPacing:
         keys = [_make_key(0)]
 
         def script(sm: StorageManager) -> None:
-            sm.reserve_write(keys, layout)
+            reserved = sm.reserve_write(keys, layout)
             time.sleep(0.05)  # force a gap
-            sm.finish_write(keys)
+            sm.finish_write(keys, l1_owners_of(reserved))
 
         _record_sequence(trace_path, sm_config, script)
 

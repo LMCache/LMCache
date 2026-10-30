@@ -24,7 +24,7 @@ from typing import Any, Callable
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 
 logger = init_logger(__name__)
 
@@ -45,6 +45,11 @@ class ReplayContext:
 
     Attributes:
         sm: The live StorageManager that receives replayed calls.
+        write_owners: The L1 manager that admitted each key in a replayed
+            ``reserve_write`` whose ``finish_write`` has not been replayed
+            yet.  The recorder redacts owner ids because they are
+            process-local, so replay rebuilds them from its own
+            reservations.
         open_read_contexts: FIFO queue of
             ``read_prefetched_results`` contexts entered but not yet
             exited.  Matching ``__enter__``/``__exit__`` records are
@@ -55,6 +60,7 @@ class ReplayContext:
     """
 
     sm: StorageManager
+    write_owners: dict[ObjectKey, int] = field(default_factory=dict)
     open_read_contexts: dict[tuple[ObjectKey, ...], deque[AbstractContextManager]] = (
         field(default_factory=dict)
     )
@@ -143,8 +149,7 @@ def _call_sm_method(method_name: str) -> Handler:
 
     The returned callable invokes ``getattr(ctx.sm, method_name)(**args)``
     and discards the result.  Used for every "plain" traced method on
-    StorageManager — ``reserve_write``, ``finish_write``,
-    ``submit_prefetch_task``, ``finish_read_prefetched``.
+    StorageManager — ``submit_prefetch_task``, ``finish_read_prefetched``.
 
     Args:
         method_name: Attribute name on the live StorageManager.
@@ -159,6 +164,45 @@ def _call_sm_method(method_name: str) -> Handler:
 
     _handler.__name__ = f"_call_sm_{method_name}"
     return _handler
+
+
+def _reserve_write(ctx: ReplayContext, args: dict[str, Any]) -> None:
+    """Handle a ``reserve_write`` record.
+
+    Reserves on the live StorageManager and remembers which L1 manager
+    took each key, so the matching ``finish_write`` record can name the
+    owners the recorder left out.
+
+    Args:
+        ctx: Active replay context.
+        args: Decoded record arguments, forwarded as keyword arguments.
+    """
+    ctx.write_owners.update(l1_owners_of(ctx.sm.reserve_write(**args)))
+
+
+def _finish_write(ctx: ReplayContext, args: dict[str, Any]) -> None:
+    """Handle a ``finish_write`` record.
+
+    Finishes the keys with the owners stashed by :func:`_reserve_write`.
+    A key without a stashed owner — the trace was truncated before its
+    reservation, or the replay target had no room for it — is logged
+    and left out so replay does not abort.
+
+    Args:
+        ctx: Active replay context.
+        args: Decoded record arguments.  Must contain ``"keys"``.
+    """
+    keys = args["keys"]
+    owners = {key: ctx.write_owners.pop(key) for key in keys if key in ctx.write_owners}
+    if len(owners) != len(keys):
+        logger.warning(
+            "trace replay: finish_write with no matching reserve_write for "
+            "%d of %d keys; finishing the rest",
+            len(keys) - len(owners),
+            len(keys),
+        )
+    if owners:
+        ctx.sm.finish_write(keys=list(owners.keys()), l1_owners=owners)
 
 
 def _enter_read_prefetched(ctx: ReplayContext, args: dict[str, Any]) -> None:
@@ -228,16 +272,13 @@ def build_default_dispatcher() -> CallDispatcher:
         additional handlers on it for future trace levels.
     """
     dispatcher = CallDispatcher()
-    for method_name in (
-        "reserve_write",
-        "finish_write",
-        "submit_prefetch_task",
-        "finish_read_prefetched",
-    ):
+    for method_name in ("submit_prefetch_task", "finish_read_prefetched"):
         dispatcher.register(
             f"{_SM_PREFIX}.{method_name}",
             _call_sm_method(method_name),
         )
+    dispatcher.register(f"{_SM_PREFIX}.reserve_write", _reserve_write)
+    dispatcher.register(f"{_SM_PREFIX}.finish_write", _finish_write)
     dispatcher.register(
         f"{_SM_PREFIX}.read_prefetched_results.__enter__",
         _enter_read_prefetched,

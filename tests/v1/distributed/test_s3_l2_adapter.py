@@ -48,6 +48,9 @@ class _FakeBackend:
         # When non-None, every request raises with this message
         # (used to simulate network failures for the circuit-breaker test).
         self._inject_error: str | None = None
+        # When set, GET bodies are delivered in pieces of this many bytes
+        # at increasing offsets, as a ranged GET would.
+        self._get_chunk_size: int | None = None
         self._put_count = 0
         self._get_count = 0
         self._delete_count = 0
@@ -57,6 +60,7 @@ class _FakeBackend:
         with self._lock:
             self._data.clear()
             self._inject_error = None
+            self._get_chunk_size = None
             self._put_count = self._get_count = 0
             self._delete_count = self._head_count = 0
 
@@ -79,6 +83,14 @@ class _FakeBackend:
     def set_error(self, msg: str | None):
         with self._lock:
             self._inject_error = msg
+
+    def set_get_chunk_size(self, n: int | None):
+        with self._lock:
+            self._get_chunk_size = n
+
+    def get_chunk_size(self) -> int | None:
+        with self._lock:
+            return self._get_chunk_size
 
     def counts(self) -> dict[str, int]:
         with self._lock:
@@ -155,12 +167,25 @@ def _parse_list_query(path: str) -> tuple[str | None, int, str | None]:
     return prefix, max_keys, cont
 
 
+def _call_on_done(on_done, **kwargs) -> None:
+    """Invoke ``on_done`` the way the CRT does: after ``finished_future``
+    is settled, with any exception it raises dropped, never propagated.
+    A check that lives in ``on_done`` therefore cannot fail a request."""
+    if on_done is None:
+        return
+    try:
+        on_done(**kwargs)
+    except Exception:
+        pass
+
+
 class _FakeS3Request:
     """In-process substitute for awscrt.s3.S3Request.
 
     Dispatches by HTTP method + operation_name against ``_BACKEND`` and
-    fires the on_headers / on_body / on_done callbacks that the real CRT
-    would invoke, then completes the finished_future.
+    fires the on_headers / on_body callbacks that the real CRT would
+    invoke, then settles ``finished_future`` and only then calls
+    ``on_done``, in the CRT's order.
     """
 
     def __init__(
@@ -199,9 +224,8 @@ class _FakeS3Request:
                     on_headers(200, [("content-type", "application/xml")])
                 if on_body is not None:
                     on_body(xml, 0)
-                if on_done is not None:
-                    on_done(error=None, status_code=200)
                 self.finished_future.set_result(None)
+                _call_on_done(on_done, error=None, status_code=200)
             except Exception as e:
                 if not self.finished_future.done():
                     self.finished_future.set_exception(e)
@@ -225,29 +249,28 @@ class _FakeS3Request:
                     _BACKEND._put_count += 1
                 if on_headers is not None:
                     on_headers(200, [])
-                if on_done is not None:
-                    on_done(error=None, status_code=200)
                 self.finished_future.set_result(None)
+                _call_on_done(on_done, error=None, status_code=200)
 
             elif method == "GET":
                 with _BACKEND._lock:
                     _BACKEND._get_count += 1
                 data = _BACKEND.get(key_str)
                 if data is None:
-                    if on_done is not None:
-                        try:
-                            on_done(error=None, status_code=404)
-                        except Exception:
-                            pass
                     self.finished_future.set_exception(
                         RuntimeError(f"S3 GET 404 for {key_str}")
                     )
+                    _call_on_done(on_done, error=None, status_code=404)
                     return
                 if on_body is not None:
-                    on_body(data, 0)
-                if on_done is not None:
-                    on_done(error=None, status_code=200)
+                    step = _BACKEND.get_chunk_size() or max(len(data), 1)
+                    for off in range(0, len(data), step):
+                        on_body(data[off : off + step], off)
+                # The CRT completes ``finished_future`` before it invokes
+                # ``on_done``: an exception raised in ``on_done`` cannot
+                # fail a request that has already been reported done.
                 self.finished_future.set_result(None)
+                _call_on_done(on_done, error=None, status_code=200)
 
             elif method == "HEAD":
                 with _BACKEND._lock:
@@ -270,9 +293,8 @@ class _FakeS3Request:
                 _BACKEND.delete(key_str)
                 if on_headers is not None:
                     on_headers(204, [])
-                if on_done is not None:
-                    on_done(error=None, status_code=204)
                 self.finished_future.set_result(None)
+                _call_on_done(on_done, error=None, status_code=204)
 
             else:
                 self.finished_future.set_exception(
@@ -280,13 +302,9 @@ class _FakeS3Request:
                 )
 
         except Exception as e:
-            try:
-                if on_done is not None:
-                    on_done(error=str(e), status_code=None)
-            except Exception:
-                pass
             if not self.finished_future.done():
                 self.finished_future.set_exception(e)
+            _call_on_done(on_done, error=str(e), status_code=None)
 
 
 class _FakeHttpRequest:
@@ -348,6 +366,26 @@ def create_memory_obj(size: int = 16, fill_value: float = 1.0) -> TensorMemoryOb
         ref_count=1,
     )
     return TensorMemoryObj(raw_data, metadata, parent_allocator=None)
+
+
+def create_guarded_memory_obj(
+    size: int = 16, guard_value: float = -1.0
+) -> tuple[TensorMemoryObj, torch.Tensor]:
+    """A MemoryObj over the first ``size`` float32 elements of a tensor
+    twice that long. The second half is a sentinel: a copy that runs past
+    the logical buffer lands there, where the test can see it, instead of
+    in unrelated memory. Returns the object and the sentinel view."""
+    backing = torch.full((size * 2,), guard_value, dtype=torch.float32)
+    metadata = MemoryObjMetadata(
+        shape=torch.Size([size]),
+        dtype=torch.float32,
+        address=0,
+        phy_size=size * 4,
+        fmt=MemoryFormat.KV_2LTD,
+        ref_count=1,
+    )
+    obj = TensorMemoryObj(backing[:size], metadata, parent_allocator=None)
+    return obj, backing[size:]
 
 
 def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
@@ -518,6 +556,128 @@ class TestStoreLookupLoad:
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         assert adapter.query_lookup_and_lock_result(tid) is not None
         assert adapter.query_lookup_and_lock_result(tid) is None
+
+
+# =============================================================================
+# Size validation on load
+# =============================================================================
+
+
+class TestLoadSizeValidation:
+    """The store is not trusted to hold objects of the expected size.
+
+    A GET must never write outside the destination buffer, and a load
+    is a hit only when exactly the destination's byte count arrived.
+    """
+
+    @staticmethod
+    def _store(adapter, key, obj) -> None:
+        tid = adapter.submit_store_task([key], [obj])
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        assert adapter.pop_completed_store_tasks()[tid].is_successful()
+
+    @staticmethod
+    def _load(adapter, keys, dsts):
+        tid = adapter.submit_load_task(keys, dsts)
+        assert wait_for_event_fd(adapter.get_load_event_fd())
+        bm = adapter.query_load_result(tid)
+        assert bm is not None
+        return bm
+
+    @staticmethod
+    def _replace_object(key, data: bytes) -> str:
+        key_str = s3mod._object_key_to_string(key)
+        _BACKEND.put(key_str, data)
+        return key_str
+
+    def test_short_object_is_a_miss(self, adapter):
+        # Stored at the right size, then replaced on the store by a
+        # shorter object under the same key. The cached size still says
+        # the object is complete, so the GET is issued and delivers half.
+        key = create_object_key(1)
+        self._store(adapter, key, create_memory_obj(fill_value=3.14))
+        data = _BACKEND.get(s3mod._object_key_to_string(key))
+        assert data is not None
+        key_str = self._replace_object(key, data[: len(data) // 2])
+
+        bm = self._load(adapter, [key], [create_memory_obj(fill_value=0.0)])
+        assert bm.test(0) is False
+        # The size cache no longer vouches for the key, so the next
+        # lookup asks S3 again instead of repeating the failed load.
+        assert key_str not in adapter._object_size_cache
+
+    def test_mismatching_cached_size_skips_the_get(self, adapter):
+        # A fresh adapter learns the size from HEAD during lookup; the
+        # load then sees it disagrees with the destination and does not
+        # transfer anything.
+        key = create_object_key(2)
+        dst = create_memory_obj(fill_value=0.0)
+        self._replace_object(key, b"\x55" * (dst.get_size() // 2))
+
+        tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
+        assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
+        lookup_bm = adapter.query_lookup_and_lock_result(tid)
+        assert lookup_bm is not None and lookup_bm.test(0) is True
+
+        gets_before = _BACKEND.counts()["get"]
+        bm = self._load(adapter, [key], [dst])
+        assert bm.test(0) is False
+        assert _BACKEND.counts()["get"] == gets_before
+        assert torch.all(dst.tensor == 0.0)
+
+    def test_oversized_object_is_rejected_before_any_copy(self, adapter):
+        # No cached size, so the GET is issued; the body is twice the
+        # destination and arrives in one callback. It must be refused
+        # before the first memmove: neither the buffer nor the guard
+        # region after it may change.
+        key = create_object_key(3)
+        dst, guard = create_guarded_memory_obj()
+        self._replace_object(key, b"\x7f" * (dst.get_size() * 2))
+
+        bm = self._load(adapter, [key], [dst])
+        assert bm.test(0) is False
+        assert torch.all(dst.tensor == -1.0)
+        assert torch.all(guard == -1.0)
+
+    def test_oversized_object_in_a_later_callback(self, adapter):
+        # The object grew after this adapter cached its size, so the
+        # size check before the GET passes and the body arrives in three
+        # pieces; the third would cross the end of the destination.
+        key = create_object_key(4)
+        dst, guard = create_guarded_memory_obj()
+        capacity = dst.get_size()
+        self._store(adapter, key, create_memory_obj(fill_value=2.0))
+        key_str = self._replace_object(key, b"\x7f" * (capacity * 3 // 2))
+        _BACKEND.set_get_chunk_size(capacity // 2)
+
+        bm = self._load(adapter, [key], [dst])
+        assert bm.test(0) is False
+        assert torch.all(guard == -1.0)
+        assert key_str not in adapter._object_size_cache
+
+    def test_fragmented_delivery_of_a_complete_object_is_a_hit(self, adapter):
+        key = create_object_key(5)
+        self._store(adapter, key, create_memory_obj(fill_value=1.5))
+        dst = create_memory_obj(fill_value=0.0)
+        _BACKEND.set_get_chunk_size(24)  # 64 bytes -> offsets 0, 24, 48
+
+        bm = self._load(adapter, [key], [dst])
+        assert bm.test(0) is True
+        assert torch.all(dst.tensor == 1.5)
+
+    def test_only_the_wrong_sized_key_misses(self, adapter):
+        keys = [create_object_key(i) for i in (10, 11, 12)]
+        for key in keys:
+            self._store(adapter, key, create_memory_obj(fill_value=1.0))
+        data = _BACKEND.get(s3mod._object_key_to_string(keys[1]))
+        assert data is not None
+        self._replace_object(keys[1], data[:8])
+
+        dsts = [create_memory_obj(fill_value=0.0) for _ in keys]
+        bm = self._load(adapter, keys, dsts)
+        assert (bm.test(0), bm.test(1), bm.test(2)) == (True, False, True)
+        assert torch.all(dsts[0].tensor == 1.0)
+        assert torch.all(dsts[2].tensor == 1.0)
 
 
 # =============================================================================
