@@ -88,6 +88,48 @@ Pinning is recommended. Without it, a process that cannot open an NPU (for
 example, because another process holds the device) falls back to the CPU stub
 without an error. With it, startup fails instead.
 
+Kubernetes (LMCache operator)
+-----------------------------
+
+With the :doc:`LMCache operator </mp/operator>`, set ``gpuVendor: rbln`` on
+the ``LMCacheEngine``. The operator then starts the server with
+``--supported-transfer-mode engine_driven`` and defaults ``nodeSelector`` to
+``rebellions.ai/npu.present: "true"``. The server only holds KV in host
+memory and never opens an NPU, so the engine pod claims no NPU and gets no
+runtime class or IPC wiring; all NPUs stay with vLLM-RBLN.
+
+.. code-block:: yaml
+
+   apiVersion: lmcache.lmcache.ai/v1alpha1
+   kind: LMCacheEngine
+   metadata:
+     name: rbln-cache
+   spec:
+     gpuVendor: rbln
+     image:
+       repository: <lmcache-image>
+       tag: <tag>
+     server:
+       chunkSize: N   # a multiple of the vLLM block size
+     l1:
+       sizeGB: 60
+
+The settings from the previous section map to the deployment as follows:
+
+* The operator passes ``spec.server.chunkSize`` (default ``256``) as
+  ``--chunk-size``. Set it to a multiple of the vLLM-RBLN block size.
+* The injection webhook adds ``--kv-transfer-config`` to opted-in vLLM-RBLN
+  pods, but not ``--model-impl vllm``. Add that to the container args.
+* Set ``LMCACHE_DEVICE_BACKEND=rbln`` on the vLLM-RBLN pods only. The engine
+  pod has no NPU, so pinning ``rbln`` there makes the server fail at startup.
+* The default image, ``lmcache/vllm-openai``, is built for CUDA. Set
+  ``spec.image`` to an LMCache image that runs on your nodes. The vLLM-RBLN
+  image must also include LMCache for ``LMCacheMPConnector``.
+
+``isolatedIPC: true``, ``hostIPC: true``, and ``pd`` are rejected with
+``gpuVendor: rbln``. See :doc:`/mp/operator` for the injection webhook and the
+other ``LMCacheEngine`` fields.
+
 Supported KV cache layouts
 --------------------------
 
