@@ -1,0 +1,25 @@
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "selfsigned-issuer") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "serving-cert") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+spec:
+  dnsNames:
+    - {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "webhook-service") }}.{{ .Release.Namespace }}.svc
+    - {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "webhook-service") }}.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "selfsigned-issuer") }}
+  secretName: webhook-server-cert
