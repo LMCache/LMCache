@@ -10,14 +10,19 @@ and ``model_name``:
 Implementation:
   - Correlates ``MP_STORE_START`` → ``MP_STORE_END`` and
     ``MP_RETRIEVE_START`` → ``MP_RETRIEVE_END`` pairs by the compound key
-    ``(session_id, device)``.  ``session_id`` alone is not sufficient
+    ``(transfer_key, device)`` (falling back to ``session_id`` for older
+    publishers). ``session_id`` alone is not sufficient
     because one MP server process serves multiple vLLM workers, so TP/PP
     replicas of the same request fire concurrent START/END pairs on
     different GPUs.
-  - START/END events fire on the GPU cupy stream (``publish_on_stream``).
+  - LMCache-driven START/END events fire on the GPU stream
+    (``publish_on_stream``).
     The store window also contains the CPU ``reserve_write`` share (it
     runs after MP_STORE_START is on the stream); it was measured at well
     under 1% of the window, so no correction is applied.
+  - Engine-driven events use CPU timestamps from prepared worker handoff
+    through commit. This includes RPC and serialization overhead, not just
+    device DMA; ``device="cpu"`` identifies the server endpoint.
 """
 
 # Future
@@ -38,7 +43,7 @@ class L0L1ThroughputSubscriber(EventSubscriber):
     """Records L0↔L1 throughput by correlating MP_*_START→MP_*_END pairs."""
 
     def __init__(self) -> None:
-        # (session_id, device) -> t_start.
+        # (transfer_key or session_id, device) -> t_start.
         # Compound key avoids collisions when one MP server
         # handles the same request_id from multiple GPUs (TP/PP).
         self._pending_store: dict[tuple[str, str], float] = {}
@@ -50,7 +55,7 @@ class L0L1ThroughputSubscriber(EventSubscriber):
             description=(
                 "Histogram of L0→L1 (GPU→CPU) store throughput in GB/s, "
                 "measured per request as total_bytes / (end_ts - start_ts) "
-                "on the GPU cupy stream."
+                "on the device stream, or prepare-to-commit for engine-driven."
             ),
             unit="GB/s",
         )
@@ -59,7 +64,7 @@ class L0L1ThroughputSubscriber(EventSubscriber):
             description=(
                 "Histogram of L1→L0 (CPU→GPU) load throughput in GB/s, "
                 "measured per request as total_bytes / (end_ts - start_ts) "
-                "on the GPU cupy stream."
+                "on the device stream, or prepare-to-commit for engine-driven."
             ),
             unit="GB/s",
         )
@@ -106,7 +111,7 @@ class L0L1ThroughputSubscriber(EventSubscriber):
 
     @staticmethod
     def _correlation_key(event: Event) -> tuple[str, str] | None:
-        """Build the ``(session_id, device)`` correlation key.
+        """Build the ``(transfer_key or session_id, device)`` correlation key.
 
         Returns ``None`` if either field is missing — such events cannot
         be paired safely and are dropped.
@@ -114,7 +119,10 @@ class L0L1ThroughputSubscriber(EventSubscriber):
         device = event.metadata.get("device")
         if not event.session_id or device is None:
             return None
-        return (event.session_id, str(device))
+        return (
+            str(event.metadata.get("transfer_key", event.session_id)),
+            str(device),
+        )
 
     @staticmethod
     def _metric_attributes(event: Event) -> dict[str, Any]:

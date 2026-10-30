@@ -9,7 +9,10 @@ import pkgutil
 import pytest
 
 # First Party
-from lmcache.v1.storage_backend.connector import ConnectorAdapter, ConnectorManager
+from lmcache.inprocess.v1.storage_backend.connector import (
+    ConnectorAdapter,
+    ConnectorManager,
+)
 
 
 def test_discover_adapters(monkeypatch):
@@ -47,7 +50,7 @@ def test_discover_adapters(monkeypatch):
     non_adapter_module = ModuleType("non_adapter")
     non_adapter_module.NotAnAdapter = object
 
-    fake_package = ModuleType("lmcache.v1.storage_backend.connector")
+    fake_package = ModuleType("lmcache.inprocess.v1.storage_backend.connector")
     fake_package.__path__ = []  # type: ignore[attr-defined]
 
     def fake_iter_modules(_path):
@@ -60,7 +63,7 @@ def test_discover_adapters(monkeypatch):
 
     def fake_import_module(name):
         """Return fake modules or simulate import failure."""
-        if name == "lmcache.v1.storage_backend.connector":
+        if name == "lmcache.inprocess.v1.storage_backend.connector":
             return fake_package
         if name.endswith(".good_adapter"):
             return good_module

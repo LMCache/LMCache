@@ -100,6 +100,14 @@ PY
         VLLM_BATCH_ARGS=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
     fi
 
+    VLLM_MODEL_ARGS=()
+    if [[ "${VLLM_TRUST_REMOTE_CODE:-0}" == "1" ]]; then
+        VLLM_MODEL_ARGS+=(--trust-remote-code)
+    fi
+    if [[ -n "${VLLM_MAX_LOGPROBS:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--max-logprobs "$VLLM_MAX_LOGPROBS")
+    fi
+
     VLLM_BLOCK_ARGS=()
     if [[ -n "${VLLM_BLOCK_SIZE:-}" ]]; then
         VLLM_BLOCK_ARGS=(--block-size "$VLLM_BLOCK_SIZE")
@@ -205,6 +213,7 @@ engine_launch() {
         "VLLM_BATCH_INVARIANT=${batch_invariant}" \
         PYTHONHASHSEED=0 \
         vllm serve "$MODEL" \
+            "${VLLM_MODEL_ARGS[@]}" \
             "${mode_args[@]}" \
             "${VLLM_ATTENTION_ARGS[@]}" \
             --port "$port" \

@@ -73,7 +73,7 @@ pytest -xvs --ignore=tests/disagg \
   --ignore=tests/v1/multiprocess/ \
   --ignore=tests/v1/distributed/ \
   --ignore=tests/skipped \
-  --ignore=tests/v1/storage_backend/test_eic.py
+  --ignore=tests/inprocess/v1/storage_backend/test_eic.py
 ```
 
 If you touched anything under `docs/`, also confirm the docs build cleanly — the Sphinx
@@ -127,6 +127,12 @@ understand and be able to defend the change end to end; a review performed only 
 that wrote the change does not satisfy this gate.
 
 #### AI-assisted update loop
+
+Use `/create-pr-explainer` in Claude Code or `$create-pr-explainer` in Codex
+to generate the reviewer guide. Codex discovers the repository skill through
+`.agents/skills/create-pr-explainer`, a symlink to
+[the shared workflow](.claude/skills/create-pr-explainer/SKILL.md).
+Both tools use that file for content, validation, and publication requirements.
 
 For a PR containing AI-generated code, the same gate applies after every AI-assisted update,
 not just when the PR is first opened:
@@ -265,7 +271,7 @@ pytest -xvs --ignore=tests/disagg \
   --ignore=tests/v1/multiprocess/ \
   --ignore=tests/v1/distributed/ \
   --ignore=tests/skipped \
-  --ignore=tests/v1/storage_backend/test_eic.py
+  --ignore=tests/inprocess/v1/storage_backend/test_eic.py
 
 # Run a single test file
 pytest -xvs tests/v1/test_cache_engine.py
@@ -339,7 +345,7 @@ import os
 import torch
 
 # First Party
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.inprocess.v1.config import LMCacheEngineConfig
 
 # Local
 from .utils import helper
