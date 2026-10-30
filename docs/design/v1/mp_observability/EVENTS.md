@@ -334,7 +334,7 @@ inside `metadata` discriminates ops.
 
 ## Blend Server Lifecycle Sentinels
 
-CPU-synchronous sentinels published by `modules/blend.py` (`BlendModule`) to
+CPU-synchronous sentinels published by `modules/blend/module.py` (`BlendModule`) to
 bracket request scope and guard GPU callback races.  Published via
 `EventBus.publish()` (not `publish_on_stream`).
 
