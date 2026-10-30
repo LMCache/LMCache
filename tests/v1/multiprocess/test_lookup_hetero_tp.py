@@ -48,7 +48,7 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
 )
-from lmcache.v1.distributed.storage_manager import L1WriteCompletion, StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -151,7 +151,7 @@ def _store(
                 tensor = obj.get_tensor(group)
                 assert tensor is not None
                 tensor.copy_(src)
-    sm.finish_write(keys)
+    sm.finish_write(keys, l1_owners_of(objs))
     return keys
 
 
@@ -806,7 +806,7 @@ def test_reshard_waits_for_the_latest_writer_of_its_keys(
     sm = mp_ctx.storage_manager
     first_in, first_go = threading.Event(), threading.Event()
     second_in, second_go = threading.Event(), threading.Event()
-    reserve, prepare = sm.reserve_write, sm.prepare_write_completion
+    reserve, finish = sm.reserve_write, sm.finish_write_and_reserve_read
     submit = L1Resharder.submit
     submitted: list[Future[ReshardResult]] = []
 
@@ -819,11 +819,13 @@ def test_reshard_waits_for_the_latest_writer_of_its_keys(
             return {}
         return reserve(keys, layout_desc)
 
-    def held_second(reserved: dict[ObjectKey, MemoryObj]) -> L1WriteCompletion:
+    def held_second(
+        keys: list[ObjectKey], l1_owners: dict[ObjectKey, int], read_locks: int = 1
+    ) -> dict[ObjectKey, int]:
         if not second_in.is_set():
             second_in.set()
             assert second_go.wait(TIMEOUT)
-        return prepare(reserved)
+        return finish(keys, l1_owners, read_locks)
 
     def counting(self: L1Resharder, task: ReshardTask) -> Future[ReshardResult]:
         future = submit(self, task)
@@ -831,7 +833,7 @@ def test_reshard_waits_for_the_latest_writer_of_its_keys(
         return future
 
     monkeypatch.setattr(sm, "reserve_write", failing_first)
-    monkeypatch.setattr(sm, "prepare_write_completion", held_second)
+    monkeypatch.setattr(sm, "finish_write_and_reserve_read", held_second)
     monkeypatch.setattr(L1Resharder, "submit", counting)
 
     module.lookup(_lookup_key(1, "first"), 1)
@@ -932,15 +934,17 @@ def test_concurrent_lookups_of_one_prefix_both_hit(
     # Hold the first reshard after it reserved its destination objects, the
     # point where a second reshard of the same keys finds them taken.
     entered, release = threading.Event(), threading.Event()
-    prepare = sm.prepare_write_completion
+    finish = sm.finish_write_and_reserve_read
 
-    def gated(reserved: dict[ObjectKey, MemoryObj]) -> L1WriteCompletion:
+    def gated(
+        keys: list[ObjectKey], l1_owners: dict[ObjectKey, int], read_locks: int = 1
+    ) -> dict[ObjectKey, int]:
         if not entered.is_set():
             entered.set()
             assert release.wait(TIMEOUT)
-        return prepare(reserved)
+        return finish(keys, l1_owners, read_locks)
 
-    monkeypatch.setattr(sm, "prepare_write_completion", gated)
+    monkeypatch.setattr(sm, "finish_write_and_reserve_read", gated)
 
     module.lookup(_lookup_key(1, "first"), 1)
     deadline = time.monotonic() + TIMEOUT
