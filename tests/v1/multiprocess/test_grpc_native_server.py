@@ -147,6 +147,39 @@ def blocked() -> Iterator[threading.Event]:
     release.set()
 
 
+def test_affinity_calls_run_in_the_order_sent() -> None:
+    """A client's pipelined affinity calls reach the handler in send order."""
+    seen: list[bytes] = []
+
+    class Module:
+        @request_handler(HandlerType.BLOCKING, requires_client_affinity=True)
+        def server_module_affinity_call(
+            self, request: ServerModuleCallRequest
+        ) -> ServerModuleCallResponse:
+            seen.append(request.payload)
+            return ServerModuleCallResponse(success=True, payload=b"", error="")
+
+    def call(payload: bytes) -> Any:
+        return client.server_module_affinity_call(
+            ServerModuleCallRequest(method="record", payload=payload)
+        )
+
+    server = _serve([Module()])
+    client = _client(server)
+    try:
+        # Calls queued before the channel connects go out in any order.
+        call(b"").result(30)
+        for _ in range(30):
+            seen.clear()
+            sent = [str(i).encode() for i in range(200)]
+            for future in [call(payload) for payload in sent]:
+                future.result(30)
+            assert seen == sent
+    finally:
+        client.close()
+        server.close()
+
+
 def test_handler_error_is_unknown_with_grpcio_message() -> None:
     """A handler exception is UNKNOWN with grpcio's message, and frees its worker."""
 
