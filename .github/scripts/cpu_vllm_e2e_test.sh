@@ -14,7 +14,7 @@
 #   lmcache_driven -> LMCACHE_MP_TRANSFER_MODE=lmcache_driven (IPC handle path)
 #
 # Environment variables (all optional, defaults shown):
-#   LMCACHE_REQUEST_TRANSPORT Request RPC transport: zmq|grpc (default: zmq)
+#   LMCACHE_REQUEST_TRANSPORT Request RPC transport: zmq|grpc|grpc-native (default: zmq)
 #   LMCACHE_REQUEST_PORT      Request RPC port (default: 5555)
 #   LMCACHE_TRANSPORT_MODE   Transport: engine_driven|lmcache_driven
 #                             (default: engine_driven)

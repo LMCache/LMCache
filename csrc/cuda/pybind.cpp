@@ -108,7 +108,7 @@ PYBIND11_MODULE(cuda_ops, m) {
   m.def(
       "multi_layer_block_kv_transfer",
       [](const torch::Tensor& paged_buffer_ptrs_tensor,
-         std::vector<int64_t> lmcache_objects_ptrs,
+         std::vector<uintptr_t> lmcache_objects_ptrs,
          const torch::Tensor& block_ids, const torch::Device& device,
          int direction, PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
          int engine_kv_format, int skip_prefix_n_blocks) {

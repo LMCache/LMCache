@@ -28,6 +28,14 @@ export CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-4}"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-DEBUG}"
 # Avoid inheriting CUDA affinity from host/agent env in XPU jobs.
 unset CUDA_VISIBLE_DEVICES || true
+
+# The shared workloads require jq, but the XPU image may not include it.
+if ! command -v jq >/dev/null 2>&1; then
+    echo "--- :wrench: Installing jq"
+    apt-get update -qq -o Acquire::Retries=3
+    apt-get install -y --no-install-recommends jq
+fi
+
 echo "--- :gear: Enable Intel oneAPI runtime"
 if [ -f /opt/intel/oneapi/setvars.sh ]; then
     # shellcheck disable=SC1091
