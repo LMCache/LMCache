@@ -268,7 +268,6 @@ class TestCoordinatorCommandExecute:
         assert captured["http_authentication"] is not None
         assert captured["http_authentication"].enabled is False
 
-
     def test_api_key_file_enables_authentication(self, cmd, tmp_path, monkeypatch):
         """--api-key-file builds an enabled verifier handed to create_app."""
         # First Party

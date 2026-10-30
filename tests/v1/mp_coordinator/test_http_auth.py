@@ -29,11 +29,11 @@ def _make_app(
     app.add_middleware(CoordinatorAuthenticationMiddleware)
 
     @app.get("/healthz")
-    def healthz() -> dict[str, bool]:
+    def healthz() -> dict[str, object]:
         return {"status": "healthy"}
 
     @app.get("/instances")
-    def instances() -> dict[str, bool]:
+    def instances() -> dict[str, object]:
         return {"ok": True}
 
     return app
@@ -48,9 +48,7 @@ def _config() -> MPCoordinatorConfig:
 
 def test_healthz_stays_public_when_auth_enabled() -> None:
     """The k8s liveness probe must not require a credential."""
-    with TestClient(
-        _make_app(CoordinatorAuthenticationConfig(["secret"]))
-    ) as client:
+    with TestClient(_make_app(CoordinatorAuthenticationConfig(["secret"]))) as client:
         response = client.get("/healthz")
 
     assert response.status_code == 200
@@ -73,9 +71,7 @@ def test_protected_route_rejects_invalid_credentials(
 ) -> None:
     """Fleet routes return a standard bearer challenge on failure."""
     headers = {} if authorization is None else {"Authorization": authorization}
-    with TestClient(
-        _make_app(CoordinatorAuthenticationConfig(["secret"]))
-    ) as client:
+    with TestClient(_make_app(CoordinatorAuthenticationConfig(["secret"]))) as client:
         response = client.get("/instances", headers=headers)
 
     assert response.status_code == 401
@@ -87,9 +83,7 @@ def test_protected_route_rejects_invalid_credentials(
 def test_each_configured_key_is_accepted(api_key: str) -> None:
     """Multiple keys support a zero-downtime rotation window."""
     with TestClient(
-        _make_app(
-            CoordinatorAuthenticationConfig(["current-key", "next-key"])
-        )
+        _make_app(CoordinatorAuthenticationConfig(["current-key", "next-key"]))
     ) as client:
         response = client.get(
             "/instances", headers={"Authorization": f"Bearer {api_key}"}
@@ -100,12 +94,8 @@ def test_each_configured_key_is_accepted(api_key: str) -> None:
 
 def test_x_lmcache_api_key_header_is_accepted() -> None:
     """The alternate API-key header is accepted alongside Bearer."""
-    with TestClient(
-        _make_app(CoordinatorAuthenticationConfig(["secret"]))
-    ) as client:
-        response = client.get(
-            "/instances", headers={"X-LMCache-API-Key": "secret"}
-        )
+    with TestClient(_make_app(CoordinatorAuthenticationConfig(["secret"]))) as client:
+        response = client.get("/instances", headers={"X-LMCache-API-Key": "secret"})
 
     assert response.status_code == 200
 
@@ -129,9 +119,7 @@ def test_real_app_allows_fleet_route_with_valid_key() -> None:
     """A valid bearer token reaches the assembled coordinator's fleet routes."""
     auth = CoordinatorAuthenticationConfig(["secret"])
     with TestClient(create_app(_config(), http_authentication=auth)) as client:
-        response = client.get(
-            "/instances", headers={"Authorization": "Bearer secret"}
-        )
+        response = client.get("/instances", headers={"Authorization": "Bearer secret"})
 
     assert response.status_code == 200
 
@@ -141,3 +129,78 @@ def test_real_app_without_key_keeps_routes_open() -> None:
     with TestClient(create_app(_config())) as client:
         assert client.get("/healthz").status_code == 200
         assert client.get("/instances").status_code == 200
+
+
+# Standard
+# ---------------------------------------------------------------------------
+# End-to-end over a real TCP socket (a live uvicorn server, not ASGI transport)
+# ---------------------------------------------------------------------------
+import threading  # noqa: E402
+
+# Third Party
+import httpx  # noqa: E402
+import uvicorn  # noqa: E402
+
+
+def _serve_live(app, host: str = "127.0.0.1") -> tuple[uvicorn.Server, str]:
+    """Boot *app* on an ephemeral port in a daemon thread.
+
+    Returns:
+        The running server and the base URL (``http://host:port``).
+    """
+    config = uvicorn.Config(app, host=host, port=0, log_level="error")
+    server = uvicorn.Server(config)
+    threading.Thread(target=server.run, daemon=True).start()
+    for _ in range(100):
+        if server.started:
+            break
+        threading.Event().wait(0.05)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    return server, f"http://{host}:{port}"
+
+
+def test_live_server_enforces_bearer_auth_end_to_end() -> None:
+    """Drive the real coordinator over a live HTTP server.
+
+    This is the CVE-2026-107205 end-to-end check: an unauthenticated peer
+    hitting the running fleet control plane is refused, while the public
+    probe and a holder of the key are served.
+    """
+    auth = CoordinatorAuthenticationConfig(["live-secret"])
+    app = create_app(_config(), http_authentication=auth)
+    server, base = _serve_live(app)
+    try:
+        with httpx.Client(base_url=base, timeout=5.0) as client:
+            probe = client.get("/healthz")
+            assert probe.status_code == 200
+
+            unauthenticated = client.get("/instances")
+            assert unauthenticated.status_code == 401
+            assert unauthenticated.headers["www-authenticate"] == "Bearer"
+
+            wrong = client.get("/instances", headers={"Authorization": "Bearer nope"})
+            assert wrong.status_code == 401
+
+            bearer = client.get(
+                "/instances", headers={"Authorization": "Bearer live-secret"}
+            )
+            assert bearer.status_code == 200
+
+            api_key_header = client.get(
+                "/instances", headers={"X-LMCache-API-Key": "live-secret"}
+            )
+            assert api_key_header.status_code == 200
+    finally:
+        server.should_exit = True
+
+
+def test_live_server_without_key_stays_open_end_to_end() -> None:
+    """A live coordinator started with no key remains reachable, unauthenticated."""
+    app = create_app(_config())
+    server, base = _serve_live(app)
+    try:
+        with httpx.Client(base_url=base, timeout=5.0) as client:
+            assert client.get("/healthz").status_code == 200
+            assert client.get("/instances").status_code == 200
+    finally:
+        server.should_exit = True

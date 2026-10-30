@@ -243,9 +243,7 @@ def create_app(
             # that may themselves enforce authentication, so present the
             # shared fleet key when one is configured.
             outbound_client = await stack.enter_async_context(
-                httpx.AsyncClient(
-                    timeout=30.0, headers=_outbound_http_headers()
-                )
+                httpx.AsyncClient(timeout=30.0, headers=_outbound_http_headers())
             )
             app.state.outbound_client = outbound_client
             if config.checkpoint_path:

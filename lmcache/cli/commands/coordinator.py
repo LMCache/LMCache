@@ -335,9 +335,7 @@ class CoordinatorCommand(BaseCommand):
         # ``api_key_file`` is registered by add_api_key_args; getattr keeps
         # hand-built Namespaces (e.g. unit tests) working when they omit it.
         key_files = getattr(args, "api_key_file", None) or []
-        http_authentication = CoordinatorAuthenticationConfig.from_sources(
-            key_files
-        )
+        http_authentication = CoordinatorAuthenticationConfig.from_sources(key_files)
         app = create_app(config, http_authentication=http_authentication)
         uvicorn.run(
             app,
