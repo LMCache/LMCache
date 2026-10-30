@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 # Standard
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 import threading
 
@@ -36,6 +37,9 @@ __all__ = [
     "initialize_transfer_channel_context",
     "get_transfer_channel_context",
     "delete_transfer_channel_context",
+    "DeviceRegionTarget",
+    "set_device_region_target",
+    "get_device_region_target",
 ]
 
 _context: TransferChannelContext | None = None
@@ -104,3 +108,36 @@ def delete_transfer_channel_context() -> None:
         if _context is not None:
             _context.close()
             _context = None
+
+
+@dataclass(frozen=True)
+class DeviceRegionTarget:
+    """Where GPU staging buffers register: a transfer channel context and the
+    alignment it enforces on device regions (its L1 alignment)."""
+
+    context: TransferChannelContext
+    align_bytes: int
+
+
+_device_region_target: DeviceRegionTarget | None = None
+
+
+def set_device_region_target(target: DeviceRegionTarget | None) -> None:
+    """Install (or clear) the target GPU cache contexts register their staging
+    buffers with.
+
+    The P2P controller installs it when GPU-direct borrowing is enabled and
+    clears it on close, so the GPU side never names a transport or a mode.
+
+    Args:
+        target: The context and alignment, or None once borrowing is off.
+    """
+    global _device_region_target
+    with _context_lock:
+        _device_region_target = target
+
+
+def get_device_region_target() -> DeviceRegionTarget | None:
+    """Return the installed target, or None when GPU-direct borrowing is off."""
+    with _context_lock:
+        return _device_region_target

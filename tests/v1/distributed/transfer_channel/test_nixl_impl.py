@@ -31,7 +31,11 @@ import torch
 nixl = pytest.importorskip("nixl")
 
 # First Party
+from lmcache import torch_dev, torch_device_type  # noqa: E402
 from lmcache.v1.distributed.internal_api import L1MemoryDesc  # noqa: E402
+from lmcache.v1.distributed.transfer_channel.api import (  # noqa: E402
+    TransferChannelAddress,
+)
 from lmcache.v1.distributed.transfer_channel.impl.nixl_impl import (  # noqa: E402
     NixlTransferChannelContext,
 )
@@ -234,3 +238,45 @@ def test_connecting_registers_clients_on_both_sides(fresh_contexts):
 def test_server_is_available_from_context(shared_contexts):
     ctx_a, _, _, _ = shared_contexts
     assert ctx_a.get_transfer_channel_server() is not None
+
+
+# =========================================================
+# Device regions (reads straight into GPU memory)
+# =========================================================
+@pytest.mark.skipif(not torch_dev.is_available(), reason="Requires a GPU")
+def test_read_into_a_registered_device_region(shared_contexts):
+    """A registered GPU buffer is an extra local destination: a read names it
+    with ``local_region`` and its offsets follow the L1 alignment."""
+    ctx_a, buf_a, ctx_b, buf_b = shared_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    landing = torch.zeros(_BUF_SIZE, dtype=torch.uint8, device=f"{torch_device_type}:0")
+
+    region = ctx_a.register_device_region(landing.data_ptr(), landing.numel(), 0)
+    try:
+        local = [TransferChannelAddress(offset=_ALIGN, size=_ALIGN)]
+        remote = ctx_b.get_transfer_channel_address([(0, _ALIGN)])
+        result = _wait_finished(
+            client, client.submit_read(local, remote, local_region=region)
+        )
+        assert result.succeeded_mask == [True]
+        assert torch.equal(landing[_ALIGN : 2 * _ALIGN].cpu(), buf_b[:_ALIGN])
+        assert torch.all(landing[:_ALIGN] == 0)
+        # The L1 region is still region 0 and unaffected.
+        host_local = ctx_a.get_transfer_channel_address([(0, _ALIGN)])
+        _wait_finished(client, client.submit_read(host_local, remote))
+        assert torch.equal(buf_a[:_ALIGN], buf_b[:_ALIGN])
+    finally:
+        ctx_a.unregister_device_region(region)
+    with pytest.raises(KeyError):
+        client.submit_read(
+            [TransferChannelAddress(offset=0, size=_ALIGN)], remote, local_region=region
+        )
+    ctx_a.unregister_device_region(region)  # unknown ids are ignored
+
+
+def test_device_region_must_be_aligned(shared_contexts):
+    ctx_a, _, _, _ = shared_contexts
+    with pytest.raises(ValueError, match="alignment"):
+        ctx_a.register_device_region(_ALIGN + 1, _ALIGN, 0)
+    with pytest.raises(ValueError, match="alignment"):
+        ctx_a.register_device_region(_ALIGN, _ALIGN + 1, 0)
