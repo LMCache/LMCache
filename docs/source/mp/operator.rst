@@ -643,9 +643,10 @@ GPU & Security
      - GPU vendor: ``nvidia`` (uses the ``nvidia`` RuntimeClass), ``amd``
        (runs on the default runtime; also resolves ``isolatedIPC`` to
        ``false``), or ``rbln`` (runs on the default runtime with
-       ``--supported-transfer-mode engine_driven``, no IPC wiring, and
-       ``nodeSelector`` defaulting to ``rebellions.ai/npu.present: "true"``;
-       rejects ``isolatedIPC: true``, ``hostIPC: true``, and ``pd``; see
+       ``--supported-transfer-mode engine_driven`` and an L1 pool in the
+       shared host ``/dev/shm`` (``--shm-name``), with ``nodeSelector``
+       defaulting to ``rebellions.ai/npu.present: "true"``; rejects
+       ``isolatedIPC: true`` and ``pd``; see
        :doc:`/platform/devices/rbln/index`).
    * - ``runtimeClassName``
      - vendor default

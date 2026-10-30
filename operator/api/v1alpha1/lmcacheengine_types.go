@@ -420,8 +420,9 @@ type PDSpec struct {
 type LMCacheEngineSpec struct {
 	// gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
 	// GPU Operator's "nvidia" RuntimeClass; "amd" runs on the default container
-	// runtime. "rbln" also runs on the default runtime and uses engine-driven KV
-	// transfer, so the engine needs no accelerator access or IPC wiring.
+	// runtime. "rbln" also runs on the default runtime; vLLM workers copy KV
+	// through the engine's L1 pool in the host /dev/shm (engine-driven
+	// transfer), so the engine needs no accelerator access.
 	// +optional
 	// +kubebuilder:default="nvidia"
 	// +kubebuilder:validation:Enum=nvidia;amd;rbln

@@ -89,7 +89,12 @@ func startupProbeFailureThreshold(l1SizeGB float64) int32 {
 // BuildDaemonSet constructs a DaemonSet for the given LMCacheEngine.
 // Selector labels take precedence over additional pod labels.
 func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
-	return buildDaemonSetCore(engine.Name, engine.Namespace, &engine.Spec, BuildContainerArgs(&engine.Spec), "lmcache/vllm-openai")
+	args := BuildContainerArgs(&engine.Spec)
+	if engine.Spec.EngineDrivenTransfer() {
+		// Engines on a node share the host /dev/shm, so the pool name must be unique.
+		args = append(args, "--shm-name", fmt.Sprintf("lmcache-%s-%s", engine.Namespace, engine.Name))
+	}
+	return buildDaemonSetCore(engine.Name, engine.Namespace, &engine.Spec, args, "lmcache/vllm-openai")
 }
 
 // buildDaemonSetCore constructs the DaemonSet shared by the LMCacheEngine and
@@ -144,8 +149,8 @@ func buildDaemonSetCore(
 	// Isolated IPC needs neither the host IPC namespace nor the shared
 	// /dev/shm, and takes priority over spec.hostIPC (see the isolatedIPC
 	// field documentation).
-	sharesHostIPC := spec.SharesHostIPC()
-	hostIPC := derefBool(spec.HostIPC, false) && sharesHostIPC
+	isolatedIPC := spec.IsolatedIPCEnabled()
+	hostIPC := derefBool(spec.HostIPC, false) && !isolatedIPC
 
 	serverPort := derefInt32(getServerPort(spec), 5555)
 	imgRepo := defaultImageRepo
@@ -245,7 +250,7 @@ func buildDaemonSetCore(
 	// /dev/shm sharing is wired at all.
 	volumes := append([]corev1.Volume{}, spec.Volumes...)
 	volumeMounts := append([]corev1.VolumeMount{}, spec.VolumeMounts...)
-	if sharesHostIPC && !hostIPC &&
+	if !isolatedIPC && !hostIPC &&
 		!HasDevShmMount(volumeMounts) && !HasDevShmVolume(volumes) {
 		volumes = append(volumes, BuildDevShmVolume())
 		volumeMounts = append(volumeMounts, BuildDevShmVolumeMount())

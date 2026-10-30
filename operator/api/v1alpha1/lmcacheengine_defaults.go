@@ -66,13 +66,8 @@ func (s *LMCacheEngineSpec) IsolatedIPCEnabled() bool {
 }
 
 // EngineDrivenTransfer reports whether vLLM workers copy KV to and from the
-// server themselves (gpuVendor "rbln", which cannot share KV via IPC).
+// server's shared-memory L1 pool themselves (gpuVendor "rbln", which cannot
+// share device memory via IPC).
 func (s *LMCacheEngineSpec) EngineDrivenTransfer() bool {
 	return s.GPUVendor != nil && *s.GPUVendor == GPUVendorRBLN
-}
-
-// SharesHostIPC reports whether the engine and vLLM pods share the host's
-// /dev/shm or IPC namespace (neither isolated IPC nor engine-driven transfer).
-func (s *LMCacheEngineSpec) SharesHostIPC() bool {
-	return !s.IsolatedIPCEnabled() && !s.EngineDrivenTransfer()
 }
