@@ -41,7 +41,11 @@ from lmcache.v1.distributed.internal_api import (
     L1OperationResult,
     L2AdapterListener,
 )
-from lmcache.v1.distributed.l1_manager import DevDaxL1Manager, create_l1_managers
+from lmcache.v1.distributed.l1_manager import (
+    DevDaxL1Manager,
+    ShadowL1Manager,
+    create_l1_managers,
+)
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -152,6 +156,11 @@ class StorageManager:
                 cleanup.callback(manager.close)
 
             self._l1_managers_by_id = {m.l1_manager_id: m for m in self._l1_managers}
+            # Shadow L1s hold borrowed views only, so writes are never placed
+            # there.
+            self._writable_l1_managers = [
+                m for m in self._l1_managers if not isinstance(m, ShadowL1Manager)
+            ]
             self._l1_by_tag = {m.config.tag: m for m in self._l1_managers}
 
             self._write_policy = create_write_policy(config.write_policy)
@@ -301,7 +310,9 @@ class StorageManager:
             ValueError: The write policy selected an unregistered L1 manager
                 or did not place every key exactly once.
         """
-        targets = self._write_policy.select_write_targets(keys, self._l1_managers)
+        targets = self._write_policy.select_write_targets(
+            keys, self._writable_l1_managers
+        )
         _validate_write_targets(keys, targets, self._l1_managers_by_id)
         reserve_result: dict[ObjectKey, L1OperationResult] = {}
         for owner, group in targets.items():
@@ -1236,6 +1247,11 @@ class StorageManager:
         for controller in self._eviction_controllers:
             controller.stop()
         self._l2_eviction_controller.stop()
+
+        # End every borrowed view's lease once no controller can read it.
+        for manager in self._l1_managers:
+            if isinstance(manager, ShadowL1Manager):
+                manager.release_all()
 
         PeriodicEventNotifier.shutdown()
 
