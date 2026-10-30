@@ -3,10 +3,11 @@
 """Tests for EventBus, EventSubscriber, and singleton management."""
 
 # Standard
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 import time
 
 # Third Party
+from opentelemetry.sdk.metrics.export import NumberDataPoint
 import pytest
 
 # First Party
@@ -19,6 +20,7 @@ from lmcache.v1.mp_observability.event_bus import (
     get_event_bus,
     init_event_bus,
 )
+from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _reader
 import lmcache.v1.mp_observability.event_bus as _bus_module
 
 # ---------------------------------------------------------------------------
@@ -579,27 +581,68 @@ class TestBlockAllocationEvent:
         assert len(sub.events) == 0
 
 
-_REGISTER_GAUGE = "lmcache.v1.mp_observability.event_bus.register_gauge"
+# ---------------------------------------------------------------------------
+# Self-monitoring gauges
+# ---------------------------------------------------------------------------
+
+_QUEUE_DEPTH = "lmcache_mp.event_bus.queue_depth"
+_DRAIN_LAG = "lmcache_mp.event_bus.drain_lag_seconds"
+
+
+def _gauge_value(name: str) -> float:
+    """Collect from the real OTel SDK and return the value of gauge *name*."""
+    data = _reader.get_metrics_data()
+    assert data is not None
+    for resource_metrics in data.resource_metrics:
+        for scope_metrics in resource_metrics.scope_metrics:
+            for metric in scope_metrics.metrics:
+                if metric.name == name:
+                    points = list(metric.data.data_points)
+                    assert len(points) == 1
+                    assert isinstance(points[0], NumberDataPoint)
+                    return points[0].value
+    raise AssertionError(f"gauge {name} was not exported")
 
 
 class TestSelfMonitoringGauges:
-    def test_init_registers_both_gauges(self):
-        with patch(_REGISTER_GAUGE) as mock_register:
-            EventBus(EventBusConfig(enabled=True))
-            names = [c.args[1] for c in mock_register.call_args_list]
-            assert set(names) == {
-                "lmcache_mp.event_bus.queue_depth",
-                "lmcache_mp.event_bus.drain_lag_seconds",
-            }
+    """The self-gauges are exported through the real OTel SDK.
 
-    def test_queue_depth_callback_reflects_bus(self):
-        captured: dict[str, object] = {}
+    These collect from a real ``MeterProvider`` instead of patching
+    ``register_gauge``: the SDK keeps only the first callback registered
+    under an instrument name, and a patched registration hides that.
+    """
 
-        def _capture(_meter, name, _desc, func):
-            captured[name] = func
+    def test_gauges_report_the_initialized_bus(self):
+        bus = init_event_bus(EventBusConfig(enabled=True))
+        bus.publish(_make_event(session_id="s1"))
+        bus.publish(_make_event(session_id="s2"))
+        time.sleep(0.01)
 
-        with patch(_REGISTER_GAUGE, side_effect=_capture):
-            bus = EventBus(EventBusConfig(enabled=True))
-            bus.publish(_make_event(session_id="s1"))
-            bus.publish(_make_event(session_id="s2"))
-            assert captured["lmcache_mp.event_bus.queue_depth"]() == 2
+        assert _gauge_value(_QUEUE_DEPTH) == 2
+        assert _gauge_value(_DRAIN_LAG) > 0.0
+
+    def test_gauges_follow_reinitialization(self):
+        first = init_event_bus(EventBusConfig(enabled=True))
+        first.publish(_make_event(session_id="s1"))
+
+        second = init_event_bus(EventBusConfig(enabled=True))
+        for i in range(3):
+            second.publish(_make_event(session_id=f"s{i}"))
+
+        assert _gauge_value(_QUEUE_DEPTH) == 3
+
+    def test_other_bus_instances_do_not_capture_the_gauges(self):
+        bus = init_event_bus(EventBusConfig(enabled=True))
+        bus.publish(_make_event(session_id="s1"))
+
+        other = EventBus(EventBusConfig(enabled=True))
+        for i in range(5):
+            other.publish(_make_event(session_id=f"o{i}"))
+
+        assert _gauge_value(_QUEUE_DEPTH) == 1
+
+    def test_gauges_read_zero_when_queue_is_empty(self):
+        init_event_bus(EventBusConfig(enabled=True))
+
+        assert _gauge_value(_QUEUE_DEPTH) == 0
+        assert _gauge_value(_DRAIN_LAG) == 0.0
