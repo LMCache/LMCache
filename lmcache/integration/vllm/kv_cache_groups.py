@@ -135,6 +135,94 @@ def _resolve_per_layer_sw_sizes(
     return per_layer_sw_size
 
 
+def _spec_bytes_per_token(spec: Any) -> "int | None":
+    """Engine-spec-derived KV payload bytes covered by one logical token.
+
+    Reads only engine-side spec fields (the leaf's ``page_size_bytes`` over
+    its ``block_size``), never LMCache's registration geometry, so the
+    store-time byte-coverage check compares two independently derived
+    quantities. Slot-compressed specs (``tokens_per_state > 1`` /
+    ``compress_ratio > 1``) keep the same per-token rate: their page still
+    covers ``block_size`` logical tokens.
+
+    Returns:
+        ``None`` when the spec does not yield a usable rate (TurboQuant's
+        ``tq_slot_size > 0`` alters page semantics; missing, non-positive or
+        non-divisible fields), so the coverage check no-ops for the group.
+    """
+    if getattr(spec, "tq_slot_size", 0) > 0:
+        return None
+    page_size_bytes = getattr(spec, "page_size_bytes", None)
+    block_size = getattr(spec, "block_size", None)
+    if (
+        not isinstance(page_size_bytes, int)
+        or not isinstance(block_size, int)
+        or page_size_bytes <= 0
+        or block_size <= 0
+        or page_size_bytes % block_size != 0
+    ):
+        return None
+    return page_size_bytes // block_size
+
+
+def _resolve_per_layer_expected_bytes(
+    vllm_groups: Sequence[Any],
+    layer_to_idx: Mapping[str, int],
+    num_layers: int,
+) -> list["int | None"]:
+    """Engine-spec-derived KV bytes per token for each registered tensor.
+
+    Args:
+        vllm_groups: vLLM ``KVCacheGroupSpec`` instances.
+        layer_to_idx: Layer name to registered tensor index mapping.
+        num_layers: Number of registered KV tensors.
+
+    Returns:
+        A list of length ``num_layers`` mapping each registered tensor
+        index to its engine-spec rate, or ``None`` where the engine group
+        reports no usable rate (the coverage check no-ops there). Aux
+        pools synthesize engine groups without a spec and stay ``None``.
+    """
+    per_layer_bytes: list["int | None"] = [None] * num_layers
+    for group in vllm_groups:
+        spec = getattr(group, "kv_cache_spec", None)
+        if spec is None:
+            continue
+        per_layer_specs = getattr(spec, "kv_cache_specs", None)
+        for name in group.layer_names:
+            layer_spec = per_layer_specs.get(name) if per_layer_specs else spec
+            if layer_spec is not None:
+                per_layer_bytes[layer_to_idx[name]] = _spec_bytes_per_token(layer_spec)
+    return per_layer_bytes
+
+
+def _merge_expected_bytes_per_token(
+    per_layer_bytes: Sequence["int | None"],
+    layer_indices: Sequence[int],
+    per_layer_sw_size: Sequence[int],
+    per_layer_recurrent: Sequence[bool],
+    dcp_size: int,
+) -> "int | None":
+    """Sum per-layer rates into one group-level expectation.
+
+    Returns:
+        ``None`` (the coverage check no-ops) when any member layer has no
+        engine-derived rate, has sliding-window or recurrent staging
+        semantics (cross-chunk windows stage a window, not a plain
+        per-token rate), the group is DCP-sharded (per-rank page semantics
+        are not derivable from the spec alone), or the group is empty.
+    """
+    if dcp_size > 1 or not layer_indices:
+        return None
+    total = 0
+    for idx in layer_indices:
+        bpt = per_layer_bytes[idx]
+        if bpt is None or per_layer_sw_size[idx] != -1 or per_layer_recurrent[idx]:
+            return None
+        total += bpt
+    return total
+
+
 #: Reserved layer-name prefix for CacheBlend fused-aux page pools:
 #: ``cb.aux_pool.<tokens_per_block>[.<label>]`` — the first suffix part is
 #: the logical block size; the optional label distinguishes multiple pools
@@ -352,6 +440,7 @@ def create_engine_group_infos_from_vllm(
     group_tokens_per_block: dict[int, int] = {}
     per_layer_sw_size = [-1] * num_layers
     per_layer_recurrent = [False] * num_layers
+    per_layer_expected: list[int | None] = [None] * num_layers
     if vllm_groups:
         per_layer_group_idx = [EXCLUDED_ENGINE_GROUP] * num_layers
         for engine_group_id, group in enumerate(vllm_groups):
@@ -370,6 +459,9 @@ def create_engine_group_infos_from_vllm(
             vllm_groups, layer_to_idx, num_layers
         )
         per_layer_recurrent = _resolve_per_layer_recurrent(
+            vllm_groups, layer_to_idx, num_layers
+        )
+        per_layer_expected = _resolve_per_layer_expected_bytes(
             vllm_groups, layer_to_idx, num_layers
         )
 
@@ -413,6 +505,13 @@ def create_engine_group_infos_from_vllm(
             # --separate-object-groups, after the regular groups.
             extra_object_group_tag=aux_group_tags.get(identity.engine_group_idx, 0),
             recurrent_state=_merge_layer_recurrent(per_layer_recurrent, indices),
+            expected_bytes_per_token=_merge_expected_bytes_per_token(
+                per_layer_expected,
+                indices,
+                per_layer_sw_size,
+                per_layer_recurrent,
+                dcp_size,
+            ),
         )
         for identity, indices in group_layers_by_identity(
             normalized_kv_caches,

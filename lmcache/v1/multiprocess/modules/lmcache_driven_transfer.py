@@ -4,6 +4,7 @@
 # Standard
 from dataclasses import dataclass
 from typing import Any, Sequence
+import os
 import threading
 import time
 
@@ -20,7 +21,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager, ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import (
@@ -85,6 +86,84 @@ def get_layout_desc(
     ]
     shapes, dtypes = zip(*shapes_and_dtypes, strict=False)
     return MemoryLayoutDesc(shapes=list(shapes), dtypes=list(dtypes))
+
+
+#: Env kill switch for the store-time byte-coverage check (default on).
+_BYTE_COVERAGE_CHECK_ENV = "LMCACHE_STORE_BYTE_COVERAGE_CHECK"
+
+#: Env values that disable the check; anything else truthy keeps it on.
+_BYTE_COVERAGE_DISABLED_VALUES = {"", "0", "false", "no", "off"}
+
+
+def byte_coverage_check_enabled() -> bool:
+    """Whether the store-time byte-coverage check is enabled.
+
+    Enabled by default; set ``LMCACHE_STORE_BYTE_COVERAGE_CHECK`` to one of
+    ``""/0/false/no/off`` to disable it (emergency escape hatch).
+    """
+    raw = os.environ.get(_BYTE_COVERAGE_CHECK_ENV)
+    if raw is None:
+        return True
+    return raw.strip().lower() not in _BYTE_COVERAGE_DISABLED_VALUES
+
+
+def verify_store_byte_coverage(
+    cache_context: BaseCacheContext,
+    object_group_id: int,
+    reserved_dict: dict[ObjectKey, MemoryObj],
+    chunk_size: int,
+) -> None:
+    """Fail closed when a reserved store object contradicts the engine spec.
+
+    Compares the host object reserved for ``object_group_id`` (sized by
+    LMCache's registration geometry) against the engine-KV-cache-spec rate
+    carried in :class:`EngineGroupInfo`. The two sides are derived
+    independently, so a layout bug that truncates a chunk to ``1/N`` of its
+    kernel pages (the silent subpage-misclassification family) shows up
+    here as a size mismatch and the chunk is refused persistence instead
+    of silently poisoning the cache with a partial payload.
+
+    No-ops (returns without raising) when the object group carries no
+    engine-derived expectation (recurrent / sliding-window / padded /
+    unrecognized / DCP layouts) or the context exposes no real
+    :class:`KVLayerGroupsManager` (test harnesses mount stand-ins).
+
+    This is a reservation-size invariant: it proves the reserved host
+    object has the engine-spec byte capacity for the chunk, not that every
+    page was actually written -- transfer and restore correctness stay
+    with the restart/exact-answer test layer.
+
+    Args:
+        cache_context: The cache context holding the layer group manager.
+        object_group_id: Index of the object group being stored.
+        reserved_dict: Objects reserved by the storage manager for this
+            object group's chunk keys; all share one layout.
+        chunk_size: Logical tokens covered by each chunk.
+
+    Raises:
+        ValueError: If the reserved object's byte size differs from the
+            engine-spec expectation for one chunk.
+    """
+    manager = cache_context.kv_layer_groups_manager
+    if not isinstance(manager, KVLayerGroupsManager):
+        # Stand-in managers (unit-test harnesses) carry no engine-derived
+        # expectation; the check no-ops rather than misread a mock.
+        return
+    expected = manager.expected_object_group_bytes_per_chunk(
+        object_group_id, chunk_size
+    )
+    if expected is None or not reserved_dict:
+        return
+    staged = next(iter(reserved_dict.values())).get_size()
+    if staged != expected:
+        raise ValueError(
+            f"store byte-coverage mismatch for object group "
+            f"{object_group_id}: reserved {staged} bytes per chunk, but the "
+            f"engine KV cache spec requires {expected} bytes for "
+            f"{chunk_size} tokens -- refusing to persist a possibly "
+            f"truncated chunk (set {_BYTE_COVERAGE_CHECK_ENV}=0 to "
+            f"disable this check)"
+        )
 
 
 def all_null_chunk_masks(
@@ -178,6 +257,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
     module_name = "lmcache_driven_transfer"
 
+    # Class default so modules built without __init__ (unit-test harnesses
+    # construct instances by hand) still take the check; real instances
+    # resolve the env kill switch once in __init__.
+    _byte_coverage_enabled: bool = True
+
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
         """Build unless the transfer mode excludes the LMCache-driven path."""
@@ -189,6 +273,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
         self._cache_contexts: dict[int, ContextEntry] = {}
+        # Cached once at module init so per-store cost is a flag check.
+        self._byte_coverage_enabled = byte_coverage_check_enabled()
         # Guards all reads/writes of _cache_contexts. The reaper mutates it
         # off the MQ main loop, so register/unregister/store/retrieve and
         # report_status all serialize through this lock. Held only for dict
@@ -787,6 +873,18 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         total_bytes += next(
                             iter(reserved_dict.values())
                         ).get_size() * len(reserved_dict)
+                        # Fail closed before any device data moves: a
+                        # reserved object whose size contradicts the engine
+                        # spec means the registration geometry truncated
+                        # the chunk (1-of-N kernel pages), and raising here
+                        # skips the whole store via the except below.
+                        if self._byte_coverage_enabled:
+                            verify_store_byte_coverage(
+                                cache_context,
+                                obj_group_id,
+                                reserved_dict,
+                                self._ctx.chunk_size,
+                            )
 
                     # Keys not in reserved_dict (all-null chunks skipped above, or
                     # skipped by the storage manager) become None entries; the
