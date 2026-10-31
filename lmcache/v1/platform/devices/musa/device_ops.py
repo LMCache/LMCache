@@ -12,7 +12,8 @@ the CUDA host-callback ABI.
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, ClassVar, TypeAlias, cast
+from importlib import import_module
+from typing import TYPE_CHECKING, ClassVar, Protocol, TypeAlias, cast
 import ctypes
 
 # Third Party
@@ -20,6 +21,7 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
+from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
@@ -36,10 +38,71 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
 
+logger = init_logger(__name__)
+
 _PagedBufferOperand: TypeAlias = (
     torch.Tensor | list[torch.Tensor] | list[list[torch.Tensor]]
 )
 _PagedLayers: TypeAlias = list[torch.Tensor] | list[list[torch.Tensor]]
+
+
+class _MusaCodec(Protocol):
+    """CacheGen codec surface exported by ``lmcache.musa_ops``."""
+
+    def calculate_cdf(self, input_tensor: torch.Tensor, num_bins: int) -> torch.Tensor:
+        """Calculate the per-(layer, channel) CDF."""
+        ...
+
+    def encode_fast_new(
+        self,
+        cdf: torch.Tensor,
+        input_sym: torch.Tensor,
+        output_buffer: torch.Tensor,
+        output_lengths: torch.Tensor,
+    ) -> None:
+        """Arithmetic-encode symbols into the output buffer."""
+        ...
+
+    def decode_fast_new(
+        self,
+        cdf: torch.Tensor,
+        bytestreams: torch.Tensor,
+        lengths: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Arithmetic-decode padded streams into the output tensor."""
+        ...
+
+    def decode_fast_prefsum(
+        self,
+        cdf: torch.Tensor,
+        bytestreams: torch.Tensor,
+        lengths_prefsum: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Arithmetic-decode prefix-sum streams into the output tensor."""
+        ...
+
+
+_NATIVE_CODEC: _MusaCodec | None = None
+_NATIVE_CODEC_RESOLVED = False
+
+
+def _native_codec() -> _MusaCodec | None:
+    """Return the compiled MUSA CacheGen codec, resolving it at most once.
+
+    Returns:
+        The cached native codec module, or ``None`` when the extension is not
+        built.
+    """
+    global _NATIVE_CODEC, _NATIVE_CODEC_RESOLVED
+    if not _NATIVE_CODEC_RESOLVED:
+        _NATIVE_CODEC_RESOLVED = True
+        try:
+            _NATIVE_CODEC = cast(_MusaCodec, import_module("lmcache.musa_ops"))
+        except (ImportError, OSError, RuntimeError) as exc:
+            logger.warning("lmcache.musa_ops unavailable: %s", exc)
+    return _NATIVE_CODEC
 
 
 def _current_musa_device() -> torch.device:
@@ -672,3 +735,93 @@ class MusaDeviceOps(DeviceOps):
             engine_kv_format,
             skip_prefix_n_blocks,
         )
+
+    # ── Ops: codec ───────────────────────────────────────────────────
+
+    def calculate_cdf(self, input_tensor: torch.Tensor, num_bins: int) -> torch.Tensor:
+        """Calculate the CDF over tokens with the MUSA codec when built.
+
+        Args:
+            input_tensor: Symbol tensor of shape ``[layers, tokens, channels]``.
+            num_bins: Maximum number of bins (``Lp - 1``).
+
+        Returns:
+            The CDF tensor, from the native kernel or the torch baseline.
+        """
+        native = _native_codec()
+        if native is not None:
+            return native.calculate_cdf(input_tensor, num_bins)
+        return torch_ops.calculate_cdf(input_tensor, num_bins)
+
+    def encode_fast_new(
+        self,
+        cdf: torch.Tensor,
+        input_sym: torch.Tensor,
+        output_buffer: torch.Tensor,
+        output_lengths: torch.Tensor,
+    ) -> None:
+        """Arithmetic-encode symbols with the MUSA codec when built.
+
+        Args:
+            cdf: CDF tensor produced by :meth:`calculate_cdf`.
+            input_sym: Symbol tensor to encode.
+            output_buffer: Destination byte buffer.
+            output_lengths: Per-stream encoded byte counts.
+
+        Returns:
+            None.
+        """
+        native = _native_codec()
+        if native is not None:
+            native.encode_fast_new(cdf, input_sym, output_buffer, output_lengths)
+            return
+        torch_ops.encode_fast_new(cdf, input_sym, output_buffer, output_lengths)
+
+    def decode_fast_new(
+        self,
+        cdf: torch.Tensor,
+        bytestreams: torch.Tensor,
+        lengths: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Arithmetic-decode padded streams with the MUSA codec when built.
+
+        Args:
+            cdf: CDF tensor produced by :meth:`calculate_cdf`.
+            bytestreams: Padded byte buffer, shape
+                ``[layers, channels, buffer_size]``.
+            lengths: Per-stream encoded byte counts.
+            output: Destination symbol tensor.
+
+        Returns:
+            None.
+        """
+        native = _native_codec()
+        if native is not None:
+            native.decode_fast_new(cdf, bytestreams, lengths, output)
+            return
+        torch_ops.decode_fast_new(cdf, bytestreams, lengths, output)
+
+    def decode_fast_prefsum(
+        self,
+        cdf: torch.Tensor,
+        bytestreams: torch.Tensor,
+        lengths_prefsum: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Arithmetic-decode prefix-sum streams with the MUSA codec when built.
+
+        Args:
+            cdf: CDF tensor produced by :meth:`calculate_cdf`.
+            bytestreams: Packed byte buffer, shape ``[total_bytes]``.
+            lengths_prefsum: Exclusive prefix sums of the stream lengths.
+            output: Destination symbol tensor.
+
+        Returns:
+            None.
+        """
+        native = _native_codec()
+        if native is not None:
+            native.decode_fast_prefsum(cdf, bytestreams, lengths_prefsum, output)
+            return
+        torch_ops.decode_fast_prefsum(cdf, bytestreams, lengths_prefsum, output)
