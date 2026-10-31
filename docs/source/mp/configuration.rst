@@ -627,7 +627,10 @@ Source: ``lmcache/v1/distributed/config.py``
      - Time-to-live for each object's write lock (seconds).
    * - ``--l1-read-ttl-seconds``
      - ``300``
-     - Time-to-live for each object's read lock (seconds).
+     - Time-to-live for each object's read lock (seconds). A lookup's read
+       locks hold its hit in L1 until the retrieve; if they expire first and
+       eviction removes the objects, the retrieve reloads them from L2 and
+       fails only when L2 does not hold them either.
 
 Eviction Policy
 ---------------

@@ -15,8 +15,10 @@ from lmcache.utils import (
     _lmcache_nvtx_annotate,
 )
 from lmcache.v1.distributed.api import (
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
+    PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.gpu_connector.utils import LayoutHints
@@ -55,6 +57,10 @@ from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
+
+# Bounds how long a retrieve waits to reload L1-evicted keys from L2; it runs
+# on the instance's affinity worker, so only that instance's requests wait.
+_L2_RELOAD_TIMEOUT_S = 30.0
 
 
 def get_layout_desc(
@@ -922,6 +928,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
+
+        Note:
+            Keys that left L1 after the lookup (their read lock expired) are
+            reloaded from L2 before the copy; the retrieve fails only if L2
+            cannot serve them either.
         """
         st = time.perf_counter()
 
@@ -1070,6 +1081,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             )
             total_bytes = 0
             retrieve_succeeded = True
+            # Keys the lookup locked but L1 no longer holds (their read lock
+            # expired and eviction removed them): there is nothing to release.
+            evicted_keys: set[ObjectKey] = set()
+            reload_completion: L1WriteCompletion = []
             try:
                 for obj_group_id in range(num_object_groups):
                     if obj_group_id in skipped_groups:
@@ -1079,10 +1094,40 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
                         in_window_keys, l1_owners=read_owners
                     )
-                    if not window_objs or found_keys != in_window_keys:
+                    if not in_window_keys:
                         logger.error("Some keys not found during retrieve!")
                         retrieve_succeeded = False
                         break
+                    if found_keys != in_window_keys:
+                        found = set(found_keys)
+                        missing = [k for k in in_window_keys if k not in found]
+                        evicted_keys.update(missing)
+                        reloaded = self._reload_from_l2(
+                            key,
+                            missing,
+                            obj_group_id,
+                            get_layout_desc(
+                                cache_context, self._ctx.chunk_size, obj_group_id
+                            ),
+                        )
+                        if reloaded is None:
+                            logger.error(
+                                "Some keys not found in L1 or L2 during retrieve!"
+                            )
+                            retrieve_succeeded = False
+                            break
+                        reloaded_objs, completion = reloaded
+                        reload_completion.extend(completion)
+                        objs_by_key = dict(zip(found_keys, window_objs, strict=True))
+                        objs_by_key.update(zip(missing, reloaded_objs, strict=True))
+                        window_objs = [objs_by_key[k] for k in in_window_keys]
+                        logger.warning(
+                            "Reloaded %d of %d keys from L2 for request %s: "
+                            "they left L1 after the lookup",
+                            len(missing),
+                            len(in_window_keys),
+                            key.request_id,
+                        )
 
                     total_bytes += sum(mo.get_size() for mo in window_objs)
                     # None-pad the skipped prefix so block-id slicing is unchanged.
@@ -1103,11 +1148,16 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 retrieve_succeeded = False
             finally:
                 event_backend.record_event(event, cache_context.stream)
-                if retained_keys:
+                release = [
+                    (owner, [k for k in keys if k not in evicted_keys])
+                    for owner, keys in read_completion
+                ] + reload_completion
+                release = [(owner, keys) for owner, keys in release if keys]
+                if release:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
                         "finish_read_by_owner",
-                        read_completion,
+                        release,
                     )
                 num_tokens = (
                     num_chunks * self._ctx.chunk_size
@@ -1144,6 +1194,74 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             event_backend.export_event(event, cache_context.device),
             retrieve_succeeded,
         )
+
+    def _reload_from_l2(
+        self,
+        key: IPCCacheServerKey,
+        missing: list[ObjectKey],
+        obj_group_id: int,
+        layout_desc: MemoryLayoutDesc,
+    ) -> tuple[list[MemoryObj], L1WriteCompletion] | None:
+        """Load keys that left L1 after the lookup back from L2, read-locked.
+
+        A lookup's read lock expires after the L1 read TTL, so a request that
+        waits longer in the engine's queue can find its keys evicted at
+        retrieve time; write-through still holds them in L2. Each key is
+        read-locked once per KV reader of the request, like the lookup, so
+        every reader's retrieve can release one lock.
+
+        Args:
+            key: The retrieve's IPC key: its reader count and request id.
+            missing: Keys of one object group absent from L1, in chunk order.
+            obj_group_id: The object group of ``missing``.
+            layout_desc: The memory layout of that object group's objects.
+
+        Returns:
+            The objects of ``missing`` in order and the read completion that
+            releases their locks after the copy, or ``None`` when any key is
+            not loaded in time. Nothing is left locked on ``None``, except by
+            a load still running past the timeout, whose locks expire with
+            the read TTL.
+        """
+        storage_manager = self._ctx.storage_manager
+        handle = storage_manager.submit_prefetch_task(
+            PrefetchTaskSpec(
+                key_groups=[
+                    GroupedObjectKeys(
+                        keys=missing,
+                        object_group_id=obj_group_id,
+                        layout_desc=layout_desc,
+                    )
+                ],
+                fetching_policy="full",
+                num_kv_readers=key.require_num_kv_readers(),
+            ),
+            external_request_id=key.request_id,
+        )
+        if not storage_manager.wait_prefetch_status(handle, _L2_RELOAD_TIMEOUT_S):
+            logger.warning(
+                "Reloading %d keys from L2 for request %s timed out after %.0fs",
+                len(missing),
+                key.request_id,
+                _L2_RELOAD_TIMEOUT_S,
+            )
+            return None
+        result = storage_manager.query_prefetch_status(handle)
+        if result is None:
+            raise RuntimeError(
+                f"L2 reload result for request {key.request_id} was consumed "
+                "before the retrieve read it"
+            )
+
+        owners = result.l1_owners
+        loaded = result.hit_cells[0].gather(missing)
+        if len(loaded) == len(missing):
+            found_keys, objs = storage_manager.unsafe_read(missing, l1_owners=owners)
+            if found_keys == missing:
+                return objs, storage_manager.prepare_read_completion(missing, owners)
+        if loaded:
+            storage_manager.finish_read_prefetched(loaded, l1_owners=owners)
+        return None
 
     def _publish_token_bindings(
         self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]

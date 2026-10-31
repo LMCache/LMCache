@@ -5,7 +5,8 @@
 - ``all_null_chunk_masks`` (store side): mark chunks whose block ids are all the
   null block so ``store`` never commits them.
 - ``retrieve`` (read side): read/transfer only each object group's in-window
-  suffix, None-padding the skipped prefix so the transfer path is unchanged.
+  suffix, None-padding the skipped prefix so the transfer path is unchanged,
+  and reload keys that left L1 after the lookup from L2.
 """
 
 # Standard
@@ -17,6 +18,8 @@ from unittest.mock import MagicMock, call
 import pytest
 
 # First Party
+from lmcache.lmcache_native import Bitmap
+from lmcache.v1.distributed.api import PrefetchResult, PrefetchTaskSpec
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
@@ -360,6 +363,137 @@ def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
         call(cache_context.cupy_stream, "finish_read_by_owner", completion),
     ]
     module.context.storage_manager.finish_read_prefetched.assert_not_called()
+
+
+# ------------------------------------------------------------------ #
+#  retrieve (reload of keys that left L1 after the lookup)             #
+# ------------------------------------------------------------------ #
+
+_KEYS = ["g0c0", "g0c1", "g0c2"]
+_RELOAD_OWNER = 9
+
+
+def _make_reload_module(monkeypatch, evicted, in_l2, l2_answers=True):
+    """A one-group, three-chunk retrieve whose ``evicted`` keys left L1.
+
+    The L2 reload loads the keys in ``in_l2`` and read-locks them on
+    ``_RELOAD_OWNER``; the lookup's own locks report owner 0. Returns
+    (module, objects by key, transfer calls, submitted prefetch specs,
+    stream callback mock).
+    """
+    module, _reads, transfers = _make_module(monkeypatch, 3, [-1])
+    storage_manager = module.context.storage_manager
+    resident = set(_KEYS) - set(evicted)
+    objs = {k: MagicMock(get_size=MagicMock(return_value=10)) for k in _KEYS}
+
+    def read(keys, l1_owners=None):
+        found = [k for k in keys if k in resident]
+        return found, [objs[k] for k in found]
+
+    specs: list[PrefetchTaskSpec] = []
+
+    def submit(spec, external_request_id=""):
+        specs.append(spec)
+        keys = spec.key_groups[0].keys
+        hits = Bitmap(len(keys))
+        for i, k in enumerate(keys):
+            if k in in_l2:
+                hits.set(i)
+                resident.add(k)
+        storage_manager.query_prefetch_status.return_value = PrefetchResult(
+            hit_cells=[hits],
+            l1_hit_cells=[Bitmap(len(keys))],
+            l2_hit_cells=[hits],
+            l1_owners={k: _RELOAD_OWNER for k in hits.gather(keys)},
+        )
+        return "handle"
+
+    storage_manager.unsafe_read.side_effect = read
+    storage_manager.submit_prefetch_task.side_effect = submit
+    storage_manager.wait_prefetch_status.return_value = l2_answers
+    storage_manager.prepare_read_completion.side_effect = lambda keys, owners: [
+        (_RELOAD_OWNER if owners else 0, list(keys))
+    ]
+    callback = MagicMock()
+    monkeypatch.setattr(mod, "submit_callback_to_stream", callback)
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *a, **kw: "layout")
+    return module, objs, transfers, specs, callback
+
+
+def _retrieve(module, num_kv_readers=1):
+    key = SimpleNamespace(
+        request_id="req",
+        cache_salt="salt",
+        require_num_kv_readers=lambda: num_kv_readers,
+    )
+    return module.retrieve(key, 1, [[1, 2, 3]], b"x")
+
+
+def _released(module, callback):
+    stream = module.get_and_touch_context_entry(1).cache_context.cupy_stream
+    return [
+        c.args[2]
+        for c in callback.call_args_list
+        if c.args[:2] == (stream, "finish_read_by_owner")
+    ]
+
+
+def test_retrieve_reloads_keys_evicted_from_l1_from_l2(monkeypatch):
+    module, objs, transfers, specs, callback = _make_reload_module(
+        monkeypatch, evicted=["g0c1"], in_l2=["g0c1"]
+    )
+
+    _, ok = _retrieve(module)
+
+    assert ok is True
+    assert [s.key_groups[0].keys for s in specs] == [["g0c1"]]
+    assert transfers == [(0, [objs[k] for k in _KEYS])]
+    # The evicted key holds no lookup lock; its reload lock is released.
+    assert _released(module, callback) == [
+        [(0, ["g0c0", "g0c2"]), (_RELOAD_OWNER, ["g0c1"])]
+    ]
+    module.context.storage_manager.finish_read_prefetched.assert_not_called()
+
+
+def test_reload_locks_once_per_kv_reader(monkeypatch):
+    # MLA with TP=2: both ranks read the same keys, so the reload must hold
+    # a lock for the rank that has not retrieved yet.
+    module, _objs, _transfers, specs, _callback = _make_reload_module(
+        monkeypatch, evicted=["g0c1"], in_l2=["g0c1"]
+    )
+
+    _, ok = _retrieve(module, num_kv_readers=2)
+
+    assert ok is True
+    assert [s.num_kv_readers for s in specs] == [2]
+
+
+def test_retrieve_fails_and_releases_partial_reload_when_l2_misses(monkeypatch):
+    module, _objs, transfers, _specs, callback = _make_reload_module(
+        monkeypatch, evicted=["g0c0", "g0c1"], in_l2=["g0c0"]
+    )
+
+    _, ok = _retrieve(module)
+
+    assert ok is False
+    assert transfers == []
+    module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
+        ["g0c0"], l1_owners={"g0c0": _RELOAD_OWNER}
+    )
+    assert _released(module, callback) == [[(0, ["g0c2"])]]
+
+
+def test_retrieve_fails_when_l2_reload_times_out(monkeypatch):
+    module, _objs, transfers, _specs, callback = _make_reload_module(
+        monkeypatch, evicted=["g0c2"], in_l2=_KEYS, l2_answers=False
+    )
+
+    _, ok = _retrieve(module)
+
+    assert ok is False
+    assert transfers == []
+    module.context.storage_manager.query_prefetch_status.assert_not_called()
+    assert _released(module, callback) == [[(0, ["g0c0", "g0c1"])]]
 
 
 # ------------------------------------------------------------------ #
