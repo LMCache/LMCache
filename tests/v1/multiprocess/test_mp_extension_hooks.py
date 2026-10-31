@@ -241,6 +241,14 @@ def test_registration_builds_the_transfer_context_through_the_hook():
             raise _StopHere
 
     adapter = _Adapter.__new__(_Adapter)
+    # Registration runs as tracked client work, which reads this lifecycle
+    # state that __init__ would set.
+    adapter._heartbeat_lock = threading.Lock()
+    adapter._shutdown_requested = False
+    adapter._client_work_in_flight = 0
+    adapter._client_work_done = threading.Condition(adapter._heartbeat_lock)
+    adapter._registration_lock = threading.Lock()
+    adapter.transfer_ctx = None
     kv_caches = {"layer.0": object()}
 
     # Shared by register_kv_caches and heartbeat re-registration.

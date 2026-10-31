@@ -28,7 +28,9 @@ so it is never reaped while alive. Entries that never produced a liveness signal
 fall under a generous registration grace. Recovery reuses existing client
 machinery: on a genuine outage the heartbeat's pings fail, clearing `health_event`;
 when the server returns the unhealthy-to-healthy edge fires the recover callback,
-which re-registers — a noop when the entry survived.
+which re-registers — a noop when the entry survived. A worker reaped while alive
+(silent past the registration grace, or with a stalled heartbeat) gets an explicit
+False from its next PING and re-registers at once.
 
 ```
 engine worker adapter                            MP server
@@ -53,8 +55,14 @@ engine worker adapter                            MP server
 ## 3. Protocol Change
 
 The PING payload changes in place from `[]` to `[int | None]`; the response stays
-`bool`, always `True` (`None` marks an untracked prober such as the scheduler
-adapter, which registers nothing and is never reapable). PING keeps its BLOCKING
+`bool`. It is `True` when some registration owner still tracks the worker, and
+`False` when none does (reaped, or never registered), which tells the worker to
+re-register. An untracked prober (`None`, such as the scheduler adapter, which
+registers nothing and is never reapable) and a server with no registration owners
+always get `True`. An answered `False` triggers re-registration at once. A ping
+with no answer (timeout or error) is an outage: the worker degrades, and
+re-registers only through the existing recovery edge once a later ping is
+answered `True`, so a single timeout under load does not replace its context. PING keeps its BLOCKING
 dispatch on the NORMAL thread pool. SERIALIZED dispatch was considered but rejected:
 SERIALIZED runs on the MQ main loop, where a slow `REGISTER_KV_CACHE` (also SERIALIZED) would
 block PING and make a live worker look dead. Sharing the NORMAL pool is in fact
@@ -115,7 +123,9 @@ is stopped and joined before any module clears state.
 ```python
 class InstanceLivenessTarget(Protocol):
     # All methods default to a no-op; an implementer overrides only its role.
-    def touch_instance(self, instance_id: int) -> None: ...
+    # Returns whether this target holds the registration; None for a target
+    # that owns no worker registrations (KV-event streams, mirrors).
+    def touch_instance(self, instance_id: int) -> bool | None: ...
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float
     ) -> list[int]: ...
@@ -146,7 +156,8 @@ warmup; the registration grace covers that window. It starts healthy (the event
 is set at construction), so the first store/retrieve is not gated. A live worker
 then pings every interval, refreshing its server-side `last_seen`, so it is never
 reaped while alive — no re-registration is needed at start. The recover callback
-re-registers only on a genuine recovery edge (Section 6.2). A retrieve dropped
+re-registers only on a genuine recovery edge, or when the server answers that it
+no longer holds the worker (Section 6.2). A retrieve dropped
 while the server is unhealthy is still reported via `get_finished` so async loads
 cannot hang.
 
@@ -162,14 +173,44 @@ T1        recover callback re-registers (id absent -> fresh context) before
 ```
 
 A shorter outage hits the NOOP register path, which refreshes `last_seen` and
-builds nothing — the server never asks a worker to re-register.
+builds nothing.
+
+A worker can also be reaped while alive and connected: its heartbeat had not
+started (idle past the registration grace) or stalled past the reap timeout. Its
+next PING is answered `False`, and the heartbeat runs the same recover callback.
+Both adapters clear `health_event` first, as on the outage path, so new
+submissions stop while the worker re-registers. Both publish the new transfer
+context only after the server registers it, so a submission already past the
+health check keeps using the old context; ATOM's swap then waits for the
+submissions in flight on it.
+In vLLM the heartbeat starts lazily on first traffic and pings at once (no
+initial wait), so only the stores submitted before that first PING is answered,
+plus the REGISTER time, are rejected. ATOM starts its heartbeat at registration,
+so it pings throughout an idle spell.
 
 ### 6.3 Shutdown
 
-`shutdown()` stops the heartbeat before sending UNREGISTER, so no stray ping
-lands on a closing client. The heartbeat cycle skips the recover callback and
-`health_event.set()` once stopped, and the callback skips re-registration when a
-stop is already requested — a straggling cycle cannot re-create a ghost context.
+`shutdown()` first sets a shutdown flag under the adapter's heartbeat lock. From
+then on, registration and recovery refuse to start, and a registration already in
+flight discards its new context instead of publishing it. `shutdown()` then stops
+the heartbeat outside the lock and waits for registration and recovery work in
+flight to finish before sending UNREGISTER and closing the client. That work
+checks the flag before each server call; a check and its call are not atomic, so
+after shutdown begins the work makes at most one call it had already passed the
+check for, plus one discarding UNREGISTER. The wait is
+therefore bounded at twice `mq_timeout`. Heartbeat pings are not tracked: a ping
+still in flight when the heartbeat's join gives up can fail on the closed client,
+as before. Past
+that bound shutdown logs a warning and closes the client anyway, and the server
+keeps any registration it accepted until it reaps it. The heartbeat
+cycle skips the recover callback and `health_event.set()` once stopped, so a
+straggling cycle cannot re-create a ghost context.
+
+A discarded or failed registration is closed. It is also unregistered only when
+it was the worker's first: on re-registration a context is already published
+under the same instance ID, and the server keys registrations by that ID, so
+unregistering the replacement would drop the registration still in use. The vLLM
+and ATOM adapters both follow this rule.
 
 ## 7. Failure Modes
 
@@ -177,8 +218,9 @@ stop is already requested — a straggling cycle cannot re-create a ghost contex
 |---|---|
 | Worker crash (SIGKILL, no UNREGISTER) after serving | Pings stop; reaped within ~`timeout + timeout/4`. Context, IPC handles, layout-desc refcount, and non-GPU strategy released via the same cleanup as a clean unregister; blend rope state dropped via the reap listener. The bug being fixed. |
 | Worker crash during warmup (registered, never pinged) | Reaped on the registration grace. Bounded leak instead of a permanent one. |
-| Worker alive but never pinged, idle past the grace | Reaped while alive only if it never pinged (heartbeat never started). Once the heartbeat is running, pings refresh `last_seen` every interval, so a live worker is never reaped regardless of traffic. |
+| Worker alive but never pinged, idle past the grace | Reaped while alive only if it never pinged (vLLM's heartbeat never started; ATOM pings from registration). Once traffic starts, its first PING, sent at once, is answered `False` and it re-registers; stores submitted before that answer and during REGISTER are rejected. Once the heartbeat is running, pings refresh `last_seen` every interval, so a live worker is not reaped again. |
+| PING times out under load, registration intact | No answer is treated as an outage: degraded at once, with no immediate re-registration. The next PING answered `True` runs the existing recover callback, which hits the NOOP register path on the server. |
 | Heartbeat thread starved, worker transferring | Store/retrieve/prepare/commit refresh `last_seen`; never reaped. |
 | Partition shorter than the reap window | No reap. On heal, the recover callback re-registers; the NOOP path refreshes `last_seen`; zero context churn. |
 | Worker crash + restart | The new process gets a fresh uuid-derived id and a fresh entry; the dead id is reaped independently. No PID-reuse aliasing. |
-| Mixed client/server versions | Every PING fails the payload-count check; the client sits permanently unhealthy. Loud, never silent corruption; upgrade both sides together. |
+| Mixed client/server versions | Every PING fails the payload-count check; the client sits permanently unhealthy. Loud, never silent corruption; upgrade both sides together. Among versions that send `instance_id`: an adapter that predates the `False` answer reads it as an outage and stays degraded after a reap until restarted; a newer adapter against a server that always answers `True` behaves as before. |

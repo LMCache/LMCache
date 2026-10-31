@@ -1611,6 +1611,121 @@ def test_heartbeat_first_ping_runs_callback_before_setting_event(
     assert event_state_during_callback == [False]
 
 
+@pytest.mark.parametrize("start_healthy", [True, False])
+@pytest.mark.parametrize(
+    ("answer", "recover_ok", "expect_recover", "expect_healthy"),
+    [
+        # Server up but this worker unknown (reaped while silent): degraded
+        # while it re-registers, healthy once the server accepts it.
+        (False, True, True, True),
+        # Re-registration failed: degraded until a later cycle succeeds.
+        (False, False, True, False),
+        # No answer (timeout or error): an outage, never a re-registration.
+        (None, True, False, False),
+    ],
+)
+def test_heartbeat_reregisters_only_on_an_explicit_unknown_answer(
+    monkeypatch,
+    start_healthy: bool,
+    answer: bool | None,
+    recover_ok: bool,
+    expect_recover: bool,
+    expect_healthy: bool,
+) -> None:
+    """Real HeartbeatThread: only the server's explicit False runs the
+    re-registration callback, with the health event cleared while it runs,
+    whether the worker was healthy or already degraded. No answer degrades
+    without touching the registration."""
+    pings: list[int | None] = []
+
+    def ping(req_client, timeout, instance_id=None) -> bool | None:
+        pings.append(instance_id)
+        return answer
+
+    monkeypatch.setattr(adapter_mod, "send_ping", ping)
+    health_event = threading.Event()
+    if start_healthy:
+        health_event.set()
+    heartbeat = HeartbeatThread(
+        req_client=MagicMock(name="req_client"),
+        health_event=health_event,
+        interval=60.0,
+        instance_id=7,
+    )
+    event_state_during_callback: list[bool] = []
+
+    def recover() -> bool:
+        event_state_during_callback.append(health_event.is_set())
+        return recover_ok
+
+    heartbeat.register_recover_callback(recover)
+
+    heartbeat._execute()
+
+    assert pings == [7]
+    assert event_state_during_callback == ([False] if expect_recover else [])
+    assert health_event.is_set() is expect_healthy
+
+
+def test_heartbeat_degrades_when_the_reregistration_callback_raises(
+    monkeypatch,
+) -> None:
+    """Real HeartbeatThread: a recover callback that raises on an explicit
+    False leaves the worker degraded and logs it, instead of escaping the
+    cycle. The unknown-worker notice is INFO, not WARNING, since it repeats
+    every interval before the first registration. The module logger does not
+    propagate, so the test spies on it."""
+    monkeypatch.setattr(
+        adapter_mod, "send_ping", lambda req_client, timeout, instance_id=None: False
+    )
+    logged: list[tuple[str, str]] = []
+    for level in ("info", "warning", "exception"):
+        monkeypatch.setattr(
+            adapter_mod.logger,
+            level,
+            lambda msg, *args, _level=level, **kwargs: logged.append(
+                (_level, str(msg))
+            ),
+        )
+    health_event = threading.Event()
+    health_event.set()
+    heartbeat = HeartbeatThread(
+        req_client=MagicMock(name="req_client"),
+        health_event=health_event,
+        interval=60.0,
+        instance_id=7,
+    )
+    heartbeat.register_recover_callback(MagicMock(side_effect=RuntimeError("boom")))
+
+    summary = heartbeat._execute()
+
+    assert summary.success
+    assert not health_event.is_set()
+    assert [lvl for lvl, msg in logged if "holds no registration" in msg] == ["info"]
+    assert ("exception", "LMCache re-registration callback failed") in logged
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [(True, True), (False, False), (TimeoutError(), None), (RuntimeError(), None)],
+)
+def test_send_ping_returns_the_answer_or_none_without_one(
+    result: object, expected: bool | None
+) -> None:
+    """send_ping passes the server's True or False through, and reports a
+    timeout or error as None, so callers never read a lost answer as an
+    unknown worker."""
+    future = MagicMock(name="future")
+    if isinstance(result, BaseException):
+        future.result.side_effect = result
+    else:
+        future.result.return_value = result
+    req_client = MagicMock(name="req_client")
+    req_client.ping.return_value = future
+
+    assert adapter_mod.send_ping(req_client, timeout=1.0, instance_id=7) is expected
+
+
 def test_dropped_retrieve_reported_once_via_unhealthy_get_finished(
     fake_adapter,
 ) -> None:
@@ -1740,6 +1855,36 @@ def test_straggler_cycle_after_stop_skips_callback_and_event(monkeypatch) -> Non
     assert not health_event.is_set()
 
 
+@pytest.mark.parametrize("answer", [True, False])
+def test_stop_during_recovery_leaves_the_health_event_cleared(
+    monkeypatch, answer: bool
+) -> None:
+    """Real HeartbeatThread: when shutdown requests a stop while the recover
+    callback runs, after a server restart (True on a degraded worker) or an
+    explicit unknown-worker answer (False), the cycle does not set the health
+    event, even though recovery reported success."""
+    monkeypatch.setattr(
+        adapter_mod, "send_ping", lambda req_client, timeout, instance_id=None: answer
+    )
+    health_event = threading.Event()  # degraded, so True takes the recovery edge
+    heartbeat = HeartbeatThread(
+        req_client=MagicMock(name="req_client"),
+        health_event=health_event,
+        interval=60.0,
+        instance_id=7,
+    )
+
+    def recover() -> bool:
+        heartbeat._stop_event.set()  # shutdown arrives mid-recovery
+        return True
+
+    heartbeat.register_recover_callback(recover)
+
+    heartbeat._execute()
+
+    assert not health_event.is_set()
+
+
 def test_recover_callback_skips_register_after_stop_requested(
     fake_adapter, monkeypatch
 ) -> None:
@@ -1764,6 +1909,257 @@ def test_recover_callback_skips_register_after_stop_requested(
 
     assert len(contexts) == rebuilds_before  # no new transfer context
     assert contexts[-1].register.call_count == 1  # no second REGISTER
+
+
+@pytest.mark.parametrize(
+    ("first", "during_register", "expect_published", "expect_unregister"),
+    [
+        # Re-registration: the old context stays visible until the new one
+        # is registered, then the new one is published.
+        (False, None, True, False),
+        # Re-registration abandoned by shutdown or a timeout: closed, but not
+        # unregistered, since that would drop the registration the published
+        # context still uses (the server keys it by instance ID).
+        (False, "shutdown", False, False),
+        (False, "timeout", False, False),
+        # First registration abandoned: nothing else holds the instance ID,
+        # and the server may have registered it, so it is unregistered.
+        (True, "shutdown", False, True),
+        (True, "timeout", False, True),
+    ],
+)
+def test_registration_publishes_only_a_registered_context(
+    fake_adapter,
+    monkeypatch,
+    first: bool,
+    during_register: str | None,
+    expect_published: bool,
+    expect_unregister: bool,
+) -> None:
+    """A transfer context is published only after the server registers it,
+    so no submission can use an unregistered one. A registration abandoned
+    because shutdown() ran during it, or because it timed out, is closed
+    and never published; it is unregistered only when it was the first."""
+    adapter, _req_client, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    kv_caches = {"layer.0": fake_tensor}
+    old_ctx = None
+    if not first:
+        adapter.register_kv_caches(kv_caches)
+        adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+        old_ctx = contexts[-1]
+    published_during_register: list[object] = []
+    shutdown_thread: list[threading.Thread] = []
+    thread_errors: list[BaseException] = []
+
+    def shutdown() -> None:
+        try:
+            adapter.shutdown()
+        except BaseException as exc:  # surfaced to the test below
+            thread_errors.append(exc)
+
+    def mint_next(*_args, **_kwargs) -> MagicMock:
+        new_ctx = MagicMock(name="new_ctx")
+
+        def register(*_a, **_kw) -> None:
+            published_during_register.append(adapter.transfer_ctx)
+            if during_register == "shutdown":
+                # The real shutdown() waits for this registration, so it
+                # runs on its own thread; give it time to set its flag.
+                thread = threading.Thread(target=shutdown)
+                thread.start()
+                shutdown_thread.append(thread)
+                deadline = time.monotonic() + 10.0
+                while not adapter._shutdown_requested and time.monotonic() < deadline:
+                    time.sleep(0.001)
+                assert adapter._shutdown_requested
+            elif during_register == "timeout":
+                raise TimeoutError
+
+        new_ctx.register.side_effect = register
+        new_ctx.unregister.return_value = None
+        contexts.append(new_ctx)
+        return new_ctx
+
+    monkeypatch.setattr(adapter_mod, "create_transfer_context", mint_next)
+
+    if during_register == "timeout":
+        with pytest.raises(ConnectionError):
+            adapter._send_register_kv_caches_request(kv_caches)
+    else:
+        published = adapter._send_register_kv_caches_request(kv_caches)
+        assert published is expect_published
+    for thread in shutdown_thread:
+        thread.join(timeout=10.0)
+        assert not thread.is_alive()
+    assert thread_errors == []
+
+    new_ctx = contexts[-1]
+    assert published_during_register == [old_ctx]
+    assert (adapter.transfer_ctx is new_ctx) is expect_published
+    assert new_ctx.unregister.called is expect_unregister
+    assert new_ctx.close.called is not expect_published
+
+
+def test_shutdown_waits_for_registration_before_closing_the_client(
+    fake_adapter, monkeypatch
+) -> None:
+    """shutdown() waits for a registration still in flight to finish, and
+    to discard its context with an UNREGISTER, before closing req_client, so
+    that UNREGISTER is never sent on a closed client. A registration that
+    starts after shutdown began is refused at once, without waiting for the
+    one in flight."""
+    adapter, req_client, _ = fake_adapter
+    events: list[str] = []
+    in_register = threading.Event()
+    release_register = threading.Event()
+    thread_errors: list[BaseException] = []
+
+    def mint(*_args, **_kwargs) -> MagicMock:
+        ctx = MagicMock(name="first_ctx")
+
+        def register(*_a, **_kw) -> None:
+            in_register.set()
+            if not release_register.wait(timeout=10.0):
+                raise AssertionError("registration was never released")
+
+        def unregister() -> None:
+            events.append("unregister")
+
+        ctx.register.side_effect = register
+        ctx.unregister.side_effect = unregister
+        return ctx
+
+    def run(target: Callable[..., object], *args: object) -> threading.Thread:
+        def wrapped() -> None:
+            try:
+                target(*args)
+            except BaseException as exc:  # surfaced to the test below
+                thread_errors.append(exc)
+
+        thread = threading.Thread(target=wrapped)
+        thread.start()
+        return thread
+
+    monkeypatch.setattr(adapter_mod, "create_transfer_context", mint)
+    req_client.close.side_effect = lambda: events.append("client.close")
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    kv_caches = {"layer.0": fake_tensor}
+
+    try:
+        registrar = run(adapter._send_register_kv_caches_request, kv_caches)
+        assert in_register.wait(timeout=10.0)
+        stopper = run(adapter.shutdown)
+        deadline = time.monotonic() + 10.0
+        while not adapter._shutdown_requested and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert adapter._shutdown_requested
+        # Refused immediately, although the first still holds the lock.
+        assert adapter._send_register_kv_caches_request(kv_caches) is False
+    finally:
+        release_register.set()
+    registrar.join(timeout=10.0)
+    stopper.join(timeout=10.0)
+
+    assert thread_errors == []
+    assert not registrar.is_alive() and not stopper.is_alive()
+    # The UNREGISTER can only run after the release above, so the client
+    # closing after it shows shutdown waited for the registration.
+    assert events == ["unregister", "client.close"]
+    assert adapter.transfer_ctx is None
+
+
+class _SignallingLock:
+    """A lock that sets an event when a thread starts waiting to acquire it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.waiting = threading.Event()
+
+    def __enter__(self) -> None:
+        if not self._lock.acquire(blocking=False):
+            self.waiting.set()
+            self._lock.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self._lock.release()
+
+
+def test_concurrent_registration_keeps_the_first_registration(
+    fake_adapter, monkeypatch
+) -> None:
+    """A second registration that starts while the first is still running,
+    as heartbeat recovery can, waits for it. When the second then times out
+    it is a replacement and is not unregistered, so the first registration,
+    which the server keys by the same instance ID, survives."""
+    adapter, _req_client, _ = fake_adapter
+    lock = _SignallingLock()
+    adapter._registration_lock = lock
+    in_first = threading.Event()
+    release_first = threading.Event()
+    minted: list[MagicMock] = []
+    thread_errors: list[BaseException] = []
+
+    def mint(*_args, **_kwargs) -> MagicMock:
+        ctx = MagicMock(name=f"ctx_{len(minted)}")
+        if not minted:
+
+            def register_first(*_a, **_kw) -> None:
+                in_first.set()
+                if not release_first.wait(timeout=10.0):
+                    raise AssertionError("first registration was never released")
+
+            ctx.register.side_effect = register_first
+        else:
+            ctx.register.side_effect = TimeoutError
+        ctx.unregister.return_value = None
+        minted.append(ctx)
+        return ctx
+
+    monkeypatch.setattr(adapter_mod, "create_transfer_context", mint)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    kv_caches = {"layer.0": fake_tensor}
+    second_errors: list[BaseException] = []
+
+    def first() -> None:
+        try:
+            adapter._send_register_kv_caches_request(kv_caches)
+        except BaseException as exc:  # surfaced to the test below
+            thread_errors.append(exc)
+
+    def second() -> None:
+        try:
+            adapter._send_register_kv_caches_request(kv_caches)
+        except ConnectionError as exc:
+            second_errors.append(exc)
+        except BaseException as exc:  # surfaced to the test below
+            thread_errors.append(exc)
+
+    first_thread = threading.Thread(target=first)
+    second_thread = threading.Thread(target=second)
+    try:
+        first_thread.start()
+        assert in_first.wait(timeout=10.0)
+        second_thread.start()
+        # The second is now blocked on the lock the first holds.
+        assert lock.waiting.wait(timeout=10.0)
+        assert len(minted) == 1
+    finally:
+        release_first.set()
+    first_thread.join(timeout=10.0)
+    second_thread.join(timeout=10.0)
+
+    assert thread_errors == []
+    assert not first_thread.is_alive() and not second_thread.is_alive()
+    assert len(second_errors) == 1
+    first_ctx, second_ctx = minted
+    assert adapter.transfer_ctx is first_ctx
+    second_ctx.unregister.assert_not_called()
+    second_ctx.close.assert_called_once_with()
 
 
 def test_register_uses_local_context_when_self_transfer_ctx_nulled(
