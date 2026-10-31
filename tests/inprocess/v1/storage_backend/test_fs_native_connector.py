@@ -296,3 +296,207 @@ def test_negative_num_read_workers_is_rejected(tmp_path: Path) -> None:
     LMCacheFSClient = _import_fs_client()
     with pytest.raises(RuntimeError, match="num_read_workers must be >= 0"):
         LMCacheFSClient(str(tmp_path), 1, "", False, 0, -1)
+
+
+# ---------------------------------------------------------------------------
+# Held descriptors (held_fd_capacity)
+# ---------------------------------------------------------------------------
+
+
+def _held_client(client_cls: type, path: Path, capacity: int, readers: int = 0):
+    return client_cls(str(path), 2, "", True, 0, readers, 0, capacity)
+
+
+def _open_fds_under(path: Path) -> int:
+    count = 0
+    for fd in os.listdir("/proc/self/fd"):
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            continue
+        if target.startswith(str(path)):
+            count += 1
+    return count
+
+
+def _corpus(path: Path, client_cls: type, count: int = 6):
+    block_size = os.statvfs(path).f_bsize
+    if block_size <= 0:
+        pytest.skip("filesystem block size is unavailable")
+    size = block_size * 7
+    keys = [f"test_model@00000000@0@{i:016x}" for i in range(count)]
+    sources, dests, keep = _aligned_pairs(count, size, block_size)
+    writer = client_cls(str(path), 2, "", True, 0)
+    try:
+        _write_corpus(writer, keys, sources)
+    finally:
+        writer.close()
+    return keys, sources, dests, keep
+
+
+def _get_all(client: Any, keys: list[str], dests: list[memoryview]) -> list[bool]:
+    completion = _wait_for_completion(client, client.submit_batch_get(keys, dests))
+    assert completion[3] is not None
+    return list(completion[3])
+
+
+def _exists(client: Any, keys: list[str]) -> list[bool]:
+    completion = _wait_for_completion(client, client.submit_batch_exists(keys))
+    assert completion[3] is not None
+    return list(completion[3])
+
+
+@pytest.mark.parametrize("num_read_workers", [0, 4])
+def test_held_fds_return_identical_bytes_and_are_reused(
+    tmp_path: Path, num_read_workers: int
+) -> None:
+    """Repeated reads reuse one descriptor per object and return its bytes."""
+    LMCacheFSClient = _import_fs_client()
+    keys, sources, dests, _keep = _corpus(tmp_path, LMCacheFSClient)
+    reader = _held_client(LMCacheFSClient, tmp_path, 8, num_read_workers)
+    try:
+        for _ in range(3):
+            for dest in dests:
+                dest[:] = b"\0" * len(dest)
+            assert _get_all(reader, keys, dests) == [True] * len(keys)
+            for index, dest in enumerate(dests):
+                assert bytes(dest) == bytes(sources[index])
+        stats = reader.held_fd_stats()
+        assert stats["opens"] == len(keys)
+        assert stats["hits"] == 2 * len(keys)
+        assert stats["open_now"] == len(keys)
+        assert stats["capacity"] == 8
+    finally:
+        reader.close()
+    assert _open_fds_under(tmp_path) == 0
+
+
+def test_held_fd_capacity_zero_keeps_the_open_per_read_path(tmp_path: Path) -> None:
+    LMCacheFSClient = _import_fs_client()
+    keys, sources, dests, _keep = _corpus(tmp_path, LMCacheFSClient)
+    reader = _held_client(LMCacheFSClient, tmp_path, 0)
+    try:
+        assert _get_all(reader, keys, dests) == [True] * len(keys)
+        assert reader.held_fd_stats()["opens"] == 0
+        assert _open_fds_under(tmp_path) == 0
+    finally:
+        reader.close()
+
+
+def test_held_fd_capacity_bounds_open_descriptors(tmp_path: Path) -> None:
+    LMCacheFSClient = _import_fs_client()
+    keys, sources, dests, _keep = _corpus(tmp_path, LMCacheFSClient)
+    reader = _held_client(LMCacheFSClient, tmp_path, 2)
+    try:
+        for _ in range(2):
+            assert _get_all(reader, keys, dests) == [True] * len(keys)
+        stats = reader.held_fd_stats()
+        assert stats["open_now"] <= 2
+        assert stats["evictions"] >= len(keys) - 2
+        assert _open_fds_under(tmp_path) <= 2
+        for index, dest in enumerate(dests):
+            assert bytes(dest) == bytes(sources[index])
+    finally:
+        reader.close()
+
+
+def test_held_fd_serves_an_object_evicted_by_another_process(tmp_path: Path) -> None:
+    """A held descriptor still reads a valid value after an outside unlink.
+
+    Keys name their content, so the bytes stay correct for the key; a
+    delete through the connector itself invalidates the descriptor.
+    """
+    LMCacheFSClient = _import_fs_client()
+    keys, sources, dests, _keep = _corpus(tmp_path, LMCacheFSClient, 2)
+    reader = _held_client(LMCacheFSClient, tmp_path, 8)
+    try:
+        assert _get_all(reader, keys, dests) == [True, True]
+        victim = next(p for p in tmp_path.iterdir() if keys[0].split("@")[-1] in p.name)
+        os.unlink(victim)
+        assert _exists(reader, keys) == [True, True]
+        dests[0][:] = b"\0" * len(dests[0])
+        assert _get_all(reader, keys, dests) == [True, True]
+        assert bytes(dests[0]) == bytes(sources[0])
+
+        future_id = reader.submit_batch_delete([keys[1]])
+        assert _wait_for_completion(reader, future_id)[1]
+        assert reader.held_fd_stats()["invalidations"] == 1
+        assert _exists(reader, [keys[1]]) == [False]
+        assert _get_all(reader, [keys[1]], [dests[1]]) == [False]
+    finally:
+        reader.close()
+
+
+def test_held_fd_failure_reopens_the_published_file(tmp_path: Path) -> None:
+    """A cached descriptor that reads short is dropped and the path reopened."""
+    LMCacheFSClient = _import_fs_client()
+    keys, sources, dests, _keep = _corpus(tmp_path, LMCacheFSClient, 1)
+    reader = _held_client(LMCacheFSClient, tmp_path, 8)
+    try:
+        assert _get_all(reader, keys, dests) == [True]
+        path = next(p for p in tmp_path.iterdir() if p.suffix != ".tmp")
+        data = bytes(sources[0])
+        # The held inode loses its bytes; a full copy is published in its place.
+        os.truncate(path, len(data) // 2)
+        fresh = path.with_name(path.name + ".fresh")
+        fresh.write_bytes(data)
+        os.replace(fresh, path)
+        dests[0][:] = b"\0" * len(dests[0])
+        assert _get_all(reader, keys, dests) == [True]
+        assert bytes(dests[0]) == data
+        stats = reader.held_fd_stats()
+        assert stats["stale_drops"] == 1
+        assert stats["opens"] == 2
+    finally:
+        reader.close()
+
+
+def test_held_fd_short_file_is_a_miss(tmp_path: Path) -> None:
+    LMCacheFSClient = _import_fs_client()
+    keys, sources, dests, _keep = _corpus(tmp_path, LMCacheFSClient, 1)
+    path = next(p for p in tmp_path.iterdir() if p.suffix != ".tmp")
+    os.truncate(path, len(sources[0]) // 2)
+    reader = _held_client(LMCacheFSClient, tmp_path, 8)
+    try:
+        assert _get_all(reader, keys, dests) == [False]
+        assert reader.held_fd_stats()["open_now"] == 0
+    finally:
+        reader.close()
+    assert _open_fds_under(tmp_path) == 0
+
+
+def test_held_fd_capacity_config_is_validated() -> None:
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+        FSNativeL2AdapterConfig,
+    )
+
+    cfg = FSNativeL2AdapterConfig.from_dict(
+        {"base_path": "/tmp/x", "held_fd_capacity": 32}
+    )
+    assert cfg.held_fd_capacity == 32
+    default = FSNativeL2AdapterConfig.from_dict({"base_path": "/tmp/x"})
+    assert default.held_fd_capacity == 0
+    with pytest.raises(ValueError):
+        FSNativeL2AdapterConfig(base_path="/tmp/x", held_fd_capacity=-1)
+
+
+def test_held_fd_capacity_reaches_the_native_client(tmp_path: Path) -> None:
+    """The real factory forwards held_fd_capacity to the C++ connector."""
+    _import_fs_client()
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.factory import (
+        create_l2_adapter_from_registry,
+    )
+    from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+        FSNativeL2AdapterConfig,
+    )
+
+    cfg = FSNativeL2AdapterConfig(base_path=str(tmp_path), held_fd_capacity=16)
+    adapter = create_l2_adapter_from_registry(cfg)
+    try:
+        assert adapter.report_status()["held_fd_capacity"] == 16
+        native: Any = adapter
+        assert native._client.held_fd_stats()["capacity"] == 16
+    finally:
+        adapter.close()

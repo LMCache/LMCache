@@ -47,6 +47,24 @@ static size_t read_all(int fd, void* buf, size_t len) {
   return total;
 }
 
+// pread loop: descriptors shared through HeldFdCache have no usable file
+// offset, so every read names its own.
+static size_t pread_all(int fd, void* buf, size_t len, off_t offset) {
+  size_t total = 0;
+  char* ptr = static_cast<char*>(buf);
+  while (total < len) {
+    ssize_t n = ::pread(fd, ptr + total, len - total,
+                        offset + static_cast<off_t>(total));
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+    }
+    if (n == 0) break;  // EOF
+    total += static_cast<size_t>(n);
+  }
+  return total;
+}
+
 static bool try_enable_odirect(int& flags, const void* buf, size_t len,
                                size_t disk_block_size) {
 #ifdef O_DIRECT
@@ -70,6 +88,168 @@ static bool try_enable_odirect(int& flags, const void* buf, size_t len,
 }
 
 // ---------------------------------------------------------------
+// HeldFdCache
+// ---------------------------------------------------------------
+
+std::string HeldFdCache::key_of(const std::string& name, int flags) {
+#ifdef O_DIRECT
+  const bool direct = (flags & O_DIRECT) != 0;
+#else
+  const bool direct = false;
+  (void)flags;
+#endif
+  return name + (direct ? "|d" : "|b");
+}
+
+void HeldFdCache::retire_locked(Entry& e) {
+  if (e.refs == 0) {
+    ::close(e.fd);
+  } else {
+    retired_[e.fd] = e.refs;
+  }
+}
+
+void HeldFdCache::evict_locked() {
+  // Least recently used first; entries in use are skipped, so the cache
+  // can exceed its capacity only by the descriptors reads are using.
+  auto it = lru_.end();
+  while (entries_.size() > capacity_ && it != lru_.begin()) {
+    --it;
+    auto e = entries_.find(*it);
+    if (e->second.refs != 0) {
+      continue;
+    }
+    ::close(e->second.fd);
+    entries_.erase(e);
+    it = lru_.erase(it);
+    ++evictions_;
+  }
+}
+
+int HeldFdCache::acquire(const std::string& name,
+                         const std::filesystem::path& path, int flags,
+                         size_t min_size) {
+  const std::string key = key_of(name, flags);
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = entries_.find(key);
+    if (it != entries_.end()) {
+      ++it->second.refs;
+      lru_.splice(lru_.begin(), lru_, it->second.lru);
+      ++hits_;
+      return it->second.fd;
+    }
+  }
+  int fd = ::open(path.c_str(), flags);
+  if (fd < 0) {
+    throw std::runtime_error("open for read failed: " + path.string() + ": " +
+                             strerror(errno));
+  }
+  struct stat st{};
+  if (::fstat(fd, &st) != 0 || static_cast<size_t>(st.st_size) < min_size) {
+    const int err = errno;
+    const auto size = static_cast<long long>(st.st_size);
+    ::close(fd);
+    throw std::runtime_error("object too short for " + path.string() + ": " +
+                             std::to_string(size) + " bytes" +
+                             (err ? std::string(": ") + strerror(err) : ""));
+  }
+  std::lock_guard<std::mutex> lk(mu_);
+  ++opens_;
+  auto it = entries_.find(key);
+  if (it != entries_.end()) {
+    // Another reader opened it meanwhile; keep one descriptor.
+    ::close(fd);
+    ++races_;
+    ++it->second.refs;
+    lru_.splice(lru_.begin(), lru_, it->second.lru);
+    return it->second.fd;
+  }
+  lru_.push_front(key);
+  Entry e;
+  e.fd = fd;
+  e.refs = 1;
+  e.lru = lru_.begin();
+  entries_.emplace(key, e);
+  evict_locked();
+  return fd;
+}
+
+void HeldFdCache::release(const std::string& name, int flags, int fd,
+                          bool stale) {
+  std::lock_guard<std::mutex> lk(mu_);
+  auto r = retired_.find(fd);
+  if (r != retired_.end()) {
+    if (--r->second == 0) {
+      ::close(fd);
+      retired_.erase(r);
+      ++deferred_closes_;
+    }
+    return;
+  }
+  auto it = entries_.find(key_of(name, flags));
+  if (it == entries_.end() || it->second.fd != fd) {
+    return;  // cannot happen: a referenced entry is cached or retired
+  }
+  --it->second.refs;
+  if (stale) {
+    ++stale_drops_;
+    lru_.erase(it->second.lru);
+    Entry e = it->second;
+    entries_.erase(it);
+    retire_locked(e);
+    return;
+  }
+  evict_locked();
+}
+
+bool HeldFdCache::contains(const std::string& name) {
+  std::lock_guard<std::mutex> lk(mu_);
+  return entries_.count(name + "|b") != 0 || entries_.count(name + "|d") != 0;
+}
+
+void HeldFdCache::invalidate(const std::string& name) {
+  std::lock_guard<std::mutex> lk(mu_);
+  for (const char* suffix : {"|b", "|d"}) {
+    auto it = entries_.find(name + suffix);
+    if (it == entries_.end()) {
+      continue;
+    }
+    ++invalidations_;
+    lru_.erase(it->second.lru);
+    Entry e = it->second;
+    entries_.erase(it);
+    retire_locked(e);
+  }
+}
+
+void HeldFdCache::close_all() {
+  std::lock_guard<std::mutex> lk(mu_);
+  for (auto& kv : entries_) {
+    ::close(kv.second.fd);
+  }
+  for (auto& kv : retired_) {
+    ::close(kv.first);
+  }
+  entries_.clear();
+  retired_.clear();
+  lru_.clear();
+}
+
+std::map<std::string, uint64_t> HeldFdCache::stats() {
+  std::lock_guard<std::mutex> lk(mu_);
+  return {{"opens", opens_},
+          {"hits", hits_},
+          {"evictions", evictions_},
+          {"invalidations", invalidations_},
+          {"stale_drops", stale_drops_},
+          {"deferred_closes", deferred_closes_},
+          {"races", races_},
+          {"open_now", entries_.size() + retired_.size()},
+          {"capacity", capacity_}};
+}
+
+// ---------------------------------------------------------------
 // FSConnector
 // ---------------------------------------------------------------
 
@@ -84,8 +264,10 @@ static size_t effective_read_budget(int num_read_workers, size_t budget) {
 FSConnector::FSConnector(std::string base_path, int num_workers,
                          std::string relative_tmp_dir, bool use_odirect,
                          size_t read_ahead_size, int num_read_workers,
-                         size_t read_max_bytes_in_flight)
+                         size_t read_max_bytes_in_flight,
+                         size_t held_fd_capacity)
     : ConnectorBase(num_workers),
+      held_fds_(held_fd_capacity),
       base_path_(std::move(base_path)),
       relative_tmp_dir_(std::move(relative_tmp_dir)),
       use_odirect_(use_odirect),
@@ -148,6 +330,11 @@ void FSConnector::do_single_get(WorkerFSConn& conn, const std::string& key,
   bool do_odirect = conn.use_odirect &&
                     try_enable_odirect(flags, buf, len, conn.disk_block_size);
 
+  if (held_fds_.enabled()) {
+    get_with_held_fd(conn, filename, file_path, flags, do_odirect, buf, len);
+    return;
+  }
+
   int fd = ::open(file_path.c_str(), flags);
   if (fd < 0) {
     throw std::runtime_error("open for read failed: " + file_path.string() +
@@ -184,6 +371,52 @@ void FSConnector::do_single_get(WorkerFSConn& conn, const std::string& key,
     throw;
   }
   ::close(fd);
+}
+
+void FSConnector::get_with_held_fd(const WorkerFSConn& conn,
+                                   const std::string& filename,
+                                   const std::filesystem::path& file_path,
+                                   int flags, bool do_odirect, void* buf,
+                                   size_t len) {
+  for (int attempt = 0;; ++attempt) {
+    // Throws on a missing or short file: a miss, as without the cache.
+    int fd = held_fds_.acquire(filename, file_path, flags, len);
+    size_t n = 0;
+    std::string error;
+    try {
+      bool use_read_ahead =
+          !do_odirect && conn.read_ahead_size > 0 && len > conn.read_ahead_size;
+      if (use_read_ahead) {
+        size_t ra = conn.read_ahead_size;
+        n = pread_all(fd, buf, ra, 0);
+        if (n == ra) {
+          n += pread_all(fd, static_cast<char*>(buf) + ra, len - ra,
+                         static_cast<off_t>(ra));
+        }
+      } else {
+        n = pread_all(fd, buf, len, 0);
+      }
+      if (n != len) {
+        error = "incomplete read for " + file_path.string() + ": expected " +
+                std::to_string(len) + ", got " + std::to_string(n);
+      }
+    } catch (const std::exception& e) {
+      error = e.what();
+    }
+    // A failure through a cached descriptor may be a revoked or replaced
+    // file: drop it and try once more with a fresh open.
+    held_fds_.release(filename, flags, fd, !error.empty());
+    if (error.empty()) {
+      return;
+    }
+    if (attempt > 0) {
+      throw std::runtime_error(error);
+    }
+  }
+}
+
+std::map<std::string, uint64_t> FSConnector::held_fd_stats() {
+  return held_fds_.stats();
 }
 
 void FSConnector::do_single_set(WorkerFSConn& conn, const std::string& key,
@@ -241,6 +474,11 @@ void FSConnector::do_single_set(WorkerFSConn& conn, const std::string& key,
 
 bool FSConnector::do_single_exists(WorkerFSConn& conn, const std::string& key) {
   std::string filename = key_to_filename(key);
+  // A held descriptor is a published object that can still be read, so
+  // the lookup needs no stat (on NFS, no GETATTR round trip).
+  if (held_fds_.enabled() && held_fds_.contains(filename)) {
+    return true;
+  }
   auto file_path = conn.base_path / filename;
   return std::filesystem::exists(file_path);
 }
@@ -248,6 +486,7 @@ bool FSConnector::do_single_exists(WorkerFSConn& conn, const std::string& key) {
 bool FSConnector::do_single_delete(WorkerFSConn& conn, const std::string& key) {
   std::string filename = key_to_filename(key);
   auto file_path = conn.base_path / filename;
+  held_fds_.invalidate(filename);
   std::error_code ec;
   return std::filesystem::remove(file_path, ec);
 }
@@ -275,7 +514,10 @@ void FSConnector::do_batch_get(WorkerFSConn& conn, const Request& req) {
   do_batch_get_pooled(req);
 }
 
-void FSConnector::on_workers_stopped() { stop_read_pool(); }
+void FSConnector::on_workers_stopped() {
+  stop_read_pool();
+  held_fds_.close_all();
+}
 
 bool FSConnector::read_budget_admits(size_t len) const {
   return reads_in_flight_ < kMinReadsInFlight ||
