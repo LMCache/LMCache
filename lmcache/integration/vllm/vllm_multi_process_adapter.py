@@ -1982,6 +1982,13 @@ class LMCacheMPWorkerAdapter:
         self._returned_finished.update(ret_stores)
         return ret_stores
 
+    def skip_finished_sending(self, request_ids: set[str]) -> None:
+        """Never report these requests in finished_sending.
+
+        The scheduler frees them on their finished_recving report instead.
+        """
+        self._returned_finished.update(request_ids)
+
     @_lmcache_nvtx_annotate
     def get_finished(
         self, finished_req_ids_from_engine: set[str]
@@ -2224,10 +2231,7 @@ class LMCacheMPWorkerAdapter:
             self.retrieve_events.pop(request_id, None)
 
         # Retrieves dropped while unhealthy still must be reported,
-        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS. No
-        # finished_sending dedup is needed (unlike the unhealthy branch): a
-        # dropped retrieve's request is parked in WAITING_FOR_REMOTE_KVS until
-        # this report, so it cannot also be engine-finished in the same call.
+        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
         # Swap-drain so a concurrent submit_retrieve_request add is never lost.
         dropped = self._dropped_retrieves
         self._dropped_retrieves = set()
@@ -2554,7 +2558,9 @@ class LMCacheMPWorkerAdapter:
         """Converge the internal states about finished stores
         and returns the 'safe finished store request ids' back
         """
-        safe_finished_s = self.finished_stores.intersection(self.previously_finished)
+        safe_finished_s = self.finished_stores.intersection(
+            self.previously_finished
+        ).difference(self.store_futures)
         self.finished_stores.difference_update(self.previously_finished)
         self.previously_finished.difference_update(safe_finished_s)
 

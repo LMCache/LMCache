@@ -760,8 +760,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 required_chunk_alignment=scheduler_block_size,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
+            # Eager requests awaiting all workers' final STORE reports.
+            self._pending_eager_session_ends: set[str] = set()
             # Worker events aggregated per step, awaiting take_events().
             self._kv_cache_events: list[KVCacheEvent] = []
+            # Retrieves sent to the workers and not yet in finished_recving.
+            self._unreported_retrieves: set[str] = set()
+            self._finished_while_loading: set[str] = set()
 
             # Align-mode Mamba keeps one speculative block per draft token at
             # the tail of a request's block list.
@@ -947,6 +952,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
+        self.worker_adapter.skip_finished_sending(metadata.finished_while_loading)
 
         request_ids = []
         ops = []
@@ -1234,11 +1240,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     def shutdown(self) -> None:
         """
-        Shutdown the connector. This is called when the owning process
-        (worker or scheduler) is shutting down to ensure that all the async
-        operations are completed and the connector is cleaned up properly.
+        Release resources owned by the worker or scheduler as it shuts down.
         On the scheduler side it also logs the lazy-offload counter ledger
         so the drop rate is auditable from the log.
+
+        Scheduler shutdown does not establish that remote STORE handlers have
+        stopped. It therefore does not end pending eager sessions without an
+        aggregated completion report; doing so could recreate the session race.
         """
         if hasattr(self, "worker_adapter"):
             self.worker_adapter.shutdown()
@@ -1612,6 +1620,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = LMCacheMPConnectorMetadata()
         metadata.need_flush_before_forward = _has_preemption_reqs(scheduler_output)
+        metadata.finished_while_loading = self._finished_while_loading
+        self._finished_while_loading = set()
 
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
@@ -1632,14 +1642,24 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         return metadata
 
-    def update_connector_output(self, connector_output: KVConnectorOutput):
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """
-        Update KVConnector state from worker-side connectors output.
+        Update KVConnector state from aggregated worker-side output.
+
+        Finished eager requests end their sessions only after all workers
+        report finished_sending. Lazy offload retains its own receipt lifecycle.
+        A STORE returning False still reports completion. A missing worker
+        report retains the pending entry and lookup state for the connector's
+        lifetime; this path does not implement timeout or worker-loss recovery.
 
         Args:
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
+        self._unreported_retrieves.difference_update(
+            connector_output.finished_recving or ()
+        )
+
         # Worker metadata carries the events only when the hook is not called.
         kv_cache_events = connector_output.kv_cache_events or getattr(
             connector_output.kv_connector_worker_meta, "kv_events", None
@@ -1649,6 +1669,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._kv_cache_events.extend(kv_cache_events.aggregate().get_all_events())
 
         if not self.lazy_offload:
+            for request_id in self._pending_eager_session_ends.intersection(
+                connector_output.finished_sending or ()
+            ):
+                self.scheduler_adapter.end_session(request_id)
+                self.scheduler_adapter.cleanup_lookup_result(request_id)
+                self._pending_eager_session_ends.remove(request_id)
             return
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, LMCacheMPWorkerMetadata):
@@ -1671,6 +1697,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         The connector may assumes responsibility for freeing the blocks
         asynchronously by returning True.
+
+        A stopped, length-capped or aborted eager producer keeps its LMCache
+        session until the aggregated finished_sending report, so a late STORE
+        cannot recreate it. Requests finishing while loading remain on the
+        receive-owned cleanup path. Consumer and lazy cleanup is unchanged.
 
         Returns:
             True if the request is being saved/sent asynchronously and blocks
@@ -1697,8 +1728,30 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "num_lmcache_extra_cached_tokens": max(0, num_lmcache - num_vllm),
             }
 
+        # vLLM parks a request that finishes while its retrieve is unreported
+        # and frees it on the finished_recving report, asserting on any later
+        # report, so the worker must not also report it in finished_sending.
+        was_loading = request.request_id in self._unreported_retrieves
+        if was_loading:
+            self._unreported_retrieves.remove(request.request_id)
+            self._finished_while_loading.add(request.request_id)
+
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
+
+        if (
+            not self.lazy_offload
+            and self._can_store
+            and not was_loading
+            and request.status
+            in (
+                RequestStatus.FINISHED_STOPPED,
+                RequestStatus.FINISHED_LENGTH_CAPPED,
+                RequestStatus.FINISHED_ABORTED,
+            )
+        ):
+            self._pending_eager_session_ends.add(request.request_id)
+            return True, (return_params or None)
 
         # Drop lookup state for a request aborted before its lookup was
         # consumed (update_state_after_alloc never ran for it). Both the eager
@@ -1824,6 +1877,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
+                self._unreported_retrieves.add(request_tracker.request_id)
             request_tracker.state = LMCacheMPRequestState.READY
 
     def _process_new_requests(
