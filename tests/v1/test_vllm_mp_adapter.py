@@ -38,6 +38,7 @@ from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.platform.devices.cuda.ipc_wrapper import set_vmm_fd_sender
 from lmcache.v1.platform.ipc_policy import (
     is_isolated_ipc,
     is_use_vmm_api,
@@ -1274,10 +1275,12 @@ def test_isolated_ipc_is_set_before_transfer_context_creation(
 
 @pytest.fixture
 def restore_use_vmm_api():
-    """Restore the process-global VMM-API switch after the test."""
+    """Restore the process-global VMM-API switch after the test, and drop
+    the VMM fd sender that enabling it installs."""
     previous = is_use_vmm_api()
     yield
     set_use_vmm_api(previous)
+    set_vmm_fd_sender(None)
 
 
 @pytest.mark.parametrize(

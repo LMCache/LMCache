@@ -252,6 +252,16 @@ def test_isolated_ipc_flag_enables():
     assert _parse_mp(["--no-isolated-ipc"]).isolated_ipc is False
 
 
+def test_enable_vmm_fd_channel_defaults_to_false():
+    assert _parse_mp([]).enable_vmm_fd_channel is False
+    assert MPServerConfig().enable_vmm_fd_channel is False
+
+
+def test_enable_vmm_fd_channel_flag_enables():
+    assert _parse_mp(["--enable-vmm-fd-channel"]).enable_vmm_fd_channel is True
+    assert _parse_mp(["--no-enable-vmm-fd-channel"]).enable_vmm_fd_channel is False
+
+
 # -- Engine type --------------------------------------------------------------
 
 

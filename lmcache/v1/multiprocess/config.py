@@ -102,6 +102,14 @@ class MPServerConfig:
     host IPC namespace or /dev/shm); see lmcache.v1.platform.ipc_policy.
     Must match the engine workers' ``lmcache.mp.isolated_ipc`` setting."""
 
+    enable_vmm_fd_channel: bool = False
+    """Whether to open the fd channel through which engine workers send the
+    POSIX fds of CUDA VMM KV caches that have no fabric handle (see
+    lmcache.v1.multiprocess.vmm_fd). Needed when workers set
+    ``lmcache.mp.use_vmm_api`` and their pools export as POSIX fds (always
+    the case on GPUs without IMEX); fabric-handle VMM registration works
+    without it."""
+
     runtime_plugin_config: "RuntimePluginConfig" = field(
         default_factory=lambda: RuntimePluginConfig()
     )
@@ -487,6 +495,18 @@ def add_mp_server_args(
         "lmcache.mp.isolated_ipc setting. (Default is False)",
     )
     mp_group.add_argument(
+        "--enable-vmm-fd-channel",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Listen on /dev/shm/lmcache_fd_<port>.sock for the POSIX fds of "
+        "KV caches that engine workers allocate through the CUDA VMM API "
+        "(vLLM --enable-cumem-allocator) when workers set "
+        "lmcache.mp.use_vmm_api and their pools export as POSIX fds (always "
+        "on GPUs without IMEX). Linux CUDA "
+        "only; if the socket cannot be opened the server logs a warning and "
+        "runs without it. (Default is False)",
+    )
+    mp_group.add_argument(
         "--runtime-plugin-locations",
         type=str,
         nargs="*",
@@ -652,6 +672,7 @@ def parse_args_to_mp_server_config(
         enable_blend_reorder=args.enable_blend_reorder,
         supported_transfer_mode=args.supported_transfer_mode,
         isolated_ipc=args.isolated_ipc,
+        enable_vmm_fd_channel=args.enable_vmm_fd_channel,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),
             extra_config=plugin_extra,

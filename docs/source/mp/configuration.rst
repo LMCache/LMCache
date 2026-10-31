@@ -159,6 +159,16 @@ Source: ``lmcache/v1/multiprocess/config.py``
        by the vLLM MP connector only; the default stays ``false`` until
        the integrations that still create raw CUDA interprocess events
        (SGLang, TensorRT-LLM, CacheBlend, qstore) migrate.
+   * - ``--enable-vmm-fd-channel`` / ``--no-enable-vmm-fd-channel``
+     - ``false``
+     - Listen on the Unix socket ``/dev/shm/lmcache_fd_<port>.sock`` for the
+       POSIX fds of KV caches that the engine allocates through the CUDA
+       VMM API (vLLM's ``--enable-cumem-allocator``). Needed when workers
+       set ``lmcache.mp.use_vmm_api`` and their pools export as POSIX fds
+       (always the case on GPUs without IMEX); fabric-handle VMM
+       registration works without it.
+       Linux CUDA only. If the socket cannot be opened, the server logs a
+       warning and runs without it.
    * - ``--runtime-plugin-locations``
      - ``[]``
      - Zero or more paths to runtime plugin scripts or directories to
@@ -1031,9 +1041,13 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        ``cuMemExportToShareableHandle`` instead (a fabric handle when
        the allocation is fabric-exportable -- requires an IMEX channel
        device, e.g. ``NVIDIA_IMEX_CHANNELS=0`` -- or a POSIX fd
-       otherwise). Composes with ``lmcache.mp.isolated_ipc`` for
-       fabric-exportable pools; a POSIX-fd-only pool under isolated IPC
-       is rejected at registration.
+       otherwise). A POSIX fd is sent to the server over the Unix socket
+       ``/dev/shm/lmcache_fd_<port>.sock`` (``<port>`` being the server's
+       ``--port``), so the server must run with ``--enable-vmm-fd-channel``
+       on the same node, under the same uid, with ``/dev/shm`` shared.
+       Composes with ``lmcache.mp.isolated_ipc`` for fabric-exportable
+       pools; a POSIX-fd-only pool under isolated IPC is rejected at
+       registration.
    * - ``lmcache.mp.lazy_offload``
      - ``false``
      - Buffer stores on the scheduler and submit them according to the
