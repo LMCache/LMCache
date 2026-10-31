@@ -942,12 +942,14 @@ class _FakeLMCacheFSClient:
         relative_tmp_dir="",
         use_odirect=False,
         read_ahead_size=0,
+        per_op_workers=None,
     ):
         self.base_path = base_path
         self.num_workers = num_workers
         self.relative_tmp_dir = relative_tmp_dir
         self.use_odirect = use_odirect
         self.read_ahead_size = read_ahead_size
+        self.per_op_workers = per_op_workers
         self._efd = create_event_notifier()
         self._closed = False
 

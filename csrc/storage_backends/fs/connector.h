@@ -59,7 +59,8 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   FSConnector(std::string base_path, int num_workers,
               std::string relative_tmp_dir = "", bool use_odirect = false,
               size_t read_ahead_size = 0, int num_read_workers = 0,
-              size_t read_max_bytes_in_flight = 0);
+              size_t read_max_bytes_in_flight = 0,
+              WorkerPoolConfig worker_pool_config = {});
   ~FSConnector() override;
 
   // The byte budget in force, or 0 when there is no read pool.
