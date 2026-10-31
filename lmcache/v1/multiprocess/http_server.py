@@ -30,6 +30,7 @@ from lmcache.v1.mp_observability.config import (
     parse_args_to_observability_config,
 )
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import shutdown_grpc_otel_metrics
 from lmcache.v1.mp_observability.trace.lifecycle import EVENTS_LEVEL
 from lmcache.v1.multiprocess.config import (
     DEFAULT_COORDINATOR_CONFIG,
@@ -189,6 +190,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     get_event_bus().stop()
     request_server.close()
     engine.close()
+    shutdown_grpc_otel_metrics()
     logger.info("LMCache HTTP server stopped")
 
 
