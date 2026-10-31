@@ -66,6 +66,11 @@ def _get_server_url(llm_args: "TorchLlmArgs") -> str:
 class _BlockSpec:
     tokens: List[int]
     block_ids: List[int]
+    # Loads only: the range whose read locks the lookup still holds, and how many
+    # tokens at its front TRT-LLM already has. Saves cover the whole aligned prompt.
+    start: int = 0
+    end: int | None = None
+    skip_first_n_tokens: int = 0
 
 
 @dataclass
@@ -221,7 +226,17 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> LMCacheMPConnectorMetadata:
-        """Build per-request load/save specs from pending lookup results."""
+        """Build load/save specs using TRT-LLM's pre-load computed position.
+
+        Args:
+            scheduler_output: New requests whose computed position excludes
+                the tokens offered by get_num_new_matched_tokens.
+
+        Returns:
+            Metadata with chunk-aligned load ranges, matching block IDs, and
+            the held prefix to skip in the first chunk. Saves retain the whole
+            prompt.
+        """
         meta = LMCacheMPConnectorMetadata()
 
         for req in scheduler_output.new_requests:
@@ -233,8 +248,19 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
             num_computed_blocks = req.computed_position // self._block_size
 
             if num_matched > 0:
+                # Chunks wholly inside TRT-LLM's prefix were released after the
+                # lookup; load the rest, skipping the held tokens of its first
+                # chunk so TRT-LLM's own blocks are not rewritten.
+                start = (req.computed_position // self._chunk_size) * self._chunk_size
+                end = req.computed_position + num_matched
                 meta.loads[req.request_id] = _BlockSpec(
-                    tokens=all_tokens, block_ids=block_ids
+                    tokens=all_tokens,
+                    block_ids=block_ids[
+                        start // self._block_size : end // self._block_size
+                    ],
+                    start=start,
+                    end=end,
+                    skip_first_n_tokens=req.computed_position - start,
                 )
 
             save_start = max(num_computed_blocks, num_matched // self._block_size)
@@ -308,16 +334,20 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         self,
         token_ids: List[int],
         request_id: int,
+        start: int = 0,
+        end: int | None = None,
     ) -> IPCCacheServerKey:
-        aligned_end = (len(token_ids) // self._chunk_size) * self._chunk_size
+        """Build a range key; end=None selects the whole-chunk prompt end."""
+        if end is None:
+            end = (len(token_ids) // self._chunk_size) * self._chunk_size
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._world_size,
             num_kv_readers=1,
             worker_id=self._rank,
             token_ids=token_ids,
-            start=0,
-            end=aligned_end,
+            start=start,
+            end=end,
             request_id=str(request_id),
         )
 
@@ -405,14 +435,14 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             if not spec.tokens or not spec.block_ids:
                 continue
 
-            key = self._create_key(spec.tokens, req_id)
+            key = self._create_key(spec.tokens, req_id, spec.start, spec.end)
             try:
                 raw_future = self._req_client.retrieve(
                     key,
                     self._instance_id,
                     [spec.block_ids],
                     self._export_event(event),
-                    0,  # skip_first_n_tokens
+                    spec.skip_first_n_tokens,
                 )
                 raw_future.retain_reference(event)
                 success = raw_future.to_device_future(
