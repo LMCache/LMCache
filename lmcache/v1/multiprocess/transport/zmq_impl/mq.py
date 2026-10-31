@@ -778,10 +778,13 @@ class MessageQueueServer(RequestServer):
                 raise ValueError("Unknown handler type")
 
     def _handle_request(self, msg: list[bytes]) -> None:
-        assert len(msg) >= 3, (
-            "Expected at least 3 message parts "
-            "[identity, request_uid, operation, *payloads]"
-        )
+        if len(msg) < 3:
+            logger.error(
+                "Malformed request: expected at least 3 message parts "
+                "[identity, request_uid, operation, *payloads], got %d",
+                len(msg),
+            )
+            return
 
         identity, b_request_uid, b_operation, *payloads = msg
         if b_operation == b"":
