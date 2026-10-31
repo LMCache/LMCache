@@ -182,6 +182,8 @@ def slice_block_ids_per_group(
     group_tokens_per_block: Sequence[int],
     start_token_idx: int,
     end_token_idx: int,
+    *,
+    include_unfull_chunk: bool = False,
 ) -> list[list[int]]:
     """Slice each engine group's block IDs for a token range.
 
@@ -200,6 +202,9 @@ def slice_block_ids_per_group(
             ``0`` marks a scratch group, which slices to an empty list.
         start_token_idx: Range start token index, inclusive.
         end_token_idx: Range end token index, exclusive.
+        include_unfull_chunk: The range ends with an unfull chunk, so
+            ``end_token_idx`` need not align: each group covers it with the
+            block holding its last token.
 
     Returns:
         One block-ID list per engine group, in engine-group order.
@@ -213,7 +218,7 @@ def slice_block_ids_per_group(
             sliced.append([])
             continue
         if start_token_idx % tokens_per_block != 0 or (
-            end_token_idx % tokens_per_block != 0
+            end_token_idx % tokens_per_block != 0 and not include_unfull_chunk
         ):
             raise ValueError(
                 f"token range [{start_token_idx}, {end_token_idx}) does not "
@@ -224,8 +229,9 @@ def slice_block_ids_per_group(
         sliced.append(
             list(
                 group_block_ids[
-                    start_token_idx // tokens_per_block : end_token_idx
-                    // tokens_per_block
+                    start_token_idx // tokens_per_block : -(
+                        -end_token_idx // tokens_per_block
+                    )
                 ]
             )
         )

@@ -538,3 +538,43 @@ def test_end_waits_for_already_sent_status_only(
         client.status.set_result(reply)
         thread.join(timeout=6)
         assert not thread.is_alive()
+
+
+def test_unfull_chunk_lookup_sends_its_length_and_is_answered_in_tokens(
+    make_adapter: AdapterFactory,
+) -> None:
+    """With the last token reserved the lookup covers P - 1 tokens, unaligned,
+    and the server's count is a token count: the hit may stop inside a chunk, at
+    an unfull chunk's boundary."""
+    adapter, (client,) = make_adapter()
+    adapter.maybe_submit_lookup_request(
+        "r",
+        pack_token_ids(range(150)),
+        reserve_last_token=True,
+        include_unfull_chunk=True,
+    )
+
+    key = client.lookups[0]
+    assert (key.end, key.include_unfull_chunk) == (149, True)
+    client.ack.set_result(None)
+    client.status.set_result(144)
+    assert resolved(adapter) == 144
+
+
+def test_servers_hitting_different_unfull_chunks_keep_their_full_chunks(
+    make_adapter: AdapterFactory,
+) -> None:
+    adapter, clients = make_adapter(2)
+    adapter.maybe_submit_lookup_request(
+        "r", pack_token_ids(range(150)), include_unfull_chunk=True
+    )
+    for client, hit in zip(clients, (144, 136), strict=True):
+        client.ack.set_result(None)
+        client.status.set_result(hit)
+
+    assert resolved(adapter) == 128
+    assert [
+        (key.start, key.end, key.include_unfull_chunk)
+        for client in clients
+        for key in client.frees
+    ] == [(128, 144, True), (128, 136, True)]

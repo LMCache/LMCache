@@ -52,6 +52,10 @@ class Session:
     prefetch_locked_gids: tuple = ()
     prefetch_group_windows: tuple[int, ...] = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
+    _unfull_chunk_keys: list[ObjectKey] = field(default_factory=list, repr=False)
+    unfull_chunk_boundary: int = 0
+    """Boundary (token count) of the unfull chunk the current lookup
+    read-locked, or 0."""
     extras: dict[str, Any] = field(default_factory=dict)
     _lookup_generation: int = field(default=0, repr=False)
     _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
@@ -125,6 +129,55 @@ class Session:
             self._compute_hash(end_chunk)
             return self.chunk_hashes[start_chunk:end_chunk]
 
+    def get_unfull_chunk_hash(self, boundary: int) -> Any:
+        """Return the hash of the unfull chunk with boundary ``boundary``.
+
+        A boundary is a token count: the unfull chunk covers the tokens from
+        the last chunk boundary at or below it up to it,
+        ``[floor(boundary / chunk_size) * chunk_size, boundary)``. It is
+        hashed like a full chunk, chaining from the rolling hash of the full
+        chunks before it. It has fewer than chunk_size tokens, so its hash
+        differs from every full chunk's.
+
+        Args:
+            boundary: Token count the unfull chunk reaches; must not be a
+                multiple of chunk_size.
+
+        Returns:
+            The unfull chunk's hash value.
+
+        Raises:
+            ValueError: If ``boundary`` is chunk-aligned or exceeds the current
+                tokens.
+        """
+        chunk_size = self.hasher.chunk_size
+        if boundary % chunk_size == 0:
+            raise ValueError(
+                f"unfull chunk boundary ({boundary}) must not be a multiple of "
+                f"chunk_size ({chunk_size})"
+            )
+        with self._lock:
+            num_tokens = num_packed_tokens(self.tokens)
+            if boundary > num_tokens:
+                raise ValueError(
+                    f"unfull chunk boundary ({boundary}) exceeds the session's "
+                    f"{num_tokens} token(s)"
+                )
+            num_full_chunks = boundary // chunk_size
+            self._compute_hash(num_full_chunks)
+            prefix = (
+                self.chunk_hashes[num_full_chunks - 1]
+                if num_full_chunks > 0
+                else self.hasher.none_hash
+            )
+            return self.hasher.hash_packed_chunk(
+                memoryview(self.tokens)[
+                    num_full_chunks * chunk_size * TOKEN_STRIDE : boundary
+                    * TOKEN_STRIDE
+                ],
+                prefix,
+            )
+
     def _compute_hash(self, end_chunk: int) -> None:
         """Compute rolling hashes up to end_chunk.
 
@@ -165,6 +218,35 @@ class Session:
             self._lookup_generation += 1
             self._failed_retrieve_releases.clear()
             self._prefetch_owners.clear()
+            self._unfull_chunk_keys = []
+            self.unfull_chunk_boundary = 0
+
+    def record_unfull_chunk_hit(
+        self,
+        keys: list[ObjectKey],
+        l1_owners: dict[ObjectKey, int],
+        boundary: int,
+    ) -> None:
+        """Record the unfull-chunk keys the current lookup read-locked.
+
+        Args:
+            keys: Every object key of the unfull chunk (all object groups
+                and kv ranks).
+            l1_owners: L1 owners of ``keys``; merged into the lookup's
+                owners so a retrieve releases them on the right L1.
+            boundary: Boundary (token count) of the unfull chunk.
+        """
+        with self._lock:
+            self._unfull_chunk_keys = list(keys)
+            self._prefetch_owners.update(l1_owners)
+            self.unfull_chunk_boundary = boundary
+
+    def take_unfull_chunk_keys(self) -> list[ObjectKey]:
+        """Return the unfull-chunk keys and forget them, for a one-time release."""
+        with self._lock:
+            keys = self._unfull_chunk_keys
+            self._unfull_chunk_keys = []
+            return keys
 
     def record_prefetch_result(
         self,

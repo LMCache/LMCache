@@ -27,6 +27,7 @@ message IpcCacheServerKey {
   string cache_salt = 8;
   optional bytes encoded_request_configs = 9;
   int64 num_kv_readers = 10;
+  bool include_unfull_chunk = 11;
 }
 
 // Store / Retrieve and CacheBlend retrieve share this reply shape.

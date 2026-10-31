@@ -25,7 +25,7 @@ class ObjectKeyIdentity(_message.Message):
     def __init__(self, chunk_hash: _Optional[bytes] = ..., kv_rank: _Optional[int] = ..., model_name: _Optional[str] = ..., object_group_id: _Optional[int] = ..., cache_salt: _Optional[str] = ...) -> None: ...
 
 class IpcCacheServerKey(_message.Message):
-    __slots__ = ("model_name", "world_size", "worker_id", "token_bytes", "start", "end", "request_id", "cache_salt", "encoded_request_configs", "num_kv_readers")
+    __slots__ = ("model_name", "world_size", "worker_id", "token_bytes", "start", "end", "request_id", "cache_salt", "encoded_request_configs", "num_kv_readers", "include_unfull_chunk")
     MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
     WORLD_SIZE_FIELD_NUMBER: _ClassVar[int]
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
@@ -36,6 +36,7 @@ class IpcCacheServerKey(_message.Message):
     CACHE_SALT_FIELD_NUMBER: _ClassVar[int]
     ENCODED_REQUEST_CONFIGS_FIELD_NUMBER: _ClassVar[int]
     NUM_KV_READERS_FIELD_NUMBER: _ClassVar[int]
+    INCLUDE_UNFULL_CHUNK_FIELD_NUMBER: _ClassVar[int]
     model_name: str
     world_size: int
     worker_id: int
@@ -46,7 +47,8 @@ class IpcCacheServerKey(_message.Message):
     cache_salt: str
     encoded_request_configs: bytes
     num_kv_readers: int
-    def __init__(self, model_name: _Optional[str] = ..., world_size: _Optional[int] = ..., worker_id: _Optional[int] = ..., token_bytes: _Optional[bytes] = ..., start: _Optional[int] = ..., end: _Optional[int] = ..., request_id: _Optional[str] = ..., cache_salt: _Optional[str] = ..., encoded_request_configs: _Optional[bytes] = ..., num_kv_readers: _Optional[int] = ...) -> None: ...
+    include_unfull_chunk: bool
+    def __init__(self, model_name: _Optional[str] = ..., world_size: _Optional[int] = ..., worker_id: _Optional[int] = ..., token_bytes: _Optional[bytes] = ..., start: _Optional[int] = ..., end: _Optional[int] = ..., request_id: _Optional[str] = ..., cache_salt: _Optional[str] = ..., encoded_request_configs: _Optional[bytes] = ..., num_kv_readers: _Optional[int] = ..., include_unfull_chunk: bool = ...) -> None: ...
 
 class EventIpcHandleResult(_message.Message):
     __slots__ = ("event_ipc_handle", "success")

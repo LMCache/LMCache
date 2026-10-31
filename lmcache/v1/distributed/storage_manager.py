@@ -284,6 +284,7 @@ class StorageManager:
         self,
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
+        is_temporary: bool = False,
     ) -> dict[ObjectKey, MemoryObj]:
         """
         Reserve the object for writing into the storage manager.
@@ -292,6 +293,9 @@ class StorageManager:
             keys (list[ObjectKey]): List of object keys to reserve for writing.
             layout_desc (MemoryLayoutDesc): Description of the memory layout
                 for the objects to be reserved.
+            is_temporary: Store the objects as temporary: L1 deletes each one
+                when its last read lock is released, and never offloads it
+                to L2.
         Returns:
             dict[ObjectKey, MemoryObj]: A dictionary mapping object keys to their
                 reserved memory objects. Note that not all requested keys could be
@@ -308,7 +312,7 @@ class StorageManager:
             reserve_result.update(
                 self._l1_managers_by_id[owner].reserve_write(
                     keys=group,
-                    is_temporary=[False] * len(group),
+                    is_temporary=[is_temporary] * len(group),
                     layout_desc=layout_desc,
                     tag=_L1_WRITE_TAG,
                 )
@@ -1253,6 +1257,15 @@ class StorageManager:
         ``L1[tag]`` device-owner names; reads without owners still resolve.
         """
         return len(self._l1_managers) > 1
+
+    @property
+    def has_gds_l1(self) -> bool:
+        """Whether any L1 is GDS-backed, so its objects move only through
+        GDS-registered staging buffers."""
+        return any(
+            manager.config.gds_l1_config is not None
+            for manager in self._l1_managers_by_id.values()
+        )
 
     def report_status(self) -> dict:
         """Return per-L1 status and aggregate health; retain single-L1 field names."""

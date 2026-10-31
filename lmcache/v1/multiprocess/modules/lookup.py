@@ -35,6 +35,7 @@ from lmcache.v1.multiprocess.kv_load_policy import (
     create_kv_load_policy,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.multiprocess.token_codec import num_packed_tokens, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -124,6 +125,11 @@ class _PrefetchJob:
     # Names the ``lookup()`` branch that returned before submitting a prefetch
     # task; empty on the normal path.
     early_exit_reason: str = ""
+    # The lookup key when it also asks for an unfull chunk
+    # (``include_unfull_chunk``); such a lookup is answered in tokens.
+    unfull_chunk_key: IPCCacheServerKey | None = None
+    # Probe the unfull chunk after the hit prefix; False on early exits.
+    probe_unfull_chunk: bool = False
 
 
 class LookupModule(DiscoverableModule):
@@ -347,6 +353,7 @@ class LookupModule(DiscoverableModule):
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
                 engine_covered_chunks=start_chunk,
+                probe_unfull_chunk=True,
             )
             return
 
@@ -382,6 +389,8 @@ class LookupModule(DiscoverableModule):
                 ),
                 model_name=model_name,
                 cache_salt=key.cache_salt,
+                unfull_chunk_key=key if key.include_unfull_chunk else None,
+                probe_unfull_chunk=True,
             )
         )
 
@@ -401,7 +410,9 @@ class LookupModule(DiscoverableModule):
             request_id: The external request ID passed in the lookup key.
 
         Returns:
-            Chunk count (int) when done, None if still in progress,
+            Chunk count (int) when done -- hit tokens for a lookup that asked
+            for an unfull chunk (``include_unfull_chunk``) --, None if still
+            in progress,
             0 if the request_id is unknown (already completed and consumed,
             or invalid).
         """
@@ -434,7 +445,8 @@ class LookupModule(DiscoverableModule):
             timeout: Maximum number of seconds to wait for the prefetch.
 
         Returns:
-            Chunk count (int) when done, None if the wait timed out, 0 if the
+            Chunk count (int) when done -- hit tokens for a lookup that asked
+            for an unfull chunk --, None if the wait timed out, 0 if the
             request_id is unknown (already completed and consumed, or invalid).
         """
         with self._prefetch_job_lock:
@@ -462,7 +474,10 @@ class LookupModule(DiscoverableModule):
         Hashes are computed only for chunks in ``[start, end)`` to avoid
         unnecessary work on tokens outside that range.
         ``start`` and ``end`` must be aligned to ``chunk_size``; it is the
-        caller's responsibility to align the boundaries as desired.
+        caller's responsibility to align the boundaries as desired. The one
+        exception: a key with ``include_unfull_chunk`` whose ``end`` is the
+        boundary (token count) of the unfull chunk the lookup locked also
+        releases that chunk (once).
 
         Only the keys the prefetch actually read-locked are released: the
         key's range is floored to the current lookup's ``start``, and each
@@ -549,6 +564,13 @@ class LookupModule(DiscoverableModule):
                     session.prefetch_locked_gids,
                 )
             )
+        # A key reaching the boundary of the unfull chunk the lookup locked,
+        # with include_unfull_chunk, releases it too.
+        if (
+            key.has_unfull_chunk(self._ctx.chunk_size)
+            and key.end == session.unfull_chunk_boundary
+        ):
+            obj_keys.extend(session.take_unfull_chunk_keys())
         if not obj_keys:
             return
 
@@ -637,6 +659,7 @@ class LookupModule(DiscoverableModule):
         start_chunk: int = 0,
         engine_covered_chunks: int = 0,
         early_exit_reason: str = "",
+        probe_unfull_chunk: bool = False,
     ) -> None:
         """Register a job that resolves immediately without a prefetch.
 
@@ -652,6 +675,9 @@ class LookupModule(DiscoverableModule):
             early_exit_reason: The ``lookup()`` branch that returned before
                 submitting a prefetch; empty when the lookup simply had
                 nothing to fetch.
+            probe_unfull_chunk: Probe the unfull chunk after the hit prefix
+                when ``key.include_unfull_chunk`` is set; set when every full
+                chunk is engine-covered.
         """
         self._register_prefetch_job(
             _PrefetchJob(
@@ -677,6 +703,8 @@ class LookupModule(DiscoverableModule):
                 model_name=key.model_name,
                 cache_salt=key.cache_salt,
                 early_exit_reason=early_exit_reason,
+                unfull_chunk_key=key if key.include_unfull_chunk else None,
+                probe_unfull_chunk=probe_unfull_chunk,
             )
         )
 
@@ -691,8 +719,11 @@ class LookupModule(DiscoverableModule):
         about what a lookup locked.
 
         Returns:
-            The hit chunk count, or None while the prefetch is still running
-            (the job is kept so a later call can resolve it).
+            The hit chunk count, or, for a lookup that asked for an unfull
+            chunk, the hit token count: the boundary of the unfull chunk
+            read-locked after the hit prefix, else the hit prefix's tokens.
+            None while the prefetch is still running (the job is kept so a
+            later call can resolve it).
         """
         result = self._ctx.storage_manager.query_prefetch_status(job.handle)
         if result is None:
@@ -726,6 +757,13 @@ class LookupModule(DiscoverableModule):
             tuple(range(job.attn_desc.num_object_groups)),
             result.l1_owners,
         )
+        unfull_chunk_boundary, unfull_chunk_probes = (
+            self._lock_unfull_chunk(
+                job.unfull_chunk_key, found_count, job.attn_desc, session
+            )
+            if job.unfull_chunk_key is not None and job.probe_unfull_chunk
+            else (0, 0)
+        )
 
         chunk_size = self._ctx.chunk_size
         covered_tokens = job.engine_covered_chunks * chunk_size
@@ -754,6 +792,8 @@ class LookupModule(DiscoverableModule):
                     "l1_hit_keys": result.l1_hit_count,
                     "l2_hit_keys": result.l2_hit_count,
                     "early_exit_reason": job.early_exit_reason,
+                    "unfull_chunk_boundary": unfull_chunk_boundary,
+                    "unfull_chunk_probes": unfull_chunk_probes,
                     "model_name": job.model_name,
                     "cache_salt": job.cache_salt,
                 },
@@ -763,7 +803,97 @@ class LookupModule(DiscoverableModule):
         with self._prefetch_job_lock:
             self._prefetch_jobs.pop(job.request_id, None)
 
-        return found_count
+        if job.unfull_chunk_key is None:
+            return found_count
+        return unfull_chunk_boundary or found_count * self._ctx.chunk_size
+
+    def _lock_unfull_chunk(
+        self,
+        key: IPCCacheServerKey,
+        hit_chunks: int,
+        attn_desc: AttnWindowDesc,
+        session: Session,
+    ) -> tuple[int, int]:
+        """Read-lock the longest unfull chunk L1 holds after the hit prefix.
+
+        Boundaries are token counts. An unfull chunk extending ``hit_chunks``
+        full chunks lies inside the next chunk, so its boundary is in
+        ``(hit, min(key.end, hit + chunk_size))``. Stores put unfull chunks at
+        a request's exact prompt length and on the engine's prefix-cache grid
+        (``lmcache.hint.unfull_chunk_grid`` in ``key.request_configs``), so
+        the lookup length ``key.end`` is probed first, then the grid
+        boundaries below it, longest first; without the hint only
+        ``key.end`` is. Each probe is an L1-only prefetch, which
+        completes synchronously and keeps its locks only when every object
+        group and kv rank hit, so a partial hit holds nothing. A hit is
+        recorded on ``session`` for the retrieve and for
+        ``free_lookup_locks``.
+
+        Args:
+            key: The lookup key; ``key.include_unfull_chunk`` must hold.
+            hit_chunks: Full chunks the lookup hit.
+            attn_desc: The registration's attention windows.
+            session: The request's session.
+
+        Returns:
+            The read-locked unfull chunk's boundary (0 when none hit), and
+            the number of boundaries probed.
+        """
+        group_layout_descs = (
+            self._ctx.layout_desc_registry.find_unfull_group_layout_descs(
+                key.model_name, key.world_size
+            )
+        )
+        # The model may have unregistered since the lookup was submitted.
+        if not group_layout_descs:
+            return 0, 0
+        chunk_size = self._ctx.chunk_size
+        hit_tokens = hit_chunks * chunk_size
+        last_boundary = min(key.end, hit_tokens + chunk_size - 1)
+        grid = int((key.request_configs or {}).get("lmcache.hint.unfull_chunk_grid", 0))
+        # An exact hit has the lookup's own length (a disaggregated decode
+        # resuming where its prefill stopped).
+        candidate_boundaries: list[int] = (
+            [key.end] if hit_tokens < key.end == last_boundary else []
+        )
+        if grid:
+            candidate_boundaries.extend(
+                boundary
+                for boundary in range(last_boundary // grid * grid, hit_tokens, -grid)
+                if boundary != key.end
+            )
+        for num_probes, boundary in enumerate(candidate_boundaries, start=1):
+            unfull_hash = TokenHasher.hash_to_bytes(
+                session.get_unfull_chunk_hash(boundary)
+            )
+            spec = PrefetchTaskSpec(
+                key_groups=ipc_key_to_grouped_object_keys(
+                    key,
+                    [unfull_hash],
+                    list(range(attn_desc.num_object_groups)),
+                    group_layout_descs,
+                    attn_desc,
+                ),
+                num_kv_readers=key.require_num_kv_readers(),
+                # No L2 adapter: served from L1, complete on submit.
+                allowed_l2_memory_tags=frozenset(),
+            )
+            handle = self._ctx.storage_manager.submit_prefetch_task(
+                spec, external_request_id=key.request_id
+            )
+            result = self._ctx.storage_manager.query_prefetch_status(handle)
+            assert result is not None, "an L1-only prefetch completes on submit"
+            hit, _retain = fold_unfold_grouped(
+                result.hit_cells, [row.sliding_window_size for row in spec.key_groups]
+            )
+            if hit:
+                session.record_unfull_chunk_hit(
+                    [obj_key for row in spec.key_groups for obj_key in row.keys],
+                    result.l1_owners,
+                    boundary,
+                )
+                return boundary, num_probes
+        return 0, len(candidate_boundaries)
 
     def _active_prefetch_count(self) -> int:
         """Return the number of active prefetch jobs (thread-safe)."""

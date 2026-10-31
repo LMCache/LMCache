@@ -61,6 +61,8 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
     get_tokens_per_block,
+    is_align_mode_mamba_spec,
+    is_per_request_state_spec,
     is_scratch_spec,
 )
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
@@ -84,6 +86,9 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.utils import CacheRemoveEvent
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
+    LMCacheDrivenTransferContext,
+)
 
 try:
     # First Party
@@ -574,6 +579,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       enters vLLM's waiting queue. Disabled by default.
     - lmcache.mp.save_decode_cache: also store chunks containing generated
       tokens. Defaults to False; only complete prompt chunks are stored.
+    - lmcache.mp.save_unfull_chunk: also store the prompt's unfull chunk, with
+      its boundary (token count) on vLLM's prefix-cache grid below the
+      prompt's last token, and let a lookup hit stop mid-chunk. Defaults to
+      False. A request whose ``kv_transfer_params`` set
+      ``lmcache.temporary_unfull_chunk`` stores it read-once. Not yet
+      supported for models with per-request ring state
+      (``CircularBufferSpec``). See
+      ``docs/design/v1/multiprocess/unfull_chunk.md``.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
@@ -633,6 +646,36 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
         if not isinstance(self._save_decode_cache, bool):
             raise ValueError("lmcache.mp.save_decode_cache must be a boolean")
+        self._save_unfull_chunk = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.save_unfull_chunk", False
+        )
+        if not isinstance(self._save_unfull_chunk, bool):
+            raise ValueError("lmcache.mp.save_unfull_chunk must be a boolean")
+        spec_config = getattr(vllm_config, "speculative_config", None)
+        if (
+            self._save_unfull_chunk
+            and spec_config is not None
+            and (spec_config.num_speculative_tokens or 0) > 0
+        ):
+            # Draft rows sit past the prompt end in relocated Mamba blocks,
+            # so the state at the prompt end is not isolated.
+            raise ValueError(
+                "lmcache.mp.save_unfull_chunk does not support speculative decoding"
+            )
+        if (
+            self._save_unfull_chunk
+            and kv_cache_config is not None
+            and any(
+                is_per_request_state_spec(group.kv_cache_spec)
+                for group in kv_cache_config.kv_cache_groups
+            )
+        ):
+            # Resuming mid-chunk needs the ring's open compression group,
+            # which LMCache does not store yet: the hit would load garbage.
+            raise ValueError(
+                "lmcache.mp.save_unfull_chunk does not support models with "
+                "per-request ring state (CircularBufferSpec) yet"
+            )
 
         self._enable_kv_events = bool(
             getattr(vllm_config, "kv_events_config", None) is not None
@@ -738,6 +781,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.lazy_offload = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.lazy_offload", False
         )
+        if self.lazy_offload and self._save_unfull_chunk:
+            raise ValueError(
+                "lmcache.mp.save_unfull_chunk does not support lmcache.mp.lazy_offload"
+            )
         if self.lazy_offload and not vllm_config.cache_config.enable_prefix_caching:
             # Eviction detection relies on block hashes, which only exist
             # when vLLM's prefix caching maintains them.
@@ -774,6 +821,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
+            # Boundary-state blocks pinned for each request's unfull-chunk
+            # stores, released once the request's stores finish.
+            self._pinned_boundary_state_blocks: dict[str, list[int]] = {}
         elif self.role == KVConnectorRole.WORKER:
             # Node routing: a worker connects only to its local LMCache server.
             # Global ranks are assigned to nodes in contiguous blocks:
@@ -832,6 +882,39 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # Smallest token count aligned to every group's paged-chunk
         # boundary; used to round down vLLM APC hit counts.
         self._hit_alignment_tokens = math.lcm(*cached_spans)
+        # Align-mode Mamba groups: their state at an unfull chunk's boundary
+        # comes from vLLM's boundary-state hand-offs, not the block table.
+        self._boundary_state_groups = (
+            [
+                engine_group_idx
+                for engine_group_idx, group in enumerate(
+                    kv_cache_config.kv_cache_groups
+                )
+                if is_align_mode_mamba_spec(group.kv_cache_spec)
+            ]
+            if kv_cache_config is not None
+            else []
+        )
+        # Grid of unfull-chunk boundaries: hand-off boundaries lie on vLLM's
+        # prefix-cache hash grid; otherwise prefix-cache hits land on the
+        # scheduler block.
+        self._unfull_chunk_grid = self._hit_alignment_tokens
+        if (
+            self._save_unfull_chunk
+            and self._boundary_state_groups
+            and kv_cache_config is not None
+        ):
+            if "kv_connector_block_state" not in SchedulerOutput.__dataclass_fields__:
+                raise ValueError(
+                    "lmcache.mp.save_unfull_chunk with align-mode Mamba needs a "
+                    "vLLM that hands boundary states to connectors"
+                )
+            # Third Party
+            from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+
+            _, self._unfull_chunk_grid = resolve_kv_cache_block_sizes(
+                kv_cache_config, vllm_config
+            )
         if self.role == KVConnectorRole.SCHEDULER:
             # Chunk boundaries must land on every group's paged-chunk
             # boundary so per-group block-id slicing stays aligned.
@@ -920,6 +1003,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             engine_group_infos=engine_group_infos,
             layout_hints=layout_hints,
         )
+        if self._save_unfull_chunk and not isinstance(
+            self.worker_adapter.transfer_ctx, LMCacheDrivenTransferContext
+        ):
+            # The engine-driven server paths copy whole chunks only.
+            raise ValueError(
+                "lmcache.mp.save_unfull_chunk requires the lmcache_driven transfer mode"
+            )
         if self.dispatcher is not None:
             dispatch(
                 self.dispatcher,
@@ -1375,11 +1465,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             packed_token_ids=tracker.packed_token_ids(),
             cache_salt=tracker.cache_salt,
             # vLLM's prefix-cache hit, for the server's KV load policy.
-            request_configs={
-                **(tracker.request_configs or {}),
-                "lmcache.hint.engine_computed_tokens": num_computed_tokens,
-            },
+            request_configs=self._lookup_request_configs(tracker, num_computed_tokens),
             reserve_last_token=self._reserve_last_token_for_lookup,
+            include_unfull_chunk=self._save_unfull_chunk,
             start=lookup_start,
         )
         # Freeze only on a real submit: a no-op poll would re-freeze a
@@ -1432,11 +1520,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request.request_id,
                 packed_token_ids=tracker.packed_token_ids(),
                 cache_salt=tracker.cache_salt,
-                request_configs={
-                    **(tracker.request_configs or {}),
-                    "lmcache.hint.engine_computed_tokens": num_computed_tokens,
-                },
+                request_configs=self._lookup_request_configs(
+                    tracker, num_computed_tokens
+                ),
                 reserve_last_token=self._reserve_last_token_for_lookup,
+                include_unfull_chunk=self._save_unfull_chunk,
             ):
                 tracker.lookup_started_at = time.monotonic()
             return None, True
@@ -1444,10 +1532,28 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if ret == 0:
             return 0, False
 
-        assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
+        lmcache_tokens_per_chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
+        full_chunk_tokens = ret - ret % lmcache_tokens_per_chunk
+        if ret != full_chunk_tokens and num_computed_tokens > full_chunk_tokens:
+            # vLLM already shares part of the unfull chunk; loading it would
+            # overwrite blocks other requests read, so release it instead.
+            self.scheduler_adapter.free_lookup_locks(
+                packed_token_ids=tracker.packed_token_ids(),
+                start=full_chunk_tokens,
+                end=ret,
+                request_id=request.request_id,
+                cache_salt=tracker.cache_salt,
+                request_configs=tracker.request_configs,
+                include_unfull_chunk=True,
+            )
+            ret = full_chunk_tokens
+            if ret == 0:
+                return 0, False
 
-        tracker.num_stored_tokens = ret
+        tracker.num_stored_tokens = full_chunk_tokens
         tracker.num_lmcache_hit_tokens = ret
+        if ret != full_chunk_tokens:
+            tracker.unfull_chunk_boundaries.add(ret)
 
         need_to_load = max(0, ret - num_computed_tokens)
 
@@ -1502,6 +1608,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
             reserve_last_token=self._reserve_last_token_for_lookup,
+            include_unfull_chunk=self._save_unfull_chunk,
         )
 
     def update_state_after_alloc(
@@ -1589,6 +1696,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     request_id=request.request_id,
                     cache_salt=tracker.cache_salt,
                     request_configs=tracker.request_configs,
+                    # Freeing the whole hit also frees its unfull chunk.
+                    include_unfull_chunk=not condition
+                    and free_end % self.scheduler_adapter.lmcache_tokens_per_chunk != 0,
                     extra_ranges=tuple(tracker.pending_free_ranges),
                 )
                 tracker.pending_free_ranges = []
@@ -1647,6 +1757,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if kv_cache_events and isinstance(kv_cache_events, LMCacheMPKVEvents):
             # One aggregated batch per step keeps the workers' event order.
             self._kv_cache_events.extend(kv_cache_events.aggregate().get_all_events())
+
+        # A request's stores are done once its workers report it sent.
+        for request_id in connector_output.finished_sending or ():
+            self._release_boundary_state_blocks(request_id)
 
         if not self.lazy_offload:
             return
@@ -1857,6 +1971,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     self._lazy_offload_manager.add_store_candidate(r_meta)
                 else:
                     metadata.add_request_metadata(r_meta)
+            if self._save_unfull_chunk:
+                self._add_unfull_chunk_stores(
+                    scheduler_output, request_tracker, metadata
+                )
 
     def _process_cached_requests(
         self,
@@ -1900,6 +2018,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     self._lazy_offload_manager.add_store_candidate(r_meta)
                 else:
                     metadata.add_request_metadata(r_meta)
+            if self._save_unfull_chunk:
+                self._add_unfull_chunk_stores(
+                    scheduler_output, request_tracker, metadata
+                )
 
     def _report_block_allocation_deltas(
         self,
@@ -2013,3 +2135,80 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "[KVConnector] Cleaned up request_tracker for request %s",
                 request_id,
             )
+
+    def _lookup_request_configs(
+        self, tracker: LMCacheMPRequestTracker, num_computed_tokens: int
+    ) -> dict[str, Any]:
+        """Return a lookup's request configs: the request's, plus hints.
+
+        Args:
+            tracker: The request's tracker.
+            num_computed_tokens: vLLM's prefix-cache hit, for the server's KV
+                load policy.
+
+        Returns:
+            The request configs to send with the lookup.
+        """
+        request_configs: dict[str, Any] = {
+            **(tracker.request_configs or {}),
+            "lmcache.hint.engine_computed_tokens": num_computed_tokens,
+        }
+        if self._save_unfull_chunk:
+            # Unfull-chunk boundaries lie on this grid, so the server probes
+            # only it.
+            request_configs["lmcache.hint.unfull_chunk_grid"] = self._unfull_chunk_grid
+        return request_configs
+
+    def _add_unfull_chunk_stores(
+        self,
+        scheduler_output: SchedulerOutput,
+        tracker: LMCacheMPRequestTracker,
+        metadata: LMCacheMPConnectorMetadata,
+    ) -> None:
+        """Queue the stores of the request's newly storable unfull chunks.
+
+        For align-mode Mamba groups, a grid unfull chunk's state block is one
+        vLLM handed over this step; it is not part of the request's block
+        table, so it is pinned until the request's stores finish.
+
+        Args:
+            scheduler_output: This step's scheduler output.
+            tracker: The request's tracker.
+            metadata: The step's connector metadata to add the stores to.
+        """
+        boundary_state_blocks: dict[int, dict[int, int]] = {}
+        pool = self._gpu_block_pool
+        if self._boundary_state_groups:
+            block_state = scheduler_output.kv_connector_block_state
+            # Without the pool a handed-over block cannot be pinned.
+            if block_state is None or pool is None:
+                return
+            for group, block_id, boundary in block_state.boundary_state_offloads.get(
+                tracker.request_id, ()
+            ):
+                boundary_state_blocks.setdefault(boundary, {})[group] = block_id
+        for r_meta, handed_over in LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
+            tracker,
+            self.scheduler_adapter.lmcache_tokens_per_chunk,
+            self._group_tokens_per_block,
+            self._unfull_chunk_grid,
+            boundary_state_blocks,
+            self._boundary_state_groups,
+        ):
+            if pool is not None and handed_over:
+                pool.touch([pool.blocks[block_id] for block_id in handed_over])
+                self._pinned_boundary_state_blocks.setdefault(
+                    tracker.request_id, []
+                ).extend(handed_over)
+            metadata.add_request_metadata(r_meta)
+
+    def _release_boundary_state_blocks(self, request_id: str) -> None:
+        """Unpin the boundary-state blocks a request's unfull-chunk stores read.
+
+        Args:
+            request_id: The request whose stores finished.
+        """
+        block_ids = self._pinned_boundary_state_blocks.pop(request_id, [])
+        if block_ids and self._gpu_block_pool is not None:
+            pool = self._gpu_block_pool
+            pool.free_blocks([pool.blocks[block_id] for block_id in block_ids])

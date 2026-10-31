@@ -44,6 +44,9 @@ class _LayoutDescEntry:
     order. Defaults to a single full-attention group."""
     group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
     """Per-group layout descriptors, or ``None`` if all share ``layout_desc``."""
+    unfull_group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
+    """Per-group layouts of unfull-chunk objects, or ``None`` if they match
+    ``group_layout_descs``."""
 
 
 class LayoutDescRegistry:
@@ -68,6 +71,7 @@ class LayoutDescRegistry:
         layout_desc: MemoryLayoutDesc,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
+        unfull_group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -84,6 +88,9 @@ class LayoutDescRegistry:
                 (each group is a separate keyed allocation); ``None`` derives
                 one entry per object group in ``attn_desc``, all sharing
                 ``layout_desc``.
+            unfull_group_layout_descs: Maps object_group_id to the layout of
+                that group's unfull-chunk objects; ``None`` when they use
+                ``group_layout_descs``.
         """
         key = (model_name, world_size)
         attn_desc = replace(attn_desc, world_size=world_size)
@@ -99,12 +106,14 @@ class LayoutDescRegistry:
                     ref_count=1,
                     attn_desc=attn_desc,
                     group_layout_descs=group_layout_descs,
+                    unfull_group_layout_descs=unfull_group_layout_descs,
                 )
                 return
 
             entry.layout_desc = layout_desc
             entry.attn_desc = attn_desc
             entry.group_layout_descs = group_layout_descs
+            entry.unfull_group_layout_descs = unfull_group_layout_descs
             entry.ref_count += 1
 
     def unregister(self, model_name: str, world_size: int) -> None:
@@ -154,6 +163,25 @@ class LayoutDescRegistry:
             if entry is None:
                 return None
             return entry.group_layout_descs
+
+    def find_unfull_group_layout_descs(
+        self, model_name: str, world_size: int
+    ) -> dict[int, MemoryLayoutDesc] | None:
+        """Look up per-object-group layouts of unfull-chunk objects.
+
+        Args:
+            model_name: The model name.
+            world_size: The world size.
+
+        Returns:
+            The registered unfull-chunk layouts, the per-group layouts when
+            none were registered, or ``None`` if the pair is not registered.
+        """
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None:
+                return None
+            return entry.unfull_group_layout_descs or entry.group_layout_descs
 
     def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
         """Look up the attention-window descriptor for a pair.
@@ -403,7 +431,9 @@ class MPCacheServerContext:
         """Resolve per-object-group object keys from an IPC cache key.
 
         Uses the session manager to track token state and the token hasher
-        to compute chunk hashes for the requested range.
+        to compute chunk hashes for the requested range. A key addressing an
+        unfull chunk (see :meth:`IPCCacheServerKey.has_unfull_chunk`) gets
+        the unfull chunk's key as its last entry.
 
         Args:
             key: IPC cache key describing model/session/token range.
@@ -420,9 +450,13 @@ class MPCacheServerContext:
         session.set_tokens(key.token_bytes)
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
-        chunk_hashes = [
-            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
-        ]
+        if key.has_unfull_chunk(self.chunk_size):
+            full_end = key.end - key.end % self.chunk_size
+            hashes = session.get_hashes(key.start, full_end)
+            hashes.append(session.get_unfull_chunk_hash(key.end))
+        else:
+            hashes = session.get_hashes(key.start, key.end)
+        chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in hashes]
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
         return ipc_key_to_object_keys(key, chunk_hashes, object_group_ids)
