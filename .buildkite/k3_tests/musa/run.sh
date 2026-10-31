@@ -286,7 +286,7 @@ run_pytest "${PYTEST_ARGS[@]}" \
     tests/v1/test_musa_support.py \
     tests/inprocess/v1/test_gpu_connector_factory.py \
     tests/inprocess/v1/test_musa_connector.py \
-    tests/v1/test_musa_native.py \
+    tests/v1/platform/devices/musa/test_musa_native.py \
     tests/v1/platform/devices/musa/test_musa_pin_memory.py \
     tests/v1/platform/devices/musa/test_musa_staging_copy.py \
     tests/inprocess/v1/platform/devices/musa/test_musa_staging_copy.py \

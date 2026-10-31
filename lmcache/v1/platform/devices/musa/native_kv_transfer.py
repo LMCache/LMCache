@@ -8,17 +8,26 @@ available, so callers can keep using the torch implementation as the fallback.
 
 # Standard
 from importlib import import_module
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import os
 
 # Third Party
 import torch
 
 # First Party
+from lmcache.lmcache_native import TransferDirection
 from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.platform.devices.musa.format_capabilities import (
+    is_supported_musa_mp_block_transfer_spec,
     is_supported_musa_native_block_transfer_spec,
 )
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.platform.torch_ops._kv_format import _BLOCKED_SCALE_BYTES
+from lmcache.v1.platform.torch_ops.mp_mem_kernels import _valid_block_range_indices
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
 
 ENV_MUSA_NATIVE_KV_TRANSFER = "LMCACHE_MUSA_NATIVE_KV_TRANSFER"
 NATIVE_LMCACHE_KV_TRANSFER_ABI_VERSION = 1
@@ -82,6 +91,141 @@ def _native_tensors_ready(
     )
 
 
+def _try_strided_native_block_transfer(
+    *,
+    paged_layers: object,
+    object_tensors: list[torch.Tensor],
+    block_ids: torch.Tensor | list[int],
+    direction: TransferDirection,
+    shape_desc: PageBufferShapeDesc,
+    format_spec: "type[KVFormatSpec]",
+    lmcache_chunk_size: int,
+    skip_prefix_n_blocks: int,
+) -> bool | None:
+    """Try the stride-aware musa_aiter block-transfer kernel.
+
+    Returns ``True``/``False`` when the strided path handled (or failed) the
+    transfer, or ``None`` when the operands are not a candidate for it so the
+    caller should continue with the legacy qualification chain.
+
+    The kernel addresses raw bytes: a contiguous staging object
+    ``[NL, staging_tokens, row_bytes]`` plus per-layer padded paged views.
+    ``mode 0`` covers plain per-layer MLA ``[NB, BS, HS]`` views; ``mode 1``
+    covers blocked-scale pages (per block: all tokens' value bytes, then all
+    tokens' scale bytes), with one fp32 scale per token and the remaining row
+    bytes as values. Both accept arbitrary physical block strides, which the
+    legacy native ABI cannot express.
+    """
+    is_d2h = int(direction) == _TRANSFER_DIRECTION_D2H
+    if int(direction) not in (_TRANSFER_DIRECTION_H2D, _TRANSFER_DIRECTION_D2H):
+        return None
+    if skip_prefix_n_blocks < 0 or (is_d2h and skip_prefix_n_blocks != 0):
+        return None
+    if not format_spec.is_mla or not is_supported_musa_mp_block_transfer_spec(
+        format_spec
+    ):
+        return None
+    layer_tensors = _as_tensor_list(paged_layers)
+    if layer_tensors is None:
+        return None
+    module = _native_module_if_ready()
+    if module is None or not callable(
+        getattr(module, "lmcache_kv_strided_block_transfer", None)
+    ):
+        return None
+
+    device = layer_tensors[0].device
+    if device.type != "musa":
+        return None
+    if any(tensor.device != device for tensor in layer_tensors) or any(
+        obj.device != device for obj in object_tensors
+    ):
+        return None
+    num_layers = len(layer_tensors)
+    if num_layers > 128:
+        return None
+
+    block_size = int(shape_desc.bs)
+    if block_size <= 0 or lmcache_chunk_size % block_size != 0:
+        return None
+    blocks_per_object = lmcache_chunk_size // block_size
+
+    # Geometry comes from the live tensors so padding stays authoritative.
+    elem = layer_tensors[0].element_size()
+    row_elems = int(shape_desc.nh) * int(shape_desc.hs)
+    row_bytes = row_elems * elem
+    block_stride = int(layer_tensors[0].stride(0))
+    if row_bytes <= 0 or row_bytes % 4 or block_stride < block_size * row_elems:
+        return None
+    if any(
+        tensor.ndim != 3
+        or tensor.shape[1:] != (block_size, row_elems)
+        or tensor.stride() != (block_stride, row_elems, 1)
+        or tensor.element_size() != elem
+        for tensor in layer_tensors
+    ):
+        return None
+    if any(
+        obj.ndim != 3
+        or obj.shape[0] != num_layers
+        or obj.shape[2] != row_elems
+        or obj.element_size() != elem
+        or not obj.is_contiguous()
+        for obj in object_tensors
+    ):
+        return None
+    is_blocked = format_spec.requires_blocked_scale_repacking
+    value_bytes = scale_bytes = 0
+    if is_blocked:
+        scale_bytes = _BLOCKED_SCALE_BYTES
+        value_bytes = row_bytes - scale_bytes
+        if elem != 1 or value_bytes <= 0:
+            return None
+
+    block_ids_dev = torch.as_tensor(
+        block_ids, dtype=torch.int64, device=device
+    ).contiguous()
+    if block_ids_dev.ndim != 1:
+        return None
+    transfers: list[tuple[torch.Tensor, int, int, int]] = []
+    for object_idx, obj in enumerate(object_tensors):
+        valid = _valid_block_range_indices(
+            object_idx,
+            block_ids_dev.numel(),
+            blocks_per_object,
+            block_size,
+            skip_prefix_n_blocks,
+        )
+        if valid is None:
+            continue
+        start, end, offset = valid
+        if offset + (end - start) * block_size > obj.shape[1]:
+            return False
+        transfers.append((obj, start, end - start, offset))
+
+    paged_ptrs = [tensor.data_ptr() for tensor in layer_tensors]
+    for obj, start, count, offset in transfers:
+        if not module.lmcache_kv_strided_block_transfer(
+            obj,
+            paged_ptrs,
+            block_ids_dev,
+            int(direction),
+            num_layers,
+            start,
+            count,
+            offset,
+            obj.shape[1],
+            block_size,
+            row_bytes,
+            block_stride * elem,
+            int(is_blocked),
+            value_bytes,
+            scale_bytes,
+        ):
+            return False
+    return True
+
+
 def try_native_multi_layer_block_kv_transfer(
     *,
     paged_layers: Any,
@@ -116,6 +260,10 @@ def try_native_multi_layer_block_kv_transfer(
         torch fallback. ``False`` when the transfer is unsupported, disabled,
         unavailable, or rejected by the native module.
 
+    Raises:
+        RuntimeError: If the strided native implementation raises during dispatch.
+            Unexpected native errors propagate rather than retrying the transfer.
+
     Notes:
         Callers must stage lazy allocator-backed memory objects through
         ``lmcache_memcpy_async_h2d`` or ``lmcache_memcpy_async_d2h`` before
@@ -128,6 +276,20 @@ def try_native_multi_layer_block_kv_transfer(
     if not object_tensors or lmcache_chunk_size <= 0:
         return False
     format_spec = get_spec_class(engine_kv_format)
+    # The stride-aware kernel accepts padded per-layer paged views and
+    # blocked-scale MLA pages that the legacy ABI cannot address.
+    result = _try_strided_native_block_transfer(
+        paged_layers=paged_layers,
+        object_tensors=object_tensors,
+        block_ids=block_ids,
+        direction=direction,
+        shape_desc=shape_desc,
+        format_spec=format_spec,
+        lmcache_chunk_size=lmcache_chunk_size,
+        skip_prefix_n_blocks=skip_prefix_n_blocks,
+    )
+    if result is not None:
+        return result
     if not is_supported_musa_native_block_transfer_spec(format_spec):
         return False
     if not _is_musa_block_transfer_candidate(paged_layers):
@@ -141,7 +303,20 @@ def try_native_multi_layer_block_kv_transfer(
         return False
 
     block_size = int(getattr(shape_desc, "bs", 0))
+    block_stride_elems = int(getattr(shape_desc, "block_stride_elems", 0))
     if block_size <= 0 or lmcache_chunk_size % block_size != 0:
+        return False
+    # The native ABI addresses blocks as ``block_id * block_size`` and has no
+    # physical-stride argument.  A DSV4 page may expose the same logical
+    # [NB, BS, HS] view with padding between blocks; keep that layout on the
+    # stride-aware Torch fallback even if the view happens to pass the generic
+    # format checks.
+    expected_block_stride = (
+        block_size
+        * int(getattr(shape_desc, "nh", 1))
+        * int(getattr(shape_desc, "hs", 0))
+    )
+    if block_stride_elems > 0 and block_stride_elems != expected_block_stride:
         return False
     blocks_per_object = lmcache_chunk_size // block_size
     block_id_list = _to_block_id_list(block_ids)

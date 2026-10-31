@@ -200,6 +200,101 @@ def test_musa_block_transfer_fallback_mla_d2h_and_h2d() -> None:
         assert torch.count_nonzero(target[layer_idx][3]) == 0
 
 
+def test_musa_block_transfer_fallback_blocked_scale_d2h_and_h2d() -> None:
+    """The MUSA adapter repacks blocked-scale bytes through its CPU fallback."""
+    source = [torch.arange(2 * 132, dtype=torch.uint8).view(1, 2, 132)]
+    chunk = torch.empty(1, 2, 132, dtype=torch.uint8)
+    shape_desc = _shape_desc(
+        num_layers=1,
+        num_blocks=1,
+        block_size=2,
+        num_heads=1,
+        head_size=132,
+        kv_size=1,
+        dtype=torch.uint8,
+    )
+
+    target = _round_trip(
+        source,
+        chunk,
+        torch.tensor([0], dtype=torch.int64),
+        torch.device("cpu"),
+        shape_desc,
+        2,
+        EngineKVFormat.NL_X_NB_BSV_BSS,
+    )
+
+    raw = source[0].view(-1)
+    assert torch.equal(chunk[0, :, :128], raw[:256].view(2, 128))
+    assert torch.equal(chunk[0, :, 128:], raw[256:].view(2, 4))
+    assert torch.equal(target[0], source[0])
+
+
+@pytest.mark.skipif(
+    not _using_python_fallback(),
+    reason="CPU fallback correctness check needs the Python fallback backend",
+)
+def test_musa_block_transfer_fallback_mla_d2h_handles_padded_layers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fallback MLA D2H gathers selected blocks from padded layer views."""
+    num_blocks = 4
+    block_size = 2
+    head_size = 4
+    block_stride = block_size * head_size + 3
+    storage = torch.arange(
+        num_blocks * block_stride,
+        dtype=torch.float32,
+    ).reshape(num_blocks, block_stride)
+    source = [
+        storage.as_strided(
+            (num_blocks, block_size, head_size),
+            (block_stride, head_size, 1),
+        )
+    ]
+    block_ids = torch.tensor([1, 3], dtype=torch.int64)
+    chunk = torch.zeros(1, block_ids.numel() * block_size, head_size)
+    shape_desc = _shape_desc(
+        num_layers=1,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_heads=1,
+        head_size=head_size,
+        kv_size=1,
+        dtype=source[0].dtype,
+    )
+    shape_desc.block_stride_elems = block_stride
+
+    real_index_select = torch.index_select
+
+    def reject_noncontiguous_out(
+        input_tensor: torch.Tensor,
+        dim: int,
+        index: torch.Tensor,
+        *,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if not input_tensor.is_contiguous():
+            raise AssertionError("padded source must bypass index_select")
+        return real_index_select(input_tensor, dim, index, out=out)
+
+    monkeypatch.setattr(torch, "index_select", reject_noncontiguous_out)
+
+    device_ops.multi_layer_block_kv_transfer(
+        source,
+        [chunk],
+        block_ids,
+        torch.device("cpu"),
+        lmcache_native.TransferDirection.D2H,
+        shape_desc,
+        chunk.shape[1],
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
+        0,
+    )
+
+    assert torch.equal(chunk[0], source[0][block_ids].reshape_as(chunk[0]))
+
+
 @pytest.mark.skipif(
     not _using_python_fallback(),
     reason="CPU fallback stress check needs the Python fallback backend",
@@ -433,7 +528,7 @@ def test_musa_cache_context_sglang_mha_operand_round_trip() -> None:
         wrappers,
         lmcache_tokens_per_chunk=block_size,
         engine_type=EngineType.SGLANG,
-        layout_hints={"tokens_per_block": block_size},
+        layout_hints={"tokens_per_block": block_size, "kv_list_layout": "k_v"},
         engine_group_infos=[],
     )
     try:

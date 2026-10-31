@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+"""MUSA native KV-transfer dispatch contracts without a hardware dependency."""
 
 # Standard
+from functools import partial
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 import sys
@@ -46,6 +48,130 @@ def _make_block_shape_desc(
     shape_desc.element_size = torch.empty((), dtype=torch.float32).element_size()
     shape_desc.kv_size = 2
     return shape_desc
+
+
+class _MusaTensor(torch.Tensor):
+    """CPU storage with MUSA device metadata for native dispatch tests."""
+
+    @property
+    def device(self) -> torch.device:
+        return cast(torch.device, SimpleNamespace(type="musa", index=0))
+
+
+@pytest.mark.parametrize(("blocked", "width"), [(False, 16), (True, 12), (True, 132)])
+@pytest.mark.parametrize(("direction", "skip"), [(0, 0), (0, 1), (0, 2), (1, 0)])
+@pytest.mark.parametrize(
+    "result",
+    ["success", "decline", "error", "bad_abi", "missing", "short", "wrong_width"],
+)
+@pytest.mark.parametrize("list_ids", [False, True])
+def test_strided_native_block_transfer_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    blocked: bool,
+    width: int,
+    direction: int,
+    skip: int,
+    result: str,
+    list_ids: bool,
+) -> None:
+    """Dispatch padded pages with exact byte geometry and visible failures."""
+    bs = 4
+    dtype = torch.uint8 if blocked else torch.float32
+    stride = bs * width + 8
+    pages = [
+        torch.empty(6, stride, dtype=dtype)
+        .as_strided((6, bs, width), (stride, width, 1))
+        .as_subclass(_MusaTensor)
+        for _ in range(2)
+    ]
+    objects = [
+        torch.empty(2, tokens, width, dtype=dtype).as_subclass(_MusaTensor)
+        for tokens in (8, 4)
+    ]
+    if result in ("short", "wrong_width"):
+        shape = (2, 3, width) if result == "short" else (2, 4, width + 4)
+        objects[1] = torch.empty(shape, dtype=dtype).as_subclass(_MusaTensor)
+    ids = torch.tensor([4, 0, 1, 0, 5, 0])[::2].as_subclass(_MusaTensor)
+    sd = _make_block_shape_desc(
+        num_blocks=6, block_size=bs, num_heads=1, head_size=width
+    )
+    sd.block_stride_elems = stride
+    sd.kv_size, sd.dtype, sd.element_size = 1, dtype, pages[0].element_size()
+    calls: list[tuple[object, ...]] = []
+
+    def transfer(*args: object) -> bool:
+        calls.append(args)
+        if result == "error":
+            raise RuntimeError("native launch failed")
+        return result != "decline"
+
+    module = _make_native_module()
+    if result != "missing":
+        module.lmcache_kv_strided_block_transfer = transfer  # type: ignore[attr-defined]
+    if result == "bad_abi":
+        module.native_lmcache_kv_transfer_abi_version = lambda: 999  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "musa_aiter", module)
+    monkeypatch.setenv("LMCACHE_MUSA_NATIVE_KV_TRANSFER", "1")
+    as_tensor = torch.as_tensor
+
+    def device_ids(
+        data: object, *, dtype: torch.dtype, device: torch.device
+    ) -> torch.Tensor:
+        assert device.type == "musa"
+        return as_tensor(data, dtype=dtype).as_subclass(_MusaTensor)
+
+    monkeypatch.setattr(torch, "as_tensor", device_ids)
+    fmt = (
+        lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS
+        if blocked
+        else lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
+    )
+    invoke = partial(
+        musa_native.try_native_multi_layer_block_kv_transfer,
+        paged_layers=pages,
+        object_tensors=objects,
+        block_ids=ids.tolist() if list_ids else ids,
+        direction=direction,
+        shape_desc=sd,
+        lmcache_chunk_size=8,
+        engine_kv_format=fmt,
+        skip_prefix_n_blocks=skip,
+    )
+    if result == "error":
+        with pytest.raises(RuntimeError, match="native launch failed"):
+            invoke()
+        return
+    assert invoke() is (result == "success")
+    if result in ("bad_abi", "missing", "short", "wrong_width"):
+        assert calls == []
+        return
+    ranges = [(0, skip, 2 - skip, skip * bs)] if skip < 2 else []
+    ranges.append((1, 2, 1, 0))
+    if result == "decline":
+        ranges = ranges[:1]
+    assert len(calls) == len(ranges)
+    for args, (obj, start, count, offset) in zip(calls, ranges, strict=True):
+        assert args[0] is objects[obj]
+        assert args[1] == [page.data_ptr() for page in pages]
+        actual_ids = cast(torch.Tensor, args[2])
+        assert actual_ids.is_contiguous()
+        assert actual_ids.dtype == torch.int64
+        assert torch.equal(actual_ids, ids)
+        elem = pages[0].element_size()
+        assert args[3:] == (
+            direction,
+            2,
+            start,
+            count,
+            offset,
+            objects[obj].shape[1],
+            bs,
+            width * elem,
+            stride * elem,
+            int(blocked),
+            width - 4 if blocked else 0,
+            4 if blocked else 0,
+        )
 
 
 def test_native_transfer_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:

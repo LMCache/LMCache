@@ -396,6 +396,59 @@ def test_chunked_prefill_stores_and_completion(
     assert not any(worker.get_finished({"request"}))
 
 
+def test_mla_non_writer_wait_for_save_does_not_create_event(
+    mock_io: SimpleNamespace,
+    lazy_offload: bool,
+) -> None:
+    """Non-writers avoid IPC events but still report lazy store completion."""
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+        )
+    )
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    scheduler.bind_gpu_block_pool(mock_io.pool)
+    worker.register_kv_caches(mock_io.kv_caches)
+    worker.worker_adapter.parallel_strategy = adapter_mod.ParallelStrategy(
+        mla_only=True,
+        vllm_world_size=8,
+        vllm_worker_id=1,
+        tp_size=8,
+        pp_size=1,
+        n_servers=1,
+    )
+    assert worker.worker_adapter.is_kv_writer is False
+    worker.worker_adapter.lazy_offload = lazy_offload
+
+    try:
+        request = _request()
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+        scheduler.update_state_after_alloc(
+            request,
+            MagicMock(get_block_ids=lambda: ([1],)),
+            0,
+        )
+        metadata = scheduler.build_connector_meta(
+            _schedule(num_tokens=4, block_ids=([1],), new=True)
+        )
+        assert len(metadata.requests) == 1
+
+        worker.bind_connector_metadata(metadata)
+        mock_io.transfer.create_recorded_event.reset_mock()
+        worker.wait_for_save()
+
+        mock_io.transfer.create_recorded_event.assert_not_called()
+        mock_io.transfer.submit_store.assert_not_called()
+        assert worker.worker_adapter.get_completed_store_requests() == (
+            {"request": 1} if lazy_offload else None
+        )
+    finally:
+        worker.shutdown()
+        scheduler.shutdown()
+
+
 @pytest.mark.parametrize("retrieve_success", [False, True])
 def test_lookup_retrieve_and_cleanup(
     connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
