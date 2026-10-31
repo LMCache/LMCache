@@ -87,13 +87,21 @@ reserves temporary buffers in that L1.
 
 ### L1 tags
 
-All L1 managers are `LOCAL`. The segment names the primary pool:
+L1 managers that own payload are `LOCAL`. The segment names the primary pool:
 
 | L1 | Tags |
 |---|---|
 | `DRAM` | `(DRAM, LOCAL)` |
 | `DEVDAX` (pure Device-DAX) | `(CXL, LOCAL)` |
 | `GDS` slab | `(GDS, LOCAL)` |
+| shadow (paired with a local L1) | the paired L1's segment, `REMOTE` |
+
+A shadow L1 (`ShadowL1Manager`) holds only borrowed views of bytes a peer
+owns, so it is `REMOTE`. That tag binds lending adapters to it through L1
+affinity, and keeps it out of P2P serving, which resolves a `LOCAL` L1: a
+node never re-exports a view it borrowed. An L1 config with `shadow` set
+(`--l1-shadow`) gets one; under `--p2p-load-mode gdr` the DRAM L1 needs it,
+giving `(DRAM, REMOTE)`.
 
 ### L2 own tags
 
@@ -108,6 +116,7 @@ reporting `REMOTE`, because a shared filesystem is visible to every peer.
 | `nixl_store`, `nixl_store_dynamic`, `nixl_native` | `POSIX`, `GDS`, `GDS_MT` backends: `(STORAGE, LOCAL)`; `REMOTE` when shared; any other backend: `(STORAGE, REMOTE)`. GDS backends still load through host L1 buffers, so they are plain storage. |
 | `mock` | `(STORAGE, LOCAL)` |
 | `p2p` | `(DRAM, REMOTE)` |
+| `p2p_gdr` | `(DRAM, REMOTE)`: a peer's DRAM L1, borrowed and read straight into GPU memory |
 | `s3`, `resp`, `valkey`, `mooncake_store`, `aerospike`, `bigtable`, `hfbucket`, `hf3fs`, `sagemaker-hyperpod`, `native_plugin` | `(STORAGE, REMOTE)` |
 | `plugin` | declared by the user's adapter class |
 | `fault_inject`, serde wrapper | forwarded from the inner adapter |
@@ -143,8 +152,12 @@ Consequences:
   server, objects the write policy places in Device-DAX are not stored to L2.
 - With several DRAM L1s, every adapter binds to the first one. Choosing among
   them (e.g. by NUMA node) would need the typed field described above.
-- A future GDS/GDR adapter overrides `get_wanted_l1_memory_tags()`, for
-  example to `((VRAM, DUMMY),)`, once a dummy L1 exists.
+- `p2p_gdr` overrides the default with `((DRAM, REMOTE),)`: it lends remote
+  handles instead of copying, so it binds to the shadow L1 paired with the
+  DRAM L1 and never to an L1 that owns payload. The prefetch controller
+  borrows exactly when an adapter's L1 is a shadow L1. The reserved `VRAM`
+  segment and `DUMMY` residency remain unused: borrowed objects are indexed
+  by the paired medium's shadow, not by a GPU-side L1.
 
 ## Addressing an L1
 

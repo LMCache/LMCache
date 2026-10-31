@@ -21,6 +21,49 @@ the full system context.
 | `TransferChannelContext` / `TransferChannelClient` | translating local L1 addresses + reading the peer's L1 |
 | `PeriodicEventNotifier` | pulsing the lookup / load event fds (see below) |
 
+## Class layout
+
+`PeerL2AdapterBase` owns what any adapter reading one peer needs: the
+lookup/unlock RPC client, the event fds, the no-op store path, and the close
+sequence. `P2PL2Adapter` adds the part specific to copying: importing the
+peer's registered region over the transfer channel and loading from it.
+`LendingPeerL2AdapterBase` adds the part specific to borrowing (keeping the
+owner's read lock as a lease); see
+[`gdr_peer_l2_adapter.md`](gdr_peer_l2_adapter.md).
+
+```
+PeerL2AdapterBase             lookup/unlock RPCs, event fds, no-op stores, close
+├── P2PL2Adapter              import the peer region; RDMA load over the transfer channel
+└── LendingPeerL2AdapterBase  lend lookup hits as leased borrowed objects
+    └── GdrPeerL2Adapter      read them straight into GPU memory at retrieve time
+```
+
+A subclass implements two lifecycle hooks and one lookup hook, all protected
+(controllers never call them):
+
+- `_register_peer_region()` runs once at construction, after the RPC client and
+  event fds exist. If it raises, everything acquired before it (RPC client,
+  event fds, notifier registrations) is released.
+- `_unregister_peer_region()` runs from `close()` after the controllers drain
+  reads. If it raises, the adapter stays open with its RPC client, so outstanding
+  unlocks still reach the peer and `close()` can be retried.
+- `_process_lookup_result(task_id, keys, addresses, started_at)` turns a
+  completed lookup into a hit bitmap; `P2PL2Adapter` caches the addresses for
+  the following load, a lender keeps them per task and bounds the owner's TTL
+  from `started_at` (taken just before the lookup RPC was sent).
+
+Because the region hook runs inside the base constructor, a subclass sets every
+attribute its hook needs *before* calling `super().__init__()` and acquires
+nothing that needs releasing after it returns: a failure in the subclass after
+that point is not unwound by the base. `P2PL2Adapter` creates its task dicts
+first and calls the base constructor last; `LendingPeerL2AdapterBase` sets up
+its lending state and starts its unlock worker first, and stops the worker if
+the base constructor fails.
+
+The split lets a second way of reading a peer reuse the RPC control plane
+without copying it. `submit_unlock(keys, wait=True)` waits for the owner's
+acknowledgment; lenders use it so peer removal drains their unlocks.
+
 ## Lifecycle
 
 ```
@@ -32,7 +75,8 @@ lookup-and-lock  → query (addresses)  → load (RDMA read)  → unlock
    returns a task id.
 2. **query** — poll `P2P_QUERY_LOOKUP_RESULTS(task_id)`; once ready the peer
    returns one `TransferChannelAddress` per key (invalid offset for keys it did
-   not lock). The adapter stashes the valid addresses keyed by `ObjectKey` and
+   not lock), each carrying the owner's read-lock TTL (`read_ttl_seconds`).
+   The adapter stashes the valid addresses keyed by `ObjectKey` and
    reports a found/not-found `Bitmap` to the prefetch controller.
 3. **load** — for the found keys, translate the local destination objects'
    `(shm_offset, shm_byte_length)` into transfer-channel addresses, pair them
@@ -107,9 +151,22 @@ storage manager owns its lifecycle. The config carries the peer's two URLs:
 
 ## close()
 
-Sets a closed flag (later submits are inert), unregisters the lookup/load fds
-from the periodic notifier, removes the transfer-channel client from the
-`TransferChannelContext` via `remove_transfer_channel_client(peer_url)` (which
-closes it and releases its transport handles), closes the request client, and
-closes the three event notifiers. `close()` is idempotent: the closed flag guards
-against a second teardown of these shared resources.
+First calls `_unregister_peer_region()`, which for `P2PL2Adapter` removes the
+transfer-channel client from the `TransferChannelContext` via
+`remove_transfer_channel_client(peer_url)` (closing it and releasing its
+transport handles). Only if that succeeds does it set the closed flag (later
+submits are inert), unregister the lookup/load fds from the periodic notifier,
+close the request client, and close the three event notifiers. A failed
+teardown therefore keeps the unlock connection and can be retried, and
+`StorageManager.delete_l2_adapter` keeps such an adapter registered for that
+retry while treating it as inactive (it leaves `l2_adapters()`, status,
+touches and the capacity topology until the retry succeeds). After a
+successful close, `close()` is idempotent; a failure while closing the RPC
+client or fds after the region was released is logged by the caller and not
+retried.
+
+For `P2PL2Adapter` itself the retry path is a contract, not an expected event:
+the nixl context's `remove_transfer_channel_client` pops the client before
+closing it and swallows close errors, so it does not raise in practice. The
+path matters for adapters whose region teardown can legitimately refuse, such
+as lenders that still have borrowed objects outstanding.

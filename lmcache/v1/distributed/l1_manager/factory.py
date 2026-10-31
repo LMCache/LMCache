@@ -7,9 +7,11 @@ from collections.abc import Sequence
 # First Party
 from lmcache.v1.distributed.config import L1ManagerConfig
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
+from lmcache.v1.distributed.l1_manager.base import BaseL1Manager
 from lmcache.v1.distributed.l1_manager.devdax import DevDaxL1Manager
 from lmcache.v1.distributed.l1_manager.dram import DramL1Manager
 from lmcache.v1.distributed.l1_manager.gds import GdsL1Manager
+from lmcache.v1.distributed.l1_manager.shadow import ShadowL1Manager
 
 
 def create_l1_manager(config: L1ManagerConfig) -> L1ManagerInterface:
@@ -39,11 +41,15 @@ def create_l1_manager(config: L1ManagerConfig) -> L1ManagerInterface:
 def create_l1_managers(configs: Sequence[L1ManagerConfig]) -> list[L1ManagerInterface]:
     """Create one L1 manager per configuration, in placement order.
 
+    Each configuration with ``shadow`` set also gets a :class:`ShadowL1Manager`
+    paired with its manager, appended after the configured managers, which
+    indexes the views peers lend of that medium.
+
     Args:
         configs: L1 settings in write-placement order.
 
     Returns:
-        The open managers, in the order of ``configs``.
+        The open managers, in the order of ``configs``, then the shadow L1s.
 
     Raises:
         ValueError: If a Device-DAX configuration maps a device range an
@@ -68,6 +74,11 @@ def create_l1_managers(configs: Sequence[L1ManagerConfig]) -> list[L1ManagerInte
             ):
                 raise ValueError(f"Device-DAX path already owned by an L1: {path}")
             created.append(create_l1_manager(config))
+        created.extend(
+            ShadowL1Manager.next_to(manager)
+            for config, manager in zip(configs, list(created), strict=True)
+            if config.shadow and isinstance(manager, BaseL1Manager)
+        )
     except Exception:
         for manager in reversed(created):
             manager.close()

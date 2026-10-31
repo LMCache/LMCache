@@ -21,6 +21,9 @@ from lmcache.v1.distributed.transfer_channel.api import (
     TransferChannelReadResult,
 )
 
+L1_REGION = 0
+"""Region id of the L1 buffer every context registers at construction."""
+
 
 class TransferChannelServer(metaclass=abc.ABCMeta):
     """Listens for incoming client connections and exchanges transfer metadata."""
@@ -62,13 +65,18 @@ class TransferChannelClient(metaclass=abc.ABCMeta):
         self,
         local_addresses: list[TransferChannelAddress],
         remote_addresses: list[TransferChannelAddress],
+        *,
+        local_region: int = L1_REGION,
     ) -> int:
         """Read data from the remote addresses into the local addresses.
 
         Args:
-            local_addresses: addresses in the local L1 buffer.
+            local_addresses: addresses in the local region ``local_region``.
             remote_addresses: addresses in the remote peer's L1 buffer.
                 Must have the same length as ``local_addresses``.
+            local_region: The local region the destinations belong to: the
+                L1 buffer by default, or a region returned by
+                ``TransferChannelContext.register_device_region``.
 
         Returns:
             A task id, to be passed to ``query_read_status``.
@@ -154,6 +162,50 @@ class TransferChannelContext(metaclass=abc.ABCMeta):
                 ``lmcache_addresses``.
         """
         raise NotImplementedError
+
+    def supports_device_regions(self) -> bool:
+        """Return whether :meth:`register_device_region` is implemented.
+
+        Lets orchestration refuse a deployment that needs reads into device
+        memory before any buffer exists to register.
+        """
+        return False
+
+    def register_device_region(self, ptr: int, size: int, device_index: int) -> int:
+        """Register a device-memory buffer as an additional local read target.
+
+        Peers never read from it; it only receives reads this context submits
+        with ``submit_read(..., local_region=<id>)``, so nothing is exchanged
+        with peers. Offsets within the region follow the L1 buffer's
+        alignment contract. Implementations that cannot read into device
+        memory keep this default.
+
+        Args:
+            ptr: Device address of the buffer.
+            size: Size in bytes; a multiple of the L1 alignment.
+            device_index: Ordinal of the device holding the buffer.
+
+        Returns:
+            The region id to pass as ``local_region``.
+
+        Raises:
+            ValueError: If ``ptr`` or ``size`` is not aligned.
+            NotImplementedError: If the transport cannot read into device
+                memory.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot read into device memory; GPU-direct "
+            "borrowing needs a transfer engine that registers device regions"
+        )
+
+    def unregister_device_region(self, region_id: int) -> None:  # noqa: B027
+        """Release a region from ``register_device_region``.
+
+        Reads into the region must have finished. Unknown ids are ignored.
+
+        Args:
+            region_id: Id returned by ``register_device_region``.
+        """
 
     @abc.abstractmethod
     def get_num_connected_clients(self) -> int:

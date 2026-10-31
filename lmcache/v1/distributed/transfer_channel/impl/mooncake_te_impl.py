@@ -14,6 +14,7 @@ import zmq
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.transfer_channel.abstract import (
+    L1_REGION,
     TransferChannelClient,
     TransferChannelContext,
     TransferChannelServer,
@@ -109,16 +110,27 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
         self,
         local_addresses: list[TransferChannelAddress],
         remote_addresses: list[TransferChannelAddress],
+        *,
+        local_region: int = L1_REGION,
     ) -> int:
         """Submit a read transfer from the remote addresses to the local addresses.
 
         Args:
             local_addresses: The local addresses to read into.
             remote_addresses: The remote addresses to read from.
+            local_region: Only the L1 buffer is supported.
 
         Returns:
             A unique task ID for this transfer.
+
+        Raises:
+            NotImplementedError: If ``local_region`` is not the L1 buffer.
         """
+        if local_region != L1_REGION:
+            raise NotImplementedError(
+                "mooncake_te reads only into the L1 buffer; device regions are "
+                "not supported"
+            )
         if len(local_addresses) != len(remote_addresses):
             raise ValueError(
                 "local_addresses and remote_addresses must have equal length "

@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     # First Party
+    from lmcache.v1.gpu_connector.gdr_context import GdrLandingRing
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
     from lmcache.v1.memory_management import MemoryObj
     from lmcache.v1.platform.ops_types import PageBufferShapeDesc
@@ -153,6 +154,12 @@ class BaseCacheContext(ABC):
         """Returns a flat uint8 temp-buffer view for a (batch, object-group)
         pair."""
         ...
+
+    @property
+    def gdr_landing(self) -> "GdrLandingRing | None":
+        """The GPU landing ring borrowed remote objects are read into, or
+        None when the platform or deployment has none."""
+        return None
 
     @abstractmethod
     def get_kernel_group_shape_dtype(

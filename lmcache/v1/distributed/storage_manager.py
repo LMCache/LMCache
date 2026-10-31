@@ -41,7 +41,11 @@ from lmcache.v1.distributed.internal_api import (
     L1OperationResult,
     L2AdapterListener,
 )
-from lmcache.v1.distributed.l1_manager import DevDaxL1Manager, create_l1_managers
+from lmcache.v1.distributed.l1_manager import (
+    DevDaxL1Manager,
+    ShadowL1Manager,
+    create_l1_managers,
+)
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -152,6 +156,11 @@ class StorageManager:
                 cleanup.callback(manager.close)
 
             self._l1_managers_by_id = {m.l1_manager_id: m for m in self._l1_managers}
+            # Shadow L1s hold borrowed views only, so writes are never placed
+            # there.
+            self._writable_l1_managers = [
+                m for m in self._l1_managers if not isinstance(m, ShadowL1Manager)
+            ]
             self._l1_by_tag = {m.config.tag: m for m in self._l1_managers}
 
             self._write_policy = create_write_policy(config.write_policy)
@@ -172,7 +181,7 @@ class StorageManager:
             # Keeps capacity snapshots ordered by the point at which they are
             # built. Registration can publish concurrently with runtime changes.
             self._capacity_publish_lock = threading.Lock()
-            # Guards the _l2_adapters and _adapter_descriptors dicts.
+            # Guards _l2_adapters, _adapter_descriptors and _closing_adapters.
             self._adapters_lock = threading.Lock()
 
             # L2 adapters:
@@ -180,6 +189,10 @@ class StorageManager:
             self._registered_l2_listeners: list[L2AdapterListener] = []
             self._l2_adapters: dict[int, L2AdapterInterface] = {}
             self._adapter_descriptors: dict[int, L2AdapterDescriptor] = {}
+            # Adapters detached from the controllers whose close() failed:
+            # still registered so delete_l2_adapter can retry, but no longer
+            # active for reads, touches, status or capacity.
+            self._closing_adapters: set[int] = set()
 
             for ac in config.l2_adapter_config.adapters:
                 self._check_dax_devices_unowned(ac)
@@ -301,7 +314,9 @@ class StorageManager:
             ValueError: The write policy selected an unregistered L1 manager
                 or did not place every key exactly once.
         """
-        targets = self._write_policy.select_write_targets(keys, self._l1_managers)
+        targets = self._write_policy.select_write_targets(
+            keys, self._writable_l1_managers
+        )
         _validate_write_targets(keys, targets, self._l1_managers_by_id)
         reserve_result: dict[ObjectKey, L1OperationResult] = {}
         for owner, group in targets.items():
@@ -642,9 +657,7 @@ class StorageManager:
         """
         for manager in self._l1_managers_by_id.values():
             manager.touch_keys(keys)
-        with self._adapters_lock:
-            adapters = list(self._l2_adapters.values())
-        for adapter in adapters:
+        for _adapter_id, _desc, adapter in self._snapshot_adapters():
             adapter.submit_touch(keys)
 
     def delete_l1_keys(
@@ -1167,42 +1180,62 @@ class StorageManager:
             TimeoutError: If draining did not complete within ``timeout``;
                 the adapter is left active (draining) so the caller can
                 retry.
+            Exception: Whatever the adapter's ``close`` raises. By then the
+                controllers and the L2 eviction state have already dropped
+                the adapter and it is no longer active (``l2_adapters``,
+                status, touches and capacity exclude it); it stays only in
+                the registry, so a retry skips the drain and closes it again.
         """
         with self._lifecycle_lock:
-            if adapter_id not in self._l2_adapters:
-                raise ValueError(f"No L2 adapter with id {adapter_id}")
-
-            deadline = time.monotonic() + timeout
-            affinity = resolve_l1_affinity(
-                self._adapter_descriptors[adapter_id].config, self._l1_by_tag
-            )
-            owner = self._l1_by_tag[affinity].l1_manager_id
-            store_done = self._store_controllers[owner].request_remove_adapter(
-                adapter_id
-            )
-            prefetch_done = self._prefetch_controller.request_remove_adapter(adapter_id)
-            if not store_done.wait(timeout=max(0.0, deadline - time.monotonic())):
-                raise LMCacheTimeoutError(
-                    f"Timed out draining adapter {adapter_id} from store controller"
-                )
-            if not prefetch_done.wait(timeout=max(0.0, deadline - time.monotonic())):
-                raise LMCacheTimeoutError(
-                    f"Timed out draining adapter {adapter_id} from prefetch controller"
-                )
-
-            self._l2_eviction_controller.remove_adapter_state(adapter_id)
             with self._adapters_lock:
-                adapter = self._l2_adapters.pop(adapter_id)
-                self._adapter_descriptors.pop(adapter_id, None)
+                if adapter_id not in self._l2_adapters:
+                    raise ValueError(f"No L2 adapter with id {adapter_id}")
+                adapter = self._l2_adapters[adapter_id]
+                drained = adapter_id in self._closing_adapters
+
+            if not drained:
+                deadline = time.monotonic() + timeout
+                affinity = resolve_l1_affinity(
+                    self._adapter_descriptors[adapter_id].config, self._l1_by_tag
+                )
+                owner = self._l1_by_tag[affinity].l1_manager_id
+                store_done = self._store_controllers[owner].request_remove_adapter(
+                    adapter_id
+                )
+                prefetch_done = self._prefetch_controller.request_remove_adapter(
+                    adapter_id
+                )
+                if not store_done.wait(timeout=max(0.0, deadline - time.monotonic())):
+                    raise LMCacheTimeoutError(
+                        f"Timed out draining adapter {adapter_id} from store controller"
+                    )
+                if not prefetch_done.wait(
+                    timeout=max(0.0, deadline - time.monotonic())
+                ):
+                    raise LMCacheTimeoutError(
+                        f"Timed out draining adapter {adapter_id} from prefetch "
+                        "controller"
+                    )
+                self._l2_eviction_controller.remove_adapter_state(adapter_id)
+                # From here the adapter is detached: not active, but kept in
+                # the registry until its close succeeds.
+                with self._adapters_lock:
+                    self._closing_adapters.add(adapter_id)
+                self._publish_capacity_changed()
+
             adapter.close()
+            with self._adapters_lock:
+                del self._l2_adapters[adapter_id]
+                self._adapter_descriptors.pop(adapter_id, None)
+                self._closing_adapters.discard(adapter_id)
             logger.info("Deleted L2 adapter %d", adapter_id)
-            self._publish_capacity_changed()
 
     def l2_adapters(self) -> list[tuple[L2AdapterDescriptor, L2AdapterInterface]]:
         """Return all active L2 adapters paired with descriptors, in
         ascending adapter-id order (== configuration order for the initial
         set, then runtime-added adapters). The list is empty when no L2 is
-        configured.
+        configured. An adapter whose ``delete_l2_adapter`` failed to close
+        is not active and is excluded until the retry succeeds.
 
         Do not cache the returned pairs — ``reconfigure_l2_adapter``,
         ``add_l2_adapter``, and ``delete_l2_adapter`` may change the set at
@@ -1237,10 +1270,20 @@ class StorageManager:
             controller.stop()
         self._l2_eviction_controller.stop()
 
+        # End every borrowed view's lease once no controller can read it.
+        for manager in self._l1_managers:
+            if isinstance(manager, ShadowL1Manager):
+                manager.release_all()
+
         PeriodicEventNotifier.shutdown()
 
-        for adapter in self._l2_adapters.values():
-            adapter.close()
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.items())
+        for adapter_id, adapter in adapters:
+            try:
+                adapter.close()
+            except Exception:
+                logger.exception("L2 adapter %d failed to close", adapter_id)
 
         for manager in self._l1_managers:
             manager.close()
@@ -1495,7 +1538,8 @@ class StorageManager:
     ) -> list[tuple[int, L2AdapterDescriptor, L2AdapterInterface]]:
         """Snapshot the active adapters under the lock, in ascending
         adapter-id order. Iterate this instead of the live dicts so a
-        concurrent add/delete cannot change them mid-iteration.
+        concurrent add/delete cannot change them mid-iteration. Adapters
+        detached by a failed ``delete_l2_adapter`` are not active.
 
         Returns:
             A list of ``(adapter_id, descriptor, adapter)`` tuples.
@@ -1504,12 +1548,13 @@ class StorageManager:
             return [
                 (adapter_id, self._adapter_descriptors[adapter_id], adapter)
                 for adapter_id, adapter in sorted(self._l2_adapters.items())
+                if adapter_id not in self._closing_adapters
             ]
 
     def _has_l2_adapters(self) -> bool:
         """Return whether any L2 adapter is currently active."""
         with self._adapters_lock:
-            return bool(self._l2_adapters)
+            return len(self._l2_adapters) > len(self._closing_adapters)
 
     def _build_l2_adapter(
         self,
@@ -1669,8 +1714,10 @@ class StorageManager:
     def _list_reconfigurable_l2_adapters(
         self,
     ) -> list[tuple[int, L2ReconfigurableAdapter]]:
-        with self._adapters_lock:
-            items = sorted(self._l2_adapters.items())
+        items = [
+            (adapter_id, adapter)
+            for adapter_id, _desc, adapter in self._snapshot_adapters()
+        ]
         adapters: list[tuple[int, L2ReconfigurableAdapter]] = []
         for l2_adapter_index, adapter in items:
             reconfigurable_adapter = self._unwrap_reconfigurable_l2_adapter(adapter)

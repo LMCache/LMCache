@@ -10,6 +10,7 @@ import time
 import pytest
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -21,6 +22,7 @@ from lmcache.v1.distributed.l2_adapters import p2p_l2_adapter as p2p_mod
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     P2PL2Adapter,
     P2PL2AdapterConfig,
+    PeerL2AdapterBase,
 )
 from lmcache.v1.distributed.transfer_channel.api import (
     TransferChannelAddress,
@@ -142,6 +144,128 @@ def test_factory_creates_adapter():
         adapter = create_l2_adapter(config)
         assert isinstance(adapter, P2PL2Adapter)
         adapter.close()
+
+
+def test_failed_region_registration_releases_rpc_resources() -> None:
+    """A failed transfer-channel handshake unwinds the RPC client, event fds
+    and notifier registrations acquired before it."""
+    client = MagicMock(spec=RequestClient)
+    events = [MagicMock() for _ in range(3)]
+    for fd, event in enumerate(events):
+        event.fileno.return_value = fd
+    notifier = MagicMock()
+    context = MagicMock()
+    context.get_transfer_channel_client.side_effect = RuntimeError(
+        "registration failed"
+    )
+    with (
+        patch.object(p2p_mod.RequestClientFactory, "create", return_value=client),
+        patch.object(p2p_mod, "create_event_notifier", side_effect=events),
+        patch.object(p2p_mod, "PeriodicEventNotifier") as periodic,
+        patch.object(p2p_mod, "get_transfer_channel_context", return_value=context),
+    ):
+        periodic.get.return_value = notifier
+        with pytest.raises(RuntimeError, match="registration failed"):
+            P2PL2Adapter(P2PL2AdapterConfig("tcp://peer:5555", "peer:7600"))
+    client.close.assert_called_once()
+    for event in events:
+        event.close.assert_called_once()
+    assert {call.args[0] for call in notifier.unregister_fd.call_args_list} == {1, 2}
+
+
+def test_missing_periodic_notifier_unwinds_before_the_region_hook() -> None:
+    """If the notifier singleton is unavailable, construction fails before the
+    region hook runs and releases the RPC client and fds."""
+    client = MagicMock(spec=RequestClient)
+    events = [MagicMock() for _ in range(3)]
+    context = MagicMock()
+    with (
+        patch.object(p2p_mod.RequestClientFactory, "create", return_value=client),
+        patch.object(p2p_mod, "create_event_notifier", side_effect=events),
+        patch.object(p2p_mod, "PeriodicEventNotifier") as periodic,
+        patch.object(p2p_mod, "get_transfer_channel_context", return_value=context),
+    ):
+        periodic.get.return_value = None
+        with pytest.raises(RuntimeError, match="PeriodicEventNotifier"):
+            P2PL2Adapter(P2PL2AdapterConfig("tcp://peer:5555", "peer:7600"))
+    client.close.assert_called_once()
+    for event in events:
+        event.close.assert_called_once()
+    context.get_transfer_channel_client.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Base-class contract through a minimal subclass
+# ---------------------------------------------------------------------------
+
+
+class _RecordingPeerAdapter(PeerL2AdapterBase):
+    """The smallest lender-shaped subclass: records the hook calls."""
+
+    def __init__(self, config: P2PL2AdapterConfig, log: list[str]) -> None:
+        self.log = log
+        super().__init__(config)
+
+    def _register_peer_region(self) -> None:
+        # The RPC client exists before the hook runs.
+        self.log.append(f"register:{self._req_client is not None}")
+
+    def _unregister_peer_region(self) -> None:
+        self.log.append("unregister")
+
+    def submit_load_task(self, keys, objects):
+        raise NotImplementedError
+
+    def query_load_result(self, task_id):
+        raise NotImplementedError
+
+    def get_memory_tags(self) -> MemoryTags:
+        return MemoryTags(MemorySegment.DRAM, MemoryResidency.REMOTE)
+
+    def _process_lookup_result(self, task_id, keys, addresses, started_at) -> Bitmap:
+        self.log.append(f"lookup:{len(keys)}")
+        bitmap = Bitmap(len(keys))
+        for i, address in enumerate(addresses):
+            if address.is_valid():
+                bitmap.set(i)
+        return bitmap
+
+
+def test_base_contract_hook_order_and_one_lookup_result_per_lookup() -> None:
+    """The base constructs RPC resources, runs the region hook once, hands each
+    completed lookup to _process_lookup_result exactly once, and unregisters
+    the region before closing the RPC client."""
+    log: list[str] = []
+    req_client = MagicMock(spec=RequestClient)
+    req_client.close.side_effect = lambda: log.append("rpc-closed")
+    req_client.p2p_lookup_and_lock.return_value = _FakeFuture(9)
+    with (
+        patch.object(p2p_mod.RequestClientFactory, "create", return_value=req_client),
+        patch.object(p2p_mod, "PeriodicEventNotifier") as periodic,
+    ):
+        periodic.get.return_value = MagicMock()
+        adapter = _RecordingPeerAdapter(
+            P2PL2AdapterConfig("tcp://peer:5555", "peer:7600", lookup_timeout_s=10.0),
+            log,
+        )
+        assert log == ["register:True"]
+
+        keys = [_key(0), _key(1)]
+        task_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
+        req_client.p2p_query_lookup_results.return_value = _FakeFuture(None)
+        assert adapter.query_lookup_and_lock_result(task_id) is None
+        req_client.p2p_query_lookup_results.return_value = _FakeFuture(
+            [TransferChannelAddress(0, 8), TransferChannelAddress(-1, 0)]
+        )
+        bitmap = adapter.query_lookup_and_lock_result(task_id)
+        assert bitmap is not None and bitmap.test(0) and not bitmap.test(1)
+        # The task is forgotten: a second query of the same id is not a result.
+        assert adapter.query_lookup_and_lock_result(task_id) is None
+        assert log == ["register:True", "lookup:2"]
+
+        adapter.close()
+        adapter.close()
+        assert log == ["register:True", "lookup:2", "unregister", "rpc-closed"]
 
 
 # ---------------------------------------------------------------------------
@@ -414,3 +538,18 @@ def test_close_is_idempotent():
         # The second close is a no-op: no duplicate teardown of shared resources.
         req_client.close.assert_called_once()
         tc_ctx.remove_transfer_channel_client.assert_called_once_with("peer:7600")
+
+
+def test_region_teardown_failure_keeps_rpc_open_for_retry() -> None:
+    """A failed region teardown leaves the adapter open so close can retry."""
+    with _adapter() as (adapter, client, context, _tc, notifier):
+        context.remove_transfer_channel_client.side_effect = [
+            RuntimeError("busy"),
+            None,
+        ]
+        with pytest.raises(RuntimeError, match="busy"):
+            adapter.close()
+        client.close.assert_not_called()
+        notifier.unregister_fd.assert_not_called()
+        adapter.close()
+        client.close.assert_called_once()

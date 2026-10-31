@@ -18,6 +18,7 @@ through a GPU temp buffer and scatters it with the block transfer kernel. See
 # Standard
 from itertools import islice
 from typing import Any, Generator, Sequence
+import time
 
 # Third Party
 import torch
@@ -31,7 +32,12 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
-from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
+from lmcache.v1.memory_management import (
+    GDSMemoryObject,
+    MemoryObj,
+    PendingRead,
+    RemoteBorrowedMemoryObj,
+)
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.mp_observability.event_bus import (
     get_event_bus,
@@ -61,6 +67,8 @@ _HAS_BATCH_MEMCPY_ASYNC: bool = (
 # Layouts already reported as ineligible, so a model whose format never
 # qualifies logs once instead of once per request.
 _direct_copy_rejected_formats: set[str] = set()
+# Host-side pause between polls of in-flight peer reads during a retrieve.
+_READ_POLL_INTERVAL_S = 0.00002
 
 
 def direct_transfer_supported(
@@ -92,9 +100,11 @@ def direct_transfer_supported(
     """
     if not block_ids_host:
         return False
-    if any(isinstance(mo, GDSMemoryObject) for mo in memory_objs):
+    if any(
+        isinstance(mo, (GDSMemoryObject, RemoteBorrowedMemoryObj)) for mo in memory_objs
+    ):
         logger.debug(
-            "Object group %d has GDS-backed objects; using the kernel path",
+            "Object group %d has objects without host bytes; using the kernel path",
             object_group_id,
         )
         return False
@@ -626,10 +636,22 @@ def transfer_kv_per_object_group(
 
     Raises:
         ValueError: If it founds None entry in memory_objs when direction is H2D.
+        RuntimeError: If a borrowed remote object cannot be read from its peer.
     Note:
         This function expects the caller to stage the block ids (list[list[int]])
         into GPU tensors and pass them in as `block_ids_gpu`.
     """
+    if any(isinstance(mo, RemoteBorrowedMemoryObj) for mo in memory_objs):
+        run_borrowed_transfer(
+            cache_context,
+            block_ids_gpu,
+            memory_objs,
+            object_group_id,
+            skip_first_n_tokens,
+            direction,
+        )
+        return
+
     if _HAS_BATCH_MEMCPY_ASYNC and direct_transfer_supported(
         cache_context, object_group_id, memory_objs, block_ids_host
     ):
@@ -774,3 +796,156 @@ def transfer_kv_per_object_group(
                     ),
                     memory_obj,
                 )
+
+
+def _wait_for_reads(reads: list[tuple[RemoteBorrowedMemoryObj, PendingRead]]) -> None:
+    """Block until every read finished, failing on the first unsuccessful one.
+
+    Raises:
+        RuntimeError: If a read failed or timed out; the peer may have
+            dropped the object or the lease ended.
+    """
+    pending = list(reads)
+    while pending:
+        still_running = []
+        for obj, read in pending:
+            if not read.is_finished():
+                still_running.append((obj, read))
+            elif not read.succeeded():
+                raise RuntimeError(
+                    f"GDR read of borrowed object at peer offset "
+                    f"{obj.meta.address:#x} failed"
+                )
+        pending = still_running
+        if pending:
+            time.sleep(_READ_POLL_INTERVAL_S)
+
+
+def run_borrowed_transfer(
+    cache_context: BaseCacheContext,
+    block_ids_gpu: list[torch.Tensor],
+    memory_objs: Sequence[MemoryObj | None],
+    object_group_id: int,
+    skip_first_n_tokens: int,
+    direction: "lmcache_native.TransferDirection",
+) -> None:
+    """Retrieve an object group whose objects include borrowed remote ones.
+
+    Each batch lands in one bank of the cache context's GDR landing ring:
+    remote objects are read there straight from the peer
+    (:meth:`RemoteBorrowedMemoryObj.read_into`), local objects are staged with
+    the ordinary host-to-device copy, and the block transfer kernel then
+    scatters the bank into the paged KV blocks. Peer reads are not stream
+    ordered, so the host waits for the bank to be free before submitting them
+    and for the reads to finish before queuing the kernel; the two banks let
+    the reads of one batch overlap the kernel of the previous one.
+
+    Args:
+        cache_context: The GPU cache context, with a landing ring.
+        block_ids_gpu: GPU block IDs, indexed by LMCache KV group index.
+        memory_objs: The objects to copy, one per chunk; None is an error.
+        object_group_id: Index of the object group being copied.
+        skip_first_n_tokens: Tokens to skip writing at the start of the range.
+        direction: Must be H2D; borrowed objects are never store targets.
+
+    Raises:
+        ValueError: If ``direction`` is not H2D or an object is None.
+        RuntimeError: If the context has no landing ring, or a peer read
+            failed or timed out.
+    """
+    if direction != lmcache_native.TransferDirection.H2D:
+        raise ValueError("Borrowed remote objects can only be retrieved")
+    ring = cache_context.gdr_landing
+    if ring is None:
+        raise RuntimeError(
+            "Retrieving borrowed remote objects needs a GDR landing ring; the "
+            "P2P controller installs one under --p2p-load-mode gdr"
+        )
+    lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
+    kv_groups_manager = cache_context.kv_layer_groups_manager
+    object_group = kv_groups_manager.object_groups[object_group_id]
+    kernel_group_ids = object_group.kernel_group_indices
+
+    attn_desc = kv_groups_manager.get_attn_desc()
+    num_objects_to_skip = 0
+    if not attn_desc.is_full_attention(object_group_id):
+        sw_size_chunks = attn_desc.num_chunks_in_sw[object_group_id]
+        num_objects_to_skip = max(0, len(memory_objs) - sw_size_chunks)
+
+    kernel_group_offsets = {
+        kernel_group_id: cache_context.get_kernel_group_offset_in_object(
+            object_group_id, kernel_group_id
+        )
+        for kernel_group_id in kernel_group_ids
+    }
+
+    bank = 0
+    for start_object_idx, memory_object_batch in batched_iteration_with_skip(
+        memory_objs, ring.slots_per_bank, skip_count=num_objects_to_skip
+    ):
+        if any(mo is None for mo in memory_object_batch):
+            raise ValueError(
+                "MemoryObj is None for some objects in the batch, cannot "
+                f"perform H2D copy. memory_object_batch: {memory_object_batch}"
+            )
+        batch_len = len(memory_object_batch)
+        batch_start_token = start_object_idx * lmcache_chunk_size
+        batch_end_token = batch_start_token + batch_len * lmcache_chunk_size
+        effective_start = max(batch_start_token, skip_first_n_tokens)
+        if effective_start >= batch_end_token:
+            continue
+        skip_tokens_in_chunk = effective_start - batch_start_token
+
+        ring.acquire(bank)
+        reads: list[tuple[RemoteBorrowedMemoryObj, PendingRead]] = []
+        for chunk_idx, memory_obj in enumerate(memory_object_batch):
+            slot = ring.slot(bank, chunk_idx)
+            if isinstance(memory_obj, RemoteBorrowedMemoryObj):
+                reads.append(
+                    (memory_obj, memory_obj.read_into(slot.region_id, slot.offset))
+                )
+            else:
+                lmcache_memcpy_async_h2d(
+                    memory_obj, slot.buffer[: memory_obj.get_size()]
+                )
+        _wait_for_reads(reads)
+
+        for kernel_group_id in kernel_group_ids:
+            blocks_per_chunk = cache_context.calculate_num_blocks(
+                lmcache_chunk_size, kernel_group_id
+            )
+            tokens_per_window = min(
+                lmcache_chunk_size,
+                kv_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
+            )
+            blocks_per_window = cache_context.calculate_num_blocks(
+                tokens_per_window, kernel_group_id
+            )
+            start_block_pos = start_object_idx * blocks_per_window
+            end_block_pos = (start_object_idx + batch_len) * blocks_per_window
+            block_ids_curr_batch = block_ids_gpu[kernel_group_id][
+                start_block_pos:end_block_pos
+            ]
+            orig_skip_blocks = cache_context.calculate_num_blocks(
+                skip_tokens_in_chunk, kernel_group_id
+            )
+            recalculated_skip_blocks = recalculate_blocks_to_skip(
+                blocks_per_chunk, blocks_per_window, orig_skip_blocks
+            )
+            kernel_group_offset = kernel_group_offsets[kernel_group_id]
+            device_ops.multi_layer_block_kv_transfer(
+                cache_context.get_kernel_group_kv_pointers(kernel_group_id),
+                [
+                    ring.slot(bank, i).buffer.data_ptr() + kernel_group_offset
+                    for i in range(batch_len)
+                ],
+                block_ids_curr_batch,
+                cache_context.device,
+                direction,
+                cache_context.get_shape_desc(kernel_group_id),
+                cache_context.get_slots_per_chunk_in_sw(kernel_group_id),
+                cache_context.get_engine_kv_format(kernel_group_id),
+                recalculated_skip_blocks,
+            )
+        ring.release(bank, cache_context.device, cache_context.stream)
+        bank ^= 1

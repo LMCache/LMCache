@@ -93,6 +93,7 @@ def _parse_l1_common(
             "eviction",
             "read_ttl_seconds",
             "write_ttl_seconds",
+            "shadow",
         }
         - backend_fields
     )
@@ -144,6 +145,7 @@ def _parse_l1_common(
         L1MemoryManagerConfig(size, False, align_bytes=align, shm_name=""),
         tag=tag,
         eviction=eviction,
+        shadow=_l1_bool(values, "shadow", False),
         read_ttl_seconds=read_ttl,
         write_ttl_seconds=write_ttl,
     )
@@ -390,6 +392,11 @@ class L1ManagerConfig:
 
     eviction: "EvictionConfig | None" = None
     """Per-L1 eviction settings; None inherits StorageManagerConfig defaults."""
+
+    shadow: bool = False
+    """Pair this L1 with a shadow L1 that indexes views peers lend of this
+    medium (tag ``<tag>.shadow``, residency REMOTE, no memory of its own).
+    Required by lending peer adapters such as GPU-direct P2P borrowing."""
 
 
 def get_configured_capacity_bytes(config: L1ManagerConfig) -> int:
@@ -828,6 +835,14 @@ def add_storage_manager_args(
             "unlimited memlock ulimit (or CAP_IPC_LOCK)."
         ),
     )
+    memory_group.add_argument(
+        "--l1-shadow",
+        action="store_true",
+        help=(
+            "Pair the L1 with a shadow L1 that indexes views peers lend of its "
+            "memory. Required by --p2p-load-mode gdr."
+        ),
+    )
 
     # GDS L1 tier (optional, opt-in via --gds-l1-path)
     gds_group = parser.add_argument_group(
@@ -1124,6 +1139,7 @@ def parse_args_to_config(
         gds_l1_config=gds_l1_config,
         write_ttl_seconds=args.l1_write_ttl_seconds,
         read_ttl_seconds=args.l1_read_ttl_seconds,
+        shadow=getattr(args, "l1_shadow", False),
     )
 
     eviction_config = EvictionConfig(

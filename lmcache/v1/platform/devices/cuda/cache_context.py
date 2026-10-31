@@ -23,6 +23,10 @@ if TYPE_CHECKING:
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.gpu_connector.gdr_context import (
+    GdrLandingRing,
+    create_landing_ring,
+)
 from lmcache.v1.gpu_connector.gds_context import (
     deregister_gds_gpu_buffer,
     register_gds_gpu_buffer,
@@ -227,6 +231,14 @@ class _TempGPUBuffer:
 
         offset, size = self._offset_map_object_group_only[key]
         return self._temp_buffer[offset : offset + size]
+
+    def get_max_object_size(self) -> int:
+        """Returns the byte size of the largest object across object groups."""
+        return max(
+            size
+            for (batch_idx, _), (_, size) in self._offset_map_object_group_only.items()
+            if batch_idx == 0
+        )
 
     def get_kernel_group_shape_dtype(
         self,
@@ -457,6 +469,14 @@ class GPUCacheContext(BaseCacheContext):
         with torch_dev.stream(self.cuda_stream_):
             register_gds_gpu_buffer(self._temp_buffer.buffer)
 
+        # Landing ring for objects borrowed from peers and read by RDMA, only
+        # when the P2P controller installed a device-region registrar.
+        self._gdr_landing: GdrLandingRing | None = create_landing_ring(
+            self.device_,
+            self._temp_buffer.get_max_object_size(),
+            self._temp_buffer.max_batch_size,
+        )
+
         # Third Party
         import cupy
 
@@ -508,6 +528,8 @@ class GPUCacheContext(BaseCacheContext):
         right after this call.
         """
         self.cuda_stream_.synchronize()
+        if self._gdr_landing is not None:
+            self._gdr_landing.close()
         with torch_dev.stream(self.cuda_stream_):
             deregister_gds_gpu_buffer(self._temp_buffer.buffer)
         self._close_kv_wrappers()
@@ -566,6 +588,11 @@ class GPUCacheContext(BaseCacheContext):
     def max_batch_size(self) -> int:
         """Maximum number of chunks processed concurrently in one batch."""
         return self._temp_buffer.max_batch_size
+
+    @property
+    def gdr_landing(self) -> GdrLandingRing | None:
+        """The landing ring for borrowed remote objects, or None."""
+        return self._gdr_landing
 
     def get_temp_object_group_buffer(
         self, batch_idx: int, object_group_idx: int

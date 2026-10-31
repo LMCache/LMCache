@@ -235,6 +235,11 @@ class P2PConfig:
     transfer_engine: str = "nixl"
     """Transfer-channel implementation to use."""
 
+    load_mode: str = "l1"
+    """How a peer's objects reach this host: ``l1`` copies them into the DRAM
+    L1 at lookup time; ``gdr`` borrows them and reads each straight into GPU
+    memory at retrieve time (needs ``nixl`` and a shadow L1, ``--l1-shadow``)."""
+
     @property
     def enabled(self) -> bool:
         """Whether P2P is enabled (an advertise URL is configured)."""
@@ -715,6 +720,18 @@ def add_p2p_args(
         default="nixl",
         help="Transfer-channel implementation to use. Default is nixl.",
     )
+    group.add_argument(
+        "--p2p-load-mode",
+        type=str,
+        choices=["l1", "gdr"],
+        default="l1",
+        help=(
+            "l1 (default): copy a peer's objects into the DRAM L1 at lookup "
+            "time. gdr: borrow them and read each straight into GPU memory at "
+            "retrieve time, using no L1 capacity; requires --p2p-transfer-engine "
+            "nixl and --l1-shadow."
+        ),
+    )
     return parser
 
 
@@ -735,6 +752,7 @@ def parse_args_to_p2p_config(
         lookup_timeout=getattr(args, "p2p_lookup_timeout", 30.0),
         load_timeout=getattr(args, "p2p_load_timeout", 30.0),
         transfer_engine=getattr(args, "p2p_transfer_engine", "nixl"),
+        load_mode=getattr(args, "p2p_load_mode", "l1"),
     )
 
 

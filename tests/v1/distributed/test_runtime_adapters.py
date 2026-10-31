@@ -318,6 +318,66 @@ class TestStorageManagerRuntimeAdapters:
         finally:
             sm.close()
 
+    def test_delete_keeps_adapter_when_close_fails(
+        self, empty_storage_manager_config, monkeypatch
+    ):
+        """A failed close leaves the adapter registered so delete can retry."""
+        sm = StorageManager(empty_storage_manager_config)
+        try:
+            adapter_id = sm.add_l2_adapter(make_mock_config())
+            adapter = adapter_by_id(sm, adapter_id)
+            original_close = adapter.close
+            failures = [RuntimeError("teardown failed")]
+
+            def flaky_close() -> None:
+                if failures:
+                    raise failures.pop()
+                original_close()
+
+            monkeypatch.setattr(adapter, "close", flaky_close)
+            touched: list[list[ObjectKey]] = []
+            monkeypatch.setattr(adapter, "submit_touch", touched.append)
+
+            with pytest.raises(RuntimeError, match="teardown failed"):
+                sm.delete_l2_adapter(adapter_id, timeout=10.0)
+            # Detached but not closed: no longer active anywhere a caller can
+            # observe, yet still registered, so the retry below finds it.
+            assert sm.l2_adapters() == []
+            assert sm.report_status()["num_l2_adapters"] == 0
+            sm.touch_cached_keys([make_object_key(1)])
+            assert touched == []
+
+            sm.delete_l2_adapter(adapter_id, timeout=10.0)
+            assert active_adapter_ids(sm) == set()
+        finally:
+            sm.close()
+
+    def test_close_continues_past_a_failing_adapter(
+        self, empty_storage_manager_config, monkeypatch
+    ):
+        """One adapter that fails to close must not keep the others, or the
+        L1 managers, from closing."""
+        sm = StorageManager(empty_storage_manager_config)
+        first = adapter_by_id(sm, sm.add_l2_adapter(make_mock_config()))
+        second = adapter_by_id(sm, sm.add_l2_adapter(make_mock_config()))
+        closed: list[str] = []
+        monkeypatch.setattr(
+            first, "close", lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        original_second_close = second.close
+        monkeypatch.setattr(
+            second, "close", lambda: (closed.append("second"), original_second_close())
+        )
+        (l1_manager,) = sm.l1_managers()
+        original_l1_close = l1_manager.close
+        monkeypatch.setattr(
+            l1_manager, "close", lambda: (closed.append("l1"), original_l1_close())
+        )
+
+        sm.close()
+
+        assert closed == ["second", "l1"]
+
     def test_delete_unknown_id_raises(self, empty_storage_manager_config):
         sm = StorageManager(empty_storage_manager_config)
         try:
