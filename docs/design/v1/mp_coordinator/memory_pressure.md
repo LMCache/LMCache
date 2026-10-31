@@ -151,7 +151,8 @@ Shared placements are keyed under an empty owner, the same convention the key
 directory uses, and surface under `shared_modules` rather than inside any
 instance. Capacity is resolved across every declaring server; when they
 disagree the pool reads as undeclared, since preferring one value would make
-the answer depend on registration order.
+the answer depend on registration order. A declared pool remains listed with
+`used_bytes: 0` while empty.
 
 ## Lifecycle
 

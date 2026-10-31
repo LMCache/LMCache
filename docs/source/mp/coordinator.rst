@@ -1539,7 +1539,8 @@ The whole fleet: every server's compartments, plus the shared pools.
 ``shared_modules`` holds storage several servers mount -- one S3 bucket, one
 CXL region. These are counted **once for the fleet** and appear in no
 instance's ``modules``. Summing them per mounting server would multiply both
-the bytes and the capacity by the number of mounts.
+the bytes and the capacity by the number of mounts. A declared pool is listed
+even while it holds no bytes, with ``used_bytes: 0``.
 
 A server appears when it is registered, when it still holds bytes, or when it
 declared capacity. ``registered: false`` therefore means a departed server
