@@ -1,22 +1,35 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The multi-layer block KV transfer kernel, used by mp_mem_kernels.cu.
+// The multi-layer block KV transfer kernel and its launcher, used by
+// mp_mem_kernels.cu.
 //
-// Header-only device code with no out-of-line dependencies, so another
-// launcher can reuse it unchanged.
+// Header-only templates with no out-of-line dependencies, so another launcher
+// can reuse them unchanged. The kernel is templated on two policies, both
+// defaulting to today's behaviour:
+//
+//   ObjectPtrs    where the kernel finds each LMCache object's base pointer
+//                 (lmcache_object_at). MemoryObj4 by value (<= 4 objects, no
+//                 device allocation) or a device array of object pointers.
+//   ObjectOffset  where (k_or_v, layer, token) starts inside an object
+//                 (TwoLTDObjectOffset, the 2LTD layout).
 
 #pragma once
 
+#include <c10/cuda/CUDAException.h>
+#include <c10/util/Exception.h>
 #include <cuda_runtime.h>
 
 #include "kv_transfer_plan_types.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
 
 namespace lmcache_mp {
 
+// Up to four LMCache objects passed to the kernel by value (no device
+// allocation).
 template <typename ScalarType>
 struct MemoryObj4 {
   ScalarType* objects[4];
@@ -36,8 +49,10 @@ struct MemoryObj4 {
  * 4. The grid will take over (2, NB, NL) dimensions. No matter what the actual
  * layout in memory is, we will calculate the global offset for the start of the
  * block
- * 5. For LMCache, we assume it is always using 2LTD layout, e.g.,
- * [2, L, 256, NH * HS], where 256 means that 256 tokens
+ * 5. For LMCache, the default object layout is 2LTD, e.g.,
+ * [2, L, 256, NH * HS], where 256 means that 256 tokens. The object-side
+ * global offset is a policy (ObjectOffset, default TwoLTDObjectOffset), so a
+ * launcher can address a different object layout with the same kernel.
  */
 
 /**
@@ -160,6 +175,33 @@ __device__ inline size_t calculate_lmcache_global_offset(
 }
 
 /**
+ * Default object-side offset policy: 2LTD [2, L, T, D].
+ *
+ * An ObjectOffset policy is a trivially copyable struct passed to the kernel
+ * by value, so it may carry host-set state (for example a layer stride). It
+ * must provide
+ *
+ *   template <typename ScalarType, EngineKVFormat format>
+ *   __device__ size_t offset(int k_or_v, int token_offset_in_lmcache_object,
+ *                            int layer_idx, int lmcache_chunk_size,
+ *                            const PageBufferShapeDesc& shape_desc) const;
+ *
+ * returning the start of (k_or_v, layer_idx, token) in ScalarType units.
+ */
+struct TwoLTDObjectOffset {
+  template <typename ScalarType, EngineKVFormat format>
+  __device__ inline size_t offset(const int k_or_v,
+                                  const int token_offset_in_lmcache_object,
+                                  const int layer_idx,
+                                  const int lmcache_chunk_size,
+                                  const PageBufferShapeDesc& shape_desc) const {
+    return calculate_lmcache_global_offset<ScalarType, format>(
+        k_or_v, token_offset_in_lmcache_object, layer_idx, lmcache_chunk_size,
+        shape_desc);
+  }
+};
+
+/**
  * Calculate the local offset for the current token against the start of the
  * block in the LMCache object.
  */
@@ -214,9 +256,10 @@ __device__ inline void warp_copy(ScalarType* __restrict__ dst,
   }
 }
 
-template <typename ScalarType, bool lmcache_to_engine, EngineKVFormat format>
+template <typename ScalarType, bool lmcache_to_engine, EngineKVFormat format,
+          typename ObjectOffset>
 __device__ void multi_layer_block_transfer_single_block(
-    ScalarType* __restrict__ lmcache_object,
+    ScalarType* __restrict__ lmcache_object, const ObjectOffset object_offset,
     ScalarType** __restrict__ paged_buffer_ptrs, const int engine_block_idx,
     const int offset_in_lmcache_block, const PageBufferShapeDesc shape_desc,
     const int lmcache_chunk_size  // e.g., 256, used to calculate global offset
@@ -232,7 +275,7 @@ __device__ void multi_layer_block_transfer_single_block(
       calculate_engine_global_offset<ScalarType, format>(
           k_or_v, engine_block_idx, layer_idx, shape_desc);
   const size_t lmcache_global_offset =
-      calculate_lmcache_global_offset<ScalarType, format>(
+      object_offset.template offset<ScalarType, format>(
           k_or_v, offset_in_lmcache_block, layer_idx, lmcache_chunk_size,
           shape_desc);
   ScalarType* paged_buffer_layer_ptr;
@@ -298,9 +341,26 @@ __device__ void multi_layer_block_transfer_single_block(
   }
 }
 
-template <typename ScalarType, bool lmcache_to_engine, EngineKVFormat format>
+/**
+ * Base pointer of LMCache object `idx`. The kernel's ObjectPtrs argument may
+ * be a MemoryObj4 passed by value or a device array of object pointers.
+ */
+template <typename ScalarType>
+__device__ inline ScalarType* lmcache_object_at(
+    const MemoryObj4<ScalarType>& lmcache_objects, const int idx) {
+  return lmcache_objects.objects[idx];
+}
+
+template <typename ScalarType>
+__device__ inline ScalarType* lmcache_object_at(
+    ScalarType* const* lmcache_objects, const int idx) {
+  return lmcache_objects[idx];
+}
+
+template <typename ScalarType, bool lmcache_to_engine, EngineKVFormat format,
+          typename ObjectPtrs, typename ObjectOffset>
 __global__ void multi_layer_block_transfer_kernel(
-    MemoryObj4<ScalarType> lmcache_objects,
+    ObjectPtrs lmcache_objects, const ObjectOffset object_offset,
     ScalarType** __restrict__ paged_buffer_ptrs,
     const int64_t* engine_block_ids,
     const int num_blocks_per_object,  // e.g. 16 for lmcache chunk size =
@@ -321,9 +381,164 @@ __global__ void multi_layer_block_transfer_kernel(
   const int engine_block_idx = engine_block_ids[flat_block_idx];
   multi_layer_block_transfer_single_block<ScalarType, lmcache_to_engine,
                                           format>(
-      lmcache_objects.objects[obj_idx], paged_buffer_ptrs, engine_block_idx,
+      lmcache_object_at<ScalarType>(lmcache_objects, obj_idx), object_offset,
+      paged_buffer_ptrs, engine_block_idx,
       block_idx_in_object * shape_desc.bs,  // offset in LMCache object
       shape_desc, lmcache_chunk_size);
+}
+
+#define LAUNCH_KERNEL(DIRECTION, FORMAT)                                      \
+  multi_layer_block_transfer_kernel<ScalarType, DIRECTION, FORMAT>            \
+      <<<grid, block, 0, stream>>>(lmcache_objects, object_offset,            \
+                                   paged_buffer_ptrs, block_ids_ptr,          \
+                                   num_blocks_per_object, shape_desc,         \
+                                   lmcache_chunk_size, skip_prefix_n_blocks); \
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+#define DISPATCH_FORMAT(DIRECTION)                                      \
+  switch (engine_kv_format) {                                           \
+    case EngineKVFormat::NB_NL_TWO_BS_NH_HS:                            \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NB_NL_TWO_BS_NH_HS);     \
+      break;                                                            \
+    case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:                          \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_TWO_NB_BS_NH_HS);   \
+      break;                                                            \
+    case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:                          \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_TWO_NB_NH_BS_HS);   \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:                          \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_TWO_BS_NH_HS);   \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:                          \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_TWO_NH_BS_HS);   \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_BS_HS:                                 \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_HS);          \
+      break;                                                            \
+    case EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS:                         \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS);  \
+      break;                                                            \
+    case EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS:                        \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS); \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NBBS_ONE_HS:                              \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NBBS_ONE_HS);       \
+      break;                                                            \
+    case EngineKVFormat::NB_NL_TWO_NH_BS_HS:                            \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NB_NL_TWO_NH_BS_HS);     \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_NH_BS_TWO_HS:                          \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_TWO_HS);   \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:                          \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_TWO_HS);   \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_NH_BS_CS:                              \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_CS);       \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_BS_NH_CS:                              \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_CS);       \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_BS_NH_HS:                              \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_HS);       \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_BSV_BSS:                               \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BSV_BSS);        \
+      break;                                                            \
+    default:                                                            \
+      TORCH_CHECK(false, "Unsupported EngineKVFormat: ",                \
+                  static_cast<int>(engine_kv_format));                  \
+  }
+
+/**
+ * Launch the multi-layer block transfer kernel on `stream` for
+ * `num_objects` LMCache objects.
+ *
+ * The caller sets the device guard and resolves `lmcache_objects`. The block
+ * count, chunk-size and thread-geometry rules are enforced here, so every
+ * launcher shares them.
+ */
+template <typename ScalarType, typename ObjectPtrs,
+          typename ObjectOffset = TwoLTDObjectOffset>
+void launch_multi_layer_block_transfer(
+    ObjectPtrs lmcache_objects, int num_objects, ScalarType** paged_buffer_ptrs,
+    const int64_t* block_ids_ptr, int total_blocks, TransferDirection direction,
+    const PageBufferShapeDesc& shape_desc, int lmcache_chunk_size,
+    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks,
+    cudaStream_t stream, const ObjectOffset object_offset = ObjectOffset{}) {
+  // --- Validation ---
+  TORCH_CHECK(num_objects >= 1, "Expected at least 1 LMCache object, got ",
+              num_objects);
+  TORCH_CHECK(total_blocks % num_objects == 0, "block_ids length (",
+              total_blocks, ") must be divisible by num_objects (", num_objects,
+              ")");
+  int num_blocks_per_object = total_blocks / num_objects;
+
+  TORCH_CHECK(num_blocks_per_object * shape_desc.bs == lmcache_chunk_size,
+              "blocks_per_object * block_size (",
+              num_blocks_per_object * shape_desc.bs,
+              ") must equal lmcache_chunk_size (", lmcache_chunk_size, ")");
+
+  // --- Grid and block dimensions ---
+  int elements_per_head = shape_desc.hs * shape_desc.element_size /
+                          static_cast<int>(sizeof(ScalarType));
+  int thread_dim_x = std::min(elements_per_head, 32);
+  int thread_dim_y = shape_desc.nh;
+  TORCH_CHECK(thread_dim_y <= 32, "Number of heads (", thread_dim_y,
+              ") exceeds max threads per block in y-dim (32). This"
+              " should never happen in normal LLMs");
+  int thread_dim_z =
+      std::min(shape_desc.bs, 1024 / (thread_dim_x * thread_dim_y));
+  thread_dim_z = std::min(thread_dim_z, 64);  // max threads per block in z-dim
+
+  dim3 block(thread_dim_x, thread_dim_y, thread_dim_z);
+  dim3 grid(shape_desc.kv_size, total_blocks, shape_desc.nl);
+
+  if (direction == TransferDirection::H2D) {
+    DISPATCH_FORMAT(true);
+  } else {
+    DISPATCH_FORMAT(false);
+  }
+}
+
+#undef DISPATCH_FORMAT
+#undef LAUNCH_KERNEL
+
+/**
+ * Transfer-unit (vectorisation width) selection. Calls
+ * `fn(TransferUnit<T>{})` with the widest unit T the head row allows; the
+ * callback recovers it with
+ * `using ScalarType = typename decltype(transfer_unit)::type;`.
+ */
+template <typename T>
+struct TransferUnit {
+  using type = T;
+};
+
+template <typename Fn>
+void dispatch_by_transfer_unit(const PageBufferShapeDesc& shape_desc,
+                               EngineKVFormat engine_kv_format, const Fn& fn) {
+  int head_bytes = shape_desc.hs * shape_desc.element_size;
+  TORCH_CHECK(head_bytes % sizeof(uint16_t) == 0, "head_size * element_size (",
+              head_bytes, ") must be divisible by 2 for vectorized access");
+
+  if (engine_kv_format == EngineKVFormat::NL_X_NB_BSV_BSS) {
+    // Blocked-scale indexer cache: the per-token fp32 scale must be a whole
+    // number of transfer units, so pin 4-byte units regardless of row width.
+    TORCH_CHECK(head_bytes % sizeof(uint32_t) == 0,
+                "NL_X_NB_BSV_BSS row bytes (", head_bytes,
+                ") must be divisible by 4");
+    fn(TransferUnit<uint32_t>{});
+    return;
+  }
+
+  if (head_bytes % sizeof(uint4) == 0) {
+    fn(TransferUnit<uint4>{});  // 16 bytes per copy
+  } else if (head_bytes % sizeof(uint32_t) == 0) {
+    fn(TransferUnit<uint32_t>{});  // 4 bytes per copy
+  } else {
+    fn(TransferUnit<uint16_t>{});  // 2 bytes per copy (minimum granularity)
+  }
 }
 
 }  // namespace lmcache_mp
