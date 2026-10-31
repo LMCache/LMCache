@@ -114,6 +114,16 @@ Options
      - Consumer group whose committed offsets a restart resumes from
        (default: ``lmcache-coordinator``). Ignored unless
        ``--event-transport kafka``.
+   * - ``--api-key-file PATH``
+     - Read an accepted bearer API key from ``PATH``. Repeat the option to
+       accept multiple keys during rotation. ``LMCACHE_API_KEY_FILE`` and
+       ``LMCACHE_API_KEY`` provide environment alternatives. All sources are
+       cumulative. When none are set, authentication is disabled and every
+       route is open. When at least one source is set, every route except
+       ``GET /healthz`` and ``GET /metrics`` requires a matching
+       ``Authorization: Bearer <key>`` header; the first configured key is
+       also used by the coordinator for its own outbound calls to MP servers.
+       ``--http-api-key-file`` is a compatibility alias.
 
 Configuration
 -------------
