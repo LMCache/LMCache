@@ -79,9 +79,10 @@ def init_coordinator_metrics(config: MPCoordinatorConfig) -> None:
         otlp_endpoint=config.otlp_endpoint,
         resource_attributes={
             "service.name": "lmcache-mp-coordinator",
-            # The hostname (the pod name under k8s) tells coordinators
-            # apart; the bind address cannot, since every pod binds 0.0.0.0.
-            "service.instance.id": socket.gethostname(),
+            # The hostname (the pod name under k8s) tells hosts apart; the
+            # bind address cannot, since every pod binds 0.0.0.0. The port
+            # tells apart coordinators sharing a host.
+            "service.instance.id": f"{socket.gethostname()}:{config.port}",
         },
         start_http_server=False,
     )

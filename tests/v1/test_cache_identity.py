@@ -63,6 +63,11 @@ def test_encoded_object_key_round_trip_preserves_tags() -> None:
         )
     )
     encoded = key.to_encoded_object_key()
+    reordered_encoded = replace(
+        encoded, tags=dict(reversed(list(encoded.tags.items())))
+    )
+
+    assert hash(encoded) == hash(reordered_encoded)
 
     for codec in (msgspec.msgpack, msgspec.json):
         recovered = codec.decode(codec.encode(encoded), type=EncodedObjectKey)

@@ -1,6 +1,7 @@
 # L1Manager: staging objects and write tags
 
-Design of the write path in `lmcache/v1/distributed/l1_manager.py`.
+Design of the write path in `lmcache/v1/distributed/l1_manager/base.py`
+(`BaseL1Manager`, shared by every medium; see [l1-manager-types.md](l1-manager-types.md)).
 
 ## Problem
 
@@ -92,7 +93,7 @@ A prefetch request still aborts its L2 load when a key becomes resident
 between its L1 lock pass and its `reserve_write`
 (`KEY_NOT_WRITABLE`, reported as `L2_PREFETCH_FAILED{reason="l1_contended"}`).
 That window is the L2 lookup latency, not the L2 load time as before; see
-`storage_controllers/prefetch_controller.md`.
+`../storage_controllers/prefetch_controller.md`.
 
 ## Contract-anchoring tests
 

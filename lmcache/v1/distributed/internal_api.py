@@ -22,10 +22,6 @@ from lmcache.v1.memory_management import MemoryObj
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.distributed.config import L1ManagerConfig
-    from lmcache.v1.memory_allocators.devdax_memory_allocator import (
-        DevDaxArenaStatus,
-        DevDaxRemoveMode,
-    )
 
 L1OperationResult = tuple[L1Error, "MemoryObj | None"]
 
@@ -56,7 +52,8 @@ class L1ObjectMeta:
 
     Attributes:
         size_bytes: Logical byte size of the object.
-        backend: The storage medium backing the object.
+        backend: The medium of the L1 that holds the object (its manager's
+            ``backend_type``).
     """
 
     size_bytes: int
@@ -269,6 +266,16 @@ class L1ManagerInterface(Protocol):
         """The configuration this L1 was built from."""
         ...
 
+    @property
+    def backend_type(self) -> L1BackendType:
+        """The medium backing this L1.
+
+        Its wire value is the ``backend`` of capacity declarations, cache
+        events and the Prometheus gauges; usage telemetry's ``l1_medium``
+        uses the same vocabulary.
+        """
+        ...
+
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for this L1's lifecycle notifications."""
         ...
@@ -343,8 +350,8 @@ class L1ManagerInterface(Protocol):
         """Return bytes held by uncommitted write reservations."""
         ...
 
-    def get_capacity_bytes_by_backend(self) -> dict[L1BackendType, int]:
-        """Return usable capacity per backing medium."""
+    def get_capacity_bytes(self) -> int:
+        """Return the currently usable capacity in bytes."""
         ...
 
     def get_l1_memory_desc(self) -> L1MemoryDesc | None:
@@ -353,41 +360,6 @@ class L1ManagerInterface(Protocol):
 
     def get_memory_tags(self) -> MemoryTags:
         """Return the memory tags of this L1's primary pool."""
-        ...
-
-    def get_devdax_arena_statuses(self) -> list["DevDaxArenaStatus"]:
-        """Return Device-DAX arena statuses for hot-pluggable L1s."""
-        ...
-
-    def get_devdax_arena_status(
-        self, device_path: str, offset_in_bytes: int = 0
-    ) -> "DevDaxArenaStatus":
-        """Return the status of the arena at ``(device_path, offset)``."""
-        ...
-
-    def owns_range(
-        self, device_path: str, offset_in_bytes: int, size_in_bytes: int
-    ) -> bool:
-        """Whether this L1 maps a range of the device overlapping the given one."""
-        ...
-
-    def memory_region_count(self) -> int:
-        """Return the number of memory regions backing this L1."""
-        ...
-
-    def add_devdax_device(
-        self, device_path: str, size_in_bytes: int, offset_in_bytes: int = 0
-    ) -> "DevDaxArenaStatus":
-        """Hot-add a Device-DAX arena mapping ``[offset, offset + size)``."""
-        ...
-
-    def remove_devdax_device(
-        self,
-        device_path: str,
-        mode: "DevDaxRemoveMode" = ...,
-        offset_in_bytes: int = 0,
-    ) -> "DevDaxArenaStatus":
-        """Hot-remove the Device-DAX arena at ``(device_path, offset)``."""
         ...
 
     def report_status(self) -> dict:

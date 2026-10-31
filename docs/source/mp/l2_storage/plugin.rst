@@ -57,13 +57,12 @@ Request-scoped metadata
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 For requests that provide LMCache request configuration, every ``ObjectKey``
-passed to an adapter exposes that same mapping as ``key.extra_attributes``.
-This applies to store, lookup, and load paths, so an adapter can use the
-metadata for request-level behavior such as encryption and decryption. The
-mapping is metadata rather than cache identity: it does not participate in
+passed to an adapter exposes a shallow copy as ``key.extra_attributes``. This
+applies to store, lookup, and load paths, so modules that create or enrich keys
+can attach per-key metadata such as NUMA placement before dispatch. The mapping
+is metadata rather than cache identity: it does not participate in
 ``ObjectKey`` equality or hashing and is omitted from persistent key encodings.
-Treat it as read-only because all keys expanded from one request share the
-same mapping object.
+L1 managers and L2 adapters should consume it without mutation.
 
 .. code-block:: python
 

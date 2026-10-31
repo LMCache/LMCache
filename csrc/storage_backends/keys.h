@@ -91,12 +91,6 @@ std::string key_to_filename(const std::string& key,
     result += cache_salt;
   }
   if (parts.size() == 6) {
-    if (parts[5].rfind("x1-", 0) != 0 ||
-        parts[5].find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq"
-                                   "rstuvwxyz0123456789-_") !=
-            std::string::npos) {
-      throw std::runtime_error("FSConnector: invalid extension token");
-    }
     result += KEY_SEP;
     result += parts[5];
   }

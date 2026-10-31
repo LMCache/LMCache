@@ -10,7 +10,8 @@ import urllib.parse
 import msgspec
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey, normalize_tags
+from lmcache.v1.distributed.api import ObjectKey, validate_identity_tags
+from lmcache.v1.utils.frozen_dict import freeze_dict
 
 
 def encode_tags(tags: Mapping[str, str]) -> str:
@@ -31,7 +32,9 @@ def decode_tags(token: str) -> Mapping[str, str]:
     payload = base64.b64decode(
         encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True
     )
-    tags = normalize_tags(msgspec.json.decode(payload, type=dict[str, str]))
+    decoded = msgspec.json.decode(payload, type=dict[str, str])
+    validate_identity_tags(decoded)
+    tags = freeze_dict(decoded, sort_keys=True)
     if encode_tags(tags) != token:
         raise ValueError("non-canonical identity tags token")
     return tags
@@ -88,12 +91,6 @@ def format_storage_key(
     return result
 
 
-def storage_shard(key: ObjectKey) -> tuple[str, str]:
-    """Return two directory components from the first four hash hex digits."""
-    chunk_hex = key.chunk_hash.hex()
-    return chunk_hex[:2], chunk_hex[2:4]
-
-
 def encode_fs_filename(key: ObjectKey) -> str:
     """Return the Python/native FS filename, preserving legacy untagged names.
 
@@ -135,9 +132,9 @@ def decode_storage_key(
     model, rank, group, chunk_hash, salt = parts
     return ObjectKey(
         chunk_hash=bytes.fromhex(chunk_hash),
-        model_name=model_decoder(model),
         kv_rank=int(rank, 16),
         object_group_id=int(group, 16),
+        model_name=model_decoder(model),
         cache_salt=salt,
         tags=decode_tags(token),
     )

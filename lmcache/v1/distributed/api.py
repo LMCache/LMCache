@@ -9,7 +9,7 @@ Could be implemented by native code in the future
 # Standard
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Literal, NoReturn, get_args
+from typing import TYPE_CHECKING, Literal, get_args
 import enum
 
 # Third Party
@@ -17,6 +17,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.utils.frozen_dict import freeze_dict
 
 if TYPE_CHECKING:
     # First Party
@@ -156,28 +157,11 @@ class MemoryTags:
     """Where the bytes reside relative to this host."""
 
 
-class _FrozenTags(dict[str, str]):
-    """An immutable dict snapshot that msgspec can serialize."""
-
-    def _immutable(self, *args: object, **kwargs: object) -> NoReturn:
-        raise TypeError("identity tags are immutable")
-
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    clear = _immutable
-    pop = _immutable
-    popitem = _immutable
-    setdefault = _immutable
-    update = _immutable
-    __ior__ = _immutable
-
-
-def normalize_tags(tags: Mapping[str, str]) -> Mapping[str, str]:
-    """Validate and snapshot identity tags in canonical name order."""
+def validate_identity_tags(tags: Mapping[str, str]) -> None:
+    """Validate identity tag names and values."""
     for name, value in tags.items():
         if not isinstance(name, str) or not name or not isinstance(value, str):
             raise ValueError("tags require non-empty string names and string values")
-    return _FrozenTags(sorted(tags.items()))
 
 
 def get_request_tags(
@@ -202,12 +186,13 @@ def get_request_tags(
         if not isinstance(value, str):
             raise ValueError("tags require non-empty string names and string values")
         tags[name.removeprefix("lmcache.tag.")] = value
-    return normalize_tags(tags)
+    validate_identity_tags(tags)
+    return freeze_dict(tags, sort_keys=True)
 
 
 @dataclass(frozen=True)
 class ObjectKeyIdentity:
-    """Complete matching identity of a stored object."""
+    """Matching fields shared by local objects and internal wire messages."""
 
     chunk_hash: bytes
     kv_rank: int
@@ -225,19 +210,8 @@ class ObjectKeyIdentity:
             raise ValueError("cache_salt must not contain '@', '/', '\\' or NUL")
         if len(self.cache_salt) > 128:
             raise ValueError("cache_salt exceeds max length 128")
-        object.__setattr__(self, "tags", normalize_tags(self.tags))
-
-    def __hash__(self) -> int:
-        return hash(
-            (
-                self.chunk_hash,
-                self.kv_rank,
-                self.object_group_id,
-                self.model_name,
-                self.cache_salt,
-                tuple(self.tags.items()),
-            )
-        )
+        validate_identity_tags(self.tags)
+        object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
 
 @dataclass(frozen=True, init=False)
@@ -253,10 +227,9 @@ class ObjectKey:
     )
     """Request-scoped metadata exposed to L2 adapters.
 
-    This field is excluded from equality, hashing, and ``repr`` so it does not
-    change cache identity or accidentally log values such as encryption
-    material. Adapters must treat the mapping as read-only because all object
-    keys expanded from one request share the same reference.
+    This field is excluded from equality, hashing, and ``repr``.
+    Upstream modules may enrich it before dispatch.
+    L1 managers and L2 adapters should not mutate it.
     """
 
     def __init__(
@@ -285,7 +258,7 @@ class ObjectKey:
             cache_salt: Isolation salt; defaults to empty without an identity.
             identity: Immutable identity providing fields not supplied explicitly.
             extra_attributes: Request-scoped metadata exposed to L2 adapters,
-                shared by all keys expanded from one request.
+                shallow-copied so the key can be enriched independently.
             tags: Additional matching dimensions for the flat constructor.
 
         Raises:
@@ -303,8 +276,6 @@ class ObjectKey:
                 cache_salt=cache_salt if cache_salt is not None else "",
                 tags=tags if tags is not None else {},
             )
-        # Legacy flat-constructor compatibility; delete this branch when callers
-        # construct ObjectKey exclusively with identity=.
         elif (
             chunk_hash is not None
             or model_name is not None
@@ -336,7 +307,7 @@ class ObjectKey:
         object.__setattr__(
             self,
             "extra_attributes",
-            extra_attributes if extra_attributes is not None else {},
+            dict(extra_attributes) if extra_attributes is not None else {},
         )
 
     @property
@@ -365,7 +336,7 @@ class ObjectKey:
         return self.identity.object_group_id
 
     def to_encoded_object_key(self) -> "EncodedObjectKey":
-        """Return the JSON-safe :class:`EncodedObjectKey` identity projection."""
+        """Return the JSON-safe :class:`EncodedObjectKey` projection."""
         return EncodedObjectKey(
             chunk_hash_hex=self.chunk_hash.hex(),
             model_name=self.model_name,
@@ -453,32 +424,29 @@ class ObjectKey:
 
 @dataclass(frozen=True)
 class EncodedObjectKey:
-    """JSON-safe object identity for control-plane addressing."""
+    """JSON-safe wire form of :class:`ObjectKey` — ``chunk_hash`` is
+    hex-encoded; other fields are preserved verbatim."""
 
     chunk_hash_hex: str
+    """Hex-encoded ``ObjectKey.chunk_hash``."""
+
     model_name: str
     kv_rank: int
+
     object_group_id: int = 0
+    """Defaults to ``0`` so pre-``object_group_id`` wire payloads still
+    deserialize."""
+
     cache_salt: str = ""
     tags: Mapping[str, str] = field(default_factory=dict)
+    """Canonical matching tags that participate in object identity."""
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "tags", normalize_tags(self.tags))
-
-    def __hash__(self) -> int:
-        return hash(
-            (
-                self.chunk_hash_hex,
-                self.model_name,
-                self.kv_rank,
-                self.object_group_id,
-                self.cache_salt,
-                tuple(self.tags.items()),
-            )
-        )
+        validate_identity_tags(self.tags)
+        object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
     def to_object_key(self) -> ObjectKey:
-        """Recover an identity-equivalent :class:`ObjectKey`.
+        """Recover the corresponding :class:`ObjectKey`.
 
         Raises:
             ValueError: ``chunk_hash_hex`` is not valid hex, or one of
@@ -852,8 +820,8 @@ def ipc_key_to_object_keys(
     where a caller passes ``ipc_key`` but forgets the salt.
 
     ``request_configs`` is likewise read from ``ipc_key`` and exposed through
-    every produced key's ``extra_attributes`` field. The same mapping reference
-    is shared across all keys rather than copied once per chunk or rank.
+    every produced key's ``extra_attributes`` field. Each key receives a
+    shallow copy so modules can enrich one key without affecting another.
 
     Args:
         ipc_key: The IPC key providing model_name, world_size, worker_id,
@@ -927,9 +895,9 @@ def ipc_key_to_grouped_object_keys(
     Note:
         A key without ``worker_id`` fans out to every kv rank of its world
         size; a worker-specific key yields that rank only. ``cache_salt`` is
-        taken from ``ipc_key``. Every produced key shares the exact
-        ``ipc_key.request_configs`` mapping through ``extra_attributes`` when
-        request configs are present.
+        taken from ``ipc_key``. Every produced key receives a shallow copy of
+        ``ipc_key.request_configs`` through ``extra_attributes`` when request
+        configs are present.
     """
     tags = get_request_tags(ipc_key.request_configs)
     kv_ranks = _lookup_kv_ranks(ipc_key)

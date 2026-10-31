@@ -278,10 +278,15 @@ raw path.
 
 ### Status page
 
-`GET /status` returns one JSON snapshot: source and Kafka positions,
-per-server stream state, controller state, loop ages and last errors,
-checkpoint state. It always returns 200; `/healthz` stays a plain liveness
-check.
+`GET /status` returns one JSON snapshot built from the same `stats()` the
+metrics read: the event source (with Kafka, records read, partitions,
+unread records and next offsets), the gate's counts and per-server stream
+state, each consumer's deliveries and failures, heartbeat ages, controller
+state, and each loop's passes, age of its last success and last error. The
+`checkpoint` loop's entry is the checkpoint's state until the P1 checkpoint
+metrics add file-level detail. It always returns 200; `/healthz` stays a
+plain liveness check. The user-facing reference, with an example, is in
+`docs/source/mp/coordinator.rst`.
 
 ## 4. Alerts
 
