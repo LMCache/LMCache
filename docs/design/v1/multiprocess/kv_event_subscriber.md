@@ -1,120 +1,83 @@
-# MP KV event subscriber extraction
+# MP scheduler KV event subscription
 
-The vLLM MP worker receives CPU cache changes through a transport-neutral
-`RequestClient`, but its receiver loop lives inside the vLLM adapter. Moving
-that loop into `MPKVEventSubscriber` makes reception reusable without moving
-registration, heartbeat, event conversion, or publication out of the engine.
+When vLLM KV events are enabled, `LMCacheMPSchedulerAdapter` owns one
+`MPKVEventSubscriber` per configured MP server. `LMCacheMPConnector.take_events()`
+drains the scheduler directly and converts its CPU events to vLLM events.
+Workers have no event subscription, event buffer, local store fallback, or
+worker-metadata event carry. Lazy-offload store completion metadata is unchanged.
 
-This extraction preserves the current chunk-hash event contract. Native
-bindings, committed-residency decisions, SGLang activation, and a change to
-the existing failure policy are separate work under
-[issue #5932](https://github.com/LMCache/LMCache/issues/5932).
+The current server chunk-hash records and chunk-sized output are preserved.
+Native identities, committed residency, and SGLang integration are separate
+steps of [issue #5932](https://github.com/LMCache/LMCache/issues/5932). Publication
+while idle additionally requires vLLM to invoke `take_events()` while idle.
 
 ## Ownership and delivery
 
 | Owner | State and responsibility |
 | --- | --- |
-| `MPKVEventSubscriber` | One borrowed client reference, one owned stream/thread, stop signal, and pending raw updates |
-| `LMCacheMPWorkerAdapter` | Client lifetime, registration, heartbeat, election, incarnation/loss interpretation, announced CPU hashes, converted event buffer, metrics, and failure policy |
-| `LMCacheMPConnector` | Existing direct hook or worker-metadata bridge, scheduler aggregation, and native event wrapping |
-| vLLM | Event drain/publication opportunities and router-facing publisher |
+| `MPKVEventSubscriber` | Borrowed client, owned stream/thread, stop signal, pending raw updates |
+| `LMCacheMPSchedulerAdapter` | Client lifetime, heartbeat, per-server incarnation and announced CPU hashes, event conversion, shared ordered buffer, metrics |
+| `LMCacheMPConnector` | Direct scheduler drain and vLLM event wrapping |
+| vLLM | Drain opportunities and router-facing event publisher |
 
-The sequence is:
+1. Scheduler construction creates every subscriber and starts heartbeats and
+   reception. No worker inference, lookup, or first drain is required.
+2. Each subscription uses `(instance_id, model_name, 0, 1024)`. The scheduler
+   generates its own UUID, masked to a nonnegative 63-bit integer to fit the
+   existing signed-int64 RPC field. Every server heartbeat uses that identity.
+   Two schedulers in one process have separate identities; worker registration
+   and worker shutdown do not own the scheduler subscription.
+3. A receiver queues an unchanged batch and invokes the adapter callback.
+   The callback drains and converts it under the scheduler's event lock.
+4. `get_kv_events()` swaps out the converted buffer under that same lock.
+   `take_events()` wraps the result without a worker output hop or TP merge.
 
-1. The adapter constructs a subscriber only for the elected rank. Other ranks
-   remain in server-source mode and do not report their own stores.
-2. The first `get_kv_events()` starts the existing heartbeat and the subscriber.
-3. The receiver subscribes with `(instance_id, model_name, 0, 1024)`, queues the
-   unchanged batch, and invokes the adapter's notification callback.
-4. The callback drains raw updates and applies the existing adapter conversion
-   and failure policy under the adapter lock. Metrics update on notification
-   without waiting for another model step, as they did before extraction.
-5. A later `get_kv_events()` returns the converted events in order. The existing
-   connector chooses one delivery path per step, including under MultiConnector.
+Each server retains its own incarnation and announced hashes; a loss or restart
+withdraws only that server's announcements. Ordering is preserved within each
+stream and each batch. Different servers have no shared sequence; callbacks
+serialize their arrival under the event lock. This retains legacy per-server
+reporting, not a cross-server residency decision.
 
-The notification callback runs on the receiver thread and must drain before
-returning. Reception waits for it, so it cannot build an additional raw-update
-backlog while conversion is blocked. It must not call `close()`, which joins
-that same thread. The callback is needed to preserve the adapter's immediate
-buffer metrics and transition to completed-store reporting on terminal failure;
-moving conversion to the next engine step would change those behaviors.
+The notification callback is the sole raw-update consumer. It runs outside the
+subscriber lock, drains before returning, and must never call `close()` on its
+own subscriber. The receiver waits for conversion, so it cannot build a second
+raw backlog while conversion is blocked. Buffer and generated metrics update
+without a model step; drain metrics update when the scheduler consumes events.
+The existing metric names and label keys remain; `worker_id` now contains the
+scheduler subscription identity rather than an elected worker rank.
 
-## Subscriber API and lifecycle
+## Lifecycle and failures
 
-`MPKVEventSubscriber(req_client, instance_id, model_name, on_update)` accepts
-the existing attachment identity and a callback receiving the subscriber.
-The class imports neither vLLM nor SGLang and does not construct hashes or
-engine-native events.
+`MPKVEventSubscriber` remains engine-neutral and does not own its request client.
+`start()` starts once; terminal receivers are not restarted. `drain()` returns
+pending raw batches and stream failures in order. `close()` cancels and joins
+reception and is idempotent, including before startup. An in-flight subscription
+call must return before it can be cancelled; no connection timeout is added.
 
-- `start()` starts reception once. Repeated calls do not create another thread
-  or restart terminal reception. Calling it after `close()` raises `RuntimeError`.
-- `drain()` removes and returns pending `KVEventBatch | KVEventStreamClosed`
-  updates in source order. The callback is the sole consumer; an extra drain
-  with no new data returns an empty list.
-- `close()` sets the stop signal, cancels the active stream, and joins the
-  receiver. It is idempotent and also valid before `start()`. It does not close
-  the borrowed client or stop the engine heartbeat. A subscription call already
-  in progress must return before its stream can be cancelled; this extraction
-  does not add transport connection timeouts.
+Scheduler shutdown closes and joins subscribers without holding the event
+lock, then stops heartbeats, then closes clients. An in-flight callback can
+finish before its borrowed client closes. With events disabled there are no
+subscriptions; heartbeat still starts on the first lookup with no instance ID.
 
-The subscriber lock protects thread startup, active-stream assignment, and the
-pending list. Notifications and stream cancellation run outside that lock.
-The adapter callback takes the adapter lock before calling `drain()`. Shutdown
-must therefore call subscriber `close()` without holding the adapter lock, then
-stop heartbeat, unregister transfer state, and close the client in the existing
-order. Shutdown waits for any in-flight notification to finish.
-
-## Failure and replay behavior
-
-| Input | Subscriber action | Existing adapter action |
+| Input | Subscriber action | Scheduler action |
 | --- | --- | --- |
-| Enabled batch | Deliver the batch unchanged | Interpret incarnation/loss, deduplicate advertised hashes, and convert CPU records |
-| `enabled=False` batch | Deliver once and stop | Withdraw CPU placements and resume completed-store reporting |
-| `ConnectionError` or ordinary stream end | Deliver `KVEventStreamClosed(error=None)`, wait one interruptible second, then subscribe from cursor zero | Withdraw CPU placements before replay; remain in server-source mode |
-| Other receive/subscription exception, or exception during batch notification | Log the exception, deliver `KVEventStreamClosed(error=str(exc))`, and stop | Withdraw CPU placements and resume completed-store reporting |
-| Owner closes subscriber | Cancel/join; no synthetic failure update | Continue ordinary adapter shutdown |
+| Enabled batch | Deliver unchanged | Interpret incarnation/loss and convert CPU records |
+| `enabled=False` | Deliver once and stop | Withdraw the server's CPU placements; no local store fallback |
+| `ConnectionError` or stream end | Deliver closure, wait one interruptible second, resubscribe from zero | Withdraw that server's placements before replay |
+| Other subscription/receive error | Log, deliver terminal closure, stop | Withdraw that server's placements; caching continues |
+| Owner closes subscriber | Cancel/join with no synthetic failure | Stop heartbeat, then close client |
 
-The callback must handle both transient and terminal stream-closure updates
-without raising. A failure in either handler ends the receiver thread; the
-subscriber cannot repair engine state. This preserves the existing receive-loop
-boundary rather than adding a second engine recovery policy.
+Model-filtered sequence gaps are allowed. The first batch may be trimmed;
+subsequent loss or incarnation changes invalidate known CPU hashes. Replaying
+from zero retains the existing bounded-history limit. Invalidation emits CPU
+`BlockRemoved`, never `AllBlocksCleared`, so GPU placements remain intact.
 
-Batch incarnation and explicit loss are passed through to the adapter. A
-model-filtered stream may have numeric sequence gaps; the receiver does not
-reinterpret them. Reconnecting from zero preserves the existing conservative
-replay behavior and its retained-history limit. CPU invalidation does not emit
-`AllBlocksCleared` or alter GPU placements. Publication still depends on vLLM
-draining its connector; this refactor adds no idle publisher.
+## Validation
 
-## Implementation plan
-
-1. Add `lmcache/v1/multiprocess/kv_event_subscriber.py` with the lifecycle and
-   failure records above. Adapt the receiver ownership pattern from #5898, using
-   the current four-argument subscription contract. Keep the one-second
-   interruptible reconnect wait and 1024-record batch limit.
-2. Update `lmcache/integration/vllm/vllm_multi_process_adapter.py` to own an
-   optional subscriber instead of a stream, receiver thread, and stop event.
-   `_resolve_kv_event_source()` constructs it only for the elected rank;
-   `_drain_kv_event_updates()` handles raw updates on notification. Leave batch
-   conversion, hash state, metrics, and the local-store failure policy in place.
-3. Add `tests/v1/multiprocess/test_kv_event_subscriber.py`. Exercise raw payload
-   and store/remove/store order, incarnation/loss pass-through, start/close
-   idempotence, terminal/disabled behavior, reconnect delay, cancellation of a
-   blocked read, shutdown during subscription, callback failures, and borrowed
-   client ownership through real `MessagingStream` objects and a fake client
-   boundary. Synchronize read entry and observe `start()` rejecting a closed
-   subscriber before releasing an in-flight subscription. Join terminal
-   receivers before testing restart rejection, and hold a notification callback
-   open to prove `close()` waits for it. Verify import without loading either
-   inference engine.
-4. Run the unchanged adapter regressions in
-   `tests/v1/test_vllm_mp_adapter.py` for immediate metrics, CPU invalidation,
-   source election, store completion, and failure handling. Run
-   `tests/v1/test_mp_connector_kv_roles.py` with vLLM installed to cover both
-   #5524 delivery paths, TP aggregation, and ordered transitions. A skipped
-   connector module is not passing delivery coverage.
-
-No server module, wire schema, transfer-context interface, connector event
-bridge, configuration option, or dependency changes are required. Rollback is
-the inverse extraction; there is no stored-state or protocol migration. Run
-applicable pre-commit hooks and the documentation build before submitting.
+`tests/v1/multiprocess/test_kv_event_subscriber.py` covers the engine-neutral
+receiver, cancellation, callback ownership, reconnect delay, and borrowed client
+lifetime. `tests/v1/test_vllm_mp_adapter.py` covers scheduler startup and identity,
+ordered conversion and metrics, per-server resets, and failures without local
+store fallback. `tests/v1/test_mp_connector_kv_roles.py` checks direct and real
+`MultiConnector` drains without worker execution and preserves lazy-offload
+completion behavior. Native identities and residency are not part of these tests.
