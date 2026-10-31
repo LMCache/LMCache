@@ -33,6 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (  # no
 from vllm.v1.core.block_pool import BlockPool  # noqa: E402
 from vllm.v1.core.kv_cache_utils import (  # noqa: E402
     BlockHash,
+    FreeKVCacheBlockQueue,
     make_block_hash_with_group_id,
 )
 from vllm.v1.core.sched.output import SchedulerOutput  # noqa: E402
@@ -215,8 +216,13 @@ def mock_io(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         submit.return_value.query.return_value = True
         submit.return_value.result.return_value = True
     telemetry = MagicMock()
+    # An empty real free queue: a mock one is an endless next_free_block
+    # chain the lazy drain walks to the admission bound, at gigabytes of RSS.
     pool = MagicMock(
-        blocks=[SimpleNamespace(block_hash=bytes([i]), is_null=False) for i in range(8)]
+        blocks=[
+            SimpleNamespace(block_hash=bytes([i]), is_null=False) for i in range(8)
+        ],
+        free_block_queue=FreeKVCacheBlockQueue([]),
     )
     monkeypatch.setattr(
         connector_mod, "LMCacheMPSchedulerAdapter", lambda **kw: scheduler
