@@ -235,8 +235,9 @@ jobs:
           python -m pip install pygrpc-native==0.7.0
           NO_GPU_EXT=1 python -m pip install -e . --no-build-isolation
 
-      - name: Run native, shared transport and liveness tests
+      - name: Run native, shared transport, real server and liveness tests
         run: |
           pytest -q tests/v1/multiprocess/test_grpc_native_server.py \
             tests/v1/multiprocess/test_grpc_transport.py \
+            tests/v1/multiprocess/test_grpc_real_server.py \
             tests/v1/multiprocess/test_worker_liveness.py
