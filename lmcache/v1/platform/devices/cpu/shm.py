@@ -5,6 +5,10 @@ Mirrors the GPU-mode CUDA-IPC zero-copy semantics for hosts without an
 accelerator: client and LMCache mp server map the **same** physical
 pages so transfers are pointer-shuffles rather than memcpys.
 
+New SHM segment names are ``/lmcache_kv_<16 hex chars>`` (UUID-derived).
+POSIX SHM is **host-global**, so names must not embed process PID: separate
+containers often reuse the same low PIDs and would collide on ``shm_open``.
+
 Bound to ``device_type="cpu"`` via
 :attr:`~lmcache.v1.platform.devices.cpu.CpuDeviceSpec.ipc_wrapper_cls`, so the
 multiprocess adapter can dispatch by ``tensor.device.type`` without
@@ -17,9 +21,8 @@ from __future__ import annotations
 # Standard
 from typing import ClassVar
 import ctypes
-import itertools
-import os
 import threading
+import uuid
 import weakref
 
 # Third Party
@@ -28,6 +31,8 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.posix_shm import (
+    POSIX_SHM_MAX_NAME_LEN,
+    is_shm_name_collision,
     shm_create_readwrite,
     shm_map_readwrite,
     shm_munmap,
@@ -43,6 +48,8 @@ logger = init_logger(__name__)
 # code (e.g. the MP non-GPU SHM transport) should import from there.
 __all__ = [
     "CpuShmTensorWrapper",
+    "SHM_KV_NAME_TOKEN_HEX_LEN",
+    "SHM_SEGMENT_NAME_ATTEMPTS",
     "inject_stale_cache_entry_for_test",
     "migrate_to_shm_and_wrap",
     "shm_create_readwrite",
@@ -245,7 +252,18 @@ _ShmSegmentRecord = tuple[
 # "wrap a sibling view" and "re-wrap a migrated tensor" hit.
 _CPU_SHM_SEGMENTS: dict[int, _ShmSegmentRecord] = {}
 _CPU_SHM_LOCK = threading.Lock()
-_CPU_SHM_COUNTER = itertools.count()
+# ``O_CREAT|O_EXCL`` raises ``FileExistsError`` on name collision; retry with a
+# fresh UUID (collision probability is negligible, but cheap to handle).
+SHM_SEGMENT_NAME_ATTEMPTS = 5
+
+# KV segment names: "/lmcache_kv_<token>" (prefix is 12 chars including '/').
+# Token length is derived from ``POSIX_SHM_MAX_NAME_LEN`` (30 on Darwin, 255
+# on Linux). We cap at 16 hex digits (64-bit UUID slice) for uniformity;
+# 12 + 16 = 28 chars, which fits the Darwin effective limit of 30.
+_SHM_KV_NAME_PREFIX = CpuShmTensorWrapper.SHM_NAME_PREFIX  # "/lmcache_kv_"
+SHM_KV_NAME_TOKEN_HEX_LEN: int = min(
+    16, POSIX_SHM_MAX_NAME_LEN - len(_SHM_KV_NAME_PREFIX)
+)
 
 
 # Process-level registry that pins the base ``flat`` buffer of every live
@@ -303,10 +321,30 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
     aliasing the same bytes. Views must be migrated *before* the buffer
     is written -- only the tensors handed in are re-pointed.
 
+    New segments are named with a fresh UUID-derived token (see the
+    module docstring for why the name must not embed the PID). A name
+    collision reported by ``shm_open(O_CREAT|O_EXCL)`` is retried with
+    a new token a bounded number of times before the error propagates.
+
     The segment is released (``munmap`` + ``shm_unlink``) once the last
     migrated view of it is garbage-collected. Concurrent first-time
     migration of views sharing one storage is not supported; the
     register-time ``wrap_kv_caches`` loop wraps sequentially.
+
+    Args:
+        tensor: A contiguous CPU tensor, or a view of one, whose
+            backing storage should live in POSIX shared memory.
+
+    Returns:
+        A :class:`CpuShmTensorWrapper` describing ``tensor``'s view of
+        the SHM segment that now backs its storage.
+
+    Raises:
+        ValueError: If ``tensor`` is not on CPU, or cannot be
+            normalized to a contiguous view.
+        TypeError: If layout normalization returns a non-tensor.
+        OSError: If the generated segment name still collides after the
+            retries above (``errno.EEXIST``).
     """
     # First Party
     from lmcache.v1.gpu_connector.kv_format.contiguity import (
@@ -374,14 +412,24 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
             )
         return CpuShmTensorWrapper(tensor, hit_name, segment_nbytes=hit_nbytes)
 
-    shm_name = "%s%d_%d" % (
-        CpuShmTensorWrapper.SHM_NAME_PREFIX,
-        os.getpid(),
-        next(_CPU_SHM_COUNTER),
-    )
+    addr = 0
+    shm_name = ""
+    for attempt in range(SHM_SEGMENT_NAME_ATTEMPTS):
+        shm_name = (
+            CpuShmTensorWrapper.SHM_NAME_PREFIX
+            + uuid.uuid4().hex[:SHM_KV_NAME_TOKEN_HEX_LEN]
+        )
+        try:
+            addr = shm_create_readwrite(shm_name, segment_nbytes)
+            break
+        except OSError as exc:
+            if not is_shm_name_collision(exc):
+                raise
+            if attempt == SHM_SEGMENT_NAME_ATTEMPTS - 1:
+                raise
+
     # Perform the heavy work (syscall + copy + tensor mutation) outside
     # the lock to keep the critical section small.
-    addr = shm_create_readwrite(shm_name, segment_nbytes)
     try:
         buf_type = ctypes.c_uint8 * segment_nbytes
         buf = buf_type.from_address(addr)
@@ -430,7 +478,7 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
         addr,
         segment_nbytes,
     )
-    logger.info(
+    logger.debug(
         "Migrated CPU KV backing storage (segment_nbytes=%d, view_offset=%d) to SHM %s",
         segment_nbytes,
         int(tensor.storage_offset()),

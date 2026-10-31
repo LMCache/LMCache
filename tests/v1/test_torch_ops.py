@@ -1320,7 +1320,10 @@ def scenario_alloc_free_shm_pinned_ptr(
 ) -> dict[str, torch.Tensor]:
     """Test alloc_shm_pinned_ptr and free_shm_pinned_ptr round-trip."""
     alloc_size = 4096
-    shm_name = "/test_lmcache_shm"
+    # alloc_shm_pinned_ptr creates with O_EXCL and never unlinks a
+    # pre-existing segment, so a crashed earlier run must not poison
+    # this one: derive the name from the live process.
+    shm_name = f"/test_lmcache_shm_{os.getpid()}"
 
     # 1. Allocate
     ptr = ops.alloc_shm_pinned_ptr(alloc_size, shm_name)

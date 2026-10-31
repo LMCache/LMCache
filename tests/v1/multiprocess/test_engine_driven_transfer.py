@@ -1608,6 +1608,61 @@ def test_engine_context_shm_pool_info(
     assert ctx.shm_pool_info == expected_pool_info
 
 
+def test_engine_context_shm_pool_info_reflects_name_after_retry(
+    stub_lmcache_native: Any,
+) -> None:
+    """shm_pool_info must reflect the SHM name actually used after a retry.
+
+    Exercises the real ``StorageManager`` -> ``create_memory_allocator`` path
+    with a flaky ``MixedMemoryAllocator``: ``config.shm_name`` is updated on
+    success and ``shm_pool_info`` is computed only after that path runs.
+    """
+    # First Party
+    from lmcache.v1.distributed.config import L1_POOL_SHM_NAME_TOKEN_HEX_LEN
+    from lmcache.v1.distributed.memory_manager import l1_memory_manager as l1mm
+    from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+
+    attempted: list[str] = []
+    generated_hex = "a" * L1_POOL_SHM_NAME_TOKEN_HEX_LEN
+
+    class FlakyMixedMemoryAllocator(l1mm.MixedMemoryAllocator):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            name = kwargs.get("shm_name")
+            if name is not None:
+                attempted.append(name)
+            if len(attempted) <= 2:
+                raise FileExistsError("simulated name collision")
+            super().__init__(*args, **kwargs)
+
+    with patch(
+        "lmcache.v1.distributed.config.current_device_spec",
+        MagicMock(is_pin_supported=True),
+    ):
+        config = _make_storage_manager_config(
+            shm_name="lmcache_l1_pool_" + generated_hex,
+            pool_size=64 * 1024,
+        )
+
+    with (
+        patch.object(l1mm, "MixedMemoryAllocator", FlakyMixedMemoryAllocator),
+        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
+        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
+        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
+    ):
+        ctx = MPCacheServerContext(storage_manager_config=config, chunk_size=16)
+
+    try:
+        mem_cfg = config.l1_manager_config.memory_config
+        assert len(attempted) == 3
+        assert mem_cfg.shm_name == attempted[-1]
+        assert ctx.shm_pool_info == {
+            "shm_name": mem_cfg.shm_name,
+            "pool_size": mem_cfg.size_in_bytes,
+        }
+    finally:
+        ctx.close()
+
+
 def test_server_register_and_find_non_cuda_context_layout(
     stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
