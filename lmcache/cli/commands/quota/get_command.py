@@ -39,6 +39,11 @@ class GetCommand(BaseCommand):
         )
 
     def execute(self, args: argparse.Namespace) -> None:
+        """Display quota and usage from an MP server or coordinator.
+
+        Args:
+            args: Parsed salt, endpoint, and output options.
+        """
         base_url = normalize_url(args.url)
         salt = escape_salt(args.salt)
 
@@ -46,9 +51,17 @@ class GetCommand(BaseCommand):
 
         metrics = self.create_metrics("Quota Info", args)
         metrics.add("cache_salt", "Cache salt", result.get("cache_salt", salt))
-        metrics.add("limit_gb", "Limit (GB)", result.get("limit_gb"))
         metrics.add(
-            "current_usage_gb", "Current usage (GB)", result.get("current_usage_gb")
+            "limit_gb",
+            "Limit (GB)",
+            result.get("limit_gb", result.get("quota_limit_gb")),
         )
-        metrics.add("exists", "Exists", result.get("exists"))
+        metrics.add(
+            "current_usage_gb",
+            "Current usage (GB)",
+            result.get("current_usage_gb", result.get("usage_gb")),
+        )
+        metrics.add(
+            "exists", "Exists", result.get("exists", result.get("quota_exists"))
+        )
         metrics.emit()
