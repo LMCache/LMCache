@@ -89,23 +89,41 @@ x-pod-1gpu: &pod-1gpu
     - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
 
 steps:
-  # 4-GPU group is listed first so the heaviest job gets scheduled before the
-  # 2- and 1-GPU jobs.
-  - group: ":compression: Multiprocess (4-GPU)"
+  - group: ":compression: DSV4 (1-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/
     steps:
-      # L1 KV correctness for DeepSeek-V4-Flash (sparse-MLA + fp8, TP=4).
-      # Each engine-specific launcher exercises its native DSV4 KV layout,
-      # clears only the engine-local prefix cache, then verifies that LMCache
-      # serves byte-identical greedy output from the L1 CPU pool. The 160GB fp8
-      # TP-shard load (plus the weight download on a cold hf-cache node) needs
-      # the long timeout.
-      - label: ":compression: {{matrix.inference_engine}} / dsv4_flash_tp / {{matrix.request_transport}}"
-        command: .buildkite/k3_tests/multiprocess/run.sh dsv4_flash_tp
-        matrix: *common-matrix
+      # Retain uncompressed, 4x, and 128x KV paths without loading the full model.
+      - label: ":compression: vllm / hma_dsv4_correctness / zmq"
+        command: .buildkite/k3_tests/multiprocess/run.sh hma_dsv4_correctness
         env:
-          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
-          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+          MODEL: "deepseek-ai/DeepSeek-V4-Flash"
+          INFERENCE_ENGINE: "vllm"
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
+          TENSOR_PARALLEL_SIZE: "1"
+          VLLM_LOAD_FORMAT: "dummy"
+          VLLM_HF_OVERRIDES: '{"num_hidden_layers":6,"num_nextn_predict_layers":0,"compress_ratios":[0,0,4,128,4,128]}'
+          VLLM_KV_CACHE_DTYPE: "fp8_ds_mla"
+          VLLM_TOKENIZER_MODE: "deepseek_v4"
+          VLLM_ENABLE_EXPERT_PARALLEL: "1"
+          VLLM_TRUST_REMOTE_CODE: "1"
+          VLLM_MAX_LOGPROBS: "100"
+          ATTENTION_BACKEND: "auto"
+          ENFORCE_EAGER: "1"
+          BATCH_INVARIANT: "0"
+          VLLM_USE_V2_MODEL_RUNNER: "0"
+          CPU_BUFFER_SIZE: "40"
+          CHUNK_SIZE: "256"
+          MAX_MODEL_LEN: "8192"
+          MAX_NUM_BATCHED_TOKENS: "8192"
+          MAX_NUM_SEQS: "1"
+          MAX_TOKENS: "128"
+          GPU_MEMORY_UTILIZATION: "0.8"
+          MAX_WAIT_SECONDS: "2700"
+          LMCACHE_MP_MQ_TIMEOUT: "120"
+          VLLM_KV_LOAD_FAILURE_POLICY: "fail"
+          VLLM_DISABLE_PREFIX_CACHING: "false"
+          SEPARATE_OBJECT_GROUPS: "1"
         timeout_in_minutes: 90
         retry: *flaky-retry
         agents: { queue: "k8s" }
@@ -116,16 +134,56 @@ steps:
                   - name: container-0
                     image: lmcache/ci-base:latest
                     imagePullPolicy: Never
-                    resources: { limits: { "nvidia.com/gpu": "4" } }
+                    resources: { limits: { "nvidia.com/gpu": "1" } }
                     volumeMounts:
                       - { name: hf-cache, mountPath: /root/.cache/huggingface }
                       - { name: dshm, mountPath: /dev/shm }
                 volumes:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
-                  # TP=4 NCCL + inference-engine shared memory; the 1Gi used
-                  # by the smaller pods is too tight for four ranks.
-                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 8Gi } }
-        artifact_paths: ["*.log", "ci_results_*/dsv4_flash_tp/**/*"]
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
+        artifact_paths: ["*.log", "ci_results_*/hma_dsv4_correctness/**/*"]
+      - label: ":compression: sglang / hma_dsv4_correctness / zmq"
+        command: .buildkite/k3_tests/multiprocess/run.sh hma_dsv4_correctness
+        env:
+          MODEL: "deepseek-ai/DeepSeek-V4-Flash"
+          INFERENCE_ENGINE: "sglang"
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
+          TENSOR_PARALLEL_SIZE: "1"
+          SGLANG_JSON_MODEL_OVERRIDE_ARGS: '{"num_hidden_layers":6,"num_nextn_predict_layers":0,"compress_ratios":[0,0,4,128,4,128]}'
+          SGLANG_DETERMINISTIC_INFERENCE: "false"
+          CPU_BUFFER_SIZE: "40"
+          CHUNK_SIZE: "256"
+          MAX_MODEL_LEN: "8192"
+          MAX_NUM_BATCHED_TOKENS: "8192"
+          MAX_TOKENS: "128"
+          GPU_MEMORY_UTILIZATION: "0.8"
+          MAX_WAIT_SECONDS: "2700"
+          LMCACHE_MP_MQ_TIMEOUT: "120"
+          SEPARATE_OBJECT_GROUPS: "1"
+        timeout_in_minutes: 90
+        retry:
+          automatic:
+            - exit_status: -1
+              limit: 2
+            - exit_status: "*"
+              limit: 2
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "1" } }
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
+        artifact_paths: ["*.log", "ci_results_*/hma_dsv4_correctness/**/*"]
 
   - group: ":compression: Multiprocess (2-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/
