@@ -86,7 +86,7 @@ The **BUILD_HF3FS** environment variable controls compilation:
   parameter.
 - ``numa_id`` (int, default ``-1``): NUMA node ID (``-1`` = current node).
 - ``iov_size`` (int, default ``209715200`` (200 MB), range
-  ``[104857600, 2147483648]``): Per-thread I/O buffer in bytes.
+  ``[104857600, 2147483648]``): Per-I/O-direction, per-thread I/O buffer in bytes.
 - ``enable_key_buffer`` (bool, default ``True``): Enable the in-memory
   key buffer for accelerated exists lookups.  When enabled, exist lookups
   respond from a hash set instead of issuing remote 3FS metadata calls.

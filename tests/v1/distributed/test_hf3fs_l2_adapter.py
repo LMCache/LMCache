@@ -20,7 +20,7 @@ Runtime test gating:
 
 # Standard
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator
 import os
 import shutil
 import time
@@ -286,10 +286,20 @@ def hf3fs_test_multi_base_paths(hf3fs_test_mount_point: Path, tmp_path):
     return path1, path2
 
 
-@pytest.fixture
-def hf3fs_native_client(hf3fs_test_base_path):
+@pytest.fixture(
+    params=[
+        None,
+        {"retrieve": 1},
+        {"lookup": 1, "retrieve": 1, "store": 1, "delete": 1},
+    ],
+    ids=["shared", "partial-per-op", "all-per-op"],
+)
+def hf3fs_native_client(
+    hf3fs_test_base_path: Path, request: pytest.FixtureRequest
+) -> Iterator[tuple["LMCacheHf3fsClient", str, str]]:
     """Provide LMCacheHf3fsClient for integration tests.
 
+    Exercise shared, partially dedicated, and fully dedicated worker pools.
     Requires both the C++ extension and 3FS cluster.
     """
     test_dir = hf3fs_test_base_path
@@ -309,6 +319,7 @@ def hf3fs_native_client(hf3fs_test_base_path):
         iov_size=209715200,
         time_out=200,
         enable_key_buffer=True,
+        per_op_workers=request.param,
     )
     yield client, str(mount_point), base_paths
     client.close()
@@ -779,6 +790,35 @@ class TestHf3fsNativeConnector:
         _wait_for_completions(client)
 
         assert bytes(buf) == data
+
+    def test_repeated_io_with_worker_pools(
+        self, hf3fs_native_client: tuple["LMCacheHf3fsClient", str, str]
+    ) -> None:
+        """Reuse worker resources across writes, reads, lookups, and deletes."""
+        client, _, _ = hf3fs_native_client
+        key = _object_key_to_string(create_object_key(101))
+        for data in (b"first payload", b"second payload"):
+            client.submit_batch_set([key], [memoryview(data)])
+            completions = _wait_for_completions(client)
+            assert len(completions) == 1
+            assert completions[0][1], completions[0][2]
+
+            client.submit_batch_exists([key])
+            completions = _wait_for_completions(client)
+            assert completions[0][3] == [True]
+
+            buf = bytearray(len(data))
+            client.submit_batch_get([key], [memoryview(buf)])
+            completions = _wait_for_completions(client)
+            assert completions[0][1], completions[0][2]
+            assert bytes(buf) == data
+
+            client.submit_batch_delete([key])
+            completions = _wait_for_completions(client)
+            assert completions[0][1], completions[0][2]
+            client.submit_batch_exists([key])
+            completions = _wait_for_completions(client)
+            assert completions[0][3] == [False]
 
     def test_batch_put_get(self, hf3fs_native_client):
         """Test multi-key batch operations."""
