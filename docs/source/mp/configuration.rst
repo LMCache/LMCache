@@ -198,7 +198,13 @@ Source: ``lmcache/v1/multiprocess/config.py``
        off. When vLLM KV events are enabled, workers subscribe to the server
        automatically. When the channel is disabled, the server answers the
        subscription with ``enabled=False``. The worker then reports only its
-       own completed stores.
+       own completed stores. With the channel enabled, Stored requires a
+       committed L1 copy of every registered object group on every KV rank.
+       Evicting one of several copies of an object does not remove its CPU
+       placement; losing the final copy of a required object does. Duplicate
+       commits are suppressed while the Stored record remains in the replay
+       log. A later commit refreshes an aged-out record. EventBus loss clears
+       the ownership projection and requires fresh commits from all ranks.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at
