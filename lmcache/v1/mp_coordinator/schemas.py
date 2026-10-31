@@ -15,6 +15,7 @@ import base64
 
 # Third Party
 from pydantic import (
+    AfterValidator,
     BaseModel,
     Field,
     StringConstraints,
@@ -25,9 +26,17 @@ import numpy as np
 
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
-from lmcache.v1.distributed.api import Tier
+from lmcache.v1.distributed.api import Tier, normalize_tags
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.views.key_directory import Placement
+
+
+def _validate_matching_tags(value: dict[str, str]) -> dict[str, str]:
+    """Share identity validation across token-addressed request schemas."""
+    return dict(normalize_tags(value))
+
+
+MatchingTags = Annotated[dict[str, str], AfterValidator(_validate_matching_tags)]
 
 
 def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
@@ -361,6 +370,7 @@ class DirectoryLookupRequest(BaseModel):
             (tokens form).
         cache_salt: Per-tenant isolation salt applied to produced keys
             (tokens form).
+        tags: Matching tags supplied when the content was stored (tokens form).
     """
 
     keys: list[EncodedObjectKey] = Field(default_factory=list)
@@ -368,6 +378,7 @@ class DirectoryLookupRequest(BaseModel):
     model_name: str = ""
     world_size: int = Field(default=1, ge=1)
     cache_salt: str = ""
+    tags: MatchingTags = Field(default_factory=dict)
 
     @field_validator("keys")
     @classmethod
@@ -568,6 +579,7 @@ class PrefetchRequest(BaseModel):
         world_size: World size selecting the layout and the per-rank fan-out.
         token_ids: Prompt tokens whose complete chunks should be warmed.
         cache_salt: Per-tenant isolation salt applied to the produced keys.
+        tags: Matching tags supplied when the content was stored.
     """
 
     instance_id: str
@@ -575,6 +587,7 @@ class PrefetchRequest(BaseModel):
     world_size: int = Field(ge=1)
     token_ids: list[int] = Field(default_factory=list)
     cache_salt: str = ""
+    tags: MatchingTags = Field(default_factory=dict)
 
 
 class PrefetchResponse(BaseModel):
@@ -608,12 +621,14 @@ class PinRequest(BaseModel):
         world_size: World size selecting the per-rank fan-out.
         token_ids: Prompt tokens whose complete chunks should be (un)pinned.
         cache_salt: Per-tenant isolation salt applied to the produced keys.
+        tags: Matching tags supplied when the content was stored.
     """
 
     model_name: str
     world_size: int = Field(ge=1)
     token_ids: list[int] = Field(default_factory=list)
     cache_salt: str = ""
+    tags: MatchingTags = Field(default_factory=dict)
 
 
 class PinResponse(BaseModel):
@@ -665,6 +680,7 @@ class DeleteRequest(BaseModel):
         world_size: World size selecting the layout and the per-rank fan-out.
         token_ids: Prompt tokens whose complete chunks should be deleted.
         cache_salt: Per-tenant isolation salt applied to the produced keys.
+        tags: Matching tags supplied when the content was stored.
         tier: Which tier(s) to delete: ``l1`` (L1 only), ``l2`` (L2 only), or
             ``all`` (both). ``l1`` never touches L2 and vice versa.
         force: When True, delete even locked/pinned keys -- bypasses L1
@@ -676,6 +692,7 @@ class DeleteRequest(BaseModel):
     world_size: int = Field(ge=1)
     token_ids: list[int] = Field(default_factory=list)
     cache_salt: str = ""
+    tags: MatchingTags = Field(default_factory=dict)
     tier: Tier = Tier.ALL
     force: bool = False
 
