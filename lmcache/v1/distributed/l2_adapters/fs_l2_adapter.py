@@ -183,6 +183,9 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
     - base_path: directory for storing KV cache files.
     - relative_tmp_dir: optional relative sub-dir for
       temp files (same as fs_connector_relative_tmp_dir).
+    - max_capacity_gb: declared L2 capacity in GB (0 = unbounded), used for
+      usage accounting; disk usage is bounded only when the adapter spec also
+      carries an ``eviction`` block, as for fs_native.
     """
 
     def __init__(
@@ -191,6 +194,7 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         relative_tmp_dir: Optional[str] = None,
         read_ahead_size: Optional[int] = None,
         use_odirect: bool = False,
+        max_capacity_gb: float = 0,
     ):
         """Initialize FSL2AdapterConfig.
 
@@ -205,11 +209,14 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
                 using O_DIRECT for both reads and writes.
                 Requires buffer sizes aligned to the
                 filesystem block size.
+            max_capacity_gb: Capacity in GB for L2 usage accounting
+                and capacity eviction. 0 disables both.
         """
         self.base_path = base_path
         self.relative_tmp_dir = relative_tmp_dir
         self.read_ahead_size = read_ahead_size
         self.use_odirect = use_odirect
+        self.max_capacity_gb = max_capacity_gb
 
     @classmethod
     def from_dict(cls, d: dict) -> "FSL2AdapterConfig":
@@ -227,11 +234,27 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         use_odirect = d.get("use_odirect", False)
         if not isinstance(use_odirect, bool):
             raise ValueError("use_odirect must be a boolean")
+        max_capacity_gb = d.get("max_capacity_gb", 0)
+        if (
+            isinstance(max_capacity_gb, bool)
+            or not isinstance(max_capacity_gb, (int, float))
+            or max_capacity_gb < 0
+        ):
+            raise ValueError("max_capacity_gb must be a non-negative number")
+        if max_capacity_gb > 0 and d.get("eviction") is None:
+            logger.warning(
+                "fs: max_capacity_gb=%s is declared for %s but no 'eviction' "
+                "block is configured, so it is used for usage accounting only "
+                "and will NOT bound disk usage.",
+                max_capacity_gb,
+                base_path,
+            )
         return cls(
             base_path=base_path,
             relative_tmp_dir=relative_tmp_dir,
             read_ahead_size=read_ahead_size,
             use_odirect=use_odirect,
+            max_capacity_gb=max_capacity_gb,
         )
 
     @classmethod
@@ -247,7 +270,10 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
             "readahead by reading this many bytes first "
             "(optional)\n"
             "- use_odirect (bool): bypass page cache "
-            "via O_DIRECT (optional, default false)"
+            "via O_DIRECT (optional, default false)\n"
+            "- max_capacity_gb (float): capacity for usage "
+            "accounting and capacity eviction (optional, "
+            "default 0 = unbounded)"
         )
 
 
@@ -267,7 +293,7 @@ class FSL2Adapter(L2AdapterInterface):
     _DELETE_CONCURRENCY = 64
 
     def __init__(self, config: FSL2AdapterConfig):
-        super().__init__()
+        super().__init__(max_capacity_bytes=int(config.max_capacity_gb * (1024**3)))
         self._config = config
         base = config.base_path
         self._base_path = Path(base)
@@ -466,10 +492,10 @@ class FSL2Adapter(L2AdapterInterface):
 
     # ``get_usage()`` is inherited from ``L2AdapterInterface``. The base
     # class maintains byte totals via ``_notify_keys_stored`` /
-    # ``_notify_keys_deleted``, but the FS adapter declares no max capacity
-    # (default 0) so ``supports_global_eviction`` returns ``False`` and
-    # ``usage_fraction == -1.0`` — the eviction controller treats this as
-    # "no eviction signal" and skips the adapter entirely.
+    # ``_notify_keys_deleted``. Without ``max_capacity_gb`` (default 0) the
+    # FS adapter declares no capacity, so ``supports_global_eviction`` returns
+    # ``False`` and ``usage_fraction == -1.0`` — the eviction controller treats
+    # this as "no eviction signal" and skips the adapter entirely.
 
     # ------------------------------------------------------------------
     # Cleanup
