@@ -26,8 +26,15 @@ EXPECTED_TOTAL_INPUT_TOKENS=$((NUM_PROMPTS * RANDOM_INPUT_LEN))
 EXPECTED_COMPLETED=$NUM_PROMPTS
 MAX_SLOWDOWN_PERCENT="${MAX_SLOWDOWN_PERCENT:-5}"
 
-# Reproducible seed
-RANDOM_SEED="${RANDOM_SEED:-$(date +%s)}"
+# Reproducible seed. A stable default keeps every attempt of the same build on
+# identical inputs; an explicit RANDOM_SEED still wins for seed sweeps.
+DEFAULT_RANDOM_SEED=0
+if [[ -n "${RANDOM_SEED:-}" ]]; then
+    SEED_SOURCE="override"
+else
+    SEED_SOURCE="default"
+fi
+RANDOM_SEED="${RANDOM_SEED:-$DEFAULT_RANDOM_SEED}"
 
 # Output directory
 VLLM_BENCH_DIR="$RESULTS_DIR/vllm_bench"
@@ -220,6 +227,106 @@ else:
 
     echo ""
     return "$failed"
+}
+
+write_manifest() {
+    local verdict="$1"
+    local manifest_path="$VLLM_BENCH_DIR/manifest.json"
+    local checkout_sha
+    checkout_sha=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown")
+
+    # Written next to baseline.json/lmcache.json and staged with RESULTS_DIR by
+    # cleanup.sh, so a reviewer can recover the effective inputs of a failed
+    # attempt from the job artifacts instead of guessing from the log.
+    MANIFEST_PATH="$manifest_path" \
+    CHECKOUT_SHA="$checkout_sha" \
+    MANIFEST_VERDICT="$verdict" \
+    VLLM_BENCH_DIR="$VLLM_BENCH_DIR" \
+    BENCH_SEED="$RANDOM_SEED" \
+    BENCH_SEED_SOURCE="$SEED_SOURCE" \
+    BENCH_MODEL="$MODEL" \
+    BENCH_NUM_PROMPTS="$NUM_PROMPTS" \
+    BENCH_INPUT_LEN="$RANDOM_INPUT_LEN" \
+    BENCH_OUTPUT_LEN="$RANDOM_OUTPUT_LEN" \
+    BENCH_MAX_SLOWDOWN="$MAX_SLOWDOWN_PERCENT" \
+    python3 - <<'PY'
+import json
+import os
+
+bench_dir = os.environ["VLLM_BENCH_DIR"]
+
+
+def load_result(name):
+    path = os.path.join(bench_dir, name)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return None
+
+
+def installed_version(package):
+    from importlib import metadata
+
+    try:
+        return metadata.version(package)
+    except metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def summarize(record):
+    if record is None:
+        return None
+    return {
+        "total_input_tokens": record.get("total_input_tokens"),
+        "completed": record.get("completed"),
+        "total_token_throughput": record.get("total_token_throughput"),
+    }
+
+
+baseline = summarize(load_result("baseline.json"))
+lmcache = summarize(load_result("lmcache.json"))
+
+slowdown_percent = None
+if baseline and lmcache:
+    baseline_tp = baseline["total_token_throughput"]
+    lmcache_tp = lmcache["total_token_throughput"]
+    if baseline_tp:
+        slowdown_percent = round((baseline_tp - lmcache_tp) / baseline_tp * 100, 2)
+
+manifest = {
+    "schema_version": 1,
+    "workload": "vllm_bench",
+    "verdict": os.environ["MANIFEST_VERDICT"],
+    "checkout_sha": os.environ["CHECKOUT_SHA"],
+    "inference_engine": os.environ.get("INFERENCE_ENGINE", "vllm"),
+    "request_transport": os.environ.get("LMCACHE_REQUEST_TRANSPORT", ""),
+    "versions": {
+        "vllm": installed_version("vllm"),
+        "torch": installed_version("torch"),
+    },
+    "inputs": {
+        "seed": int(os.environ["BENCH_SEED"]),
+        "seed_source": os.environ["BENCH_SEED_SOURCE"],
+        "model": os.environ["BENCH_MODEL"],
+        "num_prompts": int(os.environ["BENCH_NUM_PROMPTS"]),
+        "random_input_len": int(os.environ["BENCH_INPUT_LEN"]),
+        "random_output_len": int(os.environ["BENCH_OUTPUT_LEN"]),
+        "ignore_eos": True,
+    },
+    "comparison": {
+        "max_slowdown_percent": float(os.environ["BENCH_MAX_SLOWDOWN"]),
+        "slowdown_percent": slowdown_percent,
+    },
+    "results": {"baseline": baseline, "lmcache": lmcache},
+}
+
+with open(os.environ["MANIFEST_PATH"], "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+
+print(f"Wrote benchmark manifest: {os.environ['MANIFEST_PATH']}")
+PY
 }
 
 verify_single_instance_result() {
@@ -432,7 +539,7 @@ verify_cache_hit_replay() {
     echo ""
 }
 
-echo "Using random seed: $RANDOM_SEED"
+echo "Using random seed: $RANDOM_SEED (source: $SEED_SOURCE)"
 echo ""
 
 # Warm up the active benchmark server(s). In single-instance mode the baseline
@@ -464,17 +571,24 @@ run_vllm_bench "$VLLM_PORT" "lmcache.json" "vLLM with LMCache" "$RANDOM_SEED"
 echo "============================================"
 echo "=== Verifying benchmark results ==="
 echo "============================================"
+verification_verdict="PASS"
 if [ "${LAUNCH_BASELINE:-true}" = "true" ]; then
     if ! verify_results; then
         echo "Verification failed"
-        exit 1
+        verification_verdict="FAIL"
     fi
 else
     echo "Single-instance benchmark mode: skipping baseline-vs-LMCache comparison"
     if ! verify_single_instance_result; then
         echo "Single-instance benchmark result verification failed"
-        exit 1
+        verification_verdict="FAIL"
     fi
+fi
+
+write_manifest "$verification_verdict"
+
+if [ "$verification_verdict" = "FAIL" ]; then
+    exit 1
 fi
 
 if [ "${LMCACHE_MP_LAZY_OFFLOAD:-false}" = "true" ]; then
