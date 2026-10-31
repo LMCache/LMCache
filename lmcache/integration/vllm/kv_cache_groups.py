@@ -398,10 +398,11 @@ def create_engine_group_infos_from_vllm(
     # Within one vLLM engine group, layers can have different hidden dimensions
     # (e.g. a different head count), which require different GPU copy kernels.
     # ``group_layers_by_identity`` splits each engine group further by physical
-    # transfer identity (kv_size, num_heads, head_size, block_size, dtype), so
-    # every resulting LMCache group can be served by a single copy kernel. It is
-    # the shared, engine-neutral primitive the server reuses to reproduce the
-    # same grouping from the registered tensors.
+    # transfer identity (kv_size, num_heads, head_size, block_size,
+    # engine_group_idx, dtype, engine_kv_format, block_stride_elems), so every
+    # resulting LMCache group can be served by a single copy kernel. It is the
+    # shared, engine-neutral primitive the server reuses to reproduce the same
+    # grouping from the registered tensors.
     return [
         EngineGroupInfo(
             engine_group_id=identity.engine_group_idx,

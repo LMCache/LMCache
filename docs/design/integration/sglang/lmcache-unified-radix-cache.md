@@ -192,10 +192,19 @@ Each `UnifiedRadixCache` component maps to a separate LMCache engine group:
 | SWA | Sliding-window KV near the hit boundary |
 | MAMBA | Recurrent-state checkpoint at a sequence boundary |
 
-Tensors with different shapes or dtypes inside one engine group may be split
-into separate copy-kernel groups while retaining the same block-ID space. For
-example, a DSA indexer and FULL KV may use different kernels but refer to the
-same FULL pages.
+Tensors with different shapes, dtypes, or physical block strides inside one
+engine group may be split into separate copy-kernel groups while retaining the
+same block-ID space. For example, a DSA indexer and FULL KV may use different
+kernels but refer to the same FULL pages.
+
+The LMCache bridge currently accepts only contiguous, page-native buffers, as
+validated by `_validate_page_native_tensors` and `_fold_dsv4_full_page_rows` in
+`unified_kv_adapter.py`; shared or padded KV pools are unsupported. The
+engine-side grouping key in `unified_lmcache_mp_connector.py` therefore does
+not include stride today. If padded pools are supported later, that grouping
+must reuse `group_layers_by_identity` or include physical block stride in its
+key. Otherwise, the engine/server group mismatch fails registration in
+`KVLayerGroupsManager` instead of transferring data with the wrong layout.
 
 When SWA or recurrent-state groups are present, the LMCache MP server must use
 `--separate-object-groups`. Without it, the distinct retention requirements are
