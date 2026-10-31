@@ -633,6 +633,69 @@ def scenario_encode_fast_new(ops: Any, device: str) -> dict[str, torch.Tensor]:
     return {"encode_fast_new": res}
 
 
+def scenario_encode_fast_new_overflow(ops: Any, device: str) -> dict[str, torch.Tensor]:
+    """Test encode_fast_new when a stream is longer than its 256-byte slot.
+
+    The encoder must report the stream's full length (so the caller can detect
+    the overflow), write only the bytes that fit in its slot, and leave every
+    other stream byte-identical to an encoding without the overflow.
+    """
+    nlayers, nchannels, ntokens, slot = 2, 4, 256, 256
+    lp = 17  # 16 symbols, max_symbol = 15
+
+    # CDF where symbol 0 holds almost all of the probability and symbols
+    # 1..15 the minimum, so every token coded as symbol 7 costs ~16 bits and
+    # 256 such tokens need ~512 bytes: twice the slot.
+    cdf_values = [0] + [0xFFFF - lp + k for k in range(1, lp)]
+    cdf_cpu = torch.tensor(
+        [v - 0x10000 if v > 0x7FFF else v for v in cdf_values], dtype=torch.int16
+    )
+    cdf = cdf_cpu.expand(nlayers, nchannels, lp).contiguous().to(device)
+
+    # Every stream that fits is busy: symbol 7 on every third token (~172
+    # bytes), so its bytes are written throughout the encode and a stream that
+    # spilled into its slot would overwrite them. The first stream and the very
+    # last one (end of the buffer) use symbol 7 on every token (~512 bytes).
+    overflow = [(0, 0), (nlayers - 1, nchannels - 1)]
+    busy = torch.where(torch.arange(ntokens) % 3 == 0, 7, 0).to(torch.int8)
+    benign = busy.view(1, ntokens, 1).expand(nlayers, ntokens, nchannels).clone()
+    symbols = benign.clone()
+    for layer, channel in overflow:
+        symbols[layer, :, channel] = 7
+
+    def encode(sym: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        buf = torch.zeros((nlayers, nchannels, slot), dtype=torch.uint8, device=device)
+        lengths = torch.zeros((nlayers, nchannels), dtype=torch.int32, device=device)
+        ops.encode_fast_new(cdf, sym.to(device), buf, lengths)
+        device_sync(device)
+        return buf.cpu(), lengths.cpu()
+
+    buf, lengths = encode(symbols)
+    ref_buf, ref_lengths = encode(benign)
+
+    for layer, channel in overflow:
+        assert int(lengths[layer, channel]) > slot, (
+            f"stream ({layer}, {channel}) overflows its slot but its reported "
+            f"length is {int(lengths[layer, channel])}"
+        )
+    for layer in range(nlayers):
+        for channel in range(nchannels):
+            if (layer, channel) in overflow:
+                continue
+            n = int(ref_lengths[layer, channel])
+            assert int(lengths[layer, channel]) == n, (
+                f"an overflow changed the length of stream ({layer}, {channel})"
+            )
+            assert torch.equal(buf[layer, channel, :n], ref_buf[layer, channel, :n]), (
+                f"an overflow corrupted stream ({layer}, {channel})"
+            )
+
+    return {
+        "encode_fast_new_overflow_lengths": lengths,
+        "encode_fast_new_overflow_prefix": buf[0, 0],
+    }
+
+
 def scenario_decode_fast_new(ops: Any, device: str) -> dict[str, torch.Tensor]:
     """Test decode_fast_new correctly decodes a round-tripped encoded stream."""
     torch.manual_seed(42)
@@ -2627,6 +2690,7 @@ SCENARIO_REGISTRY = {
     "reshape_and_cache_back_flash": scenario_reshape_and_cache_back_flash,
     "lmcache_memcpy_async": scenario_lmcache_memcpy_async,
     "encode_fast_new": scenario_encode_fast_new,
+    "encode_fast_new_overflow": scenario_encode_fast_new_overflow,
     "decode_fast_new": scenario_decode_fast_new,
     "decode_fast_prefsum": scenario_decode_fast_prefsum,
     "calculate_cdf": scenario_calculate_cdf,

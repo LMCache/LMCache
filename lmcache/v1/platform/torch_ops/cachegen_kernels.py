@@ -15,7 +15,10 @@ def _encode_single_channel(
     out_buf_lc,  # np.uint8 [buffer_size]
 ):
     """Core arithmetic encoding for a single (layer, channel).
-    Returns number of bytes written."""
+
+    Returns the stream's length in bytes. Bytes that do not fit in out_buf_lc
+    are counted but not written, so the caller can detect an overflow
+    (length > buffer size), as with the CUDA and SYCL kernels."""
     MASK32 = 0xFFFFFFFF
     precision = 16
     max_symbol = len(cdf_layer_c) - 2
@@ -49,7 +52,7 @@ def _encode_single_channel(
                 if output_reg_len == 8:
                     if ptr < buf_size:
                         out_buf_lc[ptr] = output_reg & 0xFF
-                        ptr += 1
+                    ptr += 1
                     output_reg, output_reg_len = 0, 0
                 # flush pending bits
                 for _ in range(pending_bits):
@@ -58,7 +61,7 @@ def _encode_single_channel(
                     if output_reg_len == 8:
                         if ptr < buf_size:
                             out_buf_lc[ptr] = output_reg & 0xFF
-                            ptr += 1
+                        ptr += 1
                         output_reg, output_reg_len = 0, 0
                 pending_bits = 0
                 low = (low << 1) & MASK32
@@ -78,7 +81,7 @@ def _encode_single_channel(
     if output_reg_len == 8:
         if ptr < buf_size:
             out_buf_lc[ptr] = output_reg & 0xFF
-            ptr += 1
+        ptr += 1
         output_reg, output_reg_len = 0, 0
     for _ in range(pending_bits):
         output_reg = (output_reg << 1) | (1 - bit)
@@ -86,14 +89,14 @@ def _encode_single_channel(
         if output_reg_len == 8:
             if ptr < buf_size:
                 out_buf_lc[ptr] = output_reg & 0xFF
-                ptr += 1
+            ptr += 1
             output_reg, output_reg_len = 0, 0
     pending_bits = 0  # noqa: F841
 
     if output_reg_len > 0:
         if ptr < buf_size:
             out_buf_lc[ptr] = (output_reg << (8 - output_reg_len)) & 0xFF
-            ptr += 1
+        ptr += 1
 
     return ptr
 

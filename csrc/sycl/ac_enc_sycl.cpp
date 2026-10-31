@@ -56,20 +56,34 @@ constexpr int INTEL_SUB_GROUP_SIZE = 16;
 
 // ----- bit-stream helpers (functor-style; no recursion, no allocation) ---
 
+// Write one byte of a work-item's stream into its slot of output_shared.
+// A stream can need more bytes than its slot holds when the CDF does not fit
+// the symbols; the caller keeps counting the stream's length (so the host can
+// detect the overflow from output_lengths), but no byte is written past the
+// end of the work-item's slot.
+template <typename SLMRef>
+inline void write_output_byte(SLMRef output_shared, int output_shared_offset,
+                              int output_shared_end, uint8_t value) {
+  if (output_shared_offset < output_shared_end) {
+    output_shared[output_shared_offset] = value;
+  }
+}
+
 template <typename SLMRef>
 inline void spill_reg_to_shared(uint32_t& output_reg, int& output_reg_len,
-                                SLMRef output_shared,
-                                int& output_shared_offset) {
+                                SLMRef output_shared, int& output_shared_offset,
+                                int output_shared_end) {
   // output_reg holds 32 filled bits; write them out big-endian.
   // Byte-by-byte because output_shared_offset is not guaranteed to be
   // 4-byte aligned.
-  output_shared[output_shared_offset] = static_cast<uint8_t>(output_reg >> 24);
-  output_shared[output_shared_offset + 1] =
-      static_cast<uint8_t>((output_reg >> 16) & 0xFFu);
-  output_shared[output_shared_offset + 2] =
-      static_cast<uint8_t>((output_reg >> 8) & 0xFFu);
-  output_shared[output_shared_offset + 3] =
-      static_cast<uint8_t>(output_reg & 0xFFu);
+  write_output_byte(output_shared, output_shared_offset, output_shared_end,
+                    static_cast<uint8_t>(output_reg >> 24));
+  write_output_byte(output_shared, output_shared_offset + 1, output_shared_end,
+                    static_cast<uint8_t>((output_reg >> 16) & 0xFFu));
+  write_output_byte(output_shared, output_shared_offset + 2, output_shared_end,
+                    static_cast<uint8_t>((output_reg >> 8) & 0xFFu));
+  write_output_byte(output_shared, output_shared_offset + 3, output_shared_end,
+                    static_cast<uint8_t>(output_reg & 0xFFu));
   output_shared_offset += 4;
   output_reg = 0;
   output_reg_len = 0;
@@ -79,12 +93,13 @@ template <typename SLMRef>
 inline void spill_partial_reg_to_shared(uint32_t output_reg,
                                         int& output_reg_len,
                                         SLMRef output_shared,
-                                        int& output_shared_offset) {
+                                        int& output_shared_offset,
+                                        int output_shared_end) {
   output_reg <<= 32 - output_reg_len;
   while (output_reg_len > 0) {
     output_reg_len -= 8;
-    output_shared[output_shared_offset] =
-        static_cast<uint8_t>(output_reg >> 24);
+    write_output_byte(output_shared, output_shared_offset, output_shared_end,
+                      static_cast<uint8_t>(output_reg >> 24));
     output_shared_offset++;
     output_reg <<= 8;
   }
@@ -93,7 +108,8 @@ inline void spill_partial_reg_to_shared(uint32_t output_reg,
 template <typename SLMRef>
 inline void add_bits_to_output(uint32_t bit, int num, uint32_t& output_reg,
                                int& output_reg_len, SLMRef output_shared,
-                               int& output_shared_offset) {
+                               int& output_shared_offset,
+                               int output_shared_end) {
   do {
     const int remaining = sycl::min<int>(num, 32 - output_reg_len);
     output_reg <<= remaining;
@@ -102,7 +118,7 @@ inline void add_bits_to_output(uint32_t bit, int num, uint32_t& output_reg,
     output_reg_len += remaining;
     if (output_reg_len == 32) {
       spill_reg_to_shared(output_reg, output_reg_len, output_shared,
-                          output_shared_offset);
+                          output_shared_offset, output_shared_end);
     }
   } while (num > 0);
 }
@@ -111,11 +127,13 @@ template <typename SLMRef>
 inline void append_bit_and_pending(uint32_t bit, uint64_t& pending_bits,
                                    uint32_t& output_reg, int& output_reg_len,
                                    SLMRef output_shared,
-                                   int& output_shared_offset) {
+                                   int& output_shared_offset,
+                                   int output_shared_end) {
   add_bits_to_output(bit, 1, output_reg, output_reg_len, output_shared,
-                     output_shared_offset);
+                     output_shared_offset, output_shared_end);
   add_bits_to_output(1 - bit, static_cast<int>(pending_bits), output_reg,
-                     output_reg_len, output_shared, output_shared_offset);
+                     output_reg_len, output_shared, output_shared_offset,
+                     output_shared_end);
   pending_bits = 0;
 }
 
@@ -176,6 +194,9 @@ void launch_encode(sycl::queue& queue, const int16_t* cdf,
           uint32_t output_reg = 0;
           int output_reg_len = 0;
           int output_shared_offset = tx * OUTPUT_BUFFER_LENGTH_PER_THREAD;
+          // No byte of this work-item's stream is written past its own slot.
+          const int output_shared_end =
+              output_shared_offset + OUTPUT_BUFFER_LENGTH_PER_THREAD;
 
           auto out_acc = output_shared;  // alias
 
@@ -199,14 +220,14 @@ void launch_encode(sycl::queue& queue, const int16_t* cdf,
               if (high < 0x80000000u) {
                 append_bit_and_pending(0, pending_bits, output_reg,
                                        output_reg_len, out_acc,
-                                       output_shared_offset);
+                                       output_shared_offset, output_shared_end);
                 low <<= 1;
                 high <<= 1;
                 high |= 1;
               } else if (low >= 0x80000000u) {
                 append_bit_and_pending(1, pending_bits, output_reg,
                                        output_reg_len, out_acc,
-                                       output_shared_offset);
+                                       output_shared_offset, output_shared_end);
                 low <<= 1;
                 high <<= 1;
                 high |= 1;
@@ -225,13 +246,15 @@ void launch_encode(sycl::queue& queue, const int16_t* cdf,
           pending_bits += 1;
           if (low < 0x40000000u) {
             append_bit_and_pending(0, pending_bits, output_reg, output_reg_len,
-                                   out_acc, output_shared_offset);
+                                   out_acc, output_shared_offset,
+                                   output_shared_end);
           } else {
             append_bit_and_pending(1, pending_bits, output_reg, output_reg_len,
-                                   out_acc, output_shared_offset);
+                                   out_acc, output_shared_offset,
+                                   output_shared_end);
           }
           spill_partial_reg_to_shared(output_reg, output_reg_len, out_acc,
-                                      output_shared_offset);
+                                      output_shared_offset, output_shared_end);
 
           const int my_len =
               output_shared_offset - tx * OUTPUT_BUFFER_LENGTH_PER_THREAD;
@@ -242,7 +265,11 @@ void launch_encode(sycl::queue& queue, const int16_t* cdf,
 
           // Coalesced write-out by channel.
           for (int i = 0; i < BLOCK_SIZE; ++i) {
-            const int peer_len = lengths_shared[i];
+            // output_lengths keeps a stream's full length so the host can
+            // detect an overflow; only the bytes that fit in the slot were
+            // written and are copied.
+            const int peer_len =
+                sycl::min(lengths_shared[i], OUTPUT_BUFFER_LENGTH_PER_THREAD);
             const int current_channel = block_y * BLOCK_SIZE + i;
             for (int j = tx; j < peer_len; j += BLOCK_SIZE) {
               const int64_t global_offset =
