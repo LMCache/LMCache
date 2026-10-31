@@ -242,6 +242,66 @@ def connectors(
         scheduler.shutdown()
 
 
+@pytest.mark.parametrize("report_allocations", [None, False, True])
+def test_block_allocation_reports_through_scheduler(
+    mock_io: SimpleNamespace, report_allocations: bool | None
+) -> None:
+    """The reporting option preserves lookup and new/cached store metadata."""
+    options = {}
+    if report_allocations is not None:
+        options["lmcache.mp.report_block_allocations"] = report_allocations
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config=options,
+        )
+    )
+    connector = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    request = _request()
+    try:
+        assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
+        mock_io.scheduler.maybe_submit_lookup_request.assert_called_once()
+        connector.update_state_after_alloc(
+            request, MagicMock(get_block_ids=lambda: ([1],)), 0
+        )
+        for step in range(3):
+            metadata = connector.build_connector_meta(
+                _schedule(num_tokens=4, block_ids=([step + 1],), new=step == 0)
+            )
+            assert [
+                (meta.direction, meta.op.start, meta.op.end, meta.op.block_ids)
+                for meta in metadata.requests
+            ] == [("STORE", step * 4, (step + 1) * 4, [[step + 1]])]
+            report = mock_io.scheduler.report_block_allocations
+            if report_allocations is False:
+                report.assert_not_called()
+            else:
+                assert report.call_count == step + 1
+                records = report.call_args.args[0]
+                assert len(records) == 1
+                assert records[0].req_id == request.request_id
+                assert records[0].new_block_ids == [step + 1]
+                assert records[0].new_token_ids == list(range(step * 4, (step + 1) * 4))
+        assert connector.build_connector_meta(_schedule()).requests == []
+        mock_io.scheduler.check_lookup_result.return_value = 8
+        cached_request = _request("cached")
+        assert connector.get_num_new_matched_tokens(cached_request, 4) == (4, True)
+        connector.update_state_after_alloc(
+            cached_request, MagicMock(get_block_ids=lambda: ([1, 2],)), 4
+        )
+        metadata = connector.build_connector_meta(_schedule())
+        assert [
+            (meta.direction, meta.op.start, meta.op.end, meta.op.block_ids)
+            for meta in metadata.requests
+        ] == [("RETRIEVE", 4, 8, [[2]])]
+        assert mock_io.scheduler.report_block_allocations.call_count == (
+            0 if report_allocations is False else 3
+        )
+    finally:
+        connector.shutdown()
+
+
 @pytest.mark.parametrize("save_decode_cache", [None, False, True])
 @pytest.mark.parametrize("lazy", [False, True])
 def test_decode_store_policy_through_scheduler(

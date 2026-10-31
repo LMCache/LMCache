@@ -977,6 +977,13 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        allowing L2-to-L1 KV staging to overlap with scheduler queue wait.
        Resumable requests are skipped because their token IDs may be incomplete
        at enqueue time.
+   * - ``lmcache.mp.report_block_allocations``
+     - ``true``
+     - Publish per-step GPU block allocation records for L0 observability.
+       Set to ``false`` to skip scheduler-thread record construction and the
+       downstream serialization and ZMQ sends. L0 block-allocation logs and
+       metrics are then unavailable; cache lookup and transfer behavior is
+       unchanged.
    * - ``lmcache.mp.autostart``
      - ``false``
      - Whether vLLM worker 0 should start a local ``lmcache server`` process
