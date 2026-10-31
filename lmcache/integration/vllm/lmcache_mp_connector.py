@@ -1688,9 +1688,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             and return_params is not None
             and "cached_token_stats" in params
         ):
-            request_tracker = self._get_request_tracker(request.request_id)
-            num_vllm = request_tracker.num_vllm_hit_tokens
-            num_lmcache = request_tracker.num_lmcache_hit_tokens
+            # None if the request was aborted before its first lookup.
+            request_tracker = self.request_trackers.get(request.request_id)
+            if request_tracker is None:
+                num_vllm = num_lmcache = 0
+            else:
+                num_vllm = request_tracker.num_vllm_hit_tokens
+                num_lmcache = request_tracker.num_lmcache_hit_tokens
             return_params["cached_token_stats"] = {
                 "num_vllm_cached_tokens": num_vllm,
                 "num_lmcache_cached_tokens": num_lmcache,
