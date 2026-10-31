@@ -33,6 +33,7 @@ jobs:
     outputs:
       lmcache: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.lmcache == 'true' }}
       raw_block: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.raw_block == 'true' }}
+      token_drop: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.token_drop == 'true' }}
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         if: github.event_name == 'push'
@@ -59,6 +60,11 @@ jobs:
               - 'tests/v1/distributed/raw_block/test_utils.py'
               - 'tests/inprocess/v1/storage_backend/test_raw_block_uring_cmd.py'
               - 'tests/v1/multiprocess/test_raw_block_l2_adapter.py'
+              - '.github/workflows/test.yml'
+            token_drop:
+              - 'lmcache/integration/vllm/experimental/token_drop_adapter.py'
+              - 'lmcache/integration/vllm/experimental/token_drop_scheduler.py'
+              - 'tests/v1/test_token_drop_allocator_adapter.py'
               - '.github/workflows/test.yml'
 
   test:
@@ -120,6 +126,57 @@ jobs:
           LMCACHE_TEST_DEVDAX_L1_PATHS: ""
         run: |
           pytest -m "not (cuda or musa or xpu or npu or neuron or rbln)"
+
+  token-drop-vllm-0251:
+    needs: changes
+    if: needs.changes.outputs.token_drop == 'true'
+    name: "Token dropping: allocator (vLLM 0.25.1)"
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned vLLM and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "vllm==0.25.1" -r requirements/common.txt -r requirements/test.txt
+          NO_GPU_EXT=1 python -m pip install -e . --no-build-isolation --no-deps
+
+      - name: Verify pinned version and run allocator tests
+        run: |
+          python - <<'PY'
+          import vllm
+
+          assert vllm.__version__.split("+", 1)[0] == "0.25.1", vllm.__version__
+          PY
+
+          pytest -q -rs --junitxml=token-drop-tests.xml tests/v1/test_token_drop_allocator_adapter.py
+
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          cases = list(ET.parse("token-drop-tests.xml").getroot().iter("testcase"))
+          assert len(cases) >= 13, "Expected at least 13 allocator test cases"
+          assert not any(c.find("skipped") is not None for c in cases), "Allocator test skipped"
+          assert any(
+              c.get("name") == "test_allocator_hook_installation_is_idempotent"
+              for c in cases
+          ), "vLLM installer test was not executed"
+          print(f"{len(cases)} allocator tests passed, 0 skipped")
+          PY
 
   rust-unit-tests:
     needs: changes
