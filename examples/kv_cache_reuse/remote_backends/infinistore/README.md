@@ -41,5 +41,5 @@ LMCACHE_CONFIG_FILE=backend_type.yaml python -m lmcache_vllm.vllm.entrypoints.op
 # RDMA/infinistore troubleshooting
 
 1. infinistore's log could reveal many details. if lmcache read/write cache, you will find corresponding PUT/GET requests.
-2. you could use [perftest](https://github.com/linux-rdma/perftes) utils to check connectivity and bandwidth.
+2. you could use [perftest](https://github.com/linux-rdma/perftest) utils to check connectivity and bandwidth.
 3. infinistore itself has client [examples](https://github.com/bd-iaas-us/InfiniStore/tree/main/infinistore/example) to check if RDMA connection works.
