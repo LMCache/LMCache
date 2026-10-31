@@ -3,6 +3,8 @@
 
 # Standard
 from collections.abc import Iterator
+from pathlib import Path
+import sys
 
 # Third Party
 from fastapi.testclient import TestClient
@@ -157,7 +159,35 @@ def test_backend_key_requires_frontend_authentication() -> None:
     with pytest.raises(ValueError, match="Frontend API authentication"):
         frontend.create_app(backend_authorization_header="Bearer backend-secret")
 
-    frontend.create_app(
-        APIKeyVerifier(["frontend-secret"]), "Bearer backend-secret"
-    )
+    frontend.create_app(APIKeyVerifier(["frontend-secret"]), "Bearer backend-secret")
     frontend.create_app()
+
+
+def test_main_rejects_backend_key_without_frontend_authentication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """CLI startup fails before discovery when only the backend key is set."""
+    backend_key_file = tmp_path / "backend-api-key"
+    backend_key_file.write_text("backend-secret", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["lmcache-frontend", "--backend-http-api-key-file", str(backend_key_file)],
+    )
+    for name in (
+        "LMCACHE_API_KEY",
+        "LMCACHE_API_KEY_FILE",
+        "LMCACHE_HTTP_API_KEY",
+        "LMCACHE_HTTP_API_KEY_FILE",
+        "LMCACHE_FRONTEND_BACKEND_API_KEY",
+        "LMCACHE_FRONTEND_BACKEND_API_KEY_FILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        frontend.asyncio,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("discovery must not start"),
+    )
+
+    with pytest.raises(ValueError, match="Frontend API authentication"):
+        frontend.main()

@@ -76,7 +76,8 @@ def _validate_authentication_configuration(
     """Require caller authentication when the frontend holds a backend key."""
     if backend_authorization_header is not None and not http_authentication.enabled:
         raise ValueError(
-            "Frontend API authentication must be configured when a backend API key is set"
+            "Frontend API authentication must be configured "
+            "when a backend API key is set"
         )
 
 
@@ -1070,9 +1071,7 @@ def create_app(
         Configured frontend application.
     """
     authentication = http_authentication or APIKeyVerifier()
-    _validate_authentication_configuration(
-        authentication, backend_authorization_header
-    )
+    _validate_authentication_configuration(authentication, backend_authorization_header)
     app = FastAPI(
         title="Flexible Proxy Server",
         description="HTTP proxy service supporting specified target hosts and ports",
