@@ -53,8 +53,10 @@ engine worker adapter                            MP server
 ## 3. Protocol Change
 
 The PING payload changes in place from `[]` to `[int | None]`; the response stays
-`bool`, always `True` (`None` marks an untracked prober such as the scheduler
-adapter, which registers nothing and is never reapable). PING keeps its BLOCKING
+`bool`, always `True`. `None` marks an untracked prober, including schedulers
+with KV events disabled. Event-enabled schedulers pass their UUID-derived
+subscription identity; the event module refreshes the subscription without
+creating a transfer registration. PING keeps its BLOCKING
 dispatch on the NORMAL thread pool. SERIALIZED dispatch was considered but rejected:
 SERIALIZED runs on the MQ main loop, where a slow `REGISTER_KV_CACHE` (also SERIALIZED) would
 block PING and make a live worker look dead. Sharing the NORMAL pool is in fact
