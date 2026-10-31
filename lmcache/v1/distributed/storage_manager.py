@@ -712,14 +712,18 @@ class StorageManager:
         return self._quota_manager
 
     def get_l1_manager_by_memory_tags(
-        self, tags: MemoryTags, *, memory_region_count: int | None = None
+        self, tags: MemoryTags
     ) -> L1ManagerInterface | None:
-        """Find the first L1 matching the requested tags and region count."""
-        for manager in self._l1_by_tag.values():
-            if manager.get_memory_tags() == tags and (
-                memory_region_count is None
-                or manager.memory_region_count() == memory_region_count
-            ):
+        """Find the first L1 matching the requested memory tags.
+
+        Args:
+            tags: Memory tags to match exactly.
+
+        Returns:
+            The first matching manager in placement order, or None if absent.
+        """
+        for manager in self._l1_managers:
+            if manager.get_memory_tags() == tags:
                 return manager
         return None
 

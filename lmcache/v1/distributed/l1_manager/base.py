@@ -1021,14 +1021,6 @@ class BaseL1Manager(L1ManagerInterface):
         """
         return self._boot_capacity_bytes
 
-    def memory_region_count(self) -> int:
-        """Return the number of memory regions backing this L1.
-
-        Returns:
-            One for a single-pool medium. Multi-region media override this.
-        """
-        return 1
-
     def get_l1_memory_desc(self) -> L1MemoryDesc | None:
         """Describe the L1 memory buffer that L2 adapters and channels register.
 

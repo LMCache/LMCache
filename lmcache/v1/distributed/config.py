@@ -706,7 +706,7 @@ def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
 
     Returns:
         ``True`` if a plain DRAM L1 exists in configured order, skipping GDS,
-        Device-DAX, and hybrid DRAM/Device-DAX managers. ``False`` otherwise.
+        and Device-DAX managers. ``False`` otherwise.
     """
     for l1_config in config.l1_manager_configs:
         memory = l1_config.memory_config

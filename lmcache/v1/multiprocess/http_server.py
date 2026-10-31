@@ -244,7 +244,7 @@ def run_http_server(
         if not l1_exposes_single_memory_region(storage_manager_config):
             raise ValueError(
                 "P2P requires a local DRAM L1 with a single registerable memory "
-                "region. GDS, Device-DAX, and hybrid DRAM/Device-DAX managers "
+                "region. GDS and Device-DAX managers "
                 "are skipped when selecting the P2P pool."
             )
     if coordinator_config.event_reporting and not obs_config.enabled:

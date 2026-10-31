@@ -319,23 +319,19 @@ def test_selected_l1_lookup_uses_exact_manager(
     assert all(m.report_status()["read_locked_count"] == 0 for m in managers)
 
 
-def test_p2p_selection_skips_multi_region_dram(
+def test_p2p_selection_uses_first_dram(
     dram_storage: tuple[StorageManager, tuple[L1ManagerInterface, ...]],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pool selection, lookup and adapter affinity agree on eligible DRAM."""
     storage, managers = dram_storage
-    first, second = managers
+    first = managers[0]
     keys = [ObjectKey(ObjectKey.IntHash2Bytes(i), "selected-l1", 0) for i in range(2)]
     assert storage.get_l1_manager_by_memory_tags(_DRAM) is first
     assert storage.get_l1_manager_by_memory_tags(_GDS) is None
-    monkeypatch.setattr(first, "memory_region_count", lambda: 2)
-    assert storage.get_l1_manager_by_memory_tags(_DRAM) is first
-    assert storage.get_l1_manager_by_memory_tags(_DRAM, memory_region_count=1) is second
     manager_map = {manager.l1_manager_id: manager for manager in managers}
     assert (
         resolve_l1_affinity(P2PL2AdapterConfig("peer", "transfer"), manager_map)
-        == second.l1_manager_id
+        == first.l1_manager_id
     )
     assert (
         resolve_l1_affinity(
@@ -351,9 +347,5 @@ def test_p2p_selection_skips_multi_region_dram(
     task_id = controller.p2p_lookup_and_lock(keys, {0: _LAYOUT})
     addresses = controller.p2p_query_lookup_results(task_id)
     assert addresses is not None
-    assert [address.is_valid() for address in addresses] == [False, True]
+    assert [address.is_valid() for address in addresses] == [True, False]
     controller.p2p_unlock_objects(keys)
-    monkeypatch.setattr(second, "memory_region_count", lambda: 2)
-    assert storage.get_l1_manager_by_memory_tags(_DRAM, memory_region_count=1) is None
-    with pytest.raises(ValueError, match="No L1 has"):
-        resolve_l1_affinity(P2PL2AdapterConfig("peer", "transfer"), manager_map)

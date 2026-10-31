@@ -354,10 +354,6 @@ class L1ManagerInterface(Protocol):
         """Return the currently usable capacity in bytes."""
         ...
 
-    def memory_region_count(self) -> int:
-        """Return the number of memory regions backing this L1."""
-        ...
-
     def get_l1_memory_desc(self) -> L1MemoryDesc | None:
         """Describe a registerable L1 buffer, or None when there is none."""
         ...

@@ -162,7 +162,6 @@ def _make_controller(
     ctx = MagicMock()
     manager = ctx.storage_manager.get_l1_manager_by_memory_tags.return_value
     manager.l1_manager_id = 7
-    manager.memory_region_count.return_value = 1
     controller = P2PController(
         ctx,
         P2PConfig(),
@@ -188,7 +187,7 @@ def test_lookup_and_lock_submits_l1_only_and_returns_task_id():
 
     assert task_id == 0
     ctx.storage_manager.get_l1_manager_by_memory_tags.assert_called_with(
-        MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL), memory_region_count=1
+        MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)
     )
     (spec,), kwargs = ctx.storage_manager.submit_prefetch_task.call_args
     assert [row.keys for row in spec.key_groups] == [keys]

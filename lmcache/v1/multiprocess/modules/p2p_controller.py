@@ -435,10 +435,9 @@ class P2PController(DiscoverableModule):
 
     @property
     def _p2p_l1_manager(self) -> L1ManagerInterface | None:
-        """Return the first single-region local DRAM manager, or ``None``."""
+        """Return the first local DRAM manager, or ``None``."""
         return self._ctx.storage_manager.get_l1_manager_by_memory_tags(
             MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL),
-            memory_region_count=1,
         )
 
     def _drop_abandoned_jobs(self, now: float) -> None:

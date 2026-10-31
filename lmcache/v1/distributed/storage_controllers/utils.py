@@ -21,7 +21,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     get_type_name_for_config,
 )
-from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 
 _K = TypeVar("_K")
 
@@ -425,7 +424,7 @@ def resolve_l1_affinity(
     Returns:
         The key of the first L1 manager, in placement order, whose memory
         tags equal the adapter's most preferred wanted L1 tags that any
-        manager has. P2P skips managers with more than one memory region.
+        manager has.
 
     Raises:
         ValueError: If no L1 manager has any of the wanted memory tags.
@@ -438,11 +437,6 @@ def resolve_l1_affinity(
     for tags in wanted:
         for key, manager in l1_managers.items():
             if manager.get_memory_tags() == tags:
-                if (
-                    isinstance(adapter_config, P2PL2AdapterConfig)
-                    and manager.memory_region_count() != 1
-                ):
-                    continue
                 return key
     available = [m.get_memory_tags() for m in l1_managers.values()]
     raise ValueError(
