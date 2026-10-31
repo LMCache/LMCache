@@ -2,6 +2,7 @@
 """Tests for bench engine request sender."""
 
 # Standard
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 import os
 
@@ -75,6 +76,16 @@ async def _fake_stream(chunks):
     """Async generator yielding chunks."""
     for chunk in chunks:
         yield chunk
+
+
+async def _timed_stream(
+    chunks: list[ChatCompletionChunk], clock: MagicMock
+) -> AsyncIterator[ChatCompletionChunk]:
+    """Yield chunks one second apart, then end the response a second later."""
+    for index, chunk in enumerate(chunks, start=1):
+        clock.return_value = 10.0 + index
+        yield chunk
+    clock.return_value = 11.0 + len(chunks)
 
 
 async def _error_stream(chunks, error_after: int = 1):
@@ -220,6 +231,61 @@ class TestRequestSenderSendRequest:
         assert result.num_output_tokens == 2
         assert result.decode_speed > 0
         assert result.submit_time < result.first_token_time < result.finish_time
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "delta",
+        [
+            {"content": "", "reasoning_content": "Thinking"},
+            {"content": None, "reasoning_content": "Thinking"},
+            {"content": "", "reasoning": "Thinking"},
+            {"content": None, "reasoning": "Thinking"},
+            {"content": None, "reasoning_content": "", "reasoning": "Thinking"},
+        ],
+    )
+    @patch("lmcache.cli.commands.bench.engine_bench.request_sender.time.time")
+    @patch("lmcache.cli.commands.bench.engine_bench.request_sender.AsyncOpenAI")
+    async def test_reasoning_starts_ttft_and_reaches_callback(
+        self,
+        mock_openai_cls: MagicMock,
+        clock: MagicMock,
+        delta: dict[str, str | None],
+    ) -> None:
+        """Reasoning is generated output even when delta.content is empty."""
+        chunks = [
+            ChatCompletionChunk(
+                id="c1",
+                choices=[Choice(delta=ChoiceDelta(role="assistant"), index=0)],
+                created=0,
+                model="m",
+                object="chat.completion.chunk",
+            ),
+            ChatCompletionChunk(
+                id="c1",
+                choices=[Choice(delta=ChoiceDelta(**delta), index=0)],
+                created=0,
+                model="m",
+                object="chat.completion.chunk",
+            ),
+            _make_chat_chunk(content="Answer"),
+            _make_chat_chunk(usage=_usage(prompt=10, completion=2)),
+        ]
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=_timed_stream(chunks, clock)
+        )
+        callback = MagicMock()
+        sender = RequestSender("http://localhost:8000", "m", on_finished=[callback])
+        clock.return_value = 10.0
+
+        result = await sender.send_request("r1", [{"role": "user", "content": "Hi"}])
+
+        assert result.successful is True
+        assert result.first_token_time == 12.0
+        assert result.ttft == 2.0
+        assert result.num_output_tokens == 2
+        callback.assert_called_once_with(result, "ThinkingAnswer")
 
     @pytest.mark.asyncio
     @patch(

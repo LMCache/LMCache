@@ -13,9 +13,13 @@ import threading
 import torch
 
 # First Party
-from lmcache.utils import _lmcache_nvtx_annotate, get_device_identity, get_size_bytes
+from lmcache.utils import (
+    _lmcache_nvtx_annotate,
+    check_dax_range,
+    get_device_identity,
+    get_size_bytes,
+)
 from lmcache.v1.memory_allocators.buffer_allocator import BufferAllocator
-from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import (
     AddressManager,
@@ -26,6 +30,17 @@ from lmcache.v1.memory_management import (
     logger,
 )
 import lmcache.v1.memory_management as memory_management
+
+
+def _check_devdax_offset(offset: int) -> None:
+    """Reject a negative or non-page-aligned device offset."""
+    if offset < 0:
+        raise ValueError("devdax offset must be >= 0")
+    if offset % mmap.ALLOCATIONGRANULARITY:
+        raise ValueError(
+            f"devdax offset ({offset} bytes) must be a multiple of "
+            f"{mmap.ALLOCATIONGRANULARITY} bytes"
+        )
 
 
 class DevDaxNotMappedError(ValueError):
@@ -73,6 +88,7 @@ class DevDaxArenaStatus:
         is_primary: Whether this arena backs ``get_l1_memory_desc`` and so may
             not be removed. Only the initial arena in a pure Device-DAX (no DRAM)
             configuration is primary.
+        offset_in_bytes: Byte offset into the device where the mapping starts.
     """
 
     device_path: str
@@ -82,6 +98,7 @@ class DevDaxArenaStatus:
     active_allocations: int
     state: DevDaxArenaState
     is_primary: bool
+    offset_in_bytes: int = 0
 
 
 @dataclass
@@ -103,6 +120,7 @@ class _DevDaxArena:
     buffer: torch.Tensor
     allocator: TensorMemoryAllocator
     is_primary: bool
+    offset: int = 0
     state: DevDaxArenaState = DevDaxArenaState.ACTIVE
     pinned_ptr: int | None = None
     # Captured at map time so ``contains`` stays correct after a deferred
@@ -115,6 +133,10 @@ class _DevDaxArena:
     def contains(self, ptr: int) -> bool:
         """Return whether ``ptr`` falls within this arena's mapped range."""
         return self.base_ptr <= ptr < self.base_ptr + self.size
+
+    def overlaps(self, offset: int, size: int) -> bool:
+        """Return whether ``[offset, offset + size)`` intersects this arena."""
+        return offset < self.offset + self.size and self.offset < offset + size
 
     def status(self) -> DevDaxArenaStatus:
         """Return an immutable snapshot of this arena's runtime state."""
@@ -129,31 +151,30 @@ class _DevDaxArena:
             active_allocations=self.allocator.num_active_allocations,
             state=self.state,
             is_primary=self.is_primary,
+            offset_in_bytes=self.offset,
         )
 
 
 class DevDaxMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates L1 objects from DRAM and/or a pool of Device-DAX arenas.
+    """Allocates L1 objects from a pool of Device-DAX arenas.
 
     The mapped bytes of each arena are exposed as a flat CPU ``torch.uint8``
     tensor so the existing L1 state machine and tensor slicing logic can run
-    unchanged while the overflow backing storage is one or more configured
-    Device-DAX devices. When a local allocator is provided, local DRAM is tried
-    first and the Device-DAX arenas are used as overflow.
+    unchanged while the backing storage is one or more configured Device-DAX
+    devices.
 
     The pool starts with a single arena mapped from the configured device and can
     grow or shrink at runtime via :meth:`add_device` and :meth:`remove_device`.
+    Every arena maps ``[offset, offset + size)`` of its device; disjoint ranges
+    of one device may back several arenas, or several servers.
     Removal is drain-based: the arena stops accepting new allocations and is
-    unmapped once its already-issued allocations are all freed. In a pure
-    Device-DAX configuration (no DRAM) the initial arena is *primary* -- it backs
-    :meth:`get_l1_memory_desc` and may not be removed; in a hybrid DRAM +
-    Device-DAX configuration every Device-DAX arena is removable overflow.
+    unmapped once its already-issued allocations are all freed. The initial
+    arena is *primary* -- it backs :meth:`get_l1_memory_desc` and may not be
+    removed.
 
     Thread safety:
         ``host_mem_lock`` serializes every mutation of the arena pool and of the
-        per-arena allocators (Device-DAX allocation, free, add, and remove). The
-        DRAM local allocator provides its own synchronization and is used outside
-        this lock.
+        per-arena allocators (allocation, free, add, and remove).
     """
 
     def __init__(
@@ -161,20 +182,14 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         size: int,
         device_path: str,
         *,
-        local_allocator: MixedMemoryAllocator | None = None,
-        local_size: int = 0,
-        shm_name: str | None = None,
         align_bytes: int = AddressManager.ALIGN_BYTES,
-        use_hugepages: bool = False,
+        offset: int = 0,
     ) -> None:
         if not device_path:
             raise ValueError("device_path must be a non-empty string")
         if size <= 0:
             raise ValueError("size must be > 0")
-        if local_size < 0:
-            raise ValueError("local_size must be >= 0")
-        if local_size and local_allocator is not None:
-            raise ValueError("local_size cannot be used with local_allocator")
+        _check_devdax_offset(offset)
         if align_bytes <= 0 or align_bytes & (align_bytes - 1) != 0:
             raise ValueError("align_bytes must be a positive power of two")
 
@@ -182,31 +197,20 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         # backwards compatibility); the live pool is ``self._arenas``.
         self.size = size
         self.device_path = device_path
+        self.offset = offset
         self.align_bytes = align_bytes
-        self.local_allocator = local_allocator
-        if local_size:
-            self.local_allocator = MixedMemoryAllocator(
-                local_size,
-                align_bytes=self.align_bytes,
-                shm_name=shm_name,
-                use_hugepages=use_hugepages,
-            )
         self.host_mem_lock = threading.Lock()
         self.buffer_allocator = BufferAllocator("cpu")
         self._arenas: list[_DevDaxArena] = []
         self._unregistered = False
 
-        # Primary (non-removable) only in pure Device-DAX mode. The constructor
-        # runs single-threaded, so no lock is needed here.
-        self._map_and_append_arena(
-            device_path, size, is_primary=self.local_allocator is None
-        )
+        # The configured arena is primary (non-removable). The constructor runs
+        # single-threaded, so no lock is needed here.
+        self._map_and_append_arena(device_path, size, offset=offset, is_primary=True)
 
     @property
     def buffer(self) -> torch.Tensor:
-        """Return the primary L1 buffer (DRAM if hybrid, else the primary arena)."""
-        if self.local_allocator is not None:
-            return self.local_allocator.buffer
+        """Return the primary arena's buffer, or an empty tensor once closed."""
         if self._arenas:
             return self._arenas[0].buffer
         return torch.empty(0, dtype=torch.uint8)
@@ -241,23 +245,19 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         self,
         device_path: str,
         size: int,
+        offset: int,
     ) -> tuple[int, mmap.mmap, Any, torch.Tensor]:
         fd: int | None = None
         mmap_obj: mmap.mmap | None = None
         try:
             fd = os.open(device_path, os.O_RDWR)
-            capacity = os.fstat(fd).st_size
-            if capacity > 0 and size > capacity:
-                raise RuntimeError(
-                    f"l1 devdax size ({size} bytes) exceeds "
-                    f"{device_path} capacity ({capacity} bytes)"
-                )
-
+            check_dax_range(device_path, fd, offset, size)
             mmap_obj = mmap.mmap(
                 fd,
                 size,
                 flags=mmap.MAP_SHARED,
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
+                offset=offset,
             )
             array_type = ctypes.c_uint8 * size
             mmap_buffer = array_type.from_buffer(mmap_obj)
@@ -275,9 +275,10 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         device_path: str,
         size: int,
         *,
+        offset: int,
         is_primary: bool,
     ) -> _DevDaxArena:
-        """Map one Device-DAX device and append it to the pool as ACTIVE.
+        """Map one Device-DAX range and append it to the pool as ACTIVE.
 
         The caller must hold ``host_mem_lock`` (except during ``__init__``, which
         runs single-threaded).
@@ -285,6 +286,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         Args:
             device_path: Path to the Device-DAX device to map.
             size: Number of bytes to map.
+            offset: Byte offset into the device where the mapping starts.
             is_primary: Whether the new arena backs ``get_l1_memory_desc`` and so
                 may not be removed.
 
@@ -292,10 +294,13 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             The newly mapped arena.
 
         Raises:
-            RuntimeError: If the device capacity is smaller than ``size``.
+            RuntimeError: If the range exceeds the device capacity or breaks
+                its alignment, or the capacity cannot be determined.
             OSError: If the device cannot be opened or mapped.
         """
-        fd, mmap_obj, mmap_buffer, buffer = self._open_devdax_mapping(device_path, size)
+        fd, mmap_obj, mmap_buffer, buffer = self._open_devdax_mapping(
+            device_path, size, offset
+        )
         arena: _DevDaxArena | None = None
         try:
             allocator = TensorMemoryAllocator(buffer, align_bytes=self.align_bytes)
@@ -308,6 +313,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
                 buffer=buffer,
                 allocator=allocator,
                 is_primary=is_primary,
+                offset=offset,
             )
             self._register_arena_pin(arena)
         except Exception:
@@ -366,16 +372,20 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             arena for arena in self._arenas if arena.state == DevDaxArenaState.ACTIVE
         ]
 
-    def _find_arena_locked(self, device_path: str) -> _DevDaxArena:
-        """Return the arena mapped at ``device_path``. Caller holds the lock.
+    def _find_arena_locked(
+        self, device_path: str, offset_in_bytes: int
+    ) -> _DevDaxArena:
+        """Return the arena at ``(device_path, offset)``. Caller holds the lock.
 
         Raises:
-            DevDaxNotMappedError: If no arena is mapped at ``device_path``.
+            DevDaxNotMappedError: If no arena matches.
         """
         for arena in self._arenas:
-            if arena.device_path == device_path:
+            if arena.device_path == device_path and arena.offset == offset_in_bytes:
                 return arena
-        raise DevDaxNotMappedError(f"no Device-DAX arena mapped at {device_path}")
+        raise DevDaxNotMappedError(
+            f"no Device-DAX arena mapped at {device_path} offset {offset_in_bytes}"
+        )
 
     def _arena_for_obj_locked(self, memory_obj: MemoryObj) -> _DevDaxArena:
         """Return the arena that owns ``memory_obj``. Caller holds the lock.
@@ -423,23 +433,14 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         for arena in list(self._arenas):
             self._maybe_reap_arena_locked(arena)
 
-    def _is_local_obj(self, memory_obj: MemoryObj) -> bool:
-        return (
-            self.local_allocator is not None
-            and memory_obj.parent() is self.local_allocator
-        )
-
     def is_devdax_obj(self, memory_obj: MemoryObj) -> bool:
-        """Return whether ``memory_obj`` lives in the Device-DAX arena.
-
-        ``False`` means the object landed in the local DRAM pool of a
-        hybrid DRAM+DAX configuration.
+        """Return whether ``memory_obj`` was allocated by this allocator.
 
         Args:
-            memory_obj: An object allocated by this allocator.
+            memory_obj: A memory object.
 
         Returns:
-            ``True`` for the Device-DAX arena, ``False`` for local DRAM.
+            ``True`` when the object lives in one of this pool's arenas.
         """
         return memory_obj.parent() is self
 
@@ -456,28 +457,6 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         if unit_aligned_size <= 0:
             return 0
         return address_manager.get_free_size() // unit_aligned_size
-
-    def _local_available_count(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-    ) -> int:
-        if self.local_allocator is None:
-            return 0
-        local_pin_allocator = self.local_allocator.pin_allocator
-        assert isinstance(local_pin_allocator, TensorMemoryAllocator)
-        return self._available_count(
-            local_pin_allocator.address_manager, shapes, dtypes
-        )
-
-    def _local_memory_usage(self) -> tuple[int, int]:
-        if self.local_allocator is None:
-            return 0, 0
-        local_pin_allocator = self.local_allocator.pin_allocator
-        assert isinstance(local_pin_allocator, TensorMemoryAllocator)
-        local_total = local_pin_allocator.address_manager.get_heap_size()
-        local_used = local_total - local_pin_allocator.address_manager.get_free_size()
-        return local_used, local_total
 
     def _allocate_from_arenas(
         self,
@@ -599,10 +578,6 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
         ]:
-            if self.local_allocator is not None:
-                obj = self.local_allocator.allocate(shapes, dtypes, fmt, str(self))
-                if obj is not None:
-                    return obj
             return self._allocate_from_arenas(shapes, dtypes, fmt)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
@@ -627,41 +602,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
         ]:
-            local_objs: list[MemoryObj] = []
-            if self.local_allocator is not None:
-                local_count = min(
-                    batch_size, self._local_available_count(shapes, dtypes)
-                )
-                if local_count:
-                    local_objs = (
-                        self.local_allocator.batched_allocate(
-                            shapes, dtypes, local_count, fmt, str(self)
-                        )
-                        or []
-                    )
-                    if not local_objs:
-                        # Fragmentation can make the free-byte estimate too large.
-                        # Use available DRAM slots before spilling to DAX.
-                        for _ in range(local_count):
-                            obj = self.local_allocator.allocate(
-                                shapes, dtypes, fmt, str(self)
-                            )
-                            if obj is None:
-                                break
-                            local_objs.append(obj)
-
-            remaining = batch_size - len(local_objs)
-            if remaining == 0:
-                return local_objs
-
-            dax_objs = self._batched_allocate_from_arenas(
-                shapes, dtypes, remaining, fmt
-            )
-            if dax_objs is None:
-                if local_objs and self.local_allocator is not None:
-                    self.local_allocator.batched_free(local_objs, update_stats=False)
-                return None
-            return local_objs + dax_objs
+            return self._batched_allocate_from_arenas(shapes, dtypes, batch_size, fmt)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -677,10 +618,6 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
         ]:
-            if self._is_local_obj(memory_obj):
-                assert self.local_allocator is not None
-                self.local_allocator.free(memory_obj)
-                return
             if self.is_devdax_obj(memory_obj):
                 self._free_devdax_obj(memory_obj)
                 return
@@ -708,72 +645,70 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
         ]:
-            local_objs = [
-                memory_obj
-                for memory_obj in memory_objs
-                if self._is_local_obj(memory_obj)
-            ]
-            devdax_objs = [
-                memory_obj
-                for memory_obj in memory_objs
-                if self.is_devdax_obj(memory_obj)
-            ]
-            if len(local_objs) + len(devdax_objs) != len(memory_objs):
+            if not all(self.is_devdax_obj(memory_obj) for memory_obj in memory_objs):
                 raise ValueError(
                     "One or more memory objects do not belong to DevDaxMemoryAllocator"
                 )
-            if local_objs:
-                assert self.local_allocator is not None
-                self.local_allocator.batched_free(local_objs, update_stats=update_stats)
-            if devdax_objs:
-                self._batched_free_devdax_objs(devdax_objs, update_stats=update_stats)
+            self._batched_free_devdax_objs(memory_objs, update_stats=update_stats)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
-    def owns_device(self, device_path: str) -> bool:
-        """Return whether an arena maps the physical device at a path.
+    def owns_range(
+        self, device_path: str, offset_in_bytes: int, size_in_bytes: int
+    ) -> bool:
+        """Return whether an arena overlaps a byte range of a physical device.
 
         Args:
             device_path: Candidate device path or alias.
+            offset_in_bytes: Start of the candidate range on that device.
+            size_in_bytes: Length of the candidate range.
 
         Returns:
-            ``True`` if a retained arena's fd matches, regardless of its state.
-            Invalid, missing, or unsupported paths return ``False``.
+            ``True`` if a retained arena on the same physical device overlaps
+            the range, regardless of its state. Unidentifiable paths return
+            ``False``.
         """
         requested_identity = get_device_identity(device_path)
         if requested_identity is None:
             return False
         with self.host_mem_lock:
             for arena in self._arenas:
-                if get_device_identity(arena.fd) == requested_identity:
+                if get_device_identity(
+                    arena.fd
+                ) == requested_identity and arena.overlaps(
+                    offset_in_bytes, size_in_bytes
+                ):
                     return True
         return False
 
-    def add_device(self, device_path: str, size_in_bytes: int) -> DevDaxArenaStatus:
-        """Map an additional Device-DAX device and add it to the pool.
+    def add_device(
+        self, device_path: str, size_in_bytes: int, offset_in_bytes: int = 0
+    ) -> DevDaxArenaStatus:
+        """Map an additional Device-DAX range and add it to the pool.
 
-        The new arena is immediately available as overflow; existing allocations
-        are untouched.
+        The new arena immediately accepts allocations; existing allocations
+        are untouched. One device may back several arenas with disjoint ranges.
 
         Args:
-            device_path: Path to a readable and writable Device-DAX device that
-                is not already mapped by this allocator.
+            device_path: Path to a readable and writable Device-DAX device.
             size_in_bytes: Number of bytes to map from the device.
+            offset_in_bytes: Page-aligned byte offset into the device.
 
         Returns:
             The status of the newly added arena.
 
         Raises:
-            ValueError: If ``device_path`` is invalid, ``size_in_bytes`` is not
-                positive, or the device is already mapped.
-            RuntimeError: If the allocator is closed or the device capacity is
-                smaller than ``size_in_bytes``.
+            ValueError: If an argument is invalid or the range overlaps a
+                mapped one.
+            RuntimeError: If the allocator is closed, the range exceeds the
+                device capacity or alignment, or the capacity is unknown.
             OSError: If the device cannot be opened or mapped.
         """
         if not device_path:
             raise ValueError("device_path must be a non-empty string")
         if size_in_bytes <= 0:
             raise ValueError("size_in_bytes must be > 0")
+        _check_devdax_offset(offset_in_bytes)
         requested_identity = get_device_identity(device_path)
         if requested_identity is None:
             raise ValueError("failed to identify DAX device")
@@ -784,15 +719,19 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
                     "cannot add a device to a closed DevDaxMemoryAllocator"
                 )
             for arena in self._arenas:
-                if (
+                same_device = (
                     arena.device_path == device_path
                     or get_device_identity(arena.fd) == requested_identity
-                ):
+                )
+                if same_device and arena.overlaps(offset_in_bytes, size_in_bytes):
                     raise ValueError(
-                        f"Device-DAX arena {device_path} is already mapped"
+                        f"Device-DAX arena {device_path} is already mapped: "
+                        f"range [{offset_in_bytes}, {offset_in_bytes + size_in_bytes})"
+                        f" overlaps [{arena.offset}, {arena.offset + arena.size}) "
+                        f"of {arena.device_path}"
                     )
             arena = self._map_and_append_arena(
-                device_path, size_in_bytes, is_primary=False
+                device_path, size_in_bytes, offset=offset_in_bytes, is_primary=False
             )
             return arena.status()
 
@@ -800,6 +739,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         self,
         device_path: str,
         mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
+        offset_in_bytes: int = 0,
     ) -> DevDaxArenaStatus:
         """Retire a Device-DAX arena from the pool.
 
@@ -811,19 +751,21 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             device_path: Path of the arena to remove.
             mode: Removal strategy. Only :attr:`DevDaxRemoveMode.DRAIN` is
                 supported.
+            offset_in_bytes: Device offset the arena was added with.
 
         Returns:
             The arena status after the request: ``REMOVED`` if it was unmapped
             immediately, otherwise ``DRAINING`` with the live allocation count.
 
         Raises:
-            ValueError: If ``mode`` is unsupported, no arena is mapped at
-                ``device_path``, or the arena is the primary (non-removable) one.
+            DevDaxNotMappedError: If no arena matches.
+            ValueError: If ``mode`` is unsupported or the arena is the primary
+                (non-removable) one.
         """
         if mode != DevDaxRemoveMode.DRAIN:
             raise ValueError(f"unsupported Device-DAX L1 remove mode: {mode}")
         with self.host_mem_lock:
-            arena = self._find_arena_locked(device_path)
+            arena = self._find_arena_locked(device_path, offset_in_bytes)
             if arena.is_primary:
                 raise ValueError(
                     f"cannot remove primary Device-DAX arena {device_path}"
@@ -837,52 +779,48 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         with self.host_mem_lock:
             return [arena.status() for arena in self._arenas]
 
-    def arena_status(self, device_path: str) -> DevDaxArenaStatus:
-        """Return the status of the arena registered at ``device_path``.
+    def arena_status(
+        self, device_path: str, offset_in_bytes: int = 0
+    ) -> DevDaxArenaStatus:
+        """Return the status of the arena at ``(device_path, offset)``.
 
         Args:
             device_path: The exact path used when the arena was added.
+            offset_in_bytes: Device offset the arena was added with.
 
         Returns:
             The arena's current status.
 
         Raises:
-            DevDaxNotMappedError: If no arena is registered at the path.
+            DevDaxNotMappedError: If no arena matches.
         """
         with self.host_mem_lock:
-            return self._find_arena_locked(device_path).status()
+            return self._find_arena_locked(device_path, offset_in_bytes).status()
 
     def memory_region_count(self) -> int:
         """Return the number of memory regions backing this allocator.
 
         Returns:
-            One for the local DRAM region, if present, plus one per mapped
-            Device-DAX arena, including draining arenas.
+            One per mapped Device-DAX arena, including draining arenas.
         """
         with self.host_mem_lock:
-            arena_count = len(self._arenas)
-        return (1 if self.local_allocator is not None else 0) + arena_count
+            return len(self._arenas)
 
     def memcheck(self) -> bool:
-        local_ok = True
-        if self.local_allocator is not None:
-            local_ok = self.local_allocator.memcheck()
         with self.host_mem_lock:
-            dax_ok = all(arena.allocator.memcheck() for arena in self._arenas)
-        return local_ok and dax_ok
+            return all(arena.allocator.memcheck() for arena in self._arenas)
 
     def get_memory_usage(self) -> tuple[int, int]:
-        local_used, local_total = self._local_memory_usage()
-        dax_used = 0
-        dax_total = 0
+        used = 0
+        total = 0
         with self.host_mem_lock:
             for arena in self._arenas:
                 address_manager = arena.allocator.address_manager
                 arena_total = address_manager.get_heap_size()
-                dax_used += arena_total - address_manager.get_free_size()
+                used += arena_total - address_manager.get_free_size()
                 if arena.state == DevDaxArenaState.ACTIVE:
-                    dax_total += arena_total
-        return local_used + dax_used, local_total + dax_total
+                    total += arena_total
+        return used, total
 
     def close(self) -> None:
         if self._unregistered:
@@ -901,9 +839,6 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
                 self._close_arena_locked(arena)
             self._arenas = []
 
-        if self.local_allocator is not None:
-            self.local_allocator.close()
-            self.local_allocator = None
         self._unregistered = True
 
     def __del__(self) -> None:

@@ -8,10 +8,7 @@ export DEVICE_AFFINITY_VAR="ZE_AFFINITY_MASK"
 export GPU_MEMORY_PROBE_ENABLED="0"
 export BATCH_INVARIANT_DEFAULT="0"
 export DEFAULT_MODEL="Qwen/Qwen3-8B"
-export MODEL="${MODEL:-Qwen/Qwen3-8B}"
 export LM_EVAL_NUM_CONCURRENT_DEFAULT="8"
-export LM_EVAL_VERIFY_MODE_DEFAULT="score"
-export LM_EVAL_SCORE_MIN_DEFAULT="0.30"
 export BK_SETUP_ENV_SCRIPT=".buildkite/k3_harness/setup-lmcache-only-env.sh"
 
 # The shared vLLM harness defaults to FLASH_ATTN when this is unset.
@@ -31,6 +28,14 @@ export CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-4}"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-DEBUG}"
 # Avoid inheriting CUDA affinity from host/agent env in XPU jobs.
 unset CUDA_VISIBLE_DEVICES || true
+
+# The shared workloads require jq, but the XPU image may not include it.
+if ! command -v jq >/dev/null 2>&1; then
+    echo "--- :wrench: Installing jq"
+    apt-get update -qq -o Acquire::Retries=3
+    apt-get install -y --no-install-recommends jq
+fi
+
 echo "--- :gear: Enable Intel oneAPI runtime"
 if [ -f /opt/intel/oneapi/setvars.sh ]; then
     # shellcheck disable=SC1091

@@ -2,6 +2,7 @@
 """Owner-tagged STORE callbacks use the production MessagePack dispatcher."""
 
 # Standard
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 from unittest.mock import MagicMock
@@ -20,22 +21,23 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager.base import BaseL1Manager
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
-from lmcache.v1.distributed.storage_manager import L1WriteCompletion, StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess import native_completion
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as transfer
+from tests.v1.distributed.utils import ROUND_ROBIN_WRITE_POLICY
 
 
 @pytest.mark.parametrize("owner_count", [1, 2])
-@pytest.mark.parametrize("failure", ["none", "copy", "owner"])
+@pytest.mark.parametrize("failure", ["none", "copy"])
 def test_store_owner_callback_round_trip(
     monkeypatch: pytest.MonkeyPatch,
     owner_count: int,
-    failure: Literal["none", "copy", "owner"],
+    failure: Literal["none", "copy"],
 ) -> None:
     """Real reservations survive serialization and finish only after dispatch.
 
@@ -61,15 +63,17 @@ def test_store_owner_callback_round_trip(
             shm_name="",
         )
     )
-    managers = tuple(L1Manager(config) for _ in range(owner_count))
+    configs = [replace(config, tag=f"l1-{index}") for index in range(owner_count)]
     storage = StorageManager(
         StorageManagerConfig(
-            l1_manager_config=config,
+            l1_manager_config=configs[0],
             eviction_config=EvictionConfig(eviction_policy="noop"),
             l2_adapter_config=L2AdaptersConfig(adapters=[]),
-        ),
-        _l1_managers=managers,
+            l1_manager_configs=configs,
+            write_policy=ROUND_ROBIN_WRITE_POLICY,
+        )
     )
+    managers = tuple(cast(BaseL1Manager, m) for m in storage.l1_managers())
     queued: list[tuple[str, bytes]] = []
     order: list[str] = []
 
@@ -102,13 +106,10 @@ def test_store_owner_callback_round_trip(
 
     def copy(*args: Any, **kwargs: Any) -> None:
         order.append("copy")
-        copied.extend(args[2])
+        copied.extend(args[1])
         if failure == "copy" and len(copied) == 2:
             raise RuntimeError("device copy failed")
-        if failure == "owner" and len(copied) == 2:
-            copied[-1].reset_l1_manager()
 
-    monkeypatch.setattr(transfer, "transfer_kv_per_object_group", copy)
     keys = [ObjectKey(b"chunk", "model", 0, gid) for gid in range(2)]
     ctx = SimpleNamespace(
         chunk_size=1,
@@ -124,6 +125,7 @@ def test_store_owner_callback_round_trip(
     cache_context.cupy_stream.ptr = 123
     cache_context.calculate_num_blocks.return_value = 1
     cache_context.hold_imported_event.return_value = 7
+    cache_context.transfer_object_group.side_effect = copy
     cache_context.kv_layer_groups_manager = SimpleNamespace(
         num_object_groups=2,
         num_kernel_groups=2,
@@ -165,12 +167,12 @@ def test_store_owner_callback_round_trip(
         else:
             assert order == ["callback", "copy", "copy", "record", "callback"]
             kind, encoded = queued[1]
-            assert kind == "finish_write_by_owner"
-            payload = msgspec.msgpack.decode(encoded, type=L1WriteCompletion)
-            assert payload == [
-                (manager.l1_manager_id, keys if owner_count == 1 else [keys[index]])
-                for index, manager in enumerate(managers)
-            ]
+            assert kind == "finish_write"
+            payload = msgspec.msgpack.decode(encoded, type=dict[ObjectKey, int])
+            assert payload == {
+                k: managers[0 if owner_count == 1 else i].l1_manager_id
+                for i, k in enumerate(keys)
+            }
         module.close()
         cache_context.release_imported_event.assert_called_once_with(7)
         for index, manager in enumerate(managers):

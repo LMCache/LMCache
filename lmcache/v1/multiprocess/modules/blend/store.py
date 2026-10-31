@@ -25,6 +25,7 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
@@ -52,6 +53,7 @@ class StoreMixin:
         _fingerprint_stop: "threading.Event"
         _pending_fp_hashes: set[bytes]
         _pending_fp_lock: "threading.Lock"
+        _prompt_store: Any
 
     @request_handler(
         HandlerType.BLOCKING,
@@ -94,14 +96,19 @@ class StoreMixin:
             session = self._ctx.session_manager.get_or_create(key.request_id)
             # Request-end cleanup may have replaced the session; re-set tokens
             # (idempotent if it survived, corrective if not).
-            session.set_tokens(list(key.token_ids))
+            session.set_tokens(key.token_bytes)
             chunk_hashes = [
                 TokenHasher.hash_to_bytes(h)
                 for h in session.get_hashes(key.start, key.end)
             ]
             if not chunk_hashes:
                 return result
-            tokens_in_range = list(key.token_ids)[key.start : key.end]
+            # Record prompts whose KV was stored, for the reorder planner.
+            if getattr(self, "_prompt_store", None) is not None and any(stored_mask):
+                self._record_prompt(key, session)
+            tokens_in_range = unpack_token_ids(
+                key.token_bytes[key.start * TOKEN_STRIDE : key.end * TOKEN_STRIDE]
+            )
             # Chunk 0 is owned by the prefix lookup leg; skip its fingerprint.
             start_chunk_idx = 0 if key.start != 0 else 1
 
@@ -155,6 +162,23 @@ class StoreMixin:
             )
 
         return result
+
+    def _record_prompt(self, key: IPCCacheServerKey, session: Any) -> None:
+        """Remember a stored prompt for the reorder planner. The chain starts
+        at chunk 0 because a request's first store starts at its prefix hit.
+        Never raises: reorder planning is best-effort."""
+        try:
+            chain = [
+                TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0, key.end)
+            ]
+            self._prompt_store.record(
+                (key.model_name, key.world_size, key.cache_salt),
+                key.request_id,
+                unpack_token_ids(key.token_bytes),
+                chain,
+            )
+        except Exception:
+            logger.exception("CB reorder: recording %s failed", key.request_id)
 
     def _drain_fingerprints_sync(self) -> None:
         """Sync-drain pending fingerprint registrations (the async drainer

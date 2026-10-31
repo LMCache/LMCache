@@ -48,16 +48,6 @@ PYBIND11_MODULE(cuda_ops, m) {
       py::arg("block_size") = 0, py::arg("head_size") = 0,
       py::arg("skip_prefix_n_tokens") = 0, py::arg("block_stride_elems") = 0,
       py::call_guard<py::gil_scoped_release>());
-  m.def("multi_layer_kv_transfer_unilateral",
-        [](torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
-           const torch::Tensor& slot_mapping,
-           const torch::Device& paged_memory_device, const int page_buffer_size,
-           int direction, int engine_kv_format) {
-          return multi_layer_kv_transfer_unilateral(
-              key_value, key_value_ptrs, slot_mapping, paged_memory_device,
-              page_buffer_size, static_cast<TransferDirection>(direction),
-              static_cast<EngineKVFormat>(engine_kv_format));
-        });
   m.def(
       "single_layer_kv_transfer",
       [](torch::Tensor& lmc_key_value_cache,
@@ -71,18 +61,6 @@ PYBIND11_MODULE(cuda_ops, m) {
       py::arg("lmc_key_value_cache"), py::arg("vllm_key_value_cache"),
       py::arg("slot_mapping"), py::arg("direction"),
       py::arg("engine_kv_format"), py::arg("token_major") = false);
-  m.def(
-      "single_layer_kv_transfer_sgl",
-      [](torch::Tensor& lmc_key_value_cache, torch::Tensor& sgl_key_cache,
-         torch::Tensor& sgl_value_cache, torch::Tensor& slot_mapping,
-         int direction, const bool token_major = false) {
-        return single_layer_kv_transfer_sgl(
-            lmc_key_value_cache, sgl_key_cache, sgl_value_cache, slot_mapping,
-            static_cast<TransferDirection>(direction), token_major);
-      },
-      py::arg("lmc_key_value_cache"), py::arg("sgl_key_cache"),
-      py::arg("sgl_value_cache"), py::arg("slot_mapping"), py::arg("direction"),
-      py::arg("token_major") = false);
   m.def("load_and_reshape_flash", &load_and_reshape_flash);
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def(
@@ -130,7 +108,7 @@ PYBIND11_MODULE(cuda_ops, m) {
   m.def(
       "multi_layer_block_kv_transfer",
       [](const torch::Tensor& paged_buffer_ptrs_tensor,
-         std::vector<int64_t> lmcache_objects_ptrs,
+         std::vector<uintptr_t> lmcache_objects_ptrs,
          const torch::Tensor& block_ids, const torch::Device& device,
          int direction, PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
          int engine_kv_format, int skip_prefix_n_blocks) {
@@ -266,28 +244,19 @@ PYBIND11_MODULE(cuda_ops, m) {
                  int64_t slot_mapping_capacity, uintptr_t cos_sin_cache,
                  int rot_dim, int rope_num_kv_heads, int64_t rope_head_stride,
                  int key_scalar_type, bool is_neox, int64_t rope_base_offset,
-                 int64_t block_stride_elems) {
+                 int64_t block_stride_elems, int cache_scalar_type) {
                 return CBGroupSpec{
-                    paged_kv_ptrs,
-                    std::move(temp_buffer_ptrs),
-                    num_layers,
-                    slot_tokens,
-                    hidden_elems,
-                    element_size,
+                    paged_kv_ptrs, std::move(temp_buffer_ptrs), num_layers,
+                    slot_tokens, hidden_elems, element_size,
                     static_cast<EngineKVFormat>(engine_kv_format),
-                    page_buffer_size,
-                    block_size,
-                    head_size,
-                    block_stride_elems,
-                    slot_mapping_base,
-                    slot_mapping_capacity,
-                    cos_sin_cache,
-                    rot_dim,
-                    rope_num_kv_heads,
-                    rope_head_stride,
+                    page_buffer_size, block_size, head_size, block_stride_elems,
+                    slot_mapping_base, slot_mapping_capacity, cos_sin_cache,
+                    rot_dim, rope_num_kv_heads, rope_head_stride,
                     key_scalar_type,
-                    is_neox,
-                    rope_base_offset};
+                    // Pre-fp8 planners pass no cache type: the cache dtype
+                    // then equals the KV dtype.
+                    cache_scalar_type < 0 ? key_scalar_type : cache_scalar_type,
+                    is_neox, rope_base_offset};
               }),
           py::arg("paged_kv_ptrs"), py::arg("temp_buffer_ptrs"),
           py::arg("num_layers"), py::arg("slot_tokens"),
@@ -298,7 +267,8 @@ PYBIND11_MODULE(cuda_ops, m) {
           py::arg("cos_sin_cache"), py::arg("rot_dim"),
           py::arg("rope_num_kv_heads"), py::arg("rope_head_stride"),
           py::arg("key_scalar_type"), py::arg("is_neox"),
-          py::arg("rope_base_offset") = 0, py::arg("block_stride_elems") = 0)
+          py::arg("rope_base_offset") = 0, py::arg("block_stride_elems") = 0,
+          py::arg("cache_scalar_type") = -1)
       // Mutable so the Python planner can cache one spec per (context, group)
       // and re-stamp only the per-request slot-mapping tensor between calls;
       // every other field is invariant for the life of the paged registration.

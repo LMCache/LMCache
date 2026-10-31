@@ -5,9 +5,12 @@ Configuration for distributed storage manager
 """
 
 # Standard
-from dataclasses import dataclass, field
-from typing import Any, Literal, cast
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal, TypeVar, cast
 import argparse
+import json
+import math
+import mmap
 import os
 
 # First Party
@@ -24,13 +27,139 @@ from lmcache.v1.platform import current_device_spec
 
 logger = init_logger(__name__)
 
+_L1ConfigT = TypeVar("_L1ConfigT", bound="L1ManagerConfig")
+
+
+def _l1_number(
+    values: dict[str, object], name: str, default: float | None = None
+) -> float:
+    """Read a finite positive JSON number, rejecting booleans and missing fields."""
+    value = values.get(name, default)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError(f"{name} must be a finite positive number")
+    return float(value)
+
+
+def _l1_bool(values: dict[str, object], name: str, default: bool) -> bool:
+    """Read a JSON boolean without coercing strings or numbers."""
+    value = values.get(name, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
+
+
+def _l1_path(values: dict[str, object]) -> str:
+    """Read the non-empty backing path required by device-backed L1s."""
+    path = values.get("path")
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("path must be a non-empty string")
+    return path
+
+
+def _l1_offset_bytes(values: dict[str, object]) -> int:
+    """Read the optional ``offset_gb`` JSON field as a byte count (default 0)."""
+    value = values.get("offset_gb", 0)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise ValueError("offset_gb must be a finite non-negative number")
+    return int(value * (1 << 30))
+
+
+def _parse_l1_common(
+    cls: type[_L1ConfigT],
+    values: dict[str, object],
+    defaults: "EvictionConfig | None",
+    read_ttl: int,
+    write_ttl: int,
+    backend_fields: set[str],
+) -> _L1ConfigT:
+    """Validate shared JSON fields before the backend subclass parses its fields."""
+    unknown = (
+        set(values)
+        - {
+            "type",
+            "tag",
+            "size_gb",
+            "align_bytes",
+            "eviction",
+            "read_ttl_seconds",
+            "write_ttl_seconds",
+        }
+        - backend_fields
+    )
+    if unknown:
+        raise ValueError(f"Unknown L1 fields: {sorted(unknown)}")
+    tag = values.get("tag")
+    if not isinstance(tag, str) or not tag.strip():
+        raise ValueError("tag must be a non-empty string")
+    if tag == "_default" and cls is not DRAML1ManagerConfig:
+        raise ValueError("Only DRAM can use the _default tag")
+    ints = []
+    for name, default in (
+        ("align_bytes", 4096),
+        ("read_ttl_seconds", read_ttl),
+        ("write_ttl_seconds", write_ttl),
+    ):
+        value = values.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+        ints.append(value)
+    align, read_ttl, write_ttl = ints
+    if align & (align - 1):
+        raise ValueError("align_bytes must be a power of two")
+    size = int(_l1_number(values, "size_gb") * (1 << 30))
+    if size < align:
+        raise ValueError("size_gb must provide at least align_bytes bytes")
+    raw = values.get("eviction", {})
+    if not isinstance(raw, dict) or set(raw) - {
+        "eviction_policy",
+        "trigger_watermark",
+        "eviction_ratio",
+    }:
+        raise ValueError(
+            "eviction must contain policy, watermark and ratio settings only"
+        )
+    policy = raw.get("eviction_policy", defaults.eviction_policy if defaults else None)
+    if policy not in ("LRU", "ARC", "IsolatedLRU", "noop"):
+        raise ValueError("An eviction policy is required for each L1")
+    eviction = replace(defaults or EvictionConfig(policy), **raw)
+    for name in ("trigger_watermark", "eviction_ratio"):
+        value = getattr(eviction, name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0 <= value <= 1
+        ):
+            raise ValueError(f"{name} must be between zero and one")
+    return cls(
+        L1MemoryManagerConfig(size, False, align_bytes=align, shm_name=""),
+        tag=tag,
+        eviction=eviction,
+        read_ttl_seconds=read_ttl,
+        write_ttl_seconds=write_ttl,
+    )
+
+
 # 2 MiB hugepage size (MAP_HUGE_2MB). MP-mode L1 memory is shared across
 # processes, so when hugepages are requested the bytes must come from the
 # pre-allocated 2 MiB pool rather than regular 4 KiB pinned memory.
 HUGEPAGE_SIZE_BYTES = 2 * 1024 * 1024
 
+# mlock keeps pages off the evictable LRU; compaction migrates them anyway
+# unless this sysctl is 0.
+_COMPACT_UNEVICTABLE_ALLOWED = "/proc/sys/vm/compact_unevictable_allowed"
 
-_HYBRID_L1_SINGLE_REGION_L2_ADAPTERS = {
+
+_SINGLE_REGION_L2_ADAPTERS = {
     "nixl_store",
     "nixl_store_dynamic",
 }
@@ -61,7 +190,7 @@ def requires_single_l1_memory_region(
     """Return the adapter type requiring a single L1 memory region, if any."""
     adapter_config = unwrap_l2_adapter_config(adapter_config)
     type_name = get_type_name_for_config(adapter_config)
-    if type_name in _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS:
+    if type_name in _SINGLE_REGION_L2_ADAPTERS:
         return type_name
     if (
         type_name == "mooncake_store"
@@ -108,63 +237,6 @@ def _check_hugepage_availability(size_in_bytes: int) -> None:
         )
 
 
-def _infer_l1_devdax_overflow_from_dax_adapter(
-    memory_config: "L1MemoryManagerConfig",
-    l2_adapter_config: L2AdaptersConfig,
-) -> None:
-    if not memory_config.devdax_path or memory_config.devdax_size_in_bytes:
-        return
-
-    l1_devdax_path = memory_config.devdax_path
-    remaining_adapters: list[L2AdapterConfigBase] = []
-    matched_dax_device: Any | None = None
-    for adapter_config in l2_adapter_config.adapters:
-        if get_type_name_for_config(adapter_config) != "dax":
-            remaining_adapters.append(adapter_config)
-            continue
-
-        dax_adapter = cast(Any, adapter_config)
-        devices = list(getattr(dax_adapter, "devices", []))
-        matched_devices = [
-            device
-            for device in devices
-            if getattr(device, "device_path", None) == l1_devdax_path
-        ]
-        if not matched_devices:
-            remaining_adapters.append(adapter_config)
-            continue
-        if matched_dax_device is not None or len(matched_devices) > 1:
-            raise ValueError(
-                "Only one DAX device can match l1-devdax-path for hybrid L1"
-            )
-
-        matched_dax_device = matched_devices[0]
-        remaining_devices = [
-            device
-            for device in devices
-            if getattr(device, "device_path", None) != l1_devdax_path
-        ]
-        if remaining_devices:
-            remaining_dax_adapter = type(dax_adapter)(
-                devices=remaining_devices,
-                hotplug_enabled=dax_adapter.hotplug_enabled,
-                slot_bytes=dax_adapter.slot_bytes,
-                num_store_workers=dax_adapter.num_store_workers,
-                num_lookup_workers=dax_adapter.num_lookup_workers,
-                num_load_workers=dax_adapter.num_load_workers,
-            )
-            remaining_dax_adapter.eviction_config = dax_adapter.eviction_config
-            remaining_dax_adapter.persist_config = dax_adapter.persist_config
-            remaining_dax_adapter.serde_config = dax_adapter.serde_config
-            remaining_adapters.append(remaining_dax_adapter)
-
-    if matched_dax_device is None:
-        return
-    max_dax_size_gb = matched_dax_device.max_dax_size_gb
-    memory_config.devdax_size_in_bytes = int(max_dax_size_gb * (1 << 30))
-    l2_adapter_config.adapters = remaining_adapters
-
-
 @dataclass
 class L1MemoryManagerConfig:
     """
@@ -190,10 +262,15 @@ class L1MemoryManagerConfig:
     """ Allocate the L1 pool from the pre-allocated 2 MiB hugepage pool. """
 
     devdax_path: str | None = None
-    """ Optional Device-DAX path to use as the L1 backing arena. """
+    """ Optional Device-DAX path to use as the L1 backing arena; the whole
+    pool then lives on the device. """
 
-    devdax_size_in_bytes: int = 0
-    """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
+    devdax_offset_in_bytes: int = 0
+    """ Page-aligned byte offset into ``devdax_path`` where the L1 mapping
+    starts. Lets several servers share one device with disjoint ranges. """
+
+    mlock: bool = False
+    """ mlock the L1 buffer so compaction cannot migrate it (ROCm only). """
 
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
@@ -201,10 +278,15 @@ class L1MemoryManagerConfig:
         if self.devdax_path is not None:
             self.devdax_path = self.devdax_path.strip()
 
-        if self.devdax_size_in_bytes < 0:
-            raise ValueError("devdax_size_in_bytes must be >= 0")
-        if self.devdax_size_in_bytes and not self.devdax_path:
-            raise ValueError("devdax_size_in_bytes requires devdax_path")
+        if self.devdax_offset_in_bytes < 0:
+            raise ValueError("devdax_offset_in_bytes must be >= 0")
+        if self.devdax_offset_in_bytes and not self.devdax_path:
+            raise ValueError("devdax_offset_in_bytes requires devdax_path")
+        if self.devdax_offset_in_bytes % mmap.ALLOCATIONGRANULARITY:
+            raise ValueError(
+                "devdax_offset_in_bytes must be a multiple of "
+                f"{mmap.ALLOCATIONGRANULARITY} bytes"
+            )
 
         if self.devdax_path and self.use_lazy:
             raise ValueError(
@@ -226,6 +308,17 @@ class L1MemoryManagerConfig:
                 "incompatible with lazy allocation. Please set "
                 "--no-l1-use-lazy when enabling hugepages."
             )
+        if self.mlock:
+            if current_device_spec.backend_name != "rocm":
+                raise ValueError("l1-mlock is only supported on ROCm.")
+            if self.devdax_path:
+                raise ValueError("l1-mlock cannot be used with l1-devdax-path.")
+            with open(_COMPACT_UNEVICTABLE_ALLOWED) as f:
+                if f.read().strip() != "0":
+                    raise RuntimeError(
+                        "l1-mlock requires sysctl vm.compact_unevictable_allowed=0 "
+                        "on the node."
+                    )
 
         # LazyMemoryAllocator requires pinned memory support.
         # Auto-disable on platforms that don't support it to avoid a RuntimeError.
@@ -292,52 +385,51 @@ class L1ManagerConfig:
     read_ttl_seconds: int = field(default=300)
     """ Time to live for each object's read lock. Default is 300s (5 minutes). """
 
+    tag: str = "_default"
+    """Unique L1 name used for reporting."""
 
-def get_configured_capacity_bytes(
-    config: L1ManagerConfig,
-) -> dict[L1BackendType, int]:
-    """Return the boot-configured L1 capacity of each backing medium.
+    eviction: "EvictionConfig | None" = None
+    """Per-L1 eviction settings; None inherits StorageManagerConfig defaults."""
+
+
+def get_configured_capacity_bytes(config: L1ManagerConfig) -> int:
+    """Return the boot-configured capacity of an L1 in bytes.
 
     The boot-time source for "how large is L1". Unlike
-    ``L1Manager.get_memory_usage()``, whose total is the grown heap on the
-    lazy tier, this is stable from boot. Keyed per medium because a hybrid
-    Device-DAX tier spans two, matching how L1 events tag placements.
-    Reports the *configured* topology, so devices added later via
-    ``add_device`` are not counted. ``L1Manager`` overlays live Device-DAX
-    arena capacity when it builds a runtime declaration.
-
-    Expects a **normalized** config: ``normalize_storage_manager_config``
-    back-fills ``devdax_size_in_bytes`` from a matching DAX L2 adapter,
-    without which a hybrid deployment reads as pure Device-DAX. A config
-    from a constructed ``StorageManagerConfig`` satisfies this already.
+    ``BaseL1Manager.get_memory_usage()``, whose total is the grown heap on
+    the lazy tier, this is stable from boot. Reports the *configured*
+    topology, so Device-DAX arenas added later via ``add_device`` are not
+    counted; ``DevDaxL1Manager.get_capacity_bytes()`` reports the live value.
 
     Args:
         config: The L1 manager configuration.
 
     Returns:
-        Configured bytes per medium, omitting any sized zero.
+        Configured bytes of the medium ``config`` selects.
     """
     if config.gds_l1_config is not None:
-        size = config.gds_l1_config.size_in_bytes
-        return {L1BackendType.GDS: size} if size > 0 else {}
+        return config.gds_l1_config.size_in_bytes
+    return config.memory_config.size_in_bytes
 
-    memory_config = config.memory_config
-    if memory_config.devdax_path:
-        # Mirrors DevDaxL1MemoryManager.__init__: an unset devdax size means
-        # the whole tier is Device-DAX, else size_in_bytes is the DRAM half.
-        devdax_size = memory_config.devdax_size_in_bytes or memory_config.size_in_bytes
-        local_size = (
-            memory_config.size_in_bytes if memory_config.devdax_size_in_bytes else 0
-        )
-        capacities: dict[L1BackendType, int] = {}
-        if devdax_size > 0:
-            capacities[L1BackendType.DEVDAX] = devdax_size
-        if local_size > 0:
-            capacities[L1BackendType.DRAM] = local_size
-        return capacities
 
-    size = memory_config.size_in_bytes
-    return {L1BackendType.DRAM: size} if size > 0 else {}
+def l1_medium_name(config: L1ManagerConfig) -> str:
+    """Return the medium an L1 configuration selects.
+
+    Mirrors ``create_l1_manager``: GDS when ``gds_l1_config`` is set,
+    Device-DAX when ``memory_config.devdax_path`` is set, else DRAM.
+
+    Args:
+        config: The L1 manager configuration.
+
+    Returns:
+        ``"gds"``, ``"devdax"`` or ``"dram"``, the manager's ``backend_type``
+        wire value.
+    """
+    if config.gds_l1_config is not None:
+        return L1BackendType.GDS.value
+    if config.memory_config.devdax_path:
+        return L1BackendType.DEVDAX.value
+    return L1BackendType.DRAM.value
 
 
 @dataclass
@@ -363,6 +455,143 @@ class EvictionConfig:
 
 
 @dataclass
+class DRAML1ManagerConfig(L1ManagerConfig):
+    """DRAM configuration parsed from a tagged --l1-manager JSON object."""
+
+    @classmethod
+    def from_dict(
+        cls,
+        values: dict[str, object],
+        defaults: EvictionConfig | None,
+        read_ttl: int = 300,
+        write_ttl: int = 600,
+    ) -> "DRAML1ManagerConfig":
+        """Parse a DRAM pool without allocating its memory.
+
+        Args:
+            values: JSON fields for this backend, including tag and size_gb.
+            defaults: Global eviction settings, or None to require a local policy.
+            read_ttl: Default read-lock lifetime in seconds.
+            write_ttl: Default write-lock lifetime in seconds.
+
+        Returns:
+            A validated DRAML1ManagerConfig.
+
+        Raises:
+            ValueError: A field is unknown, malformed, or incompatible.
+            RuntimeError: The requested hugepage pool is unavailable, or
+                mlock is requested and the node allows compacting mlocked pages.
+        """
+        config = _parse_l1_common(
+            cls,
+            values,
+            defaults,
+            read_ttl,
+            write_ttl,
+            {"use_lazy", "init_size_gb", "shm_name", "use_hugepages", "mlock"},
+        )
+        use_lazy = _l1_bool(values, "use_lazy", True)
+        hugepages = _l1_bool(values, "use_hugepages", False)
+        shm_name = values.get("shm_name", "")
+        if not isinstance(shm_name, str):
+            raise ValueError("shm_name must be a string")
+        if shm_name and use_lazy:
+            raise ValueError("shm_name cannot coexist with use_lazy")
+        config.memory_config = replace(
+            config.memory_config,
+            use_lazy=use_lazy,
+            init_size_in_bytes=int(_l1_number(values, "init_size_gb", 20) * (1 << 30)),
+            shm_name=shm_name,
+            use_hugepages=hugepages,
+            mlock=_l1_bool(values, "mlock", False),
+        )
+        if hugepages:
+            _check_hugepage_availability(config.memory_config.size_in_bytes)
+        return config
+
+
+@dataclass
+class DevDaxL1ManagerConfig(L1ManagerConfig):
+    """A Device-DAX L1 whose whole pool lives on the device."""
+
+    @classmethod
+    def from_dict(
+        cls,
+        values: dict[str, object],
+        defaults: EvictionConfig | None,
+        read_ttl: int = 300,
+        write_ttl: int = 600,
+    ) -> "DevDaxL1ManagerConfig":
+        """Parse a Device-DAX pool without opening its required backing path.
+
+        Args:
+            values: JSON fields for this backend, including tag and size_gb.
+            defaults: Global eviction settings, or None to require a local policy.
+            read_ttl: Default read-lock lifetime in seconds.
+            write_ttl: Default write-lock lifetime in seconds.
+
+        Returns:
+            A validated DevDaxL1ManagerConfig.
+
+        Raises:
+            ValueError: A field is unknown, malformed, or incompatible.
+        """
+        config = _parse_l1_common(
+            cls, values, defaults, read_ttl, write_ttl, {"path", "offset_gb"}
+        )
+        config.memory_config = replace(
+            config.memory_config,
+            devdax_path=_l1_path(values),
+            devdax_offset_in_bytes=_l1_offset_bytes(values),
+        )
+        return config
+
+
+@dataclass
+class GDSL1ManagerConfig(L1ManagerConfig):
+    """A GDS L1 whose slab belongs to this manager's process-local owner ID."""
+
+    @classmethod
+    def from_dict(
+        cls,
+        values: dict[str, object],
+        defaults: EvictionConfig | None,
+        read_ttl: int = 300,
+        write_ttl: int = 600,
+    ) -> "GDSL1ManagerConfig":
+        """Parse a GDS slab and backend selection without loading its driver.
+
+        Args:
+            values: JSON fields for this backend, including tag and size_gb.
+            defaults: Global eviction settings, or None to require a local policy.
+            read_ttl: Default read-lock lifetime in seconds.
+            write_ttl: Default write-lock lifetime in seconds.
+
+        Returns:
+            A validated GDSL1ManagerConfig.
+
+        Raises:
+            ValueError: A field is unknown, malformed, or incompatible.
+        """
+        config = _parse_l1_common(
+            cls, values, defaults, read_ttl, write_ttl, {"path", "backend", "direct_io"}
+        )
+        if config.memory_config.align_bytes < 4096:
+            raise ValueError("GDS align_bytes must be at least 4096")
+        backend = values.get("backend", "auto")
+        if not isinstance(backend, str) or not backend:
+            raise ValueError("backend must be a non-empty string")
+        config.gds_l1_config = GdsL1Config(
+            _l1_path(values),
+            config.memory_config.size_in_bytes,
+            _l1_bool(values, "direct_io", True),
+            backend,
+            config.memory_config.align_bytes,
+        )
+        return config
+
+
+@dataclass
 class StorageManagerConfig:
     """
     The configuration for the distributed storage manager.
@@ -385,41 +614,44 @@ class StorageManagerConfig:
     prefetch_policy: str = "default"
     """ The L2 prefetch policy name. """
 
-    prefetch_max_in_flight: int = 8
-    """ Maximum number of concurrent prefetch requests. """
+    write_policy: str = "default"
+    """ The L1 write-placement policy name. """
+
+    prefetch_inflight_watermark: float = 0.5
+    """ Fraction of each L1's capacity that in-flight L2 prefetches may stage
+    before new prefetch requests wait, in (0, 1]. """
 
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
 
+    l1_manager_configs: list[L1ManagerConfig] = field(default_factory=list)
+    """All peer L1 configurations. Empty accepts the legacy single-L1 input."""
+
     def __post_init__(self) -> None:
-        normalize_storage_manager_config(self)
+        if not self.l1_manager_configs:
+            self.l1_manager_configs = [self.l1_manager_config]
+        else:
+            self.l1_manager_config = self.l1_manager_configs[0]
+        tags = [c.tag for c in self.l1_manager_configs]
+        if any(not isinstance(tag, str) or not tag.strip() for tag in tags):
+            raise ValueError("L1 tags must be non-empty strings")
+        if len(set(tags)) != len(tags):
+            raise ValueError("L1 tags must be unique")
+        if sum(c.gds_l1_config is not None for c in self.l1_manager_configs) > 1:
+            raise ValueError("Only one GDS L1 slab is supported per process")
+        for c in self.l1_manager_configs:
+            if c.eviction is None:
+                c.eviction = self.eviction_config
+        if not 0 < self.prefetch_inflight_watermark <= 1:
+            raise ValueError(
+                "prefetch_inflight_watermark must be in (0, 1], got "
+                f"{self.prefetch_inflight_watermark}"
+            )
         validate_storage_manager_config(self)
-
-
-def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
-    """Normalize storage manager configuration.
-
-    This consumes a matching DAX adapter as hybrid L1 Device-DAX overflow
-    capacity.
-
-    Args:
-        config: Storage manager configuration to normalize in place.
-
-    Returns:
-        None.
-
-    Raises:
-        ValueError: If more than one DAX device matches ``l1-devdax-path``.
-    """
-    memory_config = config.l1_manager_config.memory_config
-    _infer_l1_devdax_overflow_from_dax_adapter(memory_config, config.l2_adapter_config)
 
 
 def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     """Validate storage manager configuration.
-
-    This rejects L2 adapters that require a single contiguous L1 memory
-    descriptor when hybrid L1 Device-DAX overflow is enabled.
 
     Args:
         config: Storage manager configuration to validate.
@@ -428,31 +660,42 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         None.
 
     Raises:
-        ValueError: If mutually exclusive L1 tiers are both configured, or
-            hybrid L1 is paired with incompatible L2 adapters.
+        ValueError: If mutually exclusive L1 tiers are both configured, DRAM
+            managers share a shared-memory name, or a ``dax`` L2 adapter
+            maps the device range of a Device-DAX L1.
     """
-    if (
-        config.l1_manager_config.gds_l1_config is not None
-        and config.l1_manager_config.memory_config.devdax_path
-    ):
-        raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
-
-    memory_config = config.l1_manager_config.memory_config
-    if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
-        return
-
-    incompatible_adapters = [
-        adapter_name
-        for adapter_config in config.l2_adapter_config.adapters
-        if (adapter_name := requires_single_l1_memory_region(adapter_config))
-        is not None
+    by_tag = {c.tag: c for c in config.l1_manager_configs}
+    shm_names = [
+        c.memory_config.shm_name
+        for c in by_tag.values()
+        if c.memory_config.shm_name
+        and not c.memory_config.use_lazy
+        and c.gds_l1_config is None
     ]
-    if incompatible_adapters:
-        raise ValueError(
-            "Hybrid DRAM + Device-DAX L1 cannot be used with L2 adapters "
-            "that register a single L1 memory region: "
-            f"{', '.join(incompatible_adapters)}"
-        )
+    if len(set(shm_names)) != len(shm_names):
+        raise ValueError("DRAM L1 managers require distinct shm_name values")
+    for l1 in by_tag.values():
+        if l1.gds_l1_config is not None and l1.memory_config.devdax_path:
+            raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
+    # A device range belongs to exactly one owner, an L1 or a dax L2 adapter;
+    # reject the overlap here, before the mapping fails deep inside startup.
+    l1_devices = {
+        (c.memory_config.devdax_path, c.memory_config.devdax_offset_in_bytes)
+        for c in by_tag.values()
+        if c.memory_config.devdax_path
+    }
+    for adapter_config in config.l2_adapter_config.adapters:
+        device_config = unwrap_l2_adapter_config(adapter_config)
+        if get_type_name_for_config(device_config) != "dax":
+            continue
+        for device in cast(Any, device_config).devices:
+            if (device.device_path, device.offset_bytes) in l1_devices:
+                raise ValueError(
+                    f"Device-DAX range {device.device_path}@{device.offset_bytes} "
+                    "is both an L1 and a dax L2 adapter device. Hybrid DRAM + "
+                    "Device-DAX overflow is gone: give the DAX L1 its own "
+                    "--l1-manager entry and keep the adapter on another range."
+                )
 
 
 def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
@@ -465,6 +708,8 @@ def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
         ``True`` if L1 is a single registerable memory region, ``False`` for
         GDS L1 or Device-DAX L1.
     """
+    if len(config.l1_manager_configs) != 1:
+        return False
     l1_config = config.l1_manager_config
     if l1_config.gds_l1_config is not None:
         return False
@@ -501,6 +746,16 @@ def add_storage_manager_args(
     # First Party
     from lmcache.v1.gpu_connector._gds_backends import available_backends
 
+    parser.add_argument(
+        "--l1-manager",
+        action="append",
+        default=[],
+        metavar="JSON",
+        help=(
+            "Tagged L1 JSON: type (DRAM, DEVDAX, GDS), tag, size_gb "
+            "and backend fields. Repeat for multiple L1s."
+        ),
+    )
     # L1 Memory Manager Config
     memory_group = parser.add_argument_group(
         "L1 Memory Manager", "Configuration for L1 memory manager"
@@ -508,7 +763,7 @@ def add_storage_manager_args(
     memory_group.add_argument(
         "--l1-size-gb",
         type=float,
-        required=True,
+        default=None,
         help="The size of L1 memory in GB.",
     )
     memory_group.add_argument(
@@ -549,9 +804,28 @@ def add_storage_manager_args(
             "Optional /dev/dax device or mmap-able file to use as the L1 "
             "backing arena. When set, L1 lazy allocation and SHM transfer "
             "advertising must be disabled because the L1 bytes live in the DAX "
-            'map. Set --no-l1-use-lazy and --shm-name "". '
-            "If a DAX L2 adapter with the same device_path is registered, "
-            "that adapter's max_dax_size_gb is used as L1 overflow size."
+            'map. Set --no-l1-use-lazy and --shm-name "". The whole L1 pool '
+            "lives on the device; a dax L2 adapter must use another range."
+        ),
+    )
+    memory_group.add_argument(
+        "--l1-devdax-offset-gb",
+        type=float,
+        default=0.0,
+        help=(
+            "Byte offset into --l1-devdax-path, in GiB, where the L1 mapping "
+            "starts (default 0). Lets several LMCache servers share one CXL "
+            "device by mapping disjoint ranges. Must land on a page boundary; "
+            "the kernel also enforces the device alignment (usually 2 MiB)."
+        ),
+    )
+    memory_group.add_argument(
+        "--l1-mlock",
+        action="store_true",
+        help=(
+            "ROCm only: mlock the L1 buffer so memory compaction cannot migrate "
+            "it. Requires sysctl vm.compact_unevictable_allowed=0 and an "
+            "unlimited memlock ulimit (or CAP_IPC_LOCK)."
         ),
     )
 
@@ -609,7 +883,7 @@ def add_storage_manager_args(
         "--eviction-policy",
         type=str,
         choices=["LRU", "ARC", "IsolatedLRU", "noop"],
-        required=True,
+        default=None,
         help="The eviction policy to use ('LRU', 'ARC', 'IsolatedLRU', or 'noop'). "
         "'ARC' balances recent and frequently reused keys adaptively. "
         "'IsolatedLRU' maintains one LRU list per cache_salt and requires "
@@ -666,10 +940,20 @@ def add_storage_manager_args(
         "Default is 'default' (pick the first adapter by index).",
     )
     policy_group.add_argument(
+        "--l2-prefetch-inflight-watermark",
+        type=float,
+        default=0.5,
+        help="Fraction of L1 capacity, in (0, 1], that in-flight L2 prefetch "
+        "requests may stage before new prefetch requests wait. Default is 0.5.",
+    )
+    # Deprecated: released deployers (operator) still render this flag into
+    # server args, and rejecting it crashes the pod on startup.
+    policy_group.add_argument(
         "--l2-prefetch-max-in-flight",
         type=int,
-        default=8,
-        help="Maximum number of concurrent prefetch requests. Default is 8.",
+        default=None,
+        help="Deprecated and ignored; prefetch admission follows "
+        "--l2-prefetch-inflight-watermark.",
     )
     policy_group.add_argument(
         "--periodic-notifier-interval-ms",
@@ -713,6 +997,75 @@ def parse_args_to_config(
     Returns:
         StorageManagerConfig: The configuration object.
     """
+    if args.l2_prefetch_max_in_flight is not None:
+        logger.warning(
+            "--l2-prefetch-max-in-flight is deprecated and ignored; prefetch "
+            "admission follows --l2-prefetch-inflight-watermark (%s)",
+            args.l2_prefetch_inflight_watermark,
+        )
+    defaults = (
+        EvictionConfig(
+            args.eviction_policy,
+            args.eviction_trigger_watermark,
+            args.eviction_ratio,
+            getattr(args, "enable_extra_logging", False),
+            getattr(args, "extra_logging_interval", 10.0),
+        )
+        if args.eviction_policy is not None
+        else None
+    )
+    raw_configs = getattr(args, "l1_manager", [])
+    if raw_configs:
+        if (
+            args.l1_size_gb is not None
+            or args.gds_l1_path is not None
+            or args.l1_devdax_path is not None
+        ):
+            raise ValueError("Use either --l1-manager or legacy L1 flags")
+        classes: dict[
+            str,
+            type[DRAML1ManagerConfig]
+            | type[DevDaxL1ManagerConfig]
+            | type[GDSL1ManagerConfig],
+        ] = {
+            "DRAM": DRAML1ManagerConfig,
+            "DEVDAX": DevDaxL1ManagerConfig,
+            "GDS": GDSL1ManagerConfig,
+        }
+        l1_configs: list[L1ManagerConfig] = []
+        for raw in raw_configs:
+            values = json.loads(raw)
+            if (
+                not isinstance(values, dict)
+                or not isinstance(values.get("type"), str)
+                or values["type"] not in classes
+            ):
+                raise ValueError("--l1-manager requires type DRAM, DEVDAX or GDS")
+            l1_configs.append(
+                classes[values["type"]].from_dict(
+                    values,
+                    defaults,
+                    args.l1_read_ttl_seconds,
+                    args.l1_write_ttl_seconds,
+                )
+            )
+        eviction = l1_configs[0].eviction
+        if eviction is None:
+            raise ValueError("Each L1 requires eviction settings")
+        return StorageManagerConfig(
+            l1_manager_config=l1_configs[0],
+            eviction_config=eviction,
+            l1_manager_configs=l1_configs,
+            l2_adapter_config=parse_args_to_l2_adapters_config(args),
+            store_policy=args.l2_store_policy,
+            prefetch_policy=args.l2_prefetch_policy,
+            prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
+            periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
+        )
+    if args.l1_size_gb is None or defaults is None:
+        raise ValueError(
+            "Legacy L1 configuration requires --l1-size-gb and --eviction-policy"
+        )
     shm_name = getattr(args, "shm_name", None)
     use_hugepages = getattr(args, "l1_use_hugepages", False)
 
@@ -731,6 +1084,7 @@ def parse_args_to_config(
             logger.error("Hugepage availability check failed: %s", e)
             raise
 
+    devdax_offset = int(getattr(args, "l1_devdax_offset_gb", 0.0) * (1 << 30))
     if shm_name is None:
         memory_config = L1MemoryManagerConfig(
             size_in_bytes=int(args.l1_size_gb * (1 << 30)),
@@ -739,6 +1093,8 @@ def parse_args_to_config(
             align_bytes=args.l1_align_bytes,
             use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
+            devdax_offset_in_bytes=devdax_offset,
+            mlock=args.l1_mlock,
         )
     else:
         memory_config = L1MemoryManagerConfig(
@@ -749,6 +1105,8 @@ def parse_args_to_config(
             shm_name=shm_name,
             use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
+            devdax_offset_in_bytes=devdax_offset,
+            mlock=args.l1_mlock,
         )
 
     gds_l1_config: GdsL1Config | None = None
@@ -784,7 +1142,7 @@ def parse_args_to_config(
         l2_adapter_config=l2_adapter_config,
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
-        prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+        prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
     return config

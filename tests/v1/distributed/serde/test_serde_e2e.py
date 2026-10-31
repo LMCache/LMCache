@@ -3,7 +3,7 @@
 End-to-end tests for the serde integration through StorageManager.
 
 Drives the full L1 -> L2 store (with serialize) and L2 -> L1 prefetch
-(with deserialize) paths using a real L1Manager + MockL2Adapter +
+(with deserialize) paths using a real BaseL1Manager + MockL2Adapter +
 AsyncSerdeProcessor(fp8). Tests exercise the public StorageManager API
 only (no private-member access), per AGENTS.md.
 
@@ -38,7 +38,7 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.serde import SerdeConfig
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.platform import current_device_spec
 
 # Test helpers
@@ -163,7 +163,7 @@ def write_and_wait_for_l2(
         if tensor is not None:
             tensor.fill_(float(i + 1))
 
-    sm.finish_write(list(ret.keys()))
+    sm.finish_write(list(ret), l1_owners_of(ret))
 
     # Wait for StoreController to flush to L2. Polling the controller's queue
     # counters alone is racy: the background loop pops the pending keys

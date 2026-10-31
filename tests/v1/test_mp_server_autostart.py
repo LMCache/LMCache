@@ -209,7 +209,7 @@ def test_config_rejects_invalid_tcp_port(port: int | str) -> None:
 @pytest.mark.parametrize(
     "server_url",
     [
-        "grpc://localhost:5555",
+        "grpc+unix:///tmp/lmcache.sock",
         "tcp://localhost:65536",
         "tcp://localhost:5555/path",
         "tcp://user@localhost:5555",
@@ -224,6 +224,43 @@ def test_enabled_autostart_rejects_invalid_transport_url(server_url: str) -> Non
             server_url=server_url,
             zmq_context=MagicMock(),
         )
+
+
+def test_grpc_url_starts_a_grpc_server(monkeypatch) -> None:
+    """A grpc:// endpoint starts a gRPC server, so its PING and the connector
+    reach the server over the transport the URL names."""
+    configs = []
+
+    class FakeLauncher:
+        def __init__(self, config: MPServerAutostartConfig) -> None:
+            configs.append(config)
+
+        def start(self, server_url: str, zmq_context: object) -> None:
+            return None
+
+    monkeypatch.setattr(launcher_mod, "MPServerLauncher", FakeLauncher)
+
+    maybe_start_mp_server_from_url(
+        extra_config={
+            "lmcache.mp.autostart": True,
+            "lmcache.mp.autostart.server_args": "--grpc-server-mode aio",
+        },
+        server_url="grpc://127.0.0.1:6555",
+        zmq_context=MagicMock(),
+    )
+
+    assert configs[0].command()[3:] == [
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "6555",
+        "--http-host",
+        "127.0.0.1",
+        "--transport",
+        "grpc",
+        "--grpc-server-mode",
+        "aio",
+    ]
 
 
 def test_config_import_works_without_torch() -> None:
@@ -259,6 +296,8 @@ def test_config_import_works_without_torch() -> None:
         "--http-host 0.0.0.0",
         "--http-host=0.0.0.0",
         "--http-ho=0.0.0.0",
+        "--transport grpc",
+        "--transport=zmq",
     ],
 )
 def test_config_rejects_endpoint_server_args(server_args: str) -> None:

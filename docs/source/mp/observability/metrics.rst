@@ -299,6 +299,14 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
    * - ``lmcache_mp.lookup_hit_l2_keys``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Hit keys loaded from L2 into L1.
+   * - ``lmcache_mp.lookup_prompt``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Whole prompt length of each looked-up request, sub-chunk tail
+       included (denominator of the request-level hit rate).
+   * - ``lmcache_mp.lookup_request_hit``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Prefix of the prompt served by the engine's prefix cache or LMCache
+       (numerator of the request-level hit rate).
    * - ``lmcache_mp.lookups``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Completed lookups (denominator for ``lookup_early_exit``).
@@ -309,9 +317,11 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
 
 All lookup counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``),
 so they always advance together per completed lookup. Early-exit lookups
-contribute ``0`` tokens to all four token counters, ``0`` keys to both
-key counters, and ``+1`` to
-``lookups`` / ``lookup_early_exit``, and abandoned lookups contribute to neither.
+contribute ``0`` tokens to the lookup-level token counters, ``0`` keys to
+both key counters, and ``+1`` to ``lookups`` / ``lookup_early_exit``; they
+still advance the request-level counters (``lookup_prompt`` and
+``lookup_request_hit``), which describe the request rather than the
+lookup. Abandoned lookups contribute to none of them.
 
 The ``model_name`` and ``cache_salt`` attributes are captured at lookup
 time from ``IPCCacheServerKey`` so dashboards can compute per-model or
@@ -319,17 +329,27 @@ per-tenant hit rate. ``cache_salt`` can be high-cardinality (one entry
 per tenant or isolation domain); drop it at scrape time with
 ``metric_relabel_configs`` if storage cost matters.
 
-**PromQL for hit rate:**
+**PromQL for hit rate** (both ratios use the whole prompt as denominator):
 
 .. code-block:: promql
 
-    # Aggregate (all models, all salts):
+    # LMCache token hit rate, share of prompt tokens (all models, all salts):
     rate(lmcache_mp_lookup_hit_tokens_total[5m])
-    / rate(lmcache_mp_lookup_requested_tokens_total[5m])
+    / rate(lmcache_mp_lookup_prompt_tokens_total[5m])
+
+    # Request-level: share of prompt tokens served by the engine's prefix
+    # cache or LMCache:
+    rate(lmcache_mp_lookup_request_hit_tokens_total[5m])
+    / rate(lmcache_mp_lookup_prompt_tokens_total[5m])
 
     # Per-model:
     sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
-    / sum(rate(lmcache_mp_lookup_requested_tokens_total[5m])) by (model_name)
+    / sum(rate(lmcache_mp_lookup_prompt_tokens_total[5m])) by (model_name)
+
+    # LMCache hit rate on only the range it was asked to look up (past the
+    # prefix the engine already held):
+    rate(lmcache_mp_lookup_hit_tokens_total[5m])
+    / rate(lmcache_mp_lookup_requested_tokens_total[5m])
 
     # Share of hit tokens L1 could serve on its own:
     rate(lmcache_mp_lookup_hit_l1_tokens_total[5m])
@@ -703,7 +723,7 @@ Adapters with no in-flight work emit no datapoint for that scrape.
    * - ``lmcache_mp.l1_usage_ratio``
      - ObservableGauge
      - L1 used/total ratio (``0.0``–``1.0``), sampled at scrape time
-       from ``L1Manager.get_memory_usage()``. Returns ``0.0`` when the
+       from ``BaseL1Manager.get_memory_usage()``. Returns ``0.0`` when the
        gauge target is not yet wired up or ``total_bytes`` is zero, so
        the callback never raises during a scrape. Compare against the
        eviction watermark (default ``0.8``) to read whether the
@@ -785,6 +805,70 @@ For the full design rationale and the in-process accessors that back
 each metric see ``docs/design/v1/mp_observability/METRICS.md`` and
 ``docs/design/v1/mp_observability/event-bus.md`` in the source tree.
 
+gRPC Runtime Metrics
+~~~~~~~~~~~~~~~~~~~~
+
+When metrics are enabled and the MP request transport is gRPC, LMCache also
+registers gRPC Python's OpenTelemetry observability plugin against the same
+OTel ``MeterProvider``. ZMQ mode does not register this plugin, so the
+existing LMCache EventBus metrics remain unchanged. The plugin is provided by
+``grpcio-observability`` and is installed only on Linux, which is the platform
+currently supported by that upstream package. On non-Linux developer hosts the
+integration is skipped unless the package is available locally. Use
+``--disable-grpc-metrics`` to suppress the integration explicitly while
+keeping LMCache's EventBus metrics enabled.
+
+The plugin buffers its stats and flushes them from a Python thread, holding the
+GIL for the whole batch. With the upstream default of 0.5 seconds, each flush
+can stall requests for several milliseconds under load, so LMCache sets
+``GRPC_PYTHON_CENSUS_EXPORT_BATCH_INTERVAL_SECS`` to ``0.05`` unless you have
+already set it.
+
+These metrics describe the gRPC transport itself, not cache hit/miss behavior.
+They use the upstream ``grpc.*`` namespace. On Prometheus, ``.`` is converted
+to ``_`` and counters get a ``_total`` suffix.
+
+.. list-table:: gRPC Runtime Metrics
+   :header-rows: 1
+   :widths: 34 34 16 16
+
+   * - OTel metric name
+     - Prometheus name
+     - Type
+     - Unit
+   * - ``grpc.client.attempt.started``
+     - ``grpc_client_attempt_started_total``
+     - Counter
+     - ``{attempt}``
+   * - ``grpc.client.attempt.duration``
+     - ``grpc_client_attempt_duration_seconds``
+     - Histogram
+     - seconds
+   * - ``grpc.client.attempt.sent_total_compressed_message_size``
+     - ``grpc_client_attempt_sent_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+   * - ``grpc.client.attempt.rcvd_total_compressed_message_size``
+     - ``grpc_client_attempt_rcvd_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+   * - ``grpc.server.call.started``
+     - ``grpc_server_call_started_total``
+     - Counter
+     - ``{call}``
+   * - ``grpc.server.call.duration``
+     - ``grpc_server_call_duration_seconds``
+     - Histogram
+     - seconds
+   * - ``grpc.server.call.sent_total_compressed_message_size``
+     - ``grpc_server_call_sent_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+   * - ``grpc.server.call.rcvd_total_compressed_message_size``
+     - ``grpc_server_call_rcvd_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+
 Prometheus Scrape Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -807,12 +891,19 @@ you — see :doc:`index`.
 Coordinator Metrics
 ~~~~~~~~~~~~~~~~~~~
 
-The Coordinator Key Directory gauges always emit one observation for each
-``tier`` value, ``l1`` and ``l2``, including zero-valued observations for an
-empty tier.  They describe the directory's current placements.  Placement
-bytes are the sum of the logical object sizes reported for those placements,
-not unique-object bytes, physical allocation, or storage capacity.  The same
-object is therefore included once for every placement recorded for it.
+Coordinator metrics use the ``lmcache_coordinator.`` prefix, so a series'
+origin is clear from its name even when the coordinator and the MP servers
+share one Prometheus.  The coordinator's resource carries
+``service.name=lmcache-mp-coordinator`` and ``service.instance.id`` set to the
+host name (the pod name under Kubernetes).
+
+The Key Directory gauges always emit one observation for each ``tier`` value,
+``l1`` and ``l2``, including zero-valued observations for an empty tier.  A
+placement is one place a key is stored: L1 on one server, or one L2 backend.
+Placement bytes are the sum of the logical object sizes reported for those
+placements, not unique-object bytes, physical allocation, or storage capacity.
+The same object is therefore included once for every placement recorded for
+it.
 
 .. list-table::
    :header-rows: 1
@@ -821,11 +912,298 @@ object is therefore included once for every placement recorded for it.
    * - Metric
      - Type
      - Description
-   * - ``lmcache_mp.key_directory_placement_count``
+   * - ``lmcache_coordinator.key_directory.placements``
      - ObservableGauge (attr: ``tier``)
-     - Placements currently recorded in the Coordinator Key Directory for
-       each cache tier.
-   * - ``lmcache_mp.key_directory_placement_size_bytes``
+     - Placements currently recorded in the Key Directory for each cache
+       tier.
+   * - ``lmcache_coordinator.key_directory.placement_bytes``
      - ObservableGauge (attr: ``tier``)
      - Reported logical object bytes summed across the placements currently
        recorded in each cache tier.
+   * - ``lmcache_coordinator.key_directory.keys_tracked``
+     - ObservableGauge
+     - Keys with at least one placement.
+   * - ``lmcache_coordinator.key_directory.server_l1_keys``
+     - ObservableGauge (attr: ``instance_id``)
+     - L1 keys each server reported.  A sudden drop to 0 means the
+       coordinator fenced that server (it restarted or left).
+   * - ``lmcache_coordinator.blend_index.chunks_indexed``
+     - ObservableGauge
+     - Chunks in the blend (fragment) index.  The three blend index gauges
+       are reported only when blend lookup is enabled.
+   * - ``lmcache_coordinator.blend_index.unique_chunk_contents``
+     - ObservableGauge
+     - Distinct chunk contents in the blend index; fewer than
+       ``chunks_indexed`` means the same content is stored more than once.
+   * - ``lmcache_coordinator.blend_index.namespaces``
+     - ObservableGauge
+     - Namespaces (model, cache salt, world size) holding indexed content.
+
+The lookup metrics cover prefix lookups (``/directory/lookup``) and
+non-prefix lookups (``/directory/blend-lookup``), told apart by
+``lookup_type`` (``prefix``, ``non_prefix``).  A chunk is the unit for both;
+a lookup by keys counts each key as one chunk.  Only lookups served to
+clients are counted, not the coordinator's own.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_coordinator.key_directory.lookups``
+     - ObservableCounter (attr: ``lookup_type``)
+     - Lookup requests served.
+   * - ``lmcache_coordinator.key_directory.lookup_chunks_requested``
+     - ObservableCounter (attr: ``lookup_type``)
+     - Chunks the lookups asked for.
+   * - ``lmcache_coordinator.key_directory.lookup_chunks_found``
+     - ObservableCounter (attr: ``lookup_type``)
+     - Chunks the lookups found.  ``found / requested`` is the hit rate.
+   * - ``lmcache_coordinator.key_directory.lookup_chunks_found_per_request_bucket``,
+       ``..._sum``, ``..._count``
+     - ObservableCounter (attrs: ``lookup_type``, ``le`` on ``_bucket``)
+     - How many chunks each lookup found, as a histogram.  ``_bucket`` is
+       cumulative with Prometheus ``le`` bounds, so ``histogram_quantile``
+       works on it.
+
+The coordinator keeps histogram buckets itself and exports them as
+counters, because OpenTelemetry has no histogram that is read at scrape
+time.  In Prometheus the counters carry a ``_total`` suffix, for example:
+
+.. code-block:: text
+
+    histogram_quantile(0.9, sum by (le) (rate(
+      lmcache_coordinator_key_directory_lookup_chunks_found_per_request_bucket_total[5m])))
+
+The same two gauges are also emitted under their previous names,
+``lmcache_mp.key_directory_placement_count`` and
+``lmcache_mp.key_directory_placement_size_bytes``, for one release so
+dashboards can migrate.  The previous names will be removed in the next
+release.
+
+The ingest metrics say whether the coordinator's view of the fleet is
+complete.  Two kinds of loss are counted separately: batches that never
+arrived (a skipped ``seq``), and events an MP server reports it dropped
+before sending (each batch carries the server's running count in
+``dropped_events``).  The first batch of a stream the coordinator was not
+already tracking counts no missing batches: earlier batches were sent before
+it was listening.  Fleet-wide counters drive alerts; the per-server gauges,
+one series per ``instance_id`` the coordinator currently tracks, show which
+server, and cover that server's current run.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_coordinator.ingest.event_batches_received``
+     - ObservableCounter (attr: ``result``)
+     - Cache-event batches received from MP servers: ``applied``,
+       ``duplicate`` (seq already seen) or ``stale`` (older incarnation).
+   * - ``lmcache_coordinator.ingest.event_batches_missing``
+     - ObservableCounter
+     - Batches that never arrived: skipped ``seq`` values.
+   * - ``lmcache_coordinator.ingest.events_dropped_by_servers``
+     - ObservableCounter
+     - Cache events the MP servers reported dropping before they reached the
+       coordinator.
+   * - ``lmcache_coordinator.ingest.server_event_batches_missing``
+     - ObservableGauge (attr: ``instance_id``)
+     - Missing batches for one server's current run.
+   * - ``lmcache_coordinator.ingest.server_events_dropped``
+     - ObservableGauge (attr: ``instance_id``)
+     - Dropped events for one server's current run.
+   * - ``lmcache_coordinator.ingest.server_view_incomplete``
+     - ObservableGauge (attr: ``instance_id``)
+     - ``1`` while the coordinator knows it is missing part of this server's
+       cache.  Clears when the server restarts or leaves.
+   * - ``lmcache_coordinator.ingest.batch_apply_failures``
+     - ObservableCounter (attrs: ``consumer``, ``op``)
+     - A view or controller failed to apply a batch (``op="consume"``) or a
+       fence (``op="fence"``); it now disagrees with the others.
+   * - ``lmcache_coordinator.ingest.batches_delivered``
+     - ObservableCounter (attr: ``consumer``)
+     - Admitted batches handed to each view or controller.
+   * - ``lmcache_coordinator.ingest.batch_apply_time_seconds``
+     - ObservableCounter (attr: ``consumer``)
+     - Time each view or controller spent applying those batches.  Divide its
+       rate by the rate of ``batches_delivered`` for the average apply time
+       per batch.
+
+The freshness metrics say how old the coordinator's view is.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_coordinator.ingest.server_seconds_since_last_event``
+     - ObservableGauge (attr: ``instance_id``)
+     - Seconds since this server's last batch was applied.  High while the
+       server still heartbeats means it has stopped sending events.
+   * - ``lmcache_coordinator.ingest.server_event_delivery_delay_seconds``
+     - ObservableGauge (attr: ``instance_id``)
+     - For this server's last applied batch, time from the server sending it
+       to the coordinator applying it.  Measured across the two hosts' clocks,
+       so clock skew shows up here.
+   * - ``lmcache_coordinator.kafka.records_read``
+     - ObservableCounter (attr: ``result``)
+     - Records read from the Kafka topic: ``applied``, ``undecodable`` or
+       ``failed``.  Only with ``--event-transport kafka``.
+   * - ``lmcache_coordinator.kafka.partitions_assigned``
+     - ObservableGauge
+     - Topic partitions this coordinator holds.  Fewer than the topic has
+       means another member of the consumer group holds the rest.
+   * - ``lmcache_coordinator.kafka.unread_records``
+     - ObservableGauge (attr: ``partition``)
+     - Records not yet read per partition.  Kafka's own lag tools cannot report
+       this, because the coordinator never commits offsets.
+
+The liveness metrics say whether the coordinator's loops and controllers are
+still doing their work.  A failed pass of a background loop is logged and
+counted, and the loop keeps running.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_coordinator.background_loop.last_success_timestamp_seconds``
+     - ObservableGauge (attr: ``loop``)
+     - Wall-clock time each loop (``health``, ``checkpoint``, ``eviction``)
+       last finished a pass without an error.  More than three intervals ago
+       means the loop has stopped making progress.
+   * - ``lmcache_coordinator.background_loop.interval_seconds``
+     - ObservableGauge (attr: ``loop``)
+     - Configured seconds between the loop's passes.
+   * - ``lmcache_coordinator.background_loop.passes``
+     - ObservableCounter (attrs: ``loop``, ``result``)
+     - Loop passes, ``ok`` or ``failed``.
+   * - ``lmcache_coordinator.controller.up``
+     - ObservableGauge (attr: ``controller``)
+     - ``1`` if the controller is running, ``0`` if it failed to start.
+   * - ``lmcache_coordinator.event_loop.blocked_seconds``
+     - ObservableCounter
+     - Total time the coordinator's event loop was blocked.  Its rate is the
+       fraction of time request handlers, heartbeats and loops were stalled.
+   * - ``lmcache_coordinator.registry.server_seconds_since_heartbeat``
+     - ObservableGauge (attr: ``instance_id``)
+     - Seconds since each registered server's last heartbeat.
+
+The fleet metrics say who is in the fleet and how much it holds.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_coordinator.registry.servers_registered``
+     - ObservableGauge
+     - MP servers registered with the coordinator.
+   * - ``lmcache_coordinator.registry.server_membership_changes``
+     - ObservableCounter (attr: ``change``)
+     - Membership changes: ``registered``, ``re_registered``,
+       ``deregistered``, ``timed_out`` (removed by the health check) and
+       ``unknown_heartbeat`` (a heartbeat from a server not registered).  A
+       climbing ``re_registered`` or ``timed_out`` means servers are
+       flapping.
+   * - ``lmcache_coordinator.usage.bytes_stored``
+     - ObservableGauge (attr: ``tier``)
+     - Reported bytes the fleet holds in each tier.
+
+The persistence metrics say whether the coordinator's state would survive a
+restart.  The checkpoint holds derived state and is written on a timer and
+on a clean stop; a failed periodic write also counts as a failed pass of the
+``checkpoint`` background loop.  The metadata file holds pins and quotas and
+is written on every change.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_coordinator.checkpoint_file.last_write_timestamp_seconds``
+     - ObservableGauge
+     - Wall-clock time the last good checkpoint was written.  Absent until
+       the first.
+   * - ``lmcache_coordinator.checkpoint_file.writes``
+     - ObservableCounter (attr: ``result``)
+     - Checkpoint writes: ``ok``, ``quiesce_timeout`` (a batch was still
+       being applied), ``error``.
+   * - ``lmcache_coordinator.checkpoint_file.write_duration_seconds_bucket``,
+       ``..._sum``, ``..._count``
+     - ObservableCounter (attrs: ``phase``, ``le`` on ``_bucket``)
+     - Time per write phase, as a histogram: ``pause_ingest`` (waiting for
+       in-flight batches), ``copy`` (how long ingest was paused), ``write``.
+   * - ``lmcache_coordinator.checkpoint_file.size_bytes``
+     - ObservableGauge
+     - Size of the last good checkpoint.
+   * - ``lmcache_coordinator.checkpoint_file.restored_on_start``
+     - ObservableGauge (attr: ``outcome``)
+     - ``1`` for what startup did: ``cold`` (no checkpoint), ``restored``,
+       or ``ignored`` (unreadable).
+   * - ``lmcache_coordinator.metadata_file.writes``
+     - ObservableCounter (attr: ``result``)
+     - Pin and quota saves, ``ok`` or ``error``.  An ``error`` is a change
+       that could not be saved.
+
+The prefetch metrics cover warm prefetches relayed through
+``POST /cache/prefetches``.  The coordinator remembers each submitted
+prefetch until a status poll sees it completed or the server no longer knows
+it; one never polled to completion within 10 minutes is counted as abandoned.
+In-flight prefetches are not checkpointed.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_coordinator.prefetch.requests_submitted``
+     - ObservableCounter (attr: ``result``)
+     - Prefetches asked for: ``submitted``, ``noop`` (shorter than one
+       chunk), ``unknown_server``, ``server_error`` (refused or
+       unreachable).
+   * - ``lmcache_coordinator.prefetch.chunks_requested_per_request_bucket``,
+       ``..._sum``, ``..._count``
+     - ObservableCounter (attr: ``le`` on ``_bucket``)
+     - Chunks each prefetch asked to warm, as a histogram.
+   * - ``lmcache_coordinator.prefetch.submit_duration_seconds_bucket``,
+       ``..._sum``, ``..._count``
+     - ObservableCounter (attr: ``le`` on ``_bucket``)
+     - Time for the MP server to accept a prefetch, as a histogram.
+   * - ``lmcache_coordinator.prefetch.requests_in_flight``
+     - ObservableGauge (attr: ``instance_id``)
+     - Prefetches submitted to each server and not yet seen completed.
+   * - ``lmcache_coordinator.prefetch.completion_duration_seconds_bucket``,
+       ``..._sum``, ``..._count``
+     - ObservableCounter (attr: ``le`` on ``_bucket``)
+     - Submit to the first poll that saw the prefetch completed, as a
+       histogram.  Includes the caller's poll interval, so an upper bound.
+   * - ``lmcache_coordinator.prefetch.keys_requested``,
+       ``lmcache_coordinator.prefetch.keys_found``
+     - ObservableCounter
+     - Keys the completed prefetches asked to warm, and keys found in L2
+       and loaded into L1.  Found divided by requested is the prefetch hit
+       rate.
+   * - ``lmcache_coordinator.prefetch.status_polls``
+     - ObservableCounter (attr: ``result``)
+     - Status polls: ``pending``, ``completed``, ``unknown_request`` (the
+       server lost the job, or it was already collected), ``server_error``.
+   * - ``lmcache_coordinator.prefetch.requests_abandoned``
+     - ObservableCounter
+     - Prefetches never polled to completion within 10 minutes: the caller
+       gave up, or the server left.

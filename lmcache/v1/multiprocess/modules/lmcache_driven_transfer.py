@@ -18,7 +18,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
-from lmcache.v1.distributed.storage_manager import L1WriteCompletion
+from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
@@ -28,7 +28,12 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    InstanceLivenessTarget,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
 from lmcache.v1.multiprocess.native_completion import (
@@ -37,9 +42,10 @@ from lmcache.v1.multiprocess.native_completion import (
 )
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
-    transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.token_codec import unpack_token_ids
+from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -160,7 +166,7 @@ class ContextEntry:
     event_backend: EventIPCBackend | None = None
 
 
-class LMCacheDrivenTransferModule(InstanceLivenessTarget):
+class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     """Handles LMCache-driven KV cache transfer operations.
 
     Owns GPU context registrations and provides handlers for
@@ -169,6 +175,16 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
     Args:
         ctx: The shared engine context.
     """
+
+    module_name = "lmcache_driven_transfer"
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        """Build unless the transfer mode excludes the LMCache-driven path."""
+        mode = build_ctx.mp_config.supported_transfer_mode
+        if mode == "engine_driven":
+            return None
+        return cls(build_ctx.engine_context)
 
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
@@ -185,18 +201,18 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         self._device_host_func_dispatcher = DeviceHostFuncDispatcher()
         self._device_host_func_dispatcher.register(
             "finish_write",
-            self._ctx.storage_manager.finish_write,
-            payload_type=list[ObjectKey],
-        )
-        self._device_host_func_dispatcher.register(
-            "finish_write_by_owner",
-            self._ctx.storage_manager.finish_write_by_owner,
-            payload_type=L1WriteCompletion,
+            self._finish_write,
+            payload_type=dict[ObjectKey, int],
         )
         self._device_host_func_dispatcher.register(
             "finish_read_prefetched",
             self._ctx.storage_manager.finish_read_prefetched,
             payload_type=list[ObjectKey],
+        )
+        self._device_host_func_dispatcher.register(
+            "finish_read_by_owner",
+            self._ctx.storage_manager.finish_read_by_owner,
+            payload_type=L1WriteCompletion,
         )
         self._device_host_func_dispatcher.register(
             "release_imported_event",
@@ -215,6 +231,16 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         entry = self.get_and_touch_context_entry(instance_id)
         if entry is not None:
             entry.cache_context.release_imported_event(import_token)
+
+    def _finish_write(self, l1_owners: dict[ObjectKey, int]) -> None:
+        """Admit a store's reserved objects once their device copies landed.
+
+        Args:
+            l1_owners: The L1 manager that reserved each stored key.
+        """
+        self._ctx.storage_manager.finish_write(
+            list(l1_owners.keys()), l1_owners=l1_owners
+        )
 
     def register_host_func(self, kind: str, handler: Any, payload_type: Any) -> None:
         """Register *handler* for *kind* on the per-process device host-func
@@ -290,7 +316,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # particular, do not release the scheduler's whole MLA
             # reservation here: the remaining TP workers and concurrent
             # requests still own their independent read locks.
-            self._ctx.storage_manager.finish_read_prefetched(obj_keys, read_locks=1)
+            self._ctx.storage_manager.finish_read_prefetched(
+                obj_keys,
+                read_locks=1,
+                l1_owners=self._ctx.get_read_owners(key.request_id),
+            )
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
@@ -458,7 +488,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
         # time so a stale entry is not reaped right after recovery. REGISTER
-        # is SYNC-serialized on the MQ main loop, so it is the sole inserter.
+        # is SERIALIZED on the MQ main loop, so it is the sole inserter.
         with self._lock:
             existing = self._cache_contexts.get(instance_id)
             if existing is not None:
@@ -470,14 +500,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 return
 
         # Build the context and layout descriptor outside the lock.
-        cache_context = create_cache_context(
+        cache_context = self._create_cache_context(
             kv_caches,
-            self._ctx.chunk_size,
+            instance_id=instance_id,
+            engine_type=engine_type,
             layout_hints=layout_hints or None,
             engine_group_infos=engine_group_infos,
-            engine_type=engine_type,
-            separate_object_groups=self._ctx.separate_object_groups,
-            full_sw_kv=self._ctx.full_sw_kv,
         )
         kv_groups_manager = cache_context.kv_layer_groups_manager
         num_object_groups = kv_groups_manager.num_object_groups
@@ -768,8 +796,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     ]
 
                     # NOTE: batch_size must stay 1 for store.
-                    transfer_kv_per_object_group(
-                        cache_context,
+                    cache_context.transfer_object_group(
                         block_ids_per_group_gpu,
                         memory_objs,
                         object_group_id=obj_group_id,
@@ -780,11 +807,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         block_ids_host=gpu_block_ids,
                     )
 
-                completion = (
-                    self._ctx.storage_manager.prepare_write_completion(all_dict)
-                    if all_dict
-                    else []
-                )
+                l1_owners = l1_owners_of(all_dict)
                 store_succeeded = True
             except Exception:
                 logger.exception("Cannot store keys due to exception")
@@ -796,8 +819,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 if stored_count:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
-                        "finish_write_by_owner",
-                        completion,
+                        "finish_write",
+                        l1_owners,
                     )
                 else:
                     total_bytes = 0
@@ -837,6 +860,31 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             event_backend.export_event(event, cache_context.device),
             store_succeeded,
             stored_mask,
+        )
+
+    def _create_cache_context(
+        self,
+        kv_caches: KVCache,
+        *,
+        instance_id: int,
+        engine_type: EngineType,
+        layout_hints: LayoutHints | None,
+        engine_group_infos: Sequence[EngineGroupInfo],
+    ) -> BaseCacheContext:
+        """Build the cache context for a newly registered instance.
+
+        ``instance_id`` is the registering instance. The default ignores it;
+        a subclass can use it to look up per-instance data that its worker
+        sent before registering.
+        """
+        return create_cache_context(
+            kv_caches,
+            self._ctx.chunk_size,
+            layout_hints=layout_hints,
+            engine_group_infos=engine_group_infos,
+            engine_type=engine_type,
+            separate_object_groups=self._ctx.separate_object_groups,
+            full_sw_kv=self._ctx.full_sw_kv,
         )
 
     @request_handler(
@@ -1008,6 +1056,18 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
 
             prefetched_keys: list[ObjectKey] = []
+            read_owners = self._ctx.get_read_owners(key.request_id)
+            retained_keys = [
+                obj_key
+                for group, keys in enumerate(obj_keys_per_obj_group)
+                if group not in skipped_groups
+                for obj_key in keys[group_skips[group] :]
+            ]
+            # Capture every retained lock before enqueuing GPU work, including
+            # groups that a later transfer failure may leave unvisited.
+            read_completion = self._ctx.storage_manager.prepare_read_completion(
+                retained_keys, read_owners
+            )
             total_bytes = 0
             retrieve_succeeded = True
             try:
@@ -1016,48 +1076,38 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         continue
                     skip = group_skips[obj_group_id]
                     in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
-                    with self._ctx.storage_manager.read_prefetched_results(
-                        in_window_keys
-                    ) as window_objs:
-                        if not window_objs or len(window_objs) != len(in_window_keys):
-                            logger.error("Some keys not found during retrieve!")
-                            retrieve_succeeded = False
-                            break
+                    found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
+                        in_window_keys, l1_owners=read_owners
+                    )
+                    if not window_objs or found_keys != in_window_keys:
+                        logger.error("Some keys not found during retrieve!")
+                        retrieve_succeeded = False
+                        break
 
-                        total_bytes += sum(mo.get_size() for mo in window_objs)
-
-                        # None-pad the skipped prefix to full length so the
-                        # transfer's ``num_objects_to_skip`` and block-id slicing
-                        # line up unchanged; the None entries are never read.
-                        memory_objs: list[MemoryObj | None] = [None] * skip + list(
-                            window_objs
-                        )
-
-                        transfer_kv_per_object_group(
-                            cache_context,
-                            block_ids_per_group_gpu,
-                            memory_objs,
-                            object_group_id=obj_group_id,
-                            batch_size=cache_context.max_batch_size,
-                            skip_first_n_tokens=skip_first_n_tokens,
-                            direction=lmcache_native.TransferDirection.H2D,
-                            transfer_key=transfer_key,
-                            block_ids_host=gpu_block_ids,
-                        )
-                        # Extend only after the copy is enqueued: on exception,
-                        # read_prefetched_results releases this group's locks
-                        # itself, and a key must not be released twice.
-                        prefetched_keys.extend(in_window_keys)
+                    total_bytes += sum(mo.get_size() for mo in window_objs)
+                    # None-pad the skipped prefix so block-id slicing is unchanged.
+                    memory_objs: list[MemoryObj | None] = [None] * skip + window_objs
+                    cache_context.transfer_object_group(
+                        block_ids_per_group_gpu,
+                        memory_objs,
+                        object_group_id=obj_group_id,
+                        batch_size=cache_context.max_batch_size,
+                        skip_first_n_tokens=skip_first_n_tokens,
+                        direction=lmcache_native.TransferDirection.H2D,
+                        transfer_key=transfer_key,
+                        block_ids_host=gpu_block_ids,
+                    )
+                    prefetched_keys.extend(in_window_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
             finally:
                 event_backend.record_event(event, cache_context.stream)
-                if prefetched_keys:
+                if retained_keys:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
-                        "finish_read_prefetched",
-                        prefetched_keys,
+                        "finish_read_by_owner",
+                        read_completion,
                     )
                 num_tokens = (
                     num_chunks * self._ctx.chunk_size
@@ -1101,9 +1151,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         """Publish one ``MP_TOKENS`` event for ``key``'s chunks.
 
         Pairs each complete chunk in ``[key.start, key.end)`` with its
-        ObjectKey chunk hash and token position. Must be called at store
+        ObjectKey chunk hash, token position, and the preceding chunk's hash
+        (``None`` for a sequence's first chunk). Must be called at store
         submission, before the write-finished events reach the bus, so the
-        cache-event subscriber can stamp them onto the STORE entries. A
+        cache-event subscribers can stamp them onto the STORE entries. A
         store that later fails leaves only unused cache entries.
 
         Args:
@@ -1115,7 +1166,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         # imply a position without revealing it, so it is reported here. A
         # trailing partial chunk has no stored KV to bind to.
         chunk_size = self._ctx.chunk_size
-        token_ids = list(key.token_ids)
+        token_ids = unpack_token_ids(key.token_bytes)
         effective_len = min(len(token_ids), key.end)
         num_complete = effective_len - effective_len % chunk_size
         token_offsets = list(range(key.start, num_complete, chunk_size))
@@ -1135,6 +1186,18 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 key.end,
             )
             return
+        # Each chunk's hash chains to the preceding chunk's. The chunk before
+        # ``key.start`` was hashed when this store's keys were resolved, so
+        # the session still holds it.
+        parent_hashes: list[bytes | None] = [None] * len(obj_keys)
+        for index in range(1, len(obj_keys)):
+            parent_hashes[index] = obj_keys[index - 1].chunk_hash
+        if key.start >= chunk_size:
+            session = self._ctx.session_manager.get(key.request_id)
+            if session is not None:
+                previous = session.get_hashes(key.start - chunk_size, key.start)
+                if previous:
+                    parent_hashes[0] = TokenHasher.hash_to_bytes(previous[0])
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_TOKENS,
@@ -1143,6 +1206,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     "chunk_hashes": [obj_key.chunk_hash for obj_key in obj_keys],
                     "token_chunks": token_chunks,
                     "token_offsets": token_offsets,
+                    "parent_hashes": parent_hashes,
                 },
             )
         )

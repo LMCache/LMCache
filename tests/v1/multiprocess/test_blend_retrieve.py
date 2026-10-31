@@ -17,6 +17,7 @@ from lmcache import device_ops  # noqa: F401
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 import lmcache.lmcache_native as lmcache_native
 
 # ---------------------------------------------------------------------------
@@ -631,7 +632,7 @@ class _LockCountingStorageManager:
             l2_hit_cells=rows(),
         )
 
-    def finish_read_prefetched(self, keys, read_locks: int = 1) -> None:
+    def finish_read_prefetched(self, keys, read_locks: int = 1, l1_owners=None) -> None:
         for key in keys:
             held = self.locks.get(key, 0)
             if held < read_locks:
@@ -659,7 +660,7 @@ def _unretrieved_ctx(
     ctx.storage_manager = storage_manager
     ctx.event_bus.has_subscribers.return_value = False
     # Prefix leg: no full chunk hashes -> handle None -> 0 coverage.
-    ctx.token_hasher.compute_chunk_hashes.return_value = []
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
     # One registered attention-only object group.
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
@@ -700,7 +701,7 @@ def _run_unretrieved_lookup(blend, request_id: str, num_kv_readers: int = 1):
         world_size=1,
         num_kv_readers=num_kv_readers,
         worker_id=None,
-        token_ids=tuple(query),
+        token_bytes=pack_token_ids(query),
         start=0,
         end=len(query),
         request_id=request_id,
@@ -867,7 +868,7 @@ def _classify_key(request_id: str = "req-classify", num_kv_readers: int = 1):
         world_size=1,
         num_kv_readers=num_kv_readers,
         worker_id=None,
-        token_ids=(1, 2, 3),
+        token_bytes=pack_token_ids((1, 2, 3)),
         start=0,
         end=3,
         request_id=request_id,
@@ -884,7 +885,8 @@ def _classify_match(col: int, h: bytes):
     )
 
 
-def test_sparse_classify_partial_column_releases_and_takes_no_strike():
+@pytest.mark.parametrize("l1_owners", [None, {"k-partial-r0": 1}])
+def test_sparse_classify_partial_column_releases_and_takes_no_strike(l1_owners):
     """A chunk with some but not all rows loaded is not blendable and not
     stale: its landed keys' locks are released immediately (not held for the
     read TTL) and it takes no eviction strike -- the content is still stored,
@@ -906,13 +908,18 @@ def test_sparse_classify_partial_column_releases_and_takes_no_strike():
     row1.set(0)
 
     found = eng._sparse_classify(
-        key, matches, [row0, row1], per_hash_obj_keys, hash_to_col
+        key,
+        matches,
+        [row0, row1],
+        per_hash_obj_keys,
+        hash_to_col,
+        l1_owners=l1_owners,
     )
 
     assert [r.hash for r in found] == [b"whole"]
     # The partial chunk's landed key released the whole reservation, now.
     eng._ctx.storage_manager.finish_read_prefetched.assert_called_once_with(
-        ["k-partial-r0"], read_locks=8
+        ["k-partial-r0"], read_locks=8, l1_owners=l1_owners
     )
     # No strike and no matcher eviction for the partial chunk.
     assert eng._stale_strike == {}

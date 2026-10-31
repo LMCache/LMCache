@@ -1,5 +1,37 @@
 # Test disaggregated prefill related components
 
+## Native vLLM P/D with multi-L1 storage
+
+`test_multi_l1_pd.py` checks running prefill/decode instances configured with
+`MultiConnector[NixlConnector, LMCacheMPConnector]` and a separate LMCache server
+for each instance. Configure NIXL with `kv_load_failure_policy=fail` and use
+independent Device-DAX regions or GDS directories for the two servers. Hybrid
+Mamba models require `VLLM_SSM_CONV_STATE_LAYOUT=DS` in vLLM 0.30.0.
+
+Set `LMCACHE_PD_TEST_CONFIG` to a JSON file containing:
+
+- `prefill`, `decode`: engine HTTP URLs.
+- `prefill_cache`, `decode_cache`: corresponding LMCache HTTP URLs.
+- `model`: the served model name.
+- `l1_tags`: configured L1 tags in placement order.
+- `prompts`: one distinct long prompt per L1, with pools sized to force overflow.
+- `expected_token_ids`: matching output token-ID lists from an uncached reference
+  using the same model, engine, TP size, temperature 0, seed 42, and 16 output tokens.
+- `evidence_dir`: directory for responses, status, and Prometheus snapshots.
+
+```bash
+LMCACHE_PD_TEST_CONFIG=/path/to/pd.json \
+    pytest -q tests/disagg/test_multi_l1_pd.py
+```
+
+The test verifies native NIXL transfer bytes, reference output agreement,
+prefill-side cache reuse, and drained ownership locks. It separately computes
+and reloads prefixes on the decoder to exercise its LMCache storage: vLLM does
+not automatically offload NIXL-imported prefixes. Every configured L1 must
+record writes and reads on both roles. Without the configuration file, the
+test is skipped. SGLang 0.5.21 rejects native P/D combined with LMCache during
+configuration validation, so this test targets vLLM.
+
 ## NIXL Pipe
 
 ```bash
@@ -38,20 +70,20 @@ Sender side logs:
 Loaded plugin UCX
 Loaded plugin UCX_MO
 Initialized NIXL agent: NixlRole.SENDER
-[2025-04-07 13:00:26,339] LMCache INFO: Received remote transfer descriptors (nixl_connector.py:103:lmcache.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:26,339] LMCache INFO: Received remote transfer descriptors (nixl_connector.py:103:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
 [2025-04-07 13:00:28,340] LMCache INFO: Sending 500 objects... (test_nixl_storage_backend.py:89:__main__)
-[2025-04-07 13:00:28,343] LMCache DEBUG: Committing write with 128 transfers (nixl_connector.py:188:lmcache.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:28,343] LMCache DEBUG: Committing write with 128 transfers (nixl_connector.py:188:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
 [2025-04-07 13:00:28,377] LMCache DEBUG: Transfer completed in 33.7618 ms, creating the transfer: 0.0229 ms, transfer time: 18.9432 ms, wait for receiver: 14.7957 ms
-Pure transfer throughput: 211.1577 GB/s (nixl_connector.py:229:lmcache.v1.storage_backend.connector.nixl_connector)
-[2025-04-07 13:00:28,378] LMCache DEBUG: Committing write with 128 transfers (nixl_connector.py:188:lmcache.v1.storage_backend.connector.nixl_connector)
+Pure transfer throughput: 211.1577 GB/s (nixl_connector.py:229:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:28,378] LMCache DEBUG: Committing write with 128 transfers (nixl_connector.py:188:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
 [2025-04-07 13:00:28,404] LMCache DEBUG: Transfer completed in 25.6334 ms, creating the transfer: 0.0167 ms, transfer time: 11.9316 ms, wait for receiver: 13.6851 ms
-Pure transfer throughput: 335.2434 GB/s (nixl_connector.py:229:lmcache.v1.storage_backend.connector.nixl_connector)
-[2025-04-07 13:00:28,406] LMCache DEBUG: Committing write with 128 transfers (nixl_connector.py:188:lmcache.v1.storage_backend.connector.nixl_connector)
+Pure transfer throughput: 335.2434 GB/s (nixl_connector.py:229:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:28,406] LMCache DEBUG: Committing write with 128 transfers (nixl_connector.py:188:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
 [2025-04-07 13:00:28,432] LMCache DEBUG: Transfer completed in 26.4169 ms, creating the transfer: 0.0132 ms, transfer time: 11.6180 ms, wait for receiver: 14.7857 ms
-Pure transfer throughput: 344.2922 GB/s (nixl_connector.py:229:lmcache.v1.storage_backend.connector.nixl_connector)
-[2025-04-07 13:00:28,434] LMCache DEBUG: Committing write with 116 transfers (nixl_connector.py:188:lmcache.v1.storage_backend.connector.nixl_connector)
+Pure transfer throughput: 344.2922 GB/s (nixl_connector.py:229:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:28,434] LMCache DEBUG: Committing write with 116 transfers (nixl_connector.py:188:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
 [2025-04-07 13:00:28,458] LMCache DEBUG: Transfer completed in 23.8715 ms, creating the transfer: 0.0131 ms, transfer time: 11.1843 ms, wait for receiver: 12.6741 ms
-Pure transfer throughput: 324.1156 GB/s (nixl_connector.py:229:lmcache.v1.storage_backend.connector.nixl_connector)
+Pure transfer throughput: 324.1156 GB/s (nixl_connector.py:229:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
 [2025-04-07 13:00:28,458] LMCache INFO: Sent 500 objects in 0.117705 seconds (test_nixl_storage_backend.py:95:__main__)
 [2025-04-07 13:00:28,458] LMCache INFO: Throughput: 132.75 GB/s (test_nixl_storage_backend.py:97:__main__)
 [2025-04-07 13:00:30,461] LMCache INFO: Test completed (test_nixl_storage_backend.py:153:__main__)
@@ -63,22 +95,22 @@ Receiver side logs:
 Loaded plugin UCX
 Loaded plugin UCX_MO
 Initialized NIXL agent: NixlRole.RECEIVER
-[2025-04-07 13:00:26,317] LMCache INFO: Sent local transfer descriptors to sender (nixl_connector.py:115:lmcache.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:26,317] LMCache INFO: Sent local transfer descriptors to sender (nixl_connector.py:115:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
 [2025-04-07 13:00:26,317] LMCache INFO: Waiting to receive data... (test_nixl_storage_backend.py:101:__main__)
-[2025-04-07 13:00:28,341] LMCache DEBUG: Received event on the side channel, processing message... (nixl_connector.py:394:lmcache.v1.storage_backend.connector.nixl_connector)
-[2025-04-07 13:00:28,342] LMCache DEBUG: Received request with 500 keys and UUID: f69f0509846943eb9e478b021afe8127 (nixl_connector.py:403:lmcache.v1.storage_backend.connector.nixl_connector)
-[2025-04-07 13:00:28,359] LMCache INFO: Transfer for UUID 'f69f0509846943eb9e478b021afe8127' completed on the remote side (NixlRole.SENDER) (nixl_connector.py:251:lmcache.v1.storage_backend.connector.nixl_connector)
-[2025-04-07 13:00:28,359] LMCache DEBUG: Received 128 keys and 128 objects. (nixl_backend.py:51:lmcache.v1.storage_backend.nixl_backend)
-[2025-04-07 13:00:28,375] LMCache DEBUG: Observers processing in 15.6546 ms (nixl_connector.py:370:lmcache.v1.storage_backend.connector.nixl_connector)
-[2025-04-07 13:00:28,387] LMCache INFO: Transfer for UUID 'e4db696cc1604caaac790af47f111145' completed on the remote side (NixlRole.SENDER) (nixl_connector.py:251:lmcache.v1.storage_backend.connector.nixl_connector)
-[2025-04-07 13:00:28,388] LMCache DEBUG: Received 128 keys and 128 objects. (nixl_backend.py:51:lmcache.v1.storage_backend.nixl_backend)
-[2025-04-07 13:00:28,403] LMCache DEBUG: Observers processing in 15.8146 ms (nixl_connector.py:370:lmcache.v1.storage_backend.connector.nixl_connector)
-[2025-04-07 13:00:28,414] LMCache INFO: Transfer for UUID 'ead0858f0f134270b260ad4f2e05e121' completed on the remote side (NixlRole.SENDER) (nixl_connector.py:251:lmcache.v1.storage_backend.connector.nixl_connector)
-[2025-04-07 13:00:28,415] LMCache DEBUG: Received 128 keys and 128 objects. (nixl_backend.py:51:lmcache.v1.storage_backend.nixl_backend)
-[2025-04-07 13:00:28,432] LMCache DEBUG: Observers processing in 16.5569 ms (nixl_connector.py:370:lmcache.v1.storage_backend.connector.nixl_connector)
-[2025-04-07 13:00:28,441] LMCache INFO: Transfer for UUID '7cdbf69484ed4d3ca2ad9df35d00a402' completed on the remote side (NixlRole.SENDER) (nixl_connector.py:251:lmcache.v1.storage_backend.connector.nixl_connector)
-[2025-04-07 13:00:28,442] LMCache DEBUG: Received 116 keys and 116 objects. (nixl_backend.py:51:lmcache.v1.storage_backend.nixl_backend)
-[2025-04-07 13:00:28,457] LMCache DEBUG: Observers processing in 15.1075 ms (nixl_connector.py:370:lmcache.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:28,341] LMCache DEBUG: Received event on the side channel, processing message... (nixl_connector.py:394:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:28,342] LMCache DEBUG: Received request with 500 keys and UUID: f69f0509846943eb9e478b021afe8127 (nixl_connector.py:403:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:28,359] LMCache INFO: Transfer for UUID 'f69f0509846943eb9e478b021afe8127' completed on the remote side (NixlRole.SENDER) (nixl_connector.py:251:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:28,359] LMCache DEBUG: Received 128 keys and 128 objects. (nixl_backend.py:51:lmcache.inprocess.v1.storage_backend.nixl_backend)
+[2025-04-07 13:00:28,375] LMCache DEBUG: Observers processing in 15.6546 ms (nixl_connector.py:370:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:28,387] LMCache INFO: Transfer for UUID 'e4db696cc1604caaac790af47f111145' completed on the remote side (NixlRole.SENDER) (nixl_connector.py:251:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:28,388] LMCache DEBUG: Received 128 keys and 128 objects. (nixl_backend.py:51:lmcache.inprocess.v1.storage_backend.nixl_backend)
+[2025-04-07 13:00:28,403] LMCache DEBUG: Observers processing in 15.8146 ms (nixl_connector.py:370:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:28,414] LMCache INFO: Transfer for UUID 'ead0858f0f134270b260ad4f2e05e121' completed on the remote side (NixlRole.SENDER) (nixl_connector.py:251:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:28,415] LMCache DEBUG: Received 128 keys and 128 objects. (nixl_backend.py:51:lmcache.inprocess.v1.storage_backend.nixl_backend)
+[2025-04-07 13:00:28,432] LMCache DEBUG: Observers processing in 16.5569 ms (nixl_connector.py:370:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:28,441] LMCache INFO: Transfer for UUID '7cdbf69484ed4d3ca2ad9df35d00a402' completed on the remote side (NixlRole.SENDER) (nixl_connector.py:251:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
+[2025-04-07 13:00:28,442] LMCache DEBUG: Received 116 keys and 116 objects. (nixl_backend.py:51:lmcache.inprocess.v1.storage_backend.nixl_backend)
+[2025-04-07 13:00:28,457] LMCache DEBUG: Observers processing in 15.1075 ms (nixl_connector.py:370:lmcache.inprocess.v1.storage_backend.connector.nixl_connector)
 [2025-04-07 13:00:28,522] LMCache INFO: Received all 500 objects (test_nixl_storage_backend.py:123:__main__)
 [2025-04-07 13:00:28,556] LMCache INFO: All data verified successfully! (test_nixl_storage_backend.py:146:__main__)
 ```

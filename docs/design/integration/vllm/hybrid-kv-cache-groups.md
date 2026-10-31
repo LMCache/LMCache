@@ -138,8 +138,9 @@ into, corrupt the per-group block-id counts.)
 ### Scratch groups
 
 A scratch group is an engine group whose spec vLLM marks
-`prefix_cacheable = False`: vLLM never hashes its blocks and its own prefix
-cache never restores them, so they carry no token range LMCache could store.
+`prefix_cacheable = False` (or `participates_in_prefix_caching = False` on
+older vLLM forks): vLLM never hashes its blocks and its own prefix cache never
+restores them, so they carry no token range LMCache could store.
 The instances LMCache has validated are per-request rings. Every
 sparse-attention layer keeps one ring tensor, vLLM puts them in one engine
 group, and the group holds one block per request for the request's lifetime,
@@ -150,8 +151,10 @@ the compression group that is still open:
 - GLM-5.3-Flash's kpool tail (`KpoolTailSpec`, `block_size = index_kpool`).
 
 LMCache treats a scratch group as covering no tokens. `is_scratch_spec`
-(`kv_cache_groups.py`) reads `prefix_cacheable` (absent on older vLLM means
-prefix-cacheable) and the group's `tokens_per_block` is reported as `0`.
+(`kv_cache_groups.py`) reads `prefix_cacheable`, falling back to
+`participates_in_prefix_caching` only when the newer marker is absent. Specs
+with neither marker remain prefix-cacheable. A scratch group's
+`tokens_per_block` is reported as `0`.
 Everything downstream follows from that: the scheduler-side geometry
 (storable prefix, block-id slicing, hit alignment, chunk-size validation)
 ignores `0` spans, and registration skips format discovery for the group's
@@ -171,6 +174,8 @@ every chunk for every group (e.g. a caller bug), or a copy fails, the whole
 store is skipped and nothing is committed — a later retrieve simply misses and
 the engine recomputes. The non-GPU transfer path rejects multi-group transfers
 outright.
+
+**Failed retrieves:** on vLLM versions exposing `KVConnectorTransferResults`, multi-group receive failures are reported by request ID in both `finished_recving` and `failed_recving`, without flat block errors. This lets vLLM wait for all workers and apply its configured failure policy instead of rejecting an incompatible error report. Single-group models retain block-level reporting so a valid partial prefix can remain reusable; older vLLM versions retain the legacy completion and block-error hooks.
 
 ## Example
 

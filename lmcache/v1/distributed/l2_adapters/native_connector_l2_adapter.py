@@ -31,8 +31,9 @@ import threading
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, MemoryTags, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
+from lmcache.v1.distributed.key_codec import encode_storage_key
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -41,13 +42,6 @@ from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
-
-
-# Key separator — kept in sync with fs_l2_adapter.py and
-# csrc/storage_backends/fs/connector.cpp. Both ``@`` in ``model_name``
-# and ``@`` in ``cache_salt`` are rejected by ObjectKey.__post_init__
-# so splitting on ``@`` is unambiguous.
-_KEY_SEP = "@"
 
 
 @cache
@@ -72,23 +66,8 @@ def _cached_ubyte_array_type(num_bytes: int) -> "type[ctypes.Array[ctypes.c_ubyt
 
 
 def _object_key_to_string(key: ObjectKey) -> str:
-    """Serialize an ObjectKey to the native-connector wire format.
-
-    Unsalted::
-
-        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>
-
-    Salted (trailing ``cache_salt``)::
-
-        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
-    """
-    base = (
-        f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}"
-        f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
-    )
-    if key.cache_salt:
-        return f"{base}{_KEY_SEP}{key.cache_salt}"
-    return base
+    """Return the shared L2 storage key."""
+    return encode_storage_key(key)
 
 
 def _obj_to_memoryview(
@@ -156,6 +135,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     def __init__(
         self,
         native_client: Any,
+        memory_tags: MemoryTags,
         max_capacity_gb: float = 0,
         type_name: str = "",
         extra_status: dict[str, Any] | None = None,
@@ -167,6 +147,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             native_client: Pybind-wrapped C++ connector client exposing
                 ``event_fd``, ``submit_batch_*``, ``drain_completions`` and
                 ``close``.
+            memory_tags: Memory tags of the connector's storage medium.
             max_capacity_gb: Capacity in GiB used for L2 usage accounting.
                 Zero disables the capacity limit.
             type_name: Stable adapter type label for status reporting.
@@ -186,6 +167,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._type_name: str = type_name or type(native_client).__name__
         self._extra_status: dict[str, Any] = dict(extra_status or {})
         self._pad_buffers_to_alignment = pad_buffers_to_alignment
+        self._memory_tags = memory_tags
 
         # 3 distinct cross-platform notifiers for the L2 adapter
         # interface
@@ -447,6 +429,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # ---------------------------------------------------------------
     # Cleanup
     # ---------------------------------------------------------------
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags given at construction."""
+        return self._memory_tags
 
     def close(self) -> None:
         self._stop.set()

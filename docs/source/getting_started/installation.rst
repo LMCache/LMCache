@@ -3,7 +3,7 @@
 Installation
 ============
 
-**Prerequisites:** Linux · Python 3.9–3.13 · NVIDIA GPU (compute 7.0+) · CUDA 12.1+ · `uv <https://astral.sh/uv>`_
+**Prerequisites:** Linux · Python 3.10–3.14 · NVIDIA GPU (compute 7.0+) · CUDA 12.1+ · `uv <https://astral.sh/uv>`_
 
 Install LMCache
 ---------------
@@ -64,11 +64,11 @@ runtime, see :doc:`compatibility` before installing.
                             ``--extra-index-url https://download.pytorch.org/whl/cu129`` ensures the CUDA 12.9
                             build of PyTorch is resolved. Without it, pip may select a mismatched CUDA variant.
 
-                    .. tab-item:: ROCm / torch 2.11
+                    .. tab-item:: ROCm / torch 2.13
 
                         The ROCm wheel targets AMD Instinct **gfx942** (MI300X / MI325X) and
                         **gfx950** (MI350X / MI355X) in one fat binary, and is ABI-matched to the
-                        upstream ``vllm/vllm-openai-rocm`` image (torch 2.11, ROCm 7.2, Python 3.12).
+                        upstream ``vllm/vllm-openai-rocm`` image (torch 2.13, Python 3.12).
                         It is published to a dedicated
                         `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
 
@@ -79,7 +79,7 @@ runtime, see :doc:`compatibility` before installing.
 
                             docker run -it --device /dev/kfd --device /dev/dri \
                                 --group-add video --security-opt seccomp=unconfined \
-                                --entrypoint bash vllm/vllm-openai-rocm:v0.25.0
+                                --entrypoint bash vllm/vllm-openai-rocm:v0.32.0
 
                             VERSION=0.5.3  # replace with target release
                             pip install lmcache==${VERSION}+rocm7.2 --no-deps \
@@ -219,6 +219,39 @@ runtime, see :doc:`compatibility` before installing.
                         Other torch 2.10, ROCm 7.2.x, Python, or C++ ABI combinations are not
                         covered by this artifact; build from source for those environments.
 
+                    .. tab-item:: Rebellions RBLN
+
+                        The RBLN wheel targets Rebellions NPUs (CPython 3.12,
+                        ``manylinux_2_34_x86_64``). It is built against the ``torch``
+                        that ``torch-rbln`` pins and is published to a dedicated
+                        `GitHub Release <https://github.com/LMCache/LMCache/releases>`__;
+                        each release's notes name the ``torch-rbln`` version it targets.
+                        It is not uploaded to PyPI, whose ``lmcache`` wheel is built
+                        against the CUDA ``torch``.
+
+                        Install the RBLN runtime stack (``torch-rbln`` and
+                        ``rebel-compiler``) by following the
+                        `RBLN SDK documentation <https://docs.rbln.ai>`__, then install
+                        the wheel into that environment:
+
+                        .. code-block:: bash
+
+                            VERSION=X.Y.Z  # target LMCache release
+                            pip install lmcache==${VERSION}+rbln \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-rbln
+
+                        .. note::
+
+                            LMCache's ``torch`` dependency is unpinned, so pip keeps the
+                            ``torch`` that ``torch-rbln`` installed and resolves only the
+                            other dependencies from PyPI. The ``+rbln`` local version is
+                            an exact pin that only the RBLN release satisfies.
+
+                            The wheel's C++ extensions link ``libtorch``, so it works only
+                            with the ``torch-rbln`` release its notes name. For other
+                            versions, build from source as described in
+                            :doc:`/platform/devices/rbln/index`.
+
             .. tab-item:: Nightly
 
                 Nightly wheels are built from the latest ``dev`` branch each day at 07:30 UTC
@@ -332,9 +365,9 @@ runtime, see :doc:`compatibility` before installing.
                             # Need to install these packages manually to avoid build isolation
                             uv pip install -r requirements/build.txt
 
-                            # Install torch from the ROCm wheel index. Use the rocm7.2 index to
-                            # match the upstream vllm/vllm-openai-rocm image (torch 2.11, ROCm 7.2).
-                            uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.2
+                            # Install torch from the ROCm wheel index. Pin the torch minor to
+                            # match the upstream vllm/vllm-openai-rocm image (torch 2.13).
+                            uv pip install "torch==2.13.0+rocm7.2" torchvision --index-url https://download.pytorch.org/whl/rocm7.2
 
                             # Build LMCache. BUILD_WITH_HIP=1 makes setup.py pick cupy-rocm-7-0 automatically.
                             # PYTORCH_ROCM_ARCH selects the target GPU(s):
@@ -450,6 +483,17 @@ runtime, see :doc:`compatibility` before installing.
 
                             docker pull lmcache/vllm-openai:latest-nightly-cu129
 
+            .. tab-item:: SGLang
+
+                .. code-block:: bash
+
+                    docker pull lmcache/sglang
+
+                The official SGLang release image with the matching LMCache
+                wheel installed (CUDA 13.0). SGLang supports only MP mode, so
+                run it with ``--enable-lmcache`` against a separate LMCache
+                server, such as ``lmcache/standalone``.
+
             .. tab-item:: ROCm
 
                 .. code-block:: bash
@@ -461,6 +505,11 @@ runtime, see :doc:`compatibility` before installing.
                 .. code-block:: bash
 
                     docker pull vllm/vllm-openai-xpu:v0.26.0
+
+        The official CUDA vLLM and standalone images default to the non-root
+        ``lmcache`` user (uid 1000). Mount the Hugging Face cache at
+        ``/home/lmcache/.cache/huggingface``; existing volumes and bind mounts
+        must be writable by that uid.
 
         See :ref:`docker_deployment` for running the container and ROCm images.
 
