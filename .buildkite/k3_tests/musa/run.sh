@@ -250,7 +250,7 @@ excluded = {
     "tests/v1/test_device_id_race.py",
     "tests/v1/test_nixl_batched_contains.py",
     "tests/v1/test_nixl_multipath.py",
-    "tests/v1/storage_backend/test_eic.py",
+    "tests/inprocess/v1/storage_backend/test_eic.py",
 }
 
 selected: set[str] = set()

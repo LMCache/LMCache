@@ -104,16 +104,8 @@ def _bare_gpu_module() -> LMCacheDrivenTransferModule:
 
 
 def _bare_non_gpu_module() -> EngineDrivenTransferModule:
-    """A EngineDrivenTransferModule with only the liveness state initialized."""
-    module = EngineDrivenTransferModule.__new__(EngineDrivenTransferModule)
-    module._ctx = MagicMock(name="ctx")
-    module._engine_driven_contexts = {}
-    module._strategies = {}
-    module._lock = threading.Lock()
-    module._pending_shm_writes = {}
-    module._pending_shm_reads = {}
-    module._pending_shm_lock = threading.Lock()
-    return module
+    """Create an engine-driven module without hardware dependencies."""
+    return EngineDrivenTransferModule(MagicMock(name="ctx"))
 
 
 def _stub_gpu_registration_backend(monkeypatch: pytest.MonkeyPatch) -> None:

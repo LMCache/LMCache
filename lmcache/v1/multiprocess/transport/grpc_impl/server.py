@@ -159,8 +159,12 @@ class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
         self._affinity_submit_lock = threading.Lock()
         # HandlerType.SERIALIZED is a transport-neutral single-main-loop contract.
         self._serialized_handler_lock = threading.Lock()
-        self._server = grpc.server(self._executor, options=GRPC_SERVER_OPTIONS)
-        self._bind(self._server)
+        try:
+            self._server = grpc.server(self._executor, options=GRPC_SERVER_OPTIONS)
+            self._bind(self._server)
+        except BaseException:
+            self._release_threads(wait=True)
+            raise
 
     def start(self) -> None:
         """Start accepting gRPC requests."""

@@ -47,7 +47,7 @@ from lmcache.v1.memory_management import MemoryObj
 _TEST_KEY = ObjectKey(chunk_hash=b"\x00" * 32, model_name="test", kv_rank=0)
 
 # Mirror the _FakeMemoryObj used elsewhere; lets the test stay GPU-free
-# and L1Manager-free.
+# and BaseL1Manager-free.
 
 
 @dataclass

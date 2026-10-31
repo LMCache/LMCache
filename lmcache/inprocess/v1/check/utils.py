@@ -12,14 +12,14 @@ import time
 import torch
 
 # First Party
+from lmcache.inprocess.v1.metadata import LMCacheMetadata
+from lmcache.inprocess.v1.storage_backend.remote_backend import RemoteBackend
+from lmcache.inprocess.v1.storage_backend.storage_manager import StorageManager
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.kv_layer_groups import DTYPE_MAP
 
 # Import from lmcache with absolute paths
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.remote_backend import RemoteBackend
-from lmcache.v1.storage_backend.storage_manager import StorageManager
 
 DEFAULT_KV_DTYPE_STR = "bfloat16"
 DEFAULT_OBJ_SIZE = 1024
@@ -134,8 +134,8 @@ def create_storage_manager_with_config(
 ):
     """Create storage manager with default configuration"""
     # First Party
+    from lmcache.inprocess.integration.vllm.utils import lmcache_get_or_create_config
     from lmcache.inprocess.v1.event_manager import EventManager
-    from lmcache.integration.vllm.utils import lmcache_get_or_create_config
 
     config = lmcache_get_or_create_config()
     metadata = _get_default_metadata(model, kv_dtype=kv_dtype, obj_size=obj_size)

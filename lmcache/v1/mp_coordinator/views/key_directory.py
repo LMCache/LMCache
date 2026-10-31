@@ -16,7 +16,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 import threading
 
 # Third Party
@@ -39,6 +39,7 @@ from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
 )
+from lmcache.v1.mp_coordinator.utils.histogram import CHUNK_COUNT_BOUNDS, Histogram
 from lmcache.v1.mp_coordinator.views.base import View
 
 if TYPE_CHECKING:
@@ -86,6 +87,29 @@ class Placement:
     shared: bool = False
 
 
+LookupType = Literal["prefix", "non_prefix"]
+
+
+@dataclass
+class LookupStats:
+    """Lookups of one type served since this process started.
+
+    Attributes:
+        lookups: Lookup requests served.
+        chunks_requested: Chunks the lookups asked for.
+        chunks_found: Chunks the lookups found; ``chunks_found /
+            chunks_requested`` is the hit rate.
+        chunks_found_per_request: How many chunks each lookup found.
+    """
+
+    lookups: int = 0
+    chunks_requested: int = 0
+    chunks_found: int = 0
+    chunks_found_per_request: Histogram = field(
+        default_factory=lambda: Histogram.with_bounds(CHUNK_COUNT_BOUNDS)
+    )
+
+
 @dataclass(frozen=True)
 class DirectoryStats:
     """A point-in-time summary of directory contents.
@@ -96,20 +120,27 @@ class DirectoryStats:
         l1_keys_by_instance: Keys each instance reported L1 placements
             for; its stream cursor lives on the ingest gate.
         blend: How much of the directory is fragment-matchable.
+        blend_lookup_enabled: Whether non-prefix (blend) lookups are on;
+            when off, ``blend`` describes an empty, unused index.
         l1_count: Placements currently recorded in L1.
         l1_size_bytes: Reported logical bytes across the L1 placements.
         l2_count: Placements currently recorded in L2.
         l2_size_bytes: Reported logical bytes across the L2 placements.
+        lookups: Lookups served, keyed by type: ``prefix``
+            (``/directory/lookup``) and ``non_prefix``
+            (``/directory/blend-lookup``). Both are present, from 0.
     """
 
     num_keys: int
     num_placements: int
     l1_keys_by_instance: dict[str, int]
     blend: BlendIndexStats
+    blend_lookup_enabled: bool
     l1_count: int
     l1_size_bytes: int
     l2_count: int
     l2_size_bytes: int
+    lookups: dict[str, LookupStats]
 
 
 @dataclass
@@ -173,6 +204,10 @@ class KeyDirectory(View):
         self._blend_lookup_enabled = False
         self._blend_chunk_size: int | None = None
         self._blend_probe_stride = 1
+        self._lookups: dict[LookupType, LookupStats] = {
+            "prefix": LookupStats(),
+            "non_prefix": LookupStats(),
+        }
         register_metric_source(self)
 
     @classmethod
@@ -293,6 +328,28 @@ class KeyDirectory(View):
                 )
             return results
 
+    def record_lookup(
+        self, lookup_type: LookupType, chunks_requested: int, chunks_found: int
+    ) -> None:
+        """Count one lookup request served, for :meth:`stats`.
+
+        Called by the lookup endpoints rather than by :meth:`lookup`, so
+        the coordinator's own lookups (eviction routing, deletes) are not
+        counted as requests served.
+
+        Args:
+            lookup_type: ``prefix`` or ``non_prefix``.
+            chunks_requested: Chunks the request asked for; a lookup by
+                keys counts each key as one chunk.
+            chunks_found: Chunks with at least one placement.
+        """
+        with self._lock:
+            lookup_stats = self._lookups[lookup_type]
+            lookup_stats.lookups += 1
+            lookup_stats.chunks_requested += chunks_requested
+            lookup_stats.chunks_found += chunks_found
+            lookup_stats.chunks_found_per_request.observe(chunks_found)
+
     def get_keys_across_object_groups(self, keys: list[ObjectKey]) -> list[ObjectKey]:
         """Return each key with its stored copies in other object groups.
 
@@ -327,7 +384,13 @@ class KeyDirectory(View):
             stored_key
             for stored_key in chunk_binding.keys
             if stored_key.object_group_id != key.object_group_id
-            and replace(stored_key, object_group_id=key.object_group_id) == key
+            and replace(
+                stored_key,
+                identity=replace(
+                    stored_key.identity, object_group_id=key.object_group_id
+                ),
+            )
+            == key
         ]
 
     def get_token_ids(self, chunk_hashes: list[bytes]) -> list[tuple[int, ...]]:
@@ -616,10 +679,18 @@ class KeyDirectory(View):
                     for instance_id, keys in self._l1_keys_by_instance.items()
                 },
                 blend=blend,
+                blend_lookup_enabled=self._blend_lookup_enabled,
                 l1_count=l1_stats.count,
                 l1_size_bytes=l1_stats.size_bytes,
                 l2_count=l2_stats.count,
                 l2_size_bytes=l2_stats.size_bytes,
+                lookups={
+                    lookup_type: replace(
+                        stats,
+                        chunks_found_per_request=stats.chunks_found_per_request.copy(),
+                    )
+                    for lookup_type, stats in self._lookups.items()
+                },
             )
 
     # -- Internals (call with self._lock held) --------------------------------
