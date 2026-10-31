@@ -2,6 +2,7 @@
 """Tests for MP HTTP server routes and lifespan wiring."""
 
 # Standard
+from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock
 import asyncio
 
@@ -193,9 +194,9 @@ def _patch_lifespan_dependencies(
 
 
 def test_event_reporting_builds_sink_from_transport_config(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The lifespan hands the whole coordinator config to the sink factory."""
+    """The lifespan passes the coordinator and MP auth configs to the sink."""
     coordinator_config = CoordinatorConfig(
         url="http://coordinator:9300",
         event_reporting=True,
@@ -208,11 +209,14 @@ def test_event_reporting_builds_sink_from_transport_config(
     _patch_lifespan_dependencies(
         monkeypatch, coordinator_config, request_server, engine, event_bus
     )
+    key_file = tmp_path / "coordinator-key"
+    key_file.write_text("secret\n", encoding="utf-8")
+    http_server_module._configs["mp"].api_key_files = [str(key_file)]
     monkeypatch.setattr(cache_events_module, "create_cache_event_sink", create_sink)
 
     async def exercise_lifespan() -> None:
         async with http_server_module.lifespan(FastAPI()):
-            create_sink.assert_called_once_with(coordinator_config)
+            create_sink.assert_called_once_with(coordinator_config, [str(key_file)])
             event_bus.register_subscriber.assert_called_once()
 
     asyncio.run(exercise_lifespan())

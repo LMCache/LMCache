@@ -33,7 +33,6 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.config import parse_args
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
-from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.storage_controllers.utils import resolve_l1_affinity
@@ -49,7 +48,7 @@ from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import EventNotifier
 from tests.v1.distributed.utils import single_row_spec
-import lmcache.v1.distributed.l1_manager as l1_module
+import lmcache.v1.distributed.l1_manager.gds as l1_module
 import lmcache.v1.distributed.l2_adapters.p2p_l2_adapter as adapter_module
 import lmcache.v1.multiprocess.modules.p2p_controller as controller_module
 
@@ -245,7 +244,7 @@ def test_mixed_l1_p2p_round_trip(
 
 
 @pytest.fixture
-def dram_storage() -> Iterator[tuple[StorageManager, tuple[L1Manager, ...]]]:
+def dram_storage() -> Iterator[tuple[StorageManager, tuple[L1ManagerInterface, ...]]]:
     """Provide two real DRAM pools with one distinct key in each."""
     specs = [
         {
@@ -260,8 +259,8 @@ def dram_storage() -> Iterator[tuple[StorageManager, tuple[L1Manager, ...]]]:
     for manager_spec in specs:
         args.extend(["--l1-manager", json.dumps(manager_spec)])
     config = parse_args(args)
-    managers = tuple(L1Manager(c) for c in config.l1_manager_configs)
-    storage = StorageManager(config, _l1_managers=managers)
+    storage = StorageManager(config)
+    managers = tuple(storage.l1_managers())
     try:
         for i, manager in enumerate(managers):
             _store(
@@ -273,7 +272,7 @@ def dram_storage() -> Iterator[tuple[StorageManager, tuple[L1Manager, ...]]]:
 
 
 def test_selected_l1_lookup_uses_exact_manager(
-    dram_storage: tuple[StorageManager, tuple[L1Manager, ...]],
+    dram_storage: tuple[StorageManager, tuple[L1ManagerInterface, ...]],
 ) -> None:
     """Manager selection restricts hits while preserving filters and lock ownership."""
     storage, managers = dram_storage
@@ -321,7 +320,7 @@ def test_selected_l1_lookup_uses_exact_manager(
 
 
 def test_p2p_selection_skips_multi_region_dram(
-    dram_storage: tuple[StorageManager, tuple[L1Manager, ...]],
+    dram_storage: tuple[StorageManager, tuple[L1ManagerInterface, ...]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pool selection, lookup and adapter affinity agree on eligible DRAM."""

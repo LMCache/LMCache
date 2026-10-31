@@ -70,6 +70,7 @@ jobs:
                         - '.github/workflows/build_rocm_artifacts.yml'
                         - '.github/workflows/build_xpu_artifacts.yml'
                         - '.github/workflows/build_musa_artifacts.yml'
+                        - '.github/workflows/build_rbln_artifacts.yml'
                         - '.github/workflows/build_rocm_torch210_artifacts.yml'
                         - '.github/actions/build-artifacts/action.yml'
                         - '.github/actions/publish-artifacts/action.yml'
@@ -77,6 +78,7 @@ jobs:
                         - '.github/scripts/rocm_wheel_common.sh'
                         - '.github/scripts/build_xpu_wheel.sh'
                         - '.github/scripts/build_musa_wheel.sh'
+                        - '.github/scripts/build_rbln_wheel.sh'
                         - '.github/scripts/build_rocm_torch210_wheel.sh'
                         - '.github/scripts/validate_rocm_torch210_wheel.py'
                         - '!operator/**'
@@ -159,6 +161,12 @@ jobs:
         if: needs.changes.outputs.lmcache == 'true'
         name: Build MUSA
         uses: ./.github/workflows/build_musa_artifacts.yml
+
+    build-rbln:
+        needs: changes
+        if: needs.changes.outputs.lmcache == 'true'
+        name: Build RBLN
+        uses: ./.github/workflows/build_rbln_artifacts.yml
 
     build-rocm-torch210:
         needs: changes
@@ -587,6 +595,56 @@ jobs:
                   pip install lmcache==${{ needs.build-musa.outputs.musa_version }} --no-deps \\
                     --no-index \\
                     --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/\${VERSION}-musa
+                  \`\`\`" \
+                    dist/*.whl
+
+    # Publish the RBLN wheel to GitHub Release (not PyPI) when a release is
+    # published. torch-rbln and the RBLN runtime stay host-owned.
+    publish-rbln-github-release:
+        name: Publish RBLN wheel to GitHub Release
+        if: |
+            needs.build-rbln.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
+            needs.changes.outputs.lmcache == 'true' &&
+            github.repository_owner == 'LMCache' && github.event.action == 'published'
+        permissions:
+            contents: write
+        runs-on: ubuntu-24.04
+        needs: [changes, build-rbln, test, code-quality]
+
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                  disable-sudo-and-containers: false
+                  egress-policy: audit
+
+            - name: Fetch RBLN release artifacts
+              uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+              with:
+                  name: release-rbln-artifacts
+                  path: dist
+
+            - name: Publish RBLN wheel to dedicated GitHub Release
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+              run: |
+                  gh release create "${{ github.ref_name }}-rbln" \
+                    --repo "${{ github.repository }}" \
+                    --target "$GITHUB_SHA" \
+                    --latest=false \
+                    --title "Release ${{ github.ref_name }} · Rebellions RBLN" \
+                    --notes "Rebellions RBLN NPU wheel for LMCache ${{ github.ref_name }}, built against
+                  torch-rbln ${{ needs.build-rbln.outputs.torch_rbln_version }} (torch ${{ needs.build-rbln.outputs.torch_version }}).
+
+                  torch-rbln, rebel-compiler, and the RBLN driver stay host-owned and are not bundled.
+
+                  Install into an environment that already has torch-rbln and rebel-compiler:
+                  \`\`\`bash
+                  VERSION=${{ github.ref_name }}
+                  pip install lmcache==${{ needs.build-rbln.outputs.rbln_version }} \\
+                    --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/\${VERSION}-rbln
                   \`\`\`" \
                     dist/*.whl
 

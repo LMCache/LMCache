@@ -129,7 +129,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     coordinator_client = None
     coordinator_registration_task = None
     if coordinator_config.url and http_config is not None:
-        coordinator_client = httpx.AsyncClient(timeout=10.0)
+        # Present the shared fleet key when one is configured, so registration
+        # and heartbeats pass a coordinator that enforces authentication.
+        # First Party
+        from lmcache.v1.multiprocess.transport.auth import (
+            request_client_auth_headers,
+        )
+
+        coordinator_client = httpx.AsyncClient(
+            timeout=10.0,
+            headers=request_client_auth_headers(mp_config.api_key_files),
+        )
         # Canonical id resolved by run_cache_server above; shared with
         # the OTel service.instance.id so membership matches metrics/traces.
         coordinator_registration_task = asyncio.create_task(

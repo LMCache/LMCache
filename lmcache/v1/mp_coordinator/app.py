@@ -43,6 +43,10 @@ from lmcache.v1.mp_coordinator.controllers.base import (
     ControllerStatus,
 )
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
+from lmcache.v1.mp_coordinator.http_auth import (
+    CoordinatorAuthenticationConfig,
+    CoordinatorAuthenticationMiddleware,
+)
 from lmcache.v1.mp_coordinator.http_routes import HttpRoutes
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
     CacheEventBroadcaster,
@@ -83,11 +87,19 @@ from lmcache.v1.utils.router_discovery import discover_api_routers
 logger = init_logger(__name__)
 
 
-def create_app(config: MPCoordinatorConfig) -> FastAPI:
+def create_app(
+    config: MPCoordinatorConfig,
+    http_authentication: CoordinatorAuthenticationConfig | None = None,
+) -> FastAPI:
     """Build the coordinator FastAPI app.
 
     Args:
         config: The coordinator configuration.
+        http_authentication: Bearer API keys accepted by the fleet control
+            plane. ``None`` leaves authentication disabled, preserving the
+            no-key default; when at least one key is configured, every route
+            except ``/healthz`` requires a valid ``Authorization: Bearer`` (or
+            ``X-LMCache-API-Key``) header.
 
     Returns:
         A configured FastAPI application. ``app.state`` carries the shared
@@ -168,6 +180,10 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         event_gate=event_gate,
         event_source=event_source,
         metadata_persister=metadata_persister,
+        event_broadcaster=event_broadcaster,
+        background_loops=background_loops,
+        event_loop_monitor=event_loop_monitor,
+        controller_status=controller_status,
     )
 
     async def _save_checkpoint() -> CheckpointWrite:
@@ -227,9 +243,14 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         """
         async with AsyncExitStack() as stack:
             # Bound to the running event loop, so it cannot be built with
-            # the rest of the app.
+            # the rest of the app. Outbound controller calls reach MP servers
+            # that may themselves enforce authentication, so present the
+            # shared fleet key when one is configured.
             outbound_client = await stack.enter_async_context(
-                httpx.AsyncClient(timeout=30.0)
+                httpx.AsyncClient(
+                    timeout=30.0,
+                    headers=_outbound_http_headers(http_authentication),
+                )
             )
             app.state.outbound_client = outbound_client
             if config.checkpoint_path:
@@ -283,6 +304,13 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     app.state.ctx = ctx
     # Out-of-context collaborator kept on app.state directly.
     app.state.config = config
+    # Fleet-control-plane authentication: an empty verifier (the default)
+    # leaves every route open, matching the pre-auth behavior; a configured
+    # key closes every route except the public liveness probe.
+    app.state.http_authentication = (
+        http_authentication or CoordinatorAuthenticationConfig()
+    )
+    app.add_middleware(CoordinatorAuthenticationMiddleware)
 
     apis_path = Path(__file__).parent / "http_apis"
     package = f"{__package__}.http_apis"
@@ -297,6 +325,27 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
                 app.include_router(router)
 
     return app
+
+
+def _outbound_http_headers(
+    authentication: CoordinatorAuthenticationConfig | None = None,
+) -> dict[str, str]:
+    """Return default headers for the coordinator's outbound HTTP calls.
+
+    Present the first configured fleet key so outbound controller calls reach
+    MP servers that enforce authentication. When called without an explicit
+    key, the shared environment sources remain the fallback.
+
+    Returns:
+        Outbound authentication headers, or an empty mapping when no key is
+        configured.
+    """
+    if authentication is not None:
+        return authentication.client_auth_headers()
+    # First Party
+    from lmcache.v1.multiprocess.transport.auth import request_client_auth_headers
+
+    return request_client_auth_headers()
 
 
 def _artifact_store(path: str) -> ArtifactStore:

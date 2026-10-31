@@ -7,7 +7,7 @@ optional OTel log forwarding), and **tracing** (OTel spans for per-request
 latency).
 
 All three modes are powered by an internal **EventBus** that decouples
-producers (L1Manager, StorageManager, MPCacheServer) from subscribers.
+producers (BaseL1Manager, StorageManager, MPCacheServer) from subscribers.
 
 .. contents::
    :local:

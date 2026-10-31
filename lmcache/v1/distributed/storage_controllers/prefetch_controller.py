@@ -51,6 +51,7 @@ from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     PrefetchPolicy,
+    _merged_or_zeros,
 )
 from lmcache.v1.distributed.storage_controllers.utils import (
     Bitmap2D,
@@ -347,6 +348,27 @@ def _build_request(
     )
 
 
+def _needs_l2_lookup(
+    key_groups: list[GroupedObjectKeys],
+    l1_locked_keys: MapState,
+    fetching_policy: FetchingPolicy,
+) -> bool:
+    """Return whether to look up L2, i.e. L1 alone does not serve the whole request.
+
+    Under ``"prefix"``, L1 alone serves it when the cells L1 holds fold to a
+    hit over every chunk; under ``"full"``, when L1 holds every cell. L1 hits
+    are always planned from L1, so L2 cannot add to such a request.
+    """
+    l1_found = _merged_or_zeros(l1_locked_keys, key_groups)
+    num_chunks = len(key_groups[0].keys)
+    if fetching_policy == "full":
+        return l1_found.popcount() < len(key_groups) * num_chunks
+    hit_length, _retain = fold_unfold_grouped(
+        l1_found.to_list(), [group.sliding_window_size for group in key_groups]
+    )
+    return hit_length < num_chunks
+
+
 # Class definitions
 
 
@@ -457,7 +479,8 @@ class PrefetchController(StorageControllerInterface):
        An L1-only request (no allowed or no attached L2 adapter) is served on
        the calling thread and is complete when the call returns.
     2. Read-locks the keys resident in the allowed L1 managers and submits
-       lookup-and-lock tasks to every live, allowed L2 adapter.
+       lookup-and-lock tasks to every live, allowed L2 adapter, unless L1
+       alone serves the request; that request finishes here.
     3. Plans which cells to serve from L1 and which to load from L2, and
        releases every lock outside the plan.
     4. Reserves L1 staging buffers for the L2 plan; on reservation failures
@@ -1140,6 +1163,20 @@ class PrefetchController(StorageControllerInterface):
             if self._is_l2_eligible(request, adapter_idx)
         }
 
+        # No eligible L2 adapter, or no L2 result could change the plan: serve
+        # from L1 alone, on this thread. The request was registered before
+        # locking so a failed start can be aborted; retire it here like
+        # _advance_request does.
+        if not active_adapters or not _needs_l2_lookup(
+            request.key_groups,
+            request.key_states.l1_locked_keys,
+            request.fetching_policy,
+        ):
+            self._plan_load(request, {})
+            self._finish_request(request)
+            self._retire_request(request)
+            return
+
         # TODO(ApostaC): Here, we submit the full keys to L2 adapters.
         # In the future, we can do `All keys - L1 hit keys` to reduce the
         # L2 lookup overhead.
@@ -1151,15 +1188,6 @@ class PrefetchController(StorageControllerInterface):
                 flattened_keys, spec.group_layout_descs
             )
             request.inflight_lookup_tasks[adapter_idx] = task_id
-
-        # No eligible L2 adapter: serve from L1 alone, on this thread. The
-        # request was registered before locking so a failed start can be
-        # aborted; retire it here like _advance_request does.
-        if not active_adapters:
-            self._plan_load(request, {})
-            self._finish_request(request)
-            self._retire_request(request)
-            return
 
         self._event_bus.publish(
             Event(

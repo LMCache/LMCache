@@ -59,29 +59,15 @@ def test_devdax_l1_is_not_single_region():
     assert l1_exposes_single_memory_region(config) is False
 
 
-def test_hybrid_dram_l1_is_not_single_region() -> None:
-    """The first DRAM manager cannot expose a hybrid pool to P2P."""
-    config = _config(
-        L1MemoryManagerConfig(
-            size_in_bytes=_SIZE,
-            use_lazy=False,
-            devdax_path="/dev/dax0.0",
-            devdax_size_in_bytes=_SIZE,
-            shm_name="",
-        )
-    )
-    assert l1_exposes_single_memory_region(config) is False
-
-
 @pytest.mark.parametrize(
     "pools, expected",
     [
-        (["hybrid", "dram"], True),
-        (["hybrid", "hybrid", "dram"], True),
-        (["dram", "hybrid"], True),
-        (["hybrid", "hybrid"], False),
-        (["hybrid", "dax", "gds"], False),
-        (["gds", "hybrid", "dax", "dram"], True),
+        (["dax", "dram"], True),
+        (["dax", "dax", "dram"], True),
+        (["dram", "dax"], True),
+        (["dax", "dax"], False),
+        (["dax", "dax", "gds"], False),
+        (["gds", "dax", "dax", "dram"], True),
     ],
 )
 def test_single_region_search_skips_incompatible_pools(
@@ -95,8 +81,7 @@ def test_single_region_search_skips_incompatible_pools(
                 size_in_bytes=_SIZE,
                 use_lazy=False,
                 shm_name="",
-                devdax_path="/dev/dax0.0" if pool in ("hybrid", "dax") else "",
-                devdax_size_in_bytes=_SIZE if pool == "hybrid" else 0,
+                devdax_path="/dev/dax0.0" if pool == "dax" else "",
             ),
             gds_l1_config=(
                 GdsL1Config(file_location="/tmp/gds_slab", size_in_bytes=_SIZE)

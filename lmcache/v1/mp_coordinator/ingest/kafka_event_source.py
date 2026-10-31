@@ -18,8 +18,9 @@ view that was restored. Records applied after that capture are simply
 read again, and the gate's sequence dedup absorbs them.
 
 A partition :class:`StreamPosition` has never seen -- a first start, or
-a partition added since -- has no checkpointed cursor, and falls back to
-``auto.offset.reset``.
+a partition added since -- has no checkpointed cursor, and is read from
+its beginning, even if the group holds an offset an older coordinator
+committed.
 
 See ``docs/design/v1/mp_coordinator/ingest.md``.
 """
@@ -71,6 +72,9 @@ class KafkaSourceStats:
             partition's high watermark minus the next offset to read. A
             partition is absent until both are known. Kafka's own lag tools
             cannot report this, because the group never commits offsets.
+        next_offsets: The next offset to read, per assigned partition: the
+            position the next checkpoint records. A partition is absent
+            until a record from it has been read or restored.
     """
 
     records_applied: int = 0
@@ -78,6 +82,18 @@ class KafkaSourceStats:
     records_failed: int = 0
     partitions_assigned: int = 0
     unread_records: dict[int, int] = field(default_factory=dict)
+    next_offsets: dict[int, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class KafkaSourceStatus(CacheEventSourceStatus):
+    """The Kafka source's status, with what it has read.
+
+    Attributes:
+        reads: What the source has read; see :class:`KafkaSourceStats`.
+    """
+
+    reads: KafkaSourceStats
 
 
 class KafkaCacheEventSource(CacheEventSource):
@@ -167,17 +183,19 @@ class KafkaCacheEventSource(CacheEventSource):
             await asyncio.to_thread(self._thread.join)
         self._consumer.close()
 
-    def status(self) -> CacheEventSourceStatus:
+    def status(self) -> KafkaSourceStatus:
         """Return the Kafka source's status.
 
         Returns:
             Source identity ``kafka`` with replay capability
             ``SEEKABLE``: the topic retains the stream, so it can be
-            replayed by rewinding the checkpointed position.
+            replayed by rewinding the checkpointed position. ``reads``
+            carries :meth:`stats`.
         """
-        return CacheEventSourceStatus(
+        return KafkaSourceStatus(
             source_name="kafka",
             replay_capability=EventReplayCapability.SEEKABLE,
+            reads=self.stats(),
         )
 
     def stats(self) -> KafkaSourceStats:
@@ -189,7 +207,11 @@ class KafkaCacheEventSource(CacheEventSource):
         (updated by every fetch, no broker round trip). A failure there
         reaches only the caller, never the poll thread doing the ingest.
         """
-        return replace(self._stats, unread_records=self._unread_records())
+        return replace(
+            self._stats,
+            unread_records=self._unread_records(),
+            next_offsets=self._next_offsets(),
+        )
 
     # -- Poll thread -----------------------------------------------------------
 
@@ -200,22 +222,26 @@ class KafkaCacheEventSource(CacheEventSource):
 
         Runs on the poll thread, during ``poll()``. A partition
         :attr:`_position` has recorded an offset for is repositioned
-        there; one it has never seen keeps whatever confluent-kafka
-        assigned by default, which with no committed offset to find is
-        ``auto.offset.reset``. Calling ``assign`` here is what makes the
-        override take effect -- without it, the default assignment
+        there; one it has never seen starts from its beginning. Leaving
+        that one at confluent-kafka's default would resume from the
+        group's committed offset whenever one exists -- one an older
+        coordinator committed, say -- which can sit past what the
+        restored state contains. Calling ``assign`` here is what makes
+        the override take effect -- without it, the default assignment
         stands.
 
         Args:
             consumer: The consumer being assigned to.
             partitions: The partitions assigned to this member.
         """
+        # Third Party
+        from confluent_kafka import OFFSET_BEGINNING
+
         for partition in partitions:
             next_offset = self._position.next_offset(
                 partition.topic, partition.partition
             )
-            if next_offset is not None:
-                partition.offset = next_offset
+            partition.offset = OFFSET_BEGINNING if next_offset is None else next_offset
         consumer.assign(partitions)
         self._assigned = list(partitions)
         self._stats.partitions_assigned = len(partitions)
@@ -280,6 +306,17 @@ class KafkaCacheEventSource(CacheEventSource):
             summary.duplicates,
             summary.stale,
         )
+
+    def _next_offsets(self) -> dict[int, int]:
+        """Return the next offset to read, per assigned partition that has one."""
+        next_offsets: dict[int, int] = {}
+        for partition in self._assigned:
+            next_offset = self._position.next_offset(
+                partition.topic, partition.partition
+            )
+            if next_offset is not None:
+                next_offsets[partition.partition] = next_offset
+        return next_offsets
 
     def _unread_records(self) -> dict[int, int]:
         """Return the records not yet read, per assigned partition whose

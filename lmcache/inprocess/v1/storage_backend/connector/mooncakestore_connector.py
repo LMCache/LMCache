@@ -383,10 +383,9 @@ class MooncakestoreConnector(RemoteConnector):
 
                 if numa_mapping:
                     current_device_id = torch_dev.current_device()
-                    gpu_to_numa = getattr(numa_mapping, "gpu_to_numa_mapping", {})
-                    numa_id = gpu_to_numa.get(current_device_id)
+                    numa_id = numa_mapping.gpu_to_numa_mapping.get(current_device_id)
                     logger.info(
-                        "NUMA mapping detected (pre-Mooncake setup): %s", gpu_to_numa
+                        "NUMA mapping detected (pre-Mooncake setup): %s", numa_mapping
                     )
                     try:
                         # Third Party
