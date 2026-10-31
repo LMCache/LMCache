@@ -335,8 +335,8 @@ HTTP endpoints
 
 The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
 
-- **Fleet membership and health** -- registration and liveness
-  (``/instances``, ``/healthz``).
+- **Fleet membership and health** -- registration, liveness, and a debugging
+  snapshot (``/instances``, ``/healthz``, ``/status``).
 - **Quota, usage, and eviction** -- the ``/quota`` group: per-tenant byte
   budgets, usage accounting, and the usage-event ingest that drives fleet-wide
   eviction.
@@ -367,8 +367,8 @@ Fleet membership and health
 ---------------------------
 
 MP servers register, heartbeat, and deregister automatically (see
-`Connecting MP servers`_); ``GET /instances`` and ``GET /healthz`` are read-only
-operator views.
+`Connecting MP servers`_); ``GET /instances``, ``GET /healthz`` and
+``GET /status`` are read-only operator views.
 
 ``POST /instances``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -540,6 +540,92 @@ Coordinator liveness probe (for Kubernetes).
 
     curl -s http://localhost:9300/healthz
     # -> {"status": "healthy"}
+
+``GET /status``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+One JSON snapshot of the coordinator's state, for a person debugging it. Each
+section reads the same snapshot the corresponding metrics read, so the page and
+the dashboards never disagree. Use ``/healthz`` for probes; this endpoint is
+for people.
+
+**Response** (``200 OK``, trimmed to one consumer):
+
+.. code-block:: json
+
+    {
+      "event_source": {"source_name": "http", "replay_capability": "none"},
+      "ingest": {
+        "batches_applied": 1,
+        "batches_duplicate": 0,
+        "batches_stale": 0,
+        "batches_missing": 0,
+        "events_dropped": 0,
+        "streams": {
+          "mp-0": {
+            "incarnation": 1,
+            "last_seq": 1,
+            "gap_detected": false,
+            "missing_batches": 0,
+            "events_dropped": 0,
+            "seconds_since_last_event": 1.1,
+            "event_delivery_delay_seconds": null
+          }
+        }
+      },
+      "consumers": {
+        "KeyDirectory": {
+          "batches_delivered": 1,
+          "apply_seconds": 0.00001,
+          "consume_failures": 0,
+          "fence_failures": 0
+        }
+      },
+      "registry": {"seconds_since_heartbeat": {"mp-0": 1.1}},
+      "controllers": {"FleetEvictionController": true, "PrefetchManager": true},
+      "background_loops": {
+        "health": {
+          "interval_seconds": 10.0,
+          "last_success_timestamp": 1792441340.6,
+          "passes_ok": 2,
+          "passes_failed": 0,
+          "last_error": null,
+          "last_error_timestamp": null,
+          "seconds_since_last_success": 0.1
+        }
+      },
+      "event_loop": {"blocked_seconds": 0.003}
+    }
+
+- ``event_source``: the source feeding the coordinator. With Kafka it also
+  carries ``reads``: records read by outcome, ``partitions_assigned``, and per
+  partition ``unread_records`` and ``next_offsets`` (the position the next
+  checkpoint records).
+- ``ingest``: fleet-wide batch counts, and each server's stream under
+  ``streams``. ``gap_detected: true`` means the coordinator knows it is missing
+  part of that server's cache.
+- ``consumers``: each view or controller fed by the event stream. A non-zero
+  ``consume_failures`` or ``fence_failures`` means that consumer now disagrees
+  with the others.
+- ``registry``: seconds since each registered server's last heartbeat.
+- ``controllers``: ``false`` means the controller failed to start (see the
+  startup logs) and its work is not happening.
+- ``background_loops``: each periodic loop (``health``, ``checkpoint``,
+  ``eviction``). ``last_error`` is the latest failed pass; it stays after later
+  successes, so compare ``last_error_timestamp`` with
+  ``last_success_timestamp``. The ``checkpoint`` loop is absent when periodic
+  checkpoints are off.
+- ``event_loop``: total seconds the coordinator's event loop was blocked.
+
+**HTTP status codes:**
+
+- ``200``: always, so the page is available exactly when something is wrong.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:9300/status
 
 Quota, usage, and eviction
 --------------------------

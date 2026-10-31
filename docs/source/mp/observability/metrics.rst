@@ -894,8 +894,9 @@ Coordinator Metrics
 Coordinator metrics use the ``lmcache_coordinator.`` prefix, so a series'
 origin is clear from its name even when the coordinator and the MP servers
 share one Prometheus.  The coordinator's resource carries
-``service.name=lmcache-mp-coordinator`` and ``service.instance.id`` set to the
-host name (the pod name under Kubernetes).
+``service.name=lmcache-mp-coordinator`` and ``service.instance.id`` set to
+``<host name>:<port>`` (the host name is the pod name under Kubernetes), so
+coordinators sharing a host stay apart.
 
 The Key Directory gauges always emit one observation for each ``tier`` value,
 ``l1`` and ``l2``, including zero-valued observations for an empty tier.  A
@@ -1094,6 +1095,7 @@ counted, and the loop keeps running.
      - ObservableCounter
      - Total time the coordinator's event loop was blocked.  Its rate is the
        fraction of time request handlers, heartbeats and loops were stalled.
+       Delays of 10 ms or less are timer jitter and are not counted.
    * - ``lmcache_coordinator.registry.server_seconds_since_heartbeat``
      - ObservableGauge (attr: ``instance_id``)
      - Seconds since each registered server's last heartbeat.
