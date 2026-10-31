@@ -27,7 +27,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.cache_engine import LMCacheEngine
+from lmcache.inprocess.v1.cache_engine import LMCacheEngine
 
 NUM_LAYERS = 4
 EXPECTED_ADVANCES = NUM_LAYERS + 1
