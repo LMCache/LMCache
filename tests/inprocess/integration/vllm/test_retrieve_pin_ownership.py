@@ -98,6 +98,7 @@ class _SynchronousStorageManager(StorageManager):
             backend: Real CPU backend used by all normal test requests.
         """
         self.storage_backends = OrderedDict([(LOCATION, backend)])
+        self.manager_lock = threading.Lock()
         self._freeze = False
         self._freeze_lock = threading.RLock()
         self._bypassed_backends: set[str] = set()
