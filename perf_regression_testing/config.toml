@@ -51,8 +51,8 @@ tool-call-parser = "qwen3_coder"
 repo = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
 revision = "1bae0e1088993b9b82de08f59de5be5a34e42170"
 served_name = "deepseek-v4.1-flash"
-# Every session of the trace at once (393); the knee is still to be measured.
-aiperf_args = { concurrency = 393, max-context-length = 1048576 }
+# 250 of the trace's 393 sessions; the knee is still to be measured.
+aiperf_args = { concurrency = 250, max-context-length = 1048576 }
 # Its 1M context replays the same sessions uncapped (requests up to 996,579
 # tokens), in place of the workload's 256k trace.
 trace = { dir = "work/weka-062126-dir", dir_digest = "f80f847c48e5b21047f817c7a01623b4de2343865a581e9fb46d2ea890710ca6" }

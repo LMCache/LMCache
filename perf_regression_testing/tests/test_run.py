@@ -23,7 +23,7 @@ def test_busy_gpus_make_the_run_invalid(
     assert code == run.EXIT_GPU_BUSY
     assert "busy" in summary["invalid"][0]
     # The results page draws one line per model and load.
-    assert summary["concurrency"] == spec.aiperf_args["concurrency"] == 393
+    assert summary["concurrency"] == spec.aiperf_args["concurrency"] == 250
 
 
 def _fake_smi(

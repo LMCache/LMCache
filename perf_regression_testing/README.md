@@ -28,7 +28,7 @@ Each model is a frontier open-weight release on H200, served with its vLLM
 recipe's flags and replaced when a newer one appears. DeepSeek-V4.1-Flash-1017
 (MLA with compressed and sliding-window KV) runs the recipe's single-node TEP
 layout (TP8 + EP on 8 x H200) with DSpark speculative decoding, on the uncapped
-trace at 393 concurrent sessions (all of them) and a 1500 GiB DRAM budget.
+trace at 250 concurrent sessions and a 1500 GiB DRAM budget.
 Every attention cache is whole on each TP rank, so the GPU KV is one rank's
 pool, below the sessions' context. Two weekly deployments keep other models and
 the 256k trace, and add disk:
