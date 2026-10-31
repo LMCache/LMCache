@@ -14,7 +14,11 @@ import pytest
 import torch
 
 # First Party
+from lmcache import device_ops
+from lmcache.utils import EngineType
+from lmcache.v1.multiprocess import native_completion
 from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
+from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
 
 
 class _FakeEventBackend:
@@ -327,3 +331,108 @@ def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
         source = inspect.getsource(module)
         assert "lmcache.v1.platform.devices.musa" not in source
         assert 'device.type == "musa"' not in source
+
+
+@pytest.mark.parametrize("num_contexts", [0, 2])
+def test_close_delivers_pending_stream_callbacks(
+    monkeypatch: pytest.MonkeyPatch, num_contexts: int
+) -> None:
+    """Close delivers completions from every stream while their contexts exist."""
+    ready: list[tuple[str, bytes]] = []
+    pending: dict[int, list[tuple[str, bytes]]] = {}
+
+    def drain() -> list[tuple[str, bytes]]:
+        result = ready.copy()
+        ready.clear()
+        return result
+
+    monkeypatch.setattr(device_ops, "drain_recorded_completions", drain)
+    # Hold the background consumer so close must perform the final real drain.
+    monkeypatch.setattr(
+        native_completion.DeviceHostFuncDispatcher, "start", lambda self: None
+    )
+    contexts = []
+    for instance_id in range(num_contexts):
+        pending[instance_id] = [
+            ("release_imported_event", msgspec.msgpack.encode((instance_id, 7)))
+        ]
+
+        def complete(instance_id: int = instance_id) -> None:
+            ready.extend(pending.pop(instance_id, []))
+
+        context = MagicMock()
+        context.device = torch.device("cpu")
+        context.kv_layer_groups_manager.num_object_groups = 1
+        context.stream.synchronize.side_effect = complete
+        context.close.side_effect = complete
+        contexts.append(context)
+
+    monkeypatch.setattr(
+        lmcache_driven_transfer, "create_cache_context", MagicMock(side_effect=contexts)
+    )
+    monkeypatch.setattr(lmcache_driven_transfer, "get_layout_desc", MagicMock())
+    monkeypatch.setattr(
+        lmcache_driven_transfer,
+        "get_event_ipc_backend",
+        lambda device: _FakeEventBackend(),
+    )
+    monkeypatch.setattr(lmcache_driven_transfer, "torch_dev", MagicMock())
+    module = lmcache_driven_transfer.LMCacheDrivenTransferModule(MagicMock())
+    for instance_id in range(num_contexts):
+        module.register_kv_cache(
+            instance_id, [], "close-test", 1, EngineType.VLLM, {}, []
+        )
+
+    module.close()
+
+    assert module.tracked_instance_count() == 0
+    assert ready == []
+    for context in contexts:
+        context.release_imported_event.assert_called_once_with(7)
+        context.close.assert_called_once_with()
+
+
+def test_close_preserves_contexts_when_stream_sync_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed stream wait must not release possibly active device resources."""
+    dispatcher = MagicMock()
+    monkeypatch.setattr(
+        lmcache_driven_transfer, "DeviceHostFuncDispatcher", lambda: dispatcher
+    )
+    contexts = [MagicMock(), MagicMock()]
+    for context in contexts:
+        context.device = torch.device("cpu")
+        context.kv_layer_groups_manager.num_object_groups = 1
+    contexts[0].stream.synchronize.side_effect = RuntimeError("stream sync failed")
+    monkeypatch.setattr(
+        lmcache_driven_transfer, "create_cache_context", MagicMock(side_effect=contexts)
+    )
+    monkeypatch.setattr(lmcache_driven_transfer, "get_layout_desc", MagicMock())
+    monkeypatch.setattr(
+        lmcache_driven_transfer,
+        "get_event_ipc_backend",
+        lambda device: _FakeEventBackend(),
+    )
+    monkeypatch.setattr(lmcache_driven_transfer, "torch_dev", MagicMock())
+    module = lmcache_driven_transfer.LMCacheDrivenTransferModule(MagicMock())
+    for instance_id in range(2):
+        module.register_kv_cache(
+            instance_id, [], "close-sync-error", 1, EngineType.VLLM, {}, []
+        )
+
+    with pytest.raises(RuntimeError, match="stream sync failed"):
+        module.close()
+
+    assert module.tracked_instance_count() == 2
+    dispatcher.stop.assert_not_called()
+    for context in contexts:
+        context.close.assert_not_called()
+
+    # The injected error is transient; this does not simulate device recovery.
+    contexts[0].stream.synchronize.side_effect = None
+    module.close()
+    assert module.tracked_instance_count() == 0
+    dispatcher.stop.assert_called_once_with()
+    for context in contexts:
+        context.close.assert_called_once_with()
