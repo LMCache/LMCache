@@ -91,6 +91,10 @@ class P2PL2AdapterConfig(L2AdapterConfigBase):
         self.lookup_timeout_s = lookup_timeout_s
         self.load_timeout_s = load_timeout_s
 
+    def get_wanted_l1_memory_tags(self) -> tuple[MemoryTags, ...]:
+        """Use the local DRAM L1 registered with the P2P transfer channel."""
+        return (MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL),)
+
     @classmethod
     def from_dict(cls, d: dict) -> "P2PL2AdapterConfig":
         peer_mq_server_url = d.get("peer_mq_server_url")

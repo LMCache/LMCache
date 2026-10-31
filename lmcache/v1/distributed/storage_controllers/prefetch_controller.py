@@ -632,6 +632,8 @@ class PrefetchController(StorageControllerInterface):
     def submit_prefetch_request(
         self,
         spec: PrefetchTaskSpec,
+        *,
+        l1_manager_id: int | None = None,
     ) -> PrefetchRequestId:
         """
         Submit a prefetch request.
@@ -640,9 +642,15 @@ class PrefetchController(StorageControllerInterface):
 
         Args:
             spec: The prefetch request inputs (see :class:`PrefetchTaskSpec`).
+            l1_manager_id: Restrict an L1-only request to this manager; ``None``
+                searches all allowed managers. Requires empty
+                ``allowed_l2_memory_tags``.
 
         Returns:
             A request ID for tracking via query_prefetch_result.
+
+        Raises:
+            ValueError: The selected manager is unknown or the spec allows L2.
 
         Note:
             When the spec allows no L2 adapter (an empty
@@ -650,6 +658,14 @@ class PrefetchController(StorageControllerInterface):
             request is served from L1 on the calling thread and its result
             is queryable via query_prefetch_result once this returns.
         """
+        if l1_manager_id is not None:
+            if spec.allowed_l2_memory_tags != frozenset():
+                raise ValueError(
+                    "Selecting an L1 manager requires empty allowed_l2_memory_tags"
+                )
+            if l1_manager_id not in self._l1_managers:
+                raise ValueError(f"Unknown L1 manager ID: {l1_manager_id}")
+
         with self._submission_lock:
             request_id = self._next_request_id
             self._next_request_id += 1
@@ -657,7 +673,7 @@ class PrefetchController(StorageControllerInterface):
         allows_no_l2 = spec.allowed_l2_memory_tags == frozenset()
         if allows_no_l2 or not self._l2_adapters:
             request = _build_request(request_id, spec)
-            self._lock_l1_keys(request)
+            self._lock_l1_keys(request, l1_manager_id)
             self._plan_load(request, {})
             self._finish_request(request)
             return request_id
@@ -1185,12 +1201,15 @@ class PrefetchController(StorageControllerInterface):
             )
         )
 
-    def _lock_l1_keys(self, request: InFlightPrefetchRequest) -> None:
-        """Read-lock every key of the request that is resident in an allowed
-        L1 manager and record the hits in ``l1_locked_keys``.
+    def _lock_l1_keys(
+        self, request: InFlightPrefetchRequest, l1_manager_id: int | None = None
+    ) -> None:
+        """Read-lock every key of the request that is resident in an allowed L1
+        manager and record the hits in ``l1_locked_keys``.
 
         Args:
             request: The request whose keys are looked up.
+            l1_manager_id: Only lock keys in this manager when specified.
 
         Note:
             Locks are taken regardless of the lock mode; under ``NO_LOCK``
@@ -1202,6 +1221,8 @@ class PrefetchController(StorageControllerInterface):
         completed = False
         try:
             for l1_idx, l1_manager in self._l1_managers.items():
+                if l1_manager_id is not None and l1_idx != l1_manager_id:
+                    continue
                 if not _tags_allowed(
                     l1_manager.get_memory_tags(), request.allowed_l1_memory_tags
                 ):

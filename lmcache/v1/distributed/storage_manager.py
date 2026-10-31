@@ -532,22 +532,31 @@ class StorageManager:
         self,
         spec: PrefetchTaskSpec,
         external_request_id: str = "",
+        *,
+        l1_manager_id: int | None = None,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
         Args:
             spec: The request (see :class:`PrefetchTaskSpec`).
             external_request_id: Caller id for end-to-end log tracing.
+            l1_manager_id: Restrict an L1-only lookup to this manager. Requires
+                empty ``allowed_l2_memory_tags``; omitted searches all allowed L1s.
 
         Returns:
             PrefetchHandle to track the task.
+
+        Raises:
+            ValueError: The selected manager is unknown or the spec allows L2.
 
         Note:
             A spec that allows no L2 adapter (an empty
             ``allowed_l2_memory_tags``) is served from L1 only, and its result
             is available as soon as this returns.
         """
-        prefetch_request_id = self._prefetch_controller.submit_prefetch_request(spec)
+        prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
+            spec, l1_manager_id=l1_manager_id
+        )
         logger.debug(
             "Prefetch request submitted: %d keys in %d groups "
             "(external_request_id=%s, prefetch_request_id=%d, "
@@ -701,6 +710,22 @@ class StorageManager:
         storage manager creates the registry at construction time.
         """
         return self._quota_manager
+
+    def get_l1_manager_by_memory_tags(
+        self, tags: MemoryTags
+    ) -> L1ManagerInterface | None:
+        """Find the first L1 matching the requested memory tags.
+
+        Args:
+            tags: Memory tags to match exactly.
+
+        Returns:
+            The first matching manager in placement order, or None if absent.
+        """
+        for manager in self._l1_managers:
+            if manager.get_memory_tags() == tags:
+                return manager
+        return None
 
     def l1_managers(self) -> list[L1ManagerInterface]:
         """Return the L1 managers in write-placement order.

@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for ``l1_exposes_single_memory_region`` (P2P L1 compatibility)."""
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -54,3 +57,44 @@ def test_devdax_l1_is_not_single_region():
         )
     )
     assert l1_exposes_single_memory_region(config) is False
+
+
+@pytest.mark.parametrize(
+    "pools, expected",
+    [
+        (["dax", "dram"], True),
+        (["dax", "dax", "dram"], True),
+        (["dram", "dax"], True),
+        (["dax", "dax"], False),
+        (["dax", "dax", "gds"], False),
+        (["gds", "dax", "dax", "dram"], True),
+    ],
+)
+def test_single_region_search_skips_incompatible_pools(
+    pools: list[str], expected: bool
+) -> None:
+    """Search all configured pools for an exportable DRAM region."""
+    managers = [
+        L1ManagerConfig(
+            tag=f"pool-{index}",
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=_SIZE,
+                use_lazy=False,
+                shm_name="",
+                devdax_path="/dev/dax0.0" if pool == "dax" else "",
+            ),
+            gds_l1_config=(
+                GdsL1Config(file_location="/tmp/gds_slab", size_in_bytes=_SIZE)
+                if pool == "gds"
+                else None
+            ),
+        )
+        for index, pool in enumerate(pools)
+    ]
+    config = StorageManagerConfig(
+        l1_manager_config=managers[0],
+        l1_manager_configs=managers,
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+        l2_adapter_config=L2AdaptersConfig(adapters=[]),
+    )
+    assert l1_exposes_single_memory_region(config) is expected

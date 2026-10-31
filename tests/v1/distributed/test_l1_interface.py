@@ -146,3 +146,4 @@ def test_medium_specific_calls_are_not_part_of_the_interface() -> None:
     ):
         assert not hasattr(L1ManagerInterface, name)
         assert hasattr(DevDaxL1Manager, name) or name == "memory_region_count"
+    assert not hasattr(DramL1Manager, "memory_region_count")

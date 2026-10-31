@@ -228,7 +228,8 @@ def run_http_server(
 
     Raises:
         ValueError: If P2P is enabled without a coordinator URL, or with an L1
-            tier that is not a single registerable memory region; or if
+            configuration with no local DRAM L1 exposing a single
+            registerable memory region; or if
             coordinator event reporting or ``--trace-level events`` is enabled
             with observability disabled (the cache-event stream rides the
             event bus).
@@ -242,9 +243,9 @@ def run_http_server(
             )
         if not l1_exposes_single_memory_region(storage_manager_config):
             raise ValueError(
-                "P2P requires a single L1 memory region the transfer channel "
-                "can register; it is incompatible with GDS L1 (--gds-l1-path) "
-                "and Device-DAX L1 (--l1-devdax-path)."
+                "P2P requires a local DRAM L1 with a single registerable memory "
+                "region. GDS and Device-DAX managers "
+                "are skipped when selecting the P2P pool."
             )
     if coordinator_config.event_reporting and not obs_config.enabled:
         raise ValueError(
