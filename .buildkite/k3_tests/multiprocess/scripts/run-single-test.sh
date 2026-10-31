@@ -4,6 +4,7 @@
 #   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
 #              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
 #              | restart_recovery | lazy_offload | gds_smoke
+#              | eviction_aware_lazy_offload
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -121,6 +122,19 @@ elif [ "$TEST_NAME" = "deadlock" ]; then
     export CHUNK_SIZE=256
     export CPU_BUFFER_SIZE=50
     export MAX_WORKERS=2
+elif [ "$TEST_NAME" = "eviction_aware_lazy_offload" ]; then
+    export LMCACHE_MP_LAZY_OFFLOAD=true
+    export LMCACHE_MP_LAZY_OFFLOAD_POLICY=EVICTION_AWARE
+    # This policy ranks GPU blocks by how close they are to the free queue's
+    # eviction head and never drains on an idle engine, so the test is only
+    # meaningful over a pool small enough that its workload turns it over.
+    # 2048 blocks of vLLM's default 16 tokens is a 32768-token pool, and
+    # eviction-aware-lazy-offload.sh sends twice that.
+    export NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-2048}"
+    # Pin the context rather than letting "auto" derive it from the overridden
+    # pool; the workload's documents are 8000 tokens.
+    export MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
 elif [ "$TEST_NAME" = "lazy_offload" ]; then
     # The shared GPU launcher includes these values in the real vLLM
     # kv-transfer configuration only for this integration test.
