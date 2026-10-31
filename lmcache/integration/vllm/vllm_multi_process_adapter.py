@@ -697,6 +697,76 @@ RetrieveResult = bool
 LookupResult = int
 
 
+_SessionRpcFuture = MessagingFuture[None] | MessagingFuture[int | None]
+
+
+@dataclass
+class _DeferredLookup:
+    """An active request waiting to replace its cleaned-up lookup."""
+
+    deadline: float
+    failed: bool = False
+
+
+class _OrderedSessionEnd:
+    """Let admitted RPC callbacks retain a server's deferred END submission."""
+
+    def __init__(
+        self,
+        request_id: str,
+        client: RequestClient,
+        predecessors: set[_SessionRpcFuture],
+    ) -> None:
+        self._request_id = request_id
+        self._client = client
+        self._pending = predecessors.copy()
+        self._failed = False
+        self._submitted = False
+        self._lock = threading.Lock()
+
+    def start(self) -> None:
+        """Register completion callbacks without waiting on the scheduler thread."""
+        with self._lock:
+            futures = tuple(self._pending)
+            if not futures:
+                self._submitted = True
+        if not futures:
+            self._send_end()
+            return
+        for future in futures:
+            future.add_done_callback(self._on_predecessor_done)
+
+    def _on_predecessor_done(self, future: _SessionRpcFuture) -> None:
+        with self._lock:
+            self._pending.discard(future)
+            error = future.exception_
+            if error is not None:
+                self._failed = True
+            ready = not self._pending and not self._failed and not self._submitted
+            if ready:
+                self._submitted = True
+        if error is not None:
+            logger.error(
+                "Cannot order END_SESSION for request %s after failed RPC: %s",
+                self._request_id,
+                error,
+            )
+        if ready:
+            self._send_end()
+
+    def _send_end(self) -> None:
+        future = self._client.end_session(self._request_id)
+        future.add_done_callback(self._on_end_done)
+
+    def _on_end_done(self, future: MessagingFuture[None]) -> None:
+        if future.exception_ is not None:
+            logger.error(
+                "END_SESSION for request %s failed: %s",
+                self._request_id,
+                future.exception_,
+            )
+
+
 class LMCacheMPSchedulerAdapter:
     def __init__(
         self,
@@ -768,6 +838,12 @@ class LMCacheMPSchedulerAdapter:
         # once resolved, so repeated checks return the same value after the
         # server has handed the hit count over (exactly once).
         self._lookups: dict[str, LookupState] = {}
+        # Cleanup may precede END in the connector. Keep only admitted RPCs
+        # until that once-only request-finished notification transfers them.
+        self._closed_lookup_rpcs: dict[str, dict[str, set[_SessionRpcFuture]]] = {}
+        # Only requests whose replacement was attempted are tracked. Cleanup
+        # or END cancels the wait; a failure stays final until that boundary.
+        self._deferred_lookups: dict[str, _DeferredLookup] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -898,6 +974,10 @@ class LMCacheMPSchedulerAdapter:
         is queried as soon as that server acks, and ``check_lookup_result``
         reports the result.
 
+        After cleanup, a replacement waits for successful acknowledgements
+        of the old LOOKUP, status and FREE RPCs. Call again on scheduler ticks;
+        no replacement is sent by a completion callback.
+
         Args:
             request_id: The ID of the lookup request. The same ID indicates it's
                 from the same request
@@ -933,6 +1013,10 @@ class LMCacheMPSchedulerAdapter:
         if request_id in self._lookups:
             # Skip if there is already a lookup request
             return False
+
+        if not self._lookup_predecessors_complete(request_id):
+            return False
+        self._deferred_lookups.pop(request_id, None)
 
         lookup_tokens = max(
             0, num_packed_tokens(packed_token_ids) - int(reserve_last_token)
@@ -981,6 +1065,10 @@ class LMCacheMPSchedulerAdapter:
         marks that server unhealthy and makes this return 0 from then on,
         matching the behaviour of a timed-out synchronous submit.
 
+        A replacement deferred behind cleanup also returns None, including
+        after its prerequisites finish until maybe_submit_lookup_request is
+        called again. Failed prerequisites or an expired wait return 0.
+
         Args:
             request_id: The ID of the lookup request submitted in
                 `maybe_submit_lookup_request`
@@ -990,8 +1078,13 @@ class LMCacheMPSchedulerAdapter:
             in LMCache (prefix matching), or
             None if the lookup request is not finished yet.
         """
+        if not self.is_healthy:
+            return 0
+        if request_id in self._deferred_lookups:
+            self._lookup_predecessors_complete(request_id)
+            return 0 if self._deferred_lookups[request_id].failed else None
         lookup = self._lookups.get(request_id)
-        if lookup is None or not self.is_healthy:
+        if lookup is None:
             # No job (unhealthy at submit time or already cleaned up), or a
             # server went down: give up on this lookup.
             return 0
@@ -1008,18 +1101,20 @@ class LMCacheMPSchedulerAdapter:
         return self.blocks_in_chunk
 
     def cleanup_lookup_result(self, request_id: str) -> None:
-        """
-        Clean up lookup state for a finished request to prevent memory leak.
-
-        The request's lookup stops sending RPCs, and replies still in flight
-        are ignored.
+        """Forget a lookup result while retaining its outstanding RPC ordering.
 
         Args:
-            request_id: The ID of the finished request.
+            request_id: Request whose result or deferred replacement is no longer
+                needed. A later lookup or final end_session call still orders
+                itself after any unconfirmed handler acknowledgements.
         """
+        self._deferred_lookups.pop(request_id, None)
         lookup = self._lookups.pop(request_id, None)
-        if lookup is not None:
-            lookup.close()
+        if lookup is None:
+            return
+        for url, futures in lookup.close_and_take_pending_rpcs().items():
+            pending = self._closed_lookup_rpcs.setdefault(request_id, {})
+            pending.setdefault(url, set()).update(futures)
 
     def reset_cache(self) -> bool:
         """Ask every backing LMCache server to best-effort clear idle cache.
@@ -1087,6 +1182,9 @@ class LMCacheMPSchedulerAdapter:
         Or use this when a request is cancelled or aborted after lookup but
         before retrieve to avoid holding read locks until TTL expiry.
 
+        Returns without waiting. The final end_session call also waits for
+        these server acknowledgements before submitting END_SESSION.
+
         When ``start`` or ``end`` is not aligned to the chunk size, the
         entire chunk containing start boundary is freed but not end boundary.
         It is caller's responsibility to properly align the boundaries.
@@ -1116,35 +1214,37 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         ).no_worker_id_version()
+        pending = self._closed_lookup_rpcs.setdefault(request_id, {})
         for url in self._server_urls:
-            self.req_clients[url].free_lookup_locks(
+            future = self.req_clients[url].free_lookup_locks(
                 base_key, self.tp_size, extra_ranges
             )
+            pending.setdefault(url, set()).add(future)
 
     def end_session(self, request_id: str) -> None:
-        """
-        Notify LMCache server to remove the session for a finished request.
+        """Submit END after each server acknowledges its admitted lookup RPCs.
 
-        If the request's lookup is still tracked, it stops sending RPCs, and
-        this function blocks until its LOOKUP and status RPCs already in
-        flight complete, so their handlers cannot recreate the session after
-        END_SESSION.
+        Returns without waiting for LOOKUP, status or FREE replies, including
+        after a local timeout marks a server unhealthy. A failed predecessor
+        is logged and prevents END on that server; it is not a successful ACK.
+        Pending transport futures retain the ordering callbacks. No completed
+        request identities are retained by the adapter.
+        A deferred, unsent replacement is cancelled.
 
         Args:
-            request_id: The ID of the finished request.
+            request_id: Finished request. As with request_finished, callers
+                notify once and do not reuse the identity while RPCs remain.
         """
-        if not self.is_healthy:
-            return
-
-        lookup = self._lookups.get(request_id)
+        self._deferred_lookups.pop(request_id, None)
+        pending = self._closed_lookup_rpcs.pop(request_id, {})
+        lookup = self._lookups.pop(request_id, None)
         if lookup is not None:
-            url = lookup.drain()
-            if url is not None:
-                self._mark_lookup_timed_out(url)
-                return
-
+            for url, futures in lookup.close_and_take_pending_rpcs().items():
+                pending.setdefault(url, set()).update(futures)
         for url in self._server_urls:
-            self.req_clients[url].end_session(request_id)
+            _OrderedSessionEnd(
+                request_id, self.req_clients[url], pending.get(url, set())
+            ).start()
 
     def report_block_allocations(
         self,
@@ -1224,6 +1324,47 @@ class LMCacheMPSchedulerAdapter:
         else:
             self._store_request_pending_counts[req_id] = total
             return False
+
+    def _lookup_predecessors_complete(self, request_id: str) -> bool:
+        """Poll cleanup RPCs without losing unconfirmed END obligations."""
+        deferred = self._deferred_lookups.get(request_id)
+        if deferred is not None and deferred.failed:
+            return False
+        predecessors = self._closed_lookup_rpcs.get(request_id)
+        if not predecessors:
+            return True
+        if deferred is None:
+            deferred = _DeferredLookup(time.monotonic() + self._mq_timeout)
+            self._deferred_lookups[request_id] = deferred
+
+        waiting_urls: list[str] = []
+        for url, futures in predecessors.items():
+            for future in tuple(futures):
+                if not future.query():
+                    continue
+                if future.exception_ is not None:
+                    deferred.failed = True
+                    logger.error(
+                        "Cannot replace lookup for request %s after failed RPC "
+                        "to %s: %s",
+                        request_id,
+                        url,
+                        future.exception_,
+                    )
+                else:
+                    futures.remove(future)
+            if futures:
+                waiting_urls.append(url)
+        if deferred.failed:
+            return False
+        if not waiting_urls:
+            self._closed_lookup_rpcs.pop(request_id, None)
+            return True
+        if time.monotonic() >= deferred.deadline:
+            deferred.failed = True
+            for url in waiting_urls:
+                self._mark_lookup_timed_out(url)
+        return False
 
     def _mark_lookup_timed_out(self, url: str) -> None:
         """Log and mark ``url`` unhealthy after an unanswered lookup RPC."""
