@@ -64,6 +64,9 @@ func BuildContainerArgs(spec *lmcachev1alpha1.LMCacheEngineSpec) []string {
 	if spec.IsolatedIPCEnabled() {
 		args = append(args, "--isolated-ipc")
 	}
+	if spec.EngineDrivenTransfer() {
+		args = append(args, "--supported-transfer-mode", "engine_driven")
+	}
 
 	// Eviction args
 	evPolicy := "LRU"

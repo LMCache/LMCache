@@ -89,7 +89,12 @@ func startupProbeFailureThreshold(l1SizeGB float64) int32 {
 // BuildDaemonSet constructs a DaemonSet for the given LMCacheEngine.
 // Selector labels take precedence over additional pod labels.
 func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
-	return buildDaemonSetCore(engine.Name, engine.Namespace, &engine.Spec, BuildContainerArgs(&engine.Spec), "lmcache/vllm-openai")
+	args := BuildContainerArgs(&engine.Spec)
+	if engine.Spec.EngineDrivenTransfer() {
+		// Engines on a node share the host /dev/shm, so the pool name must be unique.
+		args = append(args, "--shm-name", fmt.Sprintf("lmcache-%s-%s", engine.Namespace, engine.Name))
+	}
+	return buildDaemonSetCore(engine.Name, engine.Namespace, &engine.Spec, args, "lmcache/vllm-openai")
 }
 
 // buildDaemonSetCore constructs the DaemonSet shared by the LMCacheEngine and
