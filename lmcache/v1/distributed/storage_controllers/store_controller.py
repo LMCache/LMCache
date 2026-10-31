@@ -10,7 +10,7 @@ The controller runs a background thread with an event-driven loop that:
 """
 
 # Standard
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 import enum
 import select
@@ -21,6 +21,7 @@ import weakref
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1ManagerListener
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -206,7 +207,7 @@ class StoreController(StorageControllerInterface):
        store eventfds.
     3. On new keys: consults StorePolicy to decide targets,
        calls reserve_read to get MemoryObjs, and submits store
-       tasks to L2 adapters.
+       tasks to L2 adapters. Keys past the budget wait unlocked.
     4. On L2 task completion: releases read locks, optionally
        deletes keys from L1 per policy.
 
@@ -215,6 +216,10 @@ class StoreController(StorageControllerInterface):
         l2_adapters: List of L2 adapter instances.
         adapter_descriptors: Descriptors for each L2 adapter (same order).
         policy: The store policy for deciding targets and deletions.
+        eviction_config: The L1's eviction settings. In-flight stores
+            read-lock at most ``trigger_watermark - eviction_ratio`` of L1,
+            so eviction always has something to free; the remaining keys
+            wait in a queue without locks. ``None`` submits without a limit.
     """
 
     # Singleton dispatch for ``lmcache_mp.num_inflight_l2_stores``: tests may
@@ -233,8 +238,10 @@ class StoreController(StorageControllerInterface):
         l2_adapters: list[L2AdapterInterface],
         adapter_descriptors: list[L2AdapterDescriptor],
         policy: StorePolicy,
+        eviction_config: EvictionConfig | None = None,
     ) -> None:
         self._l1_manager = l1_manager
+        self._eviction_config = eviction_config
         self._l2_adapters: dict[int, L2AdapterInterface] = {
             desc.index: adapter
             for desc, adapter in zip(adapter_descriptors, l2_adapters, strict=True)
@@ -269,6 +276,15 @@ class StoreController(StorageControllerInterface):
 
         # Shadow counter for status reporting (updated in background loop)
         self._status_in_flight_count: int = 0
+
+        # Same-shape key groups waiting for the budget; they hold no locks.
+        self._queued: deque[list[ObjectKey]] = deque()
+        self._status_queued_count: int = 0
+        # Keys read-locked by in-flight stores -> (tasks holding the key, its
+        # physical L1 size). A key stored to several adapters is one L1
+        # object, so ``_in_flight_bytes`` counts it once.
+        self._locked_objects: dict[ObjectKey, tuple[int, int]] = {}
+        self._in_flight_bytes: int = 0
 
         StoreController._gauge_target = self
         StoreController._gauge_targets[l1_manager.config.tag] = self
@@ -340,6 +356,7 @@ class StoreController(StorageControllerInterface):
             "thread_alive": is_healthy,
             "pending_keys_count": self._listener.pending_count(),
             "in_flight_task_count": self._status_in_flight_count,
+            "queued_keys_count": self._status_queued_count,
             "num_l2_adapters": len(self._l2_adapters),
             "num_active_adapters": len(self._l2_adapters) - num_draining,
             "num_draining_adapters": num_draining,
@@ -508,6 +525,10 @@ class StoreController(StorageControllerInterface):
                             task_key[0],
                             task_key[1],
                         )
+                try:
+                    self._submit_queued()
+                except Exception:
+                    logger.exception("Unexpected error submitting queued stores")
 
             # Finalize any draining adapter no longer have any in-flight
             # tasks.
@@ -572,13 +593,8 @@ class StoreController(StorageControllerInterface):
 
     def _process_new_keys(self, keys: list[ObjectKey]) -> None:
         """
-        Process a batch of newly written keys.
-
-        1. Ask the policy which adapters each key should go to.
-        2. For each adapter target, reserve read access on L1 to get
-           MemoryObj references (skip keys that fail — best-effort).
-        3. Submit store tasks to L2 adapters.
-        4. Track in-flight tasks for later cleanup.
+        Queue a batch of newly written keys, one group per shape, then
+        submit what the budget allows (see ``_submit_queued``).
 
         Args:
             keys (list[ObjectKey]): Keys that finished writing to L1.
@@ -587,7 +603,27 @@ class StoreController(StorageControllerInterface):
         # A rewritten key is deleted again once its own store finishes.
         self._deferred_l1_deletions.difference_update(keys)
         for group in _group_keys_by_shape(keys).values():
+            self._queued.append(group)
+            self._status_queued_count += len(group)
+        self._submit_queued()
+
+    def _submit_queued(self) -> None:
+        """Submit queued groups, oldest first, while under the budget. Keys
+        evicted while queued are skipped by ``reserve_read``."""
+        while self._queued and not self._over_budget():
+            group = self._queued.popleft()
+            self._status_queued_count -= len(group)
             self._submit_store_for_single_shape(group)
+
+    def _over_budget(self) -> bool:
+        """Whether in-flight stores already read-lock the whole budget."""
+        if self._eviction_config is None or self._in_flight_bytes == 0:
+            # Nothing in flight: let one group go even if it alone is larger.
+            return False
+        _, total_bytes = self._l1_manager.get_memory_usage()
+        cfg = self._eviction_config
+        budget = total_bytes * (cfg.trigger_watermark - cfg.eviction_ratio)
+        return self._in_flight_bytes >= budget
 
     def _submit_store_for_single_shape(self, keys: list[ObjectKey]) -> None:
         """Submit ``keys`` (all same shape) to their target adapters."""
@@ -642,9 +678,9 @@ class StoreController(StorageControllerInterface):
                 successful_keys.append(key)
                 successful_objs.append(obj)
 
-            # L1 read-failure anomaly reporting: target_keys come from an
+            # L1 read-failure reporting: target_keys come from an
             # L1_WRITE_FINISHED notification, so failing to reserve_read them
-            # immediately after means an unexpected eviction or lock race.
+            # means they were evicted while queued, or a lock race.
             if not_found_keys:
                 self._event_bus.publish(
                     Event(
@@ -689,6 +725,12 @@ class StoreController(StorageControllerInterface):
                 read_locked_keys=list(successful_keys),
             )
             self._status_in_flight_count += 1
+            for key, obj in zip(successful_keys, successful_objs, strict=True):
+                holders, size = self._locked_objects.get(key, (0, 0))
+                if holders == 0:
+                    size = obj.get_physical_size()
+                    self._in_flight_bytes += size
+                self._locked_objects[key] = (holders + 1, size)
 
             # All objects for a single store task share one layout (L1
             # allocates uniform MemoryObjs per chunk), so total bytes is
@@ -759,6 +801,12 @@ class StoreController(StorageControllerInterface):
         success = task.l2_store_result
 
         l1_mgr.finish_read(task.read_locked_keys)
+        for key in task.read_locked_keys:
+            holders, size = self._locked_objects.pop(key)
+            if holders > 1:
+                self._locked_objects[key] = (holders - 1, size)
+            else:
+                self._in_flight_bytes -= size
         del self._in_flight_tasks[task_key]
         self._status_in_flight_count -= 1
 
