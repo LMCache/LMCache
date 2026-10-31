@@ -55,6 +55,8 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
         num_workers: Number of native connector workers and NIXL agents.
         max_capacity_gb: Capacity used for L2 accounting. Zero disables the
             capacity limit.
+        enable_reactor: Opt-in switch for the cross-call object reactor;
+            the default false keeps every backend on the serial worker path.
     """
 
     def __init__(
@@ -63,11 +65,13 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
         backend_params: dict[str, str],
         num_workers: int = 4,
         max_capacity_gb: float = 0,
+        enable_reactor: bool = False,
     ) -> None:
         self.backend = backend
         self.backend_params = dict(backend_params)
         self.num_workers = num_workers
         self.max_capacity_gb = max_capacity_gb
+        self.enable_reactor = enable_reactor
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "NixlNativeL2AdapterConfig":
@@ -117,11 +121,16 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
         ):
             raise ValueError("max_capacity_gb must be a non-negative number")
 
+        enable_reactor = d.get("enable_reactor", False)
+        if not isinstance(enable_reactor, bool):
+            raise ValueError("enable_reactor must be a boolean")
+
         return cls(
             backend=backend,
             backend_params=backend_params,
             num_workers=num_workers,
             max_capacity_gb=float(max_capacity_gb),
+            enable_reactor=enable_reactor,
         )
 
     @classmethod
@@ -133,7 +142,10 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
             "- backend_params (dict[str, str]): parameters forwarded to NIXL; "
             "FILE_SEG backends require file_path and accept use_direct_io\n"
             "- num_workers (int): worker/agent count (default 4, >0)\n"
-            "- max_capacity_gb (float): accounting capacity (default 0)"
+            "- max_capacity_gb (float): accounting capacity (default 0)\n"
+            "- enable_reactor (bool): opt-in cross-call reactor for "
+            "pending-transfer storage (default false; serial worker path "
+            "otherwise)"
         )
 
 
@@ -186,6 +198,7 @@ def _create_nixl_native_l2_adapter(
         l1_base=l1_memory_desc.ptr,
         l1_size=l1_memory_desc.size,
         l1_alignment=l1_memory_desc.align_bytes,
+        enable_reactor=config.enable_reactor,
     )
     try:
         if config.eviction_config is not None and not native_client.supports_delete:
@@ -201,6 +214,7 @@ def _create_nixl_native_l2_adapter(
             "backend": config.backend,
             "storage_type": native_client.storage_type,
             "num_workers": config.num_workers,
+            "enable_reactor": config.enable_reactor,
             "supports_query": native_client.supports_query,
             "supports_delete": native_client.supports_delete,
             "supports_direct_io": native_client.supports_direct_io,
@@ -215,10 +229,11 @@ def _create_nixl_native_l2_adapter(
         raise
     logger.info(
         "Created native NIXL adapter (backend=%s, storage_type=%s, workers=%d, "
-        "pad_buffers_to_alignment=%s)",
+        "enable_reactor=%s, pad_buffers_to_alignment=%s)",
         config.backend,
         native_client.storage_type,
         config.num_workers,
+        config.enable_reactor,
         pad_buffers_to_alignment,
     )
     return NativeConnectorL2Adapter(
