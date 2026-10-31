@@ -27,7 +27,10 @@ def _serve(argv: list[str]) -> tuple[list[str], MPCoordinatorConfig, MagicMock]:
         calls.append("metrics")
         captured["config"] = config
 
-    def fake_create_app(config: MPCoordinatorConfig) -> MagicMock:
+    def fake_create_app(
+        config: MPCoordinatorConfig, http_authentication: object | None = None
+    ) -> MagicMock:
+        assert http_authentication is not None
         calls.append("app")
         return app
 

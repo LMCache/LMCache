@@ -379,7 +379,11 @@ def run_cache_server(
     if coordinator_config.url:
 
         def bind_chunk_size_to_coordinator(chunk_size: int) -> None:
-            bind_coordinator_chunk_size(coordinator_config.url, chunk_size)
+            bind_coordinator_chunk_size(
+                coordinator_config.url,
+                chunk_size,
+                api_key_files=mp_config.api_key_files,
+            )
 
         ctx.add_chunk_size_bind_listener(bind_chunk_size_to_coordinator)
     InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
