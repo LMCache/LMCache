@@ -653,6 +653,7 @@ def test_storage_manager_routes_generic_l2_reconfigure_to_adapter():
     sm = StorageManager.__new__(StorageManager)
     adapter = _FakeReconfigurableAdapter()
     sm._adapters_lock = threading.Lock()
+    sm._closing_adapters = set()
     sm._l2_adapters = {0: cast(L2AdapterInterface, adapter)}
     # Reconfiguring changes capacity, so the call also announces the new
     # topology; that needs enough state to build a capacity snapshot.
@@ -672,6 +673,7 @@ def test_storage_manager_routes_generic_l2_reconfigure_to_adapter():
 def test_storage_manager_finds_serde_wrapped_reconfigurable_adapter():
     sm = StorageManager.__new__(StorageManager)
     sm._adapters_lock = threading.Lock()
+    sm._closing_adapters = set()
     sm._l2_adapters = {
         0: cast(L2AdapterInterface, _SerdeLikeWrapper(_FakeReconfigurableAdapter()))
     }
