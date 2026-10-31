@@ -77,6 +77,7 @@ class P2PL2AdapterConfig(L2AdapterConfigBase):
     - peer_transfer_channel_server_url: the peer's transfer-channel server url.
     - lookup_timeout_s: deadline for a lookup result before it counts as a miss.
     - load_timeout_s: deadline for a load before it counts as a failure.
+      Failure is reported only after the underlying transfer is terminal.
     """
 
     def __init__(
@@ -330,20 +331,32 @@ class P2PL2Adapter(L2AdapterInterface):
         return task_id
 
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
+        """Poll a load without releasing ownership of an active transfer.
+
+        Args:
+            task_id: Task ID returned by ``submit_load_task``.
+
+        Returns:
+            None while the transfer is active or the task is unknown. Once the
+            transfer is terminal, a bitmap of successful keys, or an all-zero
+            bitmap if the load deadline has passed. A deadline is not transfer
+            cancellation: callers must retain buffers and locks until a bitmap
+            is returned, even if the transfer remains pending indefinitely.
+        """
         task = self._load_tasks.get(task_id)
         if task is None:
             return None
         if task.failed:
             del self._load_tasks[task_id]
             return Bitmap(len(task.keys))
+        result = self._tc_client.query_read_status(task.read_task_id)
+        if not result.is_finished():
+            return None
+
         if time.monotonic() > task.deadline:
             del self._load_tasks[task_id]
             logger.warning("P2P load task %d timed out; treating as a failure", task_id)
             return Bitmap(len(task.keys))
-
-        result = self._tc_client.query_read_status(task.read_task_id)
-        if not result.is_finished():
-            return None
 
         bitmap = Bitmap(len(task.keys))
         for i, succeeded in enumerate(result.succeeded_mask):
