@@ -94,7 +94,7 @@ def test_frontend_api_accepts_configured_key(headers: dict[str, str]) -> None:
     [
         (["frontend-secret"], "Bearer backend-secret", ["Bearer backend-secret"]),
         (["frontend-secret"], None, []),
-        ([], "Bearer backend-secret", ["Bearer backend-secret"]),
+        (["frontend-secret"], "Bearer backend-secret", ["Bearer backend-secret"]),
         ([], None, ["Bearer frontend-secret"]),
     ],
 )
@@ -150,3 +150,14 @@ def test_frontend_remains_compatible_when_authentication_is_disabled() -> None:
         response = client.get("/api/proxies")
 
     assert response.status_code == 200
+
+
+def test_backend_key_requires_frontend_authentication() -> None:
+    """A backend credential cannot be exposed through an unauthenticated proxy."""
+    with pytest.raises(ValueError, match="Frontend API authentication"):
+        frontend.create_app(backend_authorization_header="Bearer backend-secret")
+
+    frontend.create_app(
+        APIKeyVerifier(["frontend-secret"]), "Bearer backend-secret"
+    )
+    frontend.create_app()

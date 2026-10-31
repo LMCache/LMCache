@@ -69,6 +69,17 @@ def _load_backend_authorization(key_file: str | None) -> str | None:
     return bearer_authorization_header(api_keys[0])
 
 
+def _validate_authentication_configuration(
+    http_authentication: APIKeyVerifier,
+    backend_authorization_header: str | None,
+) -> None:
+    """Require caller authentication when the frontend holds a backend key."""
+    if backend_authorization_header is not None and not http_authentication.enabled:
+        raise ValueError(
+            "Frontend API authentication must be configured when a backend API key is set"
+        )
+
+
 def _package_resource_path(relative: str) -> str:
     """Return absolute filesystem path for a file shipped inside the package.
 
@@ -1058,11 +1069,15 @@ def create_app(
     Returns:
         Configured frontend application.
     """
+    authentication = http_authentication or APIKeyVerifier()
+    _validate_authentication_configuration(
+        authentication, backend_authorization_header
+    )
     app = FastAPI(
         title="Flexible Proxy Server",
         description="HTTP proxy service supporting specified target hosts and ports",
     )
-    app.state.http_authentication = http_authentication or APIKeyVerifier()
+    app.state.http_authentication = authentication
     app.state.backend_authorization_header = backend_authorization_header
     app.add_middleware(
         HTTPBearerAuthenticationMiddleware,
@@ -1165,6 +1180,9 @@ def main() -> None:
     http_authentication = APIKeyVerifier(load_service_api_keys(args.api_key_file))
     backend_authorization_header = _load_backend_authorization(
         args.backend_http_api_key_file
+    )
+    _validate_authentication_configuration(
+        http_authentication, backend_authorization_header
     )
 
     # Initialize node configuration

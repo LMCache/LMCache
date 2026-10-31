@@ -215,6 +215,10 @@ for the dashboard and the
 server. API keys do not encrypt traffic; terminate TLS at a trusted reverse
 proxy when traffic crosses an untrusted network.
 
+When a backend key is configured, a frontend API key is required as well. The
+frontend exits with an error if the backend key is set without frontend
+authentication, preventing unauthenticated callers from using the proxy.
+
 The literal ``*-local-key`` values above are only for this local walkthrough.
 For a deployment, generate independent high-entropy values and inject them
 through secret files or environment variables instead of putting them in shell
