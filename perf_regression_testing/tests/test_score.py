@@ -9,7 +9,11 @@ from perf_regression_testing.runner.score import PROMPT_DIR, score
 
 
 def _request(
-    start_s: float, end_s: float, phase: str = "profiling", rid: str = ""
+    start_s: float,
+    end_s: float,
+    phase: str = "profiling",
+    rid: str = "",
+    ttft_ms: float = 500.0,
 ) -> dict[str, object]:
     return {
         "metadata": {
@@ -19,7 +23,7 @@ def _request(
             "request_end_ns": int(end_s * 1e9),
         },
         "metrics": {
-            "time_to_first_token": {"value": 500.0},
+            "time_to_first_token": {"value": ttft_ms},
             "request_latency": {"value": (end_s - start_s) * 1e3},
             "output_sequence_length": {"value": 11},
         },
@@ -71,13 +75,15 @@ def test_ideal_hit_share_is_the_token_prefix_shared_with_any_earlier_prompt(
     a, b = list(range(128)), list(range(1000, 1064))
     # warm caches a; w1 extends it; w2 shares nothing; w3 never reached the
     # server; w4 leaves w1 30 tokens into a block; w5 is all cached, so it
-    # hits all but its last token; late is after the window, which ends at 200.
+    # hits all but its last token; the window ends at 200, and slow starts in
+    # it but is still in prefill then, and late starts after it.
     sent = {
         "warm": a,
         "w1": a + b + [7] * 10,
         "w2": list(range(5000, 5100)),
         "w4": a + b[:30] + [8],
         "w5": a[:50],
+        "slow": list(range(9000, 9300)),
         "late": a + b,
     }
     for rid, ids in sent.items():
@@ -89,6 +95,7 @@ def test_ideal_hit_share_is_the_token_prefix_shared_with_any_earlier_prompt(
         _request(103.0, 107.0, rid="w3"),
         _request(104.0, 108.0, rid="w4"),
         _request(105.0, 109.0, rid="w5"),
+        _request(190.0, 260.0, rid="slow", ttft_ms=30_000.0),
         _request(250.0, 260.0, rid="late"),
     ]
     (tmp_path / "aiperf" / "profile_export.jsonl").write_text(

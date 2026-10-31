@@ -130,9 +130,12 @@ def ideal_hit_share(
         we: Window end.
 
     Returns:
-        Hit tokens over prompt tokens of the requests that start in
-        ``[ws, we]``, or None when none of them has a prompt file. A request
-        without one never reached the server's prefill and is left out.
+        Hit tokens over prompt tokens of the requests whose first token lands
+        in ``[ws, we]``, or None when none of them has a prompt file. vLLM
+        counts a prompt by source when its prefill ends, so this is the
+        population ``cache_hit_share`` covers: one still in prefill at ``we``
+        is in neither. A request without a prompt file never reached the
+        server's prefill and is left out.
     """
     width = _ITEM * _BLOCK
     # Chained hash of a full-block prefix -> the blocks (or tails) after it.
@@ -158,7 +161,7 @@ def ideal_hit_share(
         for block in blocks:
             after[h].add(block)
             h = hashlib.blake2b(h + block, digest_size=8).digest()
-        if ws <= r["start"] <= we:
+        if r["ttft"] is not None and ws <= r["start"] + r["ttft"] <= we:
             n = len(data) // _ITEM
             hit += min(common // _ITEM, n - 1)
             total += n
