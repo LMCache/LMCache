@@ -10,6 +10,7 @@ sharing cache across nodes.
    bigtable
    sagemaker_hyperpod
    s3
+   minio
    hfbucket
    mooncake_store
    resp
