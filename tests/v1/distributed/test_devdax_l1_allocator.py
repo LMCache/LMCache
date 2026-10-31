@@ -24,6 +24,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.utils import DaxDeviceGeometry
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -38,6 +39,7 @@ from lmcache.v1.distributed.config import (
     requires_single_l1_memory_region,
 )
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError
+from lmcache.v1.distributed.internal_api import CxlArenaDescriptor
 from lmcache.v1.distributed.l1_manager import DevDaxL1Manager
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -59,6 +61,7 @@ from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
 )
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
+    CxlPeerMapping,
     DevDaxArenaState,
     DevDaxMemoryAllocator,
     DevDaxRemoveMode,
@@ -293,6 +296,62 @@ def test_devdax_allocator_rejects_invalid_offsets(tmp_path):
         DevDaxMemoryAllocator(size=4096, device_path=path, offset=1)
     with pytest.raises(RuntimeError, match="exceeds"):
         DevDaxMemoryAllocator(size=8192, device_path=path, offset=12 * 1024)
+
+
+@pytest.mark.parametrize("pool_offset", [0, 8192])
+def test_shared_devdax_allocator_preserves_bytes_outside_slab(
+    tmp_path: Path, pool_offset: int
+) -> None:
+    """A shared arena writes only its header and offset-relative payload, and
+    clears the header identity when it closes."""
+    page = 4096
+    path = _make_mmap_file(tmp_path, size=page * 6)
+    allocator = DevDaxMemoryAllocator(
+        size=page,
+        device_path=path,
+        align_bytes=page,
+        pool_id="pool",
+        offset=pool_offset,
+    )
+    arena = allocator.cxl_arena
+    assert arena is not None
+    try:
+        obj = allocator.allocate(torch.Size([page]), torch.uint8)
+        assert obj is not None
+        obj.raw_tensor.fill_(0x5A)
+        allocator.free(obj)
+        del obj
+    finally:
+        allocator.close()
+    data = Path(path).read_bytes()
+    assert data[:pool_offset] == bytes(pool_offset)
+    assert data[pool_offset : pool_offset + page] == bytes(page)
+    assert data[pool_offset + page : pool_offset + 2 * page] == bytes([0x5A]) * page
+    assert data[pool_offset + 2 * page :] == bytes(len(data) - pool_offset - 2 * page)
+
+
+@pytest.mark.parametrize("mapping_kind", ["local", "owner", "peer"])
+def test_devdax_mapping_rejects_range_beyond_capacity(
+    tmp_path: Path, mapping_kind: str
+) -> None:
+    """Local allocation and shared owner/peer mappings enforce device bounds."""
+    page = 4096
+    path = _make_mmap_file(tmp_path, size=page * 4)
+    with pytest.raises(RuntimeError, match="exceeds.*capacity"):
+        if mapping_kind == "peer":
+            CxlPeerMapping(
+                path, CxlArenaDescriptor("pool", 2 * page, 2 * page, page, "s")
+            )
+        elif mapping_kind == "owner":
+            DevDaxMemoryAllocator(
+                size=2 * page,
+                device_path=path,
+                align_bytes=page,
+                pool_id="pool",
+                offset=2 * page,
+            )
+        else:
+            DevDaxMemoryAllocator(size=5 * page, device_path=path, align_bytes=page)
 
 
 def test_devdax_allocator_registers_cuda_host_mapping(tmp_path, monkeypatch):
@@ -1407,7 +1466,6 @@ def test_owns_range_uses_character_device_number(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, same_device: bool
 ) -> None:
     primary = _make_mmap_file(tmp_path, size=4096)
-    manager = _pure_devdax_manager(primary)
     original_stat, original_fstat = os.stat, os.fstat
     mapped = original_stat(primary)
 
@@ -1421,19 +1479,29 @@ def test_owns_range_uses_character_device_number(
     def device_fstat(fd: int) -> Any:
         info = original_fstat(fd)
         if (info.st_dev, info.st_ino) == (mapped.st_dev, mapped.st_ino):
-            return SimpleNamespace(st_mode=stat.S_IFCHR, st_rdev=123)
+            return SimpleNamespace(
+                st_mode=stat.S_IFCHR, st_rdev=123, st_size=info.st_size
+            )
         return info
 
-    try:
-        with monkeypatch.context() as patch:
-            patch.setattr(os, "stat", device_stat)
-            patch.setattr(os, "fstat", device_fstat)
+    with monkeypatch.context() as patch:
+        # The device identity is captured from the open fd at map time, and
+        # the fake character device needs a geometry for the range check.
+        patch.setattr(os, "stat", device_stat)
+        patch.setattr(os, "fstat", device_fstat)
+        patch.setattr(
+            lmcache_utils,
+            "get_dax_device_geometry",
+            lambda fd: DaxDeviceGeometry(capacity=4096, align=1),
+        )
+        manager = _pure_devdax_manager(primary)
+        try:
             assert manager.owns_range("/dev/alias", 0, 4096) is same_device
             # A disjoint range of the same device is not owned.
             assert not manager.owns_range("/dev/alias", 4096, 4096)
             assert not manager.owns_range(str(tmp_path / "missing.bin"), 0, 4096)
-    finally:
-        manager.close()
+        finally:
+            manager.close()
 
 
 def test_add_device_validates_arguments(tmp_path):

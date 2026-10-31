@@ -25,12 +25,13 @@ from lmcache.v1.distributed.api import (
     PrefetchHandle,
     PrefetchTaskSpec,
 )
+from lmcache.v1.distributed.internal_api import CXL_METADATA_KEY, CxlArenaDescriptor
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel import (
     delete_transfer_channel_context,
     initialize_transfer_channel_context,
 )
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.transfer_channel.api import MemoryRegionAddress
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -50,7 +51,7 @@ from lmcache.v1.periodic_thread import (
 logger = init_logger(__name__)
 
 # Sentinel address for keys that were not found (or fell past the L1 prefix).
-_INVALID_ADDRESS = TransferChannelAddress(offset=-1, size=0)
+_INVALID_ADDRESS = MemoryRegionAddress(offset=-1, size=0)
 
 # Consecutive missed polls a peer may be absent before its adapter is removed.
 _MAX_MISSES = 3
@@ -128,6 +129,7 @@ class _PeerInstance:
     ip: str
     p2p_advertised_url: str
     mq_port: int
+    cxl_arena: CxlArenaDescriptor | None = None
 
 
 @dataclass
@@ -139,6 +141,7 @@ class _PeerAdapter:
     p2p_advertised_url: str
     mq_port: int
     consecutive_misses: int = 0
+    cxl_arena: CxlArenaDescriptor | None = None
 
 
 @dataclass
@@ -161,13 +164,12 @@ class _P2PLookupJob:
 class P2PController(DiscoverableModule):
     """Serves lookup requests from peers and maintains one L2 adapter per peer.
 
-    P2P is enabled when ``p2p_config`` carries an advertise URL; otherwise the
-    controller only answers lookup/unlock RPCs.
+    P2P is enabled by an advertise URL or the CXL transfer engine; otherwise
+    the controller only answers lookup/unlock RPCs.
 
     Args:
         ctx: Shared engine context providing the storage manager and friends.
-        p2p_config: Peer-to-peer configuration; inert when its advertise URL is
-            empty.
+        p2p_config: Peer discovery and transfer configuration.
         coordinator_config: Coordinator connection used for peer discovery.
         instance_id: Stable id of this instance, used to exclude itself from the
             discovered peer set.
@@ -198,6 +200,14 @@ class P2PController(DiscoverableModule):
     ) -> None:
         self._ctx = ctx
         self._p2p_config = p2p_config
+        # Peers can only read the L1 this mode exports: the DRAM L1 registered
+        # with the transfer channel, or the owned slab of the CXL L1.
+        self._served_l1_tags = MemoryTags(
+            MemorySegment.CXL
+            if p2p_config.transfer_engine == "cxl"
+            else MemorySegment.DRAM,
+            MemoryResidency.LOCAL,
+        )
         self._instance_id = instance_id
         self._request_scheme = "grpc" if request_transport == "grpc" else "tcp"
         self._next_task_id = 0
@@ -228,29 +238,31 @@ class P2PController(DiscoverableModule):
             coordinator_config: Coordinator connection used for peer discovery.
 
         Raises:
-            ValueError: There is not exactly one local DRAM L1, or it exposes
-                no registerable memory buffer.
+            ValueError: There is not exactly one L1 with the served memory
+                tags, or a non-CXL engine finds no registerable memory buffer.
         """
-        # Peers read the L1 registered with the transfer channel: the one
-        # local DRAM L1.
         try:
             l1_manager = self._ctx.storage_manager.get_l1_manager_by_tags(
-                MemoryTags(segment=MemorySegment.DRAM, residency=MemoryResidency.LOCAL)
+                self._served_l1_tags
             )
         except ValueError as e:
-            raise ValueError(f"P2P requires exactly one local DRAM L1: {e}") from e
-        l1_memory_desc = l1_manager.get_l1_memory_desc()
-        if l1_memory_desc is None:
             raise ValueError(
-                f"P2P requires a registerable L1 buffer; L1 "
-                f"{l1_manager.config.tag!r} exposes none"
+                f"P2P requires exactly one {self._served_l1_tags} L1: {e}"
+            ) from e
+        # CXL peers map the slab directly; only copying engines need a channel.
+        if self._p2p_config.transfer_engine != "cxl":
+            l1_memory_desc = l1_manager.get_l1_memory_desc()
+            if l1_memory_desc is None:
+                raise ValueError(
+                    f"P2P requires a registerable L1 buffer; L1 "
+                    f"{l1_manager.config.tag!r} exposes none"
+                )
+            initialize_transfer_channel_context(
+                self._p2p_config.transfer_engine,
+                l1_memory_desc,
+                listen_url=self._p2p_config.effective_listen_url,
+                advertise_url=self._p2p_config.advertise_url,
             )
-        initialize_transfer_channel_context(
-            self._p2p_config.transfer_engine,
-            l1_memory_desc,
-            listen_url=self._p2p_config.effective_listen_url,
-            advertise_url=self._p2p_config.advertise_url,
-        )
         self._instances_url = coordinator_config.url.rstrip("/") + "/instances"
         timeout = max(1.0, coordinator_config.heartbeat_interval)
         self._http_client = httpx.Client(timeout=timeout)
@@ -298,7 +310,7 @@ class P2PController(DiscoverableModule):
             self._http_client.close()
             self._http_client = None
 
-        if self._p2p_config.enabled:
+        if self._p2p_config.enabled and self._p2p_config.transfer_engine != "cxl":
             delete_transfer_channel_context()
 
     # -----------------------------------------------------------------
@@ -335,16 +347,14 @@ class P2PController(DiscoverableModule):
 
         key_groups = _group_keys_by_object_group(keys, group_layout_descs)
         if key_groups:
-            # NOTE: only objects already resident in the local DRAM L1 (the L1
-            # registered with the transfer channel) are locked, from no other
-            # L1 and no L2; "full" keeps every resident key, gaps allowed.
+            # NOTE: only objects already resident in the served L1 are locked,
+            # from no other L1 and no L2; "full" keeps every resident key, gaps
+            # allowed.
             handle = self._ctx.storage_manager.submit_prefetch_task(
                 PrefetchTaskSpec(
                     key_groups=key_groups,
                     fetching_policy="full",
-                    allowed_l1_memory_tags=frozenset(
-                        {MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)}
-                    ),
+                    allowed_l1_memory_tags=frozenset({self._served_l1_tags}),
                     allowed_l2_memory_tags=frozenset(),
                 ),
                 external_request_id=f"p2p-{task_id}",
@@ -378,22 +388,22 @@ class P2PController(DiscoverableModule):
     def p2p_query_lookup_results(
         self,
         task_id: int,
-    ) -> list[TransferChannelAddress] | None:
+    ) -> list[MemoryRegionAddress] | None:
         """Query the results of the lookup request specified by the task ID.
 
-        Returning a list of TransferChannelAddress objects indicates when the
+        Returning a list of MemoryRegionAddress objects indicates when the
         lookup is completed. None indicates the lookup has not completed yet.
 
         The returned list will always have the same length as the number of
         keys submitted in the corresponding p2p_lookup_and_lock call. For
-        objects that is not found, the corresponding TransferChannelAddress
+        objects that is not found, the corresponding MemoryRegionAddress
         will have an invalid offset (negative value).
 
         Args:
             task_id: The unique task ID returned by p2p_lookup_and_lock.
 
         Returns:
-            A list of TransferChannelAddress objects if the lookup is complete,
+            A list of MemoryRegionAddress objects if the lookup is complete,
             or None if the lookup is still in progress or the result has been
             queried. (Exactly once request)
         """
@@ -472,7 +482,7 @@ class P2PController(DiscoverableModule):
         self,
         job: _P2PLookupJob,
         found_rows: list[Bitmap],
-    ) -> list[TransferChannelAddress]:
+    ) -> list[MemoryRegionAddress]:
         """Build the per-key transfer addresses for a completed lookup.
 
         ``found_rows`` is parallel to ``job.key_groups``; the keys at its set
@@ -503,10 +513,29 @@ class P2PController(DiscoverableModule):
                 # Locked but unreadable (e.g. evicted under a race); leave it
                 # marked invalid so the peer skips it.
                 continue
-            address = TransferChannelAddress(
-                offset=obj.shm_offset,
-                size=obj.shm_byte_length,
-            )
+            if self._p2p_config.transfer_engine == "cxl":
+                address = self._ctx.storage_manager.get_cxl_address(obj)
+                layout = next(
+                    (
+                        row.layout_desc
+                        for row in job.key_groups
+                        if row.object_group_id == key.object_group_id
+                    ),
+                    None,
+                )
+                if (
+                    address is None
+                    or layout is None
+                    or obj.get_shapes() != layout.shapes
+                    or obj.get_dtypes() != layout.dtypes
+                ):
+                    self._ctx.storage_manager.finish_read_prefetched([key])
+                    continue
+            else:
+                address = MemoryRegionAddress(
+                    offset=obj.shm_offset,
+                    size=obj.shm_byte_length,
+                )
             for i in positions.get(key, ()):
                 addresses[i] = address
         return addresses
@@ -539,11 +568,26 @@ class P2PController(DiscoverableModule):
             inst.instance_id: inst
             for inst in instances
             if inst.instance_id != self._instance_id
-            and inst.p2p_advertised_url
+            and self._is_compatible_peer(inst)
             and inst.ip
             and inst.mq_port
         }
         return self._apply_state(_P2PState.REGISTERED, upstream)
+
+    def _is_compatible_peer(self, inst: _PeerInstance) -> bool:
+        """Whether ``inst`` serves this server's P2P mode.
+
+        CXL peers must advertise a slab in the same pool; copying peers must
+        advertise a transfer URL and no slab.
+        """
+        if self._p2p_config.transfer_engine != "cxl":
+            return bool(inst.p2p_advertised_url) and inst.cxl_arena is None
+        local = self._ctx.storage_manager.cxl_arena
+        return (
+            inst.cxl_arena is not None
+            and local is not None
+            and inst.cxl_arena.pool_id == local.pool_id
+        )
 
     def _fetch_instances(self) -> list[_PeerInstance]:
         """Fetch and parse the coordinator's active-instance list.
@@ -566,12 +610,21 @@ class P2PController(DiscoverableModule):
             instance_id = raw.get("instance_id", "")
             if not instance_id:
                 continue
+            cxl_metadata = raw.get("metadata", {}).get(CXL_METADATA_KEY)
+            try:
+                arena = (
+                    CxlArenaDescriptor.from_json(cxl_metadata) if cxl_metadata else None
+                )
+            except (ValueError, TypeError):
+                logger.warning("Ignoring invalid CXL metadata from %s", instance_id)
+                continue
             instances.append(
                 _PeerInstance(
                     instance_id=instance_id,
                     ip=raw.get("ip", ""),
                     p2p_advertised_url=raw.get("p2p_advertised_url", ""),
                     mq_port=int(raw.get("mq_port", 0) or 0),
+                    cxl_arena=arena,
                 )
             )
         return instances
@@ -587,7 +640,11 @@ class P2PController(DiscoverableModule):
         """
         return any(
             inst.instance_id == self._instance_id
-            and inst.p2p_advertised_url == self._p2p_config.advertise_url
+            and (
+                inst.cxl_arena == self._ctx.storage_manager.cxl_arena
+                if self._p2p_config.transfer_engine == "cxl"
+                else inst.p2p_advertised_url == self._p2p_config.advertise_url
+            )
             for inst in instances
         )
 
@@ -635,6 +692,8 @@ class P2PController(DiscoverableModule):
                     added += 1
             elif self._peer_changed(current, inst):
                 self._remove_adapter(peer_id)
+                if peer_id in self._adapters:
+                    continue
                 removed += 1
                 if self._add_adapter(inst):
                     added += 1
@@ -666,6 +725,7 @@ class P2PController(DiscoverableModule):
             adapter.p2p_advertised_url != inst.p2p_advertised_url
             or adapter.ip != inst.ip
             or adapter.mq_port != inst.mq_port
+            or adapter.cxl_arena != inst.cxl_arena
         )
 
     def _add_adapter(self, inst: _PeerInstance) -> bool:
@@ -684,7 +744,16 @@ class P2PController(DiscoverableModule):
             load_timeout_s=self._p2p_config.load_timeout,
         )
         try:
-            adapter_id = self._ctx.storage_manager.add_l2_adapter(config)
+            if self._p2p_config.transfer_engine == "cxl":
+                if inst.cxl_arena is None:
+                    return False
+                adapter_id = self._ctx.storage_manager.add_cxl_peer(
+                    inst.cxl_arena,
+                    config.peer_rpc_url,
+                    self._p2p_config.lookup_timeout,
+                )
+            else:
+                adapter_id = self._ctx.storage_manager.add_l2_adapter(config)
         except Exception:
             logger.exception("Failed to add P2P adapter for peer %s", inst.instance_id)
             return False
@@ -694,6 +763,7 @@ class P2PController(DiscoverableModule):
                 ip=inst.ip,
                 p2p_advertised_url=inst.p2p_advertised_url,
                 mq_port=inst.mq_port,
+                cxl_arena=inst.cxl_arena,
             )
         logger.debug(
             "Added P2P adapter %d for peer %s (%s)",
@@ -710,7 +780,7 @@ class P2PController(DiscoverableModule):
             peer_id: Instance id of the peer whose adapter to remove.
         """
         with self._orch_lock:
-            adapter = self._adapters.pop(peer_id, None)
+            adapter = self._adapters.get(peer_id)
         if adapter is None:
             return
         try:
@@ -718,6 +788,8 @@ class P2PController(DiscoverableModule):
         except Exception:
             logger.exception("Failed to remove P2P adapter for peer %s", peer_id)
             return
+        with self._orch_lock:
+            self._adapters.pop(peer_id, None)
         logger.debug("Removed P2P adapter for peer %s", peer_id)
 
     def _active_job_count(self) -> int:

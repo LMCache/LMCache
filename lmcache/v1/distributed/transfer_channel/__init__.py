@@ -13,6 +13,7 @@ from lmcache.v1.distributed.transfer_channel.abstract import (
     TransferChannelServer,
 )
 from lmcache.v1.distributed.transfer_channel.api import (
+    MemoryRegionAddress,
     TransferChannelAddress,
     TransferChannelReadResult,
 )
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from lmcache.v1.distributed.internal_api import L1MemoryDesc
 
 __all__ = [
+    "MemoryRegionAddress",
     "TransferChannelAddress",
     "TransferChannelReadResult",
     "TransferChannelContext",
