@@ -14,10 +14,11 @@ connector. It separates three concepts:
 - **`KVLayerGroupInfo`** — the server's runtime transfer-kernel dispatch unit,
   built from the engine group infos + the real tensors (`kv_layer_groups.py`).
 
-vLLM groups layers by cache behavior; LMCache must transfer by physical layout
-(kv_size, num_heads, head_size, block_size, dtype) *and* keep distinct engine
-block-id spaces separate. So at registration we build engine group infos, and
-store/retrieve address those infos directly.
+vLLM groups layers by cache behavior; LMCache must transfer by the full
+physical identity `(kv_size, num_heads, head_size, block_size,
+engine_group_idx, dtype, engine_kv_format, block_stride_elems)`. This keeps
+distinct engine block-ID spaces and physical layouts separate. At registration
+we build engine group infos, and store/retrieve address those infos directly.
 
 ## Goals / Non-Goals
 
