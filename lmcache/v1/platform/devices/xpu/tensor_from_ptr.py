@@ -111,7 +111,8 @@ def construct_xpu_tensor_from_data_pointer(
     """Create a non-owning XPU tensor view over an existing allocation.
 
     Args:
-        ptr: Non-zero device data pointer valid in the current process.
+        ptr: Non-zero device data pointer valid in the current process,
+            either unsigned or its int64 two's-complement form.
         shape: Logical tensor dimensions.
         dtype: Tensor element dtype.
         device: XPU device owning ``ptr``.
@@ -133,8 +134,12 @@ def construct_xpu_tensor_from_data_pointer(
         ensure the allocation outlives every view derived from it.
     """
     pointer = int(ptr)
-    if pointer <= 0:
-        raise ValueError("ptr must be a non-zero positive integer")
+    # Pointer tables staged by ``list_to_xpu_tensor`` are int64, so a high
+    # Level Zero address read back with ``int(t.item())`` arrives negative.
+    if -(1 << 63) <= pointer < 0:
+        pointer += 1 << 64
+    if not 0 < pointer < (1 << 64):
+        raise ValueError("ptr must be a non-zero 64-bit address")
     if not isinstance(shape, tuple) or any(int(size) < 0 for size in shape):
         raise ValueError("shape must be a tuple of non-negative integers")
     if not isinstance(dtype, torch.dtype):
