@@ -312,19 +312,19 @@ def test_lookup_hits_the_unfull_chunk_and_free_deletes_a_temporary_one(
 ):
     module, storage_manager, hasher = lookup_module
     tokens = list(range(2 * CHUNK_SIZE + 5))
-    lookup_end = len(tokens)
+    lookup_tokens = len(tokens)
     _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
-    unfull_keys = _unfull_keys(hasher, tokens, lookup_end)
+    unfull_keys = _unfull_keys(hasher, tokens, lookup_tokens)
     _write(storage_manager, unfull_keys, is_temporary=True)
 
     # A lookup that asks for the unfull chunk is answered in tokens.
-    assert _lookup(module, tokens, lookup_end, request_id="r1") == lookup_end
+    assert _lookup(module, tokens, lookup_tokens, request_id="r1") == lookup_tokens
 
     module.free_lookup_locks(
-        _key(tokens, 0, lookup_end, request_id="r1", include=True), tp_size=1
+        _key(tokens, 0, lookup_tokens, request_id="r1", include=True), tp_size=1
     )
     # Read once: releasing the lookup's last lock deleted the object.
-    assert _lookup(module, tokens, lookup_end, request_id="r2") == 2 * CHUNK_SIZE
+    assert _lookup(module, tokens, lookup_tokens, request_id="r2") == 2 * CHUNK_SIZE
 
 
 def test_lookup_ignores_the_unfull_chunk_without_the_flag(lookup_module):
@@ -352,17 +352,19 @@ def test_unfull_chunk_extends_only_the_hit_prefix(lookup_module):
     assert _lookup(module, tokens, len(tokens), request_id="r1") == CHUNK_SIZE
 
     _write(storage_manager, _chunk_keys(hasher, tokens, 2)[1:], is_temporary=False)
-    # Without a grid only the lookup's own end is probed.
+    # Without a grid only the lookup's own length is probed.
     assert _lookup(module, tokens, len(tokens) - 1, request_id="r2") == 2 * CHUNK_SIZE
     assert _lookup(module, tokens, len(tokens), request_id="r3") == len(tokens)
 
 
-def test_grid_lookup_hits_the_longest_unfull_chunk_up_to_its_end(lookup_module):
+def test_grid_lookup_hits_the_longest_unfull_chunk_within_the_lookup(lookup_module):
     module, storage_manager, hasher = lookup_module
     tokens = list(range(3 * CHUNK_SIZE))
     _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
-    for end in (2 * CHUNK_SIZE + 4, 2 * CHUNK_SIZE + 8):
-        _write(storage_manager, _unfull_keys(hasher, tokens, end), is_temporary=False)
+    for boundary in (2 * CHUNK_SIZE + 4, 2 * CHUNK_SIZE + 8):
+        _write(
+            storage_manager, _unfull_keys(hasher, tokens, boundary), is_temporary=False
+        )
 
     assert _lookup(module, tokens, 2 * CHUNK_SIZE + 11, "r1", grid=4) == (
         2 * CHUNK_SIZE + 8
@@ -374,12 +376,14 @@ def test_grid_lookup_hits_the_longest_unfull_chunk_up_to_its_end(lookup_module):
 
 def test_exact_unfull_chunk_wins_over_the_grid(lookup_module):
     """A disaggregated prefill stores its exact tail; the decode's lookup ends
-    there and hits it before any grid end."""
+    there and hits it before any grid boundary."""
     module, storage_manager, hasher = lookup_module
     tokens = list(range(2 * CHUNK_SIZE + 9))
     _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
-    for end in (2 * CHUNK_SIZE + 8, len(tokens)):
-        _write(storage_manager, _unfull_keys(hasher, tokens, end), is_temporary=False)
+    for boundary in (2 * CHUNK_SIZE + 8, len(tokens)):
+        _write(
+            storage_manager, _unfull_keys(hasher, tokens, boundary), is_temporary=False
+        )
 
     assert _lookup(module, tokens, len(tokens), "r1", grid=4) == len(tokens)
 
@@ -393,13 +397,15 @@ def test_identical_prompt_resuming_before_its_last_token_hits_its_tail(
     module, storage_manager, hasher = lookup_module
     num_prompt_tokens, grid = 2 * CHUNK_SIZE + 9, 4
     tokens = list(range(num_prompt_tokens))
-    tail_end = (num_prompt_tokens - 1) // grid * grid
+    tail_boundary = (num_prompt_tokens - 1) // grid * grid
     _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
-    _write(storage_manager, _unfull_keys(hasher, tokens, tail_end), is_temporary=False)
+    _write(
+        storage_manager, _unfull_keys(hasher, tokens, tail_boundary), is_temporary=False
+    )
 
     hit = _lookup(module, tokens, num_prompt_tokens - 1, "r1", grid=grid)
 
-    assert hit == tail_end
+    assert hit == tail_boundary
 
 
 def test_next_round_hits_the_previous_rounds_tail(lookup_module):
@@ -416,7 +422,7 @@ def test_next_round_hits_the_previous_rounds_tail(lookup_module):
     assert _lookup(module, round_2, len(round_2) - 1, "r1", grid=4) == round_1_tail
 
 
-def test_free_releases_the_unfull_chunk_at_the_hit_end(lookup_module):
+def test_free_releases_the_unfull_chunk_at_the_hit_boundary(lookup_module):
     module, storage_manager, hasher = lookup_module
     tokens = list(range(2 * CHUNK_SIZE + 9))
     hit = 2 * CHUNK_SIZE + 8
@@ -466,16 +472,18 @@ def _chunk_keys(
     )[0]
 
 
-def _unfull_keys(hasher: TokenHasher, tokens: list[int], end: int) -> list[ObjectKey]:
-    full = end - end % CHUNK_SIZE
+def _unfull_keys(
+    hasher: TokenHasher, tokens: list[int], boundary: int
+) -> list[ObjectKey]:
+    full = boundary - boundary % CHUNK_SIZE
     prefix = None
     for start in range(0, full, CHUNK_SIZE):
         prefix = hasher.hash_tokens(tokens[start : start + CHUNK_SIZE], prefix)
     unfull_hash = TokenHasher.hash_to_bytes(
-        hasher.hash_tokens(tokens[full:end], prefix)
+        hasher.hash_tokens(tokens[full:boundary], prefix)
     )
     return ipc_key_to_object_keys(
-        _key(tokens, full, end, "writer", True), [unfull_hash], [0]
+        _key(tokens, full, boundary, "writer", True), [unfull_hash], [0]
     )[0]
 
 

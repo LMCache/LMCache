@@ -579,11 +579,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       enters vLLM's waiting queue. Disabled by default.
     - lmcache.mp.save_decode_cache: also store chunks containing generated
       tokens. Defaults to False; only complete prompt chunks are stored.
-    - lmcache.mp.save_unfull_chunk: also store the prompt's unfull chunk, ending
-      on vLLM's prefix-cache grid before the prompt's last token, and let a
-      lookup hit end mid-chunk. Defaults to False. A request whose
-      ``kv_transfer_params`` set ``lmcache.temporary_unfull_chunk`` stores
-      it read-once. Not yet supported for models with per-request ring state
+    - lmcache.mp.save_unfull_chunk: also store the prompt's unfull chunk, with
+      its boundary (token count) on vLLM's prefix-cache grid below the
+      prompt's last token, and let a lookup hit stop mid-chunk. Defaults to
+      False. A request whose ``kv_transfer_params`` set
+      ``lmcache.temporary_unfull_chunk`` stores it read-once. Not yet
+      supported for models with per-request ring state
       (``CircularBufferSpec``). See
       ``docs/design/v1/multiprocess/unfull_chunk.md``.
     """
@@ -881,8 +882,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # Smallest token count aligned to every group's paged-chunk
         # boundary; used to round down vLLM APC hit counts.
         self._hit_alignment_tokens = math.lcm(*cached_spans)
-        # Align-mode Mamba groups: their state at an unfull chunk's end comes
-        # from vLLM's boundary-state hand-offs, not the block table.
+        # Align-mode Mamba groups: their state at an unfull chunk's boundary
+        # comes from vLLM's boundary-state hand-offs, not the block table.
         self._boundary_state_groups = (
             [
                 engine_group_idx
@@ -894,7 +895,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if kv_cache_config is not None
             else []
         )
-        # Grid of unfull-chunk ends: hand-off boundaries lie on vLLM's
+        # Grid of unfull-chunk boundaries: hand-off boundaries lie on vLLM's
         # prefix-cache hash grid; otherwise prefix-cache hits land on the
         # scheduler block.
         self._unfull_chunk_grid = self._hit_alignment_tokens
@@ -1552,7 +1553,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         tracker.num_stored_tokens = full_chunk_tokens
         tracker.num_lmcache_hit_tokens = ret
         if ret != full_chunk_tokens:
-            tracker.unfull_chunk_ends.add(ret)
+            tracker.unfull_chunk_boundaries.add(ret)
 
         need_to_load = max(0, ret - num_computed_tokens)
 
@@ -2153,7 +2154,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             "lmcache.hint.engine_computed_tokens": num_computed_tokens,
         }
         if self._save_unfull_chunk:
-            # Unfull chunks end on this grid, so the server probes only it.
+            # Unfull-chunk boundaries lie on this grid, so the server probes
+            # only it.
             request_configs["lmcache.hint.unfull_chunk_grid"] = self._unfull_chunk_grid
         return request_configs
 

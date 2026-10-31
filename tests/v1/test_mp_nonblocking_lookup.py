@@ -540,11 +540,12 @@ def test_end_waits_for_already_sent_status_only(
         assert not thread.is_alive()
 
 
-def test_unfull_chunk_lookup_sends_its_end_and_is_answered_in_tokens(
+def test_unfull_chunk_lookup_sends_its_length_and_is_answered_in_tokens(
     make_adapter: AdapterFactory,
 ) -> None:
-    """With the last token reserved the lookup ends at P - 1, unaligned, and
-    the server's count is a token count: it may end with an unfull chunk."""
+    """With the last token reserved the lookup covers P - 1 tokens, unaligned,
+    and the server's count is a token count: the hit may stop inside a chunk, at
+    an unfull chunk's boundary."""
     adapter, (client,) = make_adapter()
     adapter.maybe_submit_lookup_request(
         "r",

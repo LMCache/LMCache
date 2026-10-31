@@ -476,8 +476,8 @@ class LookupModule(DiscoverableModule):
         ``start`` and ``end`` must be aligned to ``chunk_size``; it is the
         caller's responsibility to align the boundaries as desired. The one
         exception: a key with ``include_unfull_chunk`` whose ``end`` is the
-        end of the unfull chunk the lookup locked also releases that chunk
-        (once).
+        boundary (token count) of the unfull chunk the lookup locked also
+        releases that chunk (once).
 
         Only the keys the prefetch actually read-locked are released: the
         key's range is floored to the current lookup's ``start``, and each
@@ -564,11 +564,11 @@ class LookupModule(DiscoverableModule):
                     session.prefetch_locked_gids,
                 )
             )
-        # A key reaching the end of the unfull chunk the lookup locked, with
-        # include_unfull_chunk, releases it too.
+        # A key reaching the boundary of the unfull chunk the lookup locked,
+        # with include_unfull_chunk, releases it too.
         if (
             key.has_unfull_chunk(self._ctx.chunk_size)
-            and key.end == session.unfull_chunk_end
+            and key.end == session.unfull_chunk_boundary
         ):
             obj_keys.extend(session.take_unfull_chunk_keys())
         if not obj_keys:
@@ -720,7 +720,7 @@ class LookupModule(DiscoverableModule):
 
         Returns:
             The hit chunk count, or, for a lookup that asked for an unfull
-            chunk, the hit token count: the end of the unfull chunk
+            chunk, the hit token count: the boundary of the unfull chunk
             read-locked after the hit prefix, else the hit prefix's tokens.
             None while the prefetch is still running (the job is kept so a
             later call can resolve it).
@@ -757,7 +757,7 @@ class LookupModule(DiscoverableModule):
             tuple(range(job.attn_desc.num_object_groups)),
             result.l1_owners,
         )
-        unfull_chunk_end, unfull_chunk_probes = (
+        unfull_chunk_boundary, unfull_chunk_probes = (
             self._lock_unfull_chunk(
                 job.unfull_chunk_key, found_count, job.attn_desc, session
             )
@@ -792,7 +792,7 @@ class LookupModule(DiscoverableModule):
                     "l1_hit_keys": result.l1_hit_count,
                     "l2_hit_keys": result.l2_hit_count,
                     "early_exit_reason": job.early_exit_reason,
-                    "unfull_chunk_end": unfull_chunk_end,
+                    "unfull_chunk_boundary": unfull_chunk_boundary,
                     "unfull_chunk_probes": unfull_chunk_probes,
                     "model_name": job.model_name,
                     "cache_salt": job.cache_salt,
@@ -805,7 +805,7 @@ class LookupModule(DiscoverableModule):
 
         if job.unfull_chunk_key is None:
             return found_count
-        return unfull_chunk_end or found_count * self._ctx.chunk_size
+        return unfull_chunk_boundary or found_count * self._ctx.chunk_size
 
     def _lock_unfull_chunk(
         self,
@@ -816,13 +816,14 @@ class LookupModule(DiscoverableModule):
     ) -> tuple[int, int]:
         """Read-lock the longest unfull chunk L1 holds after the hit prefix.
 
-        An unfull chunk extending ``hit_chunks`` full chunks lies inside the
-        next chunk, so it ends in ``(hit, min(key.end, hit + chunk_size))``.
-        Stores put unfull chunks at a request's exact prompt end and on the
-        engine's prefix-cache grid (``lmcache.hint.unfull_chunk_grid`` in
-        ``key.request_configs``), so ``key.end`` is probed first, then the
-        grid ends below it, longest first; without the hint only ``key.end``
-        is. Each probe is an L1-only prefetch, which
+        Boundaries are token counts. An unfull chunk extending ``hit_chunks``
+        full chunks lies inside the next chunk, so its boundary is in
+        ``(hit, min(key.end, hit + chunk_size))``. Stores put unfull chunks at
+        a request's exact prompt length and on the engine's prefix-cache grid
+        (``lmcache.hint.unfull_chunk_grid`` in ``key.request_configs``), so
+        the lookup length ``key.end`` is probed first, then the grid
+        boundaries below it, longest first; without the hint only
+        ``key.end`` is. Each probe is an L1-only prefetch, which
         completes synchronously and keeps its locks only when every object
         group and kv rank hit, so a partial hit holds nothing. A hit is
         recorded on ``session`` for the retrieve and for
@@ -835,8 +836,8 @@ class LookupModule(DiscoverableModule):
             session: The request's session.
 
         Returns:
-            The read-locked unfull chunk's end token (0 when none hit), and
-            the number of ends probed.
+            The read-locked unfull chunk's boundary (0 when none hit), and
+            the number of boundaries probed.
         """
         group_layout_descs = (
             self._ctx.layout_desc_registry.find_unfull_group_layout_descs(
@@ -847,20 +848,24 @@ class LookupModule(DiscoverableModule):
         if not group_layout_descs:
             return 0, 0
         chunk_size = self._ctx.chunk_size
-        hit_end = hit_chunks * chunk_size
-        last_end = min(key.end, hit_end + chunk_size - 1)
+        hit_tokens = hit_chunks * chunk_size
+        last_boundary = min(key.end, hit_tokens + chunk_size - 1)
         grid = int((key.request_configs or {}).get("lmcache.hint.unfull_chunk_grid", 0))
-        # An exact hit ends where the lookup does (a disaggregated decode
+        # An exact hit has the lookup's own length (a disaggregated decode
         # resuming where its prefill stopped).
-        candidate_ends: list[int] = [key.end] if hit_end < key.end == last_end else []
+        candidate_boundaries: list[int] = (
+            [key.end] if hit_tokens < key.end == last_boundary else []
+        )
         if grid:
-            candidate_ends.extend(
-                end
-                for end in range(last_end // grid * grid, hit_end, -grid)
-                if end != key.end
+            candidate_boundaries.extend(
+                boundary
+                for boundary in range(last_boundary // grid * grid, hit_tokens, -grid)
+                if boundary != key.end
             )
-        for num_probes, end in enumerate(candidate_ends, start=1):
-            unfull_hash = TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(end))
+        for num_probes, boundary in enumerate(candidate_boundaries, start=1):
+            unfull_hash = TokenHasher.hash_to_bytes(
+                session.get_unfull_chunk_hash(boundary)
+            )
             spec = PrefetchTaskSpec(
                 key_groups=ipc_key_to_grouped_object_keys(
                     key,
@@ -885,10 +890,10 @@ class LookupModule(DiscoverableModule):
                 session.record_unfull_chunk_hit(
                     [obj_key for row in spec.key_groups for obj_key in row.keys],
                     result.l1_owners,
-                    end,
+                    boundary,
                 )
-                return end, num_probes
-        return 0, len(candidate_ends)
+                return boundary, num_probes
+        return 0, len(candidate_boundaries)
 
     def _active_prefetch_count(self) -> int:
         """Return the number of active prefetch jobs (thread-safe)."""
