@@ -12,10 +12,12 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class ObjectKey(_message.Message):
-    __slots__ = ("identity",)
+    __slots__ = ("identity", "encoded_extra_attributes")
     IDENTITY_FIELD_NUMBER: _ClassVar[int]
+    ENCODED_EXTRA_ATTRIBUTES_FIELD_NUMBER: _ClassVar[int]
     identity: _common_pb2.ObjectKeyIdentity
-    def __init__(self, identity: _Optional[_Union[_common_pb2.ObjectKeyIdentity, _Mapping]] = ...) -> None: ...
+    encoded_extra_attributes: bytes
+    def __init__(self, identity: _Optional[_Union[_common_pb2.ObjectKeyIdentity, _Mapping]] = ..., encoded_extra_attributes: _Optional[bytes] = ...) -> None: ...
 
 class TensorShape(_message.Message):
     __slots__ = ("dims",)
