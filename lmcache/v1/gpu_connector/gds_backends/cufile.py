@@ -4,6 +4,8 @@
 # Standard
 from typing import TYPE_CHECKING, Any
 import ctypes
+import ctypes.util
+import importlib.util
 import os
 
 # Third Party
@@ -66,9 +68,29 @@ def _check(err: "CUfileError", op: str) -> None:
 
 _STREAM_REGISTER_FLAGS = 0x7
 
-# Device types whose pointers cuFile can register. ROCm tensors report
-# ``cuda``; on XPU the same ABI is served by the xFile shim.
-_REGISTRABLE_DEVICE_TYPES = ("cuda", "xpu")
+
+def _on_ld_library_path(filename: str) -> bool:
+    """Whether ``filename`` is in a directory listed in ``LD_LIBRARY_PATH``.
+
+    ``dlopen`` searches these directories, but ``find_library`` only does so
+    through the ``ld`` linker, which slim runtime images often lack.
+    """
+    return any(
+        directory and os.path.isfile(os.path.join(directory, filename))
+        for directory in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+    )
+
+
+def _xpu_shim_discoverable() -> bool:
+    """Whether the cuFile bindings and a ``libcufile`` shim can be found.
+
+    Locates both without importing or loading them: ``cufile.bindings`` loads
+    ``libcufile.so`` at import time, and selection must not load drivers.
+    """
+    return importlib.util.find_spec("cufile") is not None and (
+        _on_ld_library_path("libcufile.so")
+        or ctypes.util.find_library("cufile") is not None
+    )
 
 
 class Backend(FileGDSBackend):
@@ -79,10 +101,16 @@ class Backend(FileGDSBackend):
 
     @classmethod
     def is_default(cls) -> bool:
-        """Default on a CUDA or XPU build; ROCm defers to hipfile."""
-        return (
-            torch.version.cuda is not None or torch.version.xpu is not None
-        ) and torch.version.hip is None
+        """Default on CUDA, or on XPU when the xFile cuFile shim is present.
+
+        ROCm defers to hipfile. An XPU build without the shim is left to the
+        other backends so ``auto`` fails at selection, not at first I/O.
+        """
+        if torch.version.hip is not None:
+            return False
+        if torch.version.cuda is not None:
+            return True
+        return torch.version.xpu is not None and _xpu_shim_discoverable()
 
     def validate_environment(self) -> None:
         """Accept a CUDA/XPU build. XPU reuses the same cuFile API/ABI."""
@@ -117,11 +145,10 @@ class Backend(FileGDSBackend):
 
     def register_buffer(self, buf: torch.Tensor) -> None:
         """Use the raw API to preserve cuFile status codes in raised errors."""
-        if buf.device.type not in _REGISTRABLE_DEVICE_TYPES:
+        # ROCm tensors report is_cuda; XPU is served by the xFile shim.
+        if not (buf.is_cuda or buf.device.type == "xpu"):
             raise ValueError(
-                "register_buffer: tensor must be on a GDS-capable device "
-                f"({' or '.join(_REGISTRABLE_DEVICE_TYPES)}); "
-                f"got {buf.device.type}"
+                f"register_buffer: tensor must be on CUDA or XPU; got {buf.device.type}"
             )
         self._ensure_driver_open()
         # Third Party
